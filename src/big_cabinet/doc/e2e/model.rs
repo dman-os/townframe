@@ -19,6 +19,15 @@ struct Slot {
 }
 
 impl Slot {
+    /// The model tracks introductions exactly but not Automerge op counts, so its
+    /// versions carry `clock: 0` and actual clocks are zeroed before comparison.
+    fn version(&self) -> FacetVersion {
+        FacetVersion {
+            heads: self.heads.clone(),
+            clock: 0,
+        }
+    }
+
     fn exact(value: Option<Value>, heads: Vec<ChangeHash>) -> Self {
         Self {
             values: vec![value],
@@ -43,10 +52,10 @@ impl Slot {
         {
             Some(value) => FacetRead::Accepted {
                 value: value.clone(),
-                facet_heads: self.heads.clone(),
+                version: self.version(),
             },
             None => FacetRead::Absent {
-                facet_heads: self.heads.clone(),
+                version: self.version(),
             },
         }
     }
@@ -54,15 +63,23 @@ impl Slot {
     /// Rewrite an actual read to the candidate it matched, so a whole-response equality still says
     /// something when a slot is ambiguous. A read that matches no candidate is a real mismatch.
     fn normalize(&self, actual: FacetRead, context: &str) -> FacetRead {
+        let mut actual = actual;
+        match &mut actual {
+            FacetRead::Accepted { version, .. }
+            | FacetRead::Absent { version }
+            | FacetRead::Pending { version, .. }
+            | FacetRead::Undecodable { version, .. } => version.clock = 0,
+            FacetRead::Rejected { .. } => {}
+        }
         if !self.ambiguous() {
             return actual;
         }
         let covered = match &actual {
-            FacetRead::Accepted { value, facet_heads } => {
-                *facet_heads == self.heads && self.values.contains(&Some(value.clone()))
+            FacetRead::Accepted { value, version } => {
+                version.heads == self.heads && self.values.contains(&Some(value.clone()))
             }
-            FacetRead::Absent { facet_heads } => {
-                *facet_heads == self.heads && self.values.contains(&None)
+            FacetRead::Absent { version } => {
+                version.heads == self.heads && self.values.contains(&None)
             }
             other => panic!("{context}: {other:?} is not a read of a merged slot"),
         };
@@ -223,6 +240,10 @@ impl Model {
                 .facets
                 .into_iter()
                 .filter(|(facet, _)| determined(facet))
+                .map(|(facet, mut version)| {
+                    version.clock = 0;
+                    (facet, version)
+                })
                 .collect(),
         };
 
@@ -293,7 +314,7 @@ impl Model {
                     .iter()
                     .enumerate()
                     .filter(|(slot, _)| snapshot.slots[*slot].present())
-                    .map(|(slot, name)| (key(name), snapshot.slots[slot].heads.clone()))
+                    .map(|(slot, name)| (key(name), snapshot.slots[slot].version()))
                     .collect(),
             }),
             "{context}: listing"
@@ -366,9 +387,7 @@ impl Mode {
                     .iter()
                     .enumerate()
                     .filter(|(slot, _)| mask & (1 << slot) != 0)
-                    .map(|(slot, name)| {
-                        (key(name), model.checkpoints[at].slots[slot].heads.clone())
-                    })
+                    .map(|(slot, name)| (key(name), model.checkpoints[at].slots[slot].version()))
                     .collect(),
             },
         }
@@ -397,7 +416,7 @@ impl Mode {
                         heads: current.heads.clone(),
                         facets: slots
                             .into_iter()
-                            .map(|slot| (key(SLOTS[slot]), current.slots[slot].heads.clone()))
+                            .map(|slot| (key(SLOTS[slot]), current.slots[slot].version()))
                             .collect(),
                     })
             }
@@ -444,6 +463,12 @@ impl Request {
 }
 
 async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8, script: &[Op]) {
+    tracing::info!(
+        case,
+        initial_mask,
+        steps = script.len(),
+        "model script started"
+    );
     let [owner, other] = actors;
     let initial: BTreeMap<_, _> = SLOTS
         .iter()
@@ -500,6 +525,14 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
                 if author == Author::Other && !shared_write {
                     assert_eq!(actual, Err(DocsError::Denied), "{context}");
                 } else if let Some(conflict) = mode.conflict(&model) {
+                    let actual = actual.map_err(|mut error| {
+                        if let DocsError::Conflict { facets, .. } = &mut error {
+                            for version in facets.values_mut() {
+                                version.clock = 0;
+                            }
+                        }
+                        error
+                    });
                     assert_eq!(actual, Err(conflict), "{context}");
                 } else {
                     let receipt = actual.unwrap_or_else(|error| panic!("{context}: {error:?}"));
@@ -622,6 +655,7 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
             )
             .await;
     }
+    tracing::info!(case, "model script completed");
 }
 
 fn exhaustive(mode: Mode) -> Vec<Vec<Op>> {
@@ -669,10 +703,10 @@ utils_rs::table_tests! {
 }
 
 conformance! {
-    exhaustive_current_empty: ("current", 0, exhaustive(Mode::Current)),
-    exhaustive_explicit_heads: ("heads", 3, exhaustive(Mode::Heads(0))),
-    exhaustive_document_conditions: ("document", 1, exhaustive(Mode::Document(0))),
-    exhaustive_facet_conditions: ("facets", 1, exhaustive(Mode::Facets(0, 7))),
+    exhaustive_current_empty_long_test: ("current", 0, exhaustive(Mode::Current)),
+    exhaustive_explicit_heads_long_test: ("heads", 3, exhaustive(Mode::Heads(0))),
+    exhaustive_document_conditions_long_test: ("document", 1, exhaustive(Mode::Document(0))),
+    exhaustive_facet_conditions_long_test: ("facets", 1, exhaustive(Mode::Facets(0, 7))),
     historical_disjoint_branches: ("branches", 1, vec![vec![
         Op::Write(Edit::Set(0), Mode::Current, Author::Owner),
         Op::Write(Edit::Set(1), Mode::Heads(0), Author::Owner),
@@ -759,6 +793,16 @@ conformance! {
         Op::Read(3),
         Op::Restart,
         Op::Replay(2),
+    ]]),
+    // Found by the generated scripts: two concurrent writes from the same base that make the same
+    // claim on a slot (here, both removing slot 1 as the same actor) produce identical signature
+    // bytes in two distinct Automerge map entries. An unrelated write to another slot must retain
+    // both entries rather than deduplicating them by JSON value and touching the slot unsigned.
+    concurrent_identical_claims_keep_both_signature_entries: ("identical-claims", 2, vec![vec![
+        Op::Write(Edit::Remove(1), Mode::Current, Author::Owner),
+        Op::Write(Edit::SetAndRemove(0, 1), Mode::Heads(0), Author::Owner),
+        Op::Write(Edit::SetInitial(2), Mode::Document(2), Author::Owner),
+        Op::Read(3),
     ]]),
 }
 

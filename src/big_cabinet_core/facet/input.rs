@@ -613,7 +613,15 @@ fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str
         !matches!(
             marker.as_str(),
             Some(
-                "bytes" | "float" | "uint" | "text" | "timestamp" | "datetime" | "counter" | "list"
+                "bytes"
+                    | "float"
+                    | "uint"
+                    | "text"
+                    | "timestamp"
+                    | "datetime"
+                    | "counter"
+                    | "list"
+                    | "reference"
             )
         )
     }) {
@@ -851,7 +859,7 @@ impl Overlay<'_> {
         if let Some(marker) = marker {
             let expected = match marker {
                 "bytes" => primary.get("x-automerge").and_then(Value::as_str) == Some("bytes"),
-                "float" | "uint" | "text" => kind == "string",
+                "float" | "uint" | "text" | "reference" => kind == "string",
                 "timestamp" | "datetime" => {
                     kind == "string"
                         && primary

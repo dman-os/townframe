@@ -233,7 +233,7 @@ fn marked(
             }
             Ok(Some(json!({ "type": "bytes" })))
         }
-        "float" | "text" | "timestamp" => {
+        "float" | "text" | "timestamp" | "reference" => {
             if !stated("string") {
                 return Err(here(
                     path,

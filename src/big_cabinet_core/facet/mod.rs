@@ -35,8 +35,8 @@ pub use value::Extra;
 
 #[cfg(feature = "schemars")]
 pub use codec::{
-    Bytes, Codec, CodecError, CompiledSchema, Counter, Float32, Float64, KEYWORD, Stored, Text,
-    codec_schema, hydrate_value, reconcile_json_atomic,
+    Bytes, Codec, CodecError, CompiledSchema, Counter, DeclaredReference, Float32, Float64,
+    KEYWORD, Stored, Text, codec_schema, declared_references, hydrate_value, reconcile_json_atomic,
 };
 #[cfg(feature = "schemars")]
 pub use shape::{ShapeError, ShapeFlag, check_shape};

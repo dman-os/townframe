@@ -1,7 +1,7 @@
 //! Service-level tests: every assertion goes through `Client<AuthorityProtocol>`,
 //! so they exercise the same hosted path a real consumer uses.
 
-use super::protocol::AuthorityMessage;
+use super::AuthorityMessage;
 use super::{
     Actor, AttenuateCapability, Authority, AuthorityError, AuthorityProtocol,
     AuthorityServiceError, CapId, Capability, CheckGrant, GrantAccess, InspectCapability,

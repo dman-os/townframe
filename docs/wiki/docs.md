@@ -191,34 +191,21 @@ The following facets are used to track branch relationships in docs:
 
 ```js
 {
-  // the key-id of the facet indicates the branch id
-  "org.example.daybook.branch/main": {},
-  // the key-id on this one is just the facet convention
-  "org.example.daybook.branches/main": {
-    byPath: {
-      // under concurrent writes, we might have multiple branches for the same path
-      "/my/branch": ["zAyPkUKgPRFaLje8LNjK3CHCQEytgbhN2Xt35pLKpFHck"]
-    },
-    byId: {
-      "zAyPkUKgPRFaLje8LNjK3CHCQEytgbhN2Xt35pLKpFHck": {
-        path: "/my/branch",
-        branchedFrom: {
-          branchPath: "/main",
-          heads: ["ztXt35kUKgPLgbpFpLe8A"]
-        }
-      }
-    }
-  }
-}
-{
-  // this one branched from /main
-  // note that the facet is under key-id /main
-  // and that shouldn't be confused as the branch path
-  "org.example.daybook.branch/my/branch": {
-    // we track the origin
+  // the key-id of the facet indicates the doc id
+  "org.example.daybook.branch/zUKgPRFaLje8LhN2Xt35N3CHCQEytgbpLKpFHckjKAyPk": {
+    path: "/main"
+  },
+  // branches will have their own branch facet and won't remove their
+  // parent. a parent also carries the branch facet for it's children
+  // if it must track them. this means that both facets shown here exist
+  // on both parent and child branches
+  "org.example.daybook.branch/zAyPkUKgPRFaLje8LNjK3CHCQEytgbhN2Xt35pLKpFHck": {
+    path: "/my/branch",
+    // this pins which parent we branched from
     from: {
-      branchPath: "/main",
-      heads: ["ztXt35kUKgPLgbpFpLe8A"]
+      // self because ofc, we'll be carrying which parent we branched from
+      facetRef: "db+facet://self/org.example.daybook.branch/zUKgPRFaLje8LhN2Xt35N3CHCQEytgbpLKpFHckjKAyPk",
+      refHeads: ["ztXt35kUKgPLgbpFpLe8A"],
     }
   }
 }

@@ -1,0 +1,12 @@
+---
+source: src/big_cabinet/doc/e2e/wire.rs
+expression: "ObserveFacets\n{\n    capability: capability(1), scope: ObserveScope::Doc\n    { doc_id: document(1) }, after: 3,\n}"
+---
+{
+  "capability": "01010101-0101-0101-0101-010101010101",
+  "scope": {
+    "scope": "doc",
+    "doc_id": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+  },
+  "after": 3
+}

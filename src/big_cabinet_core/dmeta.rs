@@ -41,7 +41,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 pub use verification::{
     Evidence, FacetValue, SignatureChecks, SignedFacetClaim, VerificationState, facet_verification,
-    fold_checks,
+    fold_checks, signature_id,
 };
 
 use crate::reference::FacetKey;
@@ -287,7 +287,6 @@ pub struct InheritedWitness {
 }
 
 pub const BRANCH_FACET_TAG: &str = "org.example.daybook.branch";
-pub const BRANCHES_FACET_TAG: &str = "org.example.daybook.branches";
 
 /// The branch side of a branch: `org.example.daybook.branch/<docid>` on the branch document,
 /// naming that document's branch path.
@@ -301,58 +300,19 @@ pub const BRANCHES_FACET_TAG: &str = "org.example.daybook.branches";
 #[serde(rename_all = "camelCase")]
 pub struct BranchPath {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<BranchOrigin>,
     #[serde(flatten)]
     pub extra: crate::facet::Extra,
 }
 
-/// One branch an origin lists in [`BranchesPath`]. The same shape as [`BranchPath`], but a facet's
-/// value type cannot also be a nested definition of another facet.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BranchLink {
-    pub path: String,
-}
-
-/// The origin side of a branch: `org.example.daybook.branches/main` on the origin, written by a
-/// non-stealth Branch and by nothing else. `by_path` is the reverse of `by_id`: a path can name more
-/// than one branch, because two branches can be taken concurrently under the same path.
-#[cfg_attr(
-    feature = "schemars",
-    macros::facet(id = "org.example.daybook.branches")
-)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BranchesPath {
-    #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<String, BranchLink>"))]
-    pub by_id: BTreeMap<DocId, BranchLink>,
-    #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<String, Vec<String>>"))]
-    pub by_path: BTreeMap<String, Vec<DocId>>,
-    #[serde(flatten)]
-    pub extra: crate::facet::Extra,
-}
-
-impl BranchesPath {
-    /// Record a branch. Re-recording the same branch is a no-op.
-    pub fn record(&mut self, branch: DocId, path: String) {
-        if let Some(previous) = self
-            .by_id
-            .insert(branch.clone(), BranchLink { path: path.clone() })
-            && previous.path != path
-            && let Some(listed) = self.by_path.get_mut(&previous.path)
-        {
-            listed.retain(|id| id != &branch);
-            if listed.is_empty() {
-                self.by_path.remove(&previous.path);
-            }
-        }
-        let listed = self.by_path.entry(path).or_default();
-        if !listed.contains(&branch) {
-            listed.push(branch);
-            listed.sort();
-        }
-    }
+pub struct BranchOrigin {
+    pub facet_ref: crate::FacetReference,
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
+    pub ref_heads: Vec<automerge::ChangeHash>,
 }
 
 /// One entry in a facet's competing set of signatures.
@@ -1333,10 +1293,6 @@ mod tests {
                 ..signed.clone()
             };
             assert!(matches!(forged.verify(), Err(DmetaError::InvalidSignature)));
-            assert_ne!(
-                forged.signature_id().unwrap(),
-                signed.signature_id().unwrap()
-            );
             assert!(matches!(
                 SignedFacetClaim::from_signature(
                     wrong,
@@ -1351,11 +1307,19 @@ mod tests {
         signature[0] ^= 1;
         forged.signature = SignatureBytes::try_from(signature.as_slice()).unwrap();
         assert!(matches!(forged.verify(), Err(DmetaError::InvalidSignature)));
-        let mut forged = signed;
+        assert_ne!(
+            forged.signature_id().unwrap(),
+            signed.signature_id().unwrap()
+        );
+        let mut forged = signed.clone();
         let other_key = SigningKey::from_bytes(&[8; 32]);
         forged.actor_public_key =
             MultibaseKey::try_from(other_key.verifying_key().as_bytes().as_slice()).unwrap();
         assert!(matches!(forged.verify(), Err(DmetaError::InvalidSignature)));
+        assert_ne!(
+            forged.signature_id().unwrap(),
+            signed.signature_id().unwrap()
+        );
     }
 
     #[test]
@@ -1537,7 +1501,7 @@ mod tests {
         assert_eq!(signed.claim, claim);
         signed.verify().unwrap();
         let expected_id = data_encoding::HEXLOWER
-            .decode(b"01551e2013385c30b0068b9a2255aa45affdd47e4904fbb335408527ac2a259901a90270")
+            .decode(b"01551e20776f47997358fee3b289570cf1a2ef3104a2bbc4c623875c1324bf1fad6b828c")
             .unwrap();
         assert_eq!(
             signed.signature_id().unwrap().as_bytes().as_slice(),

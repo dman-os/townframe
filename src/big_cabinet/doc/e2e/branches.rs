@@ -6,7 +6,7 @@ use super::super::commands::{Commands, Detail, Kind, State};
 use super::*;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use big_cabinet_core::dmeta::{BRANCH_FACET_TAG, BRANCHES_FACET_TAG};
+use big_cabinet_core::dmeta::BRANCH_FACET_TAG;
 
 fn command(text: &str) -> CommandId {
     CommandId::try_from(text.to_owned()).unwrap()
@@ -16,8 +16,14 @@ fn branch_key(branch: &DocId) -> FacetKey {
     format!("{BRANCH_FACET_TAG}/{branch}").parse().unwrap()
 }
 
-fn branches_key() -> FacetKey {
-    format!("{BRANCHES_FACET_TAG}/main").parse().unwrap()
+fn branch_value(path: &str, origin: &WriteReceipt) -> Value {
+    json!({
+        "path": path,
+        "from": {
+            "facetRef": format!("db+facet:/{}/{}", origin.doc_id, branch_key(&origin.doc_id)),
+            "refHeads": origin.heads,
+        },
+    })
 }
 
 impl Node {
@@ -133,7 +139,7 @@ async fn a_branch_carries_its_origin_history_and_both_sides_name_it() {
     );
     assert_eq!(
         accepted(&read.facets[&branch_key(&branch.doc_id)]).0,
-        &json!({"path": "/draft"}),
+        &branch_value("/draft", &origin),
     );
     assert_eq!(
         origins(&node.claims(&branch.doc_id, &key("main")).await),
@@ -143,14 +149,16 @@ async fn a_branch_carries_its_origin_history_and_both_sides_name_it() {
     assert_eq!(
         accepted(
             &node
-                .read_one(&alice, &origin.doc_id, At::Current, &branches_key())
+                .read_one(
+                    &alice,
+                    &origin.doc_id,
+                    At::Current,
+                    &branch_key(&branch.doc_id)
+                )
                 .await
         )
         .0,
-        &json!({
-            "byId": {branch.doc_id.to_string(): {"path": "/draft"}},
-            "byPath": {"/draft": [branch.doc_id.to_string()]},
-        }),
+        &branch_value("/draft", &origin),
     );
     assert_eq!(
         node.branch(&alice, "branch", &origin.doc_id, "/draft", false)
@@ -159,26 +167,109 @@ async fn a_branch_carries_its_origin_history_and_both_sides_name_it() {
         branch,
         "a replayed branch returns its receipt without branching again"
     );
+    let second_base = node
+        .read(&alice, &origin.doc_id, At::Current, false)
+        .await
+        .unwrap();
     let second = node
         .branch(&alice, "branch-2", &origin.doc_id, "/draft", false)
         .await
         .unwrap();
-    let mut ids = [branch.doc_id.clone(), second.doc_id.clone()];
-    ids.sort();
+    let read = node
+        .read(&alice, &origin.doc_id, At::Current, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted(&read.facets[&branch_key(&branch.doc_id)]).0,
+        &branch_value("/draft", &origin)
+    );
+    assert_eq!(
+        accepted(&read.facets[&branch_key(&second.doc_id)]).0,
+        &branch_value(
+            "/draft",
+            &WriteReceipt {
+                doc_id: origin.doc_id.clone(),
+                heads: second_base.heads,
+            }
+        )
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn a_historical_branch_pins_its_concrete_parent_and_preserves_inherited_branch_metadata() {
+    let node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let origin = node
+        .create(&alice, "create", [(key("main"), note("old"))])
+        .await
+        .unwrap();
+    node.write(
+        &alice,
+        &origin.doc_id,
+        WriteMode::AtCurrent,
+        [(key("main"), note("new"))],
+        [],
+    )
+    .await
+    .unwrap();
+    let branch = op(node
+        .client()
+        .call(
+            RequestContext::root(),
+            BranchDoc {
+                capability: alice.capability,
+                command: command("historical"),
+                doc_id: origin.doc_id.clone(),
+                at: At::Heads(origin.heads.clone()),
+                path: "/historical".into(),
+                stealth: false,
+                placement: PLACEMENT.into(),
+            },
+        )
+        .await)
+    .unwrap();
+    let expected = branch_value("/historical", &origin);
+    for document in [&origin.doc_id, &branch.doc_id] {
+        assert_eq!(
+            accepted(
+                &node
+                    .read_one(&alice, document, At::Current, &branch_key(&branch.doc_id))
+                    .await
+            )
+            .0,
+            &expected
+        );
+    }
     assert_eq!(
         accepted(
             &node
-                .read_one(&alice, &origin.doc_id, At::Current, &branches_key())
+                .read_one(&alice, &branch.doc_id, At::Current, &key("main"))
                 .await
         )
         .0,
-        &json!({
-            "byId": {
-                branch.doc_id.to_string(): {"path": "/draft"},
-                second.doc_id.to_string(): {"path": "/draft"},
-            },
-            "byPath": {"/draft": [ids[0].to_string(), ids[1].to_string()]},
-        }),
+        &note("old")
+    );
+    let nested = node
+        .branch(&alice, "nested", &branch.doc_id, "/nested", true)
+        .await
+        .unwrap();
+    let read = node
+        .read(&alice, &nested.doc_id, At::Current, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted(&read.facets[&branch_key(&branch.doc_id)]).0,
+        &expected
+    );
+    assert_eq!(
+        accepted(&read.facets[&branch_key(&nested.doc_id)]).0,
+        &branch_value("/nested", &branch)
+    );
+    let typed: big_cabinet_core::dmeta::BranchPath = serde_json::from_value(expected).unwrap();
+    assert_eq!(
+        typed.from.unwrap().facet_ref.to_uri_string().unwrap(),
+        format!("db+facet:/{}/{}", origin.doc_id, branch_key(&origin.doc_id))
     );
     node.stop().await;
 }
@@ -214,7 +305,7 @@ async fn announcing_a_branch_needs_write_on_the_origin_and_stealth_needs_only_re
         origin_now.heads, origin.heads,
         "a stealth branch leaves the origin untouched"
     );
-    assert!(!origin_now.facets.contains_key(&branches_key()));
+    assert!(!origin_now.facets.contains_key(&branch_key(&branch.doc_id)));
     assert_eq!(
         accepted(
             &node
@@ -227,7 +318,7 @@ async fn announcing_a_branch_needs_write_on_the_origin_and_stealth_needs_only_re
                 .await
         )
         .0,
-        &json!({"path": "/bob"}),
+        &branch_value("/bob", &origin),
     );
     node.stop().await;
 }
@@ -287,7 +378,7 @@ async fn a_branch_merges_back_with_the_provenance_of_each_side() {
                 .await
         )
         .0,
-        &json!({"path": "/draft"}),
+        &branch_value("/draft", &origin),
         "merging a nested branch does not overwrite the branch's own path facet"
     );
     let on_origin = node
@@ -336,7 +427,6 @@ async fn a_branch_merges_back_with_the_provenance_of_each_side() {
     );
     accepted(&read.facets[&branch_key(&branch.doc_id)]);
     accepted(&read.facets[&branch_key(&nested.doc_id)]);
-    accepted(&read.facets[&branches_key()]);
     // Writing on the origin after the merge reuses the origin's own document UUID.
     node.write(
         &alice,
@@ -425,7 +515,11 @@ async fn the_boot_pass_announces_and_places_a_committed_branch_and_abandons_an_u
         .await
         .unwrap();
     let ledger = Commands::open(node.sql.clone()).await.unwrap();
-    let committed = node.repo.allocate_id().await.unwrap();
+    let committed = node
+        .branch(&alice, "seed-committed", &origin.doc_id, "/committed", true)
+        .await
+        .unwrap()
+        .doc_id;
     let uncommitted = node.repo.allocate_id().await.unwrap();
     for (name, branch) in [("committed", &committed), ("uncommitted", &uncommitted)] {
         ledger
@@ -446,17 +540,6 @@ async fn the_boot_pass_announces_and_places_a_committed_branch_and_abandons_an_u
             .unwrap();
         ledger.set_document(&command(name), branch).await.unwrap();
     }
-    let handle = match node.repo.get_doc(&origin.doc_id).await.unwrap() {
-        big_repo::DocLookup::Ready(handle) => handle,
-        _ => panic!("document is local"),
-    };
-    let fork = handle
-        .with_document_read(|doc| doc.fork_at(&origin.heads).unwrap())
-        .await;
-    node.repo
-        .commit_id(committed.clone(), fork, Vec::new(), &[])
-        .await
-        .unwrap();
     node.restart().await.unwrap();
     let settled = ledger.get(&command("committed")).await.unwrap().unwrap();
     assert_eq!(settled.state, State::Done);
@@ -480,14 +563,11 @@ async fn the_boot_pass_announces_and_places_a_committed_branch_and_abandons_an_u
     assert_eq!(
         accepted(
             &node
-                .read_one(&alice, &origin.doc_id, At::Current, &branches_key())
+                .read_one(&alice, &origin.doc_id, At::Current, &branch_key(&committed))
                 .await
         )
         .0,
-        &json!({
-            "byId": {committed.to_string(): {"path": "/committed"}},
-            "byPath": {"/committed": [committed.to_string()]},
-        }),
+        &branch_value("/committed", &origin),
     );
     // A second boot finds the backlink by its commit message and does not write it again.
     let heads = node

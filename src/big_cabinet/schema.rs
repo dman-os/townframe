@@ -13,8 +13,8 @@
 //! compiled schema is the overlay admission produces — so there is exactly one compilation path a
 //! stored value is ever read against.
 
+use big_cabinet_core::dmeta::BranchPath;
 use big_cabinet_core::dmeta::Dmeta;
-use big_cabinet_core::dmeta::{BranchPath, BranchesPath};
 use big_cabinet_core::facet::{
     Bundle, CompiledSchema, Declaration, LexiconAdmissionError, Universe, UniverseError,
 };
@@ -27,7 +27,6 @@ static CORE: LazyLock<Universe> = LazyLock::new(|| {
     Universe::collect([
         Declaration::of::<Dmeta>().expect("dmeta is a well-formed facet declaration"),
         Declaration::of::<BranchPath>().expect("branch is a well-formed facet declaration"),
-        Declaration::of::<BranchesPath>().expect("branches is a well-formed facet declaration"),
     ])
 });
 
@@ -250,6 +249,17 @@ impl SchemaRepo {
 
     pub fn resolve_for_read(&self, facet_tag: &str) -> Option<SchemaHandle> {
         self.known.get(facet_tag).cloned()
+    }
+
+    /// The tags of the known facets whose schema declares at least one `reference` position: the
+    /// selector a reference index consumes, derived once from the compiled schemas rather than
+    /// re-derived per document.
+    pub fn reference_tags(&self) -> Vec<String> {
+        self.known
+            .values()
+            .filter(|handle| handle.compiled().declares_references())
+            .map(|handle| handle.facet_tag().to_owned())
+            .collect()
     }
 
     pub fn require_for_write(&self, facet_tag: &str) -> Result<SchemaHandle, SchemaRepoError> {
@@ -536,6 +546,41 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn reference_tags_select_the_facets_that_declare_references() {
+        let referencing = "org.example.schema.referencing";
+        let plain = "org.example.schema.plain";
+        let repo = SchemaRepo::open([
+            SchemaRegistrationGroup::new(
+                Some(Bundle::new(
+                    &universe(
+                        referencing,
+                        json!({"type": "string", "x-automerge": "reference"}),
+                    ),
+                    Vec::new(),
+                )),
+                [registration(referencing, json!({"type": "string"}))],
+                Vec::new(),
+            ),
+            SchemaRegistrationGroup::new(
+                None,
+                [registration(plain, json!({"type": "string"}))],
+                Vec::new(),
+            ),
+        ])
+        .unwrap();
+        let tags = repo.reference_tags();
+        // The core branch facet carries a `FacetReference`, so it is selected alongside the
+        // registered referencing facet; the plain one and dmeta are not.
+        assert_eq!(
+            tags,
+            vec![
+                "org.example.daybook.branch".to_owned(),
+                referencing.to_owned()
+            ]
+        );
     }
 
     #[test]

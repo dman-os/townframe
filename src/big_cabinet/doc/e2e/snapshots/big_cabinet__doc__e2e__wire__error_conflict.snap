@@ -1,5 +1,5 @@
 ---
-source: src/big_cabinet/document/e2e/wire.rs
+source: src/big_cabinet/doc/e2e/wire.rs
 expression: error
 ---
 {
@@ -8,9 +8,12 @@ expression: error
       "0303030303030303030303030303030303030303030303030303030303030303"
     ],
     "facets": {
-      "org.example.note/main": [
-        "0404040404040404040404040404040404040404040404040404040404040404"
-      ]
+      "org.example.note/main": {
+        "heads": [
+          "0404040404040404040404040404040404040404040404040404040404040404"
+        ],
+        "clock": 0
+      }
     }
   }
 }

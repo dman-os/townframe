@@ -4,12 +4,13 @@ use super::{
     AUTHORIZATION_HEADER, DOMAIN_ERROR_FIELD, DOMAIN_ERROR_STATUS, IDEMPOTENCY_KEY_HEADER,
     REQUEST_ID_HEADER, TIMEOUT_HEADER, TRACEPARENT_HEADER, XrpcErrorEnvelope, XrpcHandlerError,
     XrpcRequest,
+    ws::{WsIo, accept_key},
 };
 use crate::{
     context::{HttpMetadata, RequestContext, TraceContext},
     host::Host,
     middleware::Handler,
-    operation::{Envelope, HttpInput, HttpMethod, Unary, XrpcKind, XrpcOperation},
+    operation::{Envelope, HttpInput, HttpMethod, Subscription, Unary, XrpcKind, XrpcOperation},
 };
 use axum::{
     Json, Router,
@@ -18,6 +19,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::any,
 };
+use futures::StreamExt as _;
 use mime::Mime;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -103,10 +105,94 @@ impl XrpcOperationHandler {
     }
 }
 
+/// A registered subscription handler, carried over a WebSocket upgrade of
+/// the same `/xrpc/{nsid}` route rather than the unary HTTP exchange.
+#[derive(Clone)]
+pub struct XrpcSubscriptionHandler {
+    operation: XrpcOperation,
+    handler: Arc<dyn Fn(XrpcRequest) -> SubscriptionFuture + Send + Sync>,
+}
+
+type SubscriptionFuture = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    (
+                        crate::ResponseMetadata,
+                        Pin<Box<dyn futures::Stream<Item = Result<Value, Value>> + Send>>,
+                    ),
+                    XrpcHandlerError,
+                >,
+            > + Send,
+    >,
+>;
+
+impl std::fmt::Debug for XrpcSubscriptionHandler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("XrpcSubscriptionHandler")
+            .field("operation", &self.operation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl XrpcSubscriptionHandler {
+    pub fn typed<P, E, F, Fut>(operation: XrpcOperation, handler: F) -> Self
+    where
+        P: DeserializeOwned + Send + 'static,
+        E: Serialize + Send + 'static,
+        F: Fn(RequestContext, HttpMetadata, P) -> Fut + Send + Sync + 'static,
+        Fut: Future<
+                Output = Result<
+                    Pin<Box<dyn futures::Stream<Item = Result<Value, E>> + Send>>,
+                    XrpcHandlerError,
+                >,
+            > + Send
+            + 'static,
+    {
+        let handler = Arc::new(handler);
+        Self {
+            operation,
+            handler: Arc::new(move |request| {
+                let handler = Arc::clone(&handler);
+                let result = match operation.input {
+                    HttpInput::Query => serde_urlencoded::from_str::<P>(
+                        request.raw_query.as_deref().unwrap_or_default(),
+                    )
+                    .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string())),
+                    HttpInput::JsonBody => serde_json::from_value::<P>(request.params.clone())
+                        .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string())),
+                };
+                let context = request.context;
+                let metadata = request.metadata;
+                Box::pin(async move {
+                    let params = result?;
+                    let stream = handler(context, metadata, params).await?;
+                    let stream = futures::StreamExt::map(stream, |item| match item {
+                        Ok(value) => Ok(value),
+                        Err(error) => Err(serde_json::to_value(error)
+                            .expect("subscription errors must serialize")),
+                    });
+                    Ok((
+                        crate::ResponseMetadata::default(),
+                        Box::pin(stream)
+                            as Pin<Box<dyn futures::Stream<Item = Result<Value, Value>> + Send>>,
+                    ))
+                })
+            }),
+        }
+    }
+
+    pub fn operation(&self) -> XrpcOperation {
+        self.operation
+    }
+}
+
 /// A bounded HTTP router for registered unary XRPC operations.
 #[derive(Clone, Debug)]
 pub struct XrpcRouter {
     operations: Arc<BTreeMap<String, XrpcOperationHandler>>,
+    subscriptions: Arc<BTreeMap<String, XrpcSubscriptionHandler>>,
     max_body_bytes: usize,
     admission: Arc<Semaphore>,
     #[cfg(test)]
@@ -136,6 +222,7 @@ impl XrpcRouter {
         );
         Self {
             operations: Arc::new(BTreeMap::new()),
+            subscriptions: Arc::new(BTreeMap::new()),
             max_body_bytes,
             admission: Arc::new(Semaphore::new(max_concurrent_handlers)),
             #[cfg(test)]
@@ -189,6 +276,70 @@ impl XrpcRouter {
                 })
             }
         }))
+    }
+
+    /// Mounts a hosted subscription operation. It is served as a WebSocket
+    /// upgrade of the same route; the hosted handler's event stream is pumped
+    /// as JSON text frames, so direct, IRPC and XRPC consumers see one event
+    /// vocabulary.
+    pub fn mount_subscription<P, H>(
+        &mut self,
+        host: Arc<Host<H>>,
+    ) -> Result<(), XrpcRegistrationError>
+    where
+        P: Subscription,
+        H: Handler<P>,
+    {
+        self.register_subscription(XrpcSubscriptionHandler {
+            operation: P::XRPC,
+            handler: Arc::new(move |request| {
+                let host = Arc::clone(&host);
+                Box::pin(async move {
+                    let params: P = match P::XRPC.input {
+                        HttpInput::Query => serde_urlencoded::from_str(
+                            request.raw_query.as_deref().unwrap_or_default(),
+                        )
+                        .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string()))?,
+                        HttpInput::JsonBody => serde_json::from_value(request.params)
+                            .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string()))?,
+                    };
+                    let mut envelope =
+                        Envelope::with_metadata(request.context, request.metadata, params);
+                    envelope.transport = request.transport;
+                    let response = host
+                        .invoke(envelope)
+                        .await
+                        .map_err(|error| domain_error(P::XRPC, &error))?;
+                    let stream = futures::StreamExt::map(response.output, |item| match item {
+                        Ok(event) => Ok(serde_json::to_value(event)
+                            .expect("subscription events must serialize")),
+                        Err(error) => Err(serde_json::to_value(error)
+                            .expect("subscription errors must serialize")),
+                    });
+                    Ok((
+                        response.metadata,
+                        Box::pin(stream)
+                            as Pin<Box<dyn futures::Stream<Item = Result<Value, Value>> + Send>>,
+                    ))
+                })
+            }),
+        })
+    }
+
+    pub fn register_subscription(
+        &mut self,
+        handler: XrpcSubscriptionHandler,
+    ) -> Result<(), XrpcRegistrationError> {
+        if handler.operation().kind != XrpcKind::Subscription {
+            return Err(XrpcRegistrationError::SubscriptionUnsupported);
+        }
+        let subscriptions = Arc::make_mut(&mut self.subscriptions);
+        let nsid = handler.operation().nsid.to_owned();
+        if subscriptions.contains_key(&nsid) || self.operations.contains_key(&nsid) {
+            return Err(XrpcRegistrationError::DuplicateOperation(nsid));
+        }
+        subscriptions.insert(nsid, handler);
+        Ok(())
     }
 
     pub fn register(&mut self, handler: XrpcOperationHandler) -> Result<(), XrpcRegistrationError> {
@@ -264,6 +415,17 @@ async fn dispatch(
             notifier: router.body_drop_notifier.clone(),
         });
     let request_id = request_id_from_headers(&parts.headers);
+    if let Some(subscription) = router.subscriptions.get(&nsid) {
+        return dispatch_subscription(
+            subscription.clone(),
+            Arc::clone(&router.admission),
+            nsid,
+            raw_query,
+            parts,
+            request_id,
+        )
+        .await;
+    }
     let Some(handler) = router.operations.get(&nsid) else {
         return error_response(
             StatusCode::NOT_FOUND,
@@ -400,6 +562,174 @@ async fn dispatch(
             &message,
         ),
     }
+}
+
+async fn dispatch_subscription(
+    subscription: XrpcSubscriptionHandler,
+    admission: Arc<Semaphore>,
+    _nsid: String,
+    raw_query: Option<String>,
+    parts: axum::http::request::Parts,
+    request_id: Option<uuid::Uuid>,
+) -> Response {
+    let header = |name: &str| {
+        parts
+            .headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+    };
+    let is_upgrade = header("upgrade").is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+        && header("connection").is_some_and(|value| value.to_ascii_lowercase().contains("upgrade"));
+    if !is_upgrade || parts.method != Method::GET {
+        return error_response(
+            StatusCode::UPGRADE_REQUIRED,
+            request_id,
+            "InvalidRequest",
+            "subscription operations require a WebSocket upgrade",
+        );
+    }
+    let Some(key) = header("sec-websocket-key").map(str::to_owned) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            request_id,
+            "InvalidRequest",
+            "missing Sec-WebSocket-Key",
+        );
+    };
+    let (context, metadata) = match request_context(&parts.headers) {
+        Ok(value) => value,
+        Err(message) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                request_id,
+                "InvalidRequest",
+                &message,
+            );
+        }
+    };
+    let request_id = Some(context.request_id);
+    let permit = match admission.try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                request_id,
+                "Unavailable",
+                "XRPC handler admission is currently full",
+            );
+        }
+    };
+    let Some(on_upgrade) = parts.extensions.get::<hyper::upgrade::OnUpgrade>().cloned() else {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            request_id,
+            "InternalError",
+            "websocket upgrade is not available on this listener",
+        );
+    };
+    let params = match decode_input(HttpInput::Query, raw_query.as_deref(), &[]) {
+        Ok(params) => params,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                request_id,
+                "InvalidRequest",
+                &error,
+            );
+        }
+    };
+    let transport = parts
+        .extensions
+        .get::<crate::TransportContext>()
+        .cloned()
+        .unwrap_or(crate::TransportContext::Http);
+    let (metadata_out, mut stream) = match (subscription.handler)(XrpcRequest {
+        context,
+        metadata,
+        params,
+        raw_query,
+        transport,
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(XrpcHandlerError::InvalidInput(message)) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                request_id,
+                "InvalidRequest",
+                &message,
+            );
+        }
+        Err(XrpcHandlerError::Domain { status, body }) => {
+            return error_response_with_details(
+                status,
+                request_id,
+                &body.error,
+                body.message.as_deref(),
+                body.details,
+            );
+        }
+        Err(XrpcHandlerError::Unavailable(message)) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                request_id,
+                "Unavailable",
+                &message,
+            );
+        }
+        Err(XrpcHandlerError::Internal(message)) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                request_id,
+                "InternalError",
+                &message,
+            );
+        }
+    };
+    let accept = accept_key(&key);
+    tokio::spawn(async move {
+        let _permit = permit;
+        let Ok(upgraded) = on_upgrade.await else {
+            return;
+        };
+        let mut socket = WsIo::new(hyper_util::rt::TokioIo::new(upgraded), false);
+        let open = json!({ "open": { "metadata": metadata_out } });
+        if socket.write_text(&open.to_string()).await.is_err() {
+            return;
+        }
+        while let Some(item) = stream.next().await {
+            let frame = match item {
+                Ok(event) => json!({ "event": event }),
+                Err(error) => json!({ "error": error }),
+            };
+            if socket.write_text(&frame.to_string()).await.is_err() {
+                return;
+            }
+            if frame.get("error").is_some() {
+                break;
+            }
+        }
+        drop(socket.write_close().await);
+    });
+    let mut response = Response::new(axum::body::Body::empty());
+    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    response
+        .headers_mut()
+        .insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+    response.headers_mut().insert(
+        "sec-websocket-accept",
+        HeaderValue::from_str(&accept).expect("accept key is header-safe"),
+    );
+    if let Some(request_id) = request_id
+        && let Ok(value) = HeaderValue::from_str(&request_id.to_string())
+    {
+        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    response
 }
 
 fn validate_method(method: &Method, operation: XrpcOperation) -> Result<(), StatusCode> {

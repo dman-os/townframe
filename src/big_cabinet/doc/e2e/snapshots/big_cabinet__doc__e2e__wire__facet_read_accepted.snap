@@ -1,5 +1,5 @@
 ---
-source: src/big_cabinet/document/e2e/wire.rs
+source: src/big_cabinet/doc/e2e/wire.rs
 expression: read
 ---
 {
@@ -8,7 +8,10 @@ expression: read
     "$type": "org.example.note",
     "value": "hello"
   },
-  "facet_heads": [
-    "0101010101010101010101010101010101010101010101010101010101010101"
-  ]
+  "version": {
+    "heads": [
+      "0101010101010101010101010101010101010101010101010101010101010101"
+    ],
+    "clock": 0
+  }
 }

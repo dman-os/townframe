@@ -197,6 +197,8 @@ fn compatible(scalar: &ScalarValue, declared: Declared, schema: Option<&Value>) 
         }
         Declared::Codec(Codec::Uint) => matches!(scalar, ScalarValue::Uint(_)),
         Declared::Codec(Codec::Counter) => matches!(scalar, ScalarValue::Counter(_)),
+        // A reference is a string on both sides of the document's edge.
+        Declared::Codec(Codec::Reference) => matches!(scalar, ScalarValue::Str(_)),
         // The one native kind a float's declaration produces is the `F64` its write puts; an
         // integer or an unsigned there is the token-kind drift the declaration fixes.
         Declared::Codec(Codec::Float) => matches!(scalar, ScalarValue::F64(_)),

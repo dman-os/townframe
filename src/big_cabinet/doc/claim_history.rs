@@ -3,7 +3,7 @@ use big_cabinet_core::FacetKey;
 use big_cabinet_core::dmeta::{
     Bytes, Cid, ClaimOperation, DocId, FacetClaim, FacetSignature, InheritedWitness, MultibaseKey,
     NativeReadBudget, NativeReadError, NativeValue, SignatureBytes, SignedFacetClaim, Uuid7,
-    cid_of, encode_native,
+    cid_of, encode_native, signature_id,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -90,6 +90,8 @@ pub struct ReconstructedClaim {
     pub actor_url: Option<String>,
     pub certificate: Option<Bytes>,
     pub claim: FacetClaim,
+    /// The canonical native bytes read at `introduction.resulting_heads` for a non-inherited claim.
+    pub(crate) native: Option<Option<Vec<u8>>>,
 }
 
 /// The sorted signature IDs a claim written at `heads` must name as predecessors: one per
@@ -327,7 +329,7 @@ impl Reconstruction<'_> {
         let (actor_public_key, actor_url, certificate) =
             self.actor_binding(signature.actor_uuid, &resulting_heads)?;
         let aliases = self.aliases(&resulting_heads)?;
-        let claim = if let Some(witness) = &signature.inherited {
+        let (claim, native) = if let Some(witness) = &signature.inherited {
             if signature.message.is_some() {
                 return Err(ClaimHistoryError::MalformedWitness(
                     "multiple message carriers",
@@ -343,9 +345,11 @@ impl Reconstruction<'_> {
             {
                 return Err(ClaimHistoryError::MalformedWitness("inherited context"));
             }
-            claim
+            (claim, None)
         } else {
-            let value = self.facet_value(&resulting_heads)?;
+            let encoded = self
+                .facet_value(&resulting_heads)?
+                .map(|value| encode_native(&value));
             let claim = FacetClaim {
                 // A signature reaches other documents unchanged through branches and merges, so
                 // the document its claim names is read from the binding of its `docUuid` at the
@@ -356,12 +360,12 @@ impl Reconstruction<'_> {
                     .first()
                     .ok_or(ClaimHistoryError::MalformedWitness("facet UUID alias"))?,
                 actor_uuid: signature.actor_uuid,
-                operation: if value.is_some() {
+                operation: if encoded.is_some() {
                     ClaimOperation::Set
                 } else {
                     ClaimOperation::Remove
                 },
-                value_cid: value.as_ref().map(|value| cid_of(&encode_native(value))),
+                value_cid: encoded.as_deref().map(cid_of),
                 predecessors: self.predecessor_ids(&parents)?,
             };
             if let Some(message) = &signature.message
@@ -375,7 +379,7 @@ impl Reconstruction<'_> {
                     "carried and reconstructed messages disagree",
                 ));
             }
-            claim
+            (claim, Some(encoded))
         };
         if claim.actor_uuid != signature.actor_uuid
             || claim.facet_key != *self.facet_key
@@ -396,6 +400,7 @@ impl Reconstruction<'_> {
             actor_url,
             certificate,
             claim,
+            native,
         })
     }
 
@@ -405,26 +410,31 @@ impl Reconstruction<'_> {
             if !entry.is_map {
                 continue;
             }
-            let hash = entry.hash;
-            // An entry whose claim cannot be reconstructed because it is malformed is not context
-            // anyone could have signed over; skipping it is deterministic, since malformation is a
-            // property of history. A budget or unsupported encoding prevents reconstruction,
-            // so it still fails the derivation.
-            let previous = match self.claim_for_entry(hash, entry.marker) {
-                Ok(previous) => previous,
+            let resulting_heads = [entry.hash];
+            // A predecessor's ID depends only on the actor's public key and the signature bytes
+            // recorded at its introduction, never on reconstructing or verifying the parent claim
+            // or its own ancestors. A structurally malformed entry is skipped deterministically;
+            // a resource refusal still surfaces as pending.
+            let introduced = match self.entries(&resulting_heads) {
+                Ok(entries) => entries.into_iter().find(|item| item.marker == entry.marker),
                 Err(error) if !error.pending() => continue,
                 Err(error) => return Err(error),
             };
-            let signed = SignedFacetClaim {
-                claim: previous.claim,
-                actor_public_key: previous.actor_public_key,
-                signature: previous.signature.signature,
+            if !introduced.is_some_and(|item| item.is_map && item.hash == entry.hash) {
+                continue;
+            }
+            let signature = match self.read_signature(&entry.marker, &resulting_heads) {
+                Ok(signature) => signature,
+                Err(error) if !error.pending() => continue,
+                Err(error) => return Err(error),
             };
-            ids.push(
-                signed
-                    .signature_id()
-                    .map_err(|_| ClaimHistoryError::MalformedWitness("predecessor ID"))?,
-            );
+            let (actor_public_key, _, _) =
+                match self.actor_binding(signature.actor_uuid, &resulting_heads) {
+                    Ok(binding) => binding,
+                    Err(error) if !error.pending() => continue,
+                    Err(error) => return Err(error),
+                };
+            ids.push(signature_id(&actor_public_key, &signature.signature));
         }
         ids.sort();
         ids.dedup();
@@ -700,6 +710,17 @@ impl Reconstruction<'_> {
                 let length = doc.length_at(&index, heads);
                 self.account(heads, length)?;
                 for item in doc.map_range_at(&index, .., heads) {
+                    if !item.conflict {
+                        self.account(heads, 1)?;
+                        if matches!(
+                            item.value,
+                            automerge::ValueRef::Scalar(automerge::ScalarValueRef::Str(ref text))
+                                if text.as_ref() == target.as_str()
+                        ) {
+                            aliases.push(Self::uuid(item.key.as_ref())?);
+                        }
+                        continue;
+                    }
                     let values = doc.get_all_at(&index, item.key.as_ref(), heads)?;
                     self.account(heads, values.len())?;
                     let mut matches = false;
@@ -1384,23 +1405,24 @@ mod tests {
     }
 
     #[test]
-    fn reconstruction_budget_does_not_reclassify_long_valid_ancestry_as_forgery() {
+    fn reconstruction_does_not_recurse_into_ancestor_claims() {
         let mut fixture = Fixture::new();
-        fixture.write(Some(&NativeValue::Str("first".into())));
-        let (marker, _, _) = fixture.write(Some(&NativeValue::Str("second".into())));
-        assert!(matches!(
-            reconstruct_claim_for_marker(
-                &fixture.doc,
-                &fixture.facet,
-                &marker,
-                HistoryBudget {
-                    max_claims: 1,
-                    ..HistoryBudget::default()
-                }
-            ),
-            ClaimHistoryResult::Pending(ClaimHistoryError::ResourceRefused("claim history"))
+        let mut last_marker = None;
+        for step in 0..100 {
+            let (marker, _, _) = fixture.write(Some(&NativeValue::Str(format!("step-{step}"))));
+            last_marker = Some(marker);
+        }
+        let marker = last_marker.unwrap();
+        accepted(reconstruct_claim_for_marker(
+            &fixture.doc,
+            &fixture.facet,
+            &marker,
+            HistoryBudget {
+                max_claims: 1,
+                max_depth: 1,
+                ..HistoryBudget::default()
+            },
         ));
-        accepted(fixture.reconstruct(&marker));
     }
 
     utils_rs::table_tests! {

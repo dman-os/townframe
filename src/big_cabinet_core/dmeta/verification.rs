@@ -42,14 +42,19 @@ impl SignedFacetClaim {
     }
 
     pub fn signature_id(&self) -> Result<Cid, DmetaError> {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(CLAIM_ID_DOMAIN);
-        hasher.update(self.actor_public_key.as_bytes());
-        hasher.update(&self.claim.signing_bytes()?);
-        hasher.update(self.signature.as_bytes());
-        Ok(Cid::from_digest(*hasher.finalize().as_bytes()))
+        Ok(signature_id(&self.actor_public_key, &self.signature))
     }
+}
 
+pub fn signature_id(actor_public_key: &MultibaseKey, signature: &SignatureBytes) -> Cid {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(CLAIM_ID_DOMAIN);
+    hasher.update(actor_public_key.as_bytes());
+    hasher.update(signature.as_bytes());
+    Cid::from_digest(*hasher.finalize().as_bytes())
+}
+
+impl SignedFacetClaim {
     pub fn value_evidence(&self, current: FacetValue<'_>) -> Evidence {
         match (&self.claim.operation, &self.claim.value_cid, current) {
             (_, _, FacetValue::Missing) => Evidence::Missing,

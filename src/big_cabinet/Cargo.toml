@@ -38,6 +38,9 @@ ed25519-dalek.workspace = true
 rand.workspace = true
 zeroize = "1"
 
+# streams
+futures.workspace = true
+
 # errors and durable authority state
 thiserror.workspace = true
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }

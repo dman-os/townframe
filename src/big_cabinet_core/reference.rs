@@ -165,6 +165,29 @@ impl<'de> Deserialize<'de> for FacetKey {
 }
 
 #[cfg(feature = "schemars")]
+impl schemars::JsonSchema for FacetReference {
+    /// A reference is a position, never a name a peer points at, so it is inlined.
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "FacetReference".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::FacetReference").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        crate::facet::codec_schema(
+            crate::facet::Codec::Reference,
+            schemars::json_schema!({ "type": "string" }),
+        )
+    }
+}
+
+#[cfg(feature = "schemars")]
 impl schemars::JsonSchema for FacetKey {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "FacetKey".into()

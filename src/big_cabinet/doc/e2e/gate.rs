@@ -346,7 +346,12 @@ utils_rs::table_tests! {
         assert_eq!(node.read_one(&alice, document, At::Current, &key("main")).await, read);
         assert_eq!(
             node.read_one(&alice, document, At::Current, &key("never-written")).await,
-            FacetRead::Absent { facet_heads: Vec::new() }
+            FacetRead::Absent {
+                version: FacetVersion {
+                    heads: Vec::new(),
+                    clock: 0
+                }
+            }
         );
         let old = node.read_one(&alice, document, At::Heads(created.heads.clone()), &key("main")).await;
         assert_eq!(accepted(&old).0, &note("safe"));
@@ -638,9 +643,9 @@ async fn unverifiable_encoding_has_no_value_unless_optimistic_and_cannot_be_writ
     let facet_heads = match &read.facets[&key("main")] {
         FacetRead::Pending {
             value: None,
-            facet_heads,
+            version,
             reason,
-        } if reason.contains("unsupported") => facet_heads.clone(),
+        } if reason.contains("unsupported") => version.heads.clone(),
         other => panic!("expected incomplete verification, got {other:?}"),
     };
     assert_eq!(facet_heads.len(), 1);
@@ -649,7 +654,7 @@ async fn unverifiable_encoding_has_no_value_unless_optimistic_and_cannot_be_writ
         .await
         .unwrap();
     assert!(
-        matches!(&optimistic.facets[&key("main")], FacetRead::Pending { value: Some(value), facet_heads: actual, .. } if value == &note("unverified") && *actual == facet_heads)
+        matches!(&optimistic.facets[&key("main")], FacetRead::Pending { value: Some(value), version: actual, .. } if value == &note("unverified") && actual.heads == facet_heads)
     );
     let refused = node
         .write(

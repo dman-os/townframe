@@ -198,13 +198,21 @@ async fn subscription_establishment_errors_are_returned_before_the_stream() {
         );
     }
 
-    let unsupported = stack.xrpc.subscribe(RequestContext::root(), params).await;
-    assert!(matches!(
-        unsupported,
-        Err(ClientError::Transport {
-            outcome_unknown: false,
-            ..
-        })
-    ));
+    // XRPC subscriptions run over WebSockets: establishment errors are
+    // returned before the stream opens, exactly as on the native transports,
+    // and a valid context opens a stream.
+    let result = stack.xrpc.subscribe(invalid, params.clone()).await;
+    assert!(
+        matches!(
+            result,
+            Err(ClientError::Operation(SampleError::Context(
+                ContextError::MissingRequestId
+            )))
+        ),
+        "xrpc: {result:?}"
+    );
+    let stream = stack.xrpc.subscribe(RequestContext::root(), params).await;
+    assert!(stream.is_ok(), "xrpc websocket subscription: {stream:?}");
+    drop(stream);
     stack.shutdown().await;
 }
