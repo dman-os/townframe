@@ -1,13 +1,16 @@
 ---
-source: src/big_cabinet/document/e2e/wire.rs
+source: src/big_cabinet/doc/e2e/wire.rs
 expression: read
 ---
 {
   "status": "pending",
   "reason": "verification could not complete",
-  "facet_heads": [
-    "0303030303030303030303030303030303030303030303030303030303030303"
-  ],
+  "version": {
+    "heads": [
+      "0303030303030303030303030303030303030303030303030303030303030303"
+    ],
+    "clock": 0
+  },
   "value": {
     "$type": "org.example.note",
     "value": "unverified"

@@ -70,6 +70,14 @@ impl CompiledSchema {
         &self.document
     }
 
+    /// Whether any position declares the `reference` storage form. A consumer walks a value for
+    /// its references only when this says there are any to find.
+    pub fn declares_references(&self) -> bool {
+        schema_positions(&self.document)
+            .into_iter()
+            .any(|schema| matches!(Codec::of(schema), Ok(Some(Codec::Reference))))
+    }
+
     pub(super) fn proof(&self) -> ValidationProof {
         ValidationProof {
             validator: Arc::clone(&self.validator),
@@ -211,9 +219,12 @@ impl CompiledSchema {
             }
             let expected = match codec {
                 Codec::Bytes => "object",
-                Codec::Timestamp | Codec::Float | Codec::Text | Codec::Uint | Codec::Datetime => {
-                    "string"
-                }
+                Codec::Timestamp
+                | Codec::Float
+                | Codec::Text
+                | Codec::Uint
+                | Codec::Datetime
+                | Codec::Reference => "string",
                 Codec::Counter => "integer",
             };
             if let Some(stated) = object.get("type") {

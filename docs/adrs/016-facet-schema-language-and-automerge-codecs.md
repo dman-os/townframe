@@ -373,6 +373,14 @@ What replaces it is a bounded vocabulary of storage forms, declared at the posit
 | a number | a counter | `x-automerge: "counter"` |
 | a string | a collaborative text | `x-automerge: "text"` |
 | a decimal string | a float | `x-automerge: "float"`, which `facet::Float32`/`Float64` emit |
+| a `db+facet:` address string | the same string | `x-automerge: "reference"`, which `FacetReference` emits |
+
+The reference row is the one marker that changes no storage: the string is a string on both sides
+of the document's edge. What the declaration buys is semantics — a value at a marked position must
+parse as a `db+facet:` address or the write is refused, and a consumer can find every reference a
+schema declares from the schema alone (the `facet_ref` index does exactly this, and reads the
+optional sibling `refHeads` array of change-hash hex strings as the pin named above). A string
+that happens to spell an address where nothing declares a reference is data, not a reference.
 
 The timestamp row uses JSON Schema's standard `format: "date-time"` — the one standard keyword the
 vocabulary uses. Canonical bytes are the `{"$bytes": "…"}` object and nothing else: `contentEncoding`

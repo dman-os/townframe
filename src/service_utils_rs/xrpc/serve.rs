@@ -165,6 +165,7 @@ fn spawn_connection(
             let service = TowerToHyperService::new(router);
             http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades()
                 .await
         }
         .with_current_subscriber(),

@@ -18,7 +18,7 @@
 //! - a merge adds no change of its own, so it happened exactly when the target holds the source
 //!   heads the row recorded.
 
-use super::protocol::{CommandId, DocsError};
+use super::{CommandId, DocsError};
 use automerge::ChangeHash;
 use big_cabinet_core::dmeta::{DocId, Uuid7};
 use serde::{Deserialize, Serialize};

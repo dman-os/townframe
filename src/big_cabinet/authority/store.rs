@@ -7,8 +7,8 @@
 //! reader pool beside it. Nothing here interprets an object string or decides
 //! whether an operation is allowed.
 
-use super::protocol::{CapId, Capability, Rights};
 use super::{ActorPublicKey, AuthorityError};
+use super::{CapId, Capability, Rights};
 use big_cabinet_core::dmeta::Uuid7;
 use sqlx::{Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
 

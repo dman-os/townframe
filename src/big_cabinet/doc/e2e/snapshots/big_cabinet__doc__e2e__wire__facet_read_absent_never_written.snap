@@ -1,8 +1,11 @@
 ---
-source: src/big_cabinet/document/e2e/wire.rs
+source: src/big_cabinet/doc/e2e/wire.rs
 expression: read
 ---
 {
   "status": "absent",
-  "facet_heads": []
+  "version": {
+    "heads": [],
+    "clock": 0
+  }
 }

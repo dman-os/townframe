@@ -1,83 +1,66 @@
-use automerge::ChangeHash;
+use automerge::{Automerge, ChangeHash, ObjId, ObjType, Prop, ROOT, ReadDoc, Value};
 use big_cabinet_core::{DocId, FacetKey, FacetTag};
+use big_repo::{
+    AutomergeFrontierEvent, AutomergeFrontierRevisionStore, AutomergeFrontierSelector,
+    AutomergeFrontierTarget, BigRepoLocalFilter, BigRepoLocalNotification, DocLookup,
+    SharedBigRepo,
+};
 use big_sync::SqliteDeltaWalkerStateRepo;
 use big_sync::keyed_frontier::{SqliteFrontierCodec, SqliteFrontierSelector, SqliteKeyedFrontier};
-use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateRepo;
+use big_sync_core::concurrent_delta_walker::{ConcurrentDeltaRead, ConcurrentDeltaWalker};
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
 use big_sync_core::keyed_frontier::{FrontierEntry, KeyedFrontier, KeyedFrontierError};
-use big_sync_core::revisioned_store::{KeyedFrontierRevisionReader, RevisionRead, RevisionedStore};
-use big_sync_core::serial_delta_walker::SerialDeltaWalker;
+use big_sync_core::revisioned_store::{KeyedFrontierRevisionReader, RevisionedStore};
+use big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler;
 use serde::{Deserialize, Serialize};
-use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
+use sqlx::{QueryBuilder, Row, Sqlite};
 use sqlx_utils_rs::SqlCtx;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::Notify;
 use utils_rs::prelude::{Res, async_trait, ferr};
 
-const FACET_SET_ID: &str = "big-cabinet-facet-set";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FacetSetInput {
-    Snapshot {
-        doc_id: DocId,
-        heads: Vec<ChangeHash>,
-        facet_keys: BTreeSet<FacetKey>,
-    },
-    Removed {
-        doc_id: DocId,
-    },
-}
-
-impl FacetSetInput {
-    fn doc_id(&self) -> &DocId {
-        match self {
-            Self::Snapshot { doc_id, .. } | Self::Removed { doc_id } => doc_id,
-        }
-    }
-}
+const FACET_SET_ID: &str = "big-cabinet-facet-set-v2";
+const DMETA_KEY: &str = "org.example.daybook.dmeta/main";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FacetRoute {
-    pub facet_tag: FacetTag,
     pub doc_id: DocId,
+    pub facet_key: FacetKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FacetMembership {
     Present {
-        heads: Vec<ChangeHash>,
-        matching_keys: BTreeSet<FacetKey>,
+        doc_heads: Vec<ChangeHash>,
+        facet_heads: Vec<ChangeHash>,
+        /// Lamport clock of `facet_heads`: the greatest `max_op` among the
+        /// introducing changes. See `FacetVersion` in the DocsRepo protocol.
+        clock: u64,
     },
     Removed {
-        prior_heads: Vec<ChangeHash>,
+        doc_heads: Option<Vec<ChangeHash>>,
+        facet_heads: Vec<ChangeHash>,
+        clock: u64,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FacetRecord {
     pub route: FacetRoute,
-    pub heads: Vec<ChangeHash>,
-    pub matching_keys: BTreeSet<FacetKey>,
-    pub source_revision: u64,
-    pub output_revision: u64,
+    pub doc_heads: Vec<ChangeHash>,
+    pub facet_heads: Vec<ChangeHash>,
+    pub clock: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FacetSetQuery {
     Doc(DocId),
     Tag(FacetTag),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FacetSetProjection {
-    Applied {
-        source_revision: u64,
-        output_revision: u64,
-    },
-    ReplayComplete {
-        through: u64,
-    },
+    Route(FacetRoute),
+    /// Every live route with exactly this facet key, across documents.
+    Key(FacetKey),
 }
 
 #[derive(Clone)]
@@ -88,7 +71,7 @@ impl SqliteFrontierCodec for FacetSetCodec {
     type Value = FacetMembership;
 
     fn encode_key(&self, key: &Self::Key) -> Vec<u8> {
-        serde_json::to_vec(key).expect("facet route is serializable")
+        serde_json::to_vec(key).expect("facet routes serialize")
     }
 
     fn decode_key(
@@ -99,7 +82,7 @@ impl SqliteFrontierCodec for FacetSetCodec {
     }
 
     fn encode_value(&self, value: &Self::Value) -> Vec<u8> {
-        serde_json::to_vec(value).expect("facet membership is serializable")
+        serde_json::to_vec(value).expect("facet membership serializes")
     }
 
     fn decode_value(
@@ -110,8 +93,28 @@ impl SqliteFrontierCodec for FacetSetCodec {
     }
 
     fn namespace(&self, key: &Self::Key) -> Option<Vec<u8>> {
-        Some(key.facet_tag.as_str().as_bytes().to_vec())
+        Some(key.facet_key.tag().as_str().as_bytes().to_vec())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DocState {
+    heads: Option<Vec<ChangeHash>>,
+    epoch: Option<[u8; 32]>,
+    cursor: u64,
+}
+
+#[derive(Clone)]
+struct Work {
+    doc_id: DocId,
+    state: DocState,
+}
+
+struct Prepared {
+    work: Work,
+    previous: Option<DocState>,
+    slots: BTreeMap<FacetKey, FacetMembership>,
+    replace_all: bool,
 }
 
 #[derive(Clone)]
@@ -123,25 +126,27 @@ pub struct FacetSetStore {
 
 impl FacetSetStore {
     pub async fn new(sql: SqlCtx) -> Res<Self> {
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS big_cabinet_facet_set_routes (
-                doc_id TEXT NOT NULL
-                , facet_tag TEXT NOT NULL
-                , heads_json TEXT NOT NULL
-                , matching_keys_json TEXT NOT NULL
-                , source_revision INTEGER NOT NULL
-                , output_revision INTEGER NOT NULL
-                , PRIMARY KEY (doc_id, facet_tag)
+        for statement in [
+            r#"CREATE TABLE IF NOT EXISTS big_cabinet_facet_set_docs (
+                doc_id TEXT PRIMARY KEY NOT NULL
+                , state BLOB NOT NULL
             ) STRICT"#,
-        )
-        .execute(&sql.write_pool)
-        .await?;
-        sqlx::query(
-            r#"CREATE INDEX IF NOT EXISTS big_cabinet_facet_set_routes_tag_idx
-                 ON big_cabinet_facet_set_routes (facet_tag, doc_id)"#,
-        )
-        .execute(&sql.write_pool)
-        .await?;
+            r#"CREATE TABLE IF NOT EXISTS big_cabinet_facet_set_entries (
+                doc_id TEXT NOT NULL
+                , facet_key TEXT NOT NULL
+                , facet_tag TEXT NOT NULL
+                , doc_heads BLOB NOT NULL
+                , facet_heads BLOB NOT NULL
+                , clock INTEGER NOT NULL
+                , PRIMARY KEY (doc_id, facet_key)
+            ) STRICT"#,
+            r#"CREATE INDEX IF NOT EXISTS big_cabinet_facet_set_entries_tag_idx
+                 ON big_cabinet_facet_set_entries (facet_tag, doc_id)"#,
+            r#"CREATE INDEX IF NOT EXISTS big_cabinet_facet_set_entries_key_idx
+                 ON big_cabinet_facet_set_entries (facet_key, doc_id)"#,
+        ] {
+            sqlx::query(statement).execute(&sql.write_pool).await?;
+        }
         let frontier = SqliteKeyedFrontier::new(
             sql.read_pool.clone(),
             sql.write_pool.clone(),
@@ -154,7 +159,7 @@ impl FacetSetStore {
             sql.read_pool.clone(),
             sql.write_pool.clone(),
             FACET_SET_ID,
-            "accepted-documents",
+            "automerge-frontier",
         )
         .await?;
         Ok(Self {
@@ -164,52 +169,81 @@ impl FacetSetStore {
         })
     }
 
+    /// Open the frontier across every tag namespace, for consumers (such as
+    /// doc-scoped observation) whose filter is not a single tag.
+    pub async fn open_all(
+        &self,
+        after: u64,
+    ) -> Result<KeyedFrontierRevisionReader<'_, FacetRoute, FacetMembership>, KeyedFrontierError>
+    {
+        Ok(KeyedFrontierRevisionReader::new(
+            self.frontier
+                .open(SqliteFrontierSelector::All { after })
+                .await?,
+        ))
+    }
+
+    /// Open the frontier across several tag namespaces at once, each at its own cursor.
+    pub async fn open_tags(
+        &self,
+        tags: impl IntoIterator<Item = (FacetTag, u64)>,
+    ) -> Result<KeyedFrontierRevisionReader<'_, FacetRoute, FacetMembership>, KeyedFrontierError>
+    {
+        Ok(KeyedFrontierRevisionReader::new(
+            self.frontier
+                .open(SqliteFrontierSelector::Namespaces(
+                    tags.into_iter()
+                        .map(|(tag, after)| (tag.as_str().as_bytes().to_vec(), after))
+                        .collect(),
+                ))
+                .await?,
+        ))
+    }
+
     pub async fn source_revision(&self) -> Res<u64> {
         Ok(self.input_state.progress().await?.upstream_revision)
     }
 
-    pub async fn projector<'a, S>(
-        &'a self,
-        source: &'a S,
-        selector: S::Selector,
-    ) -> Res<FacetSetProjector<'a, S>>
-    where
-        S: RevisionedStore<Revision = u64, Entry = FacetSetInput>,
-        S::Error: std::fmt::Debug,
-    {
-        let after = self.source_revision().await?;
-        let reader = source
-            .open(selector, after)
-            .await
-            .map_err(|error| ferr!("opening accepted document revisions: {error:?}"))?;
-        let walker = SerialDeltaWalker::open(reader, &self.input_state).await?;
-        Ok(FacetSetProjector {
-            store: self,
-            walker,
-            pending: None,
-        })
+    async fn doc_state(&self, doc_id: &DocId) -> Res<Option<DocState>> {
+        let bytes: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT state FROM big_cabinet_facet_set_docs WHERE doc_id = ?")
+                .bind(doc_id.to_string())
+                .fetch_optional(&self.sql.read_pool)
+                .await?;
+        bytes
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
+            .transpose()
     }
 
     pub async fn query(&self, selector: FacetSetQuery) -> Res<Vec<FacetRecord>> {
         let mut query = QueryBuilder::<Sqlite>::new(
             r#"SELECT doc_id
-                 , facet_tag
-                 , heads_json
-                 , matching_keys_json
-                 , source_revision
-                 , output_revision
-              FROM big_cabinet_facet_set_routes
+                 , facet_key
+                 , doc_heads
+                 , facet_heads
+                 , clock
+              FROM big_cabinet_facet_set_entries
              WHERE "#,
         );
         match selector {
-            FacetSetQuery::Doc(doc_id) => {
-                query.push("doc_id = ").push_bind(doc_id.to_string());
+            FacetSetQuery::Doc(doc) => {
+                query.push("doc_id = ").push_bind(doc.to_string());
             }
             FacetSetQuery::Tag(tag) => {
                 query.push("facet_tag = ").push_bind(tag.to_string());
             }
+            FacetSetQuery::Route(route) => {
+                query
+                    .push("doc_id = ")
+                    .push_bind(route.doc_id.to_string())
+                    .push(" AND facet_key = ")
+                    .push_bind(route.facet_key.to_string());
+            }
+            FacetSetQuery::Key(key) => {
+                query.push("facet_key = ").push_bind(key.to_string());
+            }
         }
-        query.push(" ORDER BY facet_tag, doc_id");
+        query.push(" ORDER BY doc_id, facet_key");
         query
             .build()
             .fetch_all(&self.sql.read_pool)
@@ -218,115 +252,495 @@ impl FacetSetStore {
             .map(|row| {
                 Ok(FacetRecord {
                     route: FacetRoute {
-                        facet_tag: FacetTag::new(row.get::<String, _>("facet_tag"))?,
                         doc_id: row.get::<String, _>("doc_id").parse()?,
+                        facet_key: row.get::<String, _>("facet_key").parse()?,
                     },
-                    heads: serde_json::from_str(row.get("heads_json"))?,
-                    matching_keys: serde_json::from_str(row.get("matching_keys_json"))?,
-                    source_revision: u64::try_from(row.get::<i64, _>("source_revision"))?,
-                    output_revision: u64::try_from(row.get::<i64, _>("output_revision"))?,
+                    doc_heads: serde_json::from_slice(row.get("doc_heads"))?,
+                    facet_heads: serde_json::from_slice(row.get("facet_heads"))?,
+                    clock: u64::try_from(row.get::<i64, _>("clock"))
+                        .map_err(|_| utils_rs::prelude::ferr!("facet-set clock is out of range"))?,
                 })
             })
             .collect()
     }
 
-    async fn apply_in_context(
-        &self,
-        source_revision: u64,
-        entries: &[FacetSetInput],
-        previous_heads: &BTreeMap<Vec<u8>, Vec<ChangeHash>>,
-        transaction: &mut Transaction<'_, Sqlite>,
-    ) -> Res<u64> {
-        let mut mutations = Vec::new();
-        let mut records = Vec::new();
-        for entry in entries {
-            let doc_id = entry.doc_id();
-            let doc_key = doc_id.to_string();
-            let old_tags: Vec<String> = sqlx::query_scalar(
-                r#"SELECT facet_tag
-                     FROM big_cabinet_facet_set_routes
-                    WHERE doc_id = ?
-                    ORDER BY facet_tag"#,
+    async fn settle(&self, prepared: Prepared) -> Res<()> {
+        let mut transaction = self.sql.write_pool.begin().await?;
+        let doc_id = prepared.work.doc_id.to_string();
+        let stored: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT state FROM big_cabinet_facet_set_docs WHERE doc_id = ?")
+                .bind(&doc_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+        let stored: Option<DocState> = stored
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()?;
+        if stored
+            .as_ref()
+            .is_some_and(|state| state.cursor >= prepared.work.state.cursor)
+        {
+            transaction.rollback().await?;
+            return Ok(());
+        }
+        if stored != prepared.previous {
+            return Err(ferr!(
+                "facet-set document changed during preparation: {doc_id}"
+            ));
+        }
+        let mut slots = prepared.slots;
+        if prepared.replace_all {
+            let old: Vec<String> = sqlx::query_scalar(
+                "SELECT facet_key FROM big_cabinet_facet_set_entries WHERE doc_id = ?",
             )
-            .bind(&doc_key)
-            .fetch_all(&mut **transaction)
+            .bind(&doc_id)
+            .fetch_all(&mut *transaction)
             .await?;
-            let mut current = BTreeMap::<FacetTag, BTreeSet<FacetKey>>::new();
-            if let FacetSetInput::Snapshot { facet_keys, .. } = entry {
-                for key in facet_keys {
-                    current
-                        .entry(key.tag().clone())
-                        .or_default()
-                        .insert(key.clone());
+            for key in old {
+                slots
+                    .entry(key.parse()?)
+                    .or_insert_with(|| FacetMembership::Removed {
+                        doc_heads: prepared.work.state.heads.clone(),
+                        facet_heads: Vec::new(),
+                        clock: 0,
+                    });
+            }
+        }
+        let mutations = slots.iter().map(|(key, value)| {
+            (
+                FacetRoute {
+                    doc_id: prepared.work.doc_id.clone(),
+                    facet_key: key.clone(),
+                },
+                Some(value.clone()),
+            )
+        });
+        if !slots.is_empty() {
+            self.frontier
+                .apply_in_context(&mut transaction, mutations)
+                .await?;
+        }
+        for (key, value) in slots {
+            match value {
+                FacetMembership::Present {
+                    doc_heads,
+                    facet_heads,
+                    clock,
+                } => {
+                    sqlx::query(
+                        r#"INSERT INTO big_cabinet_facet_set_entries (
+                        doc_id
+                        , facet_key
+                        , facet_tag
+                        , doc_heads
+                        , facet_heads
+                        , clock
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (doc_id, facet_key) DO UPDATE SET
+                        doc_heads = excluded.doc_heads
+                        , facet_heads = excluded.facet_heads
+                        , clock = excluded.clock"#,
+                    )
+                    .bind(&doc_id)
+                    .bind(key.to_string())
+                    .bind(key.tag().as_str())
+                    .bind(serde_json::to_vec(&doc_heads)?)
+                    .bind(serde_json::to_vec(&facet_heads)?)
+                    .bind(
+                        i64::try_from(clock).map_err(|_| {
+                            utils_rs::prelude::ferr!("facet-set clock is out of range")
+                        })?,
+                    )
+                    .execute(&mut *transaction)
+                    .await?;
+                }
+                FacetMembership::Removed { .. } => {
+                    sqlx::query("DELETE FROM big_cabinet_facet_set_entries WHERE doc_id = ? AND facet_key = ?")
+                        .bind(&doc_id).bind(key.to_string()).execute(&mut *transaction).await?;
                 }
             }
-            for old_tag in old_tags {
-                let facet_tag = FacetTag::new(old_tag)?;
-                if !current.contains_key(&facet_tag) {
-                    let prior_heads = previous_heads
-                        .get(doc_key.as_bytes())
-                        .expect("indexed document has sparse accepted heads")
-                        .clone();
-                    mutations.push((
-                        FacetRoute {
-                            facet_tag,
-                            doc_id: doc_id.clone(),
-                        },
-                        Some(FacetMembership::Removed { prior_heads }),
-                    ));
-                }
+        }
+        sqlx::query(
+            r#"INSERT INTO big_cabinet_facet_set_docs (doc_id, state) VALUES (?, ?)
+            ON CONFLICT (doc_id) DO UPDATE SET state = excluded.state"#,
+        )
+        .bind(doc_id)
+        .bind(serde_json::to_vec(&prepared.work.state)?)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        self.frontier.notify_changed();
+        Ok(())
+    }
+}
+
+struct DocView<'a> {
+    doc: &'a Automerge,
+    heads: &'a [ChangeHash],
+    current: bool,
+    facets: Vec<ObjId>,
+    metadata: Vec<ObjId>,
+}
+
+impl<'a> DocView<'a> {
+    fn new(doc: &'a Automerge, heads: &'a [ChangeHash]) -> Res<Self> {
+        let mut current_heads = doc.get_heads();
+        current_heads.sort_unstable();
+        let mut view = Self {
+            doc,
+            heads,
+            current: current_heads == heads,
+            facets: Vec::new(),
+            metadata: Vec::new(),
+        };
+        view.facets = view.maps(&ROOT, "facets")?;
+        for facets in &view.facets {
+            for dmeta in view.maps(facets, DMETA_KEY)? {
+                view.metadata.extend(view.maps(&dmeta, "facets")?);
             }
-            if let FacetSetInput::Snapshot { heads, .. } = entry {
-                for (facet_tag, matching_keys) in current {
-                    let route = FacetRoute {
-                        facet_tag,
-                        doc_id: doc_id.clone(),
+        }
+        Ok(view)
+    }
+
+    fn all(&self, object: &ObjId, prop: impl Into<Prop>) -> Res<Vec<(Value<'a>, ObjId)>> {
+        Ok(if self.current {
+            self.doc.get_all(object, prop)?
+        } else {
+            self.doc.get_all_at(object, prop, self.heads)?
+        })
+    }
+
+    fn maps(&self, object: &ObjId, prop: &str) -> Res<Vec<ObjId>> {
+        Ok(self
+            .all(object, prop)?
+            .into_iter()
+            .filter_map(|(value, id)| (value == Value::Object(ObjType::Map)).then_some(id))
+            .collect())
+    }
+
+    fn keys(&self) -> BTreeSet<FacetKey> {
+        self.facets
+            .iter()
+            .chain(&self.metadata)
+            .flat_map(|object| {
+                let range = if self.current {
+                    self.doc.map_range(object, ..)
+                } else {
+                    self.doc.map_range_at(object, .., self.heads)
+                };
+                range
+                    .filter_map(|item| item.key.parse::<FacetKey>().ok())
+                    .filter(|key| key.to_string() != DMETA_KEY)
+            })
+            .collect()
+    }
+
+    fn slot(&self, key: &FacetKey) -> Res<FacetMembership> {
+        let text = key.to_string();
+        let mut present = false;
+        for facets in &self.facets {
+            present |= !self.all(facets, text.as_str())?.is_empty();
+        }
+        let mut heads = BTreeSet::new();
+        for metadata in &self.metadata {
+            for facet in self.maps(metadata, &text)? {
+                for (value, list) in self.all(&facet, "signatures")? {
+                    if value != Value::Object(ObjType::List) {
+                        continue;
+                    }
+                    let range = if self.current {
+                        self.doc.list_range(&list, ..)
+                    } else {
+                        self.doc.list_range_at(&list, .., self.heads)
                     };
-                    mutations.push((
-                        route.clone(),
-                        Some(FacetMembership::Present {
-                            heads: heads.clone(),
-                            matching_keys: matching_keys.clone(),
-                        }),
-                    ));
-                    records.push((route, heads, matching_keys));
+                    for item in range {
+                        if item.conflict {
+                            for (_, marker) in self.all(&list, item.index)? {
+                                heads.insert(
+                                    self.doc
+                                        .hash_for_opid(&marker)
+                                        .expect("observed operation has an introducing change"),
+                                );
+                            }
+                        } else {
+                            heads.insert(
+                                self.doc
+                                    .hash_for_opid(&item.id())
+                                    .expect("observed operation has an introducing change"),
+                            );
+                        }
+                    }
                 }
             }
         }
-        let output_revision = self
-            .frontier
-            .apply_in_context(transaction, mutations)
-            .await?;
-        for entry in entries {
-            sqlx::query(
-                r#"DELETE FROM big_cabinet_facet_set_routes
-                    WHERE doc_id = ?"#,
-            )
-            .bind(entry.doc_id().to_string())
-            .execute(&mut **transaction)
-            .await?;
+        let clock = heads
+            .iter()
+            .filter_map(|head| self.doc.get_change_by_hash(head))
+            .map(|change| change.max_op())
+            .max()
+            .unwrap_or(0);
+        let facet_heads = heads.into_iter().collect();
+        Ok(if present {
+            FacetMembership::Present {
+                doc_heads: self.heads.to_vec(),
+                facet_heads,
+                clock,
+            }
+        } else {
+            FacetMembership::Removed {
+                doc_heads: Some(self.heads.to_vec()),
+                facet_heads,
+                clock,
+            }
+        })
+    }
+
+    fn project(
+        &self,
+        previous: Option<&DocState>,
+    ) -> Res<(BTreeMap<FacetKey, FacetMembership>, bool)> {
+        let old_heads = previous.and_then(|state| state.heads.as_deref());
+        let excluded: BTreeSet<_> = self
+            .doc
+            .get_changes(self.heads)
+            .into_iter()
+            .map(|change| change.hash())
+            .collect();
+        let mut full = old_heads.is_none_or(|heads| {
+            heads.is_empty()
+                || !self.doc.get_missing_deps(heads).is_empty()
+                || heads.iter().any(|head| excluded.contains(head))
+        });
+        let mut touched = BTreeSet::new();
+        if !full {
+            let old_heads = old_heads.expect("incremental projection has prior heads");
+            let mut paths = HashMap::new();
+            for change in self.doc.get_changes(old_heads) {
+                if excluded.contains(&change.hash()) {
+                    continue;
+                }
+                for op in change.decode().operations {
+                    // Resolve the object's path as of the change containing
+                    // the op, not the current heads: a facet write followed
+                    // by a removal inside the same projection window leaves
+                    // the op's object tombstoned at the current heads, and
+                    // automerge's clock-less parent walk cannot seek an
+                    // invisible list insert that trails its object's visible
+                    // ops (fast/slow `seek_list_opid` divergence trips a
+                    // debug_assert in automerge's op_set). Every op target is
+                    // visible at its own change's head, and object paths are
+                    // immutable, so the historical path classifies the op the
+                    // same way. Writers must not create an object and delete
+                    // its container within a single change.
+                    let path = paths
+                        .entry(op.obj.clone())
+                        .or_insert_with(|| match &op.obj {
+                            automerge::legacy::ObjectId::Root => Vec::new(),
+                            automerge::legacy::ObjectId::Id(id) => self
+                                .doc
+                                .parents_at(ObjId::Id(id.0, id.1.clone(), 0), &[change.hash()])
+                                .expect("applied operation targets an existing object")
+                                .path()
+                                .into_iter()
+                                .map(|(_, prop)| prop)
+                                .collect(),
+                        });
+                    let name = |index| match path.get(index) {
+                        Some(Prop::Map(key)) => Some(key.as_str()),
+                        None if index == path.len() => match &op.key {
+                            automerge::legacy::Key::Map(key) => Some(key.as_str()),
+                            automerge::legacy::Key::Seq(_) => None,
+                        },
+                        Some(Prop::Seq(_)) | None => None,
+                    };
+                    if name(0) != Some("facets") {
+                        continue;
+                    }
+                    let key = match (name(1), name(2), name(3)) {
+                        (None, _, _) => {
+                            full = true;
+                            None
+                        }
+                        (Some(DMETA_KEY), Some("facets"), Some(key)) => Some(key),
+                        // Aliases, actors and timestamps do not change membership
+                        // or signature heads; only the `facets` subtree does.
+                        (Some(DMETA_KEY), Some(_), _) => None,
+                        (Some(DMETA_KEY), _, _) => {
+                            full = true;
+                            None
+                        }
+                        (Some(key), _, _) => Some(key),
+                    };
+                    if let Some(key) = key.and_then(|key| key.parse::<FacetKey>().ok()) {
+                        touched.insert(key);
+                    }
+                }
+            }
         }
-        for (route, heads, matching_keys) in records {
-            sqlx::query(
-                r#"INSERT INTO big_cabinet_facet_set_routes (
-                    doc_id
-                    , facet_tag
-                    , heads_json
-                    , matching_keys_json
-                    , source_revision
-                    , output_revision
-                ) VALUES (?, ?, ?, ?, ?, ?)"#,
-            )
-            .bind(route.doc_id.to_string())
-            .bind(route.facet_tag.as_str())
-            .bind(serde_json::to_string(heads)?)
-            .bind(serde_json::to_string(&matching_keys)?)
-            .bind(i64::try_from(source_revision)?)
-            .bind(i64::try_from(output_revision)?)
-            .execute(&mut **transaction)
-            .await?;
+        if full {
+            touched.extend(self.keys());
         }
-        Ok(output_revision)
+        let slots = touched
+            .into_iter()
+            .map(|key| Ok((key.clone(), self.slot(&key)?)))
+            .collect::<Res<_>>()?;
+        Ok((slots, full))
+    }
+}
+
+impl FacetSetStore {
+    async fn prepare(&self, repo: &SharedBigRepo, work: Work) -> Res<Option<Prepared>> {
+        let previous = self.doc_state(&work.doc_id).await?;
+        if previous
+            .as_ref()
+            .is_some_and(|state| state.cursor >= work.state.cursor)
+        {
+            return Ok(Some(Prepared {
+                work,
+                previous,
+                slots: BTreeMap::new(),
+                replace_all: false,
+            }));
+        }
+        let Some(heads) = &work.state.heads else {
+            return Ok(Some(Prepared {
+                work,
+                previous,
+                slots: BTreeMap::new(),
+                replace_all: true,
+            }));
+        };
+        if previous
+            .as_ref()
+            .is_some_and(|state| state.heads == work.state.heads && state.epoch == work.state.epoch)
+        {
+            return Ok(Some(Prepared {
+                work,
+                previous,
+                slots: BTreeMap::new(),
+                replace_all: false,
+            }));
+        }
+        let handle = match repo.get_doc(&work.doc_id).await? {
+            DocLookup::Ready(handle) => handle,
+            DocLookup::Missing | DocLookup::PendingMaterialization => return Ok(None),
+        };
+        let projection = handle
+            .with_document_read(|doc| -> Res<_> {
+                if !doc.get_missing_deps(heads).is_empty() {
+                    return Ok(None);
+                }
+                let view = DocView::new(doc, heads)?;
+                let baseline = previous
+                    .as_ref()
+                    .filter(|state| state.epoch == work.state.epoch);
+                Ok(Some(view.project(baseline)?))
+            })
+            .await?;
+        Ok(projection.map(|(slots, replace_all)| Prepared {
+            work,
+            previous,
+            slots,
+            replace_all,
+        }))
+    }
+
+    pub async fn run(&self, repo: SharedBigRepo, concurrency: NonZeroUsize) -> Res<()> {
+        let source = AutomergeFrontierRevisionStore::new(repo.frontier_part_store());
+        self.drive(
+            &source,
+            AutomergeFrontierSelector {
+                targets: vec![AutomergeFrontierTarget::All],
+            },
+            repo,
+            concurrency,
+        )
+        .await
+    }
+
+    async fn drive<S>(
+        &self,
+        source: &S,
+        selector: S::Selector,
+        repo: SharedBigRepo,
+        concurrency: NonZeroUsize,
+    ) -> Res<()>
+    where
+        S: RevisionedStore<
+                Revision = u64,
+                Entry = AutomergeFrontierEvent,
+                Error = utils_rs::prelude::eyre::Report,
+            >,
+    {
+        let (_registration, mut wakes) = repo
+            .subscribe_local_listener(BigRepoLocalFilter { doc_id: None })
+            .await?;
+        let reader = source.open(selector, self.source_revision().await?).await?;
+        let mut walker: ConcurrentDeltaWalker<'_, S, _, DocId> = ConcurrentDeltaWalker::open(
+            reader,
+            self.input_state.clone(),
+            |event: &AutomergeFrontierEvent| match event {
+                AutomergeFrontierEvent::Changed { doc_id, .. }
+                | AutomergeFrontierEvent::Removed { doc_id, .. } => doc_id.clone(),
+            },
+        )
+        .await?;
+        let mut tasks = TokioKeyedScheduler::new(concurrency.get());
+        let mut pending: BTreeMap<DocId, Work> = BTreeMap::new();
+        let mut early_wakes = BTreeSet::new();
+        let task = |work: Work| {
+            let store = self.clone();
+            let repo = Arc::clone(&repo);
+            async move { store.prepare(&repo, work).await }
+        };
+        loop {
+            let available = concurrency.get().saturating_sub(tasks.active_count());
+            tokio::select! {
+                read = walker.next(NonZeroUsize::new(available.max(1)).expect("positive batch")), if available > 0 => {
+                    match read? {
+                        ConcurrentDeltaRead::ReplayComplete { .. } => {},
+                        ConcurrentDeltaRead::Entries { entries, .. } => for delta in entries {
+                            let (heads, epoch) = match delta.entry {
+                                AutomergeFrontierEvent::Changed { heads, causal_epoch, .. } => {
+                                    let mut heads = heads.to_vec(); heads.sort_unstable(); heads.dedup(); (Some(heads), causal_epoch)
+                                }
+                                AutomergeFrontierEvent::Removed { .. } => (None, None),
+                            };
+                            let work = Work { doc_id: delta.key, state: DocState { heads, epoch, cursor: delta.cursor } };
+                            if pending.get(&work.doc_id).is_some_and(|old| old.state.cursor >= work.state.cursor) { continue; }
+                            pending.insert(work.doc_id.clone(), work.clone());
+                            tasks.replace(work.doc_id.clone(), work.clone(), task(work))?;
+                        },
+                    }
+                }
+                completion = tasks.next_completion() => {
+                    let completion = completion?;
+                    let work = completion.command;
+                    match completion.result? {
+                        Some(prepared) => {
+                            self.settle(prepared).await?;
+                            walker.ack(work.doc_id.clone(), work.state.cursor).await?;
+                            pending.remove(&work.doc_id);
+                            early_wakes.remove(&work.doc_id);
+                        }
+                        None => {
+                            tasks.park(work.doc_id.clone(), work.clone());
+                            if early_wakes.remove(&work.doc_id) { tasks.wake(work.doc_id.clone(), task(work))?; }
+                        }
+                    }
+                }
+                notifications = wakes.recv() => {
+                    for notification in notifications.ok_or_else(|| ferr!("facet-set materialization listener closed"))? {
+                        let doc_id = match notification {
+                            BigRepoLocalNotification::DocCreated { doc_id, .. } | BigRepoLocalNotification::DocImported { doc_id, .. }
+                            | BigRepoLocalNotification::DocHeadsUpdated { doc_id, .. } | BigRepoLocalNotification::DocMaterializationReady { doc_id, .. } => doc_id,
+                            BigRepoLocalNotification::DocMaterializationPending { .. } => continue,
+                        };
+                        if let Some(work) = pending.get(&doc_id).cloned()
+                            && !tasks.wake(doc_id.clone(), task(work))? { early_wakes.insert(doc_id); }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -347,813 +761,684 @@ impl RevisionedStore for FacetSetStore {
         tag: FacetTag,
         after: u64,
     ) -> Result<Self::Reader<'a>, Self::Error> {
-        let selector = SqliteFrontierSelector::Namespaces(BTreeMap::from([(
-            tag.as_str().as_bytes().to_vec(),
-            after,
-        )]));
         Ok(KeyedFrontierRevisionReader::new(
-            self.frontier.open(selector).await?,
+            self.frontier
+                .open(SqliteFrontierSelector::Namespaces(BTreeMap::from([(
+                    tag.as_str().as_bytes().to_vec(),
+                    after,
+                )])))
+                .await?,
         ))
-    }
-}
-
-pub struct FacetSetProjector<'a, S>
-where
-    S: RevisionedStore<Revision = u64, Entry = FacetSetInput> + 'a,
-{
-    store: &'a FacetSetStore,
-    walker: SerialDeltaWalker<'a, S, SqliteDeltaWalkerStateRepo>,
-    pending: Option<(u64, Vec<FacetSetInput>)>,
-}
-
-impl<S> FacetSetProjector<'_, S>
-where
-    S: RevisionedStore<Revision = u64, Entry = FacetSetInput>,
-    S::Error: std::fmt::Debug,
-{
-    pub async fn next(&mut self) -> Res<FacetSetProjection> {
-        if self.pending.is_none() {
-            match self.walker.next().await? {
-                RevisionRead::ReplayComplete { through } => {
-                    return Ok(FacetSetProjection::ReplayComplete { through });
-                }
-                RevisionRead::Entries {
-                    revision,
-                    mut entries,
-                } => {
-                    for entry in &mut entries {
-                        if let FacetSetInput::Snapshot { heads, .. } = entry {
-                            heads.sort_unstable();
-                            heads.dedup();
-                        }
-                    }
-                    self.pending = Some((revision, entries));
-                }
-            }
-        }
-        let (source_revision, entries) = self.pending.as_ref().expect("source revision is pending");
-        let source_revision = *source_revision;
-        let mut keys = BTreeSet::new();
-        for entry in entries {
-            let key = entry.doc_id().to_string().into_bytes();
-            if !keys.insert(key) {
-                return Err(ferr!(
-                    "duplicate document in accepted revision {source_revision}: {}",
-                    entry.doc_id()
-                ));
-            }
-        }
-        let previous_heads = self
-            .store
-            .input_state
-            .get_many(&keys.into_iter().collect::<Vec<_>>())
-            .await?
-            .into_iter()
-            .map(|(key, value)| Ok((key, serde_json::from_slice::<Vec<ChangeHash>>(&value)?)))
-            .collect::<Res<BTreeMap<_, _>>>()?;
-        let mut settlement = self.walker.begin_settlement(source_revision).await?;
-        let output_revision = self
-            .store
-            .apply_in_context(
-                source_revision,
-                entries,
-                &previous_heads,
-                settlement.context_mut(),
-            )
-            .await?;
-        for entry in entries {
-            let key = entry.doc_id().to_string().into_bytes();
-            match entry {
-                FacetSetInput::Snapshot { heads, .. } => {
-                    settlement.put(key, serde_json::to_vec(heads)?).await?;
-                }
-                FacetSetInput::Removed { .. } => settlement.delete(&key).await?,
-            }
-        }
-        settlement.settle().await?;
-        self.store.frontier.notify_changed();
-        self.pending = None;
-        Ok(FacetSetProjection::Applied {
-            source_revision,
-            output_revision,
-        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use big_sync_core::revisioned_store::{RevisionReadLimits, RevisionedStoreReader};
-    use big_sync_core::serial_delta_walker::SerialDeltaWalkerError;
-    use std::collections::VecDeque;
-    use std::num::NonZeroUsize;
+    use automerge::transaction::Transactable;
+    use big_sync_core::revisioned_store::{
+        RevisionRead, RevisionReadLimits, RevisionedStoreReader,
+    };
 
-    struct Source {
-        revisions: Vec<(u64, Vec<FacetSetInput>)>,
+    fn key(name: &str) -> FacetKey {
+        format!("org.example.note/{name}").parse().unwrap()
     }
 
-    struct Reader {
-        reads: VecDeque<RevisionRead<u64, FacetSetInput>>,
+    fn heads_clock(doc: &Automerge, heads: &[automerge::ChangeHash]) -> u64 {
+        heads
+            .iter()
+            .filter_map(|head| doc.get_change_by_hash(head))
+            .map(|change| change.max_op())
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn state(doc: &Automerge, cursor: u64) -> DocState {
+        let mut heads = doc.get_heads();
+        heads.sort_unstable();
+        DocState {
+            heads: Some(heads),
+            epoch: None,
+            cursor,
+        }
+    }
+
+    fn fixture() -> (Automerge, ObjId, ObjId, ObjId) {
+        let mut doc = Automerge::new();
+        let mut tx = doc.transaction();
+        let facets = tx.put_object(ROOT, "facets", ObjType::Map).unwrap();
+        let first = tx
+            .put_object(&facets, key("a").to_string(), ObjType::Map)
+            .unwrap();
+        tx.put(&first, "value", "a").unwrap();
+        tx.put(&facets, key("b").to_string(), "b").unwrap();
+        let dmeta = tx.put_object(&facets, DMETA_KEY, ObjType::Map).unwrap();
+        let metadata = tx.put_object(&dmeta, "facets", ObjType::Map).unwrap();
+        let entry = tx
+            .put_object(&metadata, key("a").to_string(), ObjType::Map)
+            .unwrap();
+        let signatures = tx.put_object(&entry, "signatures", ObjType::List).unwrap();
+        tx.insert_object(&signatures, 0, ObjType::Map).unwrap();
+        tx.commit();
+        (doc, facets, first, metadata)
+    }
+
+    fn project(doc: &Automerge, previous: Option<&DocState>, cursor: u64) -> Prepared {
+        let next = state(doc, cursor);
+        let (slots, replace_all) = DocView::new(doc, next.heads.as_ref().unwrap())
+            .unwrap()
+            .project(previous)
+            .unwrap();
+        Prepared {
+            work: Work {
+                doc_id: DocId::new([1; 32]),
+                state: next,
+            },
+            previous: previous.cloned(),
+            slots,
+            replace_all,
+        }
+    }
+
+    #[test]
+    fn raw_initial_and_historical_views_do_not_verify_or_hydrate() {
+        let (mut doc, facets, _, _) = fixture();
+        let initial = state(&doc, 1);
+        let first = project(&doc, None, 1);
+        assert!(first.replace_all);
+        assert_eq!(
+            first.slots,
+            BTreeMap::from([
+                (
+                    key("a"),
+                    FacetMembership::Present {
+                        doc_heads: initial.heads.clone().unwrap(),
+                        clock: heads_clock(&doc, initial.heads.as_ref().unwrap()),
+                        facet_heads: initial.heads.clone().unwrap()
+                    }
+                ),
+                (
+                    key("b"),
+                    FacetMembership::Present {
+                        doc_heads: initial.heads.clone().unwrap(),
+                        facet_heads: Vec::new(),
+                        clock: 0
+                    }
+                ),
+            ])
+        );
+        let mut tx = doc.transaction();
+        tx.delete(&facets, key("a").to_string()).unwrap();
+        tx.commit();
+        let view = DocView::new(&doc, initial.heads.as_ref().unwrap()).unwrap();
+        assert!(!view.current);
+        assert_eq!(view.project(None).unwrap().0, first.slots);
+        let next = project(&doc, Some(&initial), 2);
+        assert_eq!(
+            next.slots,
+            BTreeMap::from([(
+                key("a"),
+                FacetMembership::Removed {
+                    doc_heads: Some(doc.get_heads()),
+                    clock: heads_clock(&doc, initial.heads.as_ref().unwrap()),
+                    facet_heads: initial.heads.unwrap(),
+                }
+            )])
+        );
+    }
+
+    #[test]
+    fn nested_unsigned_edits_emit_only_the_touched_slot_with_unchanged_signature_heads() {
+        let (mut doc, _, first, _) = fixture();
+        let initial = state(&doc, 1);
+        let mut tx = doc.transaction();
+        tx.put(&first, "value", "changed").unwrap();
+        tx.commit();
+        let next = project(&doc, Some(&initial), 2);
+        assert!(!next.replace_all);
+        assert_eq!(
+            next.slots,
+            BTreeMap::from([(
+                key("a"),
+                FacetMembership::Present {
+                    doc_heads: doc.get_heads(),
+                    clock: heads_clock(&doc, initial.heads.as_ref().unwrap()),
+                    facet_heads: initial.heads.unwrap(),
+                }
+            )])
+        );
+    }
+
+    #[test]
+    fn hidden_and_deleted_object_operations_still_touch_their_facet() {
+        let (mut doc, facets, first, _) = fixture();
+        let base = state(&doc, 1);
+        let mut peer = doc.fork();
+        let mut tx = doc.transaction();
+        tx.put(&first, "value", "same").unwrap();
+        tx.commit();
+        let before = state(&doc, 2);
+        let mut tx = peer.transaction();
+        tx.put(&first, "value", "same").unwrap();
+        tx.commit();
+        doc.merge(&mut peer).unwrap();
+        assert_eq!(
+            project(&doc, Some(&before), 3)
+                .slots
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            [key("a")]
+        );
+        let mut tx = doc.transaction();
+        tx.delete(&facets, key("a").to_string()).unwrap();
+        tx.commit();
+        let before = state(&doc, 4);
+        let mut peer = doc.fork_at(base.heads.as_ref().unwrap()).unwrap();
+        let mut tx = peer.transaction();
+        tx.put(&first, "hidden", "invisible").unwrap();
+        tx.commit();
+        doc.merge(&mut peer).unwrap();
+        assert_eq!(
+            project(&doc, Some(&before), 5)
+                .slots
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            [key("a")]
+        );
+    }
+
+    #[test]
+    fn concurrent_metadata_maps_contribute_all_signature_introductions() {
+        let (mut doc, _, _, metadata) = fixture();
+        let before = state(&doc, 1);
+        let mut peer = doc.fork();
+        for branch in [&mut doc, &mut peer] {
+            let mut tx = branch.transaction();
+            let entry = tx
+                .put_object(&metadata, key("b").to_string(), ObjType::Map)
+                .unwrap();
+            let list = tx.put_object(&entry, "signatures", ObjType::List).unwrap();
+            tx.insert_object(&list, 0, ObjType::Map).unwrap();
+            tx.commit();
+        }
+        let mut introductions = doc.get_heads();
+        introductions.extend(peer.get_heads());
+        introductions.sort_unstable();
+        doc.merge(&mut peer).unwrap();
+        let next = project(&doc, Some(&before), 2);
+        assert_eq!(
+            next.slots,
+            BTreeMap::from([(
+                key("b"),
+                FacetMembership::Present {
+                    doc_heads: introductions.clone(),
+                    clock: heads_clock(&doc, &introductions),
+                    facet_heads: introductions,
+                }
+            )])
+        );
+    }
+
+    #[test]
+    fn dmeta_fields_other_than_facets_do_not_touch_slots() {
+        let (mut doc, facets, _, _) = fixture();
+        let before = state(&doc, 1);
+        let (_, dmeta) = doc.get(&facets, DMETA_KEY).unwrap().unwrap();
+        let mut tx = doc.transaction();
+        tx.put(&dmeta, "aliases", "renamed").unwrap();
+        tx.commit();
+        let next = project(&doc, Some(&before), 2);
+        assert!(!next.replace_all);
+        assert!(next.slots.is_empty(), "{:?}", next.slots);
+    }
+
+    #[test]
+    fn projection_across_a_tombstoned_signature_uses_historical_paths() {
+        let (mut doc, _, _, metadata) = fixture();
+        let before = state(&doc, 1);
+        let (_, entry) = doc.get(&metadata, key("a").to_string()).unwrap().unwrap();
+        let (_, signatures) = doc.get(&entry, "signatures").unwrap().unwrap();
+        let (_, signature) = doc.get(&signatures, 0).unwrap().unwrap();
+        let mut tx = doc.transaction();
+        tx.put(&signature, "actor", "z").unwrap();
+        tx.commit();
+        // Tombstone the signature map in a later change of the same
+        // projection window: its creator insert becomes the list's only,
+        // invisible op, which automerge's clock-less parent walk cannot
+        // seek (fast/slow `seek_list_opid` divergence).
+        let mut tx = doc.transaction();
+        tx.delete(&signatures, 0).unwrap();
+        tx.commit();
+        let next = project(&doc, Some(&before), 2);
+        assert!(!next.replace_all);
+        assert_eq!(
+            next.slots,
+            BTreeMap::from([(
+                key("a"),
+                FacetMembership::Present {
+                    doc_heads: doc.get_heads(),
+                    facet_heads: Vec::new(),
+                    clock: 0,
+                }
+            )])
+        );
+    }
+
+    #[tokio::test]
+    async fn key_query_returns_records_with_signature_clocks() {
+        let sql = SqlCtx::memory().await.unwrap();
+        let store = FacetSetStore::new(sql).await.unwrap();
+        let (mut doc, _, first, _) = fixture();
+        let initial = state(&doc, 1);
+        store.settle(project(&doc, None, 1)).await.unwrap();
+        let records = store.query(FacetSetQuery::Key(key("a"))).await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].route.doc_id, DocId::new([1; 32]));
+        assert_eq!(
+            records[0].clock,
+            heads_clock(&doc, initial.heads.as_ref().unwrap())
+        );
+        assert!(records[0].clock > 0);
+        let first_clock = records[0].clock;
+        let mut tx = doc.transaction();
+        tx.put(&first, "value", "changed").unwrap();
+        tx.commit();
+        // An unsigned value edit does not move the facet version: its clock is
+        // over the signature introductions, which are unchanged.
+        store
+            .settle(project(&doc, Some(&initial), 2))
+            .await
+            .unwrap();
+        let records = store.query(FacetSetQuery::Key(key("a"))).await.unwrap();
+        assert_eq!(records[0].clock, first_clock);
+        assert!(
+            store
+                .query(FacetSetQuery::Key(key("missing")))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn envelope_replacement_rescans_and_ignores_later_materialized_changes() {
+        let (mut doc, _, _, _) = fixture();
+        let before = state(&doc, 1);
+        let mut tx = doc.transaction();
+        let facets = tx.put_object(ROOT, "facets", ObjType::Map).unwrap();
+        tx.put(&facets, key("c").to_string(), "c").unwrap();
+        tx.commit();
+        let replacement = state(&doc, 2);
+        let next = project(&doc, Some(&before), 2);
+        assert!(next.replace_all);
+        assert_eq!(next.slots.keys().cloned().collect::<Vec<_>>(), [key("c")]);
+        let mut tx = doc.transaction();
+        tx.put(&facets, key("later").to_string(), "later").unwrap();
+        tx.commit();
+        let historic = DocView::new(&doc, replacement.heads.as_ref().unwrap())
+            .unwrap()
+            .project(Some(&before))
+            .unwrap();
+        assert_eq!(historic, (next.slots, next.replace_all));
+    }
+
+    async fn next_entries(
+        store: &FacetSetStore,
+        tag: &str,
+        after: u64,
+    ) -> (u64, Vec<FrontierEntry<FacetRoute, FacetMembership>>) {
+        let mut reader = store
+            .open(FacetTag::new(tag).unwrap(), after)
+            .await
+            .unwrap();
+        loop {
+            match reader.next(RevisionReadLimits::default()).await.unwrap() {
+                RevisionRead::Entries { revision, entries } if !entries.is_empty() => {
+                    return (revision, entries);
+                }
+                RevisionRead::Entries { .. } | RevisionRead::ReplayComplete { .. } => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn settlements_are_atomic_idempotent_and_removals_preserve_tombstone_heads() {
+        let sql = SqlCtx::memory().await.unwrap();
+        let store = FacetSetStore::new(sql.clone()).await.unwrap();
+        let (mut doc, facets, _, _) = fixture();
+        let initial = state(&doc, 1);
+        sqlx::query("CREATE TRIGGER reject_facet_set BEFORE INSERT ON big_cabinet_facet_set_docs BEGIN SELECT RAISE(ABORT, 'injected'); END")
+            .execute(&sql.write_pool).await.unwrap();
+        assert!(store.settle(project(&doc, None, 1)).await.is_err());
+        assert_eq!(store.latest_revision().await.unwrap(), 0);
+        assert_eq!(store.doc_state(&DocId::new([1; 32])).await.unwrap(), None);
+        assert!(
+            store
+                .query(FacetSetQuery::Tag(
+                    FacetTag::new("org.example.note").unwrap()
+                ))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        sqlx::query("DROP TRIGGER reject_facet_set")
+            .execute(&sql.write_pool)
+            .await
+            .unwrap();
+        store.settle(project(&doc, None, 1)).await.unwrap();
+        let (revision, entries) = next_entries(&store, "org.example.note", 0).await;
+        assert_eq!((revision, entries.len()), (1, 2));
+        store.settle(project(&doc, None, 1)).await.unwrap();
+        assert_eq!(store.latest_revision().await.unwrap(), 1);
+        let mut tx = doc.transaction();
+        tx.delete(&facets, key("a").to_string()).unwrap();
+        tx.commit();
+        store
+            .settle(project(&doc, Some(&initial), 2))
+            .await
+            .unwrap();
+        let (revision, entries) = next_entries(&store, "org.example.note", 1).await;
+        assert_eq!(
+            entries,
+            vec![FrontierEntry {
+                revision,
+                key: FacetRoute {
+                    doc_id: DocId::new([1; 32]),
+                    facet_key: key("a")
+                },
+                value: Some(FacetMembership::Removed {
+                    doc_heads: Some(doc.get_heads()),
+                    clock: heads_clock(&doc, initial.heads.as_ref().unwrap()),
+                    facet_heads: initial.heads.unwrap()
+                })
+            }]
+        );
+        let reopened = FacetSetStore::new(sql).await.unwrap();
+        assert_eq!(
+            reopened
+                .query(FacetSetQuery::Doc(DocId::new([1; 32])))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|record| record.route.facet_key)
+                .collect::<Vec<_>>(),
+            [key("b")]
+        );
+        assert_eq!(store.source_revision().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn replacement_and_physical_removal_remove_all_old_routes_without_regressing_state() {
+        let store = FacetSetStore::new(SqlCtx::memory().await.unwrap())
+            .await
+            .unwrap();
+        let (mut doc, _, _, _) = fixture();
+        let initial = state(&doc, 1);
+        store.settle(project(&doc, None, 1)).await.unwrap();
+        let stale = project(&doc, Some(&initial), 2);
+        let mut tx = doc.transaction();
+        tx.put_object(ROOT, "facets", ObjType::Map).unwrap();
+        tx.commit();
+        store
+            .settle(project(&doc, Some(&initial), 3))
+            .await
+            .unwrap();
+        store.settle(stale).await.unwrap();
+        assert_eq!(
+            store.doc_state(&DocId::new([1; 32])).await.unwrap(),
+            Some(state(&doc, 3))
+        );
+        assert!(
+            store
+                .query(FacetSetQuery::Doc(DocId::new([1; 32])))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    struct ScriptSource {
+        receiver: std::sync::Mutex<
+            Option<tokio::sync::mpsc::UnboundedReceiver<RevisionRead<u64, AutomergeFrontierEvent>>>,
+        >,
+    }
+
+    struct ScriptReader(
+        tokio::sync::mpsc::UnboundedReceiver<RevisionRead<u64, AutomergeFrontierEvent>>,
+    );
+
+    #[async_trait]
+    impl RevisionedStore for ScriptSource {
+        type Revision = u64;
+        type Entry = AutomergeFrontierEvent;
+        type Selector = ();
+        type Error = utils_rs::prelude::eyre::Report;
+        type Reader<'a> = ScriptReader;
+
+        async fn latest_revision(&self) -> Res<u64> {
+            Ok(0)
+        }
+
+        async fn open<'a>(&'a self, (): (), _after: u64) -> Res<ScriptReader> {
+            Ok(ScriptReader(self.receiver.lock().unwrap().take().unwrap()))
+        }
     }
 
     #[async_trait]
-    impl RevisionedStoreReader<u64, FacetSetInput, utils_rs::prelude::eyre::Report> for Reader {
+    impl RevisionedStoreReader<u64, AutomergeFrontierEvent, utils_rs::prelude::eyre::Report>
+        for ScriptReader
+    {
         async fn next(
             &mut self,
             _limits: RevisionReadLimits,
-        ) -> Res<RevisionRead<u64, FacetSetInput>> {
-            Ok(self.reads.pop_front().expect("scripted source exhausted"))
+        ) -> Res<RevisionRead<u64, AutomergeFrontierEvent>> {
+            Ok(self.0.recv().await.expect("script sender stays alive"))
         }
     }
 
-    #[async_trait]
-    impl RevisionedStore for Source {
-        type Revision = u64;
-        type Entry = FacetSetInput;
-        type Selector = ();
-        type Error = utils_rs::prelude::eyre::Report;
-        type Reader<'a> = Reader;
-
-        async fn latest_revision(&self) -> Res<u64> {
-            Ok(self
-                .revisions
-                .iter()
-                .map(|(revision, _)| *revision)
-                .max()
-                .unwrap_or(0))
-        }
-
-        async fn open<'a>(&'a self, (): (), after: u64) -> Res<Reader> {
-            let mut reads: VecDeque<_> = self
-                .revisions
-                .iter()
-                .filter(|(revision, _)| *revision > after)
-                .map(|(revision, entries)| RevisionRead::Entries {
-                    revision: *revision,
-                    entries: entries.clone(),
-                })
-                .collect();
-            reads.push_back(RevisionRead::ReplayComplete {
-                through: self.latest_revision().await?,
-            });
-            Ok(Reader { reads })
-        }
-    }
-
-    fn document(index: u8) -> DocId {
-        DocId::new([index; 32])
-    }
-
-    fn tag(name: &str) -> FacetTag {
-        FacetTag::new(name).unwrap()
-    }
-
-    fn heads(indices: &[u8]) -> Vec<ChangeHash> {
-        indices
-            .iter()
-            .map(|index| ChangeHash([*index; 32]))
-            .collect()
-    }
-
-    fn keys(entries: &[(&str, &str)]) -> BTreeSet<FacetKey> {
-        entries
-            .iter()
-            .map(|(tag, id)| FacetKey::from_text(*tag, *id).unwrap())
-            .collect()
-    }
-
-    fn snapshot(index: u8, version: &[u8], facets: &[(&str, &str)]) -> FacetSetInput {
-        FacetSetInput::Snapshot {
-            doc_id: document(index),
-            heads: heads(version),
-            facet_keys: keys(facets),
-        }
-    }
-
-    fn removed(index: u8) -> FacetSetInput {
-        FacetSetInput::Removed {
-            doc_id: document(index),
-        }
-    }
-
-    fn route(index: u8, name: &str) -> FacetRoute {
-        FacetRoute {
-            facet_tag: tag(name),
-            doc_id: document(index),
-        }
-    }
-
-    fn present(
-        index: u8,
-        name: &str,
-        version: &[u8],
-        facets: &[(&str, &str)],
+    fn changed(
+        doc_id: &DocId,
+        doc: &Automerge,
         revision: u64,
-    ) -> FrontierEntry<FacetRoute, FacetMembership> {
-        FrontierEntry {
-            key: route(index, name),
+    ) -> RevisionRead<u64, AutomergeFrontierEvent> {
+        RevisionRead::Entries {
             revision,
-            value: Some(FacetMembership::Present {
-                heads: heads(version),
-                matching_keys: keys(facets),
-            }),
+            entries: vec![AutomergeFrontierEvent::Changed {
+                doc_id: doc_id.clone(),
+                heads: doc.get_heads().into(),
+                causal_epoch: None,
+                routes: Vec::new(),
+                revision,
+            }],
         }
     }
 
-    fn tombstone(
-        index: u8,
-        name: &str,
-        version: &[u8],
-        revision: u64,
-    ) -> FrontierEntry<FacetRoute, FacetMembership> {
-        FrontierEntry {
-            key: route(index, name),
-            revision,
-            value: Some(FacetMembership::Removed {
-                prior_heads: heads(version),
-            }),
-        }
+    async fn boot_repo() -> (SharedBigRepo, big_repo::BigRepoStopToken) {
+        big_repo::BigRepo::boot(big_repo::Config {
+            node_identity_seed: [31; 32],
+            storage: big_repo::StorageConfig::Memory,
+            scope_key: "facet-set-test".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
+        .await
+        .unwrap()
     }
 
-    fn applied(source_revision: u64, output_revision: u64) -> FacetSetProjection {
-        FacetSetProjection::Applied {
-            source_revision,
-            output_revision,
-        }
-    }
-
-    async fn store() -> FacetSetStore {
-        FacetSetStore::new(SqlCtx::memory().await.unwrap())
+    #[tokio::test]
+    async fn a_parked_doc_does_not_block_other_docs_and_newer_work_supersedes_it() {
+        let (repo, stop) = boot_repo().await;
+        let store = FacetSetStore::new(SqlCtx::memory().await.unwrap())
             .await
-            .unwrap()
-    }
-
-    async fn sparse_heads(store: &FacetSetStore, index: u8) -> Option<Vec<ChangeHash>> {
-        store
-            .input_state
-            .get(document(index).to_string().as_bytes())
-            .await
-            .unwrap()
-            .map(|value| serde_json::from_slice(&value).unwrap())
-    }
-
-    #[tokio::test]
-    async fn same_tag_instances_and_heads_are_canonical() -> Res<()> {
-        let store = store().await;
-        let binary_key = FacetKey::new("note", vec![0xff, b'/']).unwrap();
-        let mut facet_keys = keys(&[("note", "a"), ("note", "b"), ("task", "c")]);
-        facet_keys.insert(binary_key.clone());
-        let source = Source {
-            revisions: vec![(
-                10,
-                vec![FacetSetInput::Snapshot {
-                    doc_id: document(1),
-                    heads: heads(&[2, 1, 2]),
-                    facet_keys,
-                }],
-            )],
+            .unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let source = ScriptSource {
+            receiver: std::sync::Mutex::new(Some(receiver)),
         };
-        let mut projector = store.projector(&source, ()).await?;
-        assert_eq!(projector.next().await?, applied(10, 1));
-        let mut note_keys = keys(&[("note", "a"), ("note", "b")]);
-        note_keys.insert(binary_key);
-        let expected = vec![
-            FacetRecord {
-                route: route(1, "note"),
-                heads: heads(&[1, 2]),
-                matching_keys: note_keys.clone(),
-                source_revision: 10,
-                output_revision: 1,
-            },
-            FacetRecord {
-                route: route(1, "task"),
-                heads: heads(&[1, 2]),
-                matching_keys: keys(&[("task", "c")]),
-                source_revision: 10,
-                output_revision: 1,
-            },
-        ];
-        assert_eq!(
-            store.query(FacetSetQuery::Doc(document(1))).await?,
-            expected
-        );
-        assert_eq!(
-            store.query(FacetSetQuery::Tag(tag("note"))).await?,
-            vec![expected[0].clone()]
-        );
-        assert_eq!(sparse_heads(&store, 1).await, Some(heads(&[1, 2])));
-        let mut reader = store.open(tag("note"), 0).await?;
-        assert_eq!(
-            reader.next(RevisionReadLimits::default()).await?,
-            RevisionRead::Entries {
-                revision: 1,
-                entries: vec![FrontierEntry {
-                    key: route(1, "note"),
-                    revision: 1,
-                    value: Some(FacetMembership::Present {
-                        heads: heads(&[1, 2]),
-                        matching_keys: note_keys
-                    }),
-                }],
-            }
-        );
-        assert_eq!(
-            reader.next(RevisionReadLimits::default()).await?,
-            RevisionRead::ReplayComplete { through: 1 }
-        );
-        assert_eq!(
-            projector.next().await?,
-            FacetSetProjection::ReplayComplete { through: 10 }
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn content_only_updates_and_new_revision_reevaluations_touch_routes() -> Res<()> {
-        let store = store().await;
-        let source = Source {
-            revisions: vec![
-                (3, vec![snapshot(1, &[1], &[("note", "a")])]),
-                (8, vec![snapshot(1, &[2], &[("note", "a")])]),
-                (12, vec![snapshot(1, &[2], &[("note", "a")])]),
-            ],
-        };
-        let mut projector = store.projector(&source, ()).await?;
-        assert_eq!(projector.next().await?, applied(3, 1));
-        let mut reader = store.open(tag("note"), 1).await?;
-        assert_eq!(
-            reader.next(RevisionReadLimits::default()).await?,
-            RevisionRead::Entries {
-                revision: 1,
-                entries: vec![]
-            }
-        );
-        assert_eq!(
-            reader.next(RevisionReadLimits::default()).await?,
-            RevisionRead::ReplayComplete { through: 1 }
-        );
-        let (read, projected) =
-            tokio::join!(reader.next(RevisionReadLimits::default()), projector.next());
-        assert_eq!(projected?, applied(8, 2));
-        assert_eq!(
-            read?,
-            RevisionRead::Entries {
-                revision: 2,
-                entries: vec![present(1, "note", &[2], &[("note", "a")], 2)],
-            }
-        );
-        assert_eq!(projector.next().await?, applied(12, 3));
-        assert_eq!(
-            reader.next(RevisionReadLimits::default()).await?,
-            RevisionRead::Entries {
-                revision: 3,
-                entries: vec![present(1, "note", &[2], &[("note", "a")], 3)],
-            }
-        );
-        assert_eq!(
-            store.query(FacetSetQuery::Doc(document(1))).await?,
-            vec![FacetRecord {
-                route: route(1, "note"),
-                heads: heads(&[2]),
-                matching_keys: keys(&[("note", "a")]),
-                source_revision: 12,
-                output_revision: 3,
-            }]
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn multi_document_tag_transition_and_removals_are_one_revision() -> Res<()> {
-        let store = store().await;
-        let source = Source {
-            revisions: vec![
-                (
-                    1,
-                    vec![
-                        snapshot(1, &[1], &[("note", "a"), ("task", "b")]),
-                        snapshot(2, &[7], &[("note", "c")]),
-                    ],
-                ),
-                (
-                    2,
-                    vec![
-                        snapshot(1, &[2], &[("archive", "a"), ("task", "b")]),
-                        removed(2),
-                    ],
-                ),
-                (3, vec![removed(1)]),
-            ],
-        };
-        let mut projector = store.projector(&source, ()).await?;
-        assert_eq!(projector.next().await?, applied(1, 1));
-        assert_eq!(projector.next().await?, applied(2, 2));
-        let mut reader = KeyedFrontierRevisionReader::new(
-            store
-                .frontier
-                .open(SqliteFrontierSelector::All { after: 1 })
-                .await?,
-        );
-        let limits = RevisionReadLimits {
-            max_entries: NonZeroUsize::new(1).unwrap(),
-        };
-        let mut expected = vec![
-            tombstone(1, "note", &[1], 2),
-            tombstone(2, "note", &[7], 2),
-            present(1, "archive", &[2], &[("archive", "a")], 2),
-            present(1, "task", &[2], &[("task", "b")], 2),
-        ];
-        expected.sort_by(|left, right| left.key.cmp(&right.key));
-        let RevisionRead::Entries {
-            revision,
-            mut entries,
-        } = reader.next(limits).await?
-        else {
-            panic!("expected one atomic routing revision")
-        };
-        entries.sort_by(|left, right| left.key.cmp(&right.key));
-        assert_eq!(
-            RevisionRead::Entries { revision, entries },
-            RevisionRead::Entries {
-                revision: 2,
-                entries: expected
-            }
-        );
-        assert_eq!(
-            reader.next(limits).await?,
-            RevisionRead::ReplayComplete { through: 2 }
-        );
-        assert_eq!(store.query(FacetSetQuery::Doc(document(2))).await?, vec![]);
-        assert_eq!(sparse_heads(&store, 2).await, None);
-        assert_eq!(
-            store.query(FacetSetQuery::Doc(document(1))).await?,
-            vec![
-                FacetRecord {
-                    route: route(1, "archive"),
-                    heads: heads(&[2]),
-                    matching_keys: keys(&[("archive", "a")]),
-                    source_revision: 2,
-                    output_revision: 2
-                },
-                FacetRecord {
-                    route: route(1, "task"),
-                    heads: heads(&[2]),
-                    matching_keys: keys(&[("task", "b")]),
-                    source_revision: 2,
-                    output_revision: 2
-                },
-            ]
-        );
-        assert_eq!(projector.next().await?, applied(3, 3));
-        let mut reader = store.open(tag("task"), 2).await?;
-        assert_eq!(
-            reader.next(limits).await?,
-            RevisionRead::Entries {
-                revision: 3,
-                entries: vec![tombstone(1, "task", &[2], 3)]
-            }
-        );
-        assert_eq!(store.query(FacetSetQuery::Doc(document(1))).await?, vec![]);
-        assert_eq!(sparse_heads(&store, 1).await, None);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn empty_progress_and_documents_without_facets_settle() -> Res<()> {
-        let store = store().await;
-        let source = Source {
-            revisions: vec![
-                (7, vec![]),
-                (11, vec![snapshot(1, &[4], &[])]),
-                (18, vec![removed(1)]),
-            ],
-        };
-        let mut projector = store.projector(&source, ()).await?;
-        assert_eq!(projector.next().await?, applied(7, 1));
-        let mut reader = store.open(tag("note"), 0).await?;
-        assert_eq!(
-            reader.next(RevisionReadLimits::default()).await?,
-            RevisionRead::Entries {
-                revision: 1,
-                entries: vec![]
-            }
-        );
-        assert_eq!(
-            reader.next(RevisionReadLimits::default()).await?,
-            RevisionRead::ReplayComplete { through: 1 }
-        );
-        assert_eq!(projector.next().await?, applied(11, 2));
-        assert_eq!(sparse_heads(&store, 1).await, Some(heads(&[4])));
-        assert_eq!(store.query(FacetSetQuery::Doc(document(1))).await?, vec![]);
-        assert_eq!(
-            reader.next(RevisionReadLimits::default()).await?,
-            RevisionRead::Entries {
-                revision: 2,
-                entries: vec![]
-            }
-        );
-        assert_eq!(projector.next().await?, applied(18, 3));
-        assert_eq!(sparse_heads(&store, 1).await, None);
-        assert_eq!(
-            reader.next(RevisionReadLimits::default()).await?,
-            RevisionRead::Entries {
-                revision: 3,
-                entries: vec![]
-            }
-        );
-        assert_eq!(store.source_revision().await?, 18);
-        assert_eq!(
-            projector.next().await?,
-            FacetSetProjection::ReplayComplete { through: 18 }
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn independent_tag_readers_and_late_readers_survive_reopen() -> Res<()> {
-        let directory = tempfile::TempDir::new()?;
-        let url = format!(
-            "sqlite://{}",
-            directory.path().join("routes.sqlite").display()
-        );
-        let source = Source {
-            revisions: vec![
-                (2, vec![snapshot(1, &[1], &[("note", "a"), ("task", "b")])]),
-                (
-                    5,
-                    vec![
-                        snapshot(1, &[2], &[("task", "b")]),
-                        snapshot(2, &[3], &[("note", "c")]),
-                    ],
-                ),
-                (9, vec![snapshot(2, &[4], &[("note", "c")])]),
-            ],
-        };
-        {
-            let sql = SqlCtx::url(&url).await?;
-            let store = FacetSetStore::new(sql.clone()).await?;
-            let mut projector = store.projector(&source, ()).await?;
-            assert_eq!(projector.next().await?, applied(2, 1));
-            let mut note = store.open(tag("note"), 0).await?;
-            let mut task = store.open(tag("task"), 0).await?;
-            assert_eq!(
-                note.next(RevisionReadLimits::default()).await?,
-                RevisionRead::Entries {
-                    revision: 1,
-                    entries: vec![present(1, "note", &[1], &[("note", "a")], 1)]
-                }
-            );
-            assert_eq!(
-                note.next(RevisionReadLimits::default()).await?,
-                RevisionRead::ReplayComplete { through: 1 }
-            );
-            assert_eq!(projector.next().await?, applied(5, 2));
-            assert_eq!(
-                task.next(RevisionReadLimits::default()).await?,
-                RevisionRead::Entries {
-                    revision: 1,
-                    entries: vec![]
-                }
-            );
-            assert_eq!(
-                task.next(RevisionReadLimits::default()).await?,
-                RevisionRead::ReplayComplete { through: 1 }
-            );
-            assert_eq!(
-                task.next(RevisionReadLimits::default()).await?,
-                RevisionRead::Entries {
-                    revision: 2,
-                    entries: vec![present(1, "task", &[2], &[("task", "b")], 2)]
-                }
-            );
-            assert_eq!(projector.next().await?, applied(9, 3));
-            assert_eq!(
-                task.next(RevisionReadLimits::default()).await?,
-                RevisionRead::Entries {
-                    revision: 3,
-                    entries: vec![]
-                }
-            );
-            drop(task);
-            drop(note);
-            drop(projector);
-            drop(store);
-            sql.read_pool.close().await;
-            sql.write_pool.close().await;
-        }
-        let store = FacetSetStore::new(SqlCtx::url(&url).await?).await?;
-        assert_eq!(store.source_revision().await?, 9);
-        assert_eq!(store.latest_revision().await?, 3);
-        assert_eq!(sparse_heads(&store, 1).await, Some(heads(&[2])));
-        assert_eq!(
-            store.query(FacetSetQuery::Tag(tag("note"))).await?,
-            vec![FacetRecord {
-                route: route(2, "note"),
-                heads: heads(&[4]),
-                matching_keys: keys(&[("note", "c")]),
-                source_revision: 9,
-                output_revision: 3,
-            }]
-        );
-        let mut late = store.open(tag("note"), 0).await?;
-        assert_eq!(
-            late.next(RevisionReadLimits::default()).await?,
-            RevisionRead::Entries {
-                revision: 2,
-                entries: vec![tombstone(1, "note", &[1], 2)]
-            }
-        );
-        assert_eq!(
-            late.next(RevisionReadLimits::default()).await?,
-            RevisionRead::Entries {
-                revision: 3,
-                entries: vec![present(2, "note", &[4], &[("note", "c")], 3)]
-            }
-        );
-        assert_eq!(
-            late.next(RevisionReadLimits::default()).await?,
-            RevisionRead::ReplayComplete { through: 3 }
-        );
-        let mut resumed = store.open(tag("note"), 2).await?;
-        assert_eq!(
-            resumed.next(RevisionReadLimits::default()).await?,
-            RevisionRead::Entries {
-                revision: 3,
-                entries: vec![present(2, "note", &[4], &[("note", "c")], 3)]
-            }
-        );
-        assert_eq!(
-            resumed.next(RevisionReadLimits::default()).await?,
-            RevisionRead::ReplayComplete { through: 3 }
-        );
-        assert_eq!(
-            store.projector(&source, ()).await?.next().await?,
-            FacetSetProjection::ReplayComplete { through: 9 }
-        );
-        assert_eq!(store.latest_revision().await?, 3);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn failed_source_cursor_settlement_rolls_back_every_projection_effect() -> Res<()> {
-        let store = store().await;
-        let source = Source {
-            revisions: vec![
-                (4, vec![snapshot(1, &[1], &[("note", "a")])]),
-                (
-                    8,
-                    vec![
-                        snapshot(1, &[2], &[("task", "b")]),
-                        snapshot(2, &[3], &[("note", "c")]),
-                    ],
-                ),
-            ],
-        };
-        let mut projector = store.projector(&source, ()).await?;
-        assert_eq!(projector.next().await?, applied(4, 1));
-        let before = store.query(FacetSetQuery::Doc(document(1))).await?;
-        sqlx::query(
-            r#"CREATE TRIGGER fail_facet_set_cursor
-                BEFORE UPDATE ON delta_walker_progress
-                WHEN NEW.namespace = 'big-cabinet-facet-set'
-                 AND NEW.consumer_id = 'accepted-documents'
-                 AND NEW.upstream_revision = 8
-                BEGIN
-                    SELECT RAISE(ABORT, 'injected facet-set settlement failure');
-                END"#,
-        )
-        .execute(&store.sql.write_pool)
-        .await?;
-        let error = projector.next().await.unwrap_err();
-        assert!(format!("{error:?}").contains("injected facet-set settlement failure"));
-        assert_eq!(store.source_revision().await?, 4);
-        assert_eq!(store.latest_revision().await?, 1);
-        assert_eq!(store.query(FacetSetQuery::Doc(document(1))).await?, before);
-        assert_eq!(store.query(FacetSetQuery::Doc(document(2))).await?, vec![]);
-        assert_eq!(sparse_heads(&store, 1).await, Some(heads(&[1])));
-        assert_eq!(sparse_heads(&store, 2).await, None);
-        let mut reader = store.open(tag("note"), 1).await?;
-        assert_eq!(
-            reader.next(RevisionReadLimits::default()).await?,
-            RevisionRead::Entries {
-                revision: 1,
-                entries: vec![]
-            }
-        );
-        assert_eq!(
-            reader.next(RevisionReadLimits::default()).await?,
-            RevisionRead::ReplayComplete { through: 1 }
-        );
-        sqlx::query("DROP TRIGGER fail_facet_set_cursor")
-            .execute(&store.sql.write_pool)
-            .await?;
-        let (read, projected) =
-            tokio::join!(reader.next(RevisionReadLimits::default()), projector.next());
-        assert_eq!(projected?, applied(8, 2));
-        assert_eq!(
-            read?,
-            RevisionRead::Entries {
-                revision: 2,
-                entries: vec![
-                    tombstone(1, "note", &[1], 2),
-                    present(2, "note", &[3], &[("note", "c")], 2),
-                ]
-            }
-        );
-        assert_eq!(store.source_revision().await?, 8);
-        assert_eq!(sparse_heads(&store, 1).await, Some(heads(&[2])));
-        assert_eq!(sparse_heads(&store, 2).await, Some(heads(&[3])));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn serial_walker_rejects_wrong_settlement_and_out_of_order_source() -> Res<()> {
-        let store = store().await;
-        let source = Source {
-            revisions: vec![
-                (4, vec![snapshot(1, &[1], &[("note", "a")])]),
-                (3, vec![snapshot(1, &[2], &[("task", "b")])]),
-            ],
-        };
-        let reader = source.open((), 0).await?;
-        let mut walker = SerialDeltaWalker::<Source, _>::open(reader, &store.input_state).await?;
-        assert_eq!(
-            walker.next().await?,
-            RevisionRead::Entries {
-                revision: 4,
-                entries: vec![snapshot(1, &[1], &[("note", "a")])]
-            }
-        );
-        assert!(matches!(
-            walker.begin_settlement(3).await,
-            Err(SerialDeltaWalkerError::WrongSettlementRevision {
-                requested: 3,
-                pending: 4
+        let worker = {
+            let store = store.clone();
+            let repo = Arc::clone(&repo);
+            tokio::spawn(async move {
+                store
+                    .drive(&source, (), repo, NonZeroUsize::new(2).unwrap())
+                    .await
+                    .unwrap();
             })
-        ));
-        assert_eq!(store.source_revision().await?, 0);
-        assert_eq!(store.latest_revision().await?, 0);
-        drop(walker);
-        let mut projector = store.projector(&source, ()).await?;
-        assert_eq!(projector.next().await?, applied(4, 1));
-        let before = store.query(FacetSetQuery::Doc(document(1))).await?;
-        let error = projector.next().await.unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<SerialDeltaWalkerError<utils_rs::prelude::eyre::Report>>(),
-            Some(SerialDeltaWalkerError::NonAdvancingRevision)
-        ));
-        assert_eq!(store.source_revision().await?, 4);
-        assert_eq!(store.latest_revision().await?, 1);
-        assert_eq!(store.query(FacetSetQuery::Doc(document(1))).await?, before);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn duplicate_document_states_do_not_advance_projection() -> Res<()> {
-        let store = store().await;
-        let source = Source {
-            revisions: vec![(
-                5,
-                vec![
-                    snapshot(1, &[1], &[("note", "a")]),
-                    snapshot(1, &[1], &[("task", "b")]),
-                ],
-            )],
         };
-        let mut projector = store.projector(&source, ()).await?;
-        let error = projector.next().await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("duplicate document in accepted revision 5")
+        let delayed_id = repo.allocate_id().await.unwrap();
+        let (mut delayed, _, first, _) = fixture();
+        sender.send(changed(&delayed_id, &delayed, 1)).unwrap();
+        let other_id = repo.allocate_id().await.unwrap();
+        let (other, _, _, _) = fixture();
+        sender.send(changed(&other_id, &other, 2)).unwrap();
+        let other = repo
+            .commit_id(other_id.clone(), other, Vec::new(), &[])
+            .await
+            .unwrap();
+        let (revision, entries) = next_entries(&store, "org.example.note", 0).await;
+        assert!(entries.iter().all(|entry| entry.key.doc_id == other_id));
+        assert_eq!(store.source_revision().await.unwrap(), 0);
+        let mut tx = delayed.transaction();
+        tx.put(&first, "value", "superseding").unwrap();
+        tx.commit();
+        let latest_heads = delayed.get_heads();
+        sender.send(changed(&delayed_id, &delayed, 3)).unwrap();
+        let delayed = repo
+            .commit_id(delayed_id.clone(), delayed, Vec::new(), &[])
+            .await
+            .unwrap();
+        let mut after = revision;
+        loop {
+            let (revision, entries) = next_entries(&store, "org.example.note", after).await;
+            after = revision;
+            if entries.iter().any(|entry| {
+                entry.key.doc_id == delayed_id
+                    && matches!(&entry.value,
+                Some(FacetMembership::Present { doc_heads, .. }) if *doc_heads == latest_heads)
+            }) {
+                break;
+            }
+        }
+        assert_eq!(
+            store.doc_state(&delayed_id).await.unwrap().unwrap().cursor,
+            3
         );
-        assert_eq!(store.source_revision().await?, 0);
-        assert_eq!(store.latest_revision().await?, 0);
-        assert_eq!(store.query(FacetSetQuery::Doc(document(1))).await?, vec![]);
-        assert_eq!(sparse_heads(&store, 1).await, None);
-        Ok(())
+        sender
+            .send(RevisionRead::Entries {
+                revision: 4,
+                entries: vec![AutomergeFrontierEvent::Removed {
+                    doc_id: delayed_id.clone(),
+                    route: big_sync_core::PartKey::new(b"removed-route"),
+                    revision: 4,
+                }],
+            })
+            .unwrap();
+        let (_, entries) = next_entries(&store, "org.example.note", after).await;
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.key.doc_id == delayed_id
+            && matches!(
+                entry.value,
+                Some(FacetMembership::Removed {
+                    doc_heads: None,
+                    ..
+                })
+            )));
+        assert!(
+            store
+                .query(FacetSetQuery::Doc(delayed_id))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .query(FacetSetQuery::Doc(other_id))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        drop(delayed);
+        drop(other);
+        drop(repo);
+        stop.stop().await.unwrap();
     }
 
     #[tokio::test]
-    async fn stale_projector_cannot_overwrite_another_settlement() -> Res<()> {
-        let store = store().await;
-        let source = Source {
-            revisions: vec![(5, vec![snapshot(1, &[1], &[("note", "a")])])],
+    async fn live_afw_projection_needs_no_docs_service_and_replays_without_duplicate_output() {
+        let (repo, stop) = boot_repo().await;
+        let store = FacetSetStore::new(SqlCtx::memory().await.unwrap())
+            .await
+            .unwrap();
+        let worker = {
+            let store = store.clone();
+            let repo = Arc::clone(&repo);
+            tokio::spawn(async move {
+                store
+                    .run(repo, NonZeroUsize::new(2).unwrap())
+                    .await
+                    .unwrap()
+            })
         };
-        let mut first = store.projector(&source, ()).await?;
-        let mut stale = store.projector(&source, ()).await?;
-        assert_eq!(first.next().await?, applied(5, 1));
-        let error = stale.next().await.unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<SerialDeltaWalkerError<utils_rs::prelude::eyre::Report>>(),
-            Some(SerialDeltaWalkerError::State(
-                big_sync_core::delta_walker_state::DeltaWalkerStateError::StaleProgress {
-                    expected: 0
-                }
-            ))
-        ));
-        assert_eq!(store.source_revision().await?, 5);
-        assert_eq!(store.latest_revision().await?, 1);
-        Ok(())
+        let doc_id = repo.allocate_id().await.unwrap();
+        let (doc, _, _, _) = fixture();
+        let handle = repo
+            .commit_id(doc_id.clone(), doc, Vec::new(), &[])
+            .await
+            .unwrap();
+        let (revision, entries) = next_entries(&store, "org.example.note", 0).await;
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.key.doc_id == doc_id));
+        let before = store.doc_state(&doc_id).await.unwrap().unwrap();
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        let work = Work {
+            doc_id: doc_id.clone(),
+            state: before.clone(),
+        };
+        store
+            .settle(store.prepare(&repo, work).await.unwrap().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(store.latest_revision().await.unwrap(), revision);
+        let worker = {
+            let store = store.clone();
+            let repo = Arc::clone(&repo);
+            tokio::spawn(async move {
+                store
+                    .run(repo, NonZeroUsize::new(2).unwrap())
+                    .await
+                    .unwrap()
+            })
+        };
+        handle
+            .with_document(|doc| {
+                let facets = doc.get(ROOT, "facets").unwrap().unwrap().1;
+                let first = doc.get(&facets, key("a").to_string()).unwrap().unwrap().1;
+                let mut tx = doc.transaction();
+                tx.put(&first, "value", "remote-like raw edit").unwrap();
+                tx.commit();
+            })
+            .await
+            .unwrap();
+        let (_, entries) = next_entries(&store, "org.example.note", revision).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key.facet_key, key("a"));
+        let FacetMembership::Present { facet_heads, .. } = entries[0].value.as_ref().unwrap()
+        else {
+            panic!("live facet")
+        };
+        assert_eq!(Some(facet_heads.clone()), before.heads);
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        drop(handle);
+        drop(repo);
+        stop.stop().await.unwrap();
     }
 }

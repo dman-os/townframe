@@ -12,6 +12,13 @@ fn hash(byte: u8) -> ChangeHash {
     ChangeHash([byte; 32])
 }
 
+fn version(bytes: &[u8]) -> FacetVersion {
+    FacetVersion {
+        heads: bytes.iter().map(|byte| hash(*byte)).collect(),
+        clock: 0,
+    }
+}
+
 fn document(byte: u8) -> DocId {
     DocId::new([byte; 32])
 }
@@ -112,7 +119,7 @@ fn write_mode_wire() {
         (
             "write_mode_if_facets_unchanged",
             WriteMode::IfFacetsUnchanged {
-                facets: BTreeMap::from([(key("main"), vec![hash(2)])]),
+                facets: BTreeMap::from([(key("main"), version(&[2]))]),
             },
         ),
         (
@@ -134,26 +141,26 @@ fn facet_read_wire() {
             "facet_read_accepted",
             FacetRead::Accepted {
                 value: note("hello"),
-                facet_heads: vec![hash(1)],
+                version: version(&[1]),
             },
         ),
         (
             "facet_read_absent_written",
             FacetRead::Absent {
-                facet_heads: vec![hash(2)],
+                version: version(&[2]),
             },
         ),
         (
             "facet_read_absent_never_written",
             FacetRead::Absent {
-                facet_heads: vec![],
+                version: version(&[]),
             },
         ),
         (
             "facet_read_pending",
             FacetRead::Pending {
                 reason: "verification could not complete".into(),
-                facet_heads: vec![hash(3)],
+                version: version(&[3]),
                 value: None,
             },
         ),
@@ -161,7 +168,7 @@ fn facet_read_wire() {
             "facet_read_pending_optimistic",
             FacetRead::Pending {
                 reason: "verification could not complete".into(),
-                facet_heads: vec![hash(3)],
+                version: version(&[3]),
                 value: Some(note("unverified")),
             },
         ),
@@ -175,7 +182,7 @@ fn facet_read_wire() {
             "facet_read_undecodable",
             FacetRead::Undecodable {
                 reason: "not a string".into(),
-                facet_heads: vec![hash(4)],
+                version: version(&[4]),
             },
         ),
     ] {
@@ -192,13 +199,13 @@ fn facets_read_wire() {
                 key("main"),
                 FacetRead::Accepted {
                     value: note("hello"),
-                    facet_heads: vec![hash(2)],
+                    version: version(&[2]),
                 },
             ),
             (
                 key("extra"),
                 FacetRead::Absent {
-                    facet_heads: vec![],
+                    version: version(&[]),
                 }
             ),
         ]),
@@ -209,8 +216,51 @@ fn facets_read_wire() {
 fn facet_listing_wire() {
     insta::assert_json_snapshot!(FacetListing {
         heads: vec![hash(1)],
-        facets: BTreeMap::from([(key("main"), vec![hash(2), hash(3)])]),
+        facets: BTreeMap::from([(key("main"), version(&[2, 3]))]),
     });
+}
+
+#[test]
+fn facet_observed_wire() {
+    for (name, observed) in [
+        (
+            "facet_observed_present",
+            FacetObserved::Entry {
+                revision: 7,
+                doc_id: document(1),
+                facet_key: key("main"),
+                facet: ObservedFacet::Present {
+                    doc_heads: vec![hash(1)],
+                    version: version(&[2]),
+                },
+            },
+        ),
+        (
+            "facet_observed_access_lost",
+            FacetObserved::Entry {
+                revision: 8,
+                doc_id: document(1),
+                facet_key: key("main"),
+                facet: ObservedFacet::AccessLost,
+            },
+        ),
+        (
+            "facet_observed_replay_complete",
+            FacetObserved::ReplayComplete { through: 9 },
+        ),
+    ] {
+        insta::assert_json_snapshot!(name, observed);
+    }
+    insta::assert_json_snapshot!(
+        "observe_facets_doc",
+        ObserveFacets {
+            capability: capability(1),
+            scope: ObserveScope::Doc {
+                doc_id: document(1)
+            },
+            after: 3,
+        }
+    );
 }
 
 #[test]
@@ -308,7 +358,7 @@ fn docs_error_wire() {
             "error_conflict",
             DocsError::Conflict {
                 heads: vec![hash(3)],
-                facets: BTreeMap::from([(key("main"), vec![hash(4)])]),
+                facets: BTreeMap::from([(key("main"), version(&[4]))]),
             },
         ),
         (

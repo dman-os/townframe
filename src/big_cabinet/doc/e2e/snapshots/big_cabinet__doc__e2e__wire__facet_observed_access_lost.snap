@@ -1,0 +1,13 @@
+---
+source: src/big_cabinet/doc/e2e/wire.rs
+expression: observed
+---
+{
+  "kind": "entry",
+  "revision": 8,
+  "docId": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+  "facetKey": "org.example.note/main",
+  "facet": {
+    "state": "accessLost"
+  }
+}

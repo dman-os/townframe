@@ -1,6 +1,6 @@
 # ADR 007: Doc and Branch Identity
 
-**Status:** Partially implemented — `DocumentId` unification, `db+facet` references, `BranchDoc`/`MergeDoc`, the `org.example.daybook.branch` and `org.example.daybook.branches` core facets, and `dmeta.branchUuids` provenance across branches and merges are implemented in `big_cabinet_core` and `big_cabinet`. Explicit branch-link removal and physical document deletion remain deferred.
+**Status:** Partially implemented — `DocumentId` unification, `db+facet` references, `BranchDoc`/`MergeDoc`, the `org.example.daybook.branch` core facet with concrete parent references and pinned fork heads, and `dmeta.branchUuids` provenance across branches and merges are implemented in `big_cabinet_core` and `big_cabinet`. Explicit branch-link removal and physical document deletion remain deferred.
 
 ## Context
 
@@ -45,33 +45,36 @@ documents that do not share genesis changes cannot be merged (`UnrelatedHistory`
 Creating branch B from doc A at path `/draft` writes B's identity facet on B and, unless
 the branch is stealth, announces B on A:
 
-```json
-// On B: org.example.daybook.branch/<B>
-{ "path": "/draft" }
+On B, and on A when non-stealth, `org.example.daybook.branch/<B>` holds:
 
-// On A (when stealth = false): org.example.daybook.branches/main
+```json
 {
-  "byId": {
-    "<B>": { "path": "/draft" }
-  },
-  "byPath": {
-    "/draft": ["<B>"]
+  "path": "/draft",
+  "from": {
+    "facetRef": "db+facet:/<A>/org.example.daybook.branch/<A>",
+    "heads": ["<fork-head>"]
   }
 }
 ```
+
+The reference names the concrete parent document, not `self`: the target must remain A
+when this facet travels between documents. The pinned heads are the selected fork frontier,
+not A's current frontier when the announcement is written. The initial branch change is the
+durable source of this value during crash recovery. `from` is optional for root metadata;
+like every facet reference it is a weak address and does not assert the parent facet exists.
 
 Keying B's facet by `<B>` (`org.example.daybook.branch/<B>`) rather than `/main` keeps the
 facet merge-safe: when B is merged back into A, or a nested branch C is merged into B, the
 target acquires the source's `branch/<source-id>` facet without overwriting its own
 `branch/<self-id>`. Any document resolves its own branch path by reading
-`org.example.daybook.branch/<self-id>`. `byPath` maps a path to a sorted list of branch
-`DocumentId`s so concurrent branches taken under the same path converge without losing
-either link.
+`org.example.daybook.branch/<self-id>`. There is no `branches/main`, `byId`, or `byPath`
+map. Per-branch keys preserve concurrent branches with the same label; generic facet-reference
+backlinks can discover children through their `from.facetRef`.
 
 Announcing a branch on A (`stealth: false`) mutates A and therefore requires `Write`
 access on A (in addition to `Read` on A and `Create` for B's placement); a caller with
 only `Read` access on A is refused with `Denied`. Setting `stealth: true` skips the
-`org.example.daybook.branches/main` write on A and requires only `Read` on A plus
+`org.example.daybook.branch/<B>` write on A and requires only `Read` on A plus
 `Create` for B's placement.
 
 The links are weak. Reading either side does not require the other doc to be locally
@@ -79,8 +82,8 @@ present, readable, or still available. A branch created from B records the new
 relationship in B and the new branch; branch information is not propagated through every
 ancestor or sibling.
 
-`BranchDoc` owns both system facets (`org.example.daybook.branch/*` and
-`org.example.daybook.branches/*`) and signs them with `DocsRepo`'s system actor after
+`BranchDoc` owns `org.example.daybook.branch/*` and signs these facets with `DocsRepo`'s
+system actor after
 checking the caller's access. Ordinary `CreateDoc` and `WriteFacets` calls cannot
 set or remove them (`SystemFacet`), while `ReadFacets` and `ListFacets` read them like any
 other facet.

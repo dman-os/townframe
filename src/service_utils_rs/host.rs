@@ -313,6 +313,7 @@ macro_rules! service_protocol {
             }
             fn mount(router: &mut $crate::XrpcRouter, host: std::sync::Arc<$crate::Host<H>>) -> Result<(), $crate::xrpc::XrpcRegistrationError> {
                 $( router.mount::<$params, H>(std::sync::Arc::clone(&host))?; )*
+                $( router.mount_subscription::<$stream_params, H>(std::sync::Arc::clone(&host))?; )*
                 Ok(())
             }
         }

@@ -8,11 +8,13 @@ mod branches;
 mod commands;
 mod gate;
 mod model;
+mod observe;
 mod wire;
 mod writes;
 
 use super::*;
 use crate::authority::{Actor, Authority, GrantAccess, OpenActor, Rights};
+use crate::index::FacetSetStore;
 use crate::schema::{SchemaRegistration, SchemaRegistrationGroup, SchemaRepo};
 use automerge::{Automerge, ChangeHash};
 use big_cabinet_core::FacetKey;
@@ -65,6 +67,8 @@ struct Node {
     sql: SqlCtx,
     docs: Option<DocsRepo>,
     docs_stop: Option<StopToken>,
+    facet_set: Arc<FacetSetStore>,
+    facet_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Node {
@@ -99,6 +103,21 @@ impl Node {
         })
         .await
         .unwrap();
+        let facet_set = Arc::new(
+            FacetSetStore::new(SqlCtx::memory().await.unwrap())
+                .await
+                .unwrap(),
+        );
+        let facet_task = {
+            let store = Arc::clone(&facet_set);
+            let repo = Arc::clone(&repo);
+            tokio::spawn(async move {
+                store
+                    .run(repo, std::num::NonZeroUsize::new(4).unwrap())
+                    .await
+                    .unwrap();
+            })
+        };
         let mut node = Self {
             authority,
             authority_stop: Some(authority_stop),
@@ -108,6 +127,8 @@ impl Node {
             sql: SqlCtx::memory().await.unwrap(),
             docs: None,
             docs_stop: None,
+            facet_set,
+            facet_task: Some(facet_task),
         };
         node.start().await.unwrap();
         node
@@ -123,6 +144,7 @@ impl Node {
             node_issuer: self.authority.node_issuer.clone(),
             access: Arc::new(LedgerAccess::new(self.authority.client.clone(), issuer)),
             sql: self.sql.clone(),
+            facet_set: Some(Arc::clone(&self.facet_set)),
         })
         .await?;
         self.docs = Some(docs);
@@ -295,6 +317,9 @@ impl Node {
         if let Some(stop) = self.docs_stop.take() {
             stop.stop().await;
         }
+        if let Some(task) = self.facet_task.take() {
+            task.abort();
+        }
         if let Some(stop) = self.repo_stop.take() {
             stop.stop().await.unwrap();
         }
@@ -311,7 +336,7 @@ fn op<T>(result: Result<T, ClientError<DocsError>>) -> Result<T, DocsError> {
 
 fn accepted(read: &FacetRead) -> (&Value, &[ChangeHash]) {
     match read {
-        FacetRead::Accepted { value, facet_heads } => (value, facet_heads),
+        FacetRead::Accepted { value, version } => (value, version.heads.as_slice()),
         other => panic!("expected an accepted facet, got {other:?}"),
     }
 }

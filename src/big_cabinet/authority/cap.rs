@@ -1,6 +1,6 @@
 use super::AuthorityError;
-use super::protocol::{CapId, Rights};
 use super::store::{self, CapRow};
+use super::{CapId, Rights};
 use big_cabinet_core::dmeta::Uuid7;
 use sqlx::SqliteConnection;
 

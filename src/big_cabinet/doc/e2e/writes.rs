@@ -81,12 +81,12 @@ async fn removal_is_a_verified_absence_and_a_later_set_resurrects_the_slot() {
         .write(&alice, document, WriteMode::AtCurrent, [], [key("main")])
         .await
         .unwrap();
-    assert_eq!(
-        node.read_one(&alice, document, At::Current, &key("main"))
-            .await,
-        FacetRead::Absent {
-            facet_heads: removed.heads.clone()
-        }
+    assert!(
+        matches!(
+            node.read_one(&alice, document, At::Current, &key("main")).await,
+            FacetRead::Absent { version } if version.heads == removed.heads && version.clock > 0
+        ),
+        "a removal is an absence at the removal's version"
     );
     let listing = op(node
         .client()
@@ -106,7 +106,13 @@ async fn removal_is_a_verified_absence_and_a_later_set_resurrects_the_slot() {
             &alice,
             document,
             WriteMode::IfFacetsUnchanged {
-                facets: BTreeMap::from([(key("main"), removed.heads.clone())]),
+                facets: BTreeMap::from([(
+                    key("main"),
+                    FacetVersion {
+                        heads: removed.heads.clone(),
+                        clock: 0,
+                    },
+                )]),
             },
             [(key("main"), note("y"))],
             [],
@@ -136,7 +142,6 @@ async fn refused_writes_commit_nothing() {
     let unknown: FacetKey = "org.example.unknown/main".parse().unwrap();
     let dmeta: FacetKey = "org.example.daybook.dmeta/main".parse().unwrap();
     let branch: FacetKey = "org.example.daybook.branch/main".parse().unwrap();
-    let branches: FacetKey = "org.example.daybook.branches/main".parse().unwrap();
     let cases = [
         (
             vec![(unknown.clone(), json!({}))],
@@ -161,9 +166,9 @@ async fn refused_writes_commit_nothing() {
         ),
         (
             vec![],
-            vec![branches.clone()],
+            vec![branch.clone()],
             DocsError::SystemFacet {
-                facet_key: branches.clone(),
+                facet_key: branch.clone(),
             },
         ),
         (
@@ -249,7 +254,13 @@ async fn conditional_modes_compare_under_the_commit_and_report_what_changed() {
         &alice,
         document,
         WriteMode::IfFacetsUnchanged {
-            facets: BTreeMap::from([(key("a"), created.heads.clone())]),
+            facets: BTreeMap::from([(
+                key("a"),
+                FacetVersion {
+                    heads: created.heads.clone(),
+                    clock: 0,
+                },
+            )]),
         },
         [(key("a"), note("a1"))],
         [],
@@ -261,7 +272,13 @@ async fn conditional_modes_compare_under_the_commit_and_report_what_changed() {
             &alice,
             document,
             WriteMode::IfFacetsUnchanged {
-                facets: BTreeMap::from([(key("b"), created.heads.clone())]),
+                facets: BTreeMap::from([(
+                    key("b"),
+                    FacetVersion {
+                        heads: created.heads.clone(),
+                        clock: 0,
+                    },
+                )]),
             },
             [(key("b"), note("b2"))],
             [],
@@ -269,7 +286,7 @@ async fn conditional_modes_compare_under_the_commit_and_report_what_changed() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&stale, DocsError::Conflict { facets, .. } if facets[&key("b")] == moved.heads),
+        matches!(&stale, DocsError::Conflict { facets, .. } if facets[&key("b")].heads == moved.heads),
         "{stale:?}"
     );
     node.stop().await;
@@ -317,7 +334,13 @@ async fn writes_at_the_same_historical_heads_leave_a_set_of_facet_heads() {
         &alice,
         document,
         WriteMode::IfFacetsUnchanged {
-            facets: BTreeMap::from([(key("main"), introductions.clone())]),
+            facets: BTreeMap::from([(
+                key("main"),
+                FacetVersion {
+                    heads: introductions.clone(),
+                    clock: 0,
+                },
+            )]),
         },
         [(key("main"), note("merged"))],
         [],

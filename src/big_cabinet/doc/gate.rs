@@ -26,6 +26,7 @@
 //! arrive later. Missing document metadata or attribution certificates are malformed, not pending.
 //! Checks are facet-local: a forgery in another facet changes nothing here.
 
+use super::FacetVersion;
 use super::claim_history::{
     ClaimHistoryError, ClaimHistoryResult, HistoryBudget, ReconstructedClaim, reconstruct_claim,
     reconstruct_current_claims,
@@ -37,12 +38,13 @@ use big_cabinet_core::dmeta::{
     ActorMetadata, Attribution, AttributionError, ClaimOperation, DMETA_FACET_TAG, DocId,
     MultibaseKey, NativeReadBudget, NativeValue, cid_of, encode_native,
 };
+use std::cell::OnceCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub(super) const DMETA_KEY: &str = "org.example.daybook.dmeta/main";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Verdict {
+pub(crate) enum Verdict {
     Accepted {
         facet_heads: Vec<ChangeHash>,
         native: Option<Vec<u8>>,
@@ -58,15 +60,22 @@ pub(super) enum Verdict {
 
 #[derive(Default)]
 struct Footprint {
-    touched: Vec<ChangeHash>,
-    signed: HashSet<ChangeHash>,
+    touched: Vec<usize>,
+    signed: HashSet<usize>,
 }
 
-pub(super) struct Gate<'a> {
+struct Footprints {
+    hashes: Vec<ChangeHash>,
+    index_of: HashMap<ChangeHash, usize>,
+    deps: Vec<Vec<usize>>,
+    by_slot: HashMap<String, Footprint>,
+    envelope_changes: Vec<usize>,
+}
+
+pub(crate) struct Gate<'a> {
     doc: &'a Automerge,
     heads: &'a [ChangeHash],
-    footprints: HashMap<String, Footprint>,
-    envelope_changes: Vec<ChangeHash>,
+    footprints: OnceCell<Footprints>,
     budget: HistoryBudget,
 }
 
@@ -80,114 +89,142 @@ enum Role {
 }
 
 impl<'a> Gate<'a> {
-    /// One pass over H's history records, per facet key, which changes touched the facet's
-    /// content and which introduced a signature on it.
-    pub(super) fn new(doc: &'a Automerge, heads: &'a [ChangeHash]) -> Self {
-        let ancestry = ancestry(doc, heads.iter().copied());
-        let mut roles: HashMap<OpId, Role> = HashMap::new();
-        let mut footprints: HashMap<String, Footprint> = HashMap::new();
-        let mut envelope_changes = Vec::new();
-        for change in doc.get_changes(&[]) {
-            let hash = change.hash();
-            if !ancestry.contains(&hash) {
-                continue;
-            }
-            let decoded = change.decode();
-            for (index, op) in decoded.operations.iter().enumerate() {
-                let id = OpId(
-                    decoded.start_op.get() + index as u64,
-                    decoded.actor_id.clone(),
-                );
-                let made = matches!(op.action, OpType::Make(_));
-                let key = match &op.key {
-                    Key::Map(key) => Some(key.as_str()),
-                    Key::Seq(_) => None,
-                };
-                let shared = match (&op.obj, key) {
-                    (ObjectId::Root, Some("facets")) => true,
-                    (ObjectId::Id(parent), Some(key)) => matches!(
-                        (roles.get(parent), key),
-                        (Some(Role::Facets), DMETA_KEY) | (Some(Role::Dmeta), "facets")
-                    ),
-                    _ => false,
-                };
-                if shared && envelope_changes.last() != Some(&hash) {
-                    envelope_changes.push(hash);
-                }
-                let role = match &op.obj {
-                    ObjectId::Root => match (key, &op.action) {
-                        (Some("facets"), OpType::Make(ObjType::Map)) => Some(Role::Facets),
-                        _ => None,
-                    },
-                    ObjectId::Id(parent) => match roles.get(parent) {
-                        None => None,
-                        Some(Role::Facets) => match key {
-                            Some(DMETA_KEY) => matches!(op.action, OpType::Make(ObjType::Map))
-                                .then_some(Role::Dmeta),
-                            Some(slot) => {
-                                touch(&mut footprints, slot, hash);
-                                made.then(|| Role::Slot(slot.to_owned()))
-                            }
-                            None => None,
-                        },
-                        Some(Role::Slot(slot)) => {
-                            let slot = slot.clone();
-                            touch(&mut footprints, &slot, hash);
-                            made.then_some(Role::Slot(slot))
-                        }
-                        Some(Role::Dmeta) => (key == Some("facets")
-                            && matches!(op.action, OpType::Make(ObjType::Map)))
-                        .then_some(Role::DmetaFacets),
-                        Some(Role::DmetaFacets) => match key {
-                            Some(slot) => {
-                                touch(&mut footprints, slot, hash);
-                                matches!(op.action, OpType::Make(ObjType::Map))
-                                    .then(|| Role::FacetMeta(slot.to_owned()))
-                            }
-                            None => None,
-                        },
-                        Some(Role::FacetMeta(slot)) => {
-                            if key == Some("signatures") {
-                                touch(&mut footprints, slot, hash);
-                                matches!(op.action, OpType::Make(ObjType::List))
-                                    .then(|| Role::Signatures(slot.clone()))
-                            } else {
-                                None
-                            }
-                        }
-                        Some(Role::Signatures(slot)) => {
-                            touch(&mut footprints, slot, hash);
-                            if op.insert && matches!(op.action, OpType::Make(ObjType::Map)) {
-                                footprints
-                                    .entry(slot.clone())
-                                    .or_default()
-                                    .signed
-                                    .insert(hash);
-                            }
-                            None
-                        }
-                    },
-                };
-                if let Some(role) = role {
-                    roles.insert(id, role);
-                }
-            }
-        }
+    pub(crate) fn new(doc: &'a Automerge, heads: &'a [ChangeHash]) -> Self {
         Self {
             doc,
             heads,
-            footprints,
-            envelope_changes,
+            footprints: OnceCell::new(),
             budget: HistoryBudget::default(),
         }
     }
 
-    /// Every facet key touched in `heads`'s history, including slots later deleted.
-    pub(super) fn keys(&self) -> impl Iterator<Item = FacetKey> + '_ {
-        self.footprints.keys().filter_map(|key| key.parse().ok())
+    /// One pass over H's history records, per facet key, which changes touched the facet's
+    /// content and which introduced a signature on it. Computed lazily: a facet whose signature
+    /// heads already cover `self.heads` has no uncovered history to inspect.
+    fn footprints(&self) -> &Footprints {
+        self.footprints.get_or_init(|| {
+            let ancestry = ancestry(self.doc, self.heads.iter().copied());
+            let mut hashes = Vec::new();
+            let mut index_of = HashMap::new();
+            let mut deps = Vec::new();
+            let mut roles: HashMap<OpId, Role> = HashMap::new();
+            let mut by_slot: HashMap<String, Footprint> = HashMap::new();
+            let mut envelope_changes = Vec::new();
+            for change in self.doc.get_changes(&[]) {
+                let hash = change.hash();
+                if !ancestry.contains(&hash) {
+                    continue;
+                }
+                let change_idx = hashes.len();
+                hashes.push(hash);
+                index_of.insert(hash, change_idx);
+                deps.push(
+                    change
+                        .deps()
+                        .iter()
+                        .filter_map(|dep| index_of.get(dep).copied())
+                        .collect(),
+                );
+                let decoded = change.decode();
+                for (index, op) in decoded.operations.iter().enumerate() {
+                    let id = OpId(
+                        decoded.start_op.get() + index as u64,
+                        decoded.actor_id.clone(),
+                    );
+                    let made = matches!(op.action, OpType::Make(_));
+                    let key = match &op.key {
+                        Key::Map(key) => Some(key.as_str()),
+                        Key::Seq(_) => None,
+                    };
+                    let shared = match (&op.obj, key) {
+                        (ObjectId::Root, Some("facets")) => true,
+                        (ObjectId::Id(parent), Some(key)) => matches!(
+                            (roles.get(parent), key),
+                            (Some(Role::Facets), DMETA_KEY) | (Some(Role::Dmeta), "facets")
+                        ),
+                        _ => false,
+                    };
+                    if shared && envelope_changes.last() != Some(&change_idx) {
+                        envelope_changes.push(change_idx);
+                    }
+                    let role = match &op.obj {
+                        ObjectId::Root => match (key, &op.action) {
+                            (Some("facets"), OpType::Make(ObjType::Map)) => Some(Role::Facets),
+                            _ => None,
+                        },
+                        ObjectId::Id(parent) => match roles.get(parent) {
+                            None => None,
+                            Some(Role::Facets) => match key {
+                                Some(DMETA_KEY) => matches!(op.action, OpType::Make(ObjType::Map))
+                                    .then_some(Role::Dmeta),
+                                Some(slot) => {
+                                    touch(&mut by_slot, slot, change_idx);
+                                    made.then(|| Role::Slot(slot.to_owned()))
+                                }
+                                None => None,
+                            },
+                            Some(Role::Slot(slot)) => {
+                                let slot = slot.clone();
+                                touch(&mut by_slot, &slot, change_idx);
+                                made.then_some(Role::Slot(slot))
+                            }
+                            Some(Role::Dmeta) => (key == Some("facets")
+                                && matches!(op.action, OpType::Make(ObjType::Map)))
+                            .then_some(Role::DmetaFacets),
+                            Some(Role::DmetaFacets) => match key {
+                                Some(slot) => {
+                                    touch(&mut by_slot, slot, change_idx);
+                                    matches!(op.action, OpType::Make(ObjType::Map))
+                                        .then(|| Role::FacetMeta(slot.to_owned()))
+                                }
+                                None => None,
+                            },
+                            Some(Role::FacetMeta(slot)) => {
+                                if key == Some("signatures") {
+                                    touch(&mut by_slot, slot, change_idx);
+                                    matches!(op.action, OpType::Make(ObjType::List))
+                                        .then(|| Role::Signatures(slot.clone()))
+                                } else {
+                                    None
+                                }
+                            }
+                            Some(Role::Signatures(slot)) => {
+                                touch(&mut by_slot, slot, change_idx);
+                                if op.insert && matches!(op.action, OpType::Make(ObjType::Map)) {
+                                    by_slot
+                                        .entry(slot.clone())
+                                        .or_default()
+                                        .signed
+                                        .insert(change_idx);
+                                }
+                                None
+                            }
+                        },
+                    };
+                    if let Some(role) = role {
+                        roles.insert(id, role);
+                    }
+                }
+            }
+            Footprints {
+                hashes,
+                index_of,
+                deps,
+                by_slot,
+                envelope_changes,
+            }
+        })
     }
 
-    pub(super) fn verify(&self, key: &FacetKey) -> Verdict {
+    /// Every facet key touched in `heads`'s history, including slots later deleted.
+    pub(super) fn keys(&self) -> impl Iterator<Item = FacetKey> + '_ {
+        self.footprints()
+            .by_slot
+            .keys()
+            .filter_map(|key| key.parse().ok())
+    }
+
+    pub(crate) fn verify(&self, key: &FacetKey) -> Verdict {
         assert_ne!(
             key.tag().as_str(),
             DMETA_FACET_TAG,
@@ -199,11 +236,19 @@ impl<'a> Gate<'a> {
             Err(error) => return unreadable(error),
         };
         let mut facet_heads = BTreeSet::new();
+        let mut single_claim_native: Option<(ChangeHash, Option<Vec<u8>>)> = None;
+        let entries_len = entries.len();
         for entry in entries {
             let introduction = self
                 .doc
                 .hash_for_opid(&entry.marker)
                 .expect("an observed operation belongs to an applied change");
+            if entries_len == 1
+                && let ClaimHistoryResult::Accepted(claim) = &entry.result
+                && let Some(native) = &claim.native
+            {
+                single_claim_native = Some((introduction, native.clone()));
+            }
             match self.claim_status(entry.result) {
                 Status::Valid => {
                     facet_heads.insert(introduction);
@@ -215,43 +260,68 @@ impl<'a> Gate<'a> {
                 Status::Invalid(reason) => return Verdict::Rejected { reason },
             }
         }
-        if let Some(footprint) = self.footprints.get(&key.to_string()) {
-            let covered = ancestry(self.doc, facet_heads.iter().copied());
-            for change in footprint
-                .touched
-                .iter()
-                .chain(&self.envelope_changes)
-                .filter(|change| !covered.contains(change))
-            {
-                if !footprint.signed.contains(change) {
-                    return Verdict::Rejected {
-                        reason: format!("change {change} modified the facet without signing it"),
-                    };
-                }
-                match self.claim_status(reconstruct_claim(self.doc, key, *change, self.budget)) {
-                    Status::Valid => {}
-                    Status::Pending(reason) => {
-                        pending.get_or_insert(reason);
+        let heads_all_covered = self.heads.iter().all(|head| facet_heads.contains(head));
+        if !heads_all_covered {
+            let footprints = self.footprints();
+            if let Some(footprint) = footprints.by_slot.get(&key.to_string()) {
+                let mut covered = vec![false; footprints.hashes.len()];
+                let mut stack: Vec<usize> = facet_heads
+                    .iter()
+                    .filter_map(|head| footprints.index_of.get(head).copied())
+                    .collect();
+                while let Some(idx) = stack.pop() {
+                    if !covered[idx] {
+                        covered[idx] = true;
+                        stack.extend(footprints.deps[idx].iter().copied());
                     }
-                    Status::Invalid(reason) => {
+                }
+                for &change_idx in footprint
+                    .touched
+                    .iter()
+                    .chain(&footprints.envelope_changes)
+                    .filter(|&&change_idx| !covered[change_idx])
+                {
+                    let change = footprints.hashes[change_idx];
+                    if !footprint.signed.contains(&change_idx) {
                         return Verdict::Rejected {
                             reason: format!(
-                                "change {change} carries an invalid signature: {reason}"
+                                "change {change} modified the facet without signing it"
                             ),
                         };
+                    }
+                    match self.claim_status(reconstruct_claim(self.doc, key, change, self.budget)) {
+                        Status::Valid => {}
+                        Status::Pending(reason) => {
+                            pending.get_or_insert(reason);
+                        }
+                        Status::Invalid(reason) => {
+                            return Verdict::Rejected {
+                                reason: format!(
+                                    "change {change} carries an invalid signature: {reason}"
+                                ),
+                            };
+                        }
                     }
                 }
             }
         }
         let facet_heads: Vec<_> = facet_heads.into_iter().collect();
-        let current = match self.native(key, self.heads) {
-            Ok(native) => native,
-            Err(error) => return unreadable(error),
-        };
         let signed = if facet_heads.is_empty() {
             None
+        } else if let Some((intro, native)) = single_claim_native
+            && facet_heads.as_slice() == [intro]
+        {
+            native
         } else {
             match self.native(key, &facet_heads) {
+                Ok(native) => native,
+                Err(error) => return unreadable(error),
+            }
+        };
+        let current = if self.heads == facet_heads.as_slice() {
+            signed.clone()
+        } else {
+            match self.native(key, self.heads) {
                 Ok(native) => native,
                 Err(error) => return unreadable(error),
             }
@@ -260,7 +330,7 @@ impl<'a> Gate<'a> {
             return Verdict::Rejected {
                 reason: "the value is not the one its signatures cover".into(),
             };
-        }
+        };
         match pending {
             Some(reason) => Verdict::Pending {
                 reason,
@@ -359,10 +429,10 @@ fn ancestry(doc: &Automerge, heads: impl IntoIterator<Item = ChangeHash>) -> Has
     seen
 }
 
-fn touch(footprints: &mut HashMap<String, Footprint>, slot: &str, hash: ChangeHash) {
+fn touch(footprints: &mut HashMap<String, Footprint>, slot: &str, change_idx: usize) {
     let touched = &mut footprints.entry(slot.to_owned()).or_default().touched;
-    if touched.last() != Some(&hash) {
-        touched.push(hash);
+    if touched.last() != Some(&change_idx) {
+        touched.push(change_idx);
     }
 }
 
@@ -451,6 +521,18 @@ fn unreadable(error: ClaimHistoryError) -> Verdict {
             }
         }
     }
+}
+
+/// The version a set of facet heads names: those heads plus their Lamport
+/// clock (the greatest `max_op` among the introducing changes).
+pub(super) fn facet_version(doc: &Automerge, heads: Vec<ChangeHash>) -> FacetVersion {
+    let clock = heads
+        .iter()
+        .filter_map(|head| doc.get_change_by_hash(head))
+        .map(|change| change.max_op())
+        .max()
+        .unwrap_or(0);
+    FacetVersion { heads, clock }
 }
 
 /// The introductions of the signature entries on `key` visible at `heads`, without verifying any of

@@ -224,7 +224,7 @@ fn reconcile_set(
     base: Option<&Value>,
 ) -> Result<(), StorageError> {
     let list = ensure_object(tx, object, field.into(), ObjType::List)?;
-    let mut wanted = BTreeMap::new();
+    let mut wanted: BTreeMap<String, (usize, Value)> = BTreeMap::new();
     let Value::Array(values) = std::mem::take(submitted) else {
         unreachable!("dmeta sets are arrays");
     };
@@ -241,9 +241,11 @@ fn reconcile_set(
                     .to_string(),
             );
         }
-        wanted
-            .entry(serde_json::to_string(&value).expect("a set value serializes"))
-            .or_insert(value);
+        let key = serde_json::to_string(&value).expect("a set value serializes");
+        let entry = wanted.entry(key).or_insert((0, value));
+        if field == "signatures" || entry.0 == 0 {
+            entry.0 += 1;
+        }
     }
     let observed = match base {
         Some(Value::Array(values)) => values.as_slice(),
@@ -259,9 +261,14 @@ fn reconcile_set(
     assert_eq!(tx.length(&list), observed.len());
     let mut retained = Vec::with_capacity(wanted.len());
     let mut removed = Vec::new();
+    let mut matched = BTreeSet::new();
     for (index, value) in observed.iter().enumerate() {
         let identity = serde_json::to_string(value).expect("an observed set value serializes");
-        if wanted.remove(&identity).is_some() {
+        if let Some((remaining, _)) = wanted.get_mut(&identity)
+            && *remaining > 0
+        {
+            *remaining -= 1;
+            matched.insert(identity);
             retained.push(value.clone());
         } else {
             removed.push(index);
@@ -270,7 +277,10 @@ fn reconcile_set(
     for index in removed.into_iter().rev() {
         tx.delete(&list, index)?;
     }
-    for value in wanted.into_values() {
+    for (identity, (remaining, value)) in wanted {
+        if remaining == 0 || matched.contains(&identity) {
+            continue;
+        }
         if field == "signatures" {
             tx.insert_object(&list, retained.len(), ObjType::Map)?;
         } else {

@@ -1604,3 +1604,54 @@ async fn unsupported_subscription_is_explicit() {
         XrpcRegistrationError::SubscriptionUnsupported
     );
 }
+
+#[tokio::test]
+async fn websocket_subscription_streams_hosted_events() {
+    use crate::{
+        Client, Route,
+        sample::{PutValue, SampleProtocol, SubscribeEvents},
+    };
+    use futures::StreamExt;
+    let (sample, stop) = crate::sample::boot("initial");
+    let mut router = XrpcRouter::new(1024);
+    SampleProtocol::mount(&mut router, Arc::clone(&sample.host)).expect("mount sample protocol");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let address = listener.local_addr().expect("listener address");
+    let (task, shutdown) = serve(listener, router.into_router())
+        .await
+        .expect("start server");
+    let client = Client::<SampleProtocol>::xrpc(
+        XrpcClient::new(
+            Url::parse(&format!("http://{address}")).expect("base url"),
+            1024 * 1024,
+        )
+        .expect("xrpc client"),
+    );
+    let mut events = client
+        .subscribe(
+            RequestContext::root(),
+            SubscribeEvents {
+                after_source_revision: 0,
+            },
+        )
+        .await
+        .expect("open websocket subscription");
+    client
+        .call(
+            RequestContext::root(),
+            PutValue {
+                value: "next".into(),
+            },
+        )
+        .await
+        .expect("put value");
+    let event = events.next().await.expect("event stream").expect("event");
+    assert_eq!(event.value, "next");
+    drop(events);
+    drop(client);
+    shutdown.send(()).expect("shutdown receiver");
+    task.await.expect("server task join").expect("server task");
+    stop.stop().await;
+}
