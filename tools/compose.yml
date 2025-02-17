@@ -1,0 +1,88 @@
+name: townframe
+services:
+  #
+  # db services
+  postgres:
+    profiles: [db, auth]
+    image: docker.io/library/postgres:17
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    networks: [net-one]
+    env_file: [.env]
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASS?"PG_PASS not set."}
+      POSTGRES_USER: ${PG_USER?"PG_USER not set."}
+      PG_DATA: /var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.db.sql:/docker-entrypoint-initdb.d/init.db.sql
+
+
+  redis:
+    profiles: [db]
+    image: docker.io/library/redis:alpine
+    command: --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 3s
+    networks: [net-one]
+    env_file: [.env]
+    volumes:
+      - redisdata:/data
+
+  #
+  # auth services
+  spicedb:
+    image: ghcr.io/authzed/spicedb:v1.40.0
+    ports:
+      - 50051:50051
+    depends_on: [postgres]
+    profiles: [auth]
+    networks: [net-one]
+    env_file: [.env]
+
+  zitadel:
+    image: 'ghcr.io/zitadel/zitadel:latest'
+    command: 'start-from-init --masterkey "MasterkeyNeedsToHave32Characters" --tlsMode disabled'
+    restart: unless-stopped
+    depends_on: [postgres]
+    profiles: [auth]
+    networks: [net-one]
+    env_file: [.env]
+    ports:
+      - '${ZITADEL_EXTERNALPORT?"ZITADEL_EXTERNALPORT not set"}:8080'
+
+  #
+  # cli tools
+  zed:
+    image: ghcr.io/authzed/zed:v0.27.0
+    profiles: [cli]
+    networks: [net-one]
+    env_file: [.env]
+    # network_mode: host
+
+  flyway:
+    image: docker.io/flyway/flyway:9.21-alpine
+    profiles: [cli]
+    networks: [net-one]
+    env_file: [.env]
+    # network_mode: host
+    volumes:
+      - ..:/flyway/conf:ro
+      - ./migrations/:/flyway/sql:ro
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  net-one:

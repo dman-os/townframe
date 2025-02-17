@@ -1,0 +1,14 @@
+[package]
+name = "btress_api"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+utils_rs.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+tokio.workspace = true
+

@@ -1,0 +1,17 @@
+[package]
+name = "utils_rs"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tower = "0.5"
+tower-http = "0.6"
+axum = { version = "0.8.1" }
+hyper = "1"
+async-trait.workspace = true
+futures.workspace = true
+tokio.workspace = true
+

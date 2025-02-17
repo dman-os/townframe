@@ -1,0 +1,18 @@
+[package]
+name = "granary_web"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "granary_web"
+path = "main.rs"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+console_error_panic_hook = "0.1.7"
+gloo = { version = "0.11.0" }
+leptos = { version = "0.7.7", features = ["csr"] }
+leptos_router = "0.7.7"
+serde_json.workspace = true
