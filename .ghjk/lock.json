@@ -428,6 +428,18 @@
               "workingDir": "./src/granary_web",
               "envKey": "bciqh3as3mx4zjn5etxam7m233d4ajj3tdai3j2c3ogdh46xp6utjg4y"
             },
+            "zitadel": {
+              "ty": "denoFile@v1",
+              "key": "zitadel",
+              "workingDir": "./tools",
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
+            "psql": {
+              "ty": "denoFile@v1",
+              "key": "psql",
+              "workingDir": "./tools",
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
             "greet": {
               "ty": "denoFile@v1",
               "key": "greet",
@@ -439,6 +451,8 @@
             "compose-down",
             "compose-up",
             "dev-gran",
+            "zitadel",
+            "psql",
             "greet"
           ]
         }

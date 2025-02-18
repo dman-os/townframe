@@ -12,7 +12,8 @@ path = "lib.rs"
 
 [dependencies]
 console_error_panic_hook = "0.1.7"
-gloo = { version = "0.11.0" }
-leptos = { version = "0.7.7", features = ["csr"] }
-leptos_router = "0.7.7"
+gloo = { workspace = true, features = ["net"] }
+leptos = { workspace = true, features = ["csr"] }
+leptos_router = { workspace = true }
 serde_json.workspace = true
+leptos_oidc.workspace = true

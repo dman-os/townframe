@@ -1,0 +1,21 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "xtask"
+path = "main.rs"
+
+[dependencies]
+
+tracing-unwrap.workspace = true
+
+color-eyre.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+once_cell.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+clap = { version = "4.5.3", features = ["derive", "env"] }
+zitadel = { version = "5.5.1", features = ["api"] }

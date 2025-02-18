@@ -69,6 +69,27 @@ ghjk.task(
 )
 
 ghjk.task(
+  "psql",
+  ($) =>
+    $`${DOCKER_CMD} compose
+          exec postgres psql -U postgres -d postgres 
+          -v SEARCH_PATH=zitadel,spicedb,granary ${$.argv}`,
+  {
+    workingDir: "./tools",
+  },
+);
+
+ghjk.task(
+  "zitadel",
+  ($) =>
+    $`${DOCKER_CMD} compose exec zitadel /app/zitadel ${$.argv}`,
+  {
+    workingDir: "./tools",
+  },
+);
+
+
+ghjk.task(
   "dev-gran", 
   ($) => $`trunk serve`,
   { inherit: "dev", workingDir: "./src/granary_web", vars: {

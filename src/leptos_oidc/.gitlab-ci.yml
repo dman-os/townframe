@@ -1,0 +1,56 @@
+default:
+  image: "rust:latest" 
+
+stages:
+  - check
+  - lint
+  - test
+  - doc
+  - build_examples
+  - build
+
+format:
+  stage: check
+  before_script:
+    - rustup component add rustfmt
+  script:
+    - cargo fmt -- --check
+
+license:
+  stage: check
+  script:
+    - ./utils/license-check.sh
+
+lint:
+  stage: lint
+  needs: ["format", "license"]
+  before_script:
+    - rustup component add clippy
+  script:
+    - cargo clippy -- -D warnings -D clippy::pedantic
+
+test:
+  stage: test
+  needs: ["lint"]
+  script:
+    - cargo test --verbose
+
+doc:
+  stage: doc
+  needs: ["lint"]
+  script:
+    - cargo doc --workspace --no-deps
+
+build_examples:
+  stage: build_examples
+  needs: ["test", "doc"]
+  script:
+    - |
+      cd examples/simple
+      cargo build
+
+build:
+  stage: build
+  needs: ["test", "doc"]
+  script:
+    - cargo build

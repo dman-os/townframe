@@ -1,0 +1,44 @@
+[package]
+name = "leptos_oidc"
+version = "0.8.0"
+edition = "2021"
+description = "A Leptos utility library for simplified OpenID Connect (OIDC) authentication integration."
+keywords = ["leptos", "auth", "oidc", "openidconnect", "oauth"]
+categories = ["web-programming", "api-bindings", "network-programming"]
+authors = [
+    "Daniél Kerkmann <daniel@kerkmann.dev>",
+    "Niklas Scheerhoorn <sinner1991@gmail.com>",
+    "Reimar Stier <reimar.stier@mercedes-benz.com>",
+]
+license = "MIT"
+repository = "https://gitlab.com/kerkmann/leptos_oidc"
+documentation = "https://docs.rs/leptos_oidc"
+include = [
+    "**/*.rs",
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+]
+
+[lib]
+name = "leptos_oidc"
+
+[dependencies]
+time = { workspace = true, features = ["serde", "wasm-bindgen", "local-offset"] }
+
+codee = { version = "0.2", features = ["json_serde"] }
+serde.workspace = true
+serde_json.workspace = true
+
+jsonwebtoken = { version = "9.3", default-features = false }
+oauth2 = { version = "4.4.2", default-features = false, features = ["pkce-plain"] }
+
+leptos = { workspace = true  }
+leptos-use = { workspace = true, features = ["storage", "use_timeout_fn"] }
+leptos_router = { workspace = true  }
+
+gloo = { workspace = true, features = ["net"] }
+
+thiserror.workspace = true
+
+tracing.workspace = true
