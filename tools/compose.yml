@@ -65,7 +65,7 @@ services:
     image: 'docker.io/kanidm/server:1.5.0'
     user: "1000:1000"  # Run as user with UID 1000
     command: >
-      sh -c "/sbin/kanidmd cert-generate &&
+      sh -c "/sbin/kanidmd cert-generate --cert /certs/cert.pem --key /certs/key.pem &&
              /sbin/kanidmd server -c /data/server.toml"
     restart: unless-stopped
     profiles: [auth]
@@ -75,8 +75,9 @@ services:
       - '8443:8443'
       - '3636:3636'
     volumes:
-      - ./tools/kanidm_data:/data
+      - kanidmdata:/data
       - ./kanidm.toml:/data/server.toml
+      - ./tools/kandidm_certs:/certs
 
   #
   # cli tools
@@ -100,6 +101,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+  kanidmdata:
 
 networks:
   net-one:
