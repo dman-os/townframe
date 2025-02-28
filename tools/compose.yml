@@ -55,11 +55,27 @@ services:
     command: 'start-from-init --masterkey "MasterkeyNeedsToHave32Characters" --tlsMode disabled'
     restart: unless-stopped
     depends_on: [postgres]
-    profiles: [auth]
+    profiles: [disabled]
     networks: [net-one]
     env_file: [.env]
     ports:
       - '${ZITADEL_EXTERNALPORT?"ZITADEL_EXTERNALPORT not set"}:8080'
+
+  kanidmd:
+    image: 'docker.io/kanidm/server:1.5.0'
+    command: >
+      sh -c "/sbin/kanidmd cert-generate &&
+             /sbin/kanidmd server -c /data/server.toml"
+    restart: unless-stopped
+    profiles: [auth]
+    networks: [net-one]
+    env_file: [.env]
+    ports:
+      - '8443:8443'
+      - '3636:3636'
+    volumes:
+      - kanidmdata:/data
+      - ./kanidm.toml:/data/server.toml
 
   #
   # cli tools
@@ -83,6 +99,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+  kanidmdata:
 
 networks:
   net-one:
