@@ -63,9 +63,9 @@ services:
 
   kanidmd:
     image: 'docker.io/kanidm/server:1.5.0'
-    user: "1000:1000"  # Run as user with UID 1000
+    # user: "1000:1000"  # Run as user with UID 1000
     command: >
-      sh -c "/sbin/kanidmd cert-generate --cert /certs/cert.pem --key /certs/key.pem &&
+      sh -c "/sbin/kanidmd cert-generate &&
              /sbin/kanidmd server -c /data/server.toml"
     restart: unless-stopped
     profiles: [auth]
