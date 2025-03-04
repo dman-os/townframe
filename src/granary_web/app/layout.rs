@@ -4,6 +4,9 @@ use leptos_oidc::*;
 use leptos_router::components::*;
 use leptos_router::path;
 
+const OAUTH2_CLIENT_ID: &str = "granary";
+const KANIDM_URL: &str = "https://localhost:8443";
+
 // The #[component] macro marks a function as a reusable component
 // Components are the building blocks of your user interface
 // They define a reusable unit of behavior
@@ -11,13 +14,20 @@ use leptos_router::path;
 pub fn App() -> impl IntoView {
     provide_context(Auth::signal());
     Auth::init(AuthParameters {
-        issuer: "http://localhost:8181/oauth/v2/authorize".to_string(),
-        client_id: "307470805355266051".to_string(),
+        issuer: format!("{KANIDM_URL}/oauth2/openid/{OAUTH2_CLIENT_ID}").to_string(),
+        client_id: OAUTH2_CLIENT_ID.to_string(),
         redirect_uri: "http://localhost:3000/redirect/signin".to_string(),
         post_logout_redirect_uri: "http://localhost:3000/logout".to_string(),
         challenge: leptos_oidc::Challenge::S256,
         scope: Some("openid%20profile%20email".to_string()),
         audience: None,
+        // issuer: "http://localhost:8181/oauth/v2/authorize".to_string(),
+        // client_id: "307470805355266051".to_string(),
+        // redirect_uri: "http://localhost:3000/redirect/signin".to_string(),
+        // post_logout_redirect_uri: "http://localhost:3000/logout".to_string(),
+        // challenge: leptos_oidc::Challenge::S256,
+        // scope: Some("openid%20profile%20email".to_string()),
+        // audience: None,
     });
     view! {
         <Router>
@@ -70,7 +80,7 @@ pub fn Profile() -> impl IntoView {
     view! {
         <h1>Profile</h1>
 
-        <LogoutLink class="text-logout">Sign out</LogoutLink>
+        // <LogoutLink class="text-logout">Sign out</LogoutLink>
         // Your Profile Page
         { move || {
             view! {
@@ -84,13 +94,15 @@ pub fn Profile() -> impl IntoView {
 #[component]
 fn RedirectSignin() -> impl IntoView {
     let userinfo = LocalResource::new(|| async move {
-        gloo::net::http::Request::get("http://localhost:8181/oidc/v1/userinfo")
-            .send()
-            .await
-            .unwrap()
-            .json::<serde_json::Value>()
-            .await
-            .unwrap()
+        gloo::net::http::Request::get(&format!(
+            "{KANIDM_URL}/oauth2/openid/{OAUTH2_CLIENT_ID}/userinfo"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()
     });
 
     view! {

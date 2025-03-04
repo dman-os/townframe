@@ -87,6 +87,8 @@ impl UnauthenticatedData {
                 params = params.push_param_query("code_challenge", code_challenge.as_str());
                 params = params
                     .push_param_query("code_challenge_method", code_challenge.method().as_str());
+                // FIXME: workaround for https://github.com/kanidm/kanidm/issues/3384
+                params = params.push_param_query("state", "kanidm-kanidm-issues-3384");
             }
             Challenge::None => {
                 remove_code_verifier();

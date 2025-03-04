@@ -96,6 +96,7 @@ pub struct Configuration {
     pub issuer: String,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
+    #[serde(default)]
     pub end_session_endpoint: String,
     pub jwks_uri: String,
 }

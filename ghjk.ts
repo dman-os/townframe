@@ -6,7 +6,7 @@ import * as ports from "https://raw.githubusercontent.com/metatypedev/ghjk/v0.2.
 
 import * as std_url from "jsr:@std/url@0.215.0";
 
-const DOCKER_CMD = "docker";
+const DOCKER_CMD = Deno.env.get("DOCKER_CMD") ?? "podman";
 const RUST_VERSION = "1.84.1";
 
 const installs = {
@@ -15,6 +15,10 @@ const installs = {
     profile: "default",
     components: ["rust-src"],
     targets: ["wasm32-unknown-unknown"] 
+  }),
+  py: ports.cpy_bs({
+    version: "3.12.9",
+    releaseTag: "20250212"
   })
 }
 
@@ -24,9 +28,9 @@ const ghjk = file({
   // allows usage of ports that depend on node/python
   enableRuntimes: true,
   allowedBuildDeps: [
-    // ports.rust({ version: "nightly-2025-01-26" }),
     // ports.node({ version: "20.8.0" }),
-    installs.rust
+    installs.rust, 
+    installs.py
   ],
 });
 
@@ -39,6 +43,7 @@ ghjk.env("main")
   .install(
     installs.rust,
     ports.pipi({ packageName: "pre-commit" })[0],
+    ports.cargobi({ crateName: "kanidm_tools", locked: true }),
   );
 
 ghjk.env("dev")
@@ -46,8 +51,13 @@ ghjk.env("dev")
     ports.cargobi({ crateName: "cargo-leptos", locked: true }),
     ports.cargobi({ crateName: "leptosfmt", locked: true }),
     ports.cargobi({ crateName: "trunk", locked: true }),
+    ports.pipi({ packageName: "uv" })[0],
+    ports.pipi({ packageName: "aider-chat" })[0],
   )
   .vars({
+    KANIDM_URL: "https://localhost:8443",
+    KANIDM_SKIP_HOSTNAME_VERIFICATION: "true",
+    KANIDM_ACCEPT_INVALID_CERTS: "true",
     // ...Object.fromEntries(
     //   [
     //     await $.path(
@@ -71,7 +81,7 @@ ghjk.task(
 ghjk.task(
   "psql",
   ($) =>
-    $`${DOCKER_CMD} compose
+    $`${DOCKER_CMD} compose --profile db
           exec postgres psql -U postgres -d postgres 
           -v SEARCH_PATH=zitadel,spicedb,granary ${$.argv}`,
   {
@@ -80,13 +90,55 @@ ghjk.task(
 );
 
 ghjk.task(
-  "zitadel",
+  "kanidmd",
   ($) =>
-    $`${DOCKER_CMD} compose exec zitadel /app/zitadel ${$.argv}`,
+    $`${DOCKER_CMD} compose --profile auth exec kanidmd kanidmd ${$.argv}`,
   {
     workingDir: "./tools",
   },
 );
+
+ghjk.task(
+  "kanidm-recover", 
+  async ($) => {
+    const out = await $`ghjk x kanidmd recover-account idm_admin -o json`.text();
+    const pass = out.match(/"password":"([^"]*)"/)![1]!;
+    console.log({pass})
+    {
+      const path = $.workingDir.join(".env");
+      let envRaw = await path.readText();
+      const prefix = 'KANIDM_ADMIN_PASSWORD=';
+      let lineAdded = false;
+      await path.writeText(
+          [
+            ...envRaw.split('\n')
+              .slice(0, -1)
+              // .filter(line => line.length)
+              .map(line => {
+                if (line.startsWith(prefix)) {
+                  lineAdded = true;
+                  return prefix+pass;
+                } else {
+                  return line;
+                }
+              }),
+            lineAdded ? '' : prefix+pass
+          ]
+          .join('\n')
+      )
+    }
+    // await $`kanidm login -D idm_admin`
+  },
+  { inherit: "dev" }
+)
+
+ghjk.task(
+  "kanidm-login", 
+  async ($) => {
+    await $`kanidm login -D idm_admin`
+  },
+  { inherit: "dev", dependsOn: ["kanidm-recover"] }
+)
 
 
 ghjk.task(
@@ -107,8 +159,10 @@ ghjk.task(
   { workingDir: "./tools" }
 )
 
-const allProfiles = async ($) => (await $`${DOCKER_CMD} compose config --profiles`.text())
-      .split('\n');
+// const allProfiles = async ($) => (await $`${DOCKER_CMD} compose config --profiles`.text())
+//       .split('\n');
+// FIXME: https://github.com/containers/podman-compose/issues/1052
+const allProfiles = ($) => Promise.resolve(["auth", "db", "cli"]);
 
 ghjk.task(
   "compose-down", 

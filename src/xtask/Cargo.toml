@@ -18,4 +18,7 @@ once_cell.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 clap = { version = "4.5.3", features = ["derive", "env"] }
-zitadel = { version = "5.5.1", features = ["api"] }
+# zitadel = { version = "5.5.1", features = ["api"] }
+kanidm_client = "1.5.0"
+kanidm_proto = "1.5.0"
+dotenv-flow = "0.16.2"

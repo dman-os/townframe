@@ -63,7 +63,6 @@ services:
 
   kanidmd:
     image: 'docker.io/kanidm/server:1.5.0'
-    # user: "1000:1000"  # Run as user with UID 1000
     command: >
       sh -c "/sbin/kanidmd cert-generate &&
              /sbin/kanidmd server -c /data/server.toml"
@@ -74,10 +73,14 @@ services:
     ports:
       - '8443:8443'
       - '3636:3636'
+    # podman mounts volumes as root otherwise
+    # userns_mode: keep-id:uid=1000,gid=1000
+    # security_opt:
+    #   - label=disable
     volumes:
       - kanidmdata:/data
-      - ./kanidm.toml:/data/server.toml
-      - ./tools/kandidm_certs:/certs
+      - ./kanidm.toml:/data/server.toml:ro,Z
+      - ./kandidm_certs:/certs:Z
 
   #
   # cli tools
@@ -105,3 +108,6 @@ volumes:
 
 networks:
   net-one:
+
+# x-podman:
+#   in_pod: false

@@ -16,6 +16,7 @@ use crate::interlude::*;
 mod utils;
 
 fn main() -> Res<()> {
+    dotenv_flow::dotenv_flow().ok();
     utils::setup_tracing()?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -29,40 +30,65 @@ async fn main_main() -> Res<()> {
     use clap::Parser;
     let args = Args::parse();
     match args.command {
-        Commands::SeedZitadel {} => {
-            let mut client_mgmt =
-                zitadel::api::clients::ClientBuilder::new("http://localhost:8181")
-                    .build_management_client()
+        Commands::SeedKanidm {} => {
+            let client = kanidm_client::KanidmClientBuilder::new()
+                .address("https://localhost:8443".into())
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true)
+                .build()
+                .map_err(|err| ferr!("{err:?}"))?;
+            {
+                let pass = std::env::var("KANIDM_ADMIN_PASSWORD").expect(
+                    "env KANIDM_ADMIN_PASSWORD required, make sure to run ghjk x kanidm-recover",
+                );
+                client
+                    .auth_simple_password("idm_admin", &pass)
                     .await
-                    .unwrap_or_log();
-            let proj = client_mgmt
-                .add_project(zitadel::api::zitadel::management::v1::AddProjectRequest {
-                    name: "townframe".into(),
-                    ..Default::default()
-                })
-                .await
-                .wrap_err("error creating project")?
-                .into_inner();
+                    .map_err(|err| ferr!("{err:?}"))?;
+            }
+            let tframe_admin = "tframe_admin";
+            let tframe_group = "tframe_users";
 
-            use zitadel::api::zitadel::app::v1::*;
-            let app = client_mgmt
-                .add_oidc_app(zitadel::api::zitadel::management::v1::AddOidcAppRequest {
-                    name: "granary_web".into(),
-                    project_id: proj.id.clone(),
-                    dev_mode: true,
-                    redirect_uris: vec!["http://localhost:3000/redirect/signin".into()],
-                    app_type: OidcAppType::UserAgent.into(),
-                    // PKCE auth according to
-                    // https://github.com/zitadel/zitadel/blob/5bbb953ffbd2a20a333704217c7077a78f96dfe5/console/src/app/pages/projects/apps/authmethods.ts#L24
-                    response_types: vec![OidcResponseType::Code.into()],
-                    grant_types: vec![OidcGrantType::AuthorizationCode.into()],
-                    auth_method_type: OidcAuthMethodType::None.into(),
-                    ..Default::default()
-                })
+            client
+                .idm_service_account_create(tframe_admin, tframe_admin, "idm_admin")
                 .await
-                .wrap_err("error creating app")?
-                .into_inner();
-            println!("{app:#?}");
+                .map_err(|err| ferr!("{err:?}"))?;
+            client
+                .idm_group_create(tframe_group, Some(tframe_admin))
+                .await
+                .map_err(|err| ferr!("{err:?}"))?;
+            client
+                .idm_group_add_members(tframe_group, &[tframe_admin])
+                .await
+                .map_err(|err| ferr!("{err:?}"))?;
+            {
+                let oauth_name = "granary";
+                client
+                    .idm_oauth2_rs_public_create(
+                        oauth_name,
+                        oauth_name,
+                        "http://localhost:3000/redirect/signin",
+                    )
+                    .await
+                    .map_err(|err| ferr!("{err:?}"))?;
+                client
+                    .idm_oauth2_rs_enable_pkce(oauth_name)
+                    .await
+                    .map_err(|err| ferr!("{err:?}"))?;
+                client
+                    .idm_oauth2_rs_update_scope_map(
+                        oauth_name,
+                        tframe_group,
+                        vec!["openid", "profile", "email", "groups"],
+                    )
+                    .await
+                    .map_err(|err| ferr!("{err:?}"))?;
+                client
+                    .idm_oauth2_rs_enable_public_localhost_redirect(oauth_name)
+                    .await
+                    .map_err(|err| ferr!("{err:?}"))?;
+            }
+            //
         }
     }
 
@@ -88,6 +114,8 @@ struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
-    #[clap(visible_alias = "r")]
-    SeedZitadel {},
+    // #[clap(visible_alias = "r")]
+    // SeedZitadel {},
+    // SeedZitadel {},
+    SeedKanidm {},
 }
