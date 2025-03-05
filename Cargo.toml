@@ -13,15 +13,20 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
+# internal
 leptos_oidc = { path = "./src/leptos_oidc" }
 utils_rs = { path = "./src/utils_rs" }
 
+# futures
 async-trait = "0.1"
 futures = "0.3"
 tokio = "1"
 
+# ds
 time = { version = "0.3", default-features = false }
+once_cell = "1"
 
+# serde
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -32,13 +37,17 @@ leptos_router = { version = "0.7", default-features = false }
 reqwest = { version = "0.12", default-features = false }
 gloo = { version = "0.11.0", default-features = false }
 
+# macros
+displaydoc = "0.2"
+educe = "0.6"
+
+# errors
 thiserror = "1.0"
-
-color-eyre = "0.6"
 anyhow = "1"
+garde = { version = "0.22", features = ["derive", "regex", "url"] }
 
-once_cell = "1"
-
+# logging
+color-eyre = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [
   "env-filter",
@@ -46,3 +55,9 @@ tracing-subscriber = { version = "0.3", features = [
   "tracing-log"
 ] }
 tracing-unwrap = "1.0"
+tracing-appender = "0.2.3"
+tracing-error = "0.2.1"
+
+kanidm_client = "1.5.0"
+kanidm_proto = "1.5.0"
+dotenv-flow = "0.16.2"
