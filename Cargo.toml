@@ -6,6 +6,7 @@ members = [
   "./src/leptos_oidc",
   "./src/utils_rs",
   "./src/xtask",
+  "./src/macros",
 ]
 
 [workspace.package]
