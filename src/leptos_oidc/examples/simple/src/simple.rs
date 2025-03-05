@@ -1,9 +1,11 @@
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, Link, Stylesheet, Title};
-use leptos_oidc::{Auth, AuthErrorContext, AuthLoaded, AuthLoading, AuthParameters, AuthSignal, Authenticated, Challenge, LoginLink, LogoutLink};
+use leptos_oidc::{
+    Auth, AuthErrorContext, AuthLoaded, AuthLoading, AuthParameters, AuthSignal, Authenticated,
+    Challenge, LoginLink, LogoutLink,
+};
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
-
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -67,17 +69,11 @@ pub fn AppWithRouter() -> impl IntoView {
     }
 }
 
-
 #[component]
 pub fn AuthErrorPage() -> impl IntoView {
-    let auth = use_context::<AuthSignal>()
-        .expect("AuthErrorContext: RwSignal<AuthStore> not present");
-    let error_message = move || {
-        auth
-            .get()
-            .error()
-            .map(|error| format!("{error:?}"))
-    };
+    let auth =
+        use_context::<AuthSignal>().expect("AuthErrorContext: RwSignal<AuthStore> not present");
+    let error_message = move || auth.get().error().map(|error| format!("{error:?}"));
 
     view! {
         <h1>Error occurred</h1>
@@ -107,7 +103,6 @@ pub fn Logout() -> impl IntoView {
 
     }
 }
-
 
 /// This will be rendered, if the authentication library is still loading
 #[component]

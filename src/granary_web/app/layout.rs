@@ -71,9 +71,9 @@ pub fn Profile() -> impl IntoView {
     let auth = use_context::<AuthSignal>().expect("AuthStore not initialized in error page");
     let user = Signal::derive(move || {
         auth.with(|auth| {
-            auth.authenticated()
-                .map(|auth| auth.decoded_access_token::<serde_json::Value>(Algorithm::RS256, &[]))
-                .flatten()
+            auth.authenticated().and_then(|auth| {
+                auth.decoded_access_token::<serde_json::Value>(Algorithm::RS256, &[])
+            })
         })
     });
 

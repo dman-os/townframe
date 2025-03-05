@@ -55,12 +55,14 @@ impl From<SuccessTokenResponse> for TokenStorage {
             access_token: value.access_token,
             // Backend will validate that token is valid: iat field (issued at in seconds since epoch) < now < exp field (expiration time in seconds since epoch) and token signature
             // This shall memorize when to get a new access token
-            expires_at: time::OffsetDateTime::now_utc() + std::time::Duration::from_secs(value.expires_in as u64),
+            expires_at: time::OffsetDateTime::now_utc()
+                + std::time::Duration::from_secs(value.expires_in as u64),
             // expires_in: Utc::now().naive_utc()
             //     + TimeDelta::try_seconds(value.expires_in).unwrap_or_default(),
             refresh_token: value.refresh_token,
             refresh_expires_at: value.refresh_expires_in.map(|refresh_expires_in| {
-                time::OffsetDateTime::now_utc() + std::time::Duration::from_secs(refresh_expires_in as u64)
+                time::OffsetDateTime::now_utc()
+                    + std::time::Duration::from_secs(refresh_expires_in as u64)
                 // Utc::now().naive_utc()
                 //     + TimeDelta::try_seconds(refresh_expires_in).unwrap_or_default()
             }),

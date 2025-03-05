@@ -16,9 +16,10 @@ fn main() {
         .without_time()
         .with_writer(tracing_web::MakeConsoleWriter)
         .pretty()
-        .with_filter(Targets::default()
-            .with_default(Level::TRACE)
-            .with_target(package_name, Level::TRACE)
+        .with_filter(
+            Targets::default()
+                .with_default(Level::TRACE)
+                .with_target(package_name, Level::TRACE),
         );
 
     tracing_subscriber::registry().with(fmt_layer).init();

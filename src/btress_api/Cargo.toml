@@ -8,7 +8,19 @@ path = "lib.rs"
 
 [dependencies]
 utils_rs.workspace = true
+macros.workspace = true
+
 async-trait.workspace = true
 futures.workspace = true
 tokio.workspace = true
 
+serde.workspace = true
+serde_json.workspace = true
+
+garde.workspace = true
+
+thiserror.workspace = true
+displaydoc.workspace = true
+
+kanidm_client.workspace = true
+kanidm_proto.workspace = true

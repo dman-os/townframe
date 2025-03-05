@@ -30,6 +30,32 @@ async fn main_main() -> Res<()> {
     use clap::Parser;
     let args = Args::parse();
     match args.command {
+        Commands::Play {} => {
+            #[derive(Debug, serde::Serialize, serde::Deserialize)]
+            pub struct PrimitivesPartial {
+                pub my_prim: Option<String>,
+            }
+            #[derive(Debug, serde::Serialize, serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            pub struct Branch2Partial {
+                pub branch2: Option<String>,
+            }
+            #[derive(Debug, serde::Serialize, serde::Deserialize)]
+            #[serde(untagged)]
+            pub enum CompositesEitherEither {
+                PrimitivesPartial(PrimitivesPartial),
+                Branch2Partial(Branch2Partial),
+            }
+            let value: CompositesEitherEither = serde_json::from_str(
+                r#"
+{
+    "branch2": "bytes"
+}
+            "#,
+            )
+            .unwrap();
+            println!("{value:?}");
+        }
         Commands::SeedKanidm {} => {
             let client = kanidm_client::KanidmClientBuilder::new()
                 .address("https://localhost:8443".into())
@@ -118,4 +144,5 @@ enum Commands {
     // SeedZitadel {},
     // SeedZitadel {},
     SeedKanidm {},
+    Play {},
 }

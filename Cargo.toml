@@ -17,6 +17,7 @@ edition = "2021"
 # internal
 leptos_oidc = { path = "./src/leptos_oidc" }
 utils_rs = { path = "./src/utils_rs" }
+macros = { path = "./src/macros" }
 
 # futures
 async-trait = "0.1"
@@ -62,3 +63,5 @@ tracing-error = "0.2.1"
 kanidm_client = "1.5.0"
 kanidm_proto = "1.5.0"
 dotenv-flow = "0.16.2"
+
+http = "1"

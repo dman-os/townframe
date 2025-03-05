@@ -2,9 +2,9 @@ use elaborate::App;
 use leptos::prelude::*;
 use tracing::Level;
 use tracing_subscriber::filter::Targets;
-use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 mod elaborate;
 mod user;
 
@@ -17,9 +17,10 @@ fn main() {
         .without_time()
         .with_writer(tracing_web::MakeConsoleWriter)
         .pretty()
-        .with_filter(Targets::default()
-            .with_default(Level::TRACE)
-            .with_target(package_name, Level::TRACE)
+        .with_filter(
+            Targets::default()
+                .with_default(Level::TRACE)
+                .with_target(package_name, Level::TRACE),
         );
 
     tracing_subscriber::registry().with(fmt_layer).init();

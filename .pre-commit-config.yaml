@@ -1,0 +1,59 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        exclude: gh_action/dist/.*.js
+      - id: check-ast
+      - id: check-json
+        exclude: .vscode/.*\.json
+      - id: check-toml
+      - id: check-yaml
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+        # exclude all generated files
+        exclude: |
+          (?x)^(
+              .ghjk/lock.json|
+              .ghjk/hash.json|
+              .ghjk/deno.lock|
+              Cargo.lock|
+              gh_action/.*.js
+          )$
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.28.2
+    hooks:
+      - id: check-dependabot
+      - id: check-github-workflows
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v3.13.0
+    hooks:
+      - id: commitizen
+        stages:
+          - commit-msg
+  - repo: local
+    hooks:
+      - id: ghjk-resolve
+        name: Ghjk resolve
+        language: system
+        entry: bash -c 'ghjk p resolve'
+        pass_filenames: false
+      # - id: lock-sed
+      #   name: Sed lock
+      #   language: system
+      #   entry: bash -c 'ghjk x lock-sed'
+      #   pass_filenames: false
+  - repo: https://github.com/doublify/pre-commit-rust
+    rev: v1.0
+    hooks:
+      - id: fmt
+      - id: clippy
+        args:
+          - "--locked"
+          - "--all-features"
+          - "--all-targets"
+          - "--"
+          - "--deny"
+          - "warnings"

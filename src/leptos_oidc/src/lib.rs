@@ -408,7 +408,7 @@ fn create_handle_refresh_effect(
             let expires_in = authenticated.token_store.expires_at - time::OffsetDateTime::now_utc();
             #[allow(clippy::cast_precision_loss)]
             let wait_milliseconds =
-                (expires_in.as_seconds_f64()  - REFRESH_TOKEN_SECONDS_BEFORE as f64).max(0.0)
+                (expires_in.as_seconds_f64() - REFRESH_TOKEN_SECONDS_BEFORE as f64).max(0.0)
                     * 1000.0;
 
             let UseTimeoutFnReturn { start, .. } = use_timeout_fn(

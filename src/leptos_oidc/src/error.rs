@@ -60,4 +60,3 @@ impl From<gloo::net::Error> for AuthError {
         }
     }
 }
-

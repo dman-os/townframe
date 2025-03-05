@@ -2,7 +2,10 @@ use crate::user::Claims;
 use leptos::either::Either;
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, Link, Stylesheet, Title};
-use leptos_oidc::{Algorithm, Auth, AuthErrorContext, AuthLoaded, AuthLoading, AuthParameters, AuthSignal, Authenticated, LoginLink, LogoutLink, ReloadButton, TokenData};
+use leptos_oidc::{
+    Algorithm, Auth, AuthErrorContext, AuthLoaded, AuthLoading, AuthParameters, AuthSignal,
+    Authenticated, LoginLink, LogoutLink, ReloadButton, TokenData,
+};
 use leptos_router::components::{ProtectedRoute, Route, Router, Routes};
 use leptos_router::path;
 use serde::Deserialize;
