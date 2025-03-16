@@ -482,6 +482,48 @@
           "portRef": "pipi_pypi@0.1.0",
           "packageName": "aider-chat",
           "specifiedVersion": false
+        },
+        "bciqke266enldylptp7mgd7byltkoxkkhkfaiiqto62jtmomlhznbfvy": {
+          "version": "0.9.92",
+          "buildDepConfigs": {
+            "cargo_binstall_ghrel": {
+              "version": "v1.10.22",
+              "buildDepConfigs": {},
+              "portRef": "cargo_binstall_ghrel@0.1.0",
+              "specifiedVersion": false
+            },
+            "rust_rustup": {
+              "version": "1.84.1",
+              "buildDepConfigs": {
+                "rustup_rustlang": {
+                  "version": "1.27.1",
+                  "buildDepConfigs": {
+                    "git_aa": {
+                      "version": "2.48.1",
+                      "buildDepConfigs": {},
+                      "portRef": "git_aa@0.1.0",
+                      "specifiedVersion": false
+                    }
+                  },
+                  "portRef": "rustup_rustlang@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rust_rustup@0.1.0",
+              "profile": "default",
+              "components": [
+                "rust-src"
+              ],
+              "targets": [
+                "wasm32-unknown-unknown"
+              ],
+              "specifiedVersion": true
+            }
+          },
+          "portRef": "cargobi_cratesio@0.1.0",
+          "crateName": "cargo-nextest",
+          "locked": true,
+          "specifiedVersion": false
         }
       }
     },
@@ -502,7 +544,8 @@
               "installs": [
                 "bciqmuywvb54qymjruq4la47llycdankptd3dt4lebn5cemf434ykcbq",
                 "bciqiku4dzn2tnyoieabcbzgafouamrjjaf2il3phpk3mbms5lqg3hlq",
-                "bciql4vxfkas7x2ukzsxohgjhscnkuq6pwintbmr7hfnmvgwoct7qdpi"
+                "bciql4vxfkas7x2ukzsxohgjhscnkuq6pwintbmr7hfnmvgwoct7qdpi",
+                "bciqjccfmi5q4zxifit6w6zkk3cxornxs3j3kuuo3yxob4jkpiq537ia"
               ],
               "allowedBuildDeps": "bciqbg3xmjvndlugmohzygilanwljbo65ezgvbhidex4zifh6swzohvi"
             },
@@ -515,7 +558,8 @@
                 "bciqkw4spuz4iuydn5xz6ptimwcqmyhxeqrl67iqiuhrlkpnmi2x3hky",
                 "bciqmuywvb54qymjruq4la47llycdankptd3dt4lebn5cemf434ykcbq",
                 "bciqiku4dzn2tnyoieabcbzgafouamrjjaf2il3phpk3mbms5lqg3hlq",
-                "bciql4vxfkas7x2ukzsxohgjhscnkuq6pwintbmr7hfnmvgwoct7qdpi"
+                "bciql4vxfkas7x2ukzsxohgjhscnkuq6pwintbmr7hfnmvgwoct7qdpi",
+                "bciqjccfmi5q4zxifit6w6zkk3cxornxs3j3kuuo3yxob4jkpiq537ia"
               ],
               "allowedBuildDeps": "bciqbg3xmjvndlugmohzygilanwljbo65ezgvbhidex4zifh6swzohvi"
             }
@@ -526,6 +570,24 @@
         "id": "tasks",
         "config": {
           "tasks": {
+            "test": {
+              "ty": "denoFile@v1",
+              "key": "test",
+              "envKey": "bciqjufuefe4b2vudscd352ae7zhev72iqtury5ridqwyqi6z6ehp2ea"
+            },
+            "db-mig-btress": {
+              "ty": "denoFile@v1",
+              "key": "db-mig-btress",
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
+            "db-mig": {
+              "ty": "denoFile@v1",
+              "key": "db-mig",
+              "dependsOn": [
+                "db-mig-btress"
+              ],
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
             "compose-logs": {
               "ty": "denoFile@v1",
               "key": "compose-logs",
@@ -548,12 +610,12 @@
               "ty": "denoFile@v1",
               "key": "dev-gran",
               "workingDir": "./src/granary_web",
-              "envKey": "bciqi6zee7emoe6fitslbh4kii7xizpuv3l3i5soxyc3rtvaapzwc2tq"
+              "envKey": "bciqculrjov5mkm44r2h6evpacngncpojtuj3yv4s6lmsat6npbp3j6a"
             },
             "kanidm-recover": {
               "ty": "denoFile@v1",
               "key": "kanidm-recover",
-              "envKey": "bciqi2xz7n6wj64liyvv5tf6twfuxpwfyeq76hkcydi7vv537n7t67pi"
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
             },
             "kanidm-login": {
               "ty": "denoFile@v1",
@@ -561,7 +623,15 @@
               "dependsOn": [
                 "kanidm-recover"
               ],
-              "envKey": "bciqi2xz7n6wj64liyvv5tf6twfuxpwfyeq76hkcydi7vv537n7t67pi"
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
+            "seed-kanidm": {
+              "ty": "denoFile@v1",
+              "key": "seed-kanidm",
+              "dependsOn": [
+                "kanidm-login"
+              ],
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
             },
             "kanidmd": {
               "ty": "denoFile@v1",
@@ -575,21 +645,32 @@
               "workingDir": "./tools",
               "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
             },
+            "flyway": {
+              "ty": "denoFile@v1",
+              "key": "flyway",
+              "workingDir": "./tools",
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
             "greet": {
               "ty": "denoFile@v1",
               "key": "greet",
-              "envKey": "bciqi2xz7n6wj64liyvv5tf6twfuxpwfyeq76hkcydi7vv537n7t67pi"
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
             }
           },
           "tasksNamed": [
+            "test",
+            "db-mig-btress",
+            "db-mig",
             "compose-logs",
             "compose-down",
             "compose-up",
             "dev-gran",
             "kanidm-recover",
             "kanidm-login",
+            "seed-kanidm",
             "kanidmd",
             "psql",
+            "flyway",
             "greet"
           ]
         }
@@ -612,12 +693,48 @@
                 }
               ]
             },
+            "bciqjufuefe4b2vudscd352ae7zhev72iqtury5ridqwyqi6z6ehp2ea": {
+              "provides": [
+                {
+                  "ty": "posix.envVar",
+                  "key": "CARGO_BUILD_JOBS",
+                  "val": "8"
+                },
+                {
+                  "ty": "posix.envVar",
+                  "key": "DOTENV_ENV",
+                  "val": "test"
+                },
+                {
+                  "ty": "ghjk.ports.InstallSetRef",
+                  "setId": "ghjkEnvProvInstSet___main"
+                }
+              ]
+            },
             "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia": {
               "provides": [
                 {
                   "ty": "posix.envVar",
                   "key": "CARGO_BUILD_JOBS",
                   "val": "8"
+                },
+                {
+                  "ty": "ghjk.ports.InstallSetRef",
+                  "setId": "ghjkEnvProvInstSet___main"
+                }
+              ]
+            },
+            "bciqculrjov5mkm44r2h6evpacngncpojtuj3yv4s6lmsat6npbp3j6a": {
+              "provides": [
+                {
+                  "ty": "posix.envVar",
+                  "key": "CARGO_BUILD_JOBS",
+                  "val": "8"
+                },
+                {
+                  "ty": "posix.envVar",
+                  "key": "TRUNK_SERVE_PORT",
+                  "val": "3000"
                 },
                 {
                   "ty": "ghjk.ports.InstallSetRef",
@@ -646,39 +763,6 @@
                   "ty": "posix.envVar",
                   "key": "KANIDM_ACCEPT_INVALID_CERTS",
                   "val": "true"
-                },
-                {
-                  "ty": "ghjk.ports.InstallSetRef",
-                  "setId": "ghjkEnvProvInstSet___dev"
-                }
-              ]
-            },
-            "bciqi6zee7emoe6fitslbh4kii7xizpuv3l3i5soxyc3rtvaapzwc2tq": {
-              "provides": [
-                {
-                  "ty": "posix.envVar",
-                  "key": "CARGO_BUILD_JOBS",
-                  "val": "8"
-                },
-                {
-                  "ty": "posix.envVar",
-                  "key": "KANIDM_URL",
-                  "val": "https://localhost:8443"
-                },
-                {
-                  "ty": "posix.envVar",
-                  "key": "KANIDM_SKIP_HOSTNAME_VERIFICATION",
-                  "val": "true"
-                },
-                {
-                  "ty": "posix.envVar",
-                  "key": "KANIDM_ACCEPT_INVALID_CERTS",
-                  "val": "true"
-                },
-                {
-                  "ty": "posix.envVar",
-                  "key": "TRUNK_SERVE_PORT",
-                  "val": "3000"
                 },
                 {
                   "ty": "ghjk.ports.InstallSetRef",
@@ -807,6 +891,44 @@
           "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.2.1/ports/cargobi.ts"
         },
         "crateName": "kanidm_tools",
+        "locked": true
+      },
+      "bciqjccfmi5q4zxifit6w6zkk3cxornxs3j3kuuo3yxob4jkpiq537ia": {
+        "port": {
+          "ty": "denoWorker@v1",
+          "name": "cargobi_cratesio",
+          "platforms": [
+            "x86_64-linux",
+            "aarch64-linux",
+            "x86_64-darwin",
+            "aarch64-darwin",
+            "x86_64-windows",
+            "aarch64-windows",
+            "x86_64-freebsd",
+            "aarch64-freebsd",
+            "x86_64-netbsd",
+            "aarch64-netbsd",
+            "x86_64-aix",
+            "aarch64-aix",
+            "x86_64-solaris",
+            "aarch64-solaris",
+            "x86_64-illumos",
+            "aarch64-illumos",
+            "x86_64-android",
+            "aarch64-android"
+          ],
+          "version": "0.1.0",
+          "buildDeps": [
+            {
+              "name": "cargo_binstall_ghrel"
+            },
+            {
+              "name": "rust_rustup"
+            }
+          ],
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.2.1/ports/cargobi.ts"
+        },
+        "crateName": "cargo-nextest",
         "locked": true
       },
       "bciqoy2654xa53g5alwd6ki5rlld2o6zd5kmdc25buyemmuwvxfh4wiy": {

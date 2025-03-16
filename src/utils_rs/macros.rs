@@ -424,9 +424,10 @@ macro_rules! integration_table_tests {
         $(
             #[allow(unused_variables)]
             #[tokio::test]
-            async fn $name() {
+            async fn $name() -> $crate::prelude::eyre::Result<()> {
                 use $crate::prelude::*;
-                let (mut test_cx, state) = $cx_fn($crate::function_full!()).await;
+                $crate::testing::setup_tracing_once();
+                let (mut test_cx, state) = $cx_fn($crate::function_full!()).await?;
                 {
                     let mut request = axum::http::Request::builder()
                                         .method($method)
@@ -482,7 +483,7 @@ macro_rules! integration_table_tests {
 
                     let print_response: Option<bool> = $crate::optional_expr!($($print_res)?);
                     if let Some(true) = print_response {
-                        tracing::info!(head = ?head, "reponse_json: {:#?}", response_json);
+                        info!(head = ?head, "reponse_json: {:#?}", response_json);
                     }
 
                     let status_code = $status;
@@ -514,6 +515,7 @@ macro_rules! integration_table_tests {
                     }
                 }
                 test_cx.close().await;
+                Ok(())
             }
         )*
     }
@@ -708,7 +710,7 @@ mod tests {
                             status: $status,
                             router: sum_router(),
                             cx_fn: (|name: &'static str| async move {
-                                (crate::testing::TestContext::new(name.to_string(), [], []), (),)
+                                eyre::Ok((crate::testing::TestContext::new(name.to_string(), [], []), (),))
                             }),
                             body: $json_body,
                             $(check_json: $check_json,)?

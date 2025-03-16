@@ -44,6 +44,7 @@ ghjk.env("main")
     installs.rust,
     ports.pipi({ packageName: "pre-commit" })[0],
     ports.cargobi({ crateName: "kanidm_tools", locked: true }),
+    ports.cargobi({ crateName: "cargo-nextest", locked: true }),
   );
 
 ghjk.env("dev")
@@ -75,8 +76,17 @@ ghjk.env("dev")
 ghjk.task(
   "greet", 
   ($) => $`bash -c 'env'`,
-  { inherit: "dev" },
 )
+
+ghjk.task(
+  "flyway",
+  ($) =>
+    $`${DOCKER_CMD} compose --profile cli
+          run -e DB_NAME=$DB_NAME -e MIG_DIR=$MIG_DIR --rm flyway ${$.argv}`,
+  {
+    workingDir: "./tools",
+  },
+);
 
 ghjk.task(
   "psql",
@@ -129,7 +139,6 @@ ghjk.task(
     }
     // await $`kanidm login -D idm_admin`
   },
-  { inherit: "dev" }
 )
 
 ghjk.task(
@@ -137,16 +146,27 @@ ghjk.task(
   async ($) => {
     await $`kanidm login -D idm_admin`
   },
-  { inherit: "dev", dependsOn: ["kanidm-recover"] }
+  { dependsOn: ["kanidm-recover"] }
+)
+
+ghjk.task(
+  "seed-kanidm", 
+  async ($) => {
+    await $`cargo x seed-kanidm`
+  },
+  { dependsOn: ["kanidm-login"] }
 )
 
 
 ghjk.task(
   "dev-gran", 
   ($) => $`trunk serve`,
-  { inherit: "dev", workingDir: "./src/granary_web", vars: {
-    TRUNK_SERVE_PORT: 3000
-  } },
+  { 
+    workingDir: "./src/granary_web", 
+    vars: {
+      TRUNK_SERVE_PORT: 3000
+    } 
+  },
 )
 
 ghjk.task(
@@ -181,4 +201,28 @@ ghjk.task(
       .join(' ')
     } logs ${$.argv}`,
   { workingDir: "./tools" }
+)
+
+ghjk.task(
+  "db-mig",
+  { dependsOn: ["db-mig-btress"] }
+)
+
+ghjk.task(
+  "db-mig-btress",
+  ($) => $`ghjk x flyway migrate`.env({
+    DB_NAME: "btress",
+    MIG_DIR: $.workingDir.join("./src/btress_api/migrations").toString()
+  })
+)
+
+ghjk.task(
+  "test",
+  ($) => $`cargo nextest run -p btress_api`,
+  { 
+    vars: {
+      // required so that `.env.test` is loaded
+      DOTENV_ENV: "test"
+    }
+  }
 )

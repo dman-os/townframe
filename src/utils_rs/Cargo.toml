@@ -19,9 +19,10 @@ serde_json.workspace = true
 # ds
 ahash = "0.8"
 dashmap = "6.1"
-uuid = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
 indexmap = "2.7"
 regex = "1"
+time.workspace = true
 
 # errors
 thiserror.workspace = true
@@ -35,7 +36,7 @@ axum = { version = "0.8.1" }
 axum-extra = { version = "0.10.0", features = ["typed-header"] }
 
 utoipa = { version = "5.3.1", features = ["debug", "uuid", "time", "smallvec", "axum_extras", "preserve_order"] }
-utoipa-swagger-ui = "9"
+# utoipa-swagger-ui = "9"
 
 # http
 tower = "0.5"
@@ -51,3 +52,6 @@ tracing-unwrap.workspace = true
 tracing-appender.workspace = true
 tracing-error.workspace = true
 color-eyre.workspace = true
+
+# db
+sqlx.workspace = true

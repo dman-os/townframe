@@ -1,4 +1,5 @@
 pub mod api;
+pub mod codecs;
 pub mod macros;
 pub mod testing;
 pub mod validation_errs;
@@ -8,27 +9,34 @@ pub mod prelude {
     pub use crate::interlude::*;
     pub use crate::validation_errs::ValidationErrors;
 
-    pub use axum::{self, response::IntoResponse, Json};
     pub use axum_extra;
+    pub use dotenv_flow;
+    pub use educe;
     pub use garde::Validate;
     pub use regex;
     pub use tokio;
-    pub use utoipa::{self, openapi};
+    pub use tower;
 }
 
 mod interlude {
     pub use crate::{default, CHeapStr, DHashMap, JsonExt};
 
     pub use std::{
+        path::{Path, PathBuf},
         rc::Rc,
         sync::{Arc, LazyLock},
     };
 
+    pub use crate::internal_err;
     pub use async_trait::async_trait;
+    pub use axum::{self, response::IntoResponse, Json};
     pub use color_eyre::eyre::{self as eyre, format_err as ferr, Result as Res, WrapErr};
     pub use serde::{Deserialize, Serialize};
+    pub use time::{self, OffsetDateTime};
     pub use tracing::{debug, error, info, trace, warn};
     pub use tracing_unwrap::*;
+    pub use utoipa::{self, openapi};
+    pub use uuid::{self, Uuid};
 }
 
 use crate::interlude::*;
@@ -322,8 +330,29 @@ pub async fn find_entry_recursive(from: &Path, name: &str) -> Res<Option<PathBuf
             }
         }
     }
-} */
+}
+*/
 
+pub fn find_entry_recursive_sync(from: &Path, name: &str) -> Res<Option<PathBuf>> {
+    let mut cur = from;
+    loop {
+        let location = cur.join(name);
+        match std::fs::exists(&location) {
+            Ok(true) => {
+                return Ok(Some(location));
+            }
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                return Err(err).wrap_err("error on file stat");
+            }
+            _ => {
+                let Some(next_cur) = cur.parent() else {
+                    return Ok(None);
+                };
+                cur = next_cur;
+            }
+        }
+    }
+}
 pub trait JsonExt {
     fn remove_keys_from_obj(self, keys: &[&str]) -> Self;
     fn destructure_into_self(self, from: Self) -> Self;
@@ -369,4 +398,63 @@ pub fn type_name_raw<T>() -> &'static str {
 fn test_type_name_macro() {
     struct Foo {}
     assert_eq!("Foo", type_name_raw::<Foo>());
+}
+
+pub fn get_env_var<K>(key: K) -> eyre::Result<String>
+where
+    K: AsRef<std::ffi::OsStr>,
+{
+    match std::env::var(key.as_ref()) {
+        Ok(val) => Ok(val),
+        Err(err) => Err(eyre::eyre!(
+            "error geting env var {:?}: {err}",
+            key.as_ref()
+        )),
+    }
+}
+
+pub fn dotenv_hierarchical() -> Res<Vec<PathBuf>> {
+    let preferred_environment = std::env::var("DOTENV_ENV").ok();
+
+    let candidate_filenames = match preferred_environment {
+        // the file name that comes first overrides those that come later
+        None => vec![".env.local".to_string(), ".env".to_string()],
+        Some(ref env_name) => vec![
+            format!(".env.{env_name}.local"),
+            ".env.local".to_string(),
+            format!(".env.{env_name}"),
+            ".env".to_string(),
+        ],
+    };
+    let mut path_bufs = vec![];
+    let cwd = std::env::current_dir()?;
+    let mut found_vars: std::collections::HashMap<String, String> = default();
+    for env_filename in candidate_filenames {
+        let mut find_root = cwd.clone();
+        loop {
+            let Some(file_path) = find_entry_recursive_sync(&find_root, &env_filename)? else {
+                break;
+            };
+            for var in dotenv_flow::from_path_iter(&file_path)? {
+                let (key, val) = var?;
+                // we prefer vars found in files deeper in the tree
+                found_vars.entry(key).or_insert(val);
+            }
+            let parent = file_path
+                .parent()
+                .unwrap()
+                .parent()
+                .map(|path| path.to_owned());
+            path_bufs.push(file_path);
+            let Some(parent) = parent else {
+                break;
+            };
+            find_root = parent.to_owned();
+        }
+    }
+    for (key, val) in found_vars {
+        std::env::set_var(key, val);
+    }
+
+    Ok(path_bufs)
 }

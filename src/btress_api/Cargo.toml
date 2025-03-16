@@ -24,3 +24,6 @@ displaydoc.workspace = true
 
 kanidm_client.workspace = true
 kanidm_proto.workspace = true
+
+sqlx.workspace = true
+argon2 = "0.5.3"

@@ -5,12 +5,12 @@ services:
   postgres:
     profiles: [db, auth]
     image: docker.io/library/postgres:17
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
-      start_period: 20s
-      interval: 30s
-      retries: 5
-      timeout: 5s
+    # healthcheck:
+    #   test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+    #   start_period: 20s
+    #   interval: 30s
+    #   retries: 5
+    #   timeout: 5s
     networks: [net-one]
     env_file: [.env]
     environment:
@@ -21,7 +21,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./init.db.sql:/docker-entrypoint-initdb.d/init.db.sql
+      - ./init.db.sql:/docker-entrypoint-initdb.d/init.db.sql:Z
 
 
   redis:
@@ -92,14 +92,16 @@ services:
     # network_mode: host
 
   flyway:
-    image: docker.io/flyway/flyway:9.21-alpine
+    image: docker.io/flyway/flyway:11.4.0-alpine
     profiles: [cli]
     networks: [net-one]
     env_file: [.env]
+    environment:
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/${DB_NAME}?user=${PG_USER}&password=${PG_PASS}
     # network_mode: host
     volumes:
-      - ..:/flyway/conf:ro
-      - ./migrations/:/flyway/sql:ro
+      - ..:/flyway/conf:ro,Z
+      - ${MIG_DIR:-./migrations/}:/migrations:ro,Z
 
 volumes:
   pgdata:

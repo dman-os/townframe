@@ -24,7 +24,7 @@ pub struct RedisPool(
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum StdDb {
-    Pg {},
+    Pg { db_pool: sqlx::postgres::PgPool },
 }
 
 #[async_trait::async_trait]
@@ -669,6 +669,9 @@ where
             .parameters(Some(params.into_iter()))
             .responses(Self::responses())
             .build()
+    }
+    fn path_item() -> openapi::PathItem {
+        openapi::PathItem::new(Self::METHOD, Self::operation())
     }
 
     /// Registers the [`Error`] type schema under `EndpointIdError` name using the

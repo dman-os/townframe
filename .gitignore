@@ -1,4 +1,4 @@
 /target
-.env
+*.env*
 .aider*
 /tools/kandidm_certs

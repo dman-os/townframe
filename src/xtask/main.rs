@@ -31,32 +31,11 @@ async fn main_main() -> Res<()> {
     let args = Args::parse();
     match args.command {
         Commands::Play {} => {
-            #[derive(Debug, serde::Serialize, serde::Deserialize)]
-            pub struct PrimitivesPartial {
-                pub my_prim: Option<String>,
-            }
-            #[derive(Debug, serde::Serialize, serde::Deserialize)]
-            #[serde(deny_unknown_fields)]
-            pub struct Branch2Partial {
-                pub branch2: Option<String>,
-            }
-            #[derive(Debug, serde::Serialize, serde::Deserialize)]
-            #[serde(untagged)]
-            pub enum CompositesEitherEither {
-                PrimitivesPartial(PrimitivesPartial),
-                Branch2Partial(Branch2Partial),
-            }
-            let value: CompositesEitherEither = serde_json::from_str(
-                r#"
-{
-    "branch2": "bytes"
-}
-            "#,
-            )
-            .unwrap();
+            let value = "hi";
             println!("{value:?}");
         }
         Commands::SeedKanidm {} => {
+            let mut envs_to_add = std::collections::HashMap::new();
             let client = kanidm_client::KanidmClientBuilder::new()
                 .address("https://localhost:8443".into())
                 .danger_accept_invalid_certs(true)
@@ -74,11 +53,17 @@ async fn main_main() -> Res<()> {
             }
             let tframe_admin = "tframe_admin";
             let tframe_group = "tframe_users";
-
-            client
-                .idm_service_account_create(tframe_admin, tframe_admin, "idm_admin")
-                .await
-                .map_err(|err| ferr!("{err:?}"))?;
+            {
+                client
+                    .idm_service_account_create(tframe_admin, tframe_admin, "idm_admin")
+                    .await
+                    .map_err(|err| ferr!("{err:?}"))?;
+                let admin_pass = client
+                    .idm_service_account_generate_password(tframe_admin)
+                    .await
+                    .map_err(|err| ferr!("{err:?}"))?;
+                envs_to_add.insert("KANIDM_TFRAME_ADMIN_PASS".to_string(), admin_pass);
+            }
             client
                 .idm_group_create(tframe_group, Some(tframe_admin))
                 .await
@@ -114,7 +99,25 @@ async fn main_main() -> Res<()> {
                     .await
                     .map_err(|err| ferr!("{err:?}"))?;
             }
-            //
+            let env_file = ".env";
+            let env_raw = tokio::fs::read_to_string(env_file).await?;
+            let mut env_raw = env_raw
+                .split('\n')
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            _ = env_raw.pop();
+            'outer: for (key, val) in envs_to_add.iter() {
+                let new = format!("{key}={val}");
+                for line in &mut env_raw {
+                    if line.starts_with(key) {
+                        *line = new;
+                        continue 'outer;
+                    }
+                }
+                env_raw.push(new);
+            }
+            let env_raw = env_raw.join("\n");
+            tokio::fs::write(env_file, env_raw).await?;
         }
     }
 
