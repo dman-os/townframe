@@ -92,8 +92,19 @@ ghjk.task(
   "psql",
   ($) =>
     $`${DOCKER_CMD} compose --profile db
-          exec postgres psql -U postgres -d postgres 
-          -v SEARCH_PATH=zitadel,spicedb,granary ${$.argv}`,
+          exec postgres psql -d postgres 
+          -v SEARCH_PATH=zitadel,spicedb,granary,btress ${$.argv}`,
+  {
+    workingDir: "./tools",
+  },
+);
+
+ghjk.task(
+  "psql-tty",
+  ($) =>
+    // FIXME: compose exec doesn't suupport -i
+    $`${DOCKER_CMD} exec -i townframe_postgres_1 psql -U postgres
+          -v SEARCH_PATH=zitadel,spicedb,granary,btress ${$.argv}`,
   {
     workingDir: "./tools",
   },
@@ -150,7 +161,7 @@ ghjk.task(
 )
 
 ghjk.task(
-  "seed-kanidm", 
+  "kanidm-seed", 
   async ($) => {
     await $`cargo x seed-kanidm`
   },
@@ -214,6 +225,23 @@ ghjk.task(
     DB_NAME: "btress",
     MIG_DIR: $.workingDir.join("./src/btress_api/migrations").toString()
   })
+)
+
+ghjk.task(
+  "db-seed",
+  { dependsOn: ["db-seed-btress"] }
+)
+
+ghjk.task(
+  "db-seed-btress",
+  ($) => $`ghjk x psql-tty -d btress < ./src/btress_api/fixtures/000_test_data.sql`,
+  {
+    dependsOn: ["db-mig-btress"],
+    vars: {
+      DB_NAME: "btress",
+      MIG_DIR: "./src/btress_api/migrations"
+    }
+  }
 )
 
 ghjk.task(

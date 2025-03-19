@@ -13,15 +13,15 @@ CREATE EXTENSION IF NOT EXISTS
   WITH SCHEMA 
     extensions;
 
--- CREATE EXTENSION IF NOT EXISTS 
---     pgtap 
---   WITH SCHEMA 
---     extensions;
+CREATE EXTENSION IF NOT EXISTS 
+    pgtap 
+  WITH SCHEMA 
+    extensions;
 
--- CREATE EXTENSION IF NOT EXISTS 
---     pg_jsonschema 
---   WITH SCHEMA 
---     extensions;
+CREATE EXTENSION IF NOT EXISTS 
+    pg_jsonschema 
+  WITH SCHEMA 
+    extensions;
 
 ---
 

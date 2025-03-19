@@ -4,7 +4,15 @@ services:
   # db services
   postgres:
     profiles: [db, auth]
-    image: docker.io/library/postgres:17
+    build:
+      context: .
+      dockerfile: ./postgres.Containerfile
+    # image: docker.io/library/postgres:17
+    command:
+      - -c
+      - listen_addresses=*
+      - -c
+      - wal_level=logical
     # healthcheck:
     #   test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
     #   start_period: 20s
@@ -14,8 +22,8 @@ services:
     networks: [net-one]
     env_file: [.env]
     environment:
-      POSTGRES_PASSWORD: ${PG_PASS?"PG_PASS not set."}
-      POSTGRES_USER: ${PG_USER?"PG_USER not set."}
+      POSTGRES_PASSWORD: ${PGPASSWORD?"PGPASSWORD not set."}
+      POSTGRES_USER: ${PGUSER?"PGUSER not set."}
       PG_DATA: /var/lib/postgresql/data
     ports:
       - "5432:5432"
@@ -97,11 +105,35 @@ services:
     networks: [net-one]
     env_file: [.env]
     environment:
-      FLYWAY_URL: jdbc:postgresql://postgres:5432/${DB_NAME}?user=${PG_USER}&password=${PG_PASS}
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/${DB_NAME}?user=${PGUSER}&password=${PGPASSWORD}
     # network_mode: host
     volumes:
       - ..:/flyway/conf:ro,Z
       - ${MIG_DIR:-./migrations/}:/migrations:ro,Z
+
+  postgrest-btress:
+    image: docker.io/postgrest/postgrest:v12.2.8
+    profiles: [db]
+    networks: [net-one]
+    env_file: [.env]
+    environment:
+      PGDATABASE: btress
+    ports:
+      - 54320:3000
+    depends_on:
+      - postgres
+
+  electric-btress:
+    image: docker.io/electricsql/electric:1.0.0-beta.19
+    profiles: [disabled]
+    networks: [net-one]
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql://${PGUSER}:${PGPASSWORD}@postgres:5432/btress?sslmode=disable
+    ports:
+      - 54330:3000
+    depends_on:
+      - postgres
 
 volumes:
   pgdata:

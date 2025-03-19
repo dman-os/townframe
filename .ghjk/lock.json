@@ -524,6 +524,48 @@
           "crateName": "cargo-nextest",
           "locked": true,
           "specifiedVersion": false
+        },
+        "bciqkw2lfh3b6rezt5zj2ucmxsb4zfk63wzrysv2v54ksazu5oej2oti": {
+          "version": "0.16.2",
+          "buildDepConfigs": {
+            "cargo_binstall_ghrel": {
+              "version": "v1.10.22",
+              "buildDepConfigs": {},
+              "portRef": "cargo_binstall_ghrel@0.1.0",
+              "specifiedVersion": false
+            },
+            "rust_rustup": {
+              "version": "1.84.1",
+              "buildDepConfigs": {
+                "rustup_rustlang": {
+                  "version": "1.27.1",
+                  "buildDepConfigs": {
+                    "git_aa": {
+                      "version": "2.48.1",
+                      "buildDepConfigs": {},
+                      "portRef": "git_aa@0.1.0",
+                      "specifiedVersion": false
+                    }
+                  },
+                  "portRef": "rustup_rustlang@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rust_rustup@0.1.0",
+              "profile": "default",
+              "components": [
+                "rust-src"
+              ],
+              "targets": [
+                "wasm32-unknown-unknown"
+              ],
+              "specifiedVersion": true
+            }
+          },
+          "portRef": "cargobi_cratesio@0.1.0",
+          "crateName": "pg-trunk",
+          "locked": true,
+          "specifiedVersion": false
         }
       }
     },
@@ -580,6 +622,22 @@
               "key": "db-mig-btress",
               "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
             },
+            "db-seed-btress": {
+              "ty": "denoFile@v1",
+              "key": "db-seed-btress",
+              "dependsOn": [
+                "db-mig-btress"
+              ],
+              "envKey": "bciqd4tcwg7zq643d2ne76mzxpsn5k5fagxi2dyjjsu5j4lfgrquxrvy"
+            },
+            "db-seed": {
+              "ty": "denoFile@v1",
+              "key": "db-seed",
+              "dependsOn": [
+                "db-seed-btress"
+              ],
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
             "db-mig": {
               "ty": "denoFile@v1",
               "key": "db-mig",
@@ -625,9 +683,9 @@
               ],
               "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
             },
-            "seed-kanidm": {
+            "kanidm-seed": {
               "ty": "denoFile@v1",
-              "key": "seed-kanidm",
+              "key": "kanidm-seed",
               "dependsOn": [
                 "kanidm-login"
               ],
@@ -636,6 +694,12 @@
             "kanidmd": {
               "ty": "denoFile@v1",
               "key": "kanidmd",
+              "workingDir": "./tools",
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
+            "psql-tty": {
+              "ty": "denoFile@v1",
+              "key": "psql-tty",
               "workingDir": "./tools",
               "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
             },
@@ -660,6 +724,8 @@
           "tasksNamed": [
             "test",
             "db-mig-btress",
+            "db-seed-btress",
+            "db-seed",
             "db-mig",
             "compose-logs",
             "compose-down",
@@ -667,8 +733,9 @@
             "dev-gran",
             "kanidm-recover",
             "kanidm-login",
-            "seed-kanidm",
+            "kanidm-seed",
             "kanidmd",
+            "psql-tty",
             "psql",
             "flyway",
             "greet"
@@ -704,6 +771,29 @@
                   "ty": "posix.envVar",
                   "key": "DOTENV_ENV",
                   "val": "test"
+                },
+                {
+                  "ty": "ghjk.ports.InstallSetRef",
+                  "setId": "ghjkEnvProvInstSet___main"
+                }
+              ]
+            },
+            "bciqd4tcwg7zq643d2ne76mzxpsn5k5fagxi2dyjjsu5j4lfgrquxrvy": {
+              "provides": [
+                {
+                  "ty": "posix.envVar",
+                  "key": "CARGO_BUILD_JOBS",
+                  "val": "8"
+                },
+                {
+                  "ty": "posix.envVar",
+                  "key": "DB_NAME",
+                  "val": "btress"
+                },
+                {
+                  "ty": "posix.envVar",
+                  "key": "MIG_DIR",
+                  "val": "./src/btress_api/migrations"
                 },
                 {
                   "ty": "ghjk.ports.InstallSetRef",
