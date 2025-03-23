@@ -7,6 +7,7 @@ members = [
   "./src/utils_rs",
   "./src/xtask",
   "./src/macros",
+  "./src/daybook_core",
 ]
 
 [workspace.package]
