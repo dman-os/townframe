@@ -19,7 +19,8 @@ const installs = {
   py: ports.cpy_bs({
     version: "3.12.9",
     releaseTag: "20250212"
-  })
+  }),
+  node: ports.node({ version: "22.14.0" }),
 }
 
 // This export is necessary for typescript ghjkfiles
@@ -28,7 +29,7 @@ const ghjk = file({
   // allows usage of ports that depend on node/python
   enableRuntimes: true,
   allowedBuildDeps: [
-    // ports.node({ version: "20.8.0" }),
+    installs.node,
     installs.rust, 
     installs.py
   ],
@@ -42,6 +43,8 @@ ghjk.env("main")
   })
   .install(
     installs.rust,
+    installs.node,
+    ports.pnpm(),
     ports.pipi({ packageName: "pre-commit" })[0],
     ports.cargobi({ crateName: "kanidm_tools", locked: true }),
     ports.cargobi({ crateName: "cargo-nextest", locked: true }),
@@ -54,6 +57,7 @@ ghjk.env("dev")
     ports.cargobi({ crateName: "trunk", locked: true }),
     ports.pipi({ packageName: "uv" })[0],
     ports.pipi({ packageName: "aider-chat" })[0],
+    ports.npmi({ packageName: "eas-cli" })[0],
   )
   .vars({
     KANIDM_URL: "https://localhost:8443",

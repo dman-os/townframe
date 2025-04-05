@@ -28,5 +28,5 @@ dependencyResolutionManagement {
     }
 }
 
-include(":src:daybook_app")
-include(":src:daybook_shared")
+include(":src:daybook_compose:daybook_app")
+include(":src:daybook_compose:daybook_shared")

@@ -566,6 +566,46 @@
           "crateName": "pg-trunk",
           "locked": true,
           "specifiedVersion": false
+        },
+        "bciqo7aqsyal6oy4434fu6q7ptrjj2hkfnzz5y5qhb5srvjvtgkq4ata": {
+          "version": "16.2.1",
+          "buildDepConfigs": {
+            "node_org": {
+              "version": "v22.14.0",
+              "buildDepConfigs": {
+                "tar_aa": {
+                  "version": "1.35",
+                  "buildDepConfigs": {},
+                  "portRef": "tar_aa@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "node_org@0.1.0",
+              "specifiedVersion": true
+            }
+          },
+          "portRef": "npmi_npm@0.1.0",
+          "packageName": "eas-cli",
+          "specifiedVersion": false
+        },
+        "bciqbr62ywu5g34as5lvqijir76fawoe6kcv3ip2dfszjlot3oynhvdq": {
+          "version": "v22.14.0",
+          "buildDepConfigs": {
+            "tar_aa": {
+              "version": "1.35",
+              "buildDepConfigs": {},
+              "portRef": "tar_aa@0.1.0",
+              "specifiedVersion": false
+            }
+          },
+          "portRef": "node_org@0.1.0",
+          "specifiedVersion": true
+        },
+        "bciqlbtrpnqpzmi5zkmekn6i3v4j52kstg6nmluservmyhyh2f3niqsi": {
+          "version": "v10.7.1",
+          "buildDepConfigs": {},
+          "portRef": "pnpm_ghrel@0.1.0",
+          "specifiedVersion": false
         }
       }
     },
@@ -585,11 +625,13 @@
             "ghjkEnvProvInstSet___main": {
               "installs": [
                 "bciqmuywvb54qymjruq4la47llycdankptd3dt4lebn5cemf434ykcbq",
+                "bciql7vb22t63dvubcfj55c63byennscrkr35ugtwybwwirqd4mdldgq",
+                "bciqiadryk5bvkvswzpwqlv5eo2l6eh7ambowipq3ztckmddhacq6n2a",
                 "bciqiku4dzn2tnyoieabcbzgafouamrjjaf2il3phpk3mbms5lqg3hlq",
                 "bciql4vxfkas7x2ukzsxohgjhscnkuq6pwintbmr7hfnmvgwoct7qdpi",
                 "bciqjccfmi5q4zxifit6w6zkk3cxornxs3j3kuuo3yxob4jkpiq537ia"
               ],
-              "allowedBuildDeps": "bciqbg3xmjvndlugmohzygilanwljbo65ezgvbhidex4zifh6swzohvi"
+              "allowedBuildDeps": "bciqii35ngg4rny222npl46gnocntsyxulhui4hqg7pbebk4zgsmyacq"
             },
             "ghjkEnvProvInstSet___dev": {
               "installs": [
@@ -598,12 +640,15 @@
                 "bciqift5gltedknl7g4o7uakygund76ockv5i3dwysfxdbcz4mc4og6i",
                 "bciqi77fhxana52iunx3zmabowqxqg3apuht4rihmwd32d4eh6xc5hgi",
                 "bciqkw4spuz4iuydn5xz6ptimwcqmyhxeqrl67iqiuhrlkpnmi2x3hky",
+                "bciqhhyi37g6vv4o5ytkifj5nsd6qyyr266fv3vwnxfj6fisn5unq62a",
                 "bciqmuywvb54qymjruq4la47llycdankptd3dt4lebn5cemf434ykcbq",
+                "bciql7vb22t63dvubcfj55c63byennscrkr35ugtwybwwirqd4mdldgq",
+                "bciqiadryk5bvkvswzpwqlv5eo2l6eh7ambowipq3ztckmddhacq6n2a",
                 "bciqiku4dzn2tnyoieabcbzgafouamrjjaf2il3phpk3mbms5lqg3hlq",
                 "bciql4vxfkas7x2ukzsxohgjhscnkuq6pwintbmr7hfnmvgwoct7qdpi",
                 "bciqjccfmi5q4zxifit6w6zkk3cxornxs3j3kuuo3yxob4jkpiq537ia"
               ],
-              "allowedBuildDeps": "bciqbg3xmjvndlugmohzygilanwljbo65ezgvbhidex4zifh6swzohvi"
+              "allowedBuildDeps": "bciqii35ngg4rny222npl46gnocntsyxulhui4hqg7pbebk4zgsmyacq"
             }
           }
         }
@@ -911,6 +956,44 @@
           "wasm32-unknown-unknown"
         ]
       },
+      "bciql7vb22t63dvubcfj55c63byennscrkr35ugtwybwwirqd4mdldgq": {
+        "version": "22.14.0",
+        "port": {
+          "ty": "denoWorker@v1",
+          "name": "node_org",
+          "platforms": [
+            "aarch64-linux",
+            "x86_64-linux",
+            "aarch64-darwin",
+            "x86_64-darwin",
+            "aarch64-windows",
+            "x86_64-windows"
+          ],
+          "version": "0.1.0",
+          "buildDeps": [
+            {
+              "name": "tar_aa"
+            }
+          ],
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.2.1/ports/node.ts"
+        }
+      },
+      "bciqiadryk5bvkvswzpwqlv5eo2l6eh7ambowipq3ztckmddhacq6n2a": {
+        "port": {
+          "ty": "denoWorker@v1",
+          "name": "pnpm_ghrel",
+          "platforms": [
+            "aarch64-linux",
+            "x86_64-linux",
+            "aarch64-darwin",
+            "x86_64-darwin",
+            "aarch64-windows",
+            "x86_64-windows"
+          ],
+          "version": "0.1.0",
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.2.1/ports/pnpm.ts"
+        }
+      },
       "bciqiku4dzn2tnyoieabcbzgafouamrjjaf2il3phpk3mbms5lqg3hlq": {
         "port": {
           "ty": "denoWorker@v1",
@@ -1020,6 +1103,31 @@
         },
         "crateName": "cargo-nextest",
         "locked": true
+      },
+      "bciqbxp2u22uwmg4ordsre3uzhyhiyw7jrgredf7ye7f4wt5rp4psijy": {
+        "manifest": {
+          "ty": "denoWorker@v1",
+          "name": "node_org",
+          "platforms": [
+            "aarch64-linux",
+            "x86_64-linux",
+            "aarch64-darwin",
+            "x86_64-darwin",
+            "aarch64-windows",
+            "x86_64-windows"
+          ],
+          "version": "0.1.0",
+          "buildDeps": [
+            {
+              "name": "tar_aa"
+            }
+          ],
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.2.1/ports/node.ts"
+        },
+        "defaultInst": {
+          "version": "22.14.0",
+          "portRef": "node_org@0.1.0"
+        }
       },
       "bciqoy2654xa53g5alwd6ki5rlld2o6zd5kmdc25buyemmuwvxfh4wiy": {
         "manifest": {
@@ -1320,31 +1428,8 @@
           "portRef": "asdf_plugin_git@0.1.0"
         }
       },
-      "bciqa2c6fygnjzouze6b37hvpa5hmr7kesvb5vso4yra2rsfjegykdxq": {
-        "manifest": {
-          "ty": "denoWorker@v1",
-          "name": "node_org",
-          "platforms": [
-            "aarch64-linux",
-            "x86_64-linux",
-            "aarch64-darwin",
-            "x86_64-darwin",
-            "aarch64-windows",
-            "x86_64-windows"
-          ],
-          "version": "0.1.0",
-          "buildDeps": [
-            {
-              "name": "tar_aa"
-            }
-          ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.2.1/ports/node.ts"
-        },
-        "defaultInst": {
-          "portRef": "node_org@0.1.0"
-        }
-      },
-      "bciqbg3xmjvndlugmohzygilanwljbo65ezgvbhidex4zifh6swzohvi": {
+      "bciqii35ngg4rny222npl46gnocntsyxulhui4hqg7pbebk4zgsmyacq": {
+        "node_org": "bciqbxp2u22uwmg4ordsre3uzhyhiyw7jrgredf7ye7f4wt5rp4psijy",
         "rust_rustup": "bciqoy2654xa53g5alwd6ki5rlld2o6zd5kmdc25buyemmuwvxfh4wiy",
         "cpy_bs_ghrel": "bciqafsqylpalk4v3fd6zqahxzmr3lrb2fpubhpzvdoeq6za32scoafy",
         "tar_aa": "bciqb6ua63xodzwxngnbjq35hfikiwzb3dclbqkc7e6xgjdt5jin4pia",
@@ -1355,8 +1440,7 @@
         "rustup_rustlang": "bciqbbs5l2j72vleufdba2nj4k4dnp3akxv4w74rhhpnz5buoixxnuqy",
         "cargo_binstall_ghrel": "bciqj25jnt3hzhwfm6z2tkpfyxt7cpb2dbwavf75doh5d5qnwwdugljy",
         "pnpm_ghrel": "bciqfr2ubzsw3lefwt7mwuzlkct2cbwvo4l44hrrigfzx64uocww5rki",
-        "asdf_plugin_git": "bciqhiohdon4chnr3oagakks2xii27bgc7eb56pglnr5gelp6p2rpw4i",
-        "node_org": "bciqa2c6fygnjzouze6b37hvpa5hmr7kesvb5vso4yra2rsfjegykdxq"
+        "asdf_plugin_git": "bciqhiohdon4chnr3oagakks2xii27bgc7eb56pglnr5gelp6p2rpw4i"
       },
       "bciqdknmgxuzqeov4tmrbulwtkrrr2pk7ifqwufgvvaq5ffhyai4wrci": {
         "port": {
@@ -1539,6 +1623,40 @@
           "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.2.1/ports/pipi.ts"
         },
         "packageName": "aider-chat"
+      },
+      "bciqhhyi37g6vv4o5ytkifj5nsd6qyyr266fv3vwnxfj6fisn5unq62a": {
+        "port": {
+          "ty": "denoWorker@v1",
+          "name": "npmi_npm",
+          "platforms": [
+            "x86_64-linux",
+            "aarch64-linux",
+            "x86_64-darwin",
+            "aarch64-darwin",
+            "x86_64-windows",
+            "aarch64-windows",
+            "x86_64-freebsd",
+            "aarch64-freebsd",
+            "x86_64-netbsd",
+            "aarch64-netbsd",
+            "x86_64-aix",
+            "aarch64-aix",
+            "x86_64-solaris",
+            "aarch64-solaris",
+            "x86_64-illumos",
+            "aarch64-illumos",
+            "x86_64-android",
+            "aarch64-android"
+          ],
+          "version": "0.1.0",
+          "buildDeps": [
+            {
+              "name": "node_org"
+            }
+          ],
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.2.1/ports/npmi.ts"
+        },
+        "packageName": "eas-cli"
       }
     }
   }
