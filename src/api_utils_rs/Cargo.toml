@@ -1,0 +1,38 @@
+[package]
+name = "api_utils_rs"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+utils_rs.workspace = true
+
+# futures
+async-trait.workspace = true
+futures.workspace = true
+tokio.workspace = true
+
+# serde
+serde.workspace = true
+serde_json.workspace = true
+
+axum = { version = "0.8.1" }
+axum-extra = { version = "0.10.0", features = ["typed-header"] }
+
+utoipa = { version = "5.3.1", features = ["debug", "uuid", "time", "smallvec", "axum_extras", "preserve_order"] }
+# utoipa-swagger-ui = "9"
+
+# http
+tower = "0.5"
+tower-http = "0.6"
+hyper = "1"
+
+# db
+sqlx.workspace = true
+
+color-eyre.workspace = true
+
+# errors
+garde.workspace = true

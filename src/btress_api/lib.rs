@@ -1,18 +1,19 @@
 #![allow(unused)]
 
 mod interlude {
-    pub use utils_rs::{api, prelude::*};
+    pub use api_utils_rs::{api, prelude::*};
 
     pub use crate::{Context, SharedContext};
+    pub use async_trait::async_trait;
 
     #[cfg(test)]
     pub use crate::utils::testing::*;
     #[cfg(test)]
-    pub use utils_rs::testing::*;
+    pub use api_utils_rs::testing::*;
 }
 
 use crate::interlude::*;
-use utils_rs::api;
+use api_utils_rs::api;
 
 pub struct Context {
     config: Config,

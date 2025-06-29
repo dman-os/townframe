@@ -5,9 +5,10 @@ members = [
   "./src/granary_web",
   "./src/leptos_oidc",
   "./src/utils_rs",
+  "./src/api_utils_rs",
   "./src/xtask",
   "./src/macros",
-  "./src/daybook_compose/daybook_core",
+  "./src/daybook_core",
 ]
 
 [workspace.package]
@@ -18,6 +19,7 @@ edition = "2021"
 # internal
 leptos_oidc = { path = "./src/leptos_oidc" }
 utils_rs = { path = "./src/utils_rs" }
+api_utils_rs = { path = "./src/api_utils_rs" }
 macros = { path = "./src/macros" }
 
 # futures

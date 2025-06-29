@@ -1,7 +1,7 @@
 pub mod testing {
     use crate::interlude::*;
 
-    use utils_rs::testing::*;
+    use api_utils_rs::testing::*;
 
     pub async fn state_fn_service(testing: &TestContext) -> Res<crate::SharedServiceContext> {
         Ok(crate::SharedServiceContext(crate::ServiceContext(

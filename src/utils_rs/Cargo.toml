@@ -26,22 +26,12 @@ time.workspace = true
 
 # errors
 thiserror.workspace = true
-garde.workspace = true
 
 # macros
 displaydoc.workspace = true
 educe.workspace = true
 
-axum = { version = "0.8.1" }
-axum-extra = { version = "0.10.0", features = ["typed-header"] }
-
-utoipa = { version = "5.3.1", features = ["debug", "uuid", "time", "smallvec", "axum_extras", "preserve_order"] }
 # utoipa-swagger-ui = "9"
-
-# http
-tower = "0.5"
-tower-http = "0.6"
-hyper = "1"
 
 dotenv-flow.workspace = true
 
@@ -53,5 +43,3 @@ tracing-appender.workspace = true
 tracing-error.workspace = true
 color-eyre.workspace = true
 
-# db
-sqlx.workspace = true

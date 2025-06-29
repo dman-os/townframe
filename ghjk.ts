@@ -1,8 +1,6 @@
-// export { sophon } from "@ghjk/ts";
-// import { file } from "@ghjk/ts";
-// import * as ports from "@ghjk/ports_wip";
-import { file, $ } from "https://raw.githubusercontent.com/metatypedev/ghjk/v0.2.1/mod.ts";
-import * as ports from "https://raw.githubusercontent.com/metatypedev/ghjk/v0.2.1/ports/mod.ts";
+export { sophon } from "@ghjk/ts";
+import { file } from "@ghjk/ts";
+import * as ports from "@ghjk/ports_wip";
 
 import * as std_url from "jsr:@std/url@0.215.0";
 

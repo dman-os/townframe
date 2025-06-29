@@ -62,7 +62,7 @@ pub fn http_error_derive(input: TokenStream) -> TokenStream {
                 .into();
         };
         let status_code = quote! {
-            ::utils_rs::api::StatusCode::from(#status_code)
+            ::api_utils_rs::api::StatusCode::from(#status_code)
         };
         let desc = quote! {
             String::from(#desc)
@@ -90,15 +90,15 @@ pub fn http_error_derive(input: TokenStream) -> TokenStream {
     }
 
     let expanded = quote! {
-        impl ::utils_rs::api::ErrorResp for #name {
+        impl ::api_utils_rs::api::ErrorResp for #name {
             fn error_responses() -> Vec<(StatusCode, String)> {
                 vec![
                     #(#descs),*
                 ]
             }
         }
-        impl From<&#name> for ::utils_rs::api::StatusCode {
-            fn from(value: &#name) -> ::utils_rs::api::StatusCode {
+        impl From<&#name> for ::api_utils_rs::api::StatusCode {
+            fn from(value: &#name) -> ::api_utils_rs::api::StatusCode {
                 match value {
                     #(#status_arms),*
                 }

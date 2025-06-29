@@ -148,7 +148,7 @@ mod test {
         })
     }
 
-    utils_rs::table_tests! {
+    api_utils_rs::table_tests! {
         validate,
         (request, err_path),
         {
@@ -245,7 +245,7 @@ mod test {
         )*) => {
             mod integ {
                 use super::*;
-                utils_rs::integration_table_tests! {
+                api_utils_rs::integration_table_tests! {
                     $(
                         $name: {
                             uri: "/users",

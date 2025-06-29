@@ -1,0 +1,12 @@
+alias a=assets
+alias cash=assets:cash
+alias b=assets:banking
+alias c=liabilities:credit
+alias l=liabilities
+alias e=expenses
+alias taxi=expenses:transport:taxi
+alias food=expenses:personal:food
+alias p=expenses:people 
+alias i=income
+
+

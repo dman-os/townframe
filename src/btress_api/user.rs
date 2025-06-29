@@ -13,9 +13,9 @@ pub static USERNAME_REGEX: LazyLock<regex::Regex> =
 #[serde(rename_all = "camelCase")]
 pub struct User {
     pub id: Uuid,
-    #[serde(with = "utils_rs::codecs::sane_iso8601")]
+    #[serde(with = "api_utils_rs::codecs::sane_iso8601")]
     pub created_at: OffsetDateTime,
-    #[serde(with = "utils_rs::codecs::sane_iso8601")]
+    #[serde(with = "api_utils_rs::codecs::sane_iso8601")]
     pub updated_at: OffsetDateTime,
     #[schema(example = "alice@example.com")]
     pub email: Option<String>,

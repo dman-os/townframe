@@ -8,8 +8,10 @@ path = "lib.rs"
 
 [dependencies]
 utils_rs.workspace = true
+api_utils_rs.workspace = true
 macros.workspace = true
 
+# futures
 async-trait.workspace = true
 futures.workspace = true
 tokio.workspace = true
