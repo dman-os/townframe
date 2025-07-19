@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
@@ -38,6 +37,11 @@
                 android:value="Quick access UI for AI features." />
         </service>
 
+        <receiver android:name=".MagicWandService$StopServiceReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="org.example.daybook.ACTION_STOP_SERVICE" />
+            </intent-filter>
+        </receiver>
 
         <activity
             android:name=".MainActivity"

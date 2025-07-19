@@ -439,30 +439,31 @@
           "sets": {
             "ghjkEnvProvInstSet___main": {
               "installs": [
-                "bciqojjgvz32wmtoubg3kgpsjbqont6bi3xfqpfyff7skdqnmrgelxzi",
-                "bciqerhykyzcjots6xfz334eti7db7qjwn4w4dbledsfon4cwgzfr2ri",
-                "bciqoztfsqxu35djzrbgrevxyqvzs5qhllknyugom36bce3vekgdv2cy",
-                "bciqduvik2xowy2onultav7jr4nozejwtuephac7s7qdbiwda5jmc2ry",
-                "bciqdeiw4enbzaadswj6435s3uaodfrskbjhabf3rfkwhvnnhvwn3msa",
-                "bciqhulx76wdg23u3z6stiuolsfku5amh3l4ddcmmtaw7uvifvbyw64y"
+                "bciqkdwgrq6tq6r6h7yhcelblda2ur4kttwobce4guf57ebnf5p576iq",
+                "bciqctjanvj2ggnt2mj75ka2a3pibxjnpydxqmdzclx624o26g35vxmy",
+                "bciqffkko3tgrgpoefq6n5y7524nlsmqlcf5wjsdsxou5lwwpve6tkfi",
+                "bciqacjh6znoqzyhuxxrypzxqmfileuobbsezdwmpihigowrgjctvvgy",
+                "bciqdpw7zumb4ossgsao4d5psbsfyec6fzv6hiboxtkupkluhbvjohky",
+                "bciqcajce7wgenfg5ope2izhp4vrssmjpi3q4ho22thuicsxopemoc3q"
               ],
-              "allowedBuildDeps": "bciqdjxkcs6anbjgf6kehjcghbsaehmjqxboogsbumd5vvepqolupzcq"
+              "allowedBuildDeps": "bciqoye6sufqa6xqsig5qkhpve3rtlqmc7fakwkybvrdzye4bmmsdvzi"
             },
             "ghjkEnvProvInstSet___dev": {
               "installs": [
-                "bciqongra6kaddjfwjuevgogkindrhamepdtomvbzjv6rmdnojvfvxpq",
-                "bciqcd7i5b6qwjdt24j7uaeffnivegcfmeso3ixqngl6qbmebevpfw7q",
-                "bciqb34ow6epwpdatbeglebm2nsvqbdzfisfcolbjbf3v6yn2q6oflta",
-                "bciqm7whjzfgahlgck5z6omj65qoxh4uwby2joct4pxzqbcr6jkqreya",
-                "bciqhcv6gh4qpdmh36pacoohgm3ulf3tlhoko3ko7wmghtclfyfpdpyq",
-                "bciqojjgvz32wmtoubg3kgpsjbqont6bi3xfqpfyff7skdqnmrgelxzi",
-                "bciqerhykyzcjots6xfz334eti7db7qjwn4w4dbledsfon4cwgzfr2ri",
-                "bciqoztfsqxu35djzrbgrevxyqvzs5qhllknyugom36bce3vekgdv2cy",
-                "bciqduvik2xowy2onultav7jr4nozejwtuephac7s7qdbiwda5jmc2ry",
-                "bciqdeiw4enbzaadswj6435s3uaodfrskbjhabf3rfkwhvnnhvwn3msa",
-                "bciqhulx76wdg23u3z6stiuolsfku5amh3l4ddcmmtaw7uvifvbyw64y"
+                "bciqb3obyi3hucqcmtqjjtqxovigus5yx5jgnqcyq372xla7guexf6si",
+                "bciqnwlmwonvlcat7bt56wroyxp3eu3pwirehifhgmw33qs4s7olrp3i",
+                "bciqnicswg7oyf24niwjanqfk2qxnrsig57sgi54lbc6zadheezoe36i",
+                "bciqpxh456cihbdftrvkc6nhmy7vr626uto222l23xfelsmrqu6tthxi",
+                "bciqggoumalzhhdsvejnggkwfcxkkn7qnqw4m2vlquemweupggxes6vq",
+                "bciqecpiecc37wde2vjbjs2bmslambstmb3mmr5ylpwe53gwpvfxf6ry",
+                "bciqkdwgrq6tq6r6h7yhcelblda2ur4kttwobce4guf57ebnf5p576iq",
+                "bciqctjanvj2ggnt2mj75ka2a3pibxjnpydxqmdzclx624o26g35vxmy",
+                "bciqffkko3tgrgpoefq6n5y7524nlsmqlcf5wjsdsxou5lwwpve6tkfi",
+                "bciqacjh6znoqzyhuxxrypzxqmfileuobbsezdwmpihigowrgjctvvgy",
+                "bciqdpw7zumb4ossgsao4d5psbsfyec6fzv6hiboxtkupkluhbvjohky",
+                "bciqcajce7wgenfg5ope2izhp4vrssmjpi3q4ho22thuicsxopemoc3q"
               ],
-              "allowedBuildDeps": "bciqdjxkcs6anbjgf6kehjcghbsaehmjqxboogsbumd5vvepqolupzcq"
+              "allowedBuildDeps": "bciqoye6sufqa6xqsig5qkhpve3rtlqmc7fakwkybvrdzye4bmmsdvzi"
             }
           }
         }
@@ -471,6 +472,11 @@
         "id": "tasks",
         "config": {
           "tasks": {
+            "lock-sed": {
+              "ty": "denoFile@v1",
+              "key": "lock-sed",
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
             "test": {
               "ty": "denoFile@v1",
               "key": "test",
@@ -581,6 +587,7 @@
             }
           },
           "tasksNamed": [
+            "lock-sed",
             "test",
             "db-mig-btress",
             "db-seed-btress",
@@ -607,6 +614,19 @@
           "envs": {
             "bciqafmctvqhitkjxmtw5sdl2rg2byf6hiavwzvcthq2yjhal65n2m3y": {
               "desc": "the default default environment.",
+              "provides": [
+                {
+                  "ty": "posix.envVar",
+                  "key": "CARGO_BUILD_JOBS",
+                  "val": "8"
+                },
+                {
+                  "ty": "ghjk.ports.InstallSetRef",
+                  "setId": "ghjkEnvProvInstSet___main"
+                }
+              ]
+            },
+            "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia": {
               "provides": [
                 {
                   "ty": "posix.envVar",
@@ -653,19 +673,6 @@
                   "ty": "posix.envVar",
                   "key": "MIG_DIR",
                   "val": "./src/btress_api/migrations"
-                },
-                {
-                  "ty": "ghjk.ports.InstallSetRef",
-                  "setId": "ghjkEnvProvInstSet___main"
-                }
-              ]
-            },
-            "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia": {
-              "provides": [
-                {
-                  "ty": "posix.envVar",
-                  "key": "CARGO_BUILD_JOBS",
-                  "val": "8"
                 },
                 {
                   "ty": "ghjk.ports.InstallSetRef",
@@ -729,7 +736,7 @@
       }
     ],
     "blackboard": {
-      "bciqojjgvz32wmtoubg3kgpsjbqont6bi3xfqpfyff7skdqnmrgelxzi": {
+      "bciqkdwgrq6tq6r6h7yhcelblda2ur4kttwobce4guf57ebnf5p576iq": {
         "version": "1.84.1",
         "port": {
           "ty": "denoWorker@v1",
@@ -760,7 +767,7 @@
               "name": "rustup_rustlang"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/rust.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/rust.ts"
         },
         "profile": "default",
         "components": [
@@ -770,7 +777,7 @@
           "wasm32-unknown-unknown"
         ]
       },
-      "bciqerhykyzcjots6xfz334eti7db7qjwn4w4dbledsfon4cwgzfr2ri": {
+      "bciqctjanvj2ggnt2mj75ka2a3pibxjnpydxqmdzclx624o26g35vxmy": {
         "version": "22.14.0",
         "port": {
           "ty": "denoWorker@v1",
@@ -789,10 +796,10 @@
               "name": "tar_aa"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/node.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/node.ts"
         }
       },
-      "bciqoztfsqxu35djzrbgrevxyqvzs5qhllknyugom36bce3vekgdv2cy": {
+      "bciqffkko3tgrgpoefq6n5y7524nlsmqlcf5wjsdsxou5lwwpve6tkfi": {
         "port": {
           "ty": "denoWorker@v1",
           "name": "pnpm_ghrel",
@@ -805,10 +812,10 @@
             "x86_64-windows"
           ],
           "version": "0.1.0",
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/pnpm.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/pnpm.ts"
         }
       },
-      "bciqduvik2xowy2onultav7jr4nozejwtuephac7s7qdbiwda5jmc2ry": {
+      "bciqacjh6znoqzyhuxxrypzxqmfileuobbsezdwmpihigowrgjctvvgy": {
         "port": {
           "ty": "denoWorker@v1",
           "name": "pipi_pypi",
@@ -838,11 +845,11 @@
               "name": "cpy_bs_ghrel"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/pipi.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/pipi.ts"
         },
         "packageName": "pre-commit"
       },
-      "bciqdeiw4enbzaadswj6435s3uaodfrskbjhabf3rfkwhvnnhvwn3msa": {
+      "bciqdpw7zumb4ossgsao4d5psbsfyec6fzv6hiboxtkupkluhbvjohky": {
         "port": {
           "ty": "denoWorker@v1",
           "name": "cargobi_cratesio",
@@ -875,12 +882,12 @@
               "name": "rust_rustup"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/cargobi.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/cargobi.ts"
         },
         "crateName": "kanidm_tools",
         "locked": true
       },
-      "bciqhulx76wdg23u3z6stiuolsfku5amh3l4ddcmmtaw7uvifvbyw64y": {
+      "bciqcajce7wgenfg5ope2izhp4vrssmjpi3q4ho22thuicsxopemoc3q": {
         "port": {
           "ty": "denoWorker@v1",
           "name": "cargobi_cratesio",
@@ -913,12 +920,12 @@
               "name": "rust_rustup"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/cargobi.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/cargobi.ts"
         },
         "crateName": "cargo-nextest",
         "locked": true
       },
-      "bciqcf6hodsjqud2dp4tlq2z4chrzb5c64abp5iuntejxmmvcqpzoxgy": {
+      "bciqdwj5pmg54ekz2dxip5djfqlmyl54yot2ioqyqj55oi2k32wxtlua": {
         "manifest": {
           "ty": "denoWorker@v1",
           "name": "node_org",
@@ -936,14 +943,14 @@
               "name": "tar_aa"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/node.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/node.ts"
         },
         "defaultInst": {
           "version": "22.14.0",
           "portRef": "node_org@0.1.0"
         }
       },
-      "bciqjmrtzmubalqovzcqthfnvhtwehzkemzlofevx2fjhzql2tnksx5i": {
+      "bciqjgyvulcawofzq7bgdymx7j5h2y3nl5tkt3pmejfbpxf23alyblhy": {
         "manifest": {
           "ty": "denoWorker@v1",
           "name": "rust_rustup",
@@ -973,7 +980,7 @@
               "name": "rustup_rustlang"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/rust.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/rust.ts"
         },
         "defaultInst": {
           "version": "1.84.1",
@@ -987,7 +994,7 @@
           ]
         }
       },
-      "bciqnlclo7zmybgnmyfluofj5jtzx46rzzi7agwbjzgi66ancolphsxi": {
+      "bciqjvg6t2rx7i7ji55prdwe6cwnv2ar3pwtlo7xhhrl3dymyzgtltvi": {
         "manifest": {
           "ty": "denoWorker@v1",
           "name": "cpy_bs_ghrel",
@@ -1008,12 +1015,12 @@
               "name": "zstd_aa"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/cpy_bs.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/cpy_bs.ts"
         },
         "defaultInst": {
-          "version": "3.13.1",
+          "version": "3.12.9",
           "portRef": "cpy_bs_ghrel@0.1.0",
-          "releaseTag": "20241206"
+          "releaseTag": "20250212"
         }
       },
       "bciqb6ua63xodzwxngnbjq35hfikiwzb3dclbqkc7e6xgjdt5jin4pia": {
@@ -1146,7 +1153,7 @@
           "portRef": "zstd_aa@0.1.0"
         }
       },
-      "bciqjapbduuuy67bp5zhb3kx56qlsae6lau2heqmriz232lqobtz6ugi": {
+      "bciqprmkyr66xuw7u5ujy3m4lafwaqpmxtvkzlyousxxsbedxaeeyxcy": {
         "manifest": {
           "ty": "denoWorker@v1",
           "name": "rustup_rustlang",
@@ -1171,13 +1178,13 @@
               "name": "git_aa"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/rustup.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/rustup.ts"
         },
         "defaultInst": {
           "portRef": "rustup_rustlang@0.1.0"
         }
       },
-      "bciqlri7sfgdfwtztwmfhs56gjzrl7s6vzttmdymqgkjoq7xdxdmhtxy": {
+      "bciqmw3zelmmcnkxjdahnwadspkqczwds2m7tsjppwg5wiwjma3v773i": {
         "manifest": {
           "ty": "denoWorker@v1",
           "name": "cargo_binstall_ghrel",
@@ -1188,13 +1195,13 @@
             "x86_64-darwin"
           ],
           "version": "0.1.0",
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/cargo-binstall.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/cargo-binstall.ts"
         },
         "defaultInst": {
           "portRef": "cargo_binstall_ghrel@0.1.0"
         }
       },
-      "bciqcdz6pk24xnw7tnhimsis2udr2loznuqmp5oxpwfzkxqyzxzoju2q": {
+      "bciqd6bh5vvp7uszijfjpo6padul35qq6c77svcivmhfwgo34hgpxlra": {
         "manifest": {
           "ty": "denoWorker@v1",
           "name": "asdf_plugin_git",
@@ -1217,26 +1224,26 @@
               "name": "git_aa"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/asdf_plugin_git.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/asdf_plugin_git.ts"
         },
         "defaultInst": {
           "portRef": "asdf_plugin_git@0.1.0"
         }
       },
-      "bciqdjxkcs6anbjgf6kehjcghbsaehmjqxboogsbumd5vvepqolupzcq": {
-        "node_org": "bciqcf6hodsjqud2dp4tlq2z4chrzb5c64abp5iuntejxmmvcqpzoxgy",
-        "rust_rustup": "bciqjmrtzmubalqovzcqthfnvhtwehzkemzlofevx2fjhzql2tnksx5i",
-        "cpy_bs_ghrel": "bciqnlclo7zmybgnmyfluofj5jtzx46rzzi7agwbjzgi66ancolphsxi",
+      "bciqoye6sufqa6xqsig5qkhpve3rtlqmc7fakwkybvrdzye4bmmsdvzi": {
+        "node_org": "bciqdwj5pmg54ekz2dxip5djfqlmyl54yot2ioqyqj55oi2k32wxtlua",
+        "rust_rustup": "bciqjgyvulcawofzq7bgdymx7j5h2y3nl5tkt3pmejfbpxf23alyblhy",
+        "cpy_bs_ghrel": "bciqjvg6t2rx7i7ji55prdwe6cwnv2ar3pwtlo7xhhrl3dymyzgtltvi",
         "tar_aa": "bciqb6ua63xodzwxngnbjq35hfikiwzb3dclbqkc7e6xgjdt5jin4pia",
         "git_aa": "bciqfl5s36w335ducrb6f6gwb3vuwup7vzqwwg67pq42xtkngsnxqobi",
         "curl_aa": "bciqcfe7qyxmokpn6pgtaj35r5qg74jkehuu6cvyrtcsnegvwlm64oqy",
         "unzip_aa": "bciqgkpwxjmo5phw5se4ugyiz4xua3xrd54quzmk7wdwpq3vghglogjy",
         "zstd_aa": "bciqpezvwy56igv7hqdpb3qreewqmyftjyej7zhcyhz6afcgfxgy3rjy",
-        "rustup_rustlang": "bciqjapbduuuy67bp5zhb3kx56qlsae6lau2heqmriz232lqobtz6ugi",
-        "cargo_binstall_ghrel": "bciqlri7sfgdfwtztwmfhs56gjzrl7s6vzttmdymqgkjoq7xdxdmhtxy",
-        "asdf_plugin_git": "bciqcdz6pk24xnw7tnhimsis2udr2loznuqmp5oxpwfzkxqyzxzoju2q"
+        "rustup_rustlang": "bciqprmkyr66xuw7u5ujy3m4lafwaqpmxtvkzlyousxxsbedxaeeyxcy",
+        "cargo_binstall_ghrel": "bciqmw3zelmmcnkxjdahnwadspkqczwds2m7tsjppwg5wiwjma3v773i",
+        "asdf_plugin_git": "bciqd6bh5vvp7uszijfjpo6padul35qq6c77svcivmhfwgo34hgpxlra"
       },
-      "bciqongra6kaddjfwjuevgogkindrhamepdtomvbzjv6rmdnojvfvxpq": {
+      "bciqb3obyi3hucqcmtqjjtqxovigus5yx5jgnqcyq372xla7guexf6si": {
         "port": {
           "ty": "denoWorker@v1",
           "name": "cargobi_cratesio",
@@ -1269,12 +1276,12 @@
               "name": "rust_rustup"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/cargobi.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/cargobi.ts"
         },
         "crateName": "cargo-leptos",
         "locked": true
       },
-      "bciqcd7i5b6qwjdt24j7uaeffnivegcfmeso3ixqngl6qbmebevpfw7q": {
+      "bciqnwlmwonvlcat7bt56wroyxp3eu3pwirehifhgmw33qs4s7olrp3i": {
         "port": {
           "ty": "denoWorker@v1",
           "name": "cargobi_cratesio",
@@ -1307,12 +1314,12 @@
               "name": "rust_rustup"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/cargobi.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/cargobi.ts"
         },
         "crateName": "leptosfmt",
         "locked": true
       },
-      "bciqb34ow6epwpdatbeglebm2nsvqbdzfisfcolbjbf3v6yn2q6oflta": {
+      "bciqnicswg7oyf24niwjanqfk2qxnrsig57sgi54lbc6zadheezoe36i": {
         "port": {
           "ty": "denoWorker@v1",
           "name": "cargobi_cratesio",
@@ -1345,12 +1352,12 @@
               "name": "rust_rustup"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/cargobi.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/cargobi.ts"
         },
         "crateName": "trunk",
         "locked": true
       },
-      "bciqm7whjzfgahlgck5z6omj65qoxh4uwby2joct4pxzqbcr6jkqreya": {
+      "bciqpxh456cihbdftrvkc6nhmy7vr626uto222l23xfelsmrqu6tthxi": {
         "port": {
           "ty": "denoWorker@v1",
           "name": "pipi_pypi",
@@ -1380,11 +1387,45 @@
               "name": "cpy_bs_ghrel"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/pipi.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/pipi.ts"
         },
         "packageName": "uv"
       },
-      "bciqhcv6gh4qpdmh36pacoohgm3ulf3tlhoko3ko7wmghtclfyfpdpyq": {
+      "bciqggoumalzhhdsvejnggkwfcxkkn7qnqw4m2vlquemweupggxes6vq": {
+        "port": {
+          "ty": "denoWorker@v1",
+          "name": "pipi_pypi",
+          "platforms": [
+            "x86_64-linux",
+            "aarch64-linux",
+            "x86_64-darwin",
+            "aarch64-darwin",
+            "x86_64-windows",
+            "aarch64-windows",
+            "x86_64-freebsd",
+            "aarch64-freebsd",
+            "x86_64-netbsd",
+            "aarch64-netbsd",
+            "x86_64-aix",
+            "aarch64-aix",
+            "x86_64-solaris",
+            "aarch64-solaris",
+            "x86_64-illumos",
+            "aarch64-illumos",
+            "x86_64-android",
+            "aarch64-android"
+          ],
+          "version": "0.1.0",
+          "buildDeps": [
+            {
+              "name": "cpy_bs_ghrel"
+            }
+          ],
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/pipi.ts"
+        },
+        "packageName": "aider-chat"
+      },
+      "bciqecpiecc37wde2vjbjs2bmslambstmb3mmr5ylpwe53gwpvfxf6ry": {
         "port": {
           "ty": "denoWorker@v1",
           "name": "npmi_npm",
@@ -1414,7 +1455,7 @@
               "name": "node_org"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/33d82dece752d4e3fbcf955a1f48e54d7eefbbf8/ports/npmi.ts"
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/npmi.ts"
         },
         "packageName": "eas-cli"
       }

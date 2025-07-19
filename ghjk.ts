@@ -1,11 +1,13 @@
 export { sophon } from "@ghjk/ts";
 import { file } from "@ghjk/ts";
+import { sedLock } from "@ghjk/ts/std.ts";
 import * as ports from "@ghjk/ports_wip";
 
 import * as std_url from "jsr:@std/url@0.215.0";
 
 const DOCKER_CMD = Deno.env.get("DOCKER_CMD") ?? "podman";
 const RUST_VERSION = "1.84.1";
+const GHJK_VERSION = "v0.3.1-rc.2"
 
 const installs = {
   rust: ports.rust({ 
@@ -32,8 +34,6 @@ const ghjk = file({
     installs.py
   ],
 });
-
-export const sophon = ghjk.sophon;
 
 ghjk.env("main")
   .vars({
@@ -256,3 +256,35 @@ ghjk.task(
     }
   }
 )
+
+
+ghjk.task("lock-sed", async ($) =>
+  sedLock($.workingDir, {
+    lines: {
+      "./.ghjk/deno.jsonc": [
+        [
+          /(https:\/\/raw.githubusercontent.com\/metatypedev\/ghjk\/)[^\/]+(\/.+)/,
+          GHJK_VERSION
+        ]
+      ],
+      // "./README.md": [
+      //   [/(GHJK_VERSION=).*()/, GHJK_VERSION],
+      // ],
+    },
+    ignores: [
+      // TODO: std function for real ignore handling
+      ...(await $.path(".gitignore").readText())
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((line) => line.length > 0)
+        .filter((line) => !/^#/.test(line))
+        .map((l) => `${l}${l.endsWith("*") ? "" : "*"}`),
+      ...(await $.path(".ghjk/.gitignore").readText())
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((line) => line.length > 0)
+        .filter((line) => !/^#/.test(line))
+        .map((l) => `.ghjk/${l}${l.endsWith("*") ? "" : "*"}`),
+    ],
+  }),
+);
