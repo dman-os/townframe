@@ -28,7 +28,7 @@ const val DEBUG_LOG_TAG = "DBG"
  * @param context Extra string messages or values to log as context. These are converted to strings.
  * @return The original [value] that was passed in.
  */
-inline fun <T> dbg(value: T, vararg context: Any?): T {
+fun <T> dbg(value: T, vararg context: Any?): T {
     // Getting reliable call site info cross-platform from pure Kotlin is challenging.
     // Thread.currentThread().stackTrace is JVM-specific.
     // We'll make a best-effort approach or acknowledge limitations.

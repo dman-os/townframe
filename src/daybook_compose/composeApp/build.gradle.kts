@@ -75,6 +75,7 @@ kotlin {
             implementation(libs.kotlin.test)
         }
         desktopMain.dependencies {
+            implementation(libs.skikoLinuxX64)
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutinesSwing)
         }

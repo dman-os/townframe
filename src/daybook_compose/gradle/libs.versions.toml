@@ -17,6 +17,7 @@ junit = "4.13.2"
 kotlin = "2.2.0"
 kotlinx-coroutines = "1.10.2"
 lifecycleService = "2.9.1"
+skiko = "0.9.4.2"
 
 [libraries]
 calf-permissions = { module = "com.mohamedrejeb.calf:calf-permissions", version.ref = "calfPermissions" }
@@ -33,6 +34,7 @@ androidx-lifecycle-viewmodel = { module = "org.jetbrains.androidx.lifecycle:life
 androidx-lifecycle-runtimeCompose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose", version.ref = "androidx-lifecycle" }
 kotlinx-coroutinesSwing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
 androidx-lifecycle-service = { group = "androidx.lifecycle", name = "lifecycle-service", version.ref = "lifecycleService" }
+skikoLinuxX64 = { module = "org.jetbrains.skiko:skiko-awt-runtime-linux-x64", version.ref = "skiko" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }

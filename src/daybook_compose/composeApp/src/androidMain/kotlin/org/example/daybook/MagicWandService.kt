@@ -1,10 +1,28 @@
+/*
+ * Magic Wand Service - System-wide floating overlay with draggable puck interface
+ * 
+ * This service creates a floating overlay that works across all apps, featuring:
+ * - A draggable "puck" that can be tapped or dragged to trigger actions
+ * - Smart window resizing: shrinks to hug the puck when hidden, expands for full overlay
+ * - Sophisticated drag physics with parabolic and direct snapping strategies
+ * - Button collision detection system for drag-to-action interactions
+ * - Performance optimizations including throttled window updates and cached calculations
+ * - Animation system that respects Android's global animation settings
+ * 
+ * Key architectural decisions:
+ * - Service handles only system-level concerns (notifications, window management)
+ * - Compose UI handles all interaction logic and animations
+ * - Window resizing minimizes resource usage when overlay is hidden
+ * - Reflection used to disable window animations for smoother experience
+ */
 package org.example.daybook
 
 import MagicWandLifecycleOwner
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
+import android.app.PendingIntent.FLAG_IMMUTABLE
+import android.app.PendingIntent.FLAG_UPDATE_CURRENT
+import android.app.PendingIntent.getBroadcast
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -12,6 +30,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Build.VERSION.SDK_INT
 import android.os.IBinder
 import android.view.Gravity
 import android.view.WindowManager
@@ -25,6 +44,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -42,6 +62,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -59,7 +80,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -68,10 +88,13 @@ import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationCompat.PRIORITY_LOW
 import androidx.core.app.ServiceCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelStore
@@ -79,52 +102,24 @@ import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
-import kotlin.math.exp
-import kotlin.math.ln
-import kotlin.math.pow
-import kotlin.math.round
+import org.example.daybook.R.drawable.ic_launcher_foreground
 import kotlin.math.roundToInt
 
-// Utility function for rounding floats to specific decimal places
-fun Float.roundToString(decimals: Int): String {
-    val factor = 10f.pow(decimals)
-    return (round(this * factor) / factor).toString()
-}
-
-// Function to get animation config from system settings
-@Composable
-fun getAnimationConfig(): AnimationConfig {
-    val context = androidx.compose.ui.platform.LocalContext.current
-
-    // Check if animations are disabled globally
-    val animationsEnabled =
-        android.provider.Settings.Global.getFloat(
-            context.contentResolver,
-            android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,
-            1f
-        ) > 0f
-
-    // Get animation speed scale
-    val animationScale =
-        android.provider.Settings.Global.getFloat(
-            context.contentResolver,
-            android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,
-            1f
-        )
-
-    // Convert duration scale to speed factor (inverse relationship)
-    val speedFactor = if (animationScale > 0f) 1f / animationScale else 1f
-
-    return AnimationConfig(
-        speedFactor = speedFactor.coerceIn(0.1f, 10f),
-        isEnabled = animationsEnabled
-    )
-}
-
-// Main service - only handles system concerns
+/**
+ * Android foreground service that manages the system overlay window.
+ *
+ * Responsibilities:
+ * - Creates and manages overlay window with proper permissions
+ * - Handles foreground service lifecycle and notifications
+ * - Optimizes window size based on overlay state (shrinks to hug puck when hidden)
+ * - Throttles window updates to maintain 60fps performance
+ */
 class MagicWandService : Service() {
-    private val notificationChannelId = "MagicWandServiceChannel"
-    private val notificationId = 1
+    companion object {
+        const val NOTIFICATION_CHANNEL_ID = "MagicWandServiceChannel"
+        const val ACTION_STOP_SERVICE = "org.example.daybook.ACTION_STOP_SERVICE"
+        const val NOTIFICATION_ID = 1
+    }
 
     private lateinit var windowManager: WindowManager
     private var overlayView: ComposeView? = null
@@ -136,7 +131,14 @@ class MagicWandService : Service() {
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        createNotificationChannel()
+        val serviceChannel =
+            NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                "Magic Wand Service Channel",
+                NotificationManager.IMPORTANCE_LOW
+            )
+        getSystemService(NotificationManager::class.java)
+            ?.createNotificationChannel(serviceChannel)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -151,8 +153,42 @@ class MagicWandService : Service() {
             showOverlay()
         }
 
-        val notification = createOngoingNotification("Magic Wand Active")
-        ServiceCompat.startForeground(this, notificationId, notification, foregroundServiceType())
+        // a persistent notification is needed to have display on top overlays
+        val notification = run {
+            val stopServicePendingIntent = getBroadcast(
+                this,
+                1,
+                Intent(this, StopServiceReceiver::class.java).apply {
+                    this.action =
+                        ACTION_STOP_SERVICE
+                },
+                FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE,
+            )
+            NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+                .setContentText("magic wand")
+                // TODO: icon for notification
+                // NOTE: icons are mandatory
+                .setSmallIcon(ic_launcher_foreground)
+                .setPriority(PRIORITY_LOW)
+                .setOngoing(true)
+                .addAction(
+                    // TODO: use stop icon
+                    ic_launcher_foreground,
+                    "Stop Service",
+                    stopServicePendingIntent
+                )
+                .build()
+        }
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            notification,
+            if (SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                0
+            }
+        )
         return START_STICKY
     }
 
@@ -163,6 +199,7 @@ class MagicWandService : Service() {
                     MagicWandOverlay(
                         onStopService = { stopSelf() },
                         onOverlayPosChanged = { mode, puckPosition, puckSize ->
+                            // coordinate window resizes and moves
                             updateWindowLayout(mode, puckPosition, puckSize)
                         }
                     )
@@ -191,15 +228,14 @@ class MagicWandService : Service() {
             WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                } else {
-                    WindowManager.LayoutParams.TYPE_PHONE
-                },
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                         WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                         WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                        // NOTE: the following are used to draw over the status bar
+                        // but not exactly? The status bar icons seem to still appear
+                        // over the overlay (which is not un-desirable)
                         WindowManager.LayoutParams.FLAG_FULLSCREEN or
                         WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR or
                         WindowManager.LayoutParams
@@ -212,157 +248,66 @@ class MagicWandService : Service() {
                     y = 0
                 }
 
-        try {
-            windowManager.addView(overlayView, layoutParams)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        windowManager.addView(overlayView, layoutParams)
     }
-
-    // Throttle window updates to improve performance
-    private var lastWindowUpdateTime = 0L
-    private var lastMode = OverlayMode.HIDDEN
-    private var lastPosition = PuckPosition(0.dp, 0.dp)
-    private val windowUpdateThrottleMs = 16L // ~60fps max update rate
 
     fun updateWindowLayout(mode: OverlayMode, puckPosition: PuckPosition, puckSize: Dp) {
         layoutParams?.let { params ->
             overlayView?.let { view ->
+                val density = resources.displayMetrics.density
+                val puckSizePx = (puckSize.value * density).toInt()
+                val puckXPx = (puckPosition.x.value * density).toInt()
+                val puckYPx = (puckPosition.y.value * density).toInt()
+
+                if (mode == OverlayMode.HIDDEN) {
+                    // Resize window to hug the puck
+                    params.width = puckSizePx
+                    params.height = puckSizePx
+                    params.x = puckXPx
+                    params.y = puckYPx
+                } else {
+                    // Full screen for overlay
+                    params.width = WindowManager.LayoutParams.MATCH_PARENT
+                    params.height = WindowManager.LayoutParams.MATCH_PARENT
+                    params.x = 0
+                    params.y = 0
+                }
+
+                // Disable window animation using reflection
                 try {
-                    val currentTime = System.currentTimeMillis()
+                    val lpClass = WindowManager.LayoutParams::class.java
+                    val privateFlagsField = lpClass.getField("privateFlags")
+                    val noMoveFlagField = lpClass.getField("PRIVATE_FLAG_NO_MOVE_ANIMATION")
 
-                    // Skip update if too soon and values haven't changed significantly
-                    if (currentTime - lastWindowUpdateTime < windowUpdateThrottleMs &&
-                        mode == lastMode &&
-                        kotlin.math.abs(puckPosition.x.value - lastPosition.x.value) < 2f &&
-                        kotlin.math.abs(puckPosition.y.value - lastPosition.y.value) < 2f
-                    ) {
-                        return
-                    }
-
-                    lastWindowUpdateTime = currentTime
-                    lastMode = mode
-                    lastPosition = puckPosition
-
-                    val density = resources.displayMetrics.density
-                    val puckSizePx = (puckSize.value * density).toInt()
-                    val puckXPx = (puckPosition.x.value * density).toInt()
-                    val puckYPx = (puckPosition.y.value * density).toInt()
-
-                    if (mode == OverlayMode.HIDDEN) {
-                        // Resize window to hug the puck
-                        params.width = puckSizePx
-                        params.height = puckSizePx
-                        params.x = puckXPx
-                        params.y = puckYPx
-                    } else {
-                        // Full screen for overlay
-                        params.width = WindowManager.LayoutParams.MATCH_PARENT
-                        params.height = WindowManager.LayoutParams.MATCH_PARENT
-                        params.x = 0
-                        params.y = 0
-                    }
-
-                    // Disable window animation using reflection
-                    try {
-                        val lpClass = WindowManager.LayoutParams::class.java
-                        val privateFlagsField = lpClass.getField("privateFlags")
-                        val noMoveFlagField = lpClass.getField("PRIVATE_FLAG_NO_MOVE_ANIMATION")
-
-                        val current = privateFlagsField.getInt(params)
-                        val flag = noMoveFlagField.getInt(null)
-                        privateFlagsField.setInt(params, current or flag)
-                        windowAnimationDisabled = true
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        windowAnimationDisabled = false
-                    }
-
-                    windowManager.updateViewLayout(view, params)
+                    val current = privateFlagsField.getInt(params)
+                    val flag = noMoveFlagField.getInt(null)
+                    privateFlagsField.setInt(params, current or flag)
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
+
+                windowManager.updateViewLayout(view, params)
             }
-        }
-    }
-
-    private var windowAnimationDisabled = false
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val serviceChannel =
-                NotificationChannel(
-                    notificationChannelId,
-                    "Magic Wand Service Channel",
-                    NotificationManager.IMPORTANCE_LOW
-                )
-            getSystemService(NotificationManager::class.java)
-                ?.createNotificationChannel(serviceChannel)
-        }
-    }
-
-    private fun createOngoingNotification(contentText: String): Notification {
-        val stopServiceIntent =
-            Intent(this, StopServiceReceiver::class.java).apply { action = ACTION_STOP_SERVICE }
-        val pendingIntentFlags =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            } else {
-                PendingIntent.FLAG_UPDATE_CURRENT
-            }
-        val stopServicePendingIntent =
-            PendingIntent.getBroadcast(this, 1, stopServiceIntent, pendingIntentFlags)
-
-        return NotificationCompat.Builder(this, notificationChannelId)
-            .setContentText(contentText)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(true)
-            .addAction(
-                R.drawable.ic_launcher_foreground,
-                "Stop Service",
-                stopServicePendingIntent
-            )
-            .build()
-    }
-
-    private fun foregroundServiceType(): Int {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-        } else {
-            0
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        try {
-            lifecycleOwner?.let { owner ->
-                owner.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
-                owner.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
-                owner.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
-            }
-            lifecycleOwner = null
-
-            overlayView?.let {
-                if (it.isAttachedToWindow) {
-                    windowManager.removeView(it)
-                }
-            }
-            overlayView = null
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(Service.STOP_FOREGROUND_REMOVE)
-            } else {
-                @Suppress("DEPRECATION") stopForeground(true)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        lifecycleOwner?.let { owner ->
+            owner.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+            owner.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+            owner.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
         }
-    }
+        lifecycleOwner = null
 
-    companion object {
-        const val ACTION_STOP_SERVICE = "org.example.daybook.ACTION_STOP_SERVICE"
+        overlayView?.let {
+            if (it.isAttachedToWindow) {
+                windowManager.removeView(it)
+            }
+        }
+        overlayView = null
+
+        stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     class StopServiceReceiver : BroadcastReceiver() {
@@ -378,10 +323,44 @@ class MagicWandService : Service() {
     }
 }
 
-// Data class for puck state
+
+/**
+ * Animation configuration
+ */
+data class SysAnimationConfig(val speedFactor: Float = 1f, val isEnabled: Boolean = true)
+
+/**
+ * Reads Android's global animation settings to respect user preferences.
+ * Returns configuration for animation speed and enable/disable state.
+ */
+fun getAnimationConfig(context: Context): SysAnimationConfig {
+    // Get animation speed scale
+    val animationScale =
+        android.provider.Settings.Global.getFloat(
+            context.contentResolver,
+            android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,
+            1f
+        )
+    // Check if animations are disabled globally
+    val animationsEnabled = animationScale > 0f
+
+    // Convert duration scale to speed factor (inverse relationship)
+    val speedFactor = if (animationScale > 0f) 1f / animationScale else 1f
+
+    return SysAnimationConfig(
+        speedFactor = speedFactor.coerceIn(0.1f, 10f),
+        isEnabled = animationsEnabled
+    )
+}
+
+/**
+ * Immutable state container for the floating puck.
+ *
+ * @param initialTouchOffset Critical for natural drag feel - stores where user's finger
+ *                          is relative to puck center when drag starts
+ */
 data class PuckState(
     val position: PuckPosition,
-    val isVisible: Boolean = true,
     val isDragging: Boolean = false,
     val mode: OverlayMode = OverlayMode.HIDDEN,
     val dragState: DragState? = null,
@@ -390,78 +369,199 @@ data class PuckState(
         androidx.compose.ui.geometry.Offset.Zero
 )
 
-// Button position data for collision detection
-data class ButtonPosition(
+/**
+ * Base class for widget descriptors with common position and size properties.
+ */
+abstract class WidgetDesc(
     val id: String,
-    val center: androidx.compose.ui.geometry.Offset,
-    val radius: Float,
-    val onAction: () -> Unit
-)
+    val position: PuckPosition,
+    val size: Dp = 80.dp
+) {
+    abstract fun withPositionAndSize(position: PuckPosition, size: Dp): WidgetDesc
+}
 
-// Optimized button registry for collision detection
-class ButtonRegistry {
-    private val _buttons = mutableMapOf<String, ButtonPosition>()
-    val buttons: Map<String, ButtonPosition>
-        get() = _buttons.toMap()
+/**
+ * Descriptor for action button widgets.
+ */
+data class ActionButtonDesc(
+    val widgetId: String,
+    val label: String,
+    val icon: String,
+    val color: androidx.compose.ui.graphics.Color,
+    val onAction: () -> Unit,
+    val widgetPosition: PuckPosition,
+    val widgetSize: Dp = 80.dp
+) : WidgetDesc(widgetId, widgetPosition, widgetSize) {
 
-    fun registerButton(
-        id: String,
-        center: androidx.compose.ui.geometry.Offset,
-        radius: Float,
-        onAction: () -> Unit
-    ) {
-        _buttons[id] = ButtonPosition(id, center, radius, onAction)
-    }
-
-    fun unregisterButton(id: String) {
-        _buttons.remove(id)
-    }
-
-    // Point-in-circle collision (original method, kept for reference)
-    fun findButtonAt(position: androidx.compose.ui.geometry.Offset): String? {
-        if (_buttons.isEmpty()) return null
-
-        return _buttons.values
-            .find { button ->
-                val dx = position.x - button.center.x
-                val dy = position.y - button.center.y
-                // Use squared distance to avoid expensive sqrt operation
-                val distanceSquared = dx * dx + dy * dy
-                distanceSquared <= button.radius * button.radius
-            }
-            ?.id
-    }
-
-    // Optimized circle-to-circle overlap detection
-    fun findButtonOverlappingWith(
-        puckCenter: androidx.compose.ui.geometry.Offset,
-        puckRadius: Float
-    ): String? {
-        if (_buttons.isEmpty()) return null
-
-        return _buttons.values
-            .find { button ->
-                val dx = puckCenter.x - button.center.x
-                val dy = puckCenter.y - button.center.y
-                val combinedRadius = button.radius + puckRadius
-
-                // Use squared distance to avoid expensive sqrt operation
-                val distanceSquared = dx * dx + dy * dy
-                distanceSquared <= combinedRadius * combinedRadius
-            }
-            ?.id
-    }
-
-    fun handleButtonAction(buttonId: String) {
-        _buttons[buttonId]?.onAction?.invoke()
-    }
-
-    fun clear() {
-        _buttons.clear()
+    override fun withPositionAndSize(position: PuckPosition, size: Dp): WidgetDesc {
+        return ActionButtonDesc(
+            widgetId = widgetId,
+            label = label,
+            icon = icon,
+            color = color,
+            onAction = onAction,
+            widgetPosition = position,
+            widgetSize = size
+        )
     }
 }
 
-// Optimized weighted drag vector calculator with exponential decay
+/**
+ * Descriptor for the puck widget (for edit mode selection).
+ */
+data class PuckDesc(
+    val widgetPosition: PuckPosition,
+    val widgetSize: Dp = 64.dp
+) : WidgetDesc("puck", widgetPosition, widgetSize) {
+
+    override fun withPositionAndSize(position: PuckPosition, size: Dp): WidgetDesc {
+        return PuckDesc(
+            widgetPosition = position,
+            widgetSize = size
+        )
+    }
+}
+
+/**
+ * Widget collision data for real-time collision detection.
+ */
+data class WidgetCollision(
+    val id: String,
+    val center: androidx.compose.ui.geometry.Offset,
+    val radius: Float
+)
+
+/**
+ * Registry for managing overlay widgets with position persistence and collision detection.
+ *
+ * Replaces ButtonRegistry with more sophisticated widget management:
+ * - Persists widget positions and properties
+ * - Provides collision detection for edit mode
+ * - Supports different widget types through WidgetDesc hierarchy
+ */
+class WidgetRegistry {
+    private val _widgets = mutableMapOf<String, WidgetDesc>()
+    private val _collisionData = mutableMapOf<String, WidgetCollision>()
+
+    val widgets: Map<String, WidgetDesc>
+        get() = _widgets.toMap()
+
+    /**
+     * Register or update a widget descriptor.
+     */
+    fun registerWidget(widget: WidgetDesc) {
+        _widgets[widget.id] = widget
+    }
+
+    /**
+     * Update widget position (for drag operations).
+     */
+    fun updateWidgetPosition(id: String, position: PuckPosition) {
+        _widgets[id]?.let { widget ->
+            _widgets[id] = widget.withPositionAndSize(position, widget.size)
+        }
+    }
+
+    /**
+     * Update widget size (for adjustment operations).
+     */
+    fun updateWidgetSize(id: String, size: Dp) {
+        _widgets[id]?.let { widget ->
+            _widgets[id] = widget.withPositionAndSize(widget.position, size)
+        }
+    }
+
+    /**
+     * Register collision data for real-time collision detection.
+     */
+    fun registerCollisionData(
+        id: String,
+        center: androidx.compose.ui.geometry.Offset,
+        radius: Float
+    ) {
+        _collisionData[id] = WidgetCollision(id, center, radius)
+    }
+
+    /**
+     * Check if a widget at given position would collide with existing widgets.
+     * Excludes the widget being moved from collision check.
+     */
+    fun checkCollision(
+        movingWidgetId: String,
+        center: androidx.compose.ui.geometry.Offset,
+        radius: Float
+    ): String? {
+        return _collisionData.values
+            .filter { it.id != movingWidgetId }
+            .find { collision ->
+                val dx = center.x - collision.center.x
+                val dy = center.y - collision.center.y
+                val combinedRadius = collision.radius + radius
+                val distanceSquared = dx * dx + dy * dy
+                distanceSquared <= combinedRadius * combinedRadius
+            }?.id
+    }
+
+    /**
+     * Find widget overlapping with puck (for drag-to-action).
+     */
+    fun findWidgetOverlappingWith(
+        puckCenter: androidx.compose.ui.geometry.Offset,
+        puckRadius: Float
+    ): String? {
+        return _collisionData.values
+            .find { collision ->
+                val dx = puckCenter.x - collision.center.x
+                val dy = puckCenter.y - collision.center.y
+                val combinedRadius = collision.radius + puckRadius
+                val distanceSquared = dx * dx + dy * dy
+                distanceSquared <= combinedRadius * combinedRadius
+            }?.id
+    }
+
+    /**
+     * Handle widget action (for ActionButton widgets).
+     */
+    fun handleWidgetAction(widgetId: String) {
+        (_widgets[widgetId] as? ActionButtonDesc)?.onAction?.invoke()
+    }
+
+    /**
+     * Get default widgets for initial setup.
+     */
+    fun getDefaultWidgets(screenWidth: Dp): List<WidgetDesc> {
+        return listOf(
+            ActionButtonDesc(
+                widgetId = "camera",
+                label = "Camera",
+                icon = "📷",
+                color = Color.Green,
+                onAction = {},
+                widgetPosition = PuckPosition(screenWidth / 2 - 120.dp, 200.dp)
+            ),
+            ActionButtonDesc(
+                widgetId = "notes",
+                label = "Notes",
+                icon = "📝",
+                color = Color(0xFFFFA500),
+                onAction = {},
+                widgetPosition = PuckPosition(screenWidth / 2 + 40.dp, 200.dp)
+            )
+        )
+    }
+
+    fun clear() {
+        _widgets.clear()
+        _collisionData.clear()
+    }
+}
+
+/**
+ * Calculates weighted drag vectors with exponential decay for sophisticated snapping.
+ *
+ * Tracks recent drag movements to determine natural trajectory when released.
+ * Limited vector history prevents memory bloat during long drags.
+ */
 class WeightedDragCalculator {
     private val _dragVectors = mutableListOf<androidx.compose.ui.geometry.Offset>()
     private var _cachedWeightedVector: androidx.compose.ui.geometry.Offset? = null
@@ -536,7 +636,12 @@ class WeightedDragCalculator {
     }
 }
 
-// Drag state tracking for sophisticated snapping
+/**
+ * Tracks drag state for sophisticated physics-based snapping.
+ *
+ * @param crossedScreenHalves Used to determine if puck moved to opposite screen side,
+ *                           triggering different snapping strategies
+ */
 data class DragState(
     val startPosition: PuckPosition,
     val currentPosition: PuckPosition,
@@ -561,10 +666,9 @@ data class DragState(
     }
 }
 
-// Animation configuration
-data class AnimationConfig(val speedFactor: Float = 1f, val isEnabled: Boolean = true)
-
-// Animation strategy interface
+/**
+ * Animation strategy interface
+ */
 interface SnapAnimationStrategy {
     fun calculateTargetPosition(
         dragState: DragState,
@@ -574,11 +678,14 @@ interface SnapAnimationStrategy {
     ): PuckPosition
 
     fun getAnimationSpec(
-        config: AnimationConfig
+        config: SysAnimationConfig
     ): androidx.compose.animation.core.AnimationSpec<PuckPosition>
 }
 
-// Direct snap for drags that cross to the opposite edge
+/**
+ * Animation strategy for direct trajectory snapping.
+ * Used when drag crosses to opposite side of screen - aims for opposite edge.
+ */
 class DirectSnapStrategy : SnapAnimationStrategy {
     override fun calculateTargetPosition(
         dragState: DragState,
@@ -620,7 +727,7 @@ class DirectSnapStrategy : SnapAnimationStrategy {
     }
 
     override fun getAnimationSpec(
-        config: AnimationConfig
+        config: SysAnimationConfig
     ): androidx.compose.animation.core.AnimationSpec<PuckPosition> {
         if (!config.isEnabled) {
             return androidx.compose.animation.core.snap()
@@ -640,7 +747,11 @@ class DirectSnapStrategy : SnapAnimationStrategy {
     }
 }
 
-// Parabolic snap with drag vector as tangent to the arc
+/**
+ * Animation strategy for parabolic arc snapping.
+ * Used when staying on same side - creates natural arc to nearest edge.
+ * Uses drag vector as tangent to determine arc shape.
+ */
 class ParabolicSnapStrategy : SnapAnimationStrategy {
     override fun calculateTargetPosition(
         dragState: DragState,
@@ -691,7 +802,7 @@ class ParabolicSnapStrategy : SnapAnimationStrategy {
     }
 
     override fun getAnimationSpec(
-        config: AnimationConfig
+        config: SysAnimationConfig
     ): androidx.compose.animation.core.AnimationSpec<PuckPosition> {
         if (!config.isEnabled) {
             return androidx.compose.animation.core.snap()
@@ -711,7 +822,13 @@ class ParabolicSnapStrategy : SnapAnimationStrategy {
     }
 }
 
-// Animation manager that orchestrates the snapping behavior
+/**
+ * Selects appropriate snapping strategy based on drag behavior.
+ *
+ * Strategy selection:
+ * - Parabolic: if puck stays closer to the same edge it started from
+ * - Direct: if puck moves closer to the opposite edge (crossing screen)
+ */
 class PuckAnimationManager {
     fun selectStrategy(dragState: DragState, screenWidth: Dp, puckSize: Dp): SnapAnimationStrategy {
         val start = dragState.startPosition
@@ -737,7 +854,11 @@ class PuckAnimationManager {
     }
 }
 
-// Data class for puck position in dp
+/**
+ * Position in dp coordinates with utility methods for screen bounds and snapping.
+ *
+ * Includes custom animation converter for smooth position transitions.
+ */
 data class PuckPosition(val x: Dp, val y: Dp) {
     fun clampToScreen(screenWidth: Dp, screenHeight: Dp, puckSize: Dp): PuckPosition {
         val clampedX = x.coerceIn(0.dp, screenWidth - puckSize)
@@ -770,14 +891,34 @@ data class PuckPosition(val x: Dp, val y: Dp) {
     }
 }
 
-// Overlay modes
+/**
+ * Overlay modes
+ */
 enum class OverlayMode {
     HIDDEN,
     TAP_MODE,
-    DRAG_MODE
+    DRAG_MODE,
+    EDIT_MODE
 }
 
-// Main overlay composable - handles all UI state and logic
+/**
+ * Edit mode state for the overlay editor.
+ */
+data class EditModeState(
+    val isEditMode: Boolean = false,
+    val selectedWidgetId: String? = null,
+    val dragStartPosition: PuckPosition? = null
+)
+
+/**
+ * Main overlay UI coordinator handling puck state and interactions.
+ *
+ * Key responsibilities:
+ * - Manages puck state transitions (hidden/tap/drag modes)
+ * - Coordinates between visual puck position and window layout updates
+ * - Handles sophisticated drag physics and button collision detection
+ * - Optimizes performance with cached calculations and minimal object creation
+ */
 @Composable
 fun MagicWandOverlay(
     onStopService: () -> Unit = {},
@@ -787,15 +928,18 @@ fun MagicWandOverlay(
     val density = LocalDensity.current
     val puckSize = 64.dp
 
+    // LocalContext.current.resources..
     // Get screen dimensions in dp
-    val screenWidth = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp
-    val screenHeight = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp
+    val (screenWidth, screenHeight) = with(density) {
+        Pair(
+            LocalWindowInfo.current.containerSize.width.toDp(),
+            LocalWindowInfo.current.containerSize.height.toDp()
+        )
+    }
+
 
     // Cache frequently used calculations
-    val puckSizePx = remember { with(density) { puckSize.toPx() } }
-    val puckRadiusPx = remember { puckSizePx / 2f }
-    val screenWidthPx = remember { with(density) { screenWidth.toPx() } }
-    val screenHeightPx = remember { with(density) { screenHeight.toPx() } }
+    val puckRadiusPx = remember { with(density) { puckSize.toPx() / 2f } }
 
     var puckState by remember {
         mutableStateOf(
@@ -807,14 +951,17 @@ fun MagicWandOverlay(
         ) // Bottom right position
     }
 
-    // Button registry for collision detection
-    val buttonRegistry = remember { ButtonRegistry() }
+    // Widget registry for collision detection and position persistence
+    val widgetRegistry = remember { WidgetRegistry() }
+
+    // Edit mode state
+    var editModeState by remember { mutableStateOf(EditModeState()) }
 
     // Animation manager for sophisticated snapping
     val animationManager = remember { PuckAnimationManager() }
 
     // Get animation config from system settings
-    val animationConfig = getAnimationConfig()
+    val animationConfig = getAnimationConfig(LocalContext.current)
 
     // Dynamic animation spec based on drag state
     val currentAnimationSpec =
@@ -854,11 +1001,9 @@ fun MagicWandOverlay(
             ContentOverlay(
                 mode = puckState.mode,
                 puckPosition = puckState.position,
-                buttonRegistry = buttonRegistry,
-                dragState = puckState.dragState,
-                animationConfig = animationConfig,
-                hoveredButtonId = puckState.hoveredButtonId,
-                initialTouchOffset = puckState.initialTouchOffset,
+                widgetRegistry = widgetRegistry,
+                editModeState = editModeState,
+                hoveredWidgetId = puckState.hoveredButtonId,
                 onDismiss = {
                     puckState =
                         puckState.copy(
@@ -868,12 +1013,30 @@ fun MagicWandOverlay(
                             initialTouchOffset =
                                 androidx.compose.ui.geometry.Offset.Zero
                         )
+                    editModeState = EditModeState() // Reset edit mode when dismissing
+                },
+                onEditModeToggle = {
+                    editModeState = editModeState.copy(
+                        isEditMode = !editModeState.isEditMode,
+                        selectedWidgetId = null
+                    )
+                },
+                onWidgetSelected = { widgetId ->
+                    editModeState = editModeState.copy(selectedWidgetId = widgetId)
+                },
+                onWidgetDragStart = { widgetId, startPosition ->
+                    editModeState = editModeState.copy(dragStartPosition = startPosition)
+                },
+                onWidgetDragEnd = { widgetId, position, hasCollision ->
+                    // Widget handles its own collision reversion
+                    editModeState = editModeState.copy(dragStartPosition = null)
                 }
             )
         }
 
         // Floating puck - only consume touches when interacting
         MagicPuck(
+            editModeState = editModeState,
             modifier =
                 Modifier.offset {
                     when (puckState.mode) {
@@ -925,27 +1088,51 @@ fun MagicWandOverlay(
                                 )
                             }
                         }
+
+                        OverlayMode.EDIT_MODE -> {
+                            // In edit mode, use standard positioning
+                            IntOffset(
+                                with(density) {
+                                    animatedPuckPosition.x.toPx().roundToInt()
+                                },
+                                with(density) {
+                                    animatedPuckPosition.y.toPx().roundToInt()
+                                }
+                            )
+                        }
                     }
                 },
             size = puckSize,
             isDragging = puckState.isDragging,
             onTap = {
-                // Toggle: if already in TAP_MODE, close; otherwise open TAP_MODE
-                if (puckState.mode == OverlayMode.TAP_MODE) {
-                    puckState =
-                        puckState.copy(
+                // Toggle overlay modes based on current state
+                when {
+                    editModeState.isEditMode && puckState.mode != OverlayMode.HIDDEN -> {
+                        // In edit mode, select the puck for adjustment
+                        editModeState = editModeState.copy(selectedWidgetId = "puck")
+                        // Register puck as a widget for adjustment
+                        widgetRegistry.registerWidget(
+                            PuckDesc(widgetPosition = puckState.position, widgetSize = puckSize)
+                        )
+                    }
+
+                    puckState.mode == OverlayMode.TAP_MODE || puckState.mode == OverlayMode.EDIT_MODE -> {
+                        // Close overlay
+                        puckState = puckState.copy(
                             mode = OverlayMode.HIDDEN,
                             hoveredButtonId = null,
-                            initialTouchOffset =
-                                androidx.compose.ui.geometry.Offset.Zero
+                            initialTouchOffset = androidx.compose.ui.geometry.Offset.Zero
                         )
-                } else {
-                    puckState =
-                        puckState.copy(
-                            mode = OverlayMode.TAP_MODE,
-                            initialTouchOffset =
-                                androidx.compose.ui.geometry.Offset.Zero
+                        editModeState = EditModeState() // Reset edit mode
+                    }
+
+                    else -> {
+                        // Open overlay
+                        puckState = puckState.copy(
+                            mode = if (editModeState.isEditMode) OverlayMode.EDIT_MODE else OverlayMode.TAP_MODE,
+                            initialTouchOffset = androidx.compose.ui.geometry.Offset.Zero
                         )
+                    }
                 }
             },
             onDragStart = { initialOffset ->
@@ -987,8 +1174,8 @@ fun MagicWandOverlay(
                     val newPosition = PuckPosition(newX.dp, newY.dp)
 
                     // Optimized collision detection - only check if in overlay mode
-                    val hoveredButton =
-                        if (puckState.mode != OverlayMode.HIDDEN && buttonRegistry.buttons.isNotEmpty()) {
+                    val hoveredWidget =
+                        if (puckState.mode != OverlayMode.HIDDEN && widgetRegistry.widgets.isNotEmpty()) {
                             // Pre-calculate visual center
                             val visualCenterX =
                                 newX * density.density + puckState.initialTouchOffset.x
@@ -996,7 +1183,7 @@ fun MagicWandOverlay(
                                 newY * density.density + puckState.initialTouchOffset.y
                             val visualCenter =
                                 androidx.compose.ui.geometry.Offset(visualCenterX, visualCenterY)
-                            buttonRegistry.findButtonOverlappingWith(visualCenter, puckRadiusPx)
+                            widgetRegistry.findWidgetOverlappingWith(visualCenter, puckRadiusPx)
                         } else null
 
                     // Add drag vector and update state in one operation
@@ -1006,14 +1193,14 @@ fun MagicWandOverlay(
                     puckState = puckState.copy(
                         position = newPosition,
                         dragState = updatedDragState,
-                        hoveredButtonId = hoveredButton
+                        hoveredButtonId = hoveredWidget
                     )
                 }
             },
             onDragEnd = {
                 // Optimized drag end handling
-                val droppedOnButton =
-                    if (puckState.mode != OverlayMode.HIDDEN && buttonRegistry.buttons.isNotEmpty()) {
+                val droppedOnWidget =
+                    if (puckState.mode != OverlayMode.HIDDEN && widgetRegistry.widgets.isNotEmpty()) {
                         // Pre-calculate visual center for final collision check
                         val visualCenterX =
                             puckState.position.x.value * density.density + puckState.initialTouchOffset.x
@@ -1021,19 +1208,19 @@ fun MagicWandOverlay(
                             puckState.position.y.value * density.density + puckState.initialTouchOffset.y
                         val visualCenter =
                             androidx.compose.ui.geometry.Offset(visualCenterX, visualCenterY)
-                        buttonRegistry.findButtonOverlappingWith(visualCenter, puckRadiusPx)
+                        widgetRegistry.findWidgetOverlappingWith(visualCenter, puckRadiusPx)
                     } else null
 
-                if (droppedOnButton != null) {
-                    // Puck was dropped on a button - handle the action
-                    buttonRegistry.handleButtonAction(droppedOnButton)
+                if (droppedOnWidget != null) {
+                    // Puck was dropped on a widget - handle the action
+                    widgetRegistry.handleWidgetAction(droppedOnWidget)
                     // Snap to edge with simple animation
                     val snappedPosition = puckState.position.snapToEdge(screenWidth, puckSize)
                     puckState =
                         puckState.copy(
                             position = snappedPosition,
                             isDragging = false,
-                            mode = OverlayMode.HIDDEN,
+                            mode = if (editModeState.isEditMode) OverlayMode.EDIT_MODE else OverlayMode.HIDDEN,
                             dragState = null,
                             hoveredButtonId = null,
                             initialTouchOffset =
@@ -1060,7 +1247,7 @@ fun MagicWandOverlay(
                             puckState.copy(
                                 position = targetPosition,
                                 isDragging = false,
-                                mode = OverlayMode.HIDDEN,
+                                mode = if (editModeState.isEditMode) OverlayMode.EDIT_MODE else OverlayMode.HIDDEN,
                                 dragState = dragState.copy(isActive = false),
                                 hoveredButtonId = null,
                                 initialTouchOffset =
@@ -1074,7 +1261,7 @@ fun MagicWandOverlay(
                             puckState.copy(
                                 position = snappedPosition,
                                 isDragging = false,
-                                mode = OverlayMode.HIDDEN,
+                                mode = if (editModeState.isEditMode) OverlayMode.EDIT_MODE else OverlayMode.HIDDEN,
                                 dragState = null,
                                 hoveredButtonId = null,
                                 initialTouchOffset =
@@ -1087,198 +1274,524 @@ fun MagicWandOverlay(
     }
 }
 
-// Content overlay composable
+/**
+ * Semi-transparent overlay content shown when puck is activated.
+ * Contains widgets, edit mode controls, and debug information.
+ */
 @Composable
 fun ContentOverlay(
     mode: OverlayMode,
     puckPosition: PuckPosition,
-    buttonRegistry: ButtonRegistry,
-    dragState: DragState? = null,
-    animationConfig: AnimationConfig = AnimationConfig(),
-    hoveredButtonId: String? = null,
-    initialTouchOffset: androidx.compose.ui.geometry.Offset =
-        androidx.compose.ui.geometry.Offset.Zero,
-    onDismiss: () -> Unit
+    widgetRegistry: WidgetRegistry,
+    editModeState: EditModeState,
+    hoveredWidgetId: String? = null,
+    onDismiss: () -> Unit,
+    onEditModeToggle: () -> Unit,
+    onWidgetSelected: (String) -> Unit,
+    onWidgetDragStart: (String, PuckPosition) -> Unit,
+    onWidgetDragEnd: (String, PuckPosition, Boolean) -> Unit
 ) {
+    val context = LocalContext.current
+    val screenHeight = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp
+    val screenWidth = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp
+
+    // Initialize default widgets if registry is empty
+    LaunchedEffect(widgetRegistry.widgets.isEmpty()) {
+        if (widgetRegistry.widgets.isEmpty()) {
+            widgetRegistry.getDefaultWidgets(screenWidth).forEach { widget ->
+                widgetRegistry.registerWidget(widget)
+            }
+        }
+    }
+
     Surface(
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(Unit) {}, // Consume touch events
         color = Color.Black.copy(alpha = 0.7f)
     ) {
-        Column(modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp)) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                IconButton(onClick = onDismiss) {
-                    Icon(
-                        imageVector = Icons.Filled.Close,
-                        contentDescription = "Dismiss Overlay",
-                        tint = Color.White,
+        Box(modifier = Modifier.fillMaxSize()) {
+            // Main overlay content
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+            ) {
+
+                // Top bar with close and edit buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    // Edit button
+                    IconButton(
+                        onClick = onEditModeToggle,
+                        modifier = Modifier.background(
+                            color = if (editModeState.isEditMode)
+                                Color.Blue.copy(alpha = 0.3f) else Color.Transparent,
+                            shape = CircleShape
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Edit,
+                            contentDescription = if (editModeState.isEditMode) "Exit Edit Mode" else "Enter Edit Mode",
+                            tint = if (editModeState.isEditMode) Color.Cyan else Color.White,
+                        )
+                    }
+
+                    // Close button
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Dismiss Overlay",
+                            tint = Color.White,
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(50.dp))
+
+                // Title and mode indicator
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = if (editModeState.isEditMode) "Edit Mode" else "Magic Wand Overlay",
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = if (editModeState.isEditMode) Color.Cyan else Color.White
+                    )
+
+                    if (editModeState.isEditMode) {
+                        Text(
+                            text = "Drag widgets to move • Tap to select • Adjust size below",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color.White.copy(alpha = 0.8f)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                // Debug information (only when not in edit mode and in drag mode)
+                if (!editModeState.isEditMode && mode == OverlayMode.DRAG_MODE) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            "Drag puck to a widget or drop to dismiss",
+                            color = Color.White.copy(alpha = 0.8f),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+
+                        // Debug text (optimized)
+                        val puckXInt =
+                            remember(puckPosition.x) { puckPosition.x.value.roundToInt() }
+                        val puckYInt =
+                            remember(puckPosition.y) { puckPosition.y.value.roundToInt() }
+
+                        Text(
+                            "Puck: (${puckXInt}dp, ${puckYInt}dp)",
+                            color = Color.White.copy(alpha = 0.6f),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+
+                        hoveredWidgetId?.let { widgetId ->
+                            Text(
+                                "Hovering: $widgetId",
+                                color = Color.Yellow.copy(alpha = 0.8f),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                } else if (!editModeState.isEditMode && mode == OverlayMode.TAP_MODE) {
+                    Text(
+                        "Tap widgets or drag puck to them",
+                        color = Color.White.copy(alpha = 0.8f),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(50.dp))
-
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Text(
-                    text = "Magic Wand Overlay",
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = Color.White
-                )
-                Spacer(modifier = Modifier.height(32.dp))
-
-                // Action buttons
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(24.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val context = LocalContext.current
-                    ActionButton(
-                        id = "camera",
-                        label = "Camera",
-                        icon = "📷",
-                        color = Color.Green,
-                        buttonRegistry = buttonRegistry,
-                        isHovered = hoveredButtonId == "camera",
-                        onAction = {
-                            Toast.makeText(
-                                context,
-                                "Camera action triggered!",
-                                Toast.LENGTH_SHORT
+            // Render widgets
+            widgetRegistry.widgets.values.forEach { widget ->
+                when (widget) {
+                    is ActionButtonDesc -> {
+                        OverlayWidget(
+                            widget = widget,
+                            widgetRegistry = widgetRegistry,
+                            editModeState = editModeState,
+                            isHovered = hoveredWidgetId == widget.id,
+                            onWidgetSelected = onWidgetSelected,
+                            onWidgetDragStart = onWidgetDragStart,
+                            onWidgetDragEnd = onWidgetDragEnd,
+                            onWidgetAction = { widgetId ->
+                                if (!editModeState.isEditMode) {
+                                    widget.onAction()
+                                    Toast.makeText(
+                                        context,
+                                        "${widget.label} action triggered!",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                        ) { desc, isSelected, isHovered, modifier ->
+                            ActionButtonContent(
+                                actionButton = desc as ActionButtonDesc,
+                                isSelected = isSelected,
+                                isHovered = isHovered,
+                                modifier = modifier
                             )
-                                .show()
                         }
-                    )
-                    ActionButton(
-                        id = "notes",
-                        label = "Notes",
-                        icon = "📝",
-                        color = Color(0xFFFFA500),
-                        buttonRegistry = buttonRegistry,
-                        isHovered = hoveredButtonId == "notes",
-                        onAction = {
-                            Toast.makeText(
-                                context,
-                                "Notes action triggered!",
-                                Toast.LENGTH_SHORT
-                            )
-                                .show()
+                    }
+                }
+            }
+
+            // Widget adjustment controls (only in edit mode)
+            if (editModeState.isEditMode) {
+                val selectedWidget = editModeState.selectedWidgetId?.let { id ->
+                    widgetRegistry.widgets[id]
+                }
+
+                WidgetAdjustmentControls(
+                    selectedWidget = selectedWidget,
+                    widgetRegistry = widgetRegistry,
+                    screenHeight = screenHeight
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Generic overlay widget that handles dragging, selection, and collision detection.
+ *
+ * Features:
+ * - Drag and drop with collision detection in edit mode
+ * - Selection highlighting and controls
+ * - Hover animations for puck interactions
+ * - Automatic position updates to WidgetRegistry
+ */
+@Composable
+fun OverlayWidget(
+    widget: WidgetDesc,
+    widgetRegistry: WidgetRegistry,
+    editModeState: EditModeState,
+    isHovered: Boolean = false,
+    onWidgetSelected: (String) -> Unit = {},
+    onWidgetDragStart: (String, PuckPosition) -> Unit = { _, _ -> },
+    onWidgetDragEnd: (String, PuckPosition, Boolean) -> Unit = { _, _, _ -> },
+    onWidgetAction: (String) -> Unit = {},
+    modifier: Modifier = Modifier,
+    content: @Composable (WidgetDesc, Boolean, Boolean, Modifier) -> Unit
+) {
+    val density = LocalDensity.current
+    var isDragging by remember { mutableStateOf(false) }
+    var dragStartPosition by remember { mutableStateOf<PuckPosition?>(null) }
+    var currentPosition by remember { mutableStateOf(widget.position) }
+
+    val isSelected = editModeState.selectedWidgetId == widget.id
+    val radiusPx = with(density) { (widget.size / 2).toPx() }
+
+    // Update current position when widget position changes in registry
+    LaunchedEffect(widget.position) {
+        if (!isDragging) {
+            currentPosition = widget.position
+        }
+    }
+
+    // Hover and selection animations
+    val animatedScale by animateFloatAsState(
+        targetValue = when {
+            isDragging -> 1.2f
+            isHovered -> 1.1f
+            isSelected -> 1.05f
+            else -> 1f
+        },
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessHigh
+        ),
+        label = "widgetScale"
+    )
+
+    val animatedGlow by animateFloatAsState(
+        targetValue = when {
+            isDragging -> 1f
+            isHovered -> 0.8f
+            isSelected -> 0.6f
+            else -> 0f
+        },
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioLowBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "widgetGlow"
+    )
+
+    // Clean up when widget is removed from composition
+    DisposableEffect(widget.id) {
+        onDispose {
+            // Widget cleanup if needed
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .offset {
+                IntOffset(
+                    with(density) { currentPosition.x.toPx().roundToInt() },
+                    with(density) { currentPosition.y.toPx().roundToInt() }
+                )
+            }
+            .size(widget.size)
+            .graphicsLayer {
+                scaleX = animatedScale
+                scaleY = animatedScale
+            }
+            .onGloballyPositioned { coordinates ->
+                // Register collision data for this widget
+                val centerX = coordinates.positionInWindow().x + coordinates.size.width / 2f
+                val centerY = coordinates.positionInWindow().y + coordinates.size.height / 2f
+                val center = androidx.compose.ui.geometry.Offset(centerX, centerY)
+                widgetRegistry.registerCollisionData(widget.id, center, radiusPx)
+            }
+            .pointerInput(widget.id, editModeState.isEditMode) {
+                if (editModeState.isEditMode) {
+                    // Edit mode: handle dragging
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            isDragging = true
+                            dragStartPosition = currentPosition
+                            onWidgetDragStart(widget.id, currentPosition)
+                        },
+                        onDrag = { _, dragAmount ->
+                            if (isDragging) {
+                                val newX =
+                                    (currentPosition.x.value + dragAmount.x / density.density).coerceIn(
+                                        0f, 1000f // Use a reasonable max value
+                                    )
+                                val newY =
+                                    (currentPosition.y.value + dragAmount.y / density.density).coerceIn(
+                                        0f, 2000f // Use a reasonable max value
+                                    )
+                                currentPosition = PuckPosition(newX.dp, newY.dp)
+                            }
+                        },
+                        onDragEnd = {
+                            if (isDragging) {
+                                isDragging = false
+
+                                // Check for collision using current position
+                                val centerX =
+                                    currentPosition.x.value * density.density + widget.size.value * density.density / 2
+                                val centerY =
+                                    currentPosition.y.value * density.density + widget.size.value * density.density / 2
+                                val center = androidx.compose.ui.geometry.Offset(centerX, centerY)
+
+                                val hasCollision = widgetRegistry.checkCollision(
+                                    widget.id, center, radiusPx
+                                ) != null
+
+                                if (hasCollision) {
+                                    // Revert to start position
+                                    currentPosition = dragStartPosition ?: widget.position
+                                } else {
+                                    // Update registry with new position
+                                    widgetRegistry.updateWidgetPosition(widget.id, currentPosition)
+                                }
+
+                                onWidgetDragEnd(widget.id, currentPosition, hasCollision)
+                                dragStartPosition = null
+                            }
                         }
                     )
                 }
+            }
+            .clickable(enabled = !isDragging) {
+                if (editModeState.isEditMode) {
+                    onWidgetSelected(widget.id)
+                } else {
+                    onWidgetAction(widget.id)
+                }
+            }
+    ) {
+        // Selection border
+        if (isSelected) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .border(
+                        width = 3.dp,
+                        color = Color.Cyan,
+                        shape = CircleShape
+                    )
+            )
+        }
 
-                Spacer(modifier = Modifier.height(32.dp))
+        // Hover glow effect - only show border, not shadow
+        if (animatedGlow > 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .border(
+                        width = (2 * animatedGlow).dp,
+                        color = Color.White.copy(alpha = animatedGlow * 0.5f),
+                        shape = CircleShape
+                    )
+            )
+        }
 
-                if (true) {
-                    when (mode) {
-                        OverlayMode.TAP_MODE -> {
-                            Text(
-                                "Tap buttons or drag puck to them",
-                                color = Color.White.copy(alpha = 0.8f),
-                                style = MaterialTheme.typography.bodyMedium
-                            )
+        // Widget content
+        content(widget, isSelected, isHovered, Modifier.fillMaxSize())
+    }
+}
+
+/**
+ * Action button content for OverlayWidget.
+ */
+@Composable
+fun ActionButtonContent(
+    actionButton: ActionButtonDesc,
+    isSelected: Boolean,
+    isHovered: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Button(
+        onClick = { /* Handled by OverlayWidget */ },
+        modifier = modifier.clip(CircleShape),
+        shape = CircleShape,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = actionButton.color,
+            contentColor = Color.White
+        ),
+        elevation = ButtonDefaults.buttonElevation(0.dp, 0.dp, 0.dp, 0.dp, 0.dp)
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(text = actionButton.icon, style = MaterialTheme.typography.headlineSmall)
+            Text(
+                text = actionButton.label,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+/**
+ * Adjustment controls for editing widget properties in edit mode.
+ *
+ * Positions itself opposite to the selected widget to stay visible.
+ * Currently supports size adjustment with plans for more properties.
+ */
+@Composable
+fun WidgetAdjustmentControls(
+    selectedWidget: WidgetDesc?,
+    widgetRegistry: WidgetRegistry,
+    screenHeight: Dp,
+    modifier: Modifier = Modifier
+) {
+    if (selectedWidget == null) return
+
+    val density = LocalDensity.current
+
+    // Get the current widget from registry to ensure we have the latest size
+    val currentWidget = widgetRegistry.widgets[selectedWidget.id]
+    if (currentWidget == null) return
+
+    // Calculate position opposite to the selected widget
+    val controlsHeight = 80.dp
+    val controlsY = if (selectedWidget.position.y > screenHeight / 2) {
+        // Widget is in bottom half, show controls at top
+        32.dp
+    } else {
+        // Widget is in top half, show controls at bottom
+        screenHeight - controlsHeight - 32.dp
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(controlsHeight)
+            .offset(y = controlsY)
+            .padding(horizontal = 16.dp)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+            color = Color.Black.copy(alpha = 0.8f),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.3f))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Widget info
+                Column {
+                    Text(
+                        text = when (currentWidget) {
+                            is ActionButtonDesc -> currentWidget.label
+                            is PuckDesc -> "Puck"
+                            else -> "Widget"
+                        },
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = "Size: ${currentWidget.size.value.roundToInt()}dp",
+                        color = Color.White.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+
+                // Size adjustment controls
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Decrease size button
+                    IconButton(
+                        onClick = {
+                            val newSize = (currentWidget.size.value - 8f).coerceAtLeast(32f).dp
+                            widgetRegistry.updateWidgetSize(currentWidget.id, newSize)
                         }
+                    ) {
+                        Text(
+                            text = "−",
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                    }
 
-                        OverlayMode.DRAG_MODE -> {
-                            Text(
-                                "Drag puck to a button or drop to dismiss",
-                                color = Color.White.copy(alpha = 0.8f),
-                                style = MaterialTheme.typography.bodyMedium
-                            )
+                    // Size display
+                    Text(
+                        text = "${currentWidget.size.value.roundToInt()}",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(horizontal = 8.dp)
+                    )
 
-                            // Optimized debug text - cache expensive calculations and reduce string operations
-                            val puckXInt =
-                                remember(puckPosition.x) { puckPosition.x.value.roundToInt() }
-                            val puckYInt =
-                                remember(puckPosition.y) { puckPosition.y.value.roundToInt() }
-
-                            Text(
-                                "Puck: (${puckXInt}dp, ${puckYInt}dp)",
-                                color = Color.White.copy(alpha = 0.6f),
-                                style = MaterialTheme.typography.bodySmall
-                            )
-
-                            val density = LocalDensity.current
-                            val fingerX = remember(puckPosition.x, initialTouchOffset.x) {
-                                with(density) { puckPosition.x.toPx() } + initialTouchOffset.x
-                            }
-                            val fingerY = remember(puckPosition.y, initialTouchOffset.y) {
-                                with(density) { puckPosition.y.toPx() } + initialTouchOffset.y
-                            }
-                            val fingerDpX =
-                                remember(fingerX) { with(density) { fingerX.toDp().value.roundToInt() } }
-                            val fingerDpY =
-                                remember(fingerY) { with(density) { fingerY.toDp().value.roundToInt() } }
-
-                            Text(
-                                "Finger: (${fingerDpX}dp, ${fingerDpY}dp)",
-                                color = Color.Cyan.copy(alpha = 0.6f),
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                            Text(
-                                "Mode: $mode | Offset Applied: ${initialTouchOffset != androidx.compose.ui.geometry.Offset.Zero}",
-                                color = Color.Magenta.copy(alpha = 0.7f),
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                            dragState?.let { state ->
-                                val screenWidthDp =
-                                    androidx.compose.ui.platform.LocalConfiguration.current
-                                        .screenWidthDp
-                                        .dp
-                                val startCloserToLeft = state.startPosition.x < screenWidthDp / 2
-                                val currentCloserToLeft =
-                                    state.currentPosition.x < screenWidthDp / 2
-                                val strategy =
-                                    if (startCloserToLeft == currentCloserToLeft) "Parabolic"
-                                    else "Direct"
-
-                                // Cache expensive calculations
-                                val dragDistanceInt =
-                                    remember(state.dragDistance) { state.dragDistance.roundToInt() }
-                                val vectorSize =
-                                    remember(state.weightedCalculator.dragVectors) { state.weightedCalculator.dragVectors.size }
-
-                                Text(
-                                    "Distance: ${dragDistanceInt}px | Events: $vectorSize",
-                                    color = Color.White.copy(alpha = 0.5f),
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                                Text(
-                                    "Strategy: $strategy | Edge: ${if (startCloserToLeft) "L" else "R"} → ${if (currentCloserToLeft) "L" else "R"}",
-                                    color = Color.White.copy(alpha = 0.5f),
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-
-                            val buttonCount =
-                                remember(buttonRegistry.buttons) { buttonRegistry.buttons.size }
-                            val speedFactorStr = remember(animationConfig.speedFactor) {
-                                "${(animationConfig.speedFactor * 10).roundToInt() / 10f}x"
-                            }
-
-                            Text(
-                                "Buttons: $buttonCount | Anim: ${if (animationConfig.isEnabled) "ON" else "OFF"} | Speed: $speedFactorStr",
-                                color = Color.White.copy(alpha = 0.5f),
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                            hoveredButtonId?.let { buttonId ->
-                                Text(
-                                    "Hovering: $buttonId",
-                                    color = Color.Yellow.copy(alpha = 0.8f),
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
+                    // Increase size button
+                    IconButton(
+                        onClick = {
+                            val newSize = (currentWidget.size.value + 8f).coerceAtMost(120f).dp
+                            widgetRegistry.updateWidgetSize(currentWidget.id, newSize)
                         }
-
-                        OverlayMode.HIDDEN -> {
-                            /* Should not happen */
-                        }
+                    ) {
+                        Text(
+                            text = "+",
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleLarge
+                        )
                     }
                 }
             }
@@ -1286,108 +1799,17 @@ fun ContentOverlay(
     }
 }
 
-// Action button component
-@Composable
-fun ActionButton(
-    id: String,
-    label: String,
-    icon: String,
-    color: androidx.compose.ui.graphics.Color,
-    buttonRegistry: ButtonRegistry,
-    isHovered: Boolean = false,
-    onAction: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val density = LocalDensity.current
-    val buttonSize = 80.dp
-    val buttonRadiusPx = with(density) { (buttonSize / 2).toPx() }
-
-    // Hover animations
-    val animatedScale by
-    animateFloatAsState(
-        targetValue = if (isHovered) 1.1f else 1f,
-        animationSpec =
-            spring(
-                dampingRatio = Spring.DampingRatioMediumBouncy,
-                stiffness = Spring.StiffnessHigh
-            ),
-        label = "buttonScale"
-    )
-
-    val animatedGlow by
-    animateFloatAsState(
-        targetValue = if (isHovered) 1f else 0f,
-        animationSpec =
-            spring(
-                dampingRatio = Spring.DampingRatioLowBouncy,
-                stiffness = Spring.StiffnessMedium
-            ),
-        label = "buttonGlow"
-    )
-
-    // Clean up when button is removed from composition
-    DisposableEffect(id) { onDispose { buttonRegistry.unregisterButton(id) } }
-
-    Button(
-        onClick = onAction,
-        modifier =
-            modifier
-                .size(buttonSize)
-                .graphicsLayer {
-                    scaleX = animatedScale
-                    scaleY = animatedScale
-                }
-                .shadow(
-                    elevation = (8 + animatedGlow * 12).dp,
-                    shape = CircleShape,
-                    ambientColor = color.copy(alpha = animatedGlow * 0.6f),
-                    spotColor = color.copy(alpha = animatedGlow * 0.8f)
-                )
-                .border(
-                    width = (2 * animatedGlow).dp,
-                    color = Color.White.copy(alpha = animatedGlow * 0.7f),
-                    shape = CircleShape
-                )
-                .onGloballyPositioned { coordinates ->
-                    // Calculate center position in window coordinates
-                    val centerX =
-                        coordinates.positionInWindow().x +
-                                coordinates.size.width / 2f
-                    val centerY =
-                        coordinates.positionInWindow().y +
-                                coordinates.size.height / 2f
-                    val center = androidx.compose.ui.geometry.Offset(centerX, centerY)
-
-                    // Register button with collision detection system
-                    buttonRegistry.registerButton(
-                        id = id,
-                        center = center,
-                        radius = buttonRadiusPx,
-                        onAction = onAction
-                    )
-                },
-        shape = CircleShape,
-        colors =
-            ButtonDefaults.buttonColors(containerColor = color, contentColor = Color.White),
-        elevation =
-            ButtonDefaults.buttonElevation(
-                defaultElevation = 0.dp, // Let shadow handle elevation
-                pressedElevation = 0.dp
-            )
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Text(text = icon, style = MaterialTheme.typography.headlineSmall)
-            Text(text = label, style = MaterialTheme.typography.labelSmall, maxLines = 1)
-        }
-    }
-}
-
-// Optimized floating puck composable
+/**
+ * The floating draggable puck with sophisticated touch handling.
+ *
+ * Key features:
+ * - Distinguishes between taps and drags to prevent accidental triggers
+ * - Provides initial touch offset for natural drag feel
+ * - Optimized animations with cached calculations
+ */
 @Composable
 fun MagicPuck(
+    editModeState: EditModeState = EditModeState(),
     modifier: Modifier = Modifier,
     size: Dp = 64.dp,
     isDragging: Boolean = false,

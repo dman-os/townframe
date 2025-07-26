@@ -9,3 +9,9 @@ plugins {
     alias(libs.plugins.kotlinMultiplatform) apply false
     alias(libs.plugins.kotlinAndroid) apply false
 }
+tasks.register("printJavaHome") {
+    doLast {
+        println("java.home = " + System.getProperty("java.home"))
+        println("java.version = " + System.getProperty("java.version"))
+    }
+}

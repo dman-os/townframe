@@ -43,23 +43,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-    fun requestDrawOverlayPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (!Settings.canDrawOverlays(this)) {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    "package:$packageName".toUri()
-                )
-                drawOverlayPermissionLauncher.launch(intent)
-            } else {
-                // Permission already granted
-                // startOverlayService()
-            }
-        } else {
-            // Pre-Marshmallow, permission is granted by default if declared in manifest
-            // startOverlayService()
-        }
-    }
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -82,11 +65,13 @@ fun AppAndroidPreview() {
 fun AndroidApp() {
     val context = LocalContext.current;
 
-    val notificationPermissionState = rememberMultiplePermissionsState(listOf(
-        Permission.Notification,
-        Permission.Camera,
-        Permission.RecordAudio,
-    ))
+    val notificationPermissionState = rememberMultiplePermissionsState(
+        listOf(
+            Permission.Notification,
+            Permission.Camera,
+            Permission.RecordAudio,
+        )
+    )
 
     var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
 
@@ -127,7 +112,8 @@ fun AndroidApp() {
                         // Pre-M, permission is granted if declared, though this case is rare now
                         // and Settings.canDrawOverlays should already be true if manifest perm is there.
                         // However, for safety, you might re-check or assume it's okay if declared.
-                        hasOverlayPermission = Settings.canDrawOverlays(context) // Re-check for safety
+                        hasOverlayPermission =
+                            Settings.canDrawOverlays(context) // Re-check for safety
                         if (!hasOverlayPermission) {
                             throw Exception("impossible");
                         }

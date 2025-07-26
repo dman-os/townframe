@@ -1,6 +1,7 @@
 export { sophon } from "@ghjk/ts";
 import { file } from "@ghjk/ts";
 import { sedLock } from "@ghjk/ts/std.ts";
+import jdk_temurin from "./tools/jdk_temurin.port.ts"
 import * as ports from "@ghjk/ports_wip";
 
 import * as std_url from "jsr:@std/url@0.215.0";
@@ -54,8 +55,9 @@ ghjk.env("dev")
     ports.cargobi({ crateName: "leptosfmt", locked: true }),
     ports.cargobi({ crateName: "trunk", locked: true }),
     ports.pipi({ packageName: "uv" })[0],
-    ports.pipi({ packageName: "aider-chat" })[0],
+    // ports.pipi({ packageName: "aider-chat" })[0],
     ports.npmi({ packageName: "eas-cli" })[0],
+    jdk_temurin({ version: "21.0.8\\+9.0.LTS" })
   )
   .vars({
     KANIDM_URL: "https://localhost:8443",
@@ -288,3 +290,21 @@ ghjk.task("lock-sed", async ($) =>
     ],
   }),
 );
+
+ghjk.task(
+  "build-dayb",
+  ($) => $`./gradlew assembleDebug && 
+    adb install -r composeApp/build/outputs/apk/debug/composeApp-debug.apk
+  `,
+  { workingDir: "./src/daybook_compose/" }
+)
+
+ghjk.task(
+  "run-dayb",
+  ($) => $`adb shell am start -n org.example.daybook/.MainActivity`,
+  { workingDir: "./src/daybook_compose/" }
+)
+
+ghjk.task("dev-dayb", { dependsOn: ["build-dayb", "run-dayb"]})
+
+ghjk.task("scrcpy", ($) => $`scrcpy --no-audio -S`)

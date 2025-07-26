@@ -71,3 +71,12 @@ fn test() -> Res<()> {
             eyre::Ok(())
         })
 }
+
+struct Db {
+    records: Vec<Docs>,
+}
+
+struct Docs {
+    id: String,
+    ts: time::OffsetDateTime,
+}

@@ -421,6 +421,31 @@
           "crateName": "cargo-nextest",
           "locked": true,
           "specifiedVersion": false
+        },
+        "bciqkboillzkkhhrd3bpsg7qnz65pcw3xclcieyp3sw3oemz2wrfr3ha": {
+          "version": "21.0.8+9.0.LTS",
+          "buildDepConfigs": {
+            "tar_aa": {
+              "version": "1.35",
+              "buildDepConfigs": {},
+              "portRef": "tar_aa@0.1.0",
+              "specifiedVersion": false
+            },
+            "unzip_aa": {
+              "version": "6.00",
+              "buildDepConfigs": {},
+              "portRef": "unzip_aa@0.1.0",
+              "specifiedVersion": false
+            }
+          },
+          "portRef": "jdk_temurin@0.1.0",
+          "specifiedVersion": true
+        },
+        "bciqdpwbl2jn4h443iu6uyo2ynzu7vr7nbdixrn3duylgfskpkmgytoq": {
+          "version": "6.00",
+          "buildDepConfigs": {},
+          "portRef": "unzip_aa@0.1.0",
+          "specifiedVersion": false
         }
       }
     },
@@ -454,8 +479,8 @@
                 "bciqnwlmwonvlcat7bt56wroyxp3eu3pwirehifhgmw33qs4s7olrp3i",
                 "bciqnicswg7oyf24niwjanqfk2qxnrsig57sgi54lbc6zadheezoe36i",
                 "bciqpxh456cihbdftrvkc6nhmy7vr626uto222l23xfelsmrqu6tthxi",
-                "bciqggoumalzhhdsvejnggkwfcxkkn7qnqw4m2vlquemweupggxes6vq",
                 "bciqecpiecc37wde2vjbjs2bmslambstmb3mmr5ylpwe53gwpvfxf6ry",
+                "bciqcwar2qg4avxzuw6x232qcl65bhlo5kkiaq5tlr6nlhtumyjb5rpy",
                 "bciqkdwgrq6tq6r6h7yhcelblda2ur4kttwobce4guf57ebnf5p576iq",
                 "bciqctjanvj2ggnt2mj75ka2a3pibxjnpydxqmdzclx624o26g35vxmy",
                 "bciqffkko3tgrgpoefq6n5y7524nlsmqlcf5wjsdsxou5lwwpve6tkfi",
@@ -472,6 +497,32 @@
         "id": "tasks",
         "config": {
           "tasks": {
+            "scrcpy": {
+              "ty": "denoFile@v1",
+              "key": "scrcpy",
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
+            "run-dayb": {
+              "ty": "denoFile@v1",
+              "key": "run-dayb",
+              "workingDir": "./src/daybook_compose/",
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
+            "build-dayb": {
+              "ty": "denoFile@v1",
+              "key": "build-dayb",
+              "workingDir": "./src/daybook_compose/",
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
+            "dev-dayb": {
+              "ty": "denoFile@v1",
+              "key": "dev-dayb",
+              "dependsOn": [
+                "build-dayb",
+                "run-dayb"
+              ],
+              "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
+            },
             "lock-sed": {
               "ty": "denoFile@v1",
               "key": "lock-sed",
@@ -587,6 +638,10 @@
             }
           },
           "tasksNamed": [
+            "scrcpy",
+            "run-dayb",
+            "build-dayb",
+            "dev-dayb",
             "lock-sed",
             "test",
             "db-mig-btress",
@@ -1391,40 +1446,6 @@
         },
         "packageName": "uv"
       },
-      "bciqggoumalzhhdsvejnggkwfcxkkn7qnqw4m2vlquemweupggxes6vq": {
-        "port": {
-          "ty": "denoWorker@v1",
-          "name": "pipi_pypi",
-          "platforms": [
-            "x86_64-linux",
-            "aarch64-linux",
-            "x86_64-darwin",
-            "aarch64-darwin",
-            "x86_64-windows",
-            "aarch64-windows",
-            "x86_64-freebsd",
-            "aarch64-freebsd",
-            "x86_64-netbsd",
-            "aarch64-netbsd",
-            "x86_64-aix",
-            "aarch64-aix",
-            "x86_64-solaris",
-            "aarch64-solaris",
-            "x86_64-illumos",
-            "aarch64-illumos",
-            "x86_64-android",
-            "aarch64-android"
-          ],
-          "version": "0.1.0",
-          "buildDeps": [
-            {
-              "name": "cpy_bs_ghrel"
-            }
-          ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/pipi.ts"
-        },
-        "packageName": "aider-chat"
-      },
       "bciqecpiecc37wde2vjbjs2bmslambstmb3mmr5ylpwe53gwpvfxf6ry": {
         "port": {
           "ty": "denoWorker@v1",
@@ -1458,6 +1479,31 @@
           "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/npmi.ts"
         },
         "packageName": "eas-cli"
+      },
+      "bciqcwar2qg4avxzuw6x232qcl65bhlo5kkiaq5tlr6nlhtumyjb5rpy": {
+        "version": "21.0.8\\+9.0.LTS",
+        "port": {
+          "ty": "denoWorker@v1",
+          "name": "jdk_temurin",
+          "platforms": [
+            "aarch64-linux",
+            "x86_64-linux",
+            "aarch64-darwin",
+            "x86_64-darwin",
+            "aarch64-windows",
+            "x86_64-windows"
+          ],
+          "version": "0.1.0",
+          "buildDeps": [
+            {
+              "name": "tar_aa"
+            },
+            {
+              "name": "unzip_aa"
+            }
+          ],
+          "moduleSpecifier": "file:///home/asdf/repos/rust/townframe/tools/jdk_temurin.port.ts"
+        }
       }
     }
   }
