@@ -51,6 +51,8 @@ fun App(
         ) {
             Button(onClick = {
                 showContent = !showContent
+                // uniffi.daybook_core.uniffiEnsureInitialized()
+                uniffi.daybook_core.init()
                 extraAction?.invoke()
             }) {
                 Text("Click me!")

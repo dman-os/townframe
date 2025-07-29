@@ -7,7 +7,7 @@ import * as ports from "@ghjk/ports_wip";
 import * as std_url from "jsr:@std/url@0.215.0";
 
 const DOCKER_CMD = Deno.env.get("DOCKER_CMD") ?? "podman";
-const RUST_VERSION = "1.84.1";
+const RUST_VERSION = "1.85.0";
 const GHJK_VERSION = "v0.3.1-rc.2"
 
 const installs = {
@@ -249,9 +249,10 @@ ghjk.task(
 )
 
 ghjk.task(
-  "test",
+  "test-rust",
   ($) => $`cargo nextest run -p btress_api`,
   { 
+    desc: "Run rust tests",
     vars: {
       // required so that `.env.test` is loaded
       DOTENV_ENV: "test"
@@ -293,10 +294,11 @@ ghjk.task("lock-sed", async ($) =>
 
 ghjk.task(
   "build-dayb",
-  ($) => $`./gradlew assembleDebug && 
-    adb install -r composeApp/build/outputs/apk/debug/composeApp-debug.apk
-  `,
-  { workingDir: "./src/daybook_compose/" }
+  ($) => $`./gradlew assembleDebug && ./gradlew installDebug`,
+  { 
+    desc: "Build and install daybook_compose"
+    workingDir: "./src/daybook_compose/",
+  }
 )
 
 ghjk.task(
@@ -307,4 +309,23 @@ ghjk.task(
 
 ghjk.task("dev-dayb", { dependsOn: ["build-dayb", "run-dayb"]})
 
-ghjk.task("scrcpy", ($) => $`scrcpy --no-audio -S`)
+ghjk.task(
+  "scrcpy", 
+  ($) => $`scrcpy --no-audio -S`,
+  { desc: "Start scrcpy to mirror an adb accessible android phone" }
+)
+
+ghjk.task(
+  "gen-ffi-dayb", 
+  ($) => $`cargo build -p dabyook_core
+    && cargo run 
+      -p daybook_core 
+      generate --library ./target/debug/libdaybook_core.so 
+      --language kotlin 
+      --out-dir ./src/daybook_compose/composeApp/src/commonMain/kotlin/org/example/daybook/
+      --no-format
+  `,
+  {
+    desc: "Generate uniffi kotlin bindings for the dabyook_core crate"
+  }
+)

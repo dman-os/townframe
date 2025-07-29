@@ -80,3 +80,15 @@ struct Docs {
     id: String,
     ts: time::OffsetDateTime,
 }
+
+uniffi::setup_scaffolding!();
+
+mod ffi {
+    use crate::interlude::*;
+
+    #[uniffi::export]
+    fn init() {
+        utils_rs::setup_tracing().unwrap();
+        info!("we're online");
+    }
+}

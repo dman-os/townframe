@@ -70,6 +70,8 @@ kotlin {
             implementation(compose.ui)
             implementation(compose.components.resources)
             implementation(compose.components.uiToolingPreview)
+            implementation(libs.kotlinx.coroutinesCore)
+            implementation(libs.jna)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
