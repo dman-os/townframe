@@ -37,6 +37,15 @@ pub fn default<T: Default>() -> T {
 pub type DHashMap<K, V> = dashmap::DashMap<K, V, ahash::random_state::RandomState>;
 pub use cheapstr::CHeapStr;
 
+// Ensure that the `tracing` stack is only initialised once using `once_cell`
+// isn't required in cargo-nextest since each test runs in a new process
+pub fn setup_tracing_once() {
+    static TRACING: LazyLock<()> = LazyLock::new(|| {
+        setup_tracing().unwrap();
+    });
+    LazyLock::force(&TRACING);
+}
+
 pub fn setup_tracing() -> eyre::Result<()> {
     color_eyre::install()?;
     if std::env::var("RUST_LOG").is_err() {

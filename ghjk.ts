@@ -60,6 +60,11 @@ ghjk.env("dev")
     jdk_temurin({ version: "21.0.8\\+9.0.LTS" })
   )
   .vars({
+    // java tooling is not great with wayland scaling
+    // so we force it
+    // FIXME: this only seems to load on hot reload
+    // also, it doesn't support fractions
+    GDK_SCALE: 2,
     KANIDM_URL: "https://localhost:8443",
     KANIDM_SKIP_HOSTNAME_VERIFICATION: "true",
     KANIDM_ACCEPT_INVALID_CERTS: "true",
@@ -293,21 +298,25 @@ ghjk.task("lock-sed", async ($) =>
 );
 
 ghjk.task(
-  "build-dayb",
+  "build-a-dayb",
   ($) => $`./gradlew assembleDebug && ./gradlew installDebug`,
   { 
-    desc: "Build and install daybook_compose"
+    desc: "Build and install daybook_compose",
     workingDir: "./src/daybook_compose/",
   }
 )
 
 ghjk.task(
-  "run-dayb",
+  "run-a-dayb",
   ($) => $`adb shell am start -n org.example.daybook/.MainActivity`,
   { workingDir: "./src/daybook_compose/" }
 )
 
-ghjk.task("dev-dayb", { dependsOn: ["build-dayb", "run-dayb"]})
+ghjk.task(
+  "run-d-dayb",
+  ($) => $`./gradlew run`,
+  { workingDir: "./src/daybook_compose/" }
+)
 
 ghjk.task(
   "scrcpy", 
@@ -317,7 +326,7 @@ ghjk.task(
 
 ghjk.task(
   "gen-ffi-dayb", 
-  ($) => $`cargo build -p dabyook_core
+  ($) => $`cargo build -p daybook_core
     && cargo run 
       -p daybook_core 
       generate --library ./target/debug/libdaybook_core.so 

@@ -10,7 +10,7 @@
   - [ ] Text input
   - [ ] Audio recordings
 - Magic wand
-  - [ ] Always use parabolic snap to edge
+  - [ ] Follow bubble behavior from android
   - [ ] Status bar/Gesture bar insets for puck and widgets
   - [ ] Puck drop required to be on center bug
 

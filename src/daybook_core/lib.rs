@@ -88,7 +88,7 @@ mod ffi {
 
     #[uniffi::export]
     fn init() {
-        utils_rs::setup_tracing().unwrap();
+        utils_rs::setup_tracing_once();
         info!("we're online");
     }
 }

@@ -21,15 +21,6 @@ pub fn setup_tracing() -> eyre::Result<()> {
     Ok(())
 }
 
-// Ensure that the `tracing` stack is only initialised once using `once_cell`
-// isn't required in cargo-nextest since each test runs in a new process
-pub fn setup_tracing_once() {
-    static TRACING: LazyLock<()> = LazyLock::new(|| {
-        setup_tracing().unwrap();
-    });
-    LazyLock::force(&TRACING);
-}
-
 pub fn load_envs_once() {
     static LOADER: LazyLock<()> = LazyLock::new(|| {
         crate::dotenv_hierarchical().unwrap();

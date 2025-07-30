@@ -10,6 +10,7 @@ androidx-core = "1.16.0"
 androidx-espresso = "3.6.1"
 androidx-lifecycle = "2.9.1"
 androidx-testExt = "1.2.1"
+androidx-navigation = "2.9.0-beta04"
 calfPermissions = "0.8.0"
 composeHotReload = "1.0.0-alpha11"
 composeMultiplatform = "1.8.2"
@@ -31,11 +32,12 @@ androidx-espresso-core = { module = "androidx.test.espresso:espresso-core", vers
 androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "androidx-appcompat" }
 androidx-constraintlayout = { module = "androidx.constraintlayout:constraintlayout", version.ref = "androidx-constraintlayout" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activity" }
-androidx-lifecycle-viewmodel = { module = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel", version.ref = "androidx-lifecycle" }
-androidx-lifecycle-runtimeCompose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose", version.ref = "androidx-lifecycle" }
+androidx-lifecycle-service = { group = "org.jetbrains.androidx.lifecycle", name = "lifecycle-service", version.ref = "lifecycleService" }
+androidx-lifecycle-viewmodel = { group = "org.jetbrains.androidx.lifecycle", name = "lifecycle-viewmodel", version.ref = "androidx-lifecycle" }
+androidx-lifecycle-runtimeCompose = { group = "org.jetbrains.androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "androidx-lifecycle" }
+androidx-navigation-compose = { group = "org.jetbrains.androidx.navigation", name = "navigation-compose", version.ref = "androidx-navigation" }
 kotlinx-coroutinesSwing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
 kotlinx-coroutinesCore = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
-androidx-lifecycle-service = { group = "androidx.lifecycle", name = "lifecycle-service", version.ref = "lifecycleService" }
 skikoLinuxX64 = { module = "org.jetbrains.skiko:skiko-awt-runtime-linux-x64", version.ref = "skiko" }
 jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
 

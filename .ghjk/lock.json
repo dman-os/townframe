@@ -560,25 +560,23 @@
               "desc": "Start scrcpy to mirror an adb accessible android phone",
               "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
             },
-            "run-dayb": {
+            "run-d-dayb": {
               "ty": "denoFile@v1",
-              "key": "run-dayb",
+              "key": "run-d-dayb",
               "workingDir": "./src/daybook_compose/",
               "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
             },
-            "build-dayb": {
+            "run-a-dayb": {
               "ty": "denoFile@v1",
-              "key": "build-dayb",
+              "key": "run-a-dayb",
               "workingDir": "./src/daybook_compose/",
               "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
             },
-            "dev-dayb": {
+            "build-a-dayb": {
               "ty": "denoFile@v1",
-              "key": "dev-dayb",
-              "dependsOn": [
-                "build-dayb",
-                "run-dayb"
-              ],
+              "key": "build-a-dayb",
+              "workingDir": "./src/daybook_compose/",
+              "desc": "Build and install daybook_compose",
               "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
             },
             "lock-sed": {
@@ -586,9 +584,10 @@
               "key": "lock-sed",
               "envKey": "bciqcf6z66ufhivqry6eu2in2vyjbvhv52n6w6zdrxx2ft7hrx5fuoia"
             },
-            "test": {
+            "test-rust": {
               "ty": "denoFile@v1",
-              "key": "test",
+              "key": "test-rust",
+              "desc": "Run rust tests",
               "envKey": "bciqjufuefe4b2vudscd352ae7zhev72iqtury5ridqwyqi6z6ehp2ea"
             },
             "db-mig-btress": {
@@ -698,11 +697,11 @@
           "tasksNamed": [
             "gen-ffi-dayb",
             "scrcpy",
-            "run-dayb",
-            "build-dayb",
-            "dev-dayb",
+            "run-d-dayb",
+            "run-a-dayb",
+            "build-a-dayb",
             "lock-sed",
-            "test",
+            "test-rust",
             "db-mig-btress",
             "db-seed-btress",
             "db-seed",
@@ -812,12 +811,17 @@
                 }
               ]
             },
-            "bciqi2xz7n6wj64liyvv5tf6twfuxpwfyeq76hkcydi7vv537n7t67pi": {
+            "bciqnex2ipkk3ux54siq7tvalclpqficegyxqbxe4etl7bdvshghcfwq": {
               "provides": [
                 {
                   "ty": "posix.envVar",
                   "key": "CARGO_BUILD_JOBS",
                   "val": "8"
+                },
+                {
+                  "ty": "posix.envVar",
+                  "key": "GDK_SCALE",
+                  "val": "2"
                 },
                 {
                   "ty": "posix.envVar",
@@ -844,7 +848,7 @@
           "defaultEnv": "dev",
           "envsNamed": {
             "main": "bciqafmctvqhitkjxmtw5sdl2rg2byf6hiavwzvcthq2yjhal65n2m3y",
-            "dev": "bciqi2xz7n6wj64liyvv5tf6twfuxpwfyeq76hkcydi7vv537n7t67pi"
+            "dev": "bciqnex2ipkk3ux54siq7tvalclpqficegyxqbxe4etl7bdvshghcfwq"
           }
         }
       }
