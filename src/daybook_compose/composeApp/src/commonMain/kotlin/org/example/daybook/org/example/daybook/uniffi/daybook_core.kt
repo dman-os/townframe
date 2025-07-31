@@ -3,7 +3,7 @@
 
 @file:Suppress("NAME_SHADOWING")
 
-package uniffi.daybook_core
+package org.example.daybook.uniffi
 
 // Common helper code.
 //

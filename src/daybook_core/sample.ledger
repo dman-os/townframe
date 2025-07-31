@@ -8,5 +8,3 @@ alias taxi=expenses:transport:taxi
 alias food=expenses:personal:food
 alias p=expenses:people 
 alias i=income
-
-

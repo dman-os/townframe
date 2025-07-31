@@ -42,4 +42,3 @@ tracing-unwrap.workspace = true
 tracing-appender.workspace = true
 tracing-error.workspace = true
 color-eyre.workspace = true
-
