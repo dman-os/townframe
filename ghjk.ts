@@ -1,28 +1,28 @@
 export { sophon } from "@ghjk/ts";
 import { file } from "@ghjk/ts";
 import { sedLock } from "@ghjk/ts/std.ts";
-import jdk_temurin from "./tools/jdk_temurin.port.ts"
+import jdk_temurin from "./tools/jdk_temurin.port.ts";
 import * as ports from "@ghjk/ports_wip";
 
 import * as std_url from "jsr:@std/url@0.215.0";
 
 const DOCKER_CMD = Deno.env.get("DOCKER_CMD") ?? "podman";
 const RUST_VERSION = "1.85.0";
-const GHJK_VERSION = "v0.3.1-rc.2"
+const GHJK_VERSION = "v0.3.1-rc.2";
 
 const installs = {
-  rust: ports.rust({ 
-    version: RUST_VERSION, 
+  rust: ports.rust({
+    version: RUST_VERSION,
     profile: "default",
     components: ["rust-src"],
-    targets: ["wasm32-unknown-unknown"] 
+    targets: ["wasm32-unknown-unknown"],
   }),
   py: ports.cpy_bs({
     version: "3.12.9",
-    releaseTag: "20250212"
+    releaseTag: "20250212",
   }),
   node: ports.node({ version: "22.14.0" }),
-}
+};
 
 // This export is necessary for typescript ghjkfiles
 const ghjk = file({
@@ -31,8 +31,8 @@ const ghjk = file({
   enableRuntimes: true,
   allowedBuildDeps: [
     installs.node,
-    installs.rust, 
-    installs.py
+    installs.rust,
+    installs.py,
   ],
 });
 
@@ -57,7 +57,7 @@ ghjk.env("dev")
     ports.pipi({ packageName: "uv" })[0],
     // ports.pipi({ packageName: "aider-chat" })[0],
     ports.npmi({ packageName: "eas-cli" })[0],
-    jdk_temurin({ version: "21.0.8\\+9.0.LTS" })
+    jdk_temurin({ version: "21.0.8\\+9.0.LTS" }),
   )
   .vars({
     // java tooling is not great with wayland scaling
@@ -80,12 +80,12 @@ ghjk.env("dev")
     //     .filter((line) => line.length > 0)
     //     .map((line) => line.split("=").map((str) => str.trim())),
     // )
-  })
+  });
 
 ghjk.task(
-  "greet", 
+  "greet",
   ($) => $`bash -c 'env'`,
-)
+);
 
 ghjk.task(
   "flyway",
@@ -121,83 +121,83 @@ ghjk.task(
 
 ghjk.task(
   "kanidmd",
-  ($) =>
-    $`${DOCKER_CMD} compose --profile auth exec kanidmd kanidmd ${$.argv}`,
+  ($) => $`${DOCKER_CMD} compose --profile auth exec kanidmd kanidmd ${$.argv}`,
   {
     workingDir: "./tools",
   },
 );
 
 ghjk.task(
-  "kanidm-recover", 
+  "kanidm-recover",
   async ($) => {
-    const out = await $`ghjk x kanidmd recover-account idm_admin -o json`.text();
+    const out = await $`ghjk x kanidmd recover-account idm_admin -o json`
+      .text();
     const pass = out.match(/"password":"([^"]*)"/)![1]!;
-    console.log({pass})
+    console.log({ pass });
     {
       const path = $.workingDir.join(".env");
       let envRaw = await path.readText();
-      const prefix = 'KANIDM_ADMIN_PASSWORD=';
+      const prefix = "KANIDM_ADMIN_PASSWORD=";
       let lineAdded = false;
       await path.writeText(
-          [
-            ...envRaw.split('\n')
-              .slice(0, -1)
-              // .filter(line => line.length)
-              .map(line => {
-                if (line.startsWith(prefix)) {
-                  lineAdded = true;
-                  return prefix+pass;
-                } else {
-                  return line;
-                }
-              }),
-            lineAdded ? '' : prefix+pass
-          ]
-          .join('\n')
-      )
+        [
+          ...envRaw.split("\n")
+            .slice(0, -1)
+            // .filter(line => line.length)
+            .map((line) => {
+              if (line.startsWith(prefix)) {
+                lineAdded = true;
+                return prefix + pass;
+              } else {
+                return line;
+              }
+            }),
+          lineAdded ? "" : prefix + pass,
+        ]
+          .join("\n"),
+      );
     }
     // await $`kanidm login -D idm_admin`
   },
-)
+);
 
 ghjk.task(
-  "kanidm-login", 
+  "kanidm-login",
   async ($) => {
-    await $`kanidm login -D idm_admin`
+    await $`kanidm login -D idm_admin`;
   },
-  { dependsOn: ["kanidm-recover"] }
-)
+  { dependsOn: ["kanidm-recover"] },
+);
 
 ghjk.task(
-  "kanidm-seed", 
+  "kanidm-seed",
   async ($) => {
-    await $`cargo x seed-kanidm`
+    await $`cargo x seed-kanidm`;
   },
-  { dependsOn: ["kanidm-login"] }
-)
-
+  { dependsOn: ["kanidm-login"] },
+);
 
 ghjk.task(
-  "dev-gran", 
+  "dev-gran",
   ($) => $`trunk serve`,
-  { 
-    workingDir: "./src/granary_web", 
+  {
+    workingDir: "./src/granary_web",
     vars: {
-      TRUNK_SERVE_PORT: 3000
-    } 
+      TRUNK_SERVE_PORT: 3000,
+    },
   },
-)
+);
 
 ghjk.task(
-  "compose-up", 
-  ($) => $.raw`${DOCKER_CMD} compose ${
-    $.argv
-      .map(prof => `--profile ${prof}`)
-      .join(' ')
-    } up -d`, 
-  { workingDir: "./tools" }
-)
+  "compose-up",
+  ($) =>
+    $.raw`${DOCKER_CMD} compose ${
+      $.argv
+        .map((prof) => `--profile ${prof}`)
+        .join(" ")
+    } up -d`,
+  { workingDir: "./tools" },
+);
 
 // const allProfiles = async ($) => (await $`${DOCKER_CMD} compose config --profiles`.text())
 //       .split('\n');
@@ -205,66 +205,69 @@ ghjk.task(
 const allProfiles = ($) => Promise.resolve(["auth", "db", "cli"]);
 
 ghjk.task(
-  "compose-down", 
-  async ($) => $.raw`${DOCKER_CMD} compose ${
-    ($.argv.length ? $.argv : await allProfiles($))
-      .map(prof => `--profile ${prof}`)
-      .join(' ')
-  } down -v`,
-  { workingDir: "./tools" }
-)
+  "compose-down",
+  async ($) =>
+    $.raw`${DOCKER_CMD} compose ${
+      ($.argv.length ? $.argv : await allProfiles($))
+        .map((prof) => `--profile ${prof}`)
+        .join(" ")
+    } down -v`,
+  { workingDir: "./tools" },
+);
 ghjk.task(
-  "compose-logs", 
-  async ($) => $.raw`${DOCKER_CMD} compose ${
-    (await allProfiles($))
-      .map(prof => `--profile ${prof}`)
-      .join(' ')
+  "compose-logs",
+  async ($) =>
+    $.raw`${DOCKER_CMD} compose ${
+      (await allProfiles($))
+        .map((prof) => `--profile ${prof}`)
+        .join(" ")
     } logs ${$.argv}`,
-  { workingDir: "./tools" }
-)
+  { workingDir: "./tools" },
+);
 
 ghjk.task(
   "db-mig",
-  { dependsOn: ["db-mig-btress"] }
-)
+  { dependsOn: ["db-mig-btress"] },
+);
 
 ghjk.task(
   "db-mig-btress",
-  ($) => $`ghjk x flyway migrate`.env({
-    DB_NAME: "btress",
-    MIG_DIR: $.workingDir.join("./src/btress_api/migrations").toString()
-  })
-)
+  ($) =>
+    $`ghjk x flyway migrate`.env({
+      DB_NAME: "btress",
+      MIG_DIR: $.workingDir.join("./src/btress_api/migrations").toString(),
+    }),
+);
 
 ghjk.task(
   "db-seed",
-  { dependsOn: ["db-seed-btress"] }
-)
+  { dependsOn: ["db-seed-btress"] },
+);
 
 ghjk.task(
   "db-seed-btress",
-  ($) => $`ghjk x psql-tty -d btress < ./src/btress_api/fixtures/000_test_data.sql`,
+  ($) =>
+    $`ghjk x psql-tty -d btress < ./src/btress_api/fixtures/000_test_data.sql`,
   {
     dependsOn: ["db-mig-btress"],
     vars: {
       DB_NAME: "btress",
-      MIG_DIR: "./src/btress_api/migrations"
-    }
-  }
-)
+      MIG_DIR: "./src/btress_api/migrations",
+    },
+  },
+);
 
 ghjk.task(
   "test-rust",
   ($) => $`cargo nextest run -p btress_api`,
-  { 
+  {
     desc: "Run rust tests",
     vars: {
       // required so that `.env.test` is loaded
-      DOTENV_ENV: "test"
-    }
-  }
-)
-
+      DOTENV_ENV: "test",
+    },
+  },
+);
 
 ghjk.task("lock-sed", async ($) =>
   sedLock($.workingDir, {
@@ -272,8 +275,8 @@ ghjk.task("lock-sed", async ($) =>
       "./.ghjk/deno.jsonc": [
         [
           /(https:\/\/raw.githubusercontent.com\/metatypedev\/ghjk\/)[^\/]+(\/.+)/,
-          GHJK_VERSION
-        ]
+          GHJK_VERSION,
+        ],
       ],
       // "./README.md": [
       //   [/(GHJK_VERSION=).*()/, GHJK_VERSION],
@@ -294,47 +297,64 @@ ghjk.task("lock-sed", async ($) =>
         .filter((line) => !/^#/.test(line))
         .map((l) => `.ghjk/${l}${l.endsWith("*") ? "" : "*"}`),
     ],
-  }),
-);
+  }));
 
 ghjk.task(
   "build-a-dayb",
   ($) => $`./gradlew assembleDebug && ./gradlew installDebug`,
-  { 
+  {
     desc: "Build and install daybook_compose",
     workingDir: "./src/daybook_compose/",
-  }
-)
+  },
+);
 
 ghjk.task(
   "run-a-dayb",
   ($) => $`adb shell am start -n org.example.daybook/.MainActivity`,
-  { workingDir: "./src/daybook_compose/" }
-)
+  { workingDir: "./src/daybook_compose/" },
+);
 
 ghjk.task(
   "run-d-dayb",
   ($) => $`./gradlew run`,
-  { workingDir: "./src/daybook_compose/" }
-)
+  { workingDir: "./src/daybook_compose/" },
+);
 
 ghjk.task(
-  "scrcpy", 
+  "scrcpy",
   ($) => $`scrcpy --no-audio -S`,
-  { desc: "Start scrcpy to mirror an adb accessible android phone" }
-)
+  { desc: "Start scrcpy to mirror an adb accessible android phone" },
+);
 
 ghjk.task(
-  "gen-ffi-dayb", 
-  ($) => $`cargo build -p daybook_core
-    && cargo run 
-      -p daybook_core 
-      generate --library ./target/debug/libdaybook_core.so 
-      --language kotlin 
-      --out-dir ./src/daybook_compose/composeApp/src/commonMain/kotlin/org/example/daybook/
-      --no-format
-  `,
+  "gen-ffi-dayb",
+  async ($) => {
+    await $`cargo build -p daybook_core 
+      && cargo run 
+        -p daybook_core 
+        generate --library ./target/debug/libdaybook_core.so 
+        --language kotlin 
+        --out-dir ./src/daybook_compose/composeApp/src/commonMain/kotlin/
+        --no-format`;
+    const genPath = $.path(
+      "./src/daybook_compose/composeApp/src/commonMain/kotlin/org/example/daybook/uniffi/daybook_core.kt",
+    );
+    await genPath.writeText(
+      (await genPath.readText())
+        .split("\n")
+        .map((line) =>
+          /@file/.test(line)
+            ? [
+              line, 
+              "@file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)", 
+            ]
+            : [line]
+        )
+        .flat()
+        .join("\n"),
+    );
+  },
   {
-    desc: "Generate uniffi kotlin bindings for the dabyook_core crate"
-  }
-)
+    desc: "Generate uniffi kotlin bindings for the dabyook_core crate",
+  },
+);

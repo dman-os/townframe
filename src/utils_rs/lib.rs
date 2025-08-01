@@ -34,6 +34,7 @@ pub fn default<T: Default>() -> T {
     T::default()
 }
 
+// pub use ahash::{AHashMap, AHashSet};
 pub type DHashMap<K, V> = dashmap::DashMap<K, V, ahash::random_state::RandomState>;
 pub use cheapstr::CHeapStr;
 

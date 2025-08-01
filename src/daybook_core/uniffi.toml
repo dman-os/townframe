@@ -10,3 +10,9 @@ imports = [ "kotlin.time.Instant" ]
 lift = "Instant.fromEpochSeconds({}, 0)"
 # Expression to convert the custom type to the builtin type.  In this example, `{}` will be replaced with the URL value.
 lower = "{}.epochSeconds"
+
+[bindings.kotlin.custom_types.Uuid]
+type_name = "Uuid"
+imports = [ "kotlin.uuid.Uuid" ]
+lift = "Uuid.fromByteArray({})"
+lower = "{}.toByteArray()"

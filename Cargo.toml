@@ -47,9 +47,10 @@ displaydoc = "0.2"
 educe = "0.6"
 
 # errors
-thiserror = "1.0"
+thiserror = "2"
 anyhow = "1"
 garde = { version = "0.22", features = ["derive", "regex", "url", "email"] }
+terrors = "0.3.3"
 
 # logging
 color-eyre = "0.6"
@@ -69,6 +70,9 @@ dotenv-flow = "0.16.2"
 
 http = "1"
 
+automerge = "0.6"
+autosurgeon = "0.8.7"
+automerge-test = "0.5"
 
 sqlx = { version = "0.8.3", features = [
   "postgres", 

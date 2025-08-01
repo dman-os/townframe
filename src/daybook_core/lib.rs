@@ -1,94 +1,50 @@
 mod interlude {
+    pub(crate) use crate::{Ctx, SharedCtx};
     pub use std::{
         path::{Path, PathBuf},
         rc::Rc,
-        sync::{Arc, LazyLock},
+        sync::{Arc, LazyLock, RwLock},
     };
     pub use utils_rs::prelude::*;
     pub use utils_rs::{CHeapStr, DHashMap};
 }
 
+use std::collections::HashMap;
+
 use interlude::*;
 
-struct Ledger {
-    aliases: DHashMap<CHeapStr, CHeapStr>,
-    txns: Vec<Txn>,
-}
+mod am;
+mod ffi;
 
-struct Posting {
-    account: CHeapStr,
-    currency: CHeapStr,
-    amount: rust_decimal::Decimal,
+#[derive(uniffi::Object)]
+struct Ctx {
+    rt: tokio::runtime::Runtime,
+    acx: am::AmWorker,
 }
+type SharedCtx = Arc<Ctx>;
 
-struct Txn {
-    ts: time::OffsetDateTime,
-    desc: Option<String>,
-    postings: Vec<Posting>,
-}
-
-// #[test]
-fn test() -> Res<()> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async {
-            let ledger = Ledger {
-                aliases: [
-                    ("a".into(), "assets".into()),
-                    ("cash".into(), "assets:cash".into()),
-                    ("b".into(), "assets:banking".into()),
-                    ("c".into(), "liabilities:credit".into()),
-                    ("l".into(), "liabilities".into()),
-                    ("e".into(), "expenses".into()),
-                    ("taxi".into(), "expenses:transport:taxi".into()),
-                    ("food".into(), "expenses:personal:food".into()),
-                    ("p".into(), "expenses:people".into()),
-                    ("i".into(), "income".into()),
-                ]
-                .into_iter()
-                .collect(),
-                txns: vec![Txn {
-                    ts: time::OffsetDateTime::now_utc(),
-                    desc: Some("First".into()),
-                    postings: [
-                        Posting {
-                            account: "food".into(),
-                            currency: "$".into(),
-                            amount: 12345.into(),
-                        },
-                        Posting {
-                            account: "cash".into(),
-                            currency: "$".into(),
-                            amount: (-12345).into(),
-                        },
-                    ]
-                    .into_iter()
-                    .collect(),
-                }],
-            };
-            //
-            eyre::Ok(())
-        })
-}
-
-struct Db {
-    records: Vec<Docs>,
-}
-
-struct Docs {
-    id: String,
-    ts: time::OffsetDateTime,
+impl Ctx {
+    fn new() -> Result<Arc<Self>, eyre::Report> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let acx = rt.block_on(async { am::am_worker() });
+        Ok(Arc::new(Self { rt, acx }))
+    }
 }
 
 uniffi::setup_scaffolding!();
 
-mod ffi {
-    use crate::interlude::*;
+#[derive(Debug, Clone, autosurgeon::Reconcile, autosurgeon::Hydrate, uniffi::Record)]
+struct Doc {
+    #[key]
+    id: Uuid,
+    #[autosurgeon(with = "am::autosurgeon_date")]
+    timestamp: OffsetDateTime,
+}
 
-    #[uniffi::export]
-    fn init() {
-        utils_rs::setup_tracing_once();
-        info!("we're online");
-    }
+#[derive(autosurgeon::Reconcile, autosurgeon::Hydrate)]
+struct Docs {
+    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
+    map: HashMap<Uuid, Doc>,
 }

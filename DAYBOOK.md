@@ -3,6 +3,7 @@
 ## TODO
 
 - Data model
+  - [ ] Document repository with tests
   - [ ] Automerge
 - Ingest
   - [ ] Screenshots
