@@ -755,17 +755,17 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 // when the library is loaded.
 internal interface IntegrityCheckingUniffiLib : Library {
     // Integrity check functions only
-    fun uniffi_daybook_core_checksum_method_docsrepo_get(
+    fun uniffi_daybook_core_checksum_method_docsrepo_ffi_get(
 ): Short
-fun uniffi_daybook_core_checksum_method_docsrepo_list(
+fun uniffi_daybook_core_checksum_method_docsrepo_ffi_list(
 ): Short
-fun uniffi_daybook_core_checksum_method_docsrepo_set(
+fun uniffi_daybook_core_checksum_method_docsrepo_ffi_set(
 ): Short
 fun uniffi_daybook_core_checksum_method_ffierror_message(
 ): Short
-fun uniffi_daybook_core_checksum_constructor_ctx_for_ffi(
+fun uniffi_daybook_core_checksum_constructor_docsrepo_for_ffi(
 ): Short
-fun uniffi_daybook_core_checksum_constructor_docsrepo_new(
+fun uniffi_daybook_core_checksum_constructor_ffictx_for_ffi(
 ): Short
 fun ffi_daybook_core_uniffi_contract_version(
 ): Int
@@ -816,23 +816,23 @@ internal interface UniffiLib : Library {
     }
 
     // FFI functions
-    fun uniffi_daybook_core_fn_clone_ctx(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-): Pointer
-fun uniffi_daybook_core_fn_free_ctx(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-fun uniffi_daybook_core_fn_constructor_ctx_for_ffi(uniffi_out_err: UniffiRustCallStatus, 
-): Pointer
-fun uniffi_daybook_core_fn_clone_docsrepo(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_daybook_core_fn_clone_docsrepo(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
 fun uniffi_daybook_core_fn_free_docsrepo(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-fun uniffi_daybook_core_fn_constructor_docsrepo_new(`ctx`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_core_fn_constructor_docsrepo_for_ffi(`fcx`: Pointer,
+): Long
+fun uniffi_daybook_core_fn_method_docsrepo_ffi_get(`ptr`: Pointer,`id`: RustBuffer.ByValue,
+): Long
+fun uniffi_daybook_core_fn_method_docsrepo_ffi_list(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_core_fn_method_docsrepo_ffi_set(`ptr`: Pointer,`id`: RustBuffer.ByValue,`doc`: RustBuffer.ByValue,
+): Long
+fun uniffi_daybook_core_fn_clone_ffictx(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
-fun uniffi_daybook_core_fn_method_docsrepo_get(`ptr`: Pointer,`id`: RustBuffer.ByValue,
-): Long
-fun uniffi_daybook_core_fn_method_docsrepo_list(`ptr`: Pointer,
-): Long
-fun uniffi_daybook_core_fn_method_docsrepo_set(`ptr`: Pointer,`doc`: RustBuffer.ByValue,
+fun uniffi_daybook_core_fn_free_ffictx(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_daybook_core_fn_constructor_ffictx_for_ffi(
 ): Long
 fun uniffi_daybook_core_fn_clone_ffierror(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
@@ -966,22 +966,22 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if (lib.uniffi_daybook_core_checksum_method_docsrepo_get() != 19786.toShort()) {
+    if (lib.uniffi_daybook_core_checksum_method_docsrepo_ffi_get() != 34126.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_docsrepo_list() != 840.toShort()) {
+    if (lib.uniffi_daybook_core_checksum_method_docsrepo_ffi_list() != 44089.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_docsrepo_set() != 1738.toShort()) {
+    if (lib.uniffi_daybook_core_checksum_method_docsrepo_ffi_set() != 32324.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_core_checksum_method_ffierror_message() != 31694.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_constructor_ctx_for_ffi() != 65165.toShort()) {
+    if (lib.uniffi_daybook_core_checksum_constructor_docsrepo_for_ffi() != 64404.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_constructor_docsrepo_new() != 42888.toShort()) {
+    if (lib.uniffi_daybook_core_checksum_constructor_ffictx_for_ffi() != 55263.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1365,12 +1365,18 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 //
 
 
-public interface CtxInterface {
+public interface DocsRepoInterface {
+    
+    suspend fun `ffiGet`(`id`: Uuid): Doc?
+    
+    suspend fun `ffiList`(): List<Doc>
+    
+    suspend fun `ffiSet`(`id`: Uuid, `doc`: Doc): Doc?
     
     companion object
 }
 
-open class Ctx: Disposable, AutoCloseable, CtxInterface
+open class DocsRepo: Disposable, AutoCloseable, DocsRepoInterface
 {
 
     constructor(pointer: Pointer) {
@@ -1440,7 +1446,7 @@ open class Ctx: Disposable, AutoCloseable, CtxInterface
         override fun run() {
             pointer?.let { ptr ->
                 uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_daybook_core_fn_free_ctx(ptr, status)
+                    UniffiLib.INSTANCE.uniffi_daybook_core_fn_free_docsrepo(ptr, status)
                 }
             }
         }
@@ -1448,8 +1454,71 @@ open class Ctx: Disposable, AutoCloseable, CtxInterface
 
     fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_ctx(pointer!!, status)
+            UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_docsrepo(pointer!!, status)
         }
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `ffiGet`(`id`: Uuid) : Doc? {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_docsrepo_ffi_get(
+                thisPtr,
+                FfiConverterTypeUuid.lower(`id`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeDoc.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `ffiList`() : List<Doc> {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_docsrepo_ffi_list(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeDoc.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `ffiSet`(`id`: Uuid, `doc`: Doc) : Doc? {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_docsrepo_ffi_set(
+                thisPtr,
+                FfiConverterTypeUuid.lower(`id`),FfiConverterTypeDoc.lower(`doc`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeDoc.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
     }
 
     
@@ -1457,15 +1526,20 @@ open class Ctx: Disposable, AutoCloseable, CtxInterface
     
     companion object {
         
-    @Throws(FfiException::class) fun `forFfi`(): Ctx {
-            return FfiConverterTypeCtx.lift(
-    uniffiRustCallWithError(FfiException) { _status ->
-    UniffiLib.INSTANCE.uniffi_daybook_core_fn_constructor_ctx_for_ffi(
-        _status)
-}
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `forFfi`(`fcx`: FfiCtx) : DocsRepo {
+        return uniffiRustCallAsync(
+        UniffiLib.INSTANCE.uniffi_daybook_core_fn_constructor_docsrepo_for_ffi(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_pointer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_pointer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_pointer(future) },
+        // lift function
+        { FfiConverterTypeDocsRepo.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
     )
     }
-    
 
         
     }
@@ -1475,25 +1549,25 @@ open class Ctx: Disposable, AutoCloseable, CtxInterface
 /**
  * @suppress
  */
-public object FfiConverterTypeCtx: FfiConverter<Ctx, Pointer> {
+public object FfiConverterTypeDocsRepo: FfiConverter<DocsRepo, Pointer> {
 
-    override fun lower(value: Ctx): Pointer {
+    override fun lower(value: DocsRepo): Pointer {
         return value.uniffiClonePointer()
     }
 
-    override fun lift(value: Pointer): Ctx {
-        return Ctx(value)
+    override fun lift(value: Pointer): DocsRepo {
+        return DocsRepo(value)
     }
 
-    override fun read(buf: ByteBuffer): Ctx {
+    override fun read(buf: ByteBuffer): DocsRepo {
         // The Rust code always writes pointers as 8 bytes, and will
         // fail to compile if they don't fit.
         return lift(Pointer(buf.getLong()))
     }
 
-    override fun allocationSize(value: Ctx) = 8UL
+    override fun allocationSize(value: DocsRepo) = 8UL
 
-    override fun write(value: Ctx, buf: ByteBuffer) {
+    override fun write(value: DocsRepo, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(Pointer.nativeValue(lower(value)))
@@ -1599,18 +1673,12 @@ public object FfiConverterTypeCtx: FfiConverter<Ctx, Pointer> {
 //
 
 
-public interface DocsRepoInterface {
-    
-    suspend fun `get`(`id`: Uuid): Doc?
-    
-    suspend fun `list`(): List<Doc>
-    
-    suspend fun `set`(`doc`: Doc)
+public interface FfiCtxInterface {
     
     companion object
 }
 
-open class DocsRepo: Disposable, AutoCloseable, DocsRepoInterface
+open class FfiCtx: Disposable, AutoCloseable, FfiCtxInterface
 {
 
     constructor(pointer: Pointer) {
@@ -1628,13 +1696,6 @@ open class DocsRepo: Disposable, AutoCloseable, DocsRepoInterface
         this.pointer = null
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
     }
-    constructor(`ctx`: Ctx) :
-        this(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_daybook_core_fn_constructor_docsrepo_new(
-        FfiConverterTypeCtx.lower(`ctx`),_status)
-}
-    )
 
     protected val pointer: Pointer?
     protected val cleanable: UniffiCleaner.Cleanable
@@ -1687,7 +1748,7 @@ open class DocsRepo: Disposable, AutoCloseable, DocsRepoInterface
         override fun run() {
             pointer?.let { ptr ->
                 uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_daybook_core_fn_free_docsrepo(ptr, status)
+                    UniffiLib.INSTANCE.uniffi_daybook_core_fn_free_ffictx(ptr, status)
                 }
             }
         }
@@ -1695,104 +1756,57 @@ open class DocsRepo: Disposable, AutoCloseable, DocsRepoInterface
 
     fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_docsrepo(pointer!!, status)
+            UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_ffictx(pointer!!, status)
         }
     }
 
     
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `get`(`id`: Uuid) : Doc? {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_docsrepo_get(
-                thisPtr,
-                FfiConverterTypeUuid.lower(`id`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterOptionalTypeDoc.lift(it) },
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
 
     
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `list`() : List<Doc> {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_docsrepo_list(
-                thisPtr,
-                
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterSequenceTypeDoc.lift(it) },
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `set`(`doc`: Doc) {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_docsrepo_set(
-                thisPtr,
-                FfiConverterTypeDoc.lower(`doc`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_void(future) },
-        // lift function
-        { Unit },
+    companion object {
         
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `forFfi`() : FfiCtx {
+        return uniffiRustCallAsync(
+        UniffiLib.INSTANCE.uniffi_daybook_core_fn_constructor_ffictx_for_ffi(),
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_pointer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_pointer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_pointer(future) },
+        // lift function
+        { FfiConverterTypeFfiCtx.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
     }
 
-    
-
-    
-    
-    companion object
+        
+    }
     
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDocsRepo: FfiConverter<DocsRepo, Pointer> {
+public object FfiConverterTypeFfiCtx: FfiConverter<FfiCtx, Pointer> {
 
-    override fun lower(value: DocsRepo): Pointer {
+    override fun lower(value: FfiCtx): Pointer {
         return value.uniffiClonePointer()
     }
 
-    override fun lift(value: Pointer): DocsRepo {
-        return DocsRepo(value)
+    override fun lift(value: Pointer): FfiCtx {
+        return FfiCtx(value)
     }
 
-    override fun read(buf: ByteBuffer): DocsRepo {
+    override fun read(buf: ByteBuffer): FfiCtx {
         // The Rust code always writes pointers as 8 bytes, and will
         // fail to compile if they don't fit.
         return lift(Pointer(buf.getLong()))
     }
 
-    override fun allocationSize(value: DocsRepo) = 8UL
+    override fun allocationSize(value: FfiCtx) = 8UL
 
-    override fun write(value: DocsRepo, buf: ByteBuffer) {
+    override fun write(value: FfiCtx, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(Pointer.nativeValue(lower(value)))

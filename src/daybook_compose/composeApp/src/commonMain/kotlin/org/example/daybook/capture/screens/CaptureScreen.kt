@@ -1,5 +1,8 @@
+@file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)
+
 package org.example.daybook.capture.screens
 
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -14,6 +17,9 @@ import org.example.daybook.LocalContainer
 import org.example.daybook.uniffi.Doc
 import org.example.daybook.uniffi.DocsRepo
 import org.example.daybook.uniffi.FfiException
+import org.example.daybook.uniffi.OffsetDateTime
+import org.example.daybook.uniffi.Uuid
+import kotlin.time.Clock
 
 enum class CaptureMode {
     Text,
@@ -42,14 +48,28 @@ class CaptureScreenViewModel(
         loadLatestDocs()
     }
 
+
+    private suspend fun refrshDocs() {
+        _docsList.value = DocsListState.Loading
+        try {
+            _docsList.value = DocsListState.Data(docsRepo.ffiList())
+        } catch (err: FfiException) {
+            _docsList.value = DocsListState.Error(err)
+        }
+    }
     fun loadLatestDocs() {
         viewModelScope.launch {
-            _docsList.value = DocsListState.Loading
-            try {
-                _docsList.value = DocsListState.Data(docsRepo.list())
-            } catch (err: FfiException) {
-                _docsList.value = DocsListState.Error(err)
-            }
+            refrshDocs()
+        }
+    }
+
+    fun addOne() {
+        viewModelScope.launch {
+            val id = Uuid.random()
+            docsRepo.ffiSet(
+                id, Doc(id, Clock.System.now())
+            )
+            refrshDocs()
         }
     }
 }
@@ -71,6 +91,13 @@ fun CaptureScreen() {
             Text("Loading...")
         }
         is DocsListState.Data -> {
+            Button(
+                onClick = {
+                    vm.addOne()
+                }
+            ) {
+                Text("Add")
+            }
             Text("${docsList.docs}")
         }
     }

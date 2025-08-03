@@ -19,6 +19,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,8 +37,8 @@ import daybook.composeapp.generated.resources.compose_multiplatform
 import org.example.daybook.capture.screens.CaptureScreen
 import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
-import org.example.daybook.uniffi.Ctx
 import org.example.daybook.uniffi.DocsRepo
+import org.example.daybook.uniffi.FfiCtx
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.ui.tooling.preview.Preview
 
@@ -57,18 +58,13 @@ data class PermissionsContext(
 }
 
 data class AppContainer(
-    val ffiCtx: Ctx,
+    val ffiCtx: FfiCtx,
     val docsRepo: DocsRepo
 )
 
 val LocalContainer = staticCompositionLocalOf<AppContainer> {
     error("no AppContainer provided")
 }
-
-val LocalFfiCtx = staticCompositionLocalOf<Ctx> {
-    error("no AppContainer provided")
-}
-
 
 data class AppConfig(
     val theme: ThemeConfig = ThemeConfig.Dark,
@@ -87,29 +83,36 @@ fun App(
     extraAction: (() -> Unit)? = null,
     navController: NavHostController = rememberNavController(),
 ) {
-    val ffiCtx = remember { Ctx.forFfi() }
-    val appContainer = remember {
-        org.example.daybook.uniffi.uniffiEnsureInitialized()
-        AppContainer(
-            ffiCtx = ffiCtx,
-            docsRepo = DocsRepo(ctx = ffiCtx)
+    var appContainerState by remember { mutableStateOf<AppContainer?>(null) }
+    LaunchedEffect(true) {
+        val fcx = FfiCtx.forFfi()
+        val docsRepo = DocsRepo.forFfi(fcx = fcx)
+        appContainerState = AppContainer(
+            ffiCtx = fcx,
+            docsRepo = docsRepo
         )
     }
+    val appContainer = appContainerState;
+    if (appContainer == null) {
+        Text("Loading...")
+        return
+    } else {
 
-    CompositionLocalProvider(
-        LocalFfiCtx provides ffiCtx,
-        LocalContainer provides appContainer,
-    ) {
-        DaybookTheme(themeConfig = config.theme) {
-            AppScaffold(modifier = surfaceModifier, navController = navController) { innerPadding ->
-                Routes(
-                    modifier = Modifier.padding(innerPadding),
-                    extraAction = extraAction,
-                    navController = navController
-                )
+        CompositionLocalProvider(
+            LocalContainer provides appContainer,
+        ) {
+            DaybookTheme(themeConfig = config.theme) {
+                AppScaffold(modifier = surfaceModifier, navController = navController) { innerPadding ->
+                    Routes(
+                        modifier = Modifier.padding(innerPadding),
+                        extraAction = extraAction,
+                        navController = navController
+                    )
+                }
             }
         }
     }
+
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

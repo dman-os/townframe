@@ -5,6 +5,7 @@ pub mod prelude {
 
     pub use dotenv_flow;
     pub use educe;
+    pub use eyre::OptionExt as EyreOptExt;
     pub use regex;
     pub use tokio;
     pub use tracing::{self, debug, error, info, trace, warn};
