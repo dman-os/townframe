@@ -1151,6 +1151,7 @@ dependencies = [
  "autosurgeon",
  "color-eyre",
  "once_cell",
+ "parking_lot",
  "rust_decimal",
  "serde",
  "serde_json",

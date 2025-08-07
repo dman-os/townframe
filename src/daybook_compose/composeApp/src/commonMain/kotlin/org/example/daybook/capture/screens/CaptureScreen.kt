@@ -9,7 +9,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.lifecycle.viewmodel.viewModelFactory
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -17,8 +17,10 @@ import org.example.daybook.LocalContainer
 import org.example.daybook.uniffi.Doc
 import org.example.daybook.uniffi.DocsRepo
 import org.example.daybook.uniffi.FfiException
-import org.example.daybook.uniffi.OffsetDateTime
 import org.example.daybook.uniffi.Uuid
+import org.example.daybook.uniffi.DocsEvent
+import org.example.daybook.uniffi.DocsListener
+import org.example.daybook.uniffi.ListenerRegistration
 import kotlin.time.Clock
 
 enum class CaptureMode {
@@ -44,12 +46,34 @@ class CaptureScreenViewModel(
     private val _docsList = MutableStateFlow(DocsListState.Loading as DocsListState)
     val docsList = _docsList.asStateFlow()
 
-    init {
-        loadLatestDocs()
+    // Registration handle to auto-unregister
+    private var listenerRegistration: ListenerRegistration? = null
+
+    // Listener instance implemented on Kotlin side
+    private val listener = object : DocsListener {
+        override fun onDocsEvent(event: DocsEvent) {
+            // Ensure UI updates happen on main thread
+            viewModelScope.launch {
+                when (event) {
+                    DocsEvent.LIST_CHANGED -> {
+                        // Refresh from source of truth in Rust
+                        refreshDocs()
+                    }
+                }
+            }
+        }
     }
 
+    init {
+        // initial load
+        loadLatestDocs()
+        // register listener
+        viewModelScope.launch {
+            listenerRegistration = docsRepo.ffiRegisterListener(listener)
+        }
+    }
 
-    private suspend fun refrshDocs() {
+    private suspend fun refreshDocs() {
         _docsList.value = DocsListState.Loading
         try {
             _docsList.value = DocsListState.Data(docsRepo.ffiList())
@@ -57,9 +81,10 @@ class CaptureScreenViewModel(
             _docsList.value = DocsListState.Error(err)
         }
     }
+
     fun loadLatestDocs() {
         viewModelScope.launch {
-            refrshDocs()
+            refreshDocs()
         }
     }
 
@@ -69,8 +94,13 @@ class CaptureScreenViewModel(
             docsRepo.ffiSet(
                 id, Doc(id, Clock.System.now())
             )
-            refrshDocs()
         }
+    }
+
+    override fun onCleared() {
+        // Clean up registration
+        listenerRegistration?.unregister()
+        super.onCleared()
     }
 }
 

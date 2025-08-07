@@ -58,6 +58,7 @@ impl FfiCtx {
 impl FfiCtx {
     #[uniffi::constructor]
     async fn for_ffi() -> Result<Arc<FfiCtx>, FfiError> {
+        utils_rs::setup_tracing_once();
         let rt = crate::init_tokio()?;
         let rt = Arc::new(rt);
         let cx = do_on_rt(&rt, async { Ctx::new().await })
