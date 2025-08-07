@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [lib]
+crate-type = ["cdylib"]
 path = "lib.rs"
 
 [dependencies]
@@ -24,8 +25,12 @@ garde.workspace = true
 thiserror.workspace = true
 displaydoc.workspace = true
 
-kanidm_client.workspace = true
-kanidm_proto.workspace = true
-
-sqlx.workspace = true
 argon2 = "0.5.3"
+wit-bindgen = "0.43.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+sqlx.workspace = true
+# sqlx.workspace = true
+# kanidm_client.workspace = true
+# kanidm_proto.workspace = true
+

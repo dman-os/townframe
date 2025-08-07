@@ -1,5 +1,97 @@
 use crate::interlude::*;
 
+use api_utils_rs::gen::*;
+
+fn input(reg: &TypeReg) -> InputType {
+    InputType::builder()
+        .desc("Create user request")
+        .with_fields([
+            (
+                "username",
+                InputField::builder()
+                    .inner(RecordField::builder(reg.string()).build())
+                    .with_validations([
+                        FieldValidations::Ascii,
+                        FieldValidations::MinLength(3),
+                        FieldValidations::MaxLength(25),
+                        FieldValidations::Pattern("USERNAME_REGEX".into()),
+                    ])
+                    .build(),
+            ),
+            (
+                "email",
+                InputField::builder()
+                    .inner(RecordField::email(reg).optional(reg).build())
+                    .with_validation(FieldValidations::Email)
+                    .build(),
+            ),
+            (
+                "password",
+                InputField::builder()
+                    .inner(
+                        RecordField::builder(reg.string())
+                            .example("hunter2")
+                            .build(),
+                    )
+                    .with_validations([
+                        FieldValidations::MinLength(8),
+                        FieldValidations::MaxLength(1024),
+                    ])
+                    .build(),
+            ),
+        ])
+        .build()
+}
+
+fn error(reg: &TypeReg) -> ErrorType {
+    ErrorType::builder("UserCreateError")
+        .with_variants([
+            (
+                "usernameOccupied",
+                ErrorVariant::builder()
+                    .http_code(StatusCode::BAD_REQUEST)
+                    .message("Username occupied")
+                    .message_with_fields(": {username}")
+                    .with_field(
+                        "username",
+                        ErrorField::builder()
+                            .inner(RecordField::builder(reg.string()).build())
+                            .build(),
+                    )
+                    .build(),
+            ),
+            (
+                "emailOccupied",
+                ErrorVariant::builder()
+                    .http_code(StatusCode::BAD_REQUEST)
+                    .message("Email occupied")
+                    .with_field(
+                        "email",
+                        ErrorField::builder()
+                            .inner(RecordField::email(reg).optional(reg).build())
+                            .build(),
+                    )
+                    .build(),
+            ),
+            ("invalidInput", ErrorVariant::invalid_input(reg)),
+            ("internal", ErrorVariant::internal(reg)),
+        ])
+        .build()
+}
+
+pub fn epoint_type(reg: &TypeReg, user_schema: TypeId) -> EndpointType {
+    let output = OutputType::Ref(user_schema);
+
+    EndpointType::builder("UserCreate")
+        .path("/users")
+        .method(Method::Post)
+        .success(StatusCode::CREATED)
+        .input(input(reg))
+        .output(output)
+        .error(error(reg))
+        .build()
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateUser;
 
@@ -73,37 +165,38 @@ impl Endpoint for CreateUser {
         let StdDb::Pg { db_pool } = &cx.db else {
             panic!("unsupported db");
         };
-        let out = sqlx::query_as!(
-            super::User,
-            r#"
-SELECT 
-    id as "id!"
-    ,created_at as "created_at!"
-    ,updated_at as "updated_at!"
-    ,email::TEXT as "email?"
-    ,username::TEXT as "username!"
-FROM auth.create_user($1, $2, $3)
-        "#,
-            &request.username,
-            request.email.as_ref(),
-            pass_hash.as_ref()
-        )
-        .fetch_one(db_pool)
-        .await
-        .map_err(|err| match &err {
-            sqlx::Error::Database(boxed) if boxed.constraint().is_some() => {
-                match boxed.constraint().unwrap() {
-                    "users_username_key" => Error::UsernameOccupied {
-                        username: request.username,
-                    },
-                    "users_email_key" => Error::EmailOccupied {
-                        email: request.email.unwrap(),
-                    },
-                    _ => internal_err!("db error: {err}"),
-                }
-            }
-            _ => internal_err!("db error: {err}"),
-        })?;
+        let out: Self::Response = todo!();
+        //         let out = sqlx::query_as!(
+        //             super::User,
+        //             r#"
+        // SELECT
+        //     id as "id!"
+        //     ,created_at as "created_at!"
+        //     ,updated_at as "updated_at!"
+        //     ,email::TEXT as "email?"
+        //     ,username::TEXT as "username!"
+        // FROM auth.create_user($1, $2, $3)
+        //         "#,
+        //             &request.username,
+        //             request.email.as_ref(),
+        //             pass_hash.as_ref()
+        //         )
+        //         .fetch_one(db_pool)
+        //         .await
+        //         .map_err(|err| match &err {
+        //             sqlx::Error::Database(boxed) if boxed.constraint().is_some() => {
+        //                 match boxed.constraint().unwrap() {
+        //                     "users_username_key" => Error::UsernameOccupied {
+        //                         username: request.username,
+        //                     },
+        //                     "users_email_key" => Error::EmailOccupied {
+        //                         email: request.email.unwrap(),
+        //                     },
+        //                     _ => internal_err!("db error: {err}"),
+        //                 }
+        //             }
+        //             _ => internal_err!("db error: {err}"),
+        //         })?;
         Ok(out.into())
     }
 }

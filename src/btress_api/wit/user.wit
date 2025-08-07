@@ -1,0 +1,79 @@
+package townframe:btress-api;
+
+interface user-create {
+
+    /// Username occupied
+    /// http error code: BAD_REQUEST
+    record error-username-occupied {
+        username: string,
+    }
+
+    /// Email occupied
+    /// http error code: BAD_REQUEST
+    record error-email-occupied {
+        /// example: alice@example.com
+        email: option<string>,
+    }
+
+    /// Invalid input
+    /// http error code: BAD_REQUEST
+    record error-invalid-input {
+        issues: string,
+    }
+
+    /// Internal server error
+    /// http error code: INTERNAL_SERVER_ERROR
+    record error-internal {
+        message: string,
+    }
+
+    variant error {
+        username-occupied(error-username-occupied),
+        email-occupied(error-email-occupied),
+        invalid-input(error-invalid-input),
+        internal(error-internal),
+    }
+
+    type input = string;
+    type output = string;
+    call: func(inp: input) -> result<output, error>;
+}
+
+interface user-update {
+
+    /// Username occupied
+    /// http error code: BAD_REQUEST
+    record error-username-occupied {
+        username: string,
+    }
+
+    /// Email occupied
+    /// http error code: BAD_REQUEST
+    record error-email-occupied {
+        /// example: alice@example.com
+        email: option<string>,
+    }
+
+    /// Invalid input
+    /// http error code: BAD_REQUEST
+    record error-invalid-input {
+        issues: string,
+    }
+
+    /// Internal server error
+    /// http error code: INTERNAL_SERVER_ERROR
+    record error-internal {
+        message: string,
+    }
+
+    variant error {
+        username-occupied(error-username-occupied),
+        email-occupied(error-email-occupied),
+        invalid-input(error-invalid-input),
+        internal(error-internal),
+    }
+
+    type input = string;
+    type output = string;
+    call: func(inp: input) -> result<output, error>;
+}

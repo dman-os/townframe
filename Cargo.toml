@@ -9,6 +9,7 @@ members = [
   "./src/xtask",
   "./src/macros",
   "./src/daybook_core",
+  "./src/hello",
 ]
 
 [workspace.package]
@@ -20,15 +21,17 @@ edition = "2021"
 leptos_oidc = { path = "./src/leptos_oidc" }
 utils_rs = { path = "./src/utils_rs" }
 api_utils_rs = { path = "./src/api_utils_rs" }
+btress_api = { path = "./src/btress_api" }
 macros = { path = "./src/macros" }
 
 # futures
 async-trait = "0.1"
 futures = "0.3"
-tokio = "1"
+tokio = { version = "1", default-features = false }
 
 # ds
-time = { version = "0.3", default-features = false }
+ahash = "0.8"
+time = { version = "0.3", default-features = false, features = ["serde"] }
 once_cell = "1"
 parking_lot = "0.12"
 

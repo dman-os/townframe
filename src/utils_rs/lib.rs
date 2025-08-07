@@ -23,6 +23,7 @@ mod interlude {
 
     pub use async_trait::async_trait;
     pub use color_eyre::eyre::{self as eyre, format_err as ferr, Result as Res, WrapErr};
+    pub use indexmap::{indexmap, IndexMap};
     pub use serde::{Deserialize, Serialize};
     pub use time::{self, OffsetDateTime};
     pub use uuid::{self, Uuid};
@@ -119,7 +120,7 @@ mod cheapstr {
 
     impl Hash for CHeapStr {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            self.string.hash(state);
+            state.write_u64(self.hash);
         }
     }
 

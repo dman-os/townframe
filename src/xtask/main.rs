@@ -4,20 +4,16 @@ mod interlude {
     pub use std::path::{Path, PathBuf};
     pub use std::sync::Arc;
 
-    pub use color_eyre::eyre;
-    pub use eyre::{format_err as ferr, Context, Result as Res, WrapErr};
-    pub use tracing::{debug, error, info, trace, warn};
-    pub use tracing_unwrap::*;
+    pub use utils_rs::prelude::*;
 }
+
 use clap::builder::styling::AnsiColor;
 
 use crate::interlude::*;
 
-mod utils;
-
 fn main() -> Res<()> {
     dotenv_flow::dotenv_flow().ok();
-    utils::setup_tracing()?;
+    utils_rs::setup_tracing()?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

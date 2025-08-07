@@ -33,22 +33,22 @@ pub mod testing {
         // epigram_cx: epigram_api::SharedContext,
         testing: &TestContext,
     ) -> Res<crate::SharedContext> {
-        let kanidm = kanidm_client::KanidmClientBuilder::new()
-            .address("https://localhost:8443".into())
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-            .map_err(|err| ferr!("{err:?}"))?;
-        {
-            let pass = std::env::var("KANIDM_TFRAME_ADMIN_PASS").expect(
-                "env KANIDM_TFRAME_ADMIN_PASS required, make sure to run ghjk x kanidm-recover",
-            );
-            kanidm
-                .auth_simple_password("tframe_admin", &pass)
-                .await
-                .map_err(|err| ferr!("{err:?}"))
-                .wrap_err("error authenticating kanidm")?;
-        }
+        // let kanidm = kanidm_client::KanidmClientBuilder::new()
+        //     .address("https://localhost:8443".into())
+        //     .danger_accept_invalid_certs(true)
+        //     .danger_accept_invalid_hostnames(true)
+        //     .build()
+        //     .map_err(|err| ferr!("{err:?}"))?;
+        // {
+        //     let pass = std::env::var("KANIDM_TFRAME_ADMIN_PASS").expect(
+        //         "env KANIDM_TFRAME_ADMIN_PASS required, make sure to run ghjk x kanidm-recover",
+        //     );
+        //     kanidm
+        //         .auth_simple_password("tframe_admin", &pass)
+        //         .await
+        //         .map_err(|err| ferr!("{err:?}"))
+        //         .wrap_err("error authenticating kanidm")?;
+        // }
         let ctx = crate::Context {
             db: api::StdDb::Pg {
                 db_pool: testing.pg_pools["btress"].pool.clone(),
@@ -59,7 +59,7 @@ pub mod testing {
                 )),
             },
             argon2: Arc::new(argon2::Argon2::default()),
-            kanidm,
+            // kanidm,
         };
         Ok(Arc::new(ctx))
     }

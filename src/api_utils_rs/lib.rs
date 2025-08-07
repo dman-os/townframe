@@ -3,6 +3,7 @@ pub mod codecs;
 pub mod macros;
 pub mod testing;
 pub mod validation_errs;
+pub mod gen;
 
 pub mod prelude {
     pub use utils_rs::prelude::*;

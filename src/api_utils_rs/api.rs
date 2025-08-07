@@ -25,6 +25,7 @@ pub struct RedisPool(
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum StdDb {
+    #[cfg(not(target_arch = "wasm32"))]
     Pg { db_pool: sqlx::postgres::PgPool },
 }
 

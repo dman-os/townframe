@@ -2,6 +2,7 @@ export { sophon } from "@ghjk/ts";
 import { file } from "@ghjk/ts";
 import { sedLock } from "@ghjk/ts/std.ts";
 import jdk_temurin from "./tools/jdk_temurin.port.ts";
+import rust from "./tools/rust.port.ts";
 import * as ports from "@ghjk/ports_wip";
 
 import * as std_url from "jsr:@std/url@0.215.0";
@@ -11,11 +12,11 @@ const RUST_VERSION = "1.85.0";
 const GHJK_VERSION = "v0.3.1-rc.2";
 
 const installs = {
-  rust: ports.rust({
+  rust: rust({
     version: RUST_VERSION,
     profile: "default",
     components: ["rust-src"],
-    targets: ["wasm32-unknown-unknown"],
+    targets: ["wasm32-unknown-unknown", "wasm32-wasip2"],
   }),
   py: ports.cpy_bs({
     version: "3.12.9",
@@ -51,11 +52,17 @@ ghjk.env("main")
 
 ghjk.env("dev")
   .install(
+    ports.cargobi({ crateName: "wash", locked: true }),
+    // ports.cargobi({ crateName: "spin-cli", locked: true }),
+    ports.cargobi({ crateName: "wit-deps-cli", locked: true }),
+    ports.cargobi({ crateName: "wasm-opt", locked: true }),
+    ports.cargobi({ crateName: "wasm-tools", locked: true }),
     ports.cargobi({ crateName: "cargo-leptos", locked: true }),
     ports.cargobi({ crateName: "leptosfmt", locked: true }),
     ports.cargobi({ crateName: "trunk", locked: true }),
     ports.pipi({ packageName: "uv" })[0],
     // ports.pipi({ packageName: "aider-chat" })[0],
+    // expo router
     ports.npmi({ packageName: "eas-cli" })[0],
     jdk_temurin({ version: "21.0.8\\+9.0.LTS" }),
   )

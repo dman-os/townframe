@@ -1,10 +1,8 @@
 use crate::interlude::*;
-mod create;
 
-pub const TAG: api::Tag = api::Tag {
-    name: "user",
-    desc: "User mgmt.",
-};
+use api_utils_rs::gen::*;
+
+mod create;
 
 pub static USERNAME_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z0-9]+([_-]?[a-zA-Z0-9])*$").unwrap());
@@ -46,6 +44,29 @@ pub fn operations(
     )]
     .into_iter()
     .fold(builder, |builder, (path, item)| builder.path(path, item))
+}
+
+pub fn feature(reg: &TypeReg) -> Feature {
+    let schema_user = reg.add_type(Type::Record(
+        Record::builder()
+            .name("User")
+            .with_fields([
+                ("id", RecordField::uuid(&reg).build()),
+                ("created_at", RecordField::date_time(&reg).build()),
+                ("updated_at", RecordField::date_time(&reg).build()),
+                ("email", RecordField::email(&reg).optional(&reg).build()),
+                ("username", RecordField::builder(reg.string()).build()),
+            ])
+            .build(),
+    ));
+    Feature {
+        tag: api::Tag {
+            name: "user",
+            desc: "User mgmt.",
+        },
+        schema_types: vec![schema_user],
+        endpoints: vec![create::epoint_type(reg, schema_user)],
+    }
 }
 
 mod testing {

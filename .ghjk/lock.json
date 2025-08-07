@@ -497,6 +497,347 @@
             "wasm32-unknown-unknown"
           ],
           "specifiedVersion": true
+        },
+        "bciqdlcjhpufwu273ylmpq4tldwd5dz64dv4bybl5ucvmuonlie3eegi": {
+          "version": "0.42.1",
+          "buildDepConfigs": {
+            "cargo_binstall_ghrel": {
+              "version": "v1.13.0",
+              "buildDepConfigs": {},
+              "portRef": "cargo_binstall_ghrel@0.1.0",
+              "specifiedVersion": false
+            },
+            "rust_rustup": {
+              "version": "1.85.0",
+              "buildDepConfigs": {
+                "rustup_rustlang": {
+                  "version": "1.28.2",
+                  "buildDepConfigs": {
+                    "git_aa": {
+                      "version": "2.49.0",
+                      "buildDepConfigs": {},
+                      "portRef": "git_aa@0.1.0",
+                      "specifiedVersion": false
+                    }
+                  },
+                  "portRef": "rustup_rustlang@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rust_rustup@0.1.0",
+              "profile": "default",
+              "components": [
+                "rust-src"
+              ],
+              "targets": [
+                "wasm32-unknown-unknown"
+              ],
+              "specifiedVersion": true
+            }
+          },
+          "portRef": "cargobi_cratesio@0.1.0",
+          "crateName": "wash",
+          "locked": true,
+          "specifiedVersion": false
+        },
+        "bciqdte6halv2xbyhgjaptdx6gltl2ej73x5fueiy5phne674cp3n3ia": {
+          "version": "1.85.0",
+          "buildDepConfigs": {
+            "rustup_rustlang": {
+              "version": "1.28.2",
+              "buildDepConfigs": {
+                "git_aa": {
+                  "version": "2.49.0",
+                  "buildDepConfigs": {},
+                  "portRef": "git_aa@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rustup_rustlang@0.1.0",
+              "specifiedVersion": false
+            }
+          },
+          "portRef": "rust_rustup@0.1.0",
+          "profile": "default",
+          "components": [
+            "rust-src"
+          ],
+          "targets": [
+            "wasm32-unknown-unknown",
+            "wasm32-wasip1"
+          ],
+          "specifiedVersion": true
+        },
+        "bciqcyronccozdscdfns6lljmg4li4fvhxa2266rmhaakodltxozznna": {
+          "version": "1.85.0",
+          "buildDepConfigs": {
+            "rustup_rustlang": {
+              "version": "1.28.2",
+              "buildDepConfigs": {
+                "git_aa": {
+                  "version": "2.49.0",
+                  "buildDepConfigs": {},
+                  "portRef": "git_aa@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rustup_rustlang@0.1.0",
+              "specifiedVersion": false
+            }
+          },
+          "portRef": "rust_rustup@0.1.0",
+          "profile": "default",
+          "components": [
+            "rust-src"
+          ],
+          "targets": [
+            "wasm32-unknown-unknown",
+            "-t wasm32-wasip1"
+          ],
+          "specifiedVersion": true
+        },
+        "bciqc3gqoxlfvh6odavyp5jixrhaf5pmx5iiygphow22erjxh5xdapzy": {
+          "version": "1.85.0",
+          "buildDepConfigs": {
+            "rustup_rustlang": {
+              "version": "1.28.2",
+              "buildDepConfigs": {
+                "git_aa": {
+                  "version": "2.49.0",
+                  "buildDepConfigs": {},
+                  "portRef": "git_aa@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rustup_rustlang@0.1.0",
+              "specifiedVersion": false
+            }
+          },
+          "portRef": "rust_rustup@0.1.0",
+          "profile": "default",
+          "components": [
+            "rust-src"
+          ],
+          "targets": [
+            "wasm32-unknown-unknown",
+            "wasm32-wasip2"
+          ],
+          "specifiedVersion": true
+        },
+        "bciqg6addm4t4fpqgkcpukqvbdrkscd56popl3at6aljs4tfnsfl3iki": {
+          "version": "0.5.0",
+          "buildDepConfigs": {
+            "cargo_binstall_ghrel": {
+              "version": "v1.13.0",
+              "buildDepConfigs": {},
+              "portRef": "cargo_binstall_ghrel@0.1.0",
+              "specifiedVersion": false
+            },
+            "rust_rustup": {
+              "version": "1.85.0",
+              "buildDepConfigs": {
+                "rustup_rustlang": {
+                  "version": "1.28.2",
+                  "buildDepConfigs": {
+                    "git_aa": {
+                      "version": "2.49.0",
+                      "buildDepConfigs": {},
+                      "portRef": "git_aa@0.1.0",
+                      "specifiedVersion": false
+                    }
+                  },
+                  "portRef": "rustup_rustlang@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rust_rustup@0.1.0",
+              "profile": "default",
+              "components": [
+                "rust-src"
+              ],
+              "targets": [
+                "wasm32-unknown-unknown",
+                "wasm32-wasip2"
+              ],
+              "specifiedVersion": true
+            }
+          },
+          "portRef": "cargobi_cratesio@0.1.0",
+          "crateName": "wit-deps-cli",
+          "locked": true,
+          "specifiedVersion": false
+        },
+        "bciqiooknuxzxwcucxuwthavsajettzvpofmc3zfo2y34x6mivv65nca": {
+          "version": "0.116.1",
+          "buildDepConfigs": {
+            "cargo_binstall_ghrel": {
+              "version": "v1.13.0",
+              "buildDepConfigs": {},
+              "portRef": "cargo_binstall_ghrel@0.1.0",
+              "specifiedVersion": false
+            },
+            "rust_rustup": {
+              "version": "1.85.0",
+              "buildDepConfigs": {
+                "rustup_rustlang": {
+                  "version": "1.28.2",
+                  "buildDepConfigs": {
+                    "git_aa": {
+                      "version": "2.49.0",
+                      "buildDepConfigs": {},
+                      "portRef": "git_aa@0.1.0",
+                      "specifiedVersion": false
+                    }
+                  },
+                  "portRef": "rustup_rustlang@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rust_rustup@0.1.0",
+              "profile": "default",
+              "components": [
+                "rust-src"
+              ],
+              "targets": [
+                "wasm32-unknown-unknown",
+                "wasm32-wasip2"
+              ],
+              "specifiedVersion": true
+            }
+          },
+          "portRef": "cargobi_cratesio@0.1.0",
+          "crateName": "wasm-opt",
+          "locked": true,
+          "specifiedVersion": false
+        },
+        "bciqiw5fyh2agpqocvzdwxl7edvtmoffsqkl6covgj2xjjqdsulcflgy": {
+          "version": "1.236.0",
+          "buildDepConfigs": {
+            "cargo_binstall_ghrel": {
+              "version": "v1.13.0",
+              "buildDepConfigs": {},
+              "portRef": "cargo_binstall_ghrel@0.1.0",
+              "specifiedVersion": false
+            },
+            "rust_rustup": {
+              "version": "1.85.0",
+              "buildDepConfigs": {
+                "rustup_rustlang": {
+                  "version": "1.28.2",
+                  "buildDepConfigs": {
+                    "git_aa": {
+                      "version": "2.49.0",
+                      "buildDepConfigs": {},
+                      "portRef": "git_aa@0.1.0",
+                      "specifiedVersion": false
+                    }
+                  },
+                  "portRef": "rustup_rustlang@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rust_rustup@0.1.0",
+              "profile": "default",
+              "components": [
+                "rust-src"
+              ],
+              "targets": [
+                "wasm32-unknown-unknown",
+                "wasm32-wasip2"
+              ],
+              "specifiedVersion": true
+            }
+          },
+          "portRef": "cargobi_cratesio@0.1.0",
+          "crateName": "wasm-tools",
+          "locked": true,
+          "specifiedVersion": false
+        },
+        "bciqfwgqwfhsbpygsmtxb75tt52xc4gtipqsrwaa7deuzyftkzqfrfja": {
+          "version": "0.10.0",
+          "buildDepConfigs": {
+            "cargo_binstall_ghrel": {
+              "version": "v1.13.0",
+              "buildDepConfigs": {},
+              "portRef": "cargo_binstall_ghrel@0.1.0",
+              "specifiedVersion": false
+            },
+            "rust_rustup": {
+              "version": "1.85.0",
+              "buildDepConfigs": {
+                "rustup_rustlang": {
+                  "version": "1.28.2",
+                  "buildDepConfigs": {
+                    "git_aa": {
+                      "version": "2.49.0",
+                      "buildDepConfigs": {},
+                      "portRef": "git_aa@0.1.0",
+                      "specifiedVersion": false
+                    }
+                  },
+                  "portRef": "rustup_rustlang@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rust_rustup@0.1.0",
+              "profile": "default",
+              "components": [
+                "rust-src"
+              ],
+              "targets": [
+                "wasm32-unknown-unknown",
+                "wasm32-wasip2"
+              ],
+              "specifiedVersion": true
+            }
+          },
+          "portRef": "cargobi_cratesio@0.1.0",
+          "crateName": "spin",
+          "locked": true,
+          "specifiedVersion": false
+        },
+        "bciqg2rvzk2o35pighn2idohmen6bbrrxlddg6qs5usi3or5fctmjjma": {
+          "version": "0.0.0",
+          "buildDepConfigs": {
+            "cargo_binstall_ghrel": {
+              "version": "v1.13.0",
+              "buildDepConfigs": {},
+              "portRef": "cargo_binstall_ghrel@0.1.0",
+              "specifiedVersion": false
+            },
+            "rust_rustup": {
+              "version": "1.85.0",
+              "buildDepConfigs": {
+                "rustup_rustlang": {
+                  "version": "1.28.2",
+                  "buildDepConfigs": {
+                    "git_aa": {
+                      "version": "2.49.0",
+                      "buildDepConfigs": {},
+                      "portRef": "git_aa@0.1.0",
+                      "specifiedVersion": false
+                    }
+                  },
+                  "portRef": "rustup_rustlang@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rust_rustup@0.1.0",
+              "profile": "default",
+              "components": [
+                "rust-src"
+              ],
+              "targets": [
+                "wasm32-unknown-unknown",
+                "wasm32-wasip2"
+              ],
+              "specifiedVersion": true
+            }
+          },
+          "portRef": "cargobi_cratesio@0.1.0",
+          "crateName": "spin-cli",
+          "locked": true,
+          "specifiedVersion": false
         }
       }
     },
@@ -515,31 +856,36 @@
           "sets": {
             "ghjkEnvProvInstSet___main": {
               "installs": [
-                "bciqdt2wqm6mj7v3kmcr5jhyxoxxghk4hsypaqxmiopdidzymv6jwotq",
+                "bciqjeaqkka5mp6uzejnlilnopdgd3rktqpsh7bd55jcnjpjynt76ota",
                 "bciqctjanvj2ggnt2mj75ka2a3pibxjnpydxqmdzclx624o26g35vxmy",
                 "bciqffkko3tgrgpoefq6n5y7524nlsmqlcf5wjsdsxou5lwwpve6tkfi",
                 "bciqacjh6znoqzyhuxxrypzxqmfileuobbsezdwmpihigowrgjctvvgy",
                 "bciqdpw7zumb4ossgsao4d5psbsfyec6fzv6hiboxtkupkluhbvjohky",
                 "bciqcajce7wgenfg5ope2izhp4vrssmjpi3q4ho22thuicsxopemoc3q"
               ],
-              "allowedBuildDeps": "bciqgsq7bsvt7mcvr4mgawv6hyvm4m7j27lmm5o2552tzcttwt3mxsqi"
+              "allowedBuildDeps": "bciqa42j5j6sk6oq2hrvnr3xsee5gsmt6phuwhojdtu5v6qaazz2mtwa"
             },
             "ghjkEnvProvInstSet___dev": {
               "installs": [
+                "bciqphtxusdyb5qz2pfc5kqoujqzcbahnv7dsxb752jjjugzundmkf7q",
+                "bciqfbfi624xy45ipgiwbauxgbdwlpjzmerckdctoppdbbwnuor5suta",
+                "bciqhgsbay6hm77nznkdsak3svpzxo3zweuuvzyljlgicnzhfjchj4ga",
+                "bciqnzkme2d3wzatiuoqdoksa7gfxphm37b76undusjw2zswgdv6v4pq",
+                "bciqfv3rsy2hz2ia4rwwsul5ebs66bjcbdegeuu7cogu3gxrx3xal5hi",
                 "bciqb3obyi3hucqcmtqjjtqxovigus5yx5jgnqcyq372xla7guexf6si",
                 "bciqnwlmwonvlcat7bt56wroyxp3eu3pwirehifhgmw33qs4s7olrp3i",
                 "bciqnicswg7oyf24niwjanqfk2qxnrsig57sgi54lbc6zadheezoe36i",
                 "bciqpxh456cihbdftrvkc6nhmy7vr626uto222l23xfelsmrqu6tthxi",
                 "bciqecpiecc37wde2vjbjs2bmslambstmb3mmr5ylpwe53gwpvfxf6ry",
                 "bciqcwar2qg4avxzuw6x232qcl65bhlo5kkiaq5tlr6nlhtumyjb5rpy",
-                "bciqdt2wqm6mj7v3kmcr5jhyxoxxghk4hsypaqxmiopdidzymv6jwotq",
+                "bciqjeaqkka5mp6uzejnlilnopdgd3rktqpsh7bd55jcnjpjynt76ota",
                 "bciqctjanvj2ggnt2mj75ka2a3pibxjnpydxqmdzclx624o26g35vxmy",
                 "bciqffkko3tgrgpoefq6n5y7524nlsmqlcf5wjsdsxou5lwwpve6tkfi",
                 "bciqacjh6znoqzyhuxxrypzxqmfileuobbsezdwmpihigowrgjctvvgy",
                 "bciqdpw7zumb4ossgsao4d5psbsfyec6fzv6hiboxtkupkluhbvjohky",
                 "bciqcajce7wgenfg5ope2izhp4vrssmjpi3q4ho22thuicsxopemoc3q"
               ],
-              "allowedBuildDeps": "bciqgsq7bsvt7mcvr4mgawv6hyvm4m7j27lmm5o2552tzcttwt3mxsqi"
+              "allowedBuildDeps": "bciqa42j5j6sk6oq2hrvnr3xsee5gsmt6phuwhojdtu5v6qaazz2mtwa"
             }
           }
         }
@@ -854,7 +1200,7 @@
       }
     ],
     "blackboard": {
-      "bciqdt2wqm6mj7v3kmcr5jhyxoxxghk4hsypaqxmiopdidzymv6jwotq": {
+      "bciqjeaqkka5mp6uzejnlilnopdgd3rktqpsh7bd55jcnjpjynt76ota": {
         "version": "1.85.0",
         "port": {
           "ty": "denoWorker@v1",
@@ -885,14 +1231,15 @@
               "name": "rustup_rustlang"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/rust.ts"
+          "moduleSpecifier": "file:///home/asdf/repos/rust/townframe/tools/rust.port.ts"
         },
         "profile": "default",
         "components": [
           "rust-src"
         ],
         "targets": [
-          "wasm32-unknown-unknown"
+          "wasm32-unknown-unknown",
+          "wasm32-wasip2"
         ]
       },
       "bciqctjanvj2ggnt2mj75ka2a3pibxjnpydxqmdzclx624o26g35vxmy": {
@@ -1068,7 +1415,7 @@
           "portRef": "node_org@0.1.0"
         }
       },
-      "bciqpoess7rlemzdaj7sstczjn7j3senwwjx4c75m4lgqmptqzc7lxga": {
+      "bciqeuevowvjvz6lk76hfpmkg2ymvh46rmdqret34ffgfrpaa75k7ujy": {
         "manifest": {
           "ty": "denoWorker@v1",
           "name": "rust_rustup",
@@ -1098,7 +1445,7 @@
               "name": "rustup_rustlang"
             }
           ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/rust.ts"
+          "moduleSpecifier": "file:///home/asdf/repos/rust/townframe/tools/rust.port.ts"
         },
         "defaultInst": {
           "version": "1.85.0",
@@ -1108,7 +1455,8 @@
             "rust-src"
           ],
           "targets": [
-            "wasm32-unknown-unknown"
+            "wasm32-unknown-unknown",
+            "wasm32-wasip2"
           ]
         }
       },
@@ -1348,9 +1696,9 @@
           "portRef": "asdf_plugin_git@0.1.0"
         }
       },
-      "bciqgsq7bsvt7mcvr4mgawv6hyvm4m7j27lmm5o2552tzcttwt3mxsqi": {
+      "bciqa42j5j6sk6oq2hrvnr3xsee5gsmt6phuwhojdtu5v6qaazz2mtwa": {
         "node_org": "bciqdwj5pmg54ekz2dxip5djfqlmyl54yot2ioqyqj55oi2k32wxtlua",
-        "rust_rustup": "bciqpoess7rlemzdaj7sstczjn7j3senwwjx4c75m4lgqmptqzc7lxga",
+        "rust_rustup": "bciqeuevowvjvz6lk76hfpmkg2ymvh46rmdqret34ffgfrpaa75k7ujy",
         "cpy_bs_ghrel": "bciqjvg6t2rx7i7ji55prdwe6cwnv2ar3pwtlo7xhhrl3dymyzgtltvi",
         "tar_aa": "bciqb6ua63xodzwxngnbjq35hfikiwzb3dclbqkc7e6xgjdt5jin4pia",
         "git_aa": "bciqfl5s36w335ducrb6f6gwb3vuwup7vzqwwg67pq42xtkngsnxqobi",
@@ -1360,6 +1708,196 @@
         "rustup_rustlang": "bciqprmkyr66xuw7u5ujy3m4lafwaqpmxtvkzlyousxxsbedxaeeyxcy",
         "cargo_binstall_ghrel": "bciqmw3zelmmcnkxjdahnwadspkqczwds2m7tsjppwg5wiwjma3v773i",
         "asdf_plugin_git": "bciqd6bh5vvp7uszijfjpo6padul35qq6c77svcivmhfwgo34hgpxlra"
+      },
+      "bciqphtxusdyb5qz2pfc5kqoujqzcbahnv7dsxb752jjjugzundmkf7q": {
+        "port": {
+          "ty": "denoWorker@v1",
+          "name": "cargobi_cratesio",
+          "platforms": [
+            "x86_64-linux",
+            "aarch64-linux",
+            "x86_64-darwin",
+            "aarch64-darwin",
+            "x86_64-windows",
+            "aarch64-windows",
+            "x86_64-freebsd",
+            "aarch64-freebsd",
+            "x86_64-netbsd",
+            "aarch64-netbsd",
+            "x86_64-aix",
+            "aarch64-aix",
+            "x86_64-solaris",
+            "aarch64-solaris",
+            "x86_64-illumos",
+            "aarch64-illumos",
+            "x86_64-android",
+            "aarch64-android"
+          ],
+          "version": "0.1.0",
+          "buildDeps": [
+            {
+              "name": "cargo_binstall_ghrel"
+            },
+            {
+              "name": "rust_rustup"
+            }
+          ],
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/cargobi.ts"
+        },
+        "crateName": "wash",
+        "locked": true
+      },
+      "bciqfbfi624xy45ipgiwbauxgbdwlpjzmerckdctoppdbbwnuor5suta": {
+        "port": {
+          "ty": "denoWorker@v1",
+          "name": "cargobi_cratesio",
+          "platforms": [
+            "x86_64-linux",
+            "aarch64-linux",
+            "x86_64-darwin",
+            "aarch64-darwin",
+            "x86_64-windows",
+            "aarch64-windows",
+            "x86_64-freebsd",
+            "aarch64-freebsd",
+            "x86_64-netbsd",
+            "aarch64-netbsd",
+            "x86_64-aix",
+            "aarch64-aix",
+            "x86_64-solaris",
+            "aarch64-solaris",
+            "x86_64-illumos",
+            "aarch64-illumos",
+            "x86_64-android",
+            "aarch64-android"
+          ],
+          "version": "0.1.0",
+          "buildDeps": [
+            {
+              "name": "cargo_binstall_ghrel"
+            },
+            {
+              "name": "rust_rustup"
+            }
+          ],
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/cargobi.ts"
+        },
+        "crateName": "spin-cli",
+        "locked": true
+      },
+      "bciqhgsbay6hm77nznkdsak3svpzxo3zweuuvzyljlgicnzhfjchj4ga": {
+        "port": {
+          "ty": "denoWorker@v1",
+          "name": "cargobi_cratesio",
+          "platforms": [
+            "x86_64-linux",
+            "aarch64-linux",
+            "x86_64-darwin",
+            "aarch64-darwin",
+            "x86_64-windows",
+            "aarch64-windows",
+            "x86_64-freebsd",
+            "aarch64-freebsd",
+            "x86_64-netbsd",
+            "aarch64-netbsd",
+            "x86_64-aix",
+            "aarch64-aix",
+            "x86_64-solaris",
+            "aarch64-solaris",
+            "x86_64-illumos",
+            "aarch64-illumos",
+            "x86_64-android",
+            "aarch64-android"
+          ],
+          "version": "0.1.0",
+          "buildDeps": [
+            {
+              "name": "cargo_binstall_ghrel"
+            },
+            {
+              "name": "rust_rustup"
+            }
+          ],
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/cargobi.ts"
+        },
+        "crateName": "wit-deps-cli",
+        "locked": true
+      },
+      "bciqnzkme2d3wzatiuoqdoksa7gfxphm37b76undusjw2zswgdv6v4pq": {
+        "port": {
+          "ty": "denoWorker@v1",
+          "name": "cargobi_cratesio",
+          "platforms": [
+            "x86_64-linux",
+            "aarch64-linux",
+            "x86_64-darwin",
+            "aarch64-darwin",
+            "x86_64-windows",
+            "aarch64-windows",
+            "x86_64-freebsd",
+            "aarch64-freebsd",
+            "x86_64-netbsd",
+            "aarch64-netbsd",
+            "x86_64-aix",
+            "aarch64-aix",
+            "x86_64-solaris",
+            "aarch64-solaris",
+            "x86_64-illumos",
+            "aarch64-illumos",
+            "x86_64-android",
+            "aarch64-android"
+          ],
+          "version": "0.1.0",
+          "buildDeps": [
+            {
+              "name": "cargo_binstall_ghrel"
+            },
+            {
+              "name": "rust_rustup"
+            }
+          ],
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/cargobi.ts"
+        },
+        "crateName": "wasm-opt",
+        "locked": true
+      },
+      "bciqfv3rsy2hz2ia4rwwsul5ebs66bjcbdegeuu7cogu3gxrx3xal5hi": {
+        "port": {
+          "ty": "denoWorker@v1",
+          "name": "cargobi_cratesio",
+          "platforms": [
+            "x86_64-linux",
+            "aarch64-linux",
+            "x86_64-darwin",
+            "aarch64-darwin",
+            "x86_64-windows",
+            "aarch64-windows",
+            "x86_64-freebsd",
+            "aarch64-freebsd",
+            "x86_64-netbsd",
+            "aarch64-netbsd",
+            "x86_64-aix",
+            "aarch64-aix",
+            "x86_64-solaris",
+            "aarch64-solaris",
+            "x86_64-illumos",
+            "aarch64-illumos",
+            "x86_64-android",
+            "aarch64-android"
+          ],
+          "version": "0.1.0",
+          "buildDeps": [
+            {
+              "name": "cargo_binstall_ghrel"
+            },
+            {
+              "name": "rust_rustup"
+            }
+          ],
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.1-rc.2/ports/cargobi.ts"
+        },
+        "crateName": "wasm-tools",
+        "locked": true
       },
       "bciqb3obyi3hucqcmtqjjtqxovigus5yx5jgnqcyq372xla7guexf6si": {
         "port": {

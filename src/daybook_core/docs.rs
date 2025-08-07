@@ -147,9 +147,7 @@ impl DocsRepo {
         let out = self
             .fcx
             .clone()
-            .do_on_rt(async move { 
-                this.set(id, doc).await 
-            })
+            .do_on_rt(async move { this.set(id, doc).await })
             .await?;
         Ok(out)
     }
@@ -177,6 +175,9 @@ impl DocsRepo {
             lock.push((id, listener));
             // strong is dropped here; we only keep Weak to avoid leaks.
         }
-        Ok(Arc::new(ListenerRegistration { repo: Arc::downgrade(&self), id }))
+        Ok(Arc::new(ListenerRegistration {
+            repo: Arc::downgrade(&self),
+            id,
+        }))
     }
 }
