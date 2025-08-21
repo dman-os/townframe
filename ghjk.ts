@@ -9,7 +9,7 @@ import * as std_url from "jsr:@std/url@0.215.0";
 
 const DOCKER_CMD = Deno.env.get("DOCKER_CMD") ?? "podman";
 const RUST_VERSION = "1.85.0";
-const GHJK_VERSION = "v0.3.1-rc.2";
+const GHJK_VERSION = "v0.3.2";
 
 const installs = {
   rust: rust({
