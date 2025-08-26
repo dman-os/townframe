@@ -346,7 +346,7 @@ macro_rules! table_tests {
                                     // TODO: consider disabling tracing by default?
                                     let enable_tracing = enable_tracing.unwrap_or(true);
                                     if enable_tracing {
-                                        utils_rs::testing::setup_tracing_once();
+                                        utils_rs::setup_tracing_once();
                                     }
                                     let multi_thread: Option<bool> = $crate::optional_expr!($($multi_thread)?);
                                     let multi_thread = multi_thread.unwrap_or(false);
@@ -426,7 +426,7 @@ macro_rules! integration_table_tests {
             #[tokio::test]
             async fn $name() -> $crate::prelude::eyre::Result<()> {
                 use $crate::prelude::*;
-                utils_rs::testing::setup_tracing_once();
+                utils_rs::setup_tracing_once();
                 let (mut test_cx, state) = $cx_fn($crate::function_full!()).await?;
                 {
                     let mut request = axum::http::Request::builder()

@@ -6,6 +6,7 @@ mod interlude {
 
     pub use utils_rs::prelude::*;
 }
+mod gen;
 
 use clap::builder::styling::AnsiColor;
 
@@ -26,6 +27,9 @@ async fn main_main() -> Res<()> {
     use clap::Parser;
     let args = Args::parse();
     match args.command {
+        Commands::Gen {} => {
+            gen::cli()?;
+        }
         Commands::Play {} => {
             let value = "hi";
             println!("{value:?}");
@@ -144,4 +148,5 @@ enum Commands {
     // SeedZitadel {},
     SeedKanidm {},
     Play {},
+    Gen {},
 }

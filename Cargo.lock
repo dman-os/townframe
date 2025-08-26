@@ -151,12 +151,9 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-extra",
- "bon",
  "color-eyre",
  "futures",
  "garde",
- "heck",
- "indenter",
  "serde",
  "serde_json",
  "sqlx",
@@ -6814,8 +6811,12 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "bon",
  "clap",
  "dotenv-flow",
+ "heck",
+ "http 1.2.0",
+ "indenter",
  "kanidm_client",
  "kanidm_proto",
  "tokio",

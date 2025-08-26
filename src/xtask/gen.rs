@@ -1,13 +1,50 @@
-use crate::api::{Method, StatusCode};
 use crate::interlude::*;
 
-use std::fmt::Write;
+use http::{Method, StatusCode};
+
 use std::hash::{Hash, Hasher};
 
 use heck::*;
+mod component_wit;
+mod features;
+mod handler_rust;
 
-pub mod component_wit;
-pub mod handler_rust;
+use std::fmt::Write;
+
+pub fn cli() -> Res<()> {
+    // use std::io::Write as WriteIo;
+    let reg = TypeReg::new();
+
+    let features = features::btress_api_features(&reg);
+
+    let mut out = String::new();
+    let buf = &mut out;
+    write!(
+        buf,
+        r#"use super::*;   
+
+"#
+    )?;
+    for feature in &features {
+        handler_rust::feature_module(&reg, buf, &feature)?;
+    }
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../btress_api/gen/");
+    std::fs::create_dir_all(&path)?;
+    std::fs::write(path.join("mod.rs"), &out)?;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../btress_api/wit/");
+    std::fs::create_dir_all(&path)?;
+    for feature in &features {
+        let mut out = String::new();
+        let buf = &mut out;
+        writeln!(buf, "package townframe:btress-api;")?;
+        component_wit::feature_file(&reg, buf, &feature)?;
+        let path = path.join(format!("{}.wit", feature.tag.name.to_kebab_case()));
+        std::fs::write(path, &out)?;
+    }
+    Ok(())
+}
 
 pub type TypeId = u64;
 
@@ -18,6 +55,8 @@ pub enum Type {
     List(TypeId),
     Map(TypeId, TypeId),
     Option(TypeId),
+    Tuple(Vec<TypeId>),
+    Alias(CHeapStr, TypeId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -85,12 +124,25 @@ impl RecordField {
     }
 }
 
-#[derive(Default)]
 pub struct TypeReg {
     types: DHashMap<TypeId, Type>,
+    validation_errors_id: TypeId,
 }
 
 impl TypeReg {
+    pub fn new() -> Self {
+        let mut this = Self {
+            types: default(),
+            validation_errors_id: 0,
+        };
+        this.validation_errors_id = this.add_type(Type::Alias(
+            "ValidationErrors".into(),
+            this.add_type(Type::List(
+                this.add_type(Type::Tuple(vec![this.string(), this.string()])),
+            )),
+        ));
+        this
+    }
     pub fn add_type(&self, ty: Type) -> TypeId {
         let mut hasher = std::hash::DefaultHasher::new();
         ty.hash(&mut hasher);
@@ -141,67 +193,18 @@ impl TypeReg {
         self.add_type(Type::Option(ty))
     }
 
-    pub fn rust_name(&self, ty: TypeId) -> Option<CHeapStr> {
-        Some(match self.types.get(&ty)?.value() {
-            Type::Record(record) => record.name.to_pascal_case().into(),
-            Type::Primitives(Primitives::String) => "String".into(),
-            Type::Primitives(Primitives::U64) => "u64".into(),
-            Type::Primitives(Primitives::F64) => "f64".into(),
-            Type::Primitives(Primitives::Bool) => "bool".into(),
-            Type::Primitives(Primitives::Uuid) => "Uuid".into(),
-            Type::Primitives(Primitives::DateTime) => "OffsetDateTime".into(),
-            Type::Primitives(Primitives::Json) => "serde_json::Value".into(),
-            Type::List(ty) => format!(
-                "Vec<{}>",
-                self.rust_name(*ty).expect("unregistered inner type")
-            )
-            .into(),
-            Type::Map(key, value) => format!(
-                "HashMap<{}, {}>",
-                self.rust_name(*key).expect("unregistered key type"),
-                self.rust_name(*value).expect("unregistered value type")
-            )
-            .into(),
-            Type::Option(ty) => format!(
-                "Option<{}>",
-                self.rust_name(*ty).expect("unregistered inner type")
-            )
-            .into(),
-        })
-    }
-
-    pub fn wit_name(&self, ty: TypeId) -> Option<CHeapStr> {
-        Some(match self.types.get(&ty)?.value() {
-            Type::Record(record) => record.name.to_kebab_case().into(),
-            Type::Primitives(Primitives::String) => "string".into(),
-            Type::Primitives(Primitives::U64) => "u64".into(),
-            Type::Primitives(Primitives::F64) => "f64".into(),
-            Type::Primitives(Primitives::Bool) => "bool".into(),
-            Type::Primitives(Primitives::Uuid) => "string".into(),
-            Type::Primitives(Primitives::DateTime) => "string".into(),
-            Type::Primitives(Primitives::Json) => "string".into(),
-            Type::List(ty) => format!(
-                "list<{}>",
-                self.wit_name(*ty).expect("unregistered inner type")
-            )
-            .into(),
-            Type::Map(key, value) => format!(
-                "list<tuple<{}, {}>>",
-                self.wit_name(*key).expect("unregistered key type"),
-                self.wit_name(*value).expect("unregistered value type")
-            )
-            .into(),
-            Type::Option(ty) => format!(
-                "option<{}>",
-                self.wit_name(*ty).expect("unregistered inner type")
-            )
-            .into(),
-        })
+    pub fn validation_errors(&self) -> TypeId {
+        self.validation_errors_id
     }
 }
 
+pub struct Tag {
+    pub name: String,
+    pub desc: String,
+}
+
 pub struct Feature {
-    pub tag: crate::api::Tag,
+    pub tag: Tag,
     pub schema_types: Vec<TypeId>,
     pub endpoints: Vec<EndpointType>,
 }
@@ -220,12 +223,21 @@ pub struct EndpointType {
     success: StatusCode,
 }
 
+#[derive(Default, PartialEq, Eq, Hash, Clone, Copy)]
+enum InputFieldSource {
+    #[default]
+    JsonBody,
+    Query,
+}
+
 #[derive(bon::Builder)]
 #[builder(on(CHeapStr, into))]
 pub struct InputType {
     #[builder(field)]
     fields: IndexMap<CHeapStr, InputField>,
     desc: CHeapStr,
+    #[builder(default)]
+    main_source: InputFieldSource,
 }
 
 impl<S: input_type_builder::State> InputTypeBuilder<S> {
@@ -250,6 +262,8 @@ pub struct InputField {
     #[builder(field)]
     validations: Vec<FieldValidations>,
     inner: RecordField,
+    #[builder(default)]
+    source: InputFieldSource,
 }
 
 impl<S: input_field_builder::State> InputFieldBuilder<S> {
@@ -275,7 +289,6 @@ pub enum FieldValidations {
     MaxLength(u32),
     Pattern(CHeapStr),
     Email,
-    Length(u32, u32),
     Range(u32, u32),
     Regex(CHeapStr),
     Enum(Vec<CHeapStr>),
@@ -283,7 +296,7 @@ pub enum FieldValidations {
 
 pub enum OutputType {
     Ref(TypeId),
-    Record(IndexMap<CHeapStr, RecordField>),
+    Record(Record),
 }
 
 #[derive(bon::Builder)]
@@ -346,31 +359,39 @@ pub struct ErrorField {
 }
 
 impl ErrorVariant {
-    pub fn invalid_input(reg: &TypeReg) -> Self {
-        Self::builder()
-            .http_code(StatusCode::BAD_REQUEST)
-            .message("Invalid input")
-            .with_field(
-                "issues",
-                ErrorField::builder()
-                    .inner(RecordField::builder(reg.string()).build())
-                    .thiserror_from(true)
-                    .build(),
-            )
-            .build()
+    const ERROR_INVALID_INPUT_NAME: &str = "invalidInput";
+    const ERROR_INTERNAL_NAME: &str = "internal";
+    pub fn invalid_input(reg: &TypeReg) -> (&'static str, Self) {
+        (
+            Self::ERROR_INVALID_INPUT_NAME,
+            Self::builder()
+                .http_code(StatusCode::BAD_REQUEST)
+                .message("Invalid input")
+                .with_field(
+                    "issues",
+                    ErrorField::builder()
+                        .inner(RecordField::builder(reg.validation_errors()).build())
+                        .thiserror_from(true)
+                        .build(),
+                )
+                .build(),
+        )
     }
 
-    pub fn internal(reg: &TypeReg) -> Self {
-        Self::builder()
-            .http_code(StatusCode::INTERNAL_SERVER_ERROR)
-            .message("Internal server error")
-            .with_field(
-                "message",
-                ErrorField::builder()
-                    .inner(RecordField::builder(reg.string()).build())
-                    .build(),
-            )
-            .build()
+    pub fn internal(reg: &TypeReg) -> (&'static str, Self) {
+        (
+            Self::ERROR_INTERNAL_NAME,
+            Self::builder()
+                .http_code(StatusCode::INTERNAL_SERVER_ERROR)
+                .message("Internal server error")
+                .with_field(
+                    "message",
+                    ErrorField::builder()
+                        .inner(RecordField::builder(reg.string()).build())
+                        .build(),
+                )
+                .build(),
+        )
     }
 }
 

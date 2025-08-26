@@ -45,4 +45,3 @@ interface streams {
     blocking-splice: func(src: borrow<input-stream>, len: u64) -> result<u64, stream-error>;
   }
 }
-

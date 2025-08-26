@@ -1,6 +1,24 @@
 package townframe:btress-api;
+interface user {
+    use utils.{errors-validation};
+    use utils.{error-internal};
+    use utils.{uuid};
+    use utils.{datetime};
 
+    record user {
+        id: uuid,
+        created-at: datetime,
+        updated-at: datetime,
+        email: option<string>,
+        username: string,
+    }
+}
 interface user-create {
+    use utils.{errors-validation};
+    use utils.{error-internal};
+    use utils.{uuid};
+    use utils.{datetime};
+    use user.{user};
 
     /// Username occupied
     /// http error code: BAD_REQUEST
@@ -15,65 +33,22 @@ interface user-create {
         email: option<string>,
     }
 
-    /// Invalid input
-    /// http error code: BAD_REQUEST
-    record error-invalid-input {
-        issues: string,
-    }
-
-    /// Internal server error
-    /// http error code: INTERNAL_SERVER_ERROR
-    record error-internal {
-        message: string,
-    }
-
     variant error {
         username-occupied(error-username-occupied),
         email-occupied(error-email-occupied),
-        invalid-input(error-invalid-input),
+        invalid-input(errors-validation),
         internal(error-internal),
     }
 
-    type input = string;
-    type output = string;
+    record input {
+        username: string,
+        email: option<string>,
+        password: string,
+    }
+    type output = user;
     call: func(inp: input) -> result<output, error>;
 }
-
-interface user-update {
-
-    /// Username occupied
-    /// http error code: BAD_REQUEST
-    record error-username-occupied {
-        username: string,
-    }
-
-    /// Email occupied
-    /// http error code: BAD_REQUEST
-    record error-email-occupied {
-        /// example: alice@example.com
-        email: option<string>,
-    }
-
-    /// Invalid input
-    /// http error code: BAD_REQUEST
-    record error-invalid-input {
-        issues: string,
-    }
-
-    /// Internal server error
-    /// http error code: INTERNAL_SERVER_ERROR
-    record error-internal {
-        message: string,
-    }
-
-    variant error {
-        username-occupied(error-username-occupied),
-        email-occupied(error-email-occupied),
-        invalid-input(error-invalid-input),
-        internal(error-internal),
-    }
-
-    type input = string;
-    type output = string;
-    call: func(inp: input) -> result<output, error>;
+world feat-user {
+    export user;
+    export user-create;
 }

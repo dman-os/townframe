@@ -6,10 +6,13 @@ mod interlude {
     pub use crate::{Context, SharedContext};
     pub use async_trait::async_trait;
 
-    #[cfg(test)]
-    pub use crate::utils::testing::*;
-    #[cfg(test)]
-    pub use api_utils_rs::testing::*;
+    pub use crate::wit::wasi::clocks::wall_clock;
+    pub use crate::wit::wasi::clocks::wall_clock::Datetime;
+
+    // #[cfg(test)]
+    // pub use crate::utils::testing::*;
+    // #[cfg(test)]
+    // pub use api_utils_rs::testing::*;
 }
 
 use crate::interlude::*;
@@ -37,6 +40,7 @@ pub struct Config {
     pub pass_salt_hash: Arc<argon2::password_hash::SaltString>,
 }
 
+mod gen;
 mod user;
 mod utils;
 
@@ -48,9 +52,31 @@ mod wit {
         world: "api",
         generate_all,
         async: true,
+        additional_derives: [serde::Serialize, serde::Deserialize],
+        with: {
+            "townframe:btress-api/utils/errors-validation": api_utils_rs::validation_errs::ValidationErrors,
+            "townframe:btress-api/user": crate::gen::user,
+            "townframe:btress-api/user-create": crate::gen::user::user_create,
+        }
     });
-    pub use exports::townframe::btress_api::user_create;
-    pub use exports::townframe::btress_api::user_update;
+    use crate::interlude::utoipa;
+    use crate::interlude::OffsetDateTime;
+    use wasi::clocks::wall_clock::Datetime;
+
+    impl From<OffsetDateTime> for Datetime {
+        fn from(value: OffsetDateTime) -> Self {
+            Self {
+                seconds: todo!(),
+                nanoseconds: todo!(),
+            }
+        }
+    }
+    impl utoipa::ToSchema for Datetime {}
+    impl utoipa::PartialSchema for Datetime {
+        fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+            <OffsetDateTime as utoipa::PartialSchema>::schema()
+        }
+    }
 }
 struct Comp;
 impl wit::user_create::Guest for Comp {
@@ -60,51 +86,6 @@ impl wit::user_create::Guest for Comp {
     ) -> Result<wit::user_create::Output, wit::user_create::Error> {
         todo!()
     }
-}
-
-fn play() -> Res<()> {
-    use std::fmt::Write;
-
-    let reg = api_utils_rs::gen::TypeReg::default();
-
-    let features = vec![user::feature(&reg)];
-
-    let mut out = String::new();
-    let buf = &mut out;
-    write!(
-        buf,
-        r#"
-use super::*;   
-
-"#
-    )?;
-    for feature in features {
-        api_utils_rs::gen::handler_rust::feature_module(&reg, buf, &feature)?;
-    }
-
-    let mut out = String::new();
-    let buf = &mut out;
-
-    // writeln!(buf, "package townframe:btress-api;")?;
-    // writeln!(buf)?;
-    // writeln!(
-    //     buf,
-    //     "interface {name} {{",
-    //     name = AsKebabCase(&endpoint.id[..])
-    // )?;
-    // {
-    //     let mut buf = indenter::indented(buf).with_str("    ");
-    //     component_wit::endpoint_interface(&reg, &mut buf, &endpoint)?;
-    //     writeln!(buf)?;
-    //     writeln!(buf, "type input = string;")?;
-    //     writeln!(buf, "type output = string;")?;
-    //     writeln!(buf, "call: func(inp: input) -> result<output, error>;")?;
-    // }
-    // writeln!(buf, "}}")?;
-    //
-    // std::fs::write("../btress_api/wit/user.wit", &out)?;
-    // println!("{out}");
-    Ok(())
 }
 
 pub static USERNAME_REGEX: LazyLock<regex::Regex> =

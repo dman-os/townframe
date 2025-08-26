@@ -119,4 +119,3 @@ You can find the contributing guide [here](https://spinframework.dev/contributin
 Follow us on Twitter: [@spinframework](https://twitter.com/spinframework)
 
 You can join the Spin community in the [Spin CNCF Slack channel](https://cloud-native.slack.com/archives/C089NJ9G1V0) where you can ask questions, get help, and show off the cool things you are doing with Spin!
-

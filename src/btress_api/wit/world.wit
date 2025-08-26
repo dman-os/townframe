@@ -1,13 +1,24 @@
 package townframe:btress-api;
 
+interface utils {
+    use wasi:clocks/wall-clock@0.2.6.{datetime as dt};
+
+    record errors-validation {
+        issues: list<tuple<string, string>>,
+    }
+    type datetime = dt;
+    type uuid = string;
+    type error-internal = string;
+}
+
 world api {
     import wasi:keyvalue/atomics@0.2.0-draft;
     import wasi:keyvalue/store@0.2.0-draft;
     import wasi:logging/logging@0.1.0-draft;
     import wasmcloud:postgres/query@0.1.1-draft;
     import wasi:clocks/monotonic-clock@0.2.6;
+    import wasi:clocks/wall-clock@0.2.6;
 
     export user-create;
-    export user-update;
     // export wasi:http/incoming-handler@0.2.6;
 }

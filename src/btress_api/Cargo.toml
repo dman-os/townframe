@@ -33,4 +33,3 @@ sqlx.workspace = true
 # sqlx.workspace = true
 # kanidm_client.workspace = true
 # kanidm_proto.workspace = true
-

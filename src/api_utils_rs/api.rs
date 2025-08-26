@@ -26,7 +26,10 @@ pub struct RedisPool(
 #[non_exhaustive]
 pub enum StdDb {
     #[cfg(not(target_arch = "wasm32"))]
-    Pg { db_pool: sqlx::postgres::PgPool },
+    Pg {
+        db_pool: sqlx::postgres::PgPool,
+    },
+    None,
 }
 
 #[async_trait::async_trait]
