@@ -29,6 +29,7 @@ pub enum StdDb {
     Pg {
         db_pool: sqlx::postgres::PgPool,
     },
+    PgWasi {},
     None,
 }
 

@@ -1,9 +1,9 @@
 package townframe:btress-api;
 interface user {
-    use utils.{errors-validation};
-    use utils.{error-internal};
-    use utils.{uuid};
-    use utils.{datetime};
+    use townframe:api-utils/utils.{errors-validation};
+    use townframe:api-utils/utils.{error-internal};
+    use townframe:api-utils/utils.{uuid};
+    use townframe:api-utils/utils.{datetime};
 
     record user {
         id: uuid,
@@ -14,10 +14,10 @@ interface user {
     }
 }
 interface user-create {
-    use utils.{errors-validation};
-    use utils.{error-internal};
-    use utils.{uuid};
-    use utils.{datetime};
+    use townframe:api-utils/utils.{errors-validation};
+    use townframe:api-utils/utils.{error-internal};
+    use townframe:api-utils/utils.{uuid};
+    use townframe:api-utils/utils.{datetime};
     use user.{user};
 
     /// Username occupied
@@ -46,7 +46,9 @@ interface user-create {
         password: string,
     }
     type output = user;
-    call: func(inp: input) -> result<output, error>;
+    resource handler {
+        handle: func(inp: input) -> result<output, error>;
+    }
 }
 world feat-user {
     export user;

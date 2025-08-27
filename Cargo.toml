@@ -74,6 +74,9 @@ dotenv-flow = "0.16.2"
 
 http = "1"
 
+# wasm
+wit-bindgen = "0.43.0"
+
 automerge = "0.6"
 autosurgeon = "0.8.7"
 automerge-test = "0.5"

@@ -1,0 +1,16 @@
+package townframe:api-utils;
+
+interface utils {
+    use wasi:clocks/wall-clock@0.2.6.{datetime as dt};
+
+    record errors-validation {
+        issues: list<tuple<string, string>>,
+    }
+    record error-internal {
+        message: string
+    }
+    type datetime = dt;
+    type uuid = string;
+
+    noop: func();
+}

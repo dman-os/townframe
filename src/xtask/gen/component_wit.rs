@@ -49,10 +49,10 @@ pub(crate) fn feature_file(
     }: &Feature,
 ) -> Res<()> {
     let mut imports = vec![
-        "utils.{errors-validation}".to_string(),
-        "utils.{error-internal}".to_string(),
-        "utils.{uuid}".to_string(),
-        "utils.{datetime}".to_string(),
+        "townframe:api-utils/utils.{errors-validation}".to_string(),
+        "townframe:api-utils/utils.{error-internal}".to_string(),
+        "townframe:api-utils/utils.{uuid}".to_string(),
+        "townframe:api-utils/utils.{datetime}".to_string(),
     ];
     writeln!(
         buf,
@@ -118,7 +118,13 @@ pub fn endpoint_interface(
         writeln!(buf)?;
         input_type(&endpoint.input, reg, buf)?;
         output_type(&endpoint.output, reg, buf)?;
-        writeln!(buf, "call: func(inp: input) -> result<output, error>;")?;
+        writeln!(
+            buf,
+            r#"resource handler {{
+    handle: func(inp: input) -> result<output, error>;
+}}"#
+        )?;
+        // writeln!(buf, "call: func(inp: input) -> result<output, error>;")?;
     }
     writeln!(buf, "}}")?;
     Ok(())

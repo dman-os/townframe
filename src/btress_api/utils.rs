@@ -1,3 +1,4 @@
+#[cfg(test)]
 pub mod testing {
     use crate::interlude::*;
 

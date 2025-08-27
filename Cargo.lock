@@ -162,6 +162,7 @@ dependencies = [
  "tower-http",
  "utils_rs",
  "utoipa 5.3.1",
+ "wit-bindgen 0.43.0",
 ]
 
 [[package]]

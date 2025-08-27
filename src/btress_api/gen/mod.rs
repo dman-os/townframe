@@ -47,7 +47,7 @@ pub mod user {
         }
         #[derive(Debug, Serialize, thiserror::Error, displaydoc::Display, utoipa::ToSchema)]
         #[serde(rename_all = "camelCase", tag = "error")]
-        /// Email occupied
+        /// Email occupied: {email:?}
         pub struct ErrorEmailOccupied {
             /// example: alice@example.com
             pub email: Option<String>,
@@ -62,18 +62,18 @@ pub mod user {
         )]
         #[serde(rename_all = "camelCase", tag = "error")]
         pub enum Error {
-            /// Username occupied: {username}
+            /// Username occupied {0}
             #[http(code(StatusCode::BAD_REQUEST), desc("Username occupied"))]
             UsernameOccupied(#[from] ErrorUsernameOccupied),
-            /// Email occupied
+            /// Email occupied {0}
             #[http(code(StatusCode::BAD_REQUEST), desc("Email occupied"))]
             EmailOccupied(#[from] ErrorEmailOccupied),
-            /// Invalid input
+            /// Invalid input {0}
             #[http(code(StatusCode::BAD_REQUEST), desc("Invalid input"))]
             InvalidInput(#[from] ValidationErrors),
-            /// Internal server error
+            /// Internal server error {0}
             #[http(code(StatusCode::INTERNAL_SERVER_ERROR), desc("Internal server error"))]
-            Internal(String),
+            Internal(#[from] ErrorInternal),
         }
     }
 
@@ -84,13 +84,13 @@ pub mod user {
             async: true,
             additional_derives: [serde::Serialize, serde::Deserialize],
             with: {
-                "wasi:clocks/wall-clock@0.2.6": crate::wit::wasi::clocks::wall_clock,
-                "townframe:btress-api/utils/errors-validation": api_utils_rs::validation_errs::ValidationErrors,
-                "townframe:btress-api/user-create/input": crate::gen::user::user_create::Input,
-                "townframe:btress-api/user-create/error-email-occupied": crate::gen::user::user_create::ErrorEmailOccupied,
-                "townframe:btress-api/user-create/error": crate::gen::user::user_create::Error,
+                "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
+                "townframe:api-utils/utils": api_utils_rs::wit::townframe::api_utils::utils,
                 "townframe:btress-api/user-create/error-username-occupied": crate::gen::user::user_create::ErrorUsernameOccupied,
+                "townframe:btress-api/user-create/error-email-occupied": crate::gen::user::user_create::ErrorEmailOccupied,
                 "townframe:btress-api/user/user": crate::gen::user::User,
+                "townframe:btress-api/user-create/input": crate::gen::user::user_create::Input,
+                "townframe:btress-api/user-create/error": crate::gen::user::user_create::Error,
             }
         });
     }

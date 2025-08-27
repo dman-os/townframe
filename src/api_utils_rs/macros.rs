@@ -3,13 +3,13 @@
 #[macro_export]
 macro_rules! internal_err {
     {$msg:expr} =>{
-        panic!($msg)
-        /*Error::Internal {
-            #[cfg(not(censor_internal_errors))]
-            message: format!($msg),
-            #[cfg(censor_internal_errors)]
-            message: format!("internal server error"),
-        }*/
+        // panic!($msg)
+        Error::Internal (
+            #[cfg(not(feature = "censor_internal_errors"))]
+            format!($msg).into(),
+            #[cfg(feature = "censor_internal_errors")]
+            format!("internal server error").into(),
+        )
     }
 }
 

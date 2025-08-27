@@ -37,6 +37,8 @@ color-eyre.workspace = true
 # errors
 garde.workspace = true
 
+wit-bindgen.workspace = true
+
 # http
 # hyper = "1"
 # http.workspace = true

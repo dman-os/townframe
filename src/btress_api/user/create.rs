@@ -1,21 +1,23 @@
+use api_utils_rs::wit::wasmcloud::postgres;
+use api_utils_rs::wit::wasmcloud::postgres::types::PgValue;
+
 use crate::interlude::*;
 
-use crate::gen::user::user_create::*;
+pub use crate::gen::user::user_create::*;
+pub use crate::gen::user::wit::exports::townframe::btress_api::user_create::*;
 use crate::gen::user::User;
 
-#[async_trait]
-impl Endpoint for UserCreate {
-    type Request = Input;
-    type Response = Output;
-    type Error = Error;
-    type Cx = Context;
-
+impl crate::gen::user::wit::exports::townframe::btress_api::user_create::GuestHandler
+    for UserCreate
+{
+    #[allow(async_fn_in_trait)]
     async fn handle(
         &self,
-        cx: &Self::Cx,
-        request: Self::Request,
-    ) -> Result<Self::Response, Self::Error> {
-        garde::Validate::validate(&request).map_err(ValidationErrors::from)?;
+        inp: crate::gen::user::user_create::Input,
+    ) -> Result<crate::gen::user::User, crate::gen::user::user_create::Error> {
+        let cx = crate::cx();
+
+        garde::Validate::validate(&inp).map_err(ValidationErrors::from)?;
 
         let pass_hash = {
             use argon2::PasswordHasher;
@@ -23,7 +25,7 @@ impl Endpoint for UserCreate {
             let argon2 = cx.argon2.clone();
             tokio::task::spawn_blocking(move || {
                 argon2
-                    .hash_password(request.password.as_bytes(), salt_hash.as_ref())
+                    .hash_password(inp.password.as_bytes(), salt_hash.as_ref())
                     .expect_or_log("argon2 err")
                     .serialize()
             })
@@ -32,150 +34,200 @@ impl Endpoint for UserCreate {
         };
 
         // _cx.kanidm.idm_person_account_create()
-        let StdDb::Pg { db_pool } = &cx.db else {
+        let StdDb::PgWasi {} = &cx.db else {
             panic!("unsupported db");
         };
-        let out: Self::Response = todo!();
-        //         let out = sqlx::query_as!(
-        //             super::User,
-        //             r#"
-        // SELECT
-        //     id as "id!"
-        //     ,created_at as "created_at!"
-        //     ,updated_at as "updated_at!"
-        //     ,email::TEXT as "email?"
-        //     ,username::TEXT as "username!"
-        // FROM auth.create_user($1, $2, $3)
-        //         "#,
-        //             &request.username,
-        //             request.email.as_ref(),
-        //             pass_hash.as_ref()
-        //         )
-        //         .fetch_one(db_pool)
-        //         .await
-        //         .map_err(|err| match &err {
-        //             sqlx::Error::Database(boxed) if boxed.constraint().is_some() => {
-        //                 match boxed.constraint().unwrap() {
-        //                     "users_username_key" => Error::UsernameOccupied {
-        //                         username: request.username,
-        //                     },
-        //                     "users_email_key" => Error::EmailOccupied {
-        //                         email: request.email.unwrap(),
-        //                     },
-        //                     _ => internal_err!("db error: {err}"),
-        //                 }
-        //             }
-        //             _ => internal_err!("db error: {err}"),
-        //         })?;
-        Ok(out.into())
+        let rows = postgres::query::query(
+            r#"
+        SELECT
+            id as "id!"
+            ,created_at as "created_at!"
+            ,updated_at as "updated_at!"
+            ,email::TEXT as "email?"
+            ,username::TEXT as "username!"
+        FROM auth.create_user($1, $2, $3)
+            "#
+            .into(),
+            vec![
+                PgValue::Text(inp.username.clone()),
+                inp.email
+                    .clone()
+                    .map(PgValue::Text)
+                    .unwrap_or_else(|| PgValue::Null),
+                PgValue::Text(pass_hash.to_string()),
+            ],
+        )
+        .await
+        .map_err(|err| {
+            use postgres::types::QueryError::*;
+            match err {
+                Unexpected(msg) if msg.contains("users_username_key") => ErrorUsernameOccupied {
+                    username: inp.username,
+                }
+                .into(),
+                Unexpected(msg) if msg.contains("users_email_key") => {
+                    ErrorEmailOccupied { email: inp.email }.into()
+                }
+                Unexpected(msg) | InvalidParams(msg) | InvalidQuery(msg) => {
+                    internal_err!("db error: {msg}")
+                }
+            }
+        })?;
+        let mut rows = rows_to_objs(rows);
+        let mut out = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| internal_err!("bad response, no row found"))?;
+        let out = User {
+            id: out.swap_remove("id!").expect("bad response").to_text(),
+            created_at: out
+                .swap_remove("created_at!")
+                .expect("bad response")
+                .to_datetime(),
+            updated_at: out
+                .swap_remove("updated_at!")
+                .expect("bad response")
+                .to_datetime(),
+            email: Some(out.swap_remove("email?").expect("bad response").to_text()),
+            username: out
+                .swap_remove("username!")
+                .expect("bad response")
+                .to_text(),
+        };
+        Ok(out)
     }
 }
 
-// #[cfg(test)]
+fn rows_to_objs(rows: Vec<Vec<postgres::types::ResultRowEntry>>) -> Vec<IndexMap<String, PgValue>> {
+    rows.into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|col| (col.column_name, col.value))
+                .collect::<IndexMap<_, _>>()
+        })
+        .collect()
+}
+
+// #[async_trait]
+// impl Endpoint for UserCreate {
+//     type Input = Input;
+//     type Response = Output;
+//     type Error = Error;
+//     type Cx = Context;
+//
+//     async fn handle(
+//         &self,
+//         cx: &Self::Cx,
+//         request: Self::Input,
+//     ) -> Result<Self::Response, Self::Error> {
+//     }
+// }
+
+#[cfg(test)]
 mod test {
-    // use super::Request;
-    // use crate::interlude::*;
-    //
-    // use crate::user::testing::*;
-    //
-    // fn fixture_request() -> Request {
-    //     serde_json::from_value(fixture_request_json()).unwrap()
-    // }
-    //
-    // fn fixture_request_json() -> serde_json::Value {
-    //     serde_json::json!({
-    //         "username": "whish_box12",
-    //         "email": "multis@cream.mux",
-    //         "password": "lovebite",
-    //     })
-    // }
-    //
-    // api_utils_rs::table_tests! {
-    //     validate,
-    //     (request, err_path),
-    //     {
-    //         match garde::Validate::validate(&request) {
-    //             Ok(()) => {
-    //                 if let Some(err_path) = err_path {
-    //                     panic!("validation succeeded, was expecting err on field: {err_path} {request:?}");
-    //                 }
-    //             }
-    //             Err(err) => {
-    //                 let err_path = err_path.expect("unexpected validation failure");
-    //                 if let None = err.iter().find(|(path, err)| err_path == format!("{path}")) {
-    //                     panic!("validation didn't fail on expected field: {err_path}, {err:?}");
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
-    //
-    // validate! {
-    //     rejects_too_short_usernames: (
-    //         Request {
-    //             username: "st".into(),
-    //             ..fixture_request()
-    //         },
-    //         Some("username"),
-    //     ),
-    //     rejects_too_long_usernames: (
-    //         Request {
-    //             username: "doo-doo-do-doo-dooooo-do-do-dooooood".into(),
-    //             ..fixture_request()
-    //         },
-    //         Some("username"),
-    //     ),
-    //     rejects_usernames_that_ends_with_dashes: (
-    //         Request {
-    //             username: "wrenz-".into(),
-    //             ..fixture_request()
-    //         },
-    //         Some("username"),
-    //     ),
-    //     rejects_usernames_that_start_with_dashes: (
-    //         Request {
-    //             username: "-wrenz".into(),
-    //             ..fixture_request()
-    //         },
-    //         Some("username"),
-    //     ),
-    //     rejects_usernames_that_ends_with_underscore: (
-    //         Request {
-    //             username: "belle_".into(),
-    //             ..fixture_request()
-    //         },
-    //         Some("username"),
-    //     ),
-    //     rejects_usernames_that_start_with_underscore: (
-    //         Request {
-    //             username: "_belle".into(),
-    //             ..fixture_request()
-    //         },
-    //         Some("username"),
-    //     ),
-    //     rejects_usernames_with_white_space: (
-    //         Request {
-    //             username: "daddy yo".into(),
-    //             ..fixture_request()
-    //         },
-    //         Some("username"),
-    //     ),
-    //     rejects_too_short_passwords: (
-    //         Request {
-    //             password: "short".into(),
-    //             ..fixture_request()
-    //         },
-    //         Some("password"),
-    //     ),
-    //     rejects_invalid_emails: (
-    //         Request {
-    //             email: Some("invalid".into()),
-    //             ..fixture_request()
-    //         },
-    //         Some("email"),
-    //     ),
-    // }
-    //
+    use super::Input;
+    use crate::interlude::*;
+
+    use crate::user::testing::*;
+
+    fn fixture_request() -> Input {
+        serde_json::from_value(fixture_request_json()).unwrap()
+    }
+
+    fn fixture_request_json() -> serde_json::Value {
+        serde_json::json!({
+            "username": "whish_box12",
+            "email": "multis@cream.mux",
+            "password": "lovebite",
+        })
+    }
+
+    api_utils_rs::table_tests! {
+        validate,
+        (request, err_path),
+        {
+            match garde::Validate::validate(&request) {
+                Ok(()) => {
+                    if let Some(err_path) = err_path {
+                        panic!("validation succeeded, was expecting err on field: {err_path} {request:?}");
+                    }
+                }
+                Err(err) => {
+                    let err_path = err_path.expect("unexpected validation failure");
+                    if let None = err.iter().find(|(path, err)| err_path == format!("{path}")) {
+                        panic!("validation didn't fail on expected field: {err_path}, {err:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    validate! {
+        rejects_too_short_usernames: (
+            Input {
+                username: "st".into(),
+                ..fixture_request()
+            },
+            Some("username"),
+        ),
+        rejects_too_long_usernames: (
+            Input {
+                username: "doo-doo-do-doo-dooooo-do-do-dooooood".into(),
+                ..fixture_request()
+            },
+            Some("username"),
+        ),
+        rejects_usernames_that_ends_with_dashes: (
+            Input {
+                username: "wrenz-".into(),
+                ..fixture_request()
+            },
+            Some("username"),
+        ),
+        rejects_usernames_that_start_with_dashes: (
+            Input {
+                username: "-wrenz".into(),
+                ..fixture_request()
+            },
+            Some("username"),
+        ),
+        rejects_usernames_that_ends_with_underscore: (
+            Input {
+                username: "belle_".into(),
+                ..fixture_request()
+            },
+            Some("username"),
+        ),
+        rejects_usernames_that_start_with_underscore: (
+            Input {
+                username: "_belle".into(),
+                ..fixture_request()
+            },
+            Some("username"),
+        ),
+        rejects_usernames_with_white_space: (
+            Input {
+                username: "daddy yo".into(),
+                ..fixture_request()
+            },
+            Some("username"),
+        ),
+        rejects_too_short_passwords: (
+            Input {
+                password: "short".into(),
+                ..fixture_request()
+            },
+            Some("password"),
+        ),
+        rejects_invalid_emails: (
+            Input {
+                email: Some("invalid".into()),
+                ..fixture_request()
+            },
+            Some("email"),
+        ),
+    }
+
     // macro_rules! integ {
     //     ($(
     //         $name:ident: {
@@ -216,7 +268,7 @@ mod test {
     //                 let req_body_json = fixture_request_json();
     //                 let resp_body_json = response_json.unwrap();
     //                 // // TODO: use super user token
-    //                 // let token = authenticate::Authenticate.handle(&cx,authenticate::Request{
+    //                 // let token = authenticate::Authenticate.handle(&cx,authenticate::Input{
     //                 //     identifier: req_body_json["username"].as_str().unwrap().into(),
     //                 //     password: req_body_json["password"].as_str().unwrap().into()
     //                 // }).await.unwrap_or_log().token;
@@ -224,7 +276,7 @@ mod test {
     //                 let app = crate::user::router().with_state(cx);
     //                 let resp = app
     //                     .oneshot(
-    //                         http::Request::builder()
+    //                         http::::builder()
     //                             .method("GET")
     //                             .uri(format!("/users/{}", resp_body_json["id"].as_str().unwrap()))
     //                             // .header(

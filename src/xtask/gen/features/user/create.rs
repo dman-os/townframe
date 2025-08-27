@@ -63,6 +63,7 @@ fn error(reg: &TypeReg) -> ErrorType {
                 ErrorVariant::builder()
                     .http_code(StatusCode::BAD_REQUEST)
                     .message("Email occupied")
+                    .message_with_fields(": {email:?}")
                     .with_field(
                         "email",
                         ErrorField::builder()

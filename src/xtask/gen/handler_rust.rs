@@ -108,7 +108,7 @@ pub fn feature_module(
         let buf = &mut out;
         writeln!(
             buf,
-            r#"use super::*;   
+            r#"use super::*;
 
 pub const TAG: api::Tag = api::Tag {{
     name: "{tag_name}",
@@ -129,7 +129,6 @@ pub const TAG: api::Tag = api::Tag {{
                 schema_type(reg, buf, &mut exp, *id)?;
             }
         }
-        writeln!(buf)?;
         /*{
                 writeln!(
                     buf,
@@ -146,7 +145,6 @@ pub const TAG: api::Tag = api::Tag {{
                 }
                 writeln!(buf, "}}")?;
             }*/
-        writeln!(buf)?;
         {
             let mut exp = ExportedTypesAppender {
                 into: exp_root.clone(),
@@ -154,7 +152,8 @@ pub const TAG: api::Tag = api::Tag {{
                 rust_prefix: Some(tag.name.to_snek_case()),
             };
             for epoint in endpoints {
-                handler_rust::endpoint_module(reg, buf, &mut exp, epoint)?;
+                writeln!(buf)?;
+                endpoint_module(reg, buf, &mut exp, epoint)?;
             }
         }
         writeln!(buf)?;
@@ -173,8 +172,8 @@ world: "feat-{world}",
 async: true,
 additional_derives: [serde::Serialize, serde::Deserialize],
 with: {{
-    "wasi:clocks/wall-clock@0.2.6": crate::wit::wasi::clocks::wall_clock,
-    "townframe:btress-api/utils/errors-validation": api_utils_rs::validation_errs::ValidationErrors,"#,
+    "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
+    "townframe:api-utils/utils": api_utils_rs::wit::townframe::api_utils::utils,"#,
                 world = AsKebabCase(&tag.name[..])
             )?;
             {
@@ -379,85 +378,86 @@ fn input_type(
 #[serde(rename_all = "camelCase")]
 pub struct Input {{"#
     )?;
-    for (field_name, field) in &this.fields {
-        // Add field documentation if description exists
-        if let Some(desc) = &field.inner.desc {
-            writeln!(buf, "    /// {}", desc)?;
-        }
 
-        // Add utoipa schema attributes for validations
-        let mut schema_attrs = Vec::new();
-        for validation in &field.validations {
-            match validation {
-                FieldValidations::MinLength(len) => {
-                    schema_attrs.push(format!("min_length = {len}"))
-                }
-                FieldValidations::MaxLength(len) => {
-                    schema_attrs.push(format!("max_length = {len}"))
-                }
-                FieldValidations::Pattern(pattern) => {
-                    schema_attrs.push(format!(r#"pattern = "{}""#, pattern.as_str()))
-                }
-                _ => {} // Other validations don't have direct utoipa schema equivalents
+    {
+        let mut out = &mut indenter::indented(buf).with_str("    ");
+        let buf = &mut out;
+        for (field_name, field) in &this.fields {
+            // Add field documentation if description exists
+            if let Some(desc) = &field.inner.desc {
+                writeln!(buf, "/// {}", desc)?;
             }
-        }
 
-        if !schema_attrs.is_empty() {
-            writeln!(buf, "    #[schema({})]", schema_attrs.join(", "))?;
-        }
-
-        // Add garde validation attributes
-        let mut garde_attrs = Vec::new();
-        let mut length_validations = (None, None);
-        for validation in &field.validations {
-            match validation {
-                FieldValidations::Ascii => garde_attrs.push("ascii".to_string()),
-                FieldValidations::Email => garde_attrs.push("email".to_string()),
-                FieldValidations::MinLength(len) => {
-                    if length_validations.0.is_some() {
-                        eyre::bail!(
-                            "duplicate min length validations: {len} && {length_validations:?}"
-                        )
+            // Add utoipa schema attributes for validations
+            let mut schema_attrs = Vec::new();
+            for validation in &field.validations {
+                match validation {
+                    FieldValidations::MinLength(len) => {
+                        schema_attrs.push(format!("min_length = {len}"))
                     }
-                    length_validations.0 = Some(len);
-                }
-                FieldValidations::MaxLength(len) => {
-                    if length_validations.1.is_some() {
-                        eyre::bail!(
-                            "duplicate max length validations: {len} && {length_validations:?}"
-                        )
+                    FieldValidations::MaxLength(len) => {
+                        schema_attrs.push(format!("max_length = {len}"))
                     }
-                    length_validations.1 = Some(len);
+                    FieldValidations::Pattern(pattern) => {
+                        schema_attrs.push(format!(r#"pattern = "{}""#, pattern.as_str()))
+                    }
+                    _ => {} // Other validations don't have direct utoipa schema equivalents
                 }
-                FieldValidations::Pattern(pattern) => {
-                    garde_attrs.push(format!(r#"pattern({})"#, pattern.as_str()))
-                }
-                _ => {} // Handle other validation types as needed
             }
-        }
-        match length_validations {
-            (None, None) => {}
-            (None, Some(max)) => garde_attrs.push(format!("length(max = {max})")),
-            (Some(min), None) => garde_attrs.push(format!("length(min = {min})")),
-            (Some(min), Some(max)) => garde_attrs.push(format!("length(min = {min}, max = {max})")),
-        }
 
-        if !garde_attrs.is_empty() {
-            writeln!(buf, "    #[garde({})]", garde_attrs.join(", "))?;
-        }
-        if field.source != this.main_source {
-            writeln!(buf, "    #[serde(skip)]")?;
-        }
+            if !schema_attrs.is_empty() {
+                writeln!(buf, "#[schema({})]", schema_attrs.join(", "))?;
+            }
 
-        // Write the field definition
-        record_field(
-            &field.inner,
-            reg,
-            &mut indenter::indented(buf).with_str("    "),
-            &field_name,
-            true,
-        )?;
-        writeln!(buf, ", ")?;
+            // Add garde validation attributes
+            let mut garde_attrs = Vec::new();
+            let mut length_validations = (None, None);
+            for validation in &field.validations {
+                match validation {
+                    FieldValidations::Ascii => garde_attrs.push("ascii".to_string()),
+                    FieldValidations::Email => garde_attrs.push("email".to_string()),
+                    FieldValidations::MinLength(len) => {
+                        if length_validations.0.is_some() {
+                            eyre::bail!(
+                                "duplicate min length validations: {len} && {length_validations:?}"
+                            )
+                        }
+                        length_validations.0 = Some(len);
+                    }
+                    FieldValidations::MaxLength(len) => {
+                        if length_validations.1.is_some() {
+                            eyre::bail!(
+                                "duplicate max length validations: {len} && {length_validations:?}"
+                            )
+                        }
+                        length_validations.1 = Some(len);
+                    }
+                    FieldValidations::Pattern(pattern) => {
+                        garde_attrs.push(format!(r#"pattern({})"#, pattern.as_str()))
+                    }
+                    _ => {} // Handle other validation types as needed
+                }
+            }
+            match length_validations {
+                (None, None) => {}
+                (None, Some(max)) => garde_attrs.push(format!("length(max = {max})")),
+                (Some(min), None) => garde_attrs.push(format!("length(min = {min})")),
+                (Some(min), Some(max)) => {
+                    garde_attrs.push(format!("length(min = {min}, max = {max})"))
+                }
+            }
+
+            if !garde_attrs.is_empty() {
+                writeln!(buf, "#[garde({})]", garde_attrs.join(", "))?;
+            }
+            if field.source != this.main_source {
+                writeln!(buf, "#[serde(skip)]")?;
+            }
+
+            // Write the field definition
+            record_field(&field.inner, reg, buf, &field_name, true)?;
+            writeln!(buf, ",")?;
+        }
     }
 
     writeln!(buf, "}}")?;
@@ -495,9 +495,7 @@ fn error_type(
         );
         writeln!(
             buf,
-            r#"#[derive(
-    Debug, Serialize, thiserror::Error, displaydoc::Display, utoipa::ToSchema,
-)]
+            r#"#[derive(Debug, Serialize, thiserror::Error, displaydoc::Display, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", tag = "error")]
 /// {message}{message_with_fields}
 pub struct Error{name} {{"#,
@@ -530,10 +528,15 @@ pub struct Error{name} {{"#,
         writeln!(buf, "}}")?;
     }
     exp.append("error".to_string(), "Error".to_string());
-    write!(
+    writeln!(
         buf,
         r#"#[derive(
-    Debug, Serialize, thiserror::Error, displaydoc::Display, macros::HttpError, utoipa::ToSchema,
+    Debug,
+    Serialize,
+    thiserror::Error,
+    displaydoc::Display,
+    macros::HttpError,
+    utoipa::ToSchema,
 )]
 #[serde(rename_all = "camelCase", tag = "error")]
 pub enum Error {{"#
@@ -544,23 +547,22 @@ pub enum Error {{"#
             fields,
             http_code,
             message,
-            message_with_fields,
+            message_with_fields: _,
         },
     ) in &this.variants
     {
         let mut out = &mut indenter::indented(buf).with_str("    ");
         let buf = &mut out;
-        let message_with_fields = message_with_fields.as_deref().unwrap_or_default();
         write!(
             buf,
-            r#"/// {message}{message_with_fields}
+            r#"/// {message} {{0}}
 #[http(code(StatusCode::{code_name}), desc("{message}"))]
 {name}"#,
             name = AsPascalCase(&name[..]),
             code_name = http_status_code_name(*http_code),
         )?;
         if &name[..] == ErrorVariant::ERROR_INTERNAL_NAME {
-            writeln!(buf, "(String),")?;
+            writeln!(buf, "(#[from] ErrorInternal),")?;
         } else if &name[..] == ErrorVariant::ERROR_INVALID_INPUT_NAME {
             writeln!(buf, "(#[from] ValidationErrors),",)?;
         } else if fields.is_empty() {
