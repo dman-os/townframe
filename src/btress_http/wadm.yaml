@@ -1,25 +1,26 @@
 apiVersion: core.oam.dev/v1beta1
 kind: Application
 metadata:
-  name: rust-hello-world
+  name: btress-http
   annotations:
-    description: 'HTTP hello world demo in Rust, using the WebAssembly Component Model and WebAssembly Interfaces Types (WIT)'
-    wasmcloud.dev/authors: wasmCloud team
-    wasmcloud.dev/source-url: https://github.com/wasmCloud/wasmCloud/blob/main/examples/rust/components/http-hello-world/wadm.yaml
-    wasmcloud.dev/readme-md-url: https://github.com/wasmCloud/wasmCloud/blob/main/examples/rust/components/http-hello-world/README.md
-    wasmcloud.dev/homepage: https://github.com/wasmCloud/wasmCloud/tree/main/examples/rust/components/http-hello-world
-    wasmcloud.dev/categories: |
-      http,http-server,rust,hello-world,example
+    description: Exposes all the services of btress-api component over http.
 spec:
   components:
     - name: http-component
       type: component
       properties:
-        image: file://./build/http_hello_world_s.wasm
-        # To use the a precompiled version of this component, use the line below instead:
-        # image: ghcr.io/wasmcloud/components/http-hello-world-rust:0.1.0
+        image: file://../../target/wasm32-wasip2/debug/btress_http_s.wasm
       traits:
         # Govern the spread/scheduling of the component
+        - type: spreadscaler
+          properties:
+            instances: 1
+
+    - name: api-component
+      type: component
+      properties:
+        image: file://../../target/wasm32-wasip2/debug/btress_api_s.wasm
+      traits:
         - type: spreadscaler
           properties:
             instances: 1

@@ -46,11 +46,10 @@ interface user-create {
         password: string,
     }
     type output = user;
-    resource handler {
-        handle: func(inp: input) -> result<output, error>;
+    resource service {
+        serve: func(inp: input) -> result<output, error>;
     }
 }
 world feat-user {
-    //export user;
     export user-create;
 }

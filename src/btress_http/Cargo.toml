@@ -1,0 +1,15 @@
+[package]
+name = "btress_http"
+version.workspace = true
+edition.workspace = true
+
+
+[lib]
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+# wasmcloud-component = "0.2.0"
+wit-bindgen.workspace = true
+utils_rs.workspace = true
+api_utils_rs.workspace = true

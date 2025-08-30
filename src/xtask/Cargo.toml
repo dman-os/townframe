@@ -8,7 +8,7 @@ name = "xtask"
 path = "main.rs"
 
 [dependencies]
-clap = { version = "4.5.3", features = ["derive", "env"] }
+clap = { version = "4.5.47", features = ["derive", "env"] }
 # zitadel = { version = "5.5.1", features = ["api"] }
 # ahash.workspace = true
 
@@ -24,5 +24,5 @@ http.workspace = true
 
 # generator
 heck = "0.5.0"
-bon = "3.7.0"
+bon = "3.7.2"
 indenter = "0.3.4"

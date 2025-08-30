@@ -70,42 +70,47 @@ pub const CX: tokio::sync::OnceCell<SharedContext> = tokio::sync::OnceCell::cons
 
 mod wit {
     wit_bindgen::generate!({
+        path: "../btress_api/wit",
         world: "api",
         // generate_all,
         async: true,
         additional_derives: [serde::Serialize, serde::Deserialize],
         with: {
-            // "wasi:keyvalue/store@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::store,
-            // "wasi:keyvalue/atomics@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::atomics,
-            // "wasi:logging/logging@0.1.0-draft": api_utils_rs::wit::wasi::logging::logging,
-            // "wasmcloud:postgres/types@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::types,
-            // "wasmcloud:postgres/query@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::query,
-            // "wasi:io/poll@0.2.6": api_utils_rs::wit::wasi::io::poll,
-            // "wasi:clocks/monotonic-clock@0.2.6": api_utils_rs::wit::wasi::clocks::monotonic_clock,
-            // "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
-            //
-            // "townframe:api-utils/utils": api_utils_rs::wit::townframe::api_utils::utils,
-            //
+            "wasi:keyvalue/store@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::store,
+            "wasi:keyvalue/atomics@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::atomics,
+            "wasi:logging/logging@0.1.0-draft": api_utils_rs::wit::wasi::logging::logging,
+            "wasmcloud:postgres/types@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::types,
+            "wasmcloud:postgres/query@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::query,
+            "wasi:io/poll@0.2.6": api_utils_rs::wit::wasi::io::poll,
+            "wasi:clocks/monotonic-clock@0.2.6": api_utils_rs::wit::wasi::clocks::monotonic_clock,
+            "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
+
+            "townframe:api-utils/utils": api_utils_rs::wit::utils,
+
             // "townframe:btress-api/user": crate::gen::user,
-            // "townframe:btress-api/user-create": crate::gen::user::user_create,
+            "townframe:btress-api/user-create": crate::gen::user::user_create,
+            "townframe:btress-api/user-create/error-email-occupied": crate::gen::user::user_create::ErrorEmailOccupied,
+            "townframe:btress-api/user-create/error-username-occupied": crate::gen::user::user_create::ErrorUsernameOccupied,
+            "townframe:btress-api/user-create/input": crate::gen::user::user_create::Input,
+            "townframe:btress-api/user/user": crate::gen::user::User,
+            "townframe:btress-api/user-create/error": crate::gen::user::user_create::Error,
         }
     });
 }
 
-// wit::export!(Component with_types_in wit);
 wit::export!(Component with_types_in wit);
 
 struct Component;
 
 impl wit::exports::townframe::btress_api::ctx::Guest for Component {
     #[allow(async_fn_in_trait)]
-    async fn init() {
+    async fn init() -> Result<(), String> {
         crate::init().map_err(|err| format!("{err:?}"))?;
         Ok(())
     }
 }
-impl user::create::Guest for Component {
-    type Handler = user::create::UserCreate;
+impl wit::exports::townframe::btress_api::user_create::Guest for Component {
+    type Service = user::create::UserCreate;
 }
 
 pub static USERNAME_REGEX: LazyLock<regex::Regex> =

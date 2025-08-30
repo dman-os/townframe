@@ -4,12 +4,13 @@ use api_utils_rs::wit::wasmcloud::postgres::types::PgValue;
 use crate::interlude::*;
 
 pub use crate::gen::user::user_create::*;
-pub use crate::gen::user::wit::exports::townframe::btress_api::user_create::{ErrorsValidation, *};
+// pub use crate::gen::user::wit::exports::townframe::btress_api::user_create::GuestHandler;
 use crate::gen::user::User;
+pub use crate::wit::exports::townframe::btress_api::user_create::GuestService;
 
-impl GuestHandler for UserCreate {
+impl GuestService for UserCreate {
     #[allow(async_fn_in_trait)]
-    async fn handle(&self, inp: Input) -> Result<User, Error> {
+    async fn serve(&self, inp: Input) -> Result<User, Error> {
         let cx = crate::cx();
 
         garde::Validate::validate(&inp).map_err(ErrorsValidation::from)?;

@@ -22,9 +22,9 @@ axum = { version = "0.8.4", default-features = false, features = [
   "form", "json", "macros", "multipart", "query", "original-uri",
   "query", "tower-log", "tracing"
   ] }
-axum-extra = { version = "0.10.0", features = ["typed-header"] }
+axum-extra = { version = "0.10.1", features = ["typed-header"] }
 
-utoipa = { version = "5.3.1", features = ["debug", "uuid", "time", "smallvec", "axum_extras", "preserve_order"] }
+utoipa = { version = "5.4.0", features = ["debug", "uuid", "time", "smallvec", "axum_extras", "preserve_order"] }
 # utoipa-swagger-ui = "9"
 # http
 tower = "0.5"

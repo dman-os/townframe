@@ -1,0 +1,12 @@
+package townframe:btress-api;
+
+interface ctx {
+    init: func() -> result<_, string>;
+}
+
+world api {
+    include townframe:api-utils/imports;
+
+    export ctx;
+    export user-create;
+}

@@ -8,7 +8,7 @@ import * as ports from "@ghjk/ports_wip";
 import * as std_url from "jsr:@std/url@0.215.0";
 
 const DOCKER_CMD = Deno.env.get("DOCKER_CMD") ?? "podman";
-const RUST_VERSION = "1.85.0";
+const RUST_VERSION = "nightly-2025-09-01";
 const GHJK_VERSION = "v0.3.2";
 
 const installs = {
@@ -48,11 +48,16 @@ ghjk.env("main")
     ports.pipi({ packageName: "pre-commit" })[0],
     ports.cargobi({ crateName: "kanidm_tools", locked: true }),
     ports.cargobi({ crateName: "cargo-nextest", locked: true }),
+    ports.mold({ replaceLd: true }),
+    // ports.cargobi({ crateName: "cargo-edit", locked: true }),
   );
 
 ghjk.env("dev")
   .install(
     ports.cargobi({ crateName: "wash", locked: true }),
+    ports.cargobi({ crateName: "wac-cli", locked: true }),
+    ports.cargobi({ crateName: "wasmtime-cli", locked: true }),
+    // ports.cargobi({ crateName: "wasi-virt", locked: true }),
     // ports.cargobi({ crateName: "spin-cli", locked: true }),
     ports.cargobi({ crateName: "wit-deps-cli", locked: true }),
     ports.cargobi({ crateName: "wasm-opt", locked: true }),
@@ -75,6 +80,7 @@ ghjk.env("dev")
     KANIDM_URL: "https://localhost:8443",
     KANIDM_SKIP_HOSTNAME_VERIFICATION: "true",
     KANIDM_ACCEPT_INVALID_CERTS: "true",
+    WASMCLOUD_OCI_ALLOWED_INSECURE: "localhost:5000"
     // ...Object.fromEntries(
     //   [
     //     await $.path(
@@ -367,4 +373,10 @@ ghjk.task(async function dev($) {
   await $`wash build`;
 }, {
   workingDir: "./src/btress_api"
+});
+
+ghjk.task("build-btress", async ($) => {
+  await $`wash build`.cwd($.workingDir.join("./src/btress_api/"));
+  // await $`wash push localhost:5000/btress-api:latest`;
+}, {
 });

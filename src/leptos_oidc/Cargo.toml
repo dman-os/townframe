@@ -26,12 +26,12 @@ name = "leptos_oidc"
 [dependencies]
 time = { workspace = true, features = ["serde", "wasm-bindgen", "local-offset"] }
 
-codee = { version = "0.2", features = ["json_serde"] }
+codee = { version = "0.3", features = ["json_serde"] }
 serde.workspace = true
 serde_json.workspace = true
 
 jsonwebtoken = { version = "9.3", default-features = false }
-oauth2 = { version = "4.4.2", default-features = false, features = ["pkce-plain"] }
+oauth2 = { version = "5.0.0", default-features = false, features = ["pkce-plain"] }
 
 leptos = { workspace = true  }
 leptos-use = { workspace = true, features = ["storage", "use_timeout_fn"] }

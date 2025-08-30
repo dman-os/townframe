@@ -33,7 +33,7 @@ tracing-unwrap.workspace = true
 # ds
 once_cell.workspace = true
 time.workspace = true
-rust_decimal = "1.37.1"
+rust_decimal = "1.37.2"
 parking_lot.workspace = true
 
 # async

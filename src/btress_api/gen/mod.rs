@@ -39,13 +39,29 @@ pub mod user {
             pub password: String,
         }
 
-        #[derive(Debug, Serialize, thiserror::Error, displaydoc::Display, utoipa::ToSchema)]
+        #[derive(
+            Debug,
+            Clone,
+            Serialize,
+            Deserialize,
+            thiserror::Error,
+            displaydoc::Display,
+            utoipa::ToSchema,
+        )]
         #[serde(rename_all = "camelCase", tag = "error")]
         /// Username occupied: {username}
         pub struct ErrorUsernameOccupied {
             pub username: String,
         }
-        #[derive(Debug, Serialize, thiserror::Error, displaydoc::Display, utoipa::ToSchema)]
+        #[derive(
+            Debug,
+            Clone,
+            Serialize,
+            Deserialize,
+            thiserror::Error,
+            displaydoc::Display,
+            utoipa::ToSchema,
+        )]
         #[serde(rename_all = "camelCase", tag = "error")]
         /// Email occupied: {email:?}
         pub struct ErrorEmailOccupied {
@@ -79,7 +95,6 @@ pub mod user {
 
     pub mod wit {
         wit_bindgen::generate!({
-            path: "../btress_api/wit",
             world: "feat-user",
             async: true,
             additional_derives: [serde::Serialize, serde::Deserialize],
@@ -89,8 +104,8 @@ pub mod user {
                 "townframe:btress-api/user-create/error-username-occupied": crate::gen::user::user_create::ErrorUsernameOccupied,
                 "townframe:btress-api/user-create/input": crate::gen::user::user_create::Input,
                 "townframe:btress-api/user-create/error": crate::gen::user::user_create::Error,
-                "townframe:btress-api/user-create/error-email-occupied": crate::gen::user::user_create::ErrorEmailOccupied,
                 "townframe:btress-api/user/user": crate::gen::user::User,
+                "townframe:btress-api/user-create/error-email-occupied": crate::gen::user::user_create::ErrorEmailOccupied,
             }
         });
     }

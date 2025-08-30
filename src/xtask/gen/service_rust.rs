@@ -167,13 +167,12 @@ pub const TAG: api::Tag = api::Tag {{
             let buf = &mut out;
             writeln!(
                 buf,
-                r#"path: "../btress_api/wit",
-world: "feat-{world}",
+                r#"world: "feat-{world}",
 async: true,
 additional_derives: [serde::Serialize, serde::Deserialize],
 with: {{
     "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
-    "townframe:api-utils/utils": api_utils_rs::wit::townframe::api_utils::utils,"#,
+    "townframe:api-utils/utils": api_utils_rs::wit::utils,"#,
                 world = AsKebabCase(&tag.name[..])
             )?;
             {
@@ -495,7 +494,7 @@ fn error_type(
         );
         writeln!(
             buf,
-            r#"#[derive(Debug, Serialize, thiserror::Error, displaydoc::Display, utoipa::ToSchema)]
+            r#"#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error, displaydoc::Display, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", tag = "error")]
 /// {message}{message_with_fields}
 pub struct Error{name} {{"#,

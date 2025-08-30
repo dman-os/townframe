@@ -51,9 +51,9 @@ impl From<garde::Report> for ErrorsValidation {
 #[derive(
     Default,
     Debug,
+    Clone,
     Serialize,
     Deserialize,
-    Clone,
     PartialEq,
     utoipa::ToSchema,
     thiserror::Error,

@@ -88,7 +88,7 @@ pub(crate) fn feature_file(
     {
         let mut out = indenter::indented(buf).with_str("    ");
         let buf = &mut out;
-        writeln!(buf, "export {name};", name = AsKebabCase(&tag.name[..]))?;
+        // writeln!(buf, "export {name};", name = AsKebabCase(&tag.name[..]))?;
         for epoint in endpoints {
             writeln!(buf, "export {name};", name = AsKebabCase(&epoint.id[..]))?;
         }
@@ -120,8 +120,8 @@ pub fn endpoint_interface(
         output_type(&endpoint.output, reg, buf)?;
         writeln!(
             buf,
-            r#"resource handler {{
-    handle: func(inp: input) -> result<output, error>;
+            r#"resource service {{
+    serve: func(inp: input) -> result<output, error>;
 }}"#
         )?;
         // writeln!(buf, "call: func(inp: input) -> result<output, error>;")?;

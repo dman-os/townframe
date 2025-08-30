@@ -45,6 +45,9 @@ pub mod wit {
             "wasi:io/poll@0.2.6": generate,
             "wasi:clocks/monotonic-clock@0.2.6": generate,
             "wasi:clocks/wall-clock@0.2.6": generate,
+
+            "townframe:api-utils/utils/errors-validation": crate::errs::ErrorsValidation,
+            "townframe:api-utils/utils/error-internal": crate::errs::ErrorInternal,
         }
     });
 

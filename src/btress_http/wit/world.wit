@@ -1,0 +1,15 @@
+package townframe:btress-http;
+
+world server {
+    import wasi:logging/logging@0.1.0-draft;
+    import wasi:clocks/monotonic-clock@0.2.6;
+
+    import townframe:btress-api/user-create;
+    import townframe:btress-api/ctx;
+
+    export wasi:http/incoming-handler@0.2.6;
+}
+
+world imports {
+    include townframe:api-utils/imports;
+}

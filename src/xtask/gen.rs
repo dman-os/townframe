@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 use heck::*;
 mod component_wit;
 mod features;
-mod handler_rust;
+mod service_rust;
 
 use std::fmt::Write;
 
@@ -26,7 +26,7 @@ pub fn cli() -> Res<()> {
 "#
     )?;
     for feature in &features {
-        handler_rust::feature_module(&reg, buf, &feature)?;
+        service_rust::feature_module(&reg, buf, &feature)?;
     }
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../btress_api/gen/");
