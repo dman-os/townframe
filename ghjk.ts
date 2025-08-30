@@ -198,11 +198,10 @@ ghjk.task(
 ghjk.task(
   "compose-up",
   ($) =>
-    $.raw`${DOCKER_CMD} compose ${
-      $.argv
-        .map((prof) => `--profile ${prof}`)
-        .join(" ")
-    } up -d`,
+    $.raw`${DOCKER_CMD} compose ${$.argv
+      .map((prof) => `--profile ${prof}`)
+      .join(" ")
+      } up -d`,
   { workingDir: "./tools" },
 );
 
@@ -214,21 +213,19 @@ const allProfiles = ($) => Promise.resolve(["auth", "db", "cli"]);
 ghjk.task(
   "compose-down",
   async ($) =>
-    $.raw`${DOCKER_CMD} compose ${
-      ($.argv.length ? $.argv : await allProfiles($))
-        .map((prof) => `--profile ${prof}`)
-        .join(" ")
-    } down -v`,
+    $.raw`${DOCKER_CMD} compose ${($.argv.length ? $.argv : await allProfiles($))
+      .map((prof) => `--profile ${prof}`)
+      .join(" ")
+      } down -v`,
   { workingDir: "./tools" },
 );
 ghjk.task(
   "compose-logs",
   async ($) =>
-    $.raw`${DOCKER_CMD} compose ${
-      (await allProfiles($))
-        .map((prof) => `--profile ${prof}`)
-        .join(" ")
-    } logs ${$.argv}`,
+    $.raw`${DOCKER_CMD} compose ${(await allProfiles($))
+      .map((prof) => `--profile ${prof}`)
+      .join(" ")
+      } logs ${$.argv}`,
   { workingDir: "./tools" },
 );
 
@@ -352,8 +349,8 @@ ghjk.task(
         .map((line) =>
           /@file/.test(line)
             ? [
-              line, 
-              "@file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)", 
+              line,
+              "@file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)",
             ]
             : [line]
         )
@@ -365,3 +362,9 @@ ghjk.task(
     desc: "Generate uniffi kotlin bindings for the dabyook_core crate",
   },
 );
+
+ghjk.task(async function dev($) {
+  await $`wash build`;
+}, {
+  workingDir: "./src/btress_api"
+});

@@ -893,6 +893,12 @@
         "id": "tasks",
         "config": {
           "tasks": {
+            "dev": {
+              "ty": "denoFile@v1",
+              "key": "dev",
+              "workingDir": "./src/btress_api",
+              "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
+            },
             "gen-ffi-dayb": {
               "ty": "denoFile@v1",
               "key": "gen-ffi-dayb",
@@ -1040,6 +1046,7 @@
             }
           },
           "tasksNamed": [
+            "dev",
             "gen-ffi-dayb",
             "scrcpy",
             "run-d-dayb",

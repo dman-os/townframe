@@ -51,6 +51,6 @@ interface user-create {
     }
 }
 world feat-user {
-    export user;
+    //export user;
     export user-create;
 }

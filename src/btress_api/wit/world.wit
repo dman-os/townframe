@@ -5,14 +5,14 @@ interface ctx {
 }
 
 world api {
-    import wasi:keyvalue/atomics@0.2.0-draft;
-    import wasi:keyvalue/store@0.2.0-draft;
-    import wasi:logging/logging@0.1.0-draft;
-    import wasmcloud:postgres/query@0.1.1-draft;
-    import wasi:clocks/monotonic-clock@0.2.6;
-    import wasi:clocks/wall-clock@0.2.6;
+    //import wasi:keyvalue/atomics@0.2.0-draft;
+    //import wasi:keyvalue/store@0.2.0-draft;
+    //import wasi:logging/logging@0.1.0-draft;
+    //import wasmcloud:postgres/query@0.1.1-draft;
+    //import wasi:clocks/monotonic-clock@0.2.6;
+    //import wasi:clocks/wall-clock@0.2.6;
 
     export ctx;
-    export user-create;
+    //export user-create;
     // export wasi:http/incoming-handler@0.2.6;
 }

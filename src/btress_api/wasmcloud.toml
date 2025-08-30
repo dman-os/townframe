@@ -9,7 +9,7 @@ build = "./../../target/wash"
 wit_world = "hello"
 wasm_target = "wasm32-wasip2"
 build_command = "cargo b -p btress_api --target wasm32-wasip2"
-build_artifact = "./target/wasm32-wasip2/debug/btress_api.wasm"
+build_artifact = "./target/wasm32-wasip2/debug/libbtress_api.wasm"
 
 # [rust]
 # target_path = "./../../target"

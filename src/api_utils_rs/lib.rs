@@ -2,17 +2,17 @@ pub mod api;
 pub mod codecs;
 pub mod macros;
 // pub mod testing;
-pub mod validation_errs;
+pub mod errs;
 
 pub mod prelude {
     pub use utils_rs::prelude::*;
 
     pub use crate::api::*;
     pub use crate::interlude::*;
-    pub use crate::validation_errs::ValidationErrors;
 
+    pub use crate::wit::townframe::api_utils::utils::{Datetime, Uuid};
+    pub use crate::wit::utils::{ErrorInternal, ErrorsValidation};
     pub use crate::wit::wasi::clocks::wall_clock;
-    pub use crate::wit::wasi::clocks::wall_clock::Datetime;
 
     pub use axum_extra;
     pub use dotenv_flow;
@@ -48,10 +48,15 @@ pub mod wit {
         }
     });
 
+    pub mod utils {
+        pub use crate::errs::{ErrorInternal, ErrorsValidation};
+        pub use crate::wit::townframe::api_utils::utils::*;
+    }
     use crate::interlude::utoipa;
     use crate::interlude::OffsetDateTime;
     use crate::interlude::*;
-    use wasi::clocks::wall_clock::Datetime;
+
+    use townframe::api_utils::utils::Datetime;
     use wasmcloud::postgres::types::PgValue;
 
     // impl From<String> for crate::wit::townframe::api_utils::utils::ErrorInternal {}

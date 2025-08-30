@@ -45,9 +45,13 @@ fn init() -> Res<()> {
     CX.set(Arc::new(Context {
         argon2: Arc::new(argon2::Argon2::default()),
         config: Config {
-            pass_salt_hash: Arc::new(argon2::password_hash::SaltString::generate(
-                &mut argon2::password_hash::rand_core::OsRng,
-            )),
+            pass_salt_hash: Arc::new(
+                argon2::password_hash::SaltString::from_b64(
+                    "my salt",
+                    // &mut argon2::password_hash::rand_core::OsRng,
+                )
+                .expect("bad salt"),
+            ),
         },
         db: StdDb::PgWasi {},
     }))
@@ -71,30 +75,31 @@ mod wit {
         async: true,
         additional_derives: [serde::Serialize, serde::Deserialize],
         with: {
-            "wasi:keyvalue/store@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::store,
-            "wasi:keyvalue/atomics@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::atomics,
-            "wasi:logging/logging@0.1.0-draft": api_utils_rs::wit::wasi::logging::logging,
-            "wasmcloud:postgres/types@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::types,
-            "wasmcloud:postgres/query@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::query,
-            "wasi:io/poll@0.2.6": api_utils_rs::wit::wasi::io::poll,
-            "wasi:clocks/monotonic-clock@0.2.6": api_utils_rs::wit::wasi::clocks::monotonic_clock,
-            "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
-
-            "townframe:api-utils/utils": api_utils_rs::wit::townframe::api_utils::utils,
-
-            "townframe:btress-api/user": crate::gen::user,
-            "townframe:btress-api/user-create": crate::gen::user::user_create,
+            // "wasi:keyvalue/store@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::store,
+            // "wasi:keyvalue/atomics@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::atomics,
+            // "wasi:logging/logging@0.1.0-draft": api_utils_rs::wit::wasi::logging::logging,
+            // "wasmcloud:postgres/types@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::types,
+            // "wasmcloud:postgres/query@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::query,
+            // "wasi:io/poll@0.2.6": api_utils_rs::wit::wasi::io::poll,
+            // "wasi:clocks/monotonic-clock@0.2.6": api_utils_rs::wit::wasi::clocks::monotonic_clock,
+            // "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
+            //
+            // "townframe:api-utils/utils": api_utils_rs::wit::townframe::api_utils::utils,
+            //
+            // "townframe:btress-api/user": crate::gen::user,
+            // "townframe:btress-api/user-create": crate::gen::user::user_create,
         }
     });
 }
 
-// wit::export!(Component);
+// wit::export!(Component with_types_in wit);
+wit::export!(Component with_types_in wit);
 
 struct Component;
 
 impl wit::exports::townframe::btress_api::ctx::Guest for Component {
     #[allow(async_fn_in_trait)]
-    async fn init() -> Result<(), String> {
+    async fn init() {
         crate::init().map_err(|err| format!("{err:?}"))?;
         Ok(())
     }

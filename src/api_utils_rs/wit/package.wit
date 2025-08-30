@@ -12,5 +12,5 @@ interface utils {
     type datetime = dt;
     type uuid = string;
 
-    noop: func();
+    noop: func(a: datetime, b: uuid) -> result;
 }

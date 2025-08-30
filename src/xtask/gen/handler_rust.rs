@@ -564,7 +564,7 @@ pub enum Error {{"#
         if &name[..] == ErrorVariant::ERROR_INTERNAL_NAME {
             writeln!(buf, "(#[from] ErrorInternal),")?;
         } else if &name[..] == ErrorVariant::ERROR_INVALID_INPUT_NAME {
-            writeln!(buf, "(#[from] ValidationErrors),",)?;
+            writeln!(buf, "(#[from] ErrorsValidation),",)?;
         } else if fields.is_empty() {
             writeln!(buf, ",")?;
         } else {

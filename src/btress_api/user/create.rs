@@ -4,20 +4,15 @@ use api_utils_rs::wit::wasmcloud::postgres::types::PgValue;
 use crate::interlude::*;
 
 pub use crate::gen::user::user_create::*;
-pub use crate::gen::user::wit::exports::townframe::btress_api::user_create::*;
+pub use crate::gen::user::wit::exports::townframe::btress_api::user_create::{ErrorsValidation, *};
 use crate::gen::user::User;
 
-impl crate::gen::user::wit::exports::townframe::btress_api::user_create::GuestHandler
-    for UserCreate
-{
+impl GuestHandler for UserCreate {
     #[allow(async_fn_in_trait)]
-    async fn handle(
-        &self,
-        inp: crate::gen::user::user_create::Input,
-    ) -> Result<crate::gen::user::User, crate::gen::user::user_create::Error> {
+    async fn handle(&self, inp: Input) -> Result<User, Error> {
         let cx = crate::cx();
 
-        garde::Validate::validate(&inp).map_err(ValidationErrors::from)?;
+        garde::Validate::validate(&inp).map_err(ErrorsValidation::from)?;
 
         let pass_hash = {
             use argon2::PasswordHasher;

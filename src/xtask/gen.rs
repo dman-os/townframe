@@ -136,7 +136,7 @@ impl TypeReg {
             validation_errors_id: 0,
         };
         this.validation_errors_id = this.add_type(Type::Alias(
-            "ValidationErrors".into(),
+            "ErrorsValidation".into(),
             this.add_type(Type::List(
                 this.add_type(Type::Tuple(vec![this.string(), this.string()])),
             )),
