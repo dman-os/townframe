@@ -1,7 +1,6 @@
 pub mod api;
 pub mod codecs;
 pub mod macros;
-// pub mod testing;
 pub mod errs;
 
 pub mod prelude {
@@ -14,27 +13,24 @@ pub mod prelude {
     pub use crate::wit::utils::{ErrorInternal, ErrorsValidation};
     pub use crate::wit::wasi::clocks::wall_clock;
 
-    pub use axum_extra;
     pub use dotenv_flow;
     pub use educe;
     pub use garde::Validate;
     pub use regex;
     pub use tokio;
-    pub use tower;
 }
 
 mod interlude {
     pub use utils_rs::prelude::*;
 
     pub use crate::internal_err;
-    pub use axum::{self, response::IntoResponse, Json};
     pub use utoipa::{self, openapi};
 }
 
 pub mod wit {
     wit_bindgen::generate!({
         // generate_all,
-        async: true,
+        // async: true,
         additional_derives: [serde::Serialize, serde::Deserialize],
         with: {
             "wasi:keyvalue/store@0.2.0-draft": generate,
@@ -45,6 +41,7 @@ pub mod wit {
             "wasi:io/poll@0.2.6": generate,
             "wasi:clocks/monotonic-clock@0.2.6": generate,
             "wasi:clocks/wall-clock@0.2.6": generate,
+            "wasi:config/runtime@0.2.0-draft": generate,
 
             "townframe:api-utils/utils/errors-validation": crate::errs::ErrorsValidation,
             "townframe:api-utils/utils/error-internal": crate::errs::ErrorInternal,
@@ -62,7 +59,7 @@ pub mod wit {
     use townframe::api_utils::utils::Datetime;
     use wasmcloud::postgres::types::PgValue;
 
-    // impl From<String> for crate::wit::townframe::api_utils::utils::ErrorInternal {}
+    // impl From<String> for crate::wit::townframe::a i_utils::utils::ErrorInternal {}
 
     impl PgValue {
         pub fn to_text(self) -> String {

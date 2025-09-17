@@ -8,8 +8,8 @@ build = "./../../target/wash"
 [component]
 wit_world = "server"
 wasm_target = "wasm32-wasip2"
-build_command = "cargo b -p btress_http --target wasm32-wasip2"
-build_artifact = "./target/wasm32-wasip2/debug/btress_http.wasm"
+build_command = "ghjk x build-btress-http"
+build_artifact = "./target/wasm32-wasip2/debug/btress_http_plugged.wasm"
 
 # [rust]
 # target_path = "./../../target"

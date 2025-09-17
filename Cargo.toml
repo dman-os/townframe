@@ -2,14 +2,16 @@
 resolver = "3"
 members = [
   "./src/btress_api",
-  "./src/granary_web",
-  "./src/leptos_oidc",
+  # "./src/granary_web",
+  # "./src/leptos_oidc",
   "./src/utils_rs",
   "./src/api_utils_rs",
   "./src/xtask",
   "./src/macros",
   "./src/daybook_core",
   "./src/btress_http",
+  "./src/tests_http/",
+  # "./src/leptos_wasi/",
 ]
 
 [workspace.package]
@@ -34,6 +36,7 @@ ahash = "0.8"
 time = { version = "0.3", default-features = false, features = ["serde"] }
 once_cell = "1"
 parking_lot = "0.12"
+bytes = "1"
 
 # serde
 serde = { version = "1", features = ["derive"] }
@@ -72,7 +75,15 @@ kanidm_client = "1.7.2"
 kanidm_proto = "1.7.2"
 dotenv-flow = "0.16.2"
 
+# http
+axum = { version = "0.8.4", default-features = false }
+axum-extra = { version = "0.10.1", default-features = false }
 http = "1"
+utoipa = { version = "5.4.0", features = ["debug", "uuid", "time", "smallvec",  "preserve_order"] }
+# utoipa-swagger-ui = "9"
+# http
+tower = "0.5"
+tower-http = "0.6"
 
 # wasm
 wit-bindgen = "0.45.1"

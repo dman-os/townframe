@@ -15,6 +15,12 @@ spec:
         - type: spreadscaler
           properties:
             instances: 1
+        - type: link
+          properties:
+            target: api-component
+            namespace: townframe
+            package: btress-api
+            interfaces: [ctx, user-create]
 
     - name: api-component
       type: component

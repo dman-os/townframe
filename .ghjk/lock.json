@@ -1109,6 +1109,16 @@
         "id": "tasks",
         "config": {
           "tasks": {
+            "deploy-btress": {
+              "ty": "denoFile@v1",
+              "key": "deploy-btress",
+              "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
+            },
+            "build-btress-http": {
+              "ty": "denoFile@v1",
+              "key": "build-btress-http",
+              "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
+            },
             "dev": {
               "ty": "denoFile@v1",
               "key": "dev",
@@ -1262,6 +1272,8 @@
             }
           },
           "tasksNamed": [
+            "deploy-btress",
+            "build-btress-http",
             "dev",
             "gen-ffi-dayb",
             "scrcpy",
@@ -1409,7 +1421,7 @@
                 }
               ]
             },
-            "bciqavxkohsrnwrgjhm3qtfreqfpvyxmhkizjdihsbbwcoi44i7us7qi": {
+            "bciqbcavdxanyxeqtktr5bp6szb2lkh4oivjqdocmsgihdyict57hixi": {
               "provides": [
                 {
                   "ty": "posix.envVar",
@@ -1437,6 +1449,11 @@
                   "val": "true"
                 },
                 {
+                  "ty": "posix.envVar",
+                  "key": "WASMCLOUD_OCI_ALLOWED_INSECURE",
+                  "val": "localhost:5000"
+                },
+                {
                   "ty": "ghjk.tasks.Alias"
                 },
                 {
@@ -1452,7 +1469,7 @@
           "defaultEnv": "dev",
           "envsNamed": {
             "main": "bciqhm5xwleu3qh7tgayj6ahmnxfpsfmgq4zhdhwgi6sohxksqcnb5wy",
-            "dev": "bciqavxkohsrnwrgjhm3qtfreqfpvyxmhkizjdihsbbwcoi44i7us7qi"
+            "dev": "bciqbcavdxanyxeqtktr5bp6szb2lkh4oivjqdocmsgihdyict57hixi"
           }
         }
       }

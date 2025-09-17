@@ -6,20 +6,17 @@ mod interlude {
     pub use crate::{Context, SharedContext};
     pub use async_trait::async_trait;
 
-    // #[cfg(test)]
-    // pub use crate::utils::testing::*;
-    // #[cfg(test)]
-    // pub use api_utils_rs::testing::*;
 }
 
 use crate::interlude::*;
 use api_utils_rs::api;
+use futures::TryFutureExt;
 
 pub struct Context {
     config: Config,
     db: api::StdDb,
     // kanidm: kanidm_client::KanidmClient,
-    argon2: Arc<argon2::Argon2<'static>>,
+    // rt: tokio::runtime::Runtime,
 }
 
 pub type SharedContext = Arc<Context>;
@@ -34,26 +31,21 @@ pub struct SharedServiceContext(pub ServiceContext);
 
 #[derive(Debug)]
 pub struct Config {
-    pub pass_salt_hash: Arc<argon2::password_hash::SaltString>,
 }
 
 mod gen;
 mod user;
-mod utils;
+// mod utils;
 
 fn init() -> Res<()> {
     CX.set(Arc::new(Context {
-        argon2: Arc::new(argon2::Argon2::default()),
         config: Config {
-            pass_salt_hash: Arc::new(
-                argon2::password_hash::SaltString::from_b64(
-                    "my salt",
-                    // &mut argon2::password_hash::rand_core::OsRng,
-                )
-                .expect("bad salt"),
-            ),
         },
         db: StdDb::PgWasi {},
+        // rt: tokio::runtime::Builder::new_current_thread()
+        //     .enable_all()
+        //     .build()
+        //     .wrap_err("tokio error")?,
     }))
     .map_err(|_| ferr!("double component intialization"))?;
     Ok(())
@@ -73,7 +65,7 @@ mod wit {
         path: "../btress_api/wit",
         world: "api",
         // generate_all,
-        async: true,
+        // async: true,
         additional_derives: [serde::Serialize, serde::Deserialize],
         with: {
             "wasi:keyvalue/store@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::store,
@@ -84,6 +76,7 @@ mod wit {
             "wasi:io/poll@0.2.6": api_utils_rs::wit::wasi::io::poll,
             "wasi:clocks/monotonic-clock@0.2.6": api_utils_rs::wit::wasi::clocks::monotonic_clock,
             "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
+            "wasi:config/runtime@0.2.0-draft": api_utils_rs::wit::wasi::config::runtime,
 
             "townframe:api-utils/utils": api_utils_rs::wit::utils,
 
@@ -104,7 +97,7 @@ struct Component;
 
 impl wit::exports::townframe::btress_api::ctx::Guest for Component {
     #[allow(async_fn_in_trait)]
-    async fn init() -> Result<(), String> {
+    fn init() -> Result<(), String> {
         crate::init().map_err(|err| format!("{err:?}"))?;
         Ok(())
     }

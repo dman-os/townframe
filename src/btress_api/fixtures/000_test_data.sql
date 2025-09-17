@@ -23,12 +23,6 @@ DO $body$
             -- ,'\x7c5bade04be3bb0fb9bd33f5eec539863c0c82866e333e525311823ef44b8cf5'::bytea
             -- ,'\xeb28ec6fa7d60b719af82e4de57391dfda3fd354a344acd5f4ae143ca6554d3e'::bytea
         ) RETURNING * INTO le_user;
-        INSERT INTO auth.credentials (
-            user_id, pass_hash
-        ) VALUES ( 
-            le_user.id, 
-            '$argon2i$v=19$m=4096,t=3,p=1$c29tZXNhbHQ$iWh06vD8Fy27wf9npn6FXWiCX4K6pW6Ue1Bnzz07Z8A'
-        );
         INSERT INTO auth.sessions (
             id, token, user_id, expires_at
         ) VALUES (
@@ -69,12 +63,6 @@ DO $body$
             -- ,'\x67bf08ee99120acf1a708e8d41f1ff7fc2de8a4361d780626f569e8f81de5146'::bytea
             -- ,'\x7ceffe6e9dd0cba3bd2cd362e472b0b94d0f4b1417c665f7249967ebdc7fd6a0'::bytea
         ) RETURNING * INTO le_user;
-        INSERT INTO auth.credentials (
-            user_id, pass_hash
-        ) VALUES ( 
-            le_user.id, 
-            '$argon2i$v=19$m=4096,t=3,p=1$c29tZXNhbHQ$iWh06vD8Fy27wf9npn6FXWiCX4K6pW6Ue1Bnzz07Z8A'
-        );
     END;
 $body$ LANGUAGE PLpgSQL;
 
@@ -97,12 +85,6 @@ DO $body$
             -- ,'\x16179796da54225bcfd6937d6ed275807a2818e59c89276f7b4992adee613edc'::bytea
             -- ,'\x223c52751e99d3acfa7dc2a9185fe7b6ec8f3acbc5503ae9f3815033e1f04846'::bytea
         ) RETURNING * INTO le_user;
-        INSERT INTO auth.credentials (
-            user_id, pass_hash
-        ) VALUES ( 
-            le_user.id, 
-            '$argon2i$v=19$m=4096,t=3,p=1$c29tZXNhbHQ$iWh06vD8Fy27wf9npn6FXWiCX4K6pW6Ue1Bnzz07Z8A'
-        );
     END;
 $body$ LANGUAGE PLpgSQL;
 
@@ -126,12 +108,6 @@ DO $body$
             -- ,'\x642c72a0d589ba75c22351db61c7beada6a5e12d65373b86ecd6f8e248c654af'::bytea
             -- ,'\x359b2f5d06e233765fc2afcc51e39b716b0d790d4233f8f07e1ebb08a3de8223'::bytea
         ) RETURNING * INTO le_user;
-        INSERT INTO auth.credentials (
-            user_id, pass_hash
-        ) VALUES ( 
-            le_user.id, 
-            '$argon2i$v=19$m=4096,t=3,p=1$c29tZXNhbHQ$iWh06vD8Fy27wf9npn6FXWiCX4K6pW6Ue1Bnzz07Z8A'
-        );
         INSERT INTO auth.sessions (
             id, token, user_id, expires_at
         ) VALUES (

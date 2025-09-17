@@ -10,21 +10,27 @@ spec:
     - name: http-component
       type: component
       properties:
-        image: file://../../target/wasm32-wasip2/debug/btress_http_s.wasm
+        image: file://../../target/wasm32-wasip2/debug/btress_http_plugged_s.wasm
       traits:
         # Govern the spread/scheduling of the component
         - type: spreadscaler
           properties:
             instances: 1
+        # - type: link
+        #   properties:
+        #     target: api-component
+        #     namespace: townframe
+        #     package: btress-api
+        #     interfaces: [ctx, user-create]
 
-    - name: api-component
-      type: component
-      properties:
-        image: file://../../target/wasm32-wasip2/debug/btress_api_s.wasm
-      traits:
-        - type: spreadscaler
-          properties:
-            instances: 1
+    # - name: api-component
+    #   type: component
+    #   properties:
+    #     image: file://../../target/wasm32-wasip2/debug/btress_api_s.wasm
+    #   traits:
+    #     - type: spreadscaler
+    #       properties:
+    #         instances: 1
 
     # Add a capability provider that enables HTTP access
     - name: httpserver

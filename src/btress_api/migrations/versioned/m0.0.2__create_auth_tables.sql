@@ -33,23 +33,6 @@ CALL util.create_deleted_rows_table('auth', 'users');
 
 ---
 
-CREATE TABLE auth.credentials (
-    created_at      TIMESTAMPTZ         NOT NULL    DEFAULT CURRENT_TIMESTAMP
-,   updated_at      TIMESTAMPTZ         NOT NULL    DEFAULT CURRENT_TIMESTAMP
-
-,   user_id        UUID           NOT NULL
-,   pass_hash      TEXT           NOT NULL
-
-,   PRIMARY KEY(user_id)
-,   FOREIGN KEY(user_id) REFERENCES auth.users  -- no need to specify foreign col if primary key
-);
-
-CALL util.apply_default_table_config('auth', 'credentials');
-
-CALL util.create_deleted_rows_table('auth', 'credentials');
-
----
-
 CREATE TABLE auth.sessions (
     created_at      TIMESTAMPTZ         NOT NULL    DEFAULT CURRENT_TIMESTAMP
 ,   updated_at      TIMESTAMPTZ         NOT NULL    DEFAULT CURRENT_TIMESTAMP

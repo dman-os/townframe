@@ -29,7 +29,6 @@ garde.workspace = true
 thiserror.workspace = true
 displaydoc.workspace = true
 
-argon2 = "0.5.3"
 wit-bindgen.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

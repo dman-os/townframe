@@ -1,85 +1,4 @@
-use std::collections::HashMap;
-
 use crate::interlude::*;
-
-pub use axum::http;
-pub use axum::http::StatusCode;
-pub use tower::ServiceExt;
-
-pub struct ExtraAssertionAgs<'a> {
-    pub test_cx: &'a mut TestContext,
-    pub auth_token: Option<String>,
-    pub response_head: axum::http::response::Parts,
-    pub response_json: Option<serde_json::Value>,
-}
-
-pub type EAArgs<'a> = ExtraAssertionAgs<'a>;
-
-/// BoxFuture type that's not send
-pub type LocalBoxFuture<'a, T> = std::pin::Pin<Box<dyn futures::Future<Output = T> + 'a>>;
-
-pub type ExtraAssertions<'c, 'f> = dyn Fn(ExtraAssertionAgs<'c>) -> LocalBoxFuture<'f, ()>;
-
-pub struct TestContext {
-    pub test_name: String,
-    pub pg_pools: HashMap<String, TestPg>,
-    pub redis_pools: HashMap<String, ()>,
-}
-
-impl TestContext {
-    pub fn new(
-        test_name: String,
-        pools: impl Into<HashMap<String, TestPg>>,
-        redis_pools: impl Into<HashMap<String, ()>>,
-        // redis_pools: impl Into<HashMap<String, TestRedis>>,
-    ) -> Self {
-        Self {
-            test_name,
-            pg_pools: pools.into(),
-            redis_pools: redis_pools.into(),
-        }
-    }
-
-    /// Call this after all holders of the [`SharedContext`] have been dropped.
-    pub async fn close(mut self) {
-        for (_, _db) in self.pg_pools.drain() {
-            // db.close().await;
-        }
-    }
-}
-
-impl Drop for TestContext {
-    fn drop(&mut self) {
-        for db_name in self.pg_pools.keys() {
-            tracing::warn!("test context dropped without cleaning up for db: {db_name}",)
-        }
-    }
-}
-
-/* pub struct TestRedis {
-    pub pool: RedisPool,
-}
-
-impl TestRedis {
-    pub async fn new() -> Self {
-        Self {
-            pool: RedisPool(
-                bb8_redis::bb8::Pool::builder()
-                    .build(
-                        bb8_redis::RedisConnectionManager::new(
-                            crate::utils::get_env_var("TEST_REDIS_URL")
-                                .unwrap_or_log()
-                                .as_str(),
-                        )
-                        .unwrap_or_log(),
-                    )
-                    .await
-                    .unwrap_or_log(),
-            ),
-        }
-    }
-}
- */
 
 pub struct TestPg {
     pub db_name: String,
@@ -88,28 +7,21 @@ pub struct TestPg {
 }
 
 impl TestPg {
-    pub async fn new(db_name: String, migrations_root: &Path) -> Self {
+    pub async fn new(test_name: &str, migrations_root: &Path) -> Res<Self> {
+        let db_name = test_name.replace("::tests::", "_").replace("::", "_");
+
         use sqlx::prelude::*;
         let opts = sqlx::postgres::PgConnectOptions::default()
-            .host(
-                std::env::var("TEST_PG_HOST")
-                    .expect("TEST_PG_HOST wasn't found in enviroment")
-                    .as_str(),
-            )
+            .host(utils_rs::get_env_var("TEST_PG_HOST")?.as_str())
             .port(
-                std::env::var("TEST_PG_PORT")
-                    .expect("TEST_PG_PORT wasn't found in enviroment")
+                utils_rs::get_env_var("TEST_PG_PORT")?
                     .parse()
                     .expect("TEST_PG_PORT is not a valid number"),
             )
-            .username(
-                std::env::var("TEST_PG_USER")
-                    .expect("TEST_PG_USER wasn't found in enviroment")
-                    .as_str(),
-            )
+            .username(utils_rs::get_env_var("TEST_PG_USER")?.as_str())
             .log_statements("DEBUG".parse().unwrap());
 
-        let opts = if let Ok(pword) = std::env::var("TEST_PG_PASS") {
+        let opts = if let Ok(pword) = utils_rs::get_env_var("TEST_PG_PASS") {
             opts.password(pword.as_str())
         } else {
             opts
@@ -119,44 +31,42 @@ impl TestPg {
             .clone()
             .connect()
             .await
-            .expect("Failed to connect to Postgres without db");
+            .wrap_err("Failed to connect to Postgres without db")?;
 
         connection
             .execute(&format!(r###"DROP DATABASE IF EXISTS {db_name}"###)[..])
             .await
-            .expect("Failed to drop old database.");
+            .wrap_err("Failed to drop old database.")?;
 
         connection
             .execute(&format!(r###"CREATE DATABASE {db_name}"###)[..])
             .await
-            .expect("Failed to create database.");
+            .wrap_err("Failed to create database.")?;
 
         let opts = opts.database(&db_name[..]);
 
         // migrate database
         let pool = sqlx::PgPool::connect_with(opts)
             .await
-            .expect("Failed to connect to Postgres as test db.");
+            .wrap_err("Failed to connect to Postgres as test db.")?;
 
         sqlx::migrate::Migrator::new(FlywayMigrationSource(&migrations_root.join("migrations")))
             .await
-            .unwrap_or_else(|_| {
-                panic!("error setting up migrator for {migrations_root:?}/migrations")
-            })
+            .wrap_err_with(|| {
+                format!("error setting up migrator for {migrations_root:?}/migrations")
+            })?
             .run(&pool)
             .await
-            .expect("Failed to migrate the database");
+            .wrap_err("Failed to migrate the database")?;
         sqlx::migrate::Migrator::new(migrations_root.join("fixtures"))
             .await
-            .unwrap_or_else(|_| {
-                panic!("error setting up migrator for {migrations_root:?}/fixtures")
-            })
+            .wrap_err_with(|| format!("error setting up migrator for {migrations_root:?}/fixtures"))?
             .set_ignore_missing(true) // don't inspect migrations store
             .run(&pool)
             .await
-            .expect("Failed to add test data");
+            .wrap_err("Failed to add test data")?;
 
-        Self {
+        Ok(Self {
             db_name: db_name.clone(),
             pool,
             clean_up_closure: Some(Box::new(move || {
@@ -167,7 +77,7 @@ impl TestPg {
                         .expect("Failed to drop test database.");
                 })
             })),
-        }
+        })
     }
 
     /// Call this after all holders of the [`SharedContext`] have been dropped.
@@ -325,39 +235,5 @@ impl<'a> sqlx::migrate::MigrationSource<'a> for FlywayMigrationSource<'a> {
 
             Ok(migrations)
         })
-    }
-}
-/// Not deep equality but deep "`is_subset_of`" check.
-pub fn check_json(
-    (check_name, check): (&str, &serde_json::Value),
-    (json_name, json): (&str, &serde_json::Value),
-) {
-    use serde_json::Value::*;
-    match (check, json) {
-        (Array(check), Array(response)) => {
-            for ii in 0..check.len() {
-                check_json(
-                    (&format!("{check_name}[{ii}]"), &check[ii]),
-                    (&format!("{json_name}[{ii}]"), &response[ii]),
-                );
-            }
-        }
-        (Object(check), Object(response)) => {
-            for (key, val) in check {
-                check_json(
-                    (&format!("{check_name}.{key}"), val),
-                    (
-                        &format!("{json_name}.{key}"),
-                        response
-                            .get(key)
-                            .ok_or_else(|| {
-                                format!("key {key} wasn't found on {json_name}: {response:?}")
-                            })
-                            .unwrap(),
-                    ),
-                );
-            }
-        }
-        (check, json) => assert_eq!(check, json, "{check_name} != {json_name}"),
     }
 }

@@ -10,24 +10,10 @@ pub use crate::wit::exports::townframe::btress_api::user_create::GuestService;
 
 impl GuestService for UserCreate {
     #[allow(async_fn_in_trait)]
-    async fn serve(&self, inp: Input) -> Result<User, Error> {
+    fn serve(&self, inp: Input) -> Result<User, Error> {
         let cx = crate::cx();
 
         garde::Validate::validate(&inp).map_err(ErrorsValidation::from)?;
-
-        let pass_hash = {
-            use argon2::PasswordHasher;
-            let salt_hash = cx.config.pass_salt_hash.clone();
-            let argon2 = cx.argon2.clone();
-            tokio::task::spawn_blocking(move || {
-                argon2
-                    .hash_password(inp.password.as_bytes(), salt_hash.as_ref())
-                    .expect_or_log("argon2 err")
-                    .serialize()
-            })
-            .await
-            .expect_or_log("tokio err")
-        };
 
         // _cx.kanidm.idm_person_account_create()
         let StdDb::PgWasi {} = &cx.db else {
@@ -41,19 +27,17 @@ impl GuestService for UserCreate {
             ,updated_at as "updated_at!"
             ,email::TEXT as "email?"
             ,username::TEXT as "username!"
-        FROM auth.create_user($1, $2, $3)
+        FROM auth.create_user($1, $2)
             "#
             .into(),
-            vec![
+            &[
                 PgValue::Text(inp.username.clone()),
                 inp.email
                     .clone()
                     .map(PgValue::Text)
                     .unwrap_or_else(|| PgValue::Null),
-                PgValue::Text(pass_hash.to_string()),
             ],
         )
-        .await
         .map_err(|err| {
             use postgres::types::QueryError::*;
             match err {
@@ -138,7 +122,7 @@ mod test {
         })
     }
 
-    api_utils_rs::table_tests! {
+    utils_rs::table_tests! {
         validate,
         (request, err_path),
         {

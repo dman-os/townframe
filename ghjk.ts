@@ -375,8 +375,16 @@ ghjk.task(async function dev($) {
   workingDir: "./src/btress_api"
 });
 
-ghjk.task("build-btress", async ($) => {
-  await $`wash build`.cwd($.workingDir.join("./src/btress_api/"));
-  // await $`wash push localhost:5000/btress-api:latest`;
+ghjk.task("build-btress-http", async ($) => {
+  await $`cargo b -p btress_api -p btress_http --target wasm32-wasip2`
+  await $`wac plug --plug btress_api.wasm btress_http.wasm -o btress_http_plugged.wasm`
+    .cwd("./target/wasm32-wasip2/debug/")
 }, {
+});
+
+ghjk.task("deploy-btress", async ($) => {
+  await $`wash build`.cwd("./src/btress_http/");
+  await $`wash app deploy ./src/btress_http/local.wadm.yaml --replace`
+}, {
+  // dependsOn: "build-btress"
 });

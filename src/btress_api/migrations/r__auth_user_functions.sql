@@ -1,7 +1,6 @@
 CREATE FUNCTION auth.create_user(
   username TEXT
 , email TEXT
-, pass_hash TEXT
 -- , pub_key BYTEA
 -- , pri_key BYTEA
 )
@@ -21,22 +20,15 @@ AS $body$
             -- ,pub_key
             -- ,pri_key
         ) RETURNING * INTO le_user;
-        INSERT INTO auth.credentials (
-            user_id, pass_hash
-        ) VALUES ( 
-            le_user.id, 
-            pass_hash
-        );
         return le_user;
     END;
 $body$ LANGUAGE PLpgSQL;
 
 CREATE FUNCTION auth.update_user(
-  user_id UUID,
-  new_username extensions.CITEXT,
-  new_email extensions.CITEXT,
-  new_pic_url TEXT,
-  new_pass_hash TEXT
+  user_id UUID
+, new_username extensions.CITEXT
+, new_email extensions.CITEXT
+, new_pic_url TEXT
 )
 RETURNS SETOF auth.users -- use SETOF to allow return of 0 rows
 AS $body$
@@ -55,11 +47,6 @@ AS $body$
           RETURN;
         END IF;
 
-        IF new_pass_hash != NULL THEN
-            UPDATE auth.credentials
-            SET pass_hash = new_pass_hash
-            WHERE user_id = user_id;
-        END IF;
         RETURN NEXT le_user;
     END;
 $body$ LANGUAGE PLpgSQL;
@@ -73,13 +60,13 @@ AS $body$
 
         -- delete foreign keys that refer to users first to avoid referential
         -- integrity errors
-        WITH deleted AS (
-          DELETE FROM auth.credentials
-          WHERE user_id = target_id
-          RETURNING *
-        )
-        INSERT INTO auth.credentials_deleted (row) 
-        SELECT row_to_json(d.*)::jsonb FROM deleted AS d;
+        -- WITH deleted AS (
+        --   DELETE FROM auth.credentials
+        --   WHERE user_id = target_id
+        --   RETURNING *
+        -- )
+        -- INSERT INTO auth.credentials_deleted (row) 
+        -- SELECT row_to_json(d.*)::jsonb FROM deleted AS d;
 
 	UPDATE web.sessions
 	  SET auth_session_id = NULL
