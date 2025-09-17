@@ -16,6 +16,6 @@ wadm-client = "0.10.0"
 wadm-types = "0.8.3"
 futures = { workspace = true }
 
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["postgres"] }
 rand = "0.9.2"
 url = "2.5"

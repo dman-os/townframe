@@ -1,0 +1,3 @@
+[submodule "src/samod"]
+	path = src/samod
+	url = https://github.com/dman-os/samod

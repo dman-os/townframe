@@ -3,8 +3,10 @@
 ## TODO
 
 - Data model
-  - [ ] Document repository with tests
-  - [ ] Automerge
+  - [x] Document repository with tests
+    - [ ] Tests
+  - [x] Automerge
+    - [ ] Tests
 - Ingest
   - [ ] Screenshots
   - [ ] Photographs
@@ -28,7 +30,33 @@
 - Postgres (DB)
 - Kanidm (auth)
 
+-- 
+
+New version
+
+- Compose multiplatform
+  - We need this for the native integration on Android
+  - I like the desktop support
+  - We do miss out OTA updates but those were limited anwyays
+    - We ought to rely on a system similar to Telegram
+- Automerge
+  - Use our own stupid sync server
+    - Connect through websocket
+  - Backed by object store storage
+- Kanidm is a pita for some usecases
+  - Connsider Authelia
+- Compute
+  - Wasmcloud
+    - Should be used for 99% of mutations
+  - Durable store
+    - Not
+- Database
+  - Postgres for relational
+  - Redis for kv
+
 ### Features
+
+- [ ] Android auto-updates
 
 #### Stretch goals
 

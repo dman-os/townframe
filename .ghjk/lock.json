@@ -1125,22 +1125,34 @@
               "workingDir": "./src/btress_api",
               "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
             },
-            "gen-ffi-dayb": {
-              "ty": "denoFile@v1",
-              "key": "gen-ffi-dayb",
-              "desc": "Generate uniffi kotlin bindings for the dabyook_core crate",
-              "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
-            },
             "scrcpy": {
               "ty": "denoFile@v1",
               "key": "scrcpy",
               "desc": "Start scrcpy to mirror an adb accessible android phone",
               "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
             },
+            "gen-ffi-dayb": {
+              "ty": "denoFile@v1",
+              "key": "gen-ffi-dayb",
+              "desc": "Generate uniffi kotlin bindings for the dabyook_core crate",
+              "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
+            },
+            "dev-d-dayb": {
+              "ty": "denoFile@v1",
+              "key": "dev-d-dayb",
+              "workingDir": "./src/daybook_compose/",
+              "dependsOn": [
+                "gen-ffi-dayb"
+              ],
+              "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
+            },
             "run-d-dayb": {
               "ty": "denoFile@v1",
               "key": "run-d-dayb",
               "workingDir": "./src/daybook_compose/",
+              "dependsOn": [
+                "gen-ffi-dayb"
+              ],
               "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
             },
             "run-a-dayb": {
@@ -1275,8 +1287,9 @@
             "deploy-btress",
             "build-btress-http",
             "dev",
-            "gen-ffi-dayb",
             "scrcpy",
+            "gen-ffi-dayb",
+            "dev-d-dayb",
             "run-d-dayb",
             "run-a-dayb",
             "build-a-dayb",

@@ -40,39 +40,39 @@ repos:
         language: system
         entry: bash -c 'ghjk p resolve'
         pass_filenames: false
-      # - id: lock-sed
-      #   name: Sed lock
+      - id: lock-sed
+        name: Sed lock
+        language: system
+        entry: bash -c 'ghjk x lock-sed'
+        pass_filenames: false
+      # - id: lint-check
+      #   name: Ts check
       #   language: system
-      #   entry: bash -c 'ghjk x lock-sed'
+      #   entry: bash -c 'pnpm -C ./src/daybook_rn/ expo lint'
       #   pass_filenames: false
-      - id: lint-check
-        name: Ts check
-        language: system
-        entry: bash -c 'pnpm -C ./src/daybook_rn/ expo lint'
-        pass_filenames: false
-        types:
-          - ts
-          - tsx
-          - javascript
-      - id: tsc-check
-        name: Ts check
-        language: system
-        entry: bash -c 'pnpm -C ./src/daybook_rn/ tsc --noEmit'
-        pass_filenames: false
-        types:
-          - ts
-          - tsx
-          - javascript
-      - id: pnpm-install
-        name: Pnpm install
-        language: system
-        entry: bash -c 'pnpm -C ./src/daybook_rn/ install'
-        pass_filenames: false
-        files: |
-          (?x)^(
-              ./src/daybook_rn/pnpm-lock.yaml|
-              ./src/daybook_rn/package.json
-          )$
+      #   types:
+      #     - ts
+      #     - tsx
+      #     - javascript
+      # - id: tsc-check
+      #   name: Ts check
+      #   language: system
+      #   entry: bash -c 'pnpm -C ./src/daybook_rn/ tsc --noEmit'
+      #   pass_filenames: false
+      #   types:
+      #     - ts
+      #     - tsx
+      #     - javascript
+      # - id: pnpm-install
+      #   name: Pnpm install
+      #   language: system
+      #   entry: bash -c 'pnpm -C ./src/daybook_rn/ install'
+      #   pass_filenames: false
+      #   files: |
+      #     (?x)^(
+      #         ./src/daybook_rn/pnpm-lock.yaml|
+      #         ./src/daybook_rn/package.json
+      #     )$
   - repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0
     hooks:

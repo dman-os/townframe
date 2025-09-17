@@ -1,5 +1,5 @@
-pub mod testing;
 mod macros;
+pub mod testing;
 
 pub mod prelude {
     pub use crate::interlude::*;
@@ -7,10 +7,10 @@ pub mod prelude {
     pub use dotenv_flow;
     pub use educe;
     pub use regex;
+    pub use serde_json;
     pub use tokio;
     pub use tracing::{self, debug, error, info, trace, warn};
     pub use tracing_unwrap::*;
-    pub use serde_json;
 }
 
 mod interlude {
@@ -54,9 +54,10 @@ pub fn setup_tracing_once() {
 
 pub fn setup_tracing() -> eyre::Result<()> {
     color_eyre::install()?;
-    // if std::env::var("RUST_LOG").is_err() {
-    //     std::env::set_var("RUST_LOG", "info");
-    // }
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "info");
+    }
 
     use tracing_subscriber::prelude::*;
     tracing_subscriber::registry()

@@ -326,14 +326,24 @@ ghjk.task(
 
 ghjk.task(
   "run-d-dayb",
-  ($) => $`./gradlew run`,
-  { workingDir: "./src/daybook_compose/" },
+  ($) => $`./gradlew run`.env({
+    LD_LIBRARY_PATH: `${$.env.LD_LIBRARY_PATH}:${$.workingDir.join("../../target/debug/").toString()}`
+  }),
+  {
+    dependsOn: "gen-ffi-dayb",
+    workingDir: "./src/daybook_compose/",
+  },
 );
 
 ghjk.task(
-  "scrcpy",
-  ($) => $`scrcpy --no-audio -S`,
-  { desc: "Start scrcpy to mirror an adb accessible android phone" },
+  "dev-d-dayb",
+  ($) => $`./gradlew desktopRunHot -PmainClass=org.example.daybook.MainKt --auto`.env({
+    LD_LIBRARY_PATH: `${$.env.LD_LIBRARY_PATH}:${$.workingDir.join("../../target/debug/").toString()}`
+  }),
+  {
+    dependsOn: "gen-ffi-dayb",
+    workingDir: "./src/daybook_compose/",
+  },
 );
 
 ghjk.task(
@@ -367,6 +377,12 @@ ghjk.task(
   {
     desc: "Generate uniffi kotlin bindings for the dabyook_core crate",
   },
+);
+
+ghjk.task(
+  "scrcpy",
+  ($) => $`scrcpy --no-audio -S`,
+  { desc: "Start scrcpy to mirror an adb accessible android phone" },
 );
 
 ghjk.task(async function dev($) {

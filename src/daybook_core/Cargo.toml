@@ -35,6 +35,7 @@ once_cell.workspace = true
 time.workspace = true
 rust_decimal = "1.37.2"
 parking_lot.workspace = true
+url.workspace = true
 
 # async
 tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs"] }
@@ -45,6 +46,13 @@ uniffi = { version = "0.29.4", features = ["cli"] }
 # sync
 autosurgeon = { workspace = true, features = ["uuid"] }
 automerge = { workspace = true }
+samod = { workspace = true, features = ["tokio", "tungstenite"] }
+tokio-tungstenite = { version = "0.27.0", features = ["url"] }
+
+# http
+reqwest.workspace = true
+
+sqlx = { workspace = true, features = ["sqlite"] }
 
 [build-dependencies]
 uniffi = { version = "0.29.4", features = [ "build" ] }

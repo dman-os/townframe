@@ -2,18 +2,107 @@ use std::any::Any;
 
 use crate::interlude::*;
 
-use automerge::AutoCommit;
 use autosurgeon::{Hydrate, HydrateError, Prop, Reconcile, ReconcileError};
 use tokio::sync::{mpsc, oneshot};
 
 pub struct AmCtx {
-    doc: Arc<tokio::sync::RwLock<AutoCommit>>,
+    repo: samod::Repo,
+    peer_id: samod::PeerId,
+    doc_handle: tokio::sync::OnceCell<samod::DocHandle>,
 }
 impl AmCtx {
-    pub async fn load() -> Res<Self> {
-        let doc = init_am_doc().await?;
-        let doc = Arc::new(tokio::sync::RwLock::new(doc));
-        Ok(Self { doc })
+    pub async fn new() -> Res<Self> {
+        let peer_id = samod::PeerId::from_string("daybook_client".to_string());
+
+        let repo = samod::Repo::build_tokio()
+            .with_peer_id(peer_id.clone())
+            .with_storage(samod::storage::TokioFilesystemStorage::new(
+                "/tmp/samod-client",
+            ))
+            .load()
+            .await;
+
+        Ok(Self {
+            doc_handle: default(),
+            repo,
+            peer_id,
+        })
+    }
+
+    pub async fn init(&self) -> Res<()> {
+        let connection_signal = Arc::new(tokio::sync::Notify::new());
+        {
+            let repo = self.repo.clone();
+            let connection_signal = connection_signal.clone();
+            tokio::spawn(async move {
+                let mut attempt = 0;
+                loop {
+                    if attempt > 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                    attempt += 1;
+                    let (conn, resp) =
+                        match tokio_tungstenite::connect_async("ws://0.0.0.0:8090").await {
+                            Ok(val) => val,
+                            Err(err) => {
+                                error!("error connecting to sync server {err}");
+                                continue;
+                            }
+                        };
+                    if resp.status().as_u16() != 101 {
+                        error!("bad response connecting to server {resp:?}");
+                        continue;
+                    }
+                    connection_signal.notify_waiters();
+                    let fin = repo
+                        .connect_tungstenite(conn, samod::ConnDirection::Outgoing)
+                        .await;
+                    error!(?fin, "connection closed");
+                }
+            });
+        }
+        connection_signal.notified().await;
+        let doc_handle;
+        loop {
+            let res = reqwest::get(format!(
+                "http://0.0.0.0:8090/doc_id?peer_id={}",
+                self.peer_id
+            ))
+            .await
+            .wrap_err("error on doc_id request")?;
+            if res.status().as_u16() == 404 {
+                let doc =
+                    version_updates::version_latest().expect_or_log("error initing version_latest");
+                let doc =
+                    automerge::Automerge::load(&doc).expect_or_log("error loading version_latest");
+                doc_handle = self
+                    .repo
+                    .create(doc)
+                    .await
+                    .wrap_err("error creating doc handle")?;
+                break;
+            } else if res.status().is_success() {
+                let doc_id = res.text().await.wrap_err("error reading doc_id body")?;
+                let doc_id: samod::DocumentId = doc_id.parse().wrap_err("error parsing doc_id")?;
+                let doc_handle_maybe = self
+                    .repo
+                    .find(doc_id)
+                    .await
+                    .wrap_err("error finding doc handle")?;
+                doc_handle = doc_handle_maybe.ok_or_eyre("retrieved doc handle not found")?;
+                break;
+            }
+            error!(?res, "error on doc_id request");
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        let Ok(()) = self.doc_handle.set(doc_handle) else {
+            eyre::bail!("doc_handle already set");
+        };
+        Ok(())
+    }
+
+    fn doc_handle(&self) -> &samod::DocHandle {
+        self.doc_handle.get().expect("am not initialized")
     }
 
     pub async fn reconcile_prop<'a, D, P>(
@@ -24,10 +113,17 @@ impl AmCtx {
     ) -> Res<()>
     where
         D: Hydrate + Reconcile + Send + Sync + 'static,
-        P: Into<Prop<'a>>,
+        P: Into<Prop<'a>> + Send + Sync + 'static,
     {
-        let mut doc = self.doc.write().await;
-        autosurgeon::reconcile_prop(&mut *doc, obj_id, prop_name, update)?;
+        tokio::task::block_in_place(move || {
+            self.doc_handle().with_document(move |doc| {
+                doc.transact(move |tx| {
+                    autosurgeon::reconcile_prop(tx, obj_id, prop_name, update)?;
+                    eyre::Ok(())
+                })
+            })
+        })
+        .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
         Ok(())
     }
 
@@ -36,9 +132,12 @@ impl AmCtx {
         obj_id: automerge::ObjId,
         path: Vec<Prop<'static>>,
     ) -> Res<Option<D>> {
-        let doc = self.doc.read().await;
-        let value: Option<D> = autosurgeon::hydrate_path(&*doc, &obj_id, path)?;
-        return Ok(value);
+        tokio::task::block_in_place(move || {
+            self.doc_handle().with_document(move |doc| {
+                let value: Option<D> = autosurgeon::hydrate_path(doc, &obj_id, path)?;
+                eyre::Ok(value)
+            })
+        })
     }
 }
 
@@ -46,8 +145,6 @@ async fn init_am_doc() -> Res<automerge::AutoCommit> {
     use automerge::ReadDoc;
     let doc = automerge::AutoCommit::new();
 
-    // TODO: load from disk
-    // TODO: sync with network
     let version = match doc.get(automerge::ROOT, "version") {
         Ok(None) => None,
         Ok(Some((

@@ -66,6 +66,12 @@ impl FfiCtx {
             .wrap_err("error initializing main Ctx")?;
         Ok(Arc::new(Self { cx, rt }))
     }
+
+    async fn init_am(&self) -> Res<(), FfiError> {
+        let cx = self.cx.clone();
+        self.do_on_rt(async move { cx.acx.init().await }).await?;
+        Ok(())
+    }
 }
 
 async fn do_on_rt<O, F>(rt: &tokio::runtime::Runtime, future: F) -> O

@@ -770,6 +770,8 @@ internal open class UniffiVTableCallbackInterfaceDocsListener(
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -794,6 +796,8 @@ fun uniffi_daybook_core_checksum_method_docsrepo_ffi_list(
 fun uniffi_daybook_core_checksum_method_docsrepo_ffi_register_listener(
 ): Short
 fun uniffi_daybook_core_checksum_method_docsrepo_ffi_set(
+): Short
+fun uniffi_daybook_core_checksum_method_ffictx_init_am(
 ): Short
 fun uniffi_daybook_core_checksum_method_ffierror_message(
 ): Short
@@ -880,6 +884,8 @@ fun uniffi_daybook_core_fn_clone_ffictx(`ptr`: Pointer,uniffi_out_err: UniffiRus
 fun uniffi_daybook_core_fn_free_ffictx(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_daybook_core_fn_constructor_ffictx_for_ffi(
+): Long
+fun uniffi_daybook_core_fn_method_ffictx_init_am(`ptr`: Pointer,
 ): Long
 fun uniffi_daybook_core_fn_clone_ffierror(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
@@ -1032,6 +1038,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_core_checksum_method_docsrepo_ffi_set() != 32324.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_core_checksum_method_ffictx_init_am() != 17503.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_core_checksum_method_ffierror_message() != 31694.toShort()) {
@@ -2061,6 +2070,8 @@ public object FfiConverterTypeDocsRepo: FfiConverter<DocsRepo, Pointer> {
 
 public interface FfiCtxInterface {
     
+    suspend fun `initAm`()
+    
     companion object
 }
 
@@ -2144,6 +2155,28 @@ open class FfiCtx: Disposable, AutoCloseable, FfiCtxInterface
         return uniffiRustCall() { status ->
             UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_ffictx(pointer!!, status)
         }
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `initAm`() {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_ffictx_init_am(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
     }
 
     
@@ -2884,3 +2917,12 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+
+
+
+
+
+
+
+
+

@@ -18,7 +18,13 @@
 
 ## dev-log
 
-### 2024-03-05 | Proc macros
+### 2025-09-18 | Wasmcloud
+
+After long delays due to some tooling bugs, I was able to complete the wasmcloud based API system.
+Overengineering crap but I do like the result.
+Even though I feel like wasm is an important part of the vision, I can't help but feel this is loosing focus.
+
+### 2025-03-05 | Proc macros
 
 Spent today porting glue code from the aggy codebase.
 Cleaned up some of the boilerplates due to new proc macros.
@@ -27,7 +33,7 @@ Well, it certainly helped anyways.
 Next time, I'll have to setup the db stuff.
 Can't wait to start on actual feature work lol.
 
-### 2024-03-04 | Ramping up
+### 2025-03-04 | Ramping up
 
 Trying to get the show on the road.
 This is a full stack project in the traditional sense.

@@ -32,6 +32,3 @@ utoipa.workspace = true
 http.workspace = true
 # hyper = "1"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# db
-sqlx.workspace = true

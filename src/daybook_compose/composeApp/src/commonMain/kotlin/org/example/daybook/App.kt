@@ -86,6 +86,7 @@ fun App(
     var appContainerState by remember { mutableStateOf<AppContainer?>(null) }
     LaunchedEffect(true) {
         val fcx = FfiCtx.forFfi()
+        fcx.initAm()
         val docsRepo = DocsRepo.forFfi(fcx = fcx)
         appContainerState = AppContainer(
             ffiCtx = fcx,
