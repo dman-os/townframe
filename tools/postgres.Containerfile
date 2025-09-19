@@ -14,4 +14,3 @@ RUN set -eux; \
 RUN pig repo add pgsql -ru \
   && pig ext install -y pg_http pg_jsonschema pgtap pg_uuidv7 \
   && pig ext status;
-

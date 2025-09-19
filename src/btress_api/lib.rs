@@ -5,7 +5,6 @@ mod interlude {
 
     pub use crate::{Context, SharedContext};
     pub use async_trait::async_trait;
-
 }
 
 use crate::interlude::*;
@@ -30,8 +29,7 @@ pub struct ServiceContext(pub SharedContext);
 pub struct SharedServiceContext(pub ServiceContext);
 
 #[derive(Debug)]
-pub struct Config {
-}
+pub struct Config {}
 
 mod gen;
 mod user;
@@ -39,8 +37,7 @@ mod user;
 
 fn init() -> Res<()> {
     CX.set(Arc::new(Context {
-        config: Config {
-        },
+        config: Config {},
         db: StdDb::PgWasi {},
         // rt: tokio::runtime::Builder::new_current_thread()
         //     .enable_all()

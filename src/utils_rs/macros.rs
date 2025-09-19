@@ -11,7 +11,6 @@ macro_rules! anyhow_to_eyre {
     };
 }
 
-
 /// Name of currently execution function
 /// Resolves to first found in current function path that isn't a closure.
 #[macro_export]
@@ -69,7 +68,6 @@ macro_rules! function_full {
 fn test_function_macro() {
     assert_eq!("test_function_macro", function!())
 }
-
 
 /// Gives you a identifier that is equivalent to an escaped dollar_sign.
 /// Without this helper, nested using the dollar operator in nested macros would be impossible.
@@ -251,7 +249,6 @@ macro_rules! table_tests {
         }
     };
 }
-
 
 #[cfg(test)]
 mod tests {

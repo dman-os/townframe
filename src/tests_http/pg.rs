@@ -60,7 +60,9 @@ impl TestPg {
             .wrap_err("Failed to migrate the database")?;
         sqlx::migrate::Migrator::new(migrations_root.join("fixtures"))
             .await
-            .wrap_err_with(|| format!("error setting up migrator for {migrations_root:?}/fixtures"))?
+            .wrap_err_with(|| {
+                format!("error setting up migrator for {migrations_root:?}/fixtures")
+            })?
             .set_ignore_missing(true) // don't inspect migrations store
             .run(&pool)
             .await

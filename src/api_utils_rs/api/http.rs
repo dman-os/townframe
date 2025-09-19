@@ -1,4 +1,3 @@
-
 use super::*;
 use axum::{
     extract::*,
@@ -8,7 +7,6 @@ use axum::{
 pub type BearerToken =
     axum_extra::headers::Authorization<axum_extra::headers::authorization::Bearer>;
 pub type DiscardBody = axum::body::Body;
-
 
 pub type Method = openapi::HttpMethod;
 pub type HttpResponse = axum::response::Response;
@@ -281,8 +279,6 @@ where
         vec
     }
 }
-
-
 
 pub trait DocumentedEndpoint: HttpEndpoint + Sized
 where
@@ -689,4 +685,3 @@ impl DocumentedParameter for axum_extra::TypedHeader<BearerToken> {
         vec![]
     }
 }
-

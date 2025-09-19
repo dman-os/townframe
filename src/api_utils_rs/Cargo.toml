@@ -31,4 +31,3 @@ wit-bindgen.workspace = true
 utoipa.workspace = true
 http.workspace = true
 # hyper = "1"
-

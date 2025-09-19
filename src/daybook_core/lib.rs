@@ -48,7 +48,7 @@ mod sql {
     use crate::interlude::*;
 
     pub struct SqlCtx {
-        db_pool: sqlx::SqlitePool
+        db_pool: sqlx::SqlitePool,
     }
 
     impl SqlCtx {

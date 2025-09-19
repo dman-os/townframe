@@ -1,4 +1,3 @@
-
 // mod http;
 
 use crate::interlude::*;
@@ -6,9 +5,9 @@ use crate::interlude::*;
 // pub use sqlx;
 pub use http::StatusCode;
 
-use utoipa::openapi;
-use utils_rs::type_name_raw;
 use std::borrow::Cow;
+use utils_rs::type_name_raw;
+use utoipa::openapi;
 
 /* #[derive(Clone, educe::Educe)]
 #[educe(Deref, Debug)]
@@ -95,7 +94,6 @@ where
         self.handle(cx, auth_info, request).await
     }
 }
-
 
 pub struct Tag {
     pub name: &'static str,

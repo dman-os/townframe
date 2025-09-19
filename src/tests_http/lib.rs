@@ -85,13 +85,10 @@ impl Drop for TestContext {
 #[allow(unused)]
 async fn test_cx(test_name: &'static str) -> Res<TestContext> {
     utils_rs::testing::load_envs_once();
-    let api_root_path = std::path::PathBuf::from(&utils_rs::get_env_var("BTRESS_API_ROOT_PATH").unwrap());
+    let api_root_path =
+        std::path::PathBuf::from(&utils_rs::get_env_var("BTRESS_API_ROOT_PATH").unwrap());
     let (btress_db, btress_http) = tokio::try_join!(
-        pg::TestPg::new(
-            test_name,
-            &api_root_path,
-        )
-        ,
+        pg::TestPg::new(test_name, &api_root_path,),
         wasmcloud::TestApp::new(test_name)
     )?;
     let testing = TestContext::new(

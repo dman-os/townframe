@@ -1,4 +1,3 @@
-
 #[macro_export]
 macro_rules! integration_table_tests {
     ($(

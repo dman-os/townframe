@@ -17,4 +17,3 @@ interface stdin {
 
   get-stdin: func() -> input-stream;
 }
-
