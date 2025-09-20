@@ -1068,7 +1068,6 @@
           "sets": {
             "ghjkEnvProvInstSet___main": {
               "installs": [
-                "bciqjfk3ky4bcubgz7weth56wwidj742cewc2guznrbz6h3jvicrihqa",
                 "bciqhkopahseugyce773uxsdne7md3hzakphgp7jczxplcmlhidtyrvy",
                 "bciqkpzir7fijfkm3mr6uxar5xvwrbrtb7ya7vconaxqgphpq6e2kpxy",
                 "bciqewmazngoskxx2fe54iimwlim5cteswbno524bfb5glzetv7aqf6i",
@@ -1091,8 +1090,6 @@
                 "bciqmrfsq4ay7kjzlolyqkyxce4rso7kbxdpo3ccy756hcgxjxfe6clq",
                 "bciqkksz2d5trxsu3nmz654rgpcgw3sytr45njq2jn3yzsthqsagzy2i",
                 "bciqlger7l36c7se5x2rpenndenyh2wotg36do7zmn5xyot6fmx27hbq",
-                "bciqcwar2qg4avxzuw6x232qcl65bhlo5kkiaq5tlr6nlhtumyjb5rpy",
-                "bciqjfk3ky4bcubgz7weth56wwidj742cewc2guznrbz6h3jvicrihqa",
                 "bciqhkopahseugyce773uxsdne7md3hzakphgp7jczxplcmlhidtyrvy",
                 "bciqkpzir7fijfkm3mr6uxar5xvwrbrtb7ya7vconaxqgphpq6e2kpxy",
                 "bciqewmazngoskxx2fe54iimwlim5cteswbno524bfb5glzetv7aqf6i",
@@ -1488,48 +1485,6 @@
       }
     ],
     "blackboard": {
-      "bciqjfk3ky4bcubgz7weth56wwidj742cewc2guznrbz6h3jvicrihqa": {
-        "version": "nightly-2025-09-01",
-        "port": {
-          "ty": "denoWorker@v1",
-          "name": "rust_rustup",
-          "platforms": [
-            "x86_64-linux",
-            "aarch64-linux",
-            "x86_64-darwin",
-            "aarch64-darwin",
-            "x86_64-windows",
-            "aarch64-windows",
-            "x86_64-freebsd",
-            "aarch64-freebsd",
-            "x86_64-netbsd",
-            "aarch64-netbsd",
-            "x86_64-aix",
-            "aarch64-aix",
-            "x86_64-solaris",
-            "aarch64-solaris",
-            "x86_64-illumos",
-            "aarch64-illumos",
-            "x86_64-android",
-            "aarch64-android"
-          ],
-          "version": "0.1.0",
-          "buildDeps": [
-            {
-              "name": "rustup_rustlang"
-            }
-          ],
-          "moduleSpecifier": "file:///home/asdf/repos/rust/townframe/tools/rust.port.ts"
-        },
-        "profile": "default",
-        "components": [
-          "rust-src"
-        ],
-        "targets": [
-          "wasm32-unknown-unknown",
-          "wasm32-wasip2"
-        ]
-      },
       "bciqhkopahseugyce773uxsdne7md3hzakphgp7jczxplcmlhidtyrvy": {
         "version": "22.14.0",
         "port": {
@@ -2424,31 +2379,6 @@
           "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.2/ports/npmi.ts"
         },
         "packageName": "eas-cli"
-      },
-      "bciqcwar2qg4avxzuw6x232qcl65bhlo5kkiaq5tlr6nlhtumyjb5rpy": {
-        "version": "21.0.8\\+9.0.LTS",
-        "port": {
-          "ty": "denoWorker@v1",
-          "name": "jdk_temurin",
-          "platforms": [
-            "aarch64-linux",
-            "x86_64-linux",
-            "aarch64-darwin",
-            "x86_64-darwin",
-            "aarch64-windows",
-            "x86_64-windows"
-          ],
-          "version": "0.1.0",
-          "buildDeps": [
-            {
-              "name": "tar_aa"
-            },
-            {
-              "name": "unzip_aa"
-            }
-          ],
-          "moduleSpecifier": "file:///home/asdf/repos/rust/townframe/tools/jdk_temurin.port.ts"
-        }
       }
     }
   }

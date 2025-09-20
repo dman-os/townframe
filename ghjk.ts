@@ -1,7 +1,7 @@
 export { sophon } from "@ghjk/ts";
 import { file } from "@ghjk/ts";
 import { sedLock } from "@ghjk/ts/std.ts";
-import jdk_temurin from "./tools/jdk_temurin.port.ts";
+// import jdk_temurin from "./tools/jdk_temurin.port.ts";
 import rust from "./tools/rust.port.ts";
 import * as ports from "@ghjk/ports_wip";
 
@@ -42,7 +42,6 @@ ghjk.env("main")
     CARGO_BUILD_JOBS: 8,
   })
   .install(
-    installs.rust,
     installs.node,
     ports.pnpm(),
     ports.pipi({ packageName: "pre-commit" })[0],
@@ -69,7 +68,7 @@ ghjk.env("dev")
     // ports.pipi({ packageName: "aider-chat" })[0],
     // expo router
     ports.npmi({ packageName: "eas-cli" })[0],
-    jdk_temurin({ version: "21.0.8\\+9.0.LTS" }),
+    // jdk_temurin({ version: "21.0.8\\+9.0.LTS" }),
   )
   .vars({
     // java tooling is not great with wayland scaling

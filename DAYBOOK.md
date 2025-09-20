@@ -2,6 +2,14 @@
 
 ## TODO
 
+### Stack
+
+- [ ] Get uniffi working on android
+
+---
+
+### Features
+
 - Data model
   - [x] Document repository with tests
     - [ ] Tests
