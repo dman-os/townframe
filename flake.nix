@@ -21,6 +21,7 @@
         };
 
         androidBuildToolsVersion = "35.0.0";
+        androidApiLevel = "31";
         androidComposition = (pkgs.android-studio.withSdk (
           pkgs.androidenv.composeAndroidPackages { 
             includeNDK = true; 
@@ -33,7 +34,13 @@
         rustVersion = "2025-09-01";
         rustChannel = pkgs.rust-bin.nightly.${rustVersion}.default.override {
           extensions = [ "rust-src" ];
-          targets = [ "wasm32-unknown-unknown" ];
+          targets = [ 
+            "wasm32-unknown-unknown" 
+            "armv7-linux-androideabi" # For armeabi-v7a
+            "aarch64-linux-android" # For arm64-v8a
+            "i686-linux-android" # For x86"
+            "x86_64-linux-android"  # For x86_64
+          ];
         };
 
         # Base shell with just the development environment setup
@@ -43,7 +50,25 @@
           ANDROID_SDK_ROOT = "${androidComposition.sdk}/libexec/android-sdk";
           ANDROID_HOME = "${ANDROID_SDK_ROOT}";
           ANDROID_NDK_ROOT = "${ANDROID_SDK_ROOT}/ndk-bundle";
+          ANDROID_NDK_TOOLCHAIN_BIN_DIR = "${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/${pkgs.stdenv.hostPlatform.system}/bin";
           GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${ANDROID_SDK_ROOT}/build-tools/${androidBuildToolsVersion}/aapt2";
+          
+          # ARMv7 (armeabi-v7a)
+          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/armv7a-linux-androideabi${androidApiLevel}-clang";
+          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_AR = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/llvm-ar";
+
+          # ARM64 (arm64-v8a)
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/aarch64-linux-android${androidApiLevel}-clang";
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_AR = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/llvm-ar";
+
+          # x86
+          CARGO_TARGET_I686_LINUX_ANDROID_LINKER = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/i686-linux-android${androidApiLevel}-clang";
+          CARGO_TARGET_I686_LINUX_ANDROID_AR = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/llvm-ar";
+
+          # x86_64
+          CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/x86_64-linux-android${androidApiLevel}-clang";
+          CARGO_TARGET_X86_64_LINUX_ANDROID_AR = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/llvm-ar";
+
 
           buildInputs = with pkgs; [
             rustChannel
@@ -63,7 +88,7 @@
             # kanidm CLI
             systemd # libudev-sys
 
-            jdk21_headless
+            # openjdk21
             # sqlite
             # deno
 
@@ -82,8 +107,8 @@
               (lib.getLib xorg.libXext)
               (lib.getLib xorg.libXtst)
               (lib.getLib xorg.libX11)
-              (lib.getLib xorg.libXrender)
               (lib.getLib xorg.libXi)
+              (lib.getLib xorg.libXrandr)
               (lib.getLib freetype)
               (lib.getLib fontconfig)
               (lib.getLib libglvnd)

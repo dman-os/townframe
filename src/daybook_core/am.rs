@@ -29,76 +29,75 @@ impl AmCtx {
         })
     }
 
-    pub async fn init(&self) -> Res<()> {
-        let connection_signal = Arc::new(tokio::sync::Notify::new());
-        {
-            let repo = self.repo.clone();
-            let connection_signal = connection_signal.clone();
-            tokio::spawn(async move {
-                let mut attempt = 0;
-                loop {
-                    if attempt > 0 {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    }
-                    attempt += 1;
-                    let (conn, resp) =
-                        match tokio_tungstenite::connect_async("ws://0.0.0.0:8090").await {
-                            Ok(val) => val,
-                            Err(err) => {
-                                error!("error connecting to sync server {err}");
-                                continue;
-                            }
-                        };
-                    if resp.status().as_u16() != 101 {
-                        error!("bad response connecting to server {resp:?}");
-                        continue;
-                    }
-                    connection_signal.notify_waiters();
-                    let fin = repo
-                        .connect_tungstenite(conn, samod::ConnDirection::Outgoing)
-                        .await;
-                    error!(?fin, "connection closed");
+    /// Initialize the automerge document based on globals, and start connector lazily.
+    pub async fn init_from_globals(&self, cx: &crate::Ctx) -> Res<()> {
+        // Start the connector in background but do not block app startup
+        self.spawn_connector();
+
+        // Try to recover existing doc_id from local globals kv
+        let init_state = crate::globals::get_init_state(cx).await?;
+        let handle = if let crate::globals::InitState::Created { doc_id } = init_state {
+            match self.repo.find(doc_id).await? {
+                Some(handle) => handle,
+                None => {
+                    warn!("doc not found locally for stored doc_id; creating new local document");
+                    let doc = version_updates::version_latest()?;
+                    let doc = automerge::Automerge::load(&doc)
+                        .wrap_err("error loading version_latest")?;
+                    let handle = self.repo.create(doc).await?;
+                    // Update init state to new id so future runs recover
+                    let new_state = crate::globals::InitState::Created {
+                        doc_id: handle.document_id().clone(),
+                    };
+                    crate::globals::set_init_state(cx, &new_state).await?;
+                    handle
                 }
-            });
-        }
-        connection_signal.notified().await;
-        let doc_handle;
-        loop {
-            let res = reqwest::get(format!(
-                "http://0.0.0.0:8090/doc_id?peer_id={}",
-                self.peer_id
-            ))
-            .await
-            .wrap_err("error on doc_id request")?;
-            if res.status().as_u16() == 404 {
-                let doc =
-                    version_updates::version_latest().expect_or_log("error initing version_latest");
-                let doc =
-                    automerge::Automerge::load(&doc).expect_or_log("error loading version_latest");
-                doc_handle = self
-                    .repo
-                    .create(doc)
-                    .await
-                    .wrap_err("error creating doc handle")?;
-                break;
-            } else if res.status().is_success() {
-                let doc_id = res.text().await.wrap_err("error reading doc_id body")?;
-                let doc_id: samod::DocumentId = doc_id.parse().wrap_err("error parsing doc_id")?;
-                let doc_handle_maybe = self
-                    .repo
-                    .find(doc_id)
-                    .await
-                    .wrap_err("error finding doc handle")?;
-                doc_handle = doc_handle_maybe.ok_or_eyre("retrieved doc handle not found")?;
-                break;
             }
-            error!(?res, "error on doc_id request");
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-        let Ok(()) = self.doc_handle.set(doc_handle) else {
+        } else {
+            // First run: create a new document and persist its id
+            let doc = version_updates::version_latest()?;
+            let doc = automerge::Automerge::load(&doc).wrap_err("error loading version_latest")?;
+            let handle = self.repo.create(doc).await?;
+            let state = crate::globals::InitState::Created {
+                doc_id: handle.document_id().clone(),
+            };
+            crate::globals::set_init_state(cx, &state).await?;
+            handle
+        };
+
+        let Ok(()) = self.doc_handle.set(handle) else {
             eyre::bail!("doc_handle already set");
         };
         Ok(())
+    }
+
+    fn spawn_connector(&self) {
+        let repo = self.repo.clone();
+        tokio::spawn(async move {
+            let mut attempt = 0u32;
+            loop {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                attempt += 1;
+                match tokio_tungstenite::connect_async("ws://0.0.0.0:8090").await {
+                    Ok((conn, resp)) => {
+                        if resp.status().as_u16() != 101 {
+                            error!(?resp, "bad response connecting to server");
+                            continue;
+                        }
+                        let fin = repo
+                            .connect_tungstenite(conn, samod::ConnDirection::Outgoing)
+                            .await;
+                        error!(?fin, "connection closed");
+                    }
+                    Err(err) => {
+                        error!("error connecting to sync server {err}");
+                        continue;
+                    }
+                }
+            }
+        });
     }
 
     fn doc_handle(&self) -> &samod::DocHandle {

@@ -15,25 +15,6 @@ mod sanity_http;
 
 use std::{collections::HashMap, time::Duration};
 
-pub async fn wait_http_ready(url: &str, timeout: Duration) -> bool {
-    let client = reqwest::Client::new();
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > timeout {
-            return false;
-        }
-        match client.get(url).send().await {
-            Ok(resp) => {
-                if resp.status().is_success() || resp.status().is_redirection() {
-                    return true;
-                }
-            }
-            Err(_) => {}
-        }
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    }
-}
-
 pub struct TestContext {
     pub test_name: String,
     pub pg_pools: HashMap<String, pg::TestPg>,

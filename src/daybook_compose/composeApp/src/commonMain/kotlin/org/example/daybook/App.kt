@@ -2,16 +2,20 @@ package org.example.daybook
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeContentPadding
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -28,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -75,6 +80,12 @@ enum class AppScreens {
     Capture
 }
 
+private sealed interface AppInitState {
+    data object Loading: AppInitState
+    data class Ready(val container: AppContainer): AppInitState
+    data class Error(val throwable: Throwable): AppInitState
+}
+
 @Composable
 @Preview
 fun App(
@@ -83,37 +94,57 @@ fun App(
     extraAction: (() -> Unit)? = null,
     navController: NavHostController = rememberNavController(),
 ) {
-    var appContainerState by remember { mutableStateOf<AppContainer?>(null) }
-    LaunchedEffect(true) {
+    var initAttempt by remember { mutableStateOf(0) }
+    var initState by remember { mutableStateOf<AppInitState>(AppInitState.Loading) }
+
+    LaunchedEffect(initAttempt) {
+        initState = AppInitState.Loading
         val fcx = FfiCtx.forFfi()
-        fcx.initAm()
-        val docsRepo = DocsRepo.forFfi(fcx = fcx)
-        appContainerState = AppContainer(
-            ffiCtx = fcx,
-            docsRepo = docsRepo
+        val repo = DocsRepo.forFfi(fcx = fcx)
+        initState = AppInitState.Ready(
+            AppContainer(
+                ffiCtx = fcx,
+                docsRepo = repo
+            )
         )
     }
-    val appContainer = appContainerState;
-    if (appContainer == null) {
-        Text("Loading...")
-        return
-    } else {
 
-        CompositionLocalProvider(
-            LocalContainer provides appContainer,
-        ) {
-            DaybookTheme(themeConfig = config.theme) {
-                AppScaffold(modifier = surfaceModifier, navController = navController) { innerPadding ->
-                    Routes(
-                        modifier = Modifier.padding(innerPadding),
-                        extraAction = extraAction,
-                        navController = navController
-                    )
+    DaybookTheme(themeConfig = config.theme) {
+        when (val state = initState) {
+            is AppInitState.Loading -> {
+                LoadingScreen()
+            }
+            is AppInitState.Error -> {
+                ErrorScreen(
+                    message = state.throwable.message ?: "Unknown error",
+                    onRetry = { initAttempt += 1 }
+                )
+            }
+            is AppInitState.Ready -> {
+                val appContainer = state.container
+
+                // Ensure FFI resources are closed when the composition leaves
+                androidx.compose.runtime.DisposableEffect(appContainer) {
+                    onDispose {
+                        appContainer.docsRepo.close()
+                        appContainer.ffiCtx.close()
+                    }
+                }
+
+                CompositionLocalProvider(
+                    LocalContainer provides appContainer,
+                ) {
+                    AppScaffold(modifier = surfaceModifier, navController = navController) { innerPadding ->
+                        Routes(
+                            modifier = Modifier.padding(innerPadding),
+                            extraAction = extraAction,
+                            navController = navController
+                        )
+                    }
                 }
             }
         }
     }
-
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -219,6 +250,45 @@ fun Routes(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun LoadingScreen() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            CircularProgressIndicator()
+            Spacer(Modifier.height(16.dp))
+            Text("Preparing Daybook…")
+        }
+    }
+}
+
+@Composable
+private fun ErrorScreen(
+    message: String,
+    onRetry: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("Failed to initialize")
+            Spacer(Modifier.height(8.dp))
+            Text(message)
+            Spacer(Modifier.height(16.dp))
+            Button(onClick = onRetry) { Text("Retry") }
         }
     }
 }

@@ -24,6 +24,7 @@ async fn app_main() -> Res<()> {
         .route("/", axum::routing::any(connect))
         .route("/doc_id", axum::routing::get(get_doc_id))
         .with_state(cx)
+        // tracing layer
         .layer(
             tower::ServiceBuilder::new()
                 .sensitive_headers(vec![http::header::AUTHORIZATION, http::header::COOKIE])

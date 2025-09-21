@@ -48,7 +48,7 @@ impl FfiCtx {
     pub async fn do_on_rt<O, F>(&self, future: F) -> O
     where
         O: Send + Sync + 'static,
-        F: std::future::Future<Output = O> + Send + Sync + 'static,
+        F: std::future::Future<Output = O> + Send + 'static,
     {
         do_on_rt(&self.rt, future).await
     }
@@ -57,6 +57,7 @@ impl FfiCtx {
 #[uniffi::export]
 impl FfiCtx {
     #[uniffi::constructor]
+    #[tracing::instrument(err)]
     async fn for_ffi() -> Result<Arc<FfiCtx>, FfiError> {
         utils_rs::setup_tracing_once();
         let rt = crate::init_tokio()?;
@@ -66,18 +67,12 @@ impl FfiCtx {
             .wrap_err("error initializing main Ctx")?;
         Ok(Arc::new(Self { cx, rt }))
     }
-
-    async fn init_am(&self) -> Res<(), FfiError> {
-        let cx = self.cx.clone();
-        self.do_on_rt(async move { cx.acx.init().await }).await?;
-        Ok(())
-    }
 }
 
 async fn do_on_rt<O, F>(rt: &tokio::runtime::Runtime, future: F) -> O
 where
     O: Send + Sync + 'static,
-    F: std::future::Future<Output = O> + Send + Sync + 'static,
+    F: std::future::Future<Output = O> + Send + 'static,
 {
     let (tx, rx) = oneshot::channel();
     rt.spawn(async {

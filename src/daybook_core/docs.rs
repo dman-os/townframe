@@ -126,12 +126,14 @@ impl Drop for ListenerRegistration {
 #[uniffi::export]
 impl DocsRepo {
     #[uniffi::constructor]
+    #[tracing::instrument(err, skip(fcx))]
     async fn for_ffi(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
         let cx = fcx.clone();
         let this = fcx.do_on_rt(Self::load(cx)).await?;
         Ok(this)
     }
 
+    #[tracing::instrument(err, skip(self))]
     async fn ffi_get(self: Arc<Self>, id: Uuid) -> Result<Option<Doc>, FfiError> {
         let this = self.clone();
         let out = self
@@ -142,6 +144,7 @@ impl DocsRepo {
         Ok(out)
     }
 
+    #[tracing::instrument(err, skip(self, doc))]
     async fn ffi_set(self: Arc<Self>, id: Uuid, doc: Doc) -> Result<Option<Doc>, FfiError> {
         let this = self.clone();
         let out = self
@@ -152,6 +155,7 @@ impl DocsRepo {
         Ok(out)
     }
 
+    #[tracing::instrument(err, skip(self))]
     async fn ffi_list(self: Arc<Self>) -> Result<Vec<Doc>, FfiError> {
         let this = self.clone();
         let out = self
@@ -165,6 +169,7 @@ impl DocsRepo {
     // Register a listener; returns a handle that unregisters on drop.
     //
     // UniFFI expects callback parameters to be plain trait objects (Box<dyn Trait>) rather than Arc<dyn Trait>.
+    #[tracing::instrument(err, skip(self, listener))]
     async fn ffi_register_listener(
         self: Arc<Self>,
         listener: Arc<dyn DocsListener>,
