@@ -1,0 +1,1 @@
+- To type check the ./src/daybook_compose multiplatform app, use `./gradlew check 2>&1 | rg -v daybook_core.kt`

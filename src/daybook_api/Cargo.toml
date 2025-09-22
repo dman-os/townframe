@@ -1,0 +1,32 @@
+[package]
+name = "daybook_api"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"
+
+[features]
+default = []
+censor_internal_errors = []
+
+[dependencies]
+utils_rs.workspace = true
+api_utils_rs.workspace = true
+macros.workspace = true
+
+# futures
+async-trait.workspace = true
+futures.workspace = true
+tokio.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+
+garde.workspace = true
+
+thiserror.workspace = true
+displaydoc.workspace = true
+
+wit-bindgen.workspace = true

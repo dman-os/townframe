@@ -5,6 +5,7 @@
 ### Stack
 
 - [ ] Get uniffi working on android
+- [ ] Save a photo
 
 ---
 
@@ -52,7 +53,7 @@ New version
     - Connect through websocket
   - Backed by object store storage
 - Kanidm is a pita for some usecases
-  - Connsider Authelia
+  - Consider Authelia
 - Compute
   - Wasmcloud
     - Should be used for 99% of mutations
@@ -61,19 +62,30 @@ New version
 - Database
   - Postgres for relational
   - Redis for kv
+- Processing queue
+-
 
 ### Features
 
-- [ ] Android auto-updates
-
 #### Stretch goals
+
+- [ ] Android auto-updates
 
 ### Endpoints
 
 ### Schema
 
-```
+- A document is created
+  - Photo taken
+  - Note written
+  - Speech recorded
+- DocumentEvents are put in an API somewhere
+- Parametrized event handlers then get to work
+  - I.e. if event == xyz, run handler abc
+- Is this message based actors basically??
+  - This system doens't allow one handler to suspend and wait on another
 
+```
 ```
 
 ## dev-log

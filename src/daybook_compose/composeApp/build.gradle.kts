@@ -3,6 +3,7 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
+import java.io.File
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -131,3 +132,82 @@ compose.desktop {
         }
     }
 }
+
+// Build the Rust core for Android ABIs and copy .so into jniLibs
+val rustAndroidTargets = mapOf(
+    "arm64-v8a" to "aarch64-linux-android",
+    "armeabi-v7a" to "armv7-linux-androideabi",
+    "x86_64" to "x86_64-linux-android",
+    "x86" to "i686-linux-android",
+)
+
+// Debug variant: build Rust in debug mode
+tasks.register("buildRustAndroidDebug") {
+    group = "build"
+    description = "Build Rust daybook_core (debug) for Android ABIs and copy into jniLibs"
+
+    doLast {
+        val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
+
+        rustAndroidTargets.values.toSet().forEach { target ->
+            project.exec {
+                workingDir = repoRoot
+                commandLine("cargo", "build", "-p", "daybook_core", "--target", target)
+                environment(System.getenv())
+            }
+        }
+
+        rustAndroidTargets.forEach { (abi, target) ->
+            val soFile = File(repoRoot, "target/$target/debug/libdaybook_core.so")
+            if (!soFile.exists()) {
+                throw GradleException("Expected native library not found: ${soFile.absolutePath}")
+            }
+            val destDir = File(project.projectDir, "src/androidMain/jniLibs/$abi")
+            destDir.mkdirs()
+            project.copy {
+                from(soFile)
+                into(destDir)
+            }
+        }
+    }
+}
+
+// Release variant: build Rust in release mode
+tasks.register("buildRustAndroidRelease") {
+    group = "build"
+    description = "Build Rust daybook_core (release) for Android ABIs and copy into jniLibs"
+
+    doLast {
+        val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
+
+        rustAndroidTargets.values.toSet().forEach { target ->
+            project.exec {
+                workingDir = repoRoot
+                commandLine("cargo", "build", "-p", "daybook_core", "--release", "--target", target)
+                environment(System.getenv())
+            }
+        }
+
+        rustAndroidTargets.forEach { (abi, target) ->
+            val soFile = File(repoRoot, "target/$target/release/libdaybook_core.so")
+            if (!soFile.exists()) {
+                throw GradleException("Expected native library not found: ${soFile.absolutePath}")
+            }
+            val destDir = File(project.projectDir, "src/androidMain/jniLibs/$abi")
+            destDir.mkdirs()
+            project.copy {
+                from(soFile)
+                into(destDir)
+            }
+        }
+    }
+}
+
+// Wire tasks to Android variants
+// tasks.matching { it.name == "preDebugBuild" }.configureEach {
+//     dependsOn("buildRustAndroidDebug")
+// }
+// tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+//     dependsOn("buildRustAndroidRelease")
+// }
+

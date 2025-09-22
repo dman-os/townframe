@@ -1380,20 +1380,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "575f75dfd25738df5b91b8e43e14d44bda14637a58fae779fd2b064f8bf3e010"
 
 [[package]]
+name = "daybook_api"
+version = "0.1.0"
+dependencies = [
+ "api_utils_rs",
+ "async-trait",
+ "displaydoc",
+ "futures",
+ "garde",
+ "macros",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.16",
+ "tokio",
+ "utils_rs",
+ "wit-bindgen 0.45.1",
+]
+
+[[package]]
 name = "daybook_core"
 version = "0.1.0"
 dependencies = [
  "automerge",
  "autosurgeon",
  "color-eyre",
+ "futures",
  "once_cell",
  "parking_lot",
+ "pastey",
  "reqwest",
  "rust_decimal",
  "samod",
  "serde",
  "serde_json",
  "sqlx",
+ "struct-patch",
  "thiserror 2.0.16",
  "time",
  "tokio",
@@ -5466,6 +5487,26 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "struct-patch"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e986d2cf6e819bd843319120453d837dfdfa31497c3fee4cefa614b2d182d8c"
+dependencies = [
+ "struct-patch-derive",
+]
+
+[[package]]
+name = "struct-patch-derive"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68c6387c1c7b53060605101b63d93edca618c6cf7ce61839f2ec2a527419fdb5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+]
 
 [[package]]
 name = "subtle"

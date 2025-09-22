@@ -1,0 +1,16 @@
+name = "daybook_api"
+version = "0.1.0"
+language = "rust"
+type = "component"
+path = "./../../"
+build = "./../../target/wash"
+
+[component]
+wit_world = "api"
+wasm_target = "wasm32-wasip2"
+build_command = "cargo b -p daybook_api --target wasm32-wasip2"
+build_artifact = "./target/wasm32-wasip2/debug/daybook_api.wasm"
+
+# [rust]
+# target_path = "./../../target"
+# debug = true

@@ -43,6 +43,12 @@
           ];
         };
 
+        # Map NDK host tag from nix platform (needed for correct toolchain path)
+        ndkHostTag = if pkgs.stdenv.isDarwin then
+          (if pkgs.stdenv.hostPlatform.parsed.cpu.name == "aarch64" then "darwin-aarch64" else "darwin-x86_64")
+        else
+          (if pkgs.stdenv.hostPlatform.parsed.cpu.name == "aarch64" then "linux-aarch64" else "linux-x86_64");
+
         # Base shell with just the development environment setup
         baseShell = pkgs.mkShell rec {
           name = "devshell-base";
@@ -50,30 +56,39 @@
           ANDROID_SDK_ROOT = "${androidComposition.sdk}/libexec/android-sdk";
           ANDROID_HOME = "${ANDROID_SDK_ROOT}";
           ANDROID_NDK_ROOT = "${ANDROID_SDK_ROOT}/ndk-bundle";
-          ANDROID_NDK_TOOLCHAIN_BIN_DIR = "${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/${pkgs.stdenv.hostPlatform.system}/bin";
+          ANDROID_NDK_TOOLCHAIN_BIN_DIR = "${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/${ndkHostTag}/bin";
           GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${ANDROID_SDK_ROOT}/build-tools/${androidBuildToolsVersion}/aapt2";
           
           # ARMv7 (armeabi-v7a)
           CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/armv7a-linux-androideabi${androidApiLevel}-clang";
           CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_AR = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/llvm-ar";
+          # Ensure C toolchain is used by cc crate when cross-compiling
+          CC_armv7_linux_androideabi = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/armv7a-linux-androideabi${androidApiLevel}-clang";
+          AR_armv7_linux_androideabi = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/llvm-ar";
 
           # ARM64 (arm64-v8a)
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/aarch64-linux-android${androidApiLevel}-clang";
           CARGO_TARGET_AARCH64_LINUX_ANDROID_AR = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/llvm-ar";
+          CC_aarch64_linux_android = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/aarch64-linux-android${androidApiLevel}-clang";
+          AR_aarch64_linux_android = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/llvm-ar";
 
           # x86
           CARGO_TARGET_I686_LINUX_ANDROID_LINKER = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/i686-linux-android${androidApiLevel}-clang";
           CARGO_TARGET_I686_LINUX_ANDROID_AR = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/llvm-ar";
+          CC_i686_linux_android = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/i686-linux-android${androidApiLevel}-clang";
+          AR_i686_linux_android = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/llvm-ar";
 
           # x86_64
           CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/x86_64-linux-android${androidApiLevel}-clang";
           CARGO_TARGET_X86_64_LINUX_ANDROID_AR = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/llvm-ar";
+          CC_x86_64_linux_android = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/x86_64-linux-android${androidApiLevel}-clang";
+          AR_x86_64_linux_android = "${ANDROID_NDK_TOOLCHAIN_BIN_DIR}/llvm-ar";
 
 
           buildInputs = with pkgs; [
             rustChannel
             androidComposition
-            android-tools
+            # android-tools
             # (
             #   android-studio.withSdk (
             #     androidenv.composeAndroidPackages { 

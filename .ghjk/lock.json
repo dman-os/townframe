@@ -1050,6 +1050,92 @@
           "crateName": "wasmtime-cli",
           "locked": true,
           "specifiedVersion": false
+        },
+        "bciqietacjrcoughk4nssp4mjn77ns7f7lv7fqapvh2gj7m2e2bssj6q": {
+          "version": "1.3.0-rc6",
+          "buildDepConfigs": {
+            "cargo_binstall_ghrel": {
+              "version": "v1.13.0",
+              "buildDepConfigs": {},
+              "portRef": "cargo_binstall_ghrel@0.1.0",
+              "specifiedVersion": false
+            },
+            "rust_rustup": {
+              "version": "nightly-2025-09-01",
+              "buildDepConfigs": {
+                "rustup_rustlang": {
+                  "version": "1.28.2",
+                  "buildDepConfigs": {
+                    "git_aa": {
+                      "version": "2.49.0",
+                      "buildDepConfigs": {},
+                      "portRef": "git_aa@0.1.0",
+                      "specifiedVersion": false
+                    }
+                  },
+                  "portRef": "rustup_rustlang@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rust_rustup@0.1.0",
+              "profile": "default",
+              "components": [
+                "rust-src"
+              ],
+              "targets": [
+                "wasm32-unknown-unknown",
+                "wasm32-wasip2"
+              ],
+              "specifiedVersion": true
+            }
+          },
+          "portRef": "cargobi_cratesio@0.1.0",
+          "crateName": "golem-cli",
+          "locked": true,
+          "specifiedVersion": false
+        },
+        "bciqap7jbjiww4a4glcwapbygtem4fbvyzr5fbdfnkjibg5sb2cf2doy": {
+          "version": "0.2.0-alpha0",
+          "buildDepConfigs": {
+            "cargo_binstall_ghrel": {
+              "version": "v1.13.0",
+              "buildDepConfigs": {},
+              "portRef": "cargo_binstall_ghrel@0.1.0",
+              "specifiedVersion": false
+            },
+            "rust_rustup": {
+              "version": "nightly-2025-09-01",
+              "buildDepConfigs": {
+                "rustup_rustlang": {
+                  "version": "1.28.2",
+                  "buildDepConfigs": {
+                    "git_aa": {
+                      "version": "2.49.0",
+                      "buildDepConfigs": {},
+                      "portRef": "git_aa@0.1.0",
+                      "specifiedVersion": false
+                    }
+                  },
+                  "portRef": "rustup_rustlang@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rust_rustup@0.1.0",
+              "profile": "default",
+              "components": [
+                "rust-src"
+              ],
+              "targets": [
+                "wasm32-unknown-unknown",
+                "wasm32-wasip2"
+              ],
+              "specifiedVersion": true
+            }
+          },
+          "portRef": "cargobi_cratesio@0.1.0",
+          "crateName": "golem",
+          "locked": true,
+          "specifiedVersion": false
         }
       }
     },
@@ -1107,6 +1193,12 @@
         "id": "tasks",
         "config": {
           "tasks": {
+            "restate": {
+              "ty": "denoFile@v1",
+              "key": "restate",
+              "workingDir": "./tools",
+              "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
+            },
             "deploy-btress": {
               "ty": "denoFile@v1",
               "key": "deploy-btress",
@@ -1132,7 +1224,7 @@
             "gen-ffi-dayb": {
               "ty": "denoFile@v1",
               "key": "gen-ffi-dayb",
-              "desc": "Generate uniffi kotlin bindings for the dabyook_core crate",
+              "desc": "Generate uniffi kotlin bindings for the daybook_core crate",
               "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
             },
             "dev-d-dayb": {
@@ -1282,6 +1374,7 @@
             }
           },
           "tasksNamed": [
+            "restate",
             "deploy-btress",
             "build-btress-http",
             "dev",

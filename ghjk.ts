@@ -347,34 +347,15 @@ ghjk.task(
 
 ghjk.task(
   "gen-ffi-dayb",
-  async ($) => {
-    await $`cargo build -p daybook_core 
-      && cargo run 
-        -p daybook_core 
-        generate --library ${$.workingDir.join("./target/debug/libdaybook_core.so")}
-        --language kotlin 
-        --out-dir ${$.workingDir.join("./src/daybook_compose/composeApp/src/commonMain/kotlin/")}
-        --no-format`;
-    const genPath = $.workingDir.join(
-      "./src/daybook_compose/composeApp/src/commonMain/kotlin/org/example/daybook/uniffi/daybook_core.kt",
-    );
-    await genPath.writeText(
-      (await genPath.readText())
-        .split("\n")
-        .map((line) =>
-          /@file/.test(line)
-            ? [
-              line,
-              "@file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)",
-            ]
-            : [line]
-        )
-        .flat()
-        .join("\n"),
-    );
-  },
+  ($) => $`cargo build -p daybook_core 
+    && cargo run 
+      -p daybook_core 
+      generate --library ${$.workingDir.join("./target/debug/libdaybook_core.so")}
+      --language kotlin 
+      --out-dir ${$.workingDir.join("./src/daybook_compose/composeApp/src/commonMain/kotlin/")}
+      --no-format`,
   {
-    desc: "Generate uniffi kotlin bindings for the dabyook_core crate",
+    desc: "Generate uniffi kotlin bindings for the daybook_core crate",
   },
 );
 
@@ -403,3 +384,13 @@ ghjk.task("deploy-btress", async ($) => {
 }, {
   // dependsOn: "build-btress"
 });
+
+ghjk.task(
+  "restate",
+  ($) =>
+    $`${DOCKER_CMD} compose --profile cli
+          run --rm restate-cli ${$.argv}`,
+  {
+    workingDir: "./tools",
+  },
+);

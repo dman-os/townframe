@@ -19,7 +19,7 @@ import org.example.daybook.uniffi.DocsRepo
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.Uuid
 import org.example.daybook.uniffi.DocsEvent
-import org.example.daybook.uniffi.DocsListener
+import org.example.daybook.uniffi.DocsEventListener
 import org.example.daybook.uniffi.ListenerRegistration
 import kotlin.time.Clock
 
@@ -50,7 +50,7 @@ class CaptureScreenViewModel(
     private var listenerRegistration: ListenerRegistration? = null
 
     // Listener instance implemented on Kotlin side
-    private val listener = object : DocsListener {
+    private val listener = object : DocsEventListener {
         override fun onDocsEvent(event: DocsEvent) {
             // Ensure UI updates happen on main thread
             viewModelScope.launch {

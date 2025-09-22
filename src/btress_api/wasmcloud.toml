@@ -6,7 +6,7 @@ path = "./../../"
 build = "./../../target/wash"
 
 [component]
-wit_world = "hello"
+wit_world = "api"
 wasm_target = "wasm32-wasip2"
 build_command = "cargo b -p btress_api --target wasm32-wasip2"
 build_artifact = "./target/wasm32-wasip2/debug/btress_api.wasm"

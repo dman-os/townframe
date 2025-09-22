@@ -1,0 +1,55 @@
+package townframe:daybook-api;
+interface user {
+    use townframe:api-utils/utils.{errors-validation};
+    use townframe:api-utils/utils.{error-internal};
+    use townframe:api-utils/utils.{uuid};
+    use townframe:api-utils/utils.{datetime};
+
+    record user {
+        id: uuid,
+        created-at: datetime,
+        updated-at: datetime,
+        email: option<string>,
+        username: string,
+    }
+}
+interface user-create {
+    use townframe:api-utils/utils.{errors-validation};
+    use townframe:api-utils/utils.{error-internal};
+    use townframe:api-utils/utils.{uuid};
+    use townframe:api-utils/utils.{datetime};
+    use user.{user};
+
+    /// Username occupied
+    /// http error code: BAD_REQUEST
+    record error-username-occupied {
+        username: string,
+    }
+
+    /// Email occupied
+    /// http error code: BAD_REQUEST
+    record error-email-occupied {
+        /// example: alice@example.com
+        email: option<string>,
+    }
+
+    variant error {
+        username-occupied(error-username-occupied),
+        email-occupied(error-email-occupied),
+        invalid-input(errors-validation),
+        internal(error-internal),
+    }
+
+    record input {
+        username: string,
+        email: option<string>,
+        password: string,
+    }
+    type output = user;
+    resource service {
+        serve: func(inp: input) -> result<output, error>;
+    }
+}
+world feat-user {
+    export user-create;
+}

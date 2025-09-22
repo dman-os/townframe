@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+  "./src/agents",
   "./src/btress_api",
   # "./src/granary_web",
   # "./src/leptos_oidc",
@@ -10,6 +11,7 @@ members = [
   "./src/macros",
   "./src/daybook_core",
   "./src/daybook_sync",
+  "./src/daybook_api",
   "./src/btress_http",
   "./src/tests_http",
   # "./src/leptos_wasi/",

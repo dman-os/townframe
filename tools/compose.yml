@@ -48,6 +48,30 @@ services:
     volumes:
       - redisdata:/data
 
+  postgrest-btress:
+    image: docker.io/postgrest/postgrest:v12.2.8
+    profiles: [db]
+    networks: [net-one]
+    env_file: [.env]
+    environment:
+      PGDATABASE: btress
+    ports:
+      - 54320:3000
+    depends_on:
+      - postgres
+
+  electric-btress:
+    image: docker.io/electricsql/electric:1.0.0-beta.19
+    profiles: [disabled]
+    networks: [net-one]
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql://${PGUSER}:${PGPASSWORD}@postgres:5432/btress?sslmode=disable
+    ports:
+      - 54330:3000
+    depends_on:
+      - postgres
+
   #
   # auth services
   spicedb:
@@ -112,29 +136,12 @@ services:
       - ..:/flyway/conf:ro,Z
       - ${MIG_DIR:-./migrations/}:/migrations:ro,Z
 
-  postgrest-btress:
-    image: docker.io/postgrest/postgrest:v12.2.8
-    profiles: [db]
-    networks: [net-one]
+  restate-cli:
+    image: docker.io/restatedev/restate-cli:1.5.0
+    profiles: [cli]
     env_file: [.env]
-    environment:
-      PGDATABASE: btress
-    ports:
-      - 54320:3000
-    depends_on:
-      - postgres
-
-  electric-btress:
-    image: docker.io/electricsql/electric:1.0.0-beta.19
-    profiles: [disabled]
-    networks: [net-one]
-    env_file: [.env]
-    environment:
-      DATABASE_URL: postgresql://${PGUSER}:${PGPASSWORD}@postgres:5432/btress?sslmode=disable
-    ports:
-      - 54330:3000
-    depends_on:
-      - postgres
+    # networks: [net-one]
+    network_mode: host
 
   #
   # otel
@@ -246,6 +253,18 @@ services:
     image: ghcr.io/wasmcloud/wadm:latest
     environment:
       - WADM_NATS_SERVER=nats
+  
+  #
+  # restate
+  restate-dev:
+    profiles: [restate]
+    networks: [net-one]
+    image: docker.io/restatedev/restate:1.5.0
+    ports:
+      - "9080:8080"
+      - "9070:9070"
+      - "9071:9071"
+
 
 volumes:
   pgdata:
