@@ -29,7 +29,6 @@ impl CartObject for CartObjectImpl {
         _ctx: ObjectContext<'_>,
         _ticket_id: String,
     ) -> Result<(), HandlerError> {
-
         Ok(())
     }
 }

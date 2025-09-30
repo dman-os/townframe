@@ -65,7 +65,7 @@ impl DocsRepo {
         let am = DocsAm::load(&fcx.cx).await?;
         let am = Arc::new(tokio::sync::RwLock::new(am));
         let registry = crate::repos::ListenersRegistry::new();
-        
+
         let repo = Arc::new(Self {
             fcx: fcx.clone(),
             am,
@@ -79,7 +79,8 @@ impl DocsRepo {
                 // Notify repo listeners that the docs list changed
                 registry.notify(DocsEvent::ListChanged);
             }
-        }).await?;
+        })
+        .await?;
 
         Ok(repo)
     }

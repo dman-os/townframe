@@ -5232,12 +5232,3 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
-
-
-
-
-
-
-
-
-

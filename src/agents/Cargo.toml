@@ -5,9 +5,14 @@ edition = "2021"
 
 [dependencies]
 restate-sdk = "0.7.0"
+
+# serde
+serde.workspace = true
+
+tokio = { workspace = true, features = ["full"] }
+
 utils_rs.workspace = true
 
 [[bin]]
 name = "app"
 path = "main.rs"
-

@@ -389,6 +389,7 @@ fun App(
 
     LaunchedEffect(initAttempt) {
         initState = AppInitState.Loading
+        print("XXXX here")
         val fcx = FfiCtx.forFfi()
         val docsRepo = DocsRepo.forFfi(fcx = fcx)
         val tablesRepo = TablesRepo.forFfi(fcx = fcx)

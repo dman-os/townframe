@@ -33,92 +33,91 @@ async fn main_main() -> Res<()> {
         Commands::Play {} => {
             let value = "hi";
             println!("{value:?}");
-        }
-        Commands::SeedKanidm {} => {
-            let mut envs_to_add = std::collections::HashMap::new();
-            let client = kanidm_client::KanidmClientBuilder::new()
-                .address("https://localhost:8443".into())
-                .danger_accept_invalid_certs(true)
-                .danger_accept_invalid_hostnames(true)
-                .build()
-                .map_err(|err| ferr!("{err:?}"))?;
-            {
-                let pass = std::env::var("KANIDM_ADMIN_PASSWORD").expect(
-                    "env KANIDM_ADMIN_PASSWORD required, make sure to run ghjk x kanidm-recover",
-                );
-                client
-                    .auth_simple_password("idm_admin", &pass)
-                    .await
-                    .map_err(|err| ferr!("{err:?}"))?;
-            }
-            let tframe_admin = "tframe_admin";
-            let tframe_group = "tframe_users";
-            {
-                client
-                    .idm_service_account_create(tframe_admin, tframe_admin, "idm_admin")
-                    .await
-                    .map_err(|err| ferr!("{err:?}"))?;
-                let admin_pass = client
-                    .idm_service_account_generate_password(tframe_admin)
-                    .await
-                    .map_err(|err| ferr!("{err:?}"))?;
-                envs_to_add.insert("KANIDM_TFRAME_ADMIN_PASS".to_string(), admin_pass);
-            }
-            client
-                .idm_group_create(tframe_group, Some(tframe_admin))
-                .await
-                .map_err(|err| ferr!("{err:?}"))?;
-            client
-                .idm_group_add_members(tframe_group, &[tframe_admin])
-                .await
-                .map_err(|err| ferr!("{err:?}"))?;
-            {
-                let oauth_name = "granary";
-                client
-                    .idm_oauth2_rs_public_create(
-                        oauth_name,
-                        oauth_name,
-                        "http://localhost:3000/redirect/signin",
-                    )
-                    .await
-                    .map_err(|err| ferr!("{err:?}"))?;
-                client
-                    .idm_oauth2_rs_enable_pkce(oauth_name)
-                    .await
-                    .map_err(|err| ferr!("{err:?}"))?;
-                client
-                    .idm_oauth2_rs_update_scope_map(
-                        oauth_name,
-                        tframe_group,
-                        vec!["openid", "profile", "email", "groups"],
-                    )
-                    .await
-                    .map_err(|err| ferr!("{err:?}"))?;
-                client
-                    .idm_oauth2_rs_enable_public_localhost_redirect(oauth_name)
-                    .await
-                    .map_err(|err| ferr!("{err:?}"))?;
-            }
-            let env_file = ".env";
-            let env_raw = tokio::fs::read_to_string(env_file).await?;
-            let mut env_raw = env_raw
-                .split('\n')
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            _ = env_raw.pop();
-            'outer: for (key, val) in envs_to_add.iter() {
-                let new = format!("{key}={val}");
-                for line in &mut env_raw {
-                    if line.starts_with(key) {
-                        *line = new;
-                        continue 'outer;
-                    }
-                }
-                env_raw.push(new);
-            }
-            let env_raw = env_raw.join("\n");
-            tokio::fs::write(env_file, env_raw).await?;
-        }
+        } /* Commands::SeedKanidm {} => {
+              let mut envs_to_add = std::collections::HashMap::new();
+              let client = kanidm_client::KanidmClientBuilder::new()
+                  .address("https://localhost:8443".into())
+                  .danger_accept_invalid_certs(true)
+                  .danger_accept_invalid_hostnames(true)
+                  .build()
+                  .map_err(|err| ferr!("{err:?}"))?;
+              {
+                  let pass = std::env::var("KANIDM_ADMIN_PASSWORD").expect(
+                      "env KANIDM_ADMIN_PASSWORD required, make sure to run ghjk x kanidm-recover",
+                  );
+                  client
+                      .auth_simple_password("idm_admin", &pass)
+                      .await
+                      .map_err(|err| ferr!("{err:?}"))?;
+              }
+              let tframe_admin = "tframe_admin";
+              let tframe_group = "tframe_users";
+              {
+                  client
+                      .idm_service_account_create(tframe_admin, tframe_admin, "idm_admin")
+                      .await
+                      .map_err(|err| ferr!("{err:?}"))?;
+                  let admin_pass = client
+                      .idm_service_account_generate_password(tframe_admin)
+                      .await
+                      .map_err(|err| ferr!("{err:?}"))?;
+                  envs_to_add.insert("KANIDM_TFRAME_ADMIN_PASS".to_string(), admin_pass);
+              }
+              client
+                  .idm_group_create(tframe_group, Some(tframe_admin))
+                  .await
+                  .map_err(|err| ferr!("{err:?}"))?;
+              client
+                  .idm_group_add_members(tframe_group, &[tframe_admin])
+                  .await
+                  .map_err(|err| ferr!("{err:?}"))?;
+              {
+                  let oauth_name = "granary";
+                  client
+                      .idm_oauth2_rs_public_create(
+                          oauth_name,
+                          oauth_name,
+                          "http://localhost:3000/redirect/signin",
+                      )
+                      .await
+                      .map_err(|err| ferr!("{err:?}"))?;
+                  client
+                      .idm_oauth2_rs_enable_pkce(oauth_name)
+                      .await
+                      .map_err(|err| ferr!("{err:?}"))?;
+                  client
+                      .idm_oauth2_rs_update_scope_map(
+                          oauth_name,
+                          tframe_group,
+                          vec!["openid", "profile", "email", "groups"],
+                      )
+                      .await
+                      .map_err(|err| ferr!("{err:?}"))?;
+                  client
+                      .idm_oauth2_rs_enable_public_localhost_redirect(oauth_name)
+                      .await
+                      .map_err(|err| ferr!("{err:?}"))?;
+              }
+              let env_file = ".env";
+              let env_raw = tokio::fs::read_to_string(env_file).await?;
+              let mut env_raw = env_raw
+                  .split('\n')
+                  .map(ToString::to_string)
+                  .collect::<Vec<_>>();
+              _ = env_raw.pop();
+              'outer: for (key, val) in envs_to_add.iter() {
+                  let new = format!("{key}={val}");
+                  for line in &mut env_raw {
+                      if line.starts_with(key) {
+                          *line = new;
+                          continue 'outer;
+                      }
+                  }
+                  env_raw.push(new);
+              }
+              let env_raw = env_raw.join("\n");
+              tokio::fs::write(env_file, env_raw).await?;
+          } */
     }
 
     Ok(())
@@ -146,7 +145,7 @@ enum Commands {
     // #[clap(visible_alias = "r")]
     // SeedZitadel {},
     // SeedZitadel {},
-    SeedKanidm {},
+    // SeedKanidm {},
     Play {},
     Gen {},
 }

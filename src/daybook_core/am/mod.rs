@@ -21,9 +21,10 @@ impl AmCtx {
 
         let repo = samod::Repo::build_tokio()
             .with_peer_id(peer_id.clone())
-            .with_storage(samod::storage::TokioFilesystemStorage::new(
-                "/tmp/samod-client",
-            ))
+            .with_storage(samod::storage::InMemoryStorage::new())
+            // .with_storage(samod::storage::TokioFilesystemStorage::new(
+            //     "/tmp/samod-client",
+            // ))
             .load()
             .await;
 
@@ -257,13 +258,13 @@ pub fn am_worker(mut doc: automerge::AutoCommit) -> AmHandle {
                     response_channel,
                 } => response_channel
                     .send(cb(&mut doc))
-                    .expect_or_log("channel error"),
+                    .expect_or_log(ERROR_CHANNEL),
                 AmMsg::Hydrate {
                     cb,
                     response_channel,
                 } => response_channel
                     .send(cb(&mut doc))
-                    .expect_or_log("channel error"),
+                    .expect_or_log(ERROR_CHANNEL),
             }
         }
     });
@@ -300,9 +301,9 @@ impl AmHandle {
             },
             response_channel: tx,
         };
-        self.msg_tx.send(msg).await.expect_or_log("channel error");
+        self.msg_tx.send(msg).await.expect_or_log(ERROR_CHANNEL);
         rx.await
-            .expect_or_log("channel error")
+            .expect_or_log(ERROR_CHANNEL)
             .map_err(|err| ferr!("error reonciling update: {err}"))
     }
 
@@ -319,9 +320,9 @@ impl AmHandle {
             }),
             response_channel: tx,
         };
-        self.msg_tx.send(msg).await.expect_or_log("channel error");
+        self.msg_tx.send(msg).await.expect_or_log(ERROR_CHANNEL);
         rx.await
-            .expect_or_log("channel error")
+            .expect_or_log(ERROR_CHANNEL)
             .map(|opt| opt.map(|any| any.downcast::<D>().expect_or_log("downcast error")))
             .map_err(|err| ferr!("error hydrating value: {err}"))
     }

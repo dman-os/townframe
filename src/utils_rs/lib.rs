@@ -30,9 +30,17 @@ mod interlude {
     pub use serde::{Deserialize, Serialize};
     pub use time::{self, OffsetDateTime};
     pub use uuid::{self, Uuid};
+
+    pub use crate::expect_tags::*;
 }
 
 use crate::interlude::*;
+
+mod expect_tags {
+    pub const ERROR_TOKIO: &str = "tokio error";
+    pub const ERROR_CHANNEL: &str = "channel error";
+    pub const ERROR_JSON: &str = "json error";
+}
 
 #[inline]
 pub fn default<T: Default>() -> T {
@@ -46,30 +54,45 @@ pub use cheapstr::CHeapStr;
 // Ensure that the `tracing` stack is only initialised once using `once_cell`
 // isn't required in cargo-nextest since each test runs in a new process
 pub fn setup_tracing_once() {
-    static TRACING: LazyLock<()> = LazyLock::new(|| {
-        setup_tracing().unwrap();
+    static TRACING: std::sync::Once = std::sync::Once::new();
+    TRACING.call_once(|| {
+        setup_tracing().expect("setup tracing error");
     });
-    LazyLock::force(&TRACING);
 }
 
 pub fn setup_tracing() -> eyre::Result<()> {
-    color_eyre::install()?;
     #[cfg(not(target_arch = "wasm32"))]
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
+    {
+        if std::env::var("RUST_LOG").is_err() {
+            std::env::set_var("RUST_LOG", "info");
+        }
+        if std::env::var("RUST_BACKTRACE").is_err() {
+            std::env::set_var("RUST_BACKTRACE", "1");
+        }
     }
 
     use tracing_subscriber::prelude::*;
-    tracing_subscriber::registry()
-        .with(tracing_error::ErrorLayer::default())
-        .with(tracing_subscriber::EnvFilter::from_default_env())
+    let registry = tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
                 .compact()
                 .with_timer(tracing_subscriber::fmt::time::uptime()),
         )
-        .try_init()
-        .map_err(|err| eyre::eyre!(err))?;
+        .with(tracing_error::ErrorLayer::default());
+
+    #[cfg(target_os = "android")]
+    let registry = registry.with(tracing_android::layer("com.example.daybook")?);
+
+    registry.try_init().map_err(|err| eyre::eyre!(err))?;
+
+    // color_eyre::install()?;
+    let (eyre_panic_hook, eyre_hook) =
+        color_eyre::config::HookBuilder::default().try_into_hooks()?;
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let report = eyre_panic_hook.panic_report(panic_info);
+        tracing::error!("{report}");
+    }));
+    eyre_hook.install()?;
 
     Ok(())
 }

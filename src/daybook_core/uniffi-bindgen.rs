@@ -5,7 +5,7 @@ use std::path::Path;
 fn main() {
     // Parse command line arguments to detect if we're generating bindings
     let args: Vec<String> = env::args().collect();
-    
+
     // Check if this is a generate command
     if args.len() >= 2 && args[1] == "generate" {
         // Find the --out-dir argument to locate the output directory
@@ -16,10 +16,10 @@ fn main() {
                 break;
             }
         }
-        
+
         // Run the original uniffi bindgen
         uniffi::uniffi_bindgen_main();
-        
+
         // Apply post-processing modifications if we have an output directory
         if let Some(out_dir) = out_dir {
             apply_kotlin_modifications(&out_dir);
@@ -38,7 +38,7 @@ fn apply_kotlin_modifications(out_dir: &str) {
         .join("daybook")
         .join("uniffi")
         .join("daybook_core.kt");
-    
+
     if kotlin_file_path.exists() {
         match fs::read_to_string(&kotlin_file_path) {
             Ok(content) => {
@@ -53,7 +53,7 @@ fn apply_kotlin_modifications(out_dir: &str) {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                
+
                 if let Err(e) = fs::write(&kotlin_file_path, modified_content) {
                     eprintln!("Warning: Failed to apply Kotlin modifications: {}", e);
                 }

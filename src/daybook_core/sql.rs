@@ -8,11 +8,13 @@ impl SqlCtx {
     pub async fn new() -> Res<Self> {
         use std::str::FromStr;
         let db_pool = sqlx::SqlitePool::connect_with(
-            sqlx::sqlite::SqliteConnectOptions::from_str("sqlite:///tmp/daybook.db")?
-                .create_if_missing(true),
+            sqlx::sqlite::SqliteConnectOptions::from_str(
+                "sqlite::memory:", // "sqlite:///tmp/daybook.db"
+            )?
+            .create_if_missing(true),
         )
         .await
-        .unwrap_or_log();
+        .wrap_err("error initializing sqlite db")?;
         // Initialize schema
         sqlx::query(
             r#"

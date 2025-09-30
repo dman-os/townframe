@@ -1,6 +1,6 @@
+use crate::interlude::*;
+
 use std::collections::HashSet;
-use restate_sdk::prelude::*;
-use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,7 +20,10 @@ impl CheckoutService for CheckoutServiceImpl {
     async fn handle(
         &self,
         _ctx: Context<'_>,
-        Json(CheckoutRequest { user_id: _, tickets: _ }): Json<CheckoutRequest>,
+        Json(CheckoutRequest {
+            user_id: _,
+            tickets: _,
+        }): Json<CheckoutRequest>,
     ) -> Result<bool, HandlerError> {
         Ok(true)
     }

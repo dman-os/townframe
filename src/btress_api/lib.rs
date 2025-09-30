@@ -42,7 +42,7 @@ fn init() -> Res<()> {
         // rt: tokio::runtime::Builder::new_current_thread()
         //     .enable_all()
         //     .build()
-        //     .wrap_err("tokio error")?,
+        //     .wrap_err(ERROR_TOKIO)?,
     }))
     .map_err(|_| ferr!("double component intialization"))?;
     Ok(())

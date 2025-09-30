@@ -33,7 +33,7 @@ impl From<eyre::Report> for FfiError {
 #[uniffi::export]
 impl FfiError {
     fn message(&self) -> String {
-        format!("{}", self.inner)
+        format!("{:#?}", self.inner)
     }
 }
 
@@ -64,7 +64,8 @@ impl FfiCtx {
         let rt = Arc::new(rt);
         let cx = do_on_rt(&rt, async { Ctx::new().await })
             .await
-            .wrap_err("error initializing main Ctx")?;
+            .wrap_err("error initializing main Ctx")
+            .inspect_err(|err| tracing::error!(%err))?;
         Ok(Arc::new(Self { cx, rt }))
     }
 }
@@ -79,5 +80,5 @@ where
         let res = future.await;
         tx.send(res)
     });
-    rx.await.expect_or_log("channel error")
+    rx.await.expect_or_log(ERROR_CHANNEL)
 }

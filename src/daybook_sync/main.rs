@@ -12,7 +12,7 @@ fn main() -> Res<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .wrap_err("tokio error")?;
+        .wrap_err(ERROR_TOKIO)?;
     rt.block_on(app_main())
 }
 

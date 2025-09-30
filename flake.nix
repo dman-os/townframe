@@ -87,7 +87,12 @@
 
           buildInputs = with pkgs; [
             rustChannel
+
             androidComposition
+            rogcat
+
+            # ollama
+
             # android-tools
             # (
             #   android-studio.withSdk (

@@ -42,3 +42,7 @@ tracing-unwrap.workspace = true
 tracing-appender.workspace = true
 tracing-error.workspace = true
 color-eyre.workspace = true
+
+
+[target.'cfg(target_os = "android")'.dependencies]
+tracing-android = "0.2"

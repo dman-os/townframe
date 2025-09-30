@@ -53,7 +53,7 @@ impl HttpIncomingGuest for Component {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect_or_log("tokio error");
+            .expect_or_log(ERROR_TOKIO);
         rt.block_on(app_main(wasi_req, res_handle))
             .expect_or_log("error handling request");
     }

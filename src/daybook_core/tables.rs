@@ -214,7 +214,7 @@ impl TablesRepo {
         let am = TablesAm::load(&fcx.cx).await?;
         let am = Arc::new(tokio::sync::RwLock::new(am));
         let registry = crate::repos::ListenersRegistry::new();
-        
+
         let repo = Arc::new(Self {
             fcx: fcx.clone(),
             am,
@@ -227,7 +227,7 @@ impl TablesRepo {
             move |notifications| {
                 // Analyze notifications to determine which specific events to send
                 let mut events = Vec::new();
-                
+
                 for notification in notifications {
                     match notification.action {
                         automerge::PatchAction::PutMap { key, .. } => {
@@ -238,10 +238,14 @@ impl TablesRepo {
                                     match &notification.path[1] {
                                         autosurgeon::Prop::Key(path_key) => {
                                             match path_key.as_ref() {
-                                                "windows" => events.push(TablesEvent::WindowChanged { id: uuid }),
-                                                "tables" => events.push(TablesEvent::TableChanged { id: uuid }),
-                                                "tabs" => events.push(TablesEvent::TabChanged { id: uuid }),
-                                                "panels" => events.push(TablesEvent::PanelChanged { id: uuid }),
+                                                "windows" => events
+                                                    .push(TablesEvent::WindowChanged { id: uuid }),
+                                                "tables" => events
+                                                    .push(TablesEvent::TableChanged { id: uuid }),
+                                                "tabs" => events
+                                                    .push(TablesEvent::TabChanged { id: uuid }),
+                                                "panels" => events
+                                                    .push(TablesEvent::PanelChanged { id: uuid }),
                                                 _ => events.push(TablesEvent::ListChanged),
                                             }
                                         }
@@ -259,10 +263,14 @@ impl TablesRepo {
                                     match &notification.path[1] {
                                         autosurgeon::Prop::Key(path_key) => {
                                             match path_key.as_ref() {
-                                                "windows" => events.push(TablesEvent::WindowChanged { id: uuid }),
-                                                "tables" => events.push(TablesEvent::TableChanged { id: uuid }),
-                                                "tabs" => events.push(TablesEvent::TabChanged { id: uuid }),
-                                                "panels" => events.push(TablesEvent::PanelChanged { id: uuid }),
+                                                "windows" => events
+                                                    .push(TablesEvent::WindowChanged { id: uuid }),
+                                                "tables" => events
+                                                    .push(TablesEvent::TableChanged { id: uuid }),
+                                                "tabs" => events
+                                                    .push(TablesEvent::TabChanged { id: uuid }),
+                                                "panels" => events
+                                                    .push(TablesEvent::PanelChanged { id: uuid }),
                                                 _ => events.push(TablesEvent::ListChanged),
                                             }
                                         }
@@ -279,7 +287,7 @@ impl TablesRepo {
                         }
                     }
                 }
-                
+
                 // Send events (deduplicate)
                 let mut sent_events = std::collections::HashSet::new();
                 for event in events {
@@ -288,7 +296,8 @@ impl TablesRepo {
                     }
                 }
             }
-        }).await?;
+        })
+        .await?;
 
         Ok(repo)
     }
@@ -446,7 +455,7 @@ impl TablesRepo {
     async fn list_tables(&self) -> Res<Vec<Table>> {
         let am = self.am.read().await;
         let tables: Vec<Table> = am.tables.values().cloned().collect();
-        
+
         // Auto-create table if none exist
         if tables.is_empty() {
             drop(am); // Release the read lock
@@ -548,7 +557,7 @@ impl TablesRepo {
     // Auto-create a default table with window, tab, and panel
     async fn auto_create_default_table(&self) -> Res<()> {
         let mut am = self.am.clone().write_owned().await;
-        
+
         let window_id = Uuid::new_v4();
         let table_id = Uuid::new_v4();
         let tab_id = Uuid::new_v4();
@@ -602,7 +611,7 @@ impl TablesRepo {
     // Auto-create a tab for a table when all tabs are removed
     async fn auto_create_tab_for_table(&self, table_id: Uuid) -> Res<()> {
         let mut am = self.am.clone().write_owned().await;
-        
+
         // Get the table to find its window
         let table = am.tables.get(&table_id).ok_or_eyre("Table not found")?;
         let window_id = match &table.window {
@@ -664,7 +673,8 @@ impl TablesRepo {
         am.panel_to_tab.insert(panel_id, tab_id);
 
         am.flush(&self.fcx.cx).await?;
-        self.registry.notify(TablesEvent::TableChanged { id: table_id });
+        self.registry
+            .notify(TablesEvent::TableChanged { id: table_id });
         self.registry.notify(TablesEvent::ListChanged);
         Ok(())
     }
@@ -672,7 +682,7 @@ impl TablesRepo {
     // Get the selected table from the first window
     async fn get_selected_table(&self) -> Res<Option<Table>> {
         let am = self.am.read().await;
-        
+
         // Find the first window with a selected table
         for window in am.windows.values() {
             if let Some(selected_table_id) = window.selected_table {
@@ -681,7 +691,7 @@ impl TablesRepo {
                 }
             }
         }
-        
+
         // If no selected table found, return the first table
         if let Some((_, table)) = am.tables.iter().next() {
             Ok(Some(table.clone()))
@@ -693,7 +703,7 @@ impl TablesRepo {
     // Create a new table with a default tab and panel
     async fn create_new_table(&self) -> Res<Table> {
         let mut am = self.am.clone().write_owned().await;
-        
+
         let table_id = Uuid::new_v4();
         let tab_id = Uuid::new_v4();
         let panel_id = Uuid::new_v4();
@@ -754,16 +764,17 @@ impl TablesRepo {
         am.panel_to_tab.insert(panel_id, tab_id);
 
         am.flush(&self.fcx.cx).await?;
-        self.registry.notify(TablesEvent::TableChanged { id: table_id });
+        self.registry
+            .notify(TablesEvent::TableChanged { id: table_id });
         self.registry.notify(TablesEvent::ListChanged);
-        
+
         Ok(table)
     }
 
     // Create a new tab for an existing table
     async fn create_new_tab(&self, table_id: Uuid) -> Res<Tab> {
         let mut am = self.am.clone().write_owned().await;
-        
+
         // Get the table to find its window
         let table = am.tables.get(&table_id).ok_or_eyre("Table not found")?;
         let window_id = match &table.window {
@@ -825,27 +836,28 @@ impl TablesRepo {
         am.panel_to_tab.insert(panel_id, tab_id);
 
         am.flush(&self.fcx.cx).await?;
-        self.registry.notify(TablesEvent::TableChanged { id: table_id });
+        self.registry
+            .notify(TablesEvent::TableChanged { id: table_id });
         self.registry.notify(TablesEvent::ListChanged);
-        
+
         Ok(tab)
     }
 
     // Remove a tab and its panel
     async fn remove_tab(&self, tab_id: Uuid) -> Res<()> {
         let mut am = self.am.clone().write_owned().await;
-        
+
         // Get the tab to find its panels
         let tab = am.tabs.get(&tab_id).ok_or_eyre("Tab not found")?;
         let panel_ids = tab.panels.clone();
-        
+
         // Find which table and window contain this tab
         let table_id = am.tab_to_table.get(&tab_id).copied();
         let window_id = am.tab_to_window.get(&tab_id).copied();
 
         // Remove the tab
         am.tabs.remove(&tab_id);
-        
+
         // Remove all panels in this tab
         for panel_id in panel_ids {
             am.panels.remove(&panel_id);
@@ -860,7 +872,7 @@ impl TablesRepo {
                 if table.selected_tab == Some(tab_id) {
                     table.selected_tab = table.tabs.first().copied();
                 }
-                
+
                 // Auto-create a new tab if this was the last tab
                 if table.tabs.is_empty() {
                     drop(am); // Release the write lock
@@ -883,10 +895,11 @@ impl TablesRepo {
 
         am.flush(&self.fcx.cx).await?;
         if let Some(table_id) = table_id {
-            self.registry.notify(TablesEvent::TableChanged { id: table_id });
+            self.registry
+                .notify(TablesEvent::TableChanged { id: table_id });
         }
         self.registry.notify(TablesEvent::ListChanged);
-        
+
         Ok(())
     }
 }

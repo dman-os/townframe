@@ -12,8 +12,8 @@ clap = { version = "4.5.47", features = ["derive", "env"] }
 # zitadel = { version = "5.5.1", features = ["api"] }
 # ahash.workspace = true
 
-kanidm_client.workspace = true
-kanidm_proto.workspace = true
+# kanidm_client.workspace = true
+# kanidm_proto.workspace = true
 
 dotenv-flow.workspace = true
 

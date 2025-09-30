@@ -63,6 +63,7 @@ kotlin {
             implementation(libs.androidx.activity.compose)
             implementation(libs.androidx.lifecycle.viewmodel)
             implementation(libs.androidx.lifecycle.runtimeCompose)
+            implementation("${libs.jna.get()}@aar")
         }
         commonMain.dependencies {
             implementation(compose.runtime)
@@ -75,7 +76,6 @@ kotlin {
             implementation(libs.androidx.lifecycle.viewmodel.compose)
             implementation(libs.androidx.navigation.compose)
             implementation(libs.kotlinx.coroutinesCore)
-            implementation(libs.jna)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
@@ -84,6 +84,7 @@ kotlin {
             implementation(libs.skikoLinuxX64)
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutinesSwing)
+            implementation(libs.jna)
         }
     }
 }
@@ -102,6 +103,9 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+        jniLibs {
+            useLegacyPackaging = false
         }
     }
     buildTypes {
@@ -141,73 +145,103 @@ val rustAndroidTargets = mapOf(
     "x86" to "i686-linux-android",
 )
 
-// Debug variant: build Rust in debug mode
-tasks.register("buildRustAndroidDebug") {
-    group = "build"
-    description = "Build Rust daybook_core (debug) for Android ABIs and copy into jniLibs"
-
-    doLast {
-        val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
-
-        rustAndroidTargets.values.toSet().forEach { target ->
-            project.exec {
-                workingDir = repoRoot
-                commandLine("cargo", "build", "-p", "daybook_core", "--target", target)
-                environment(System.getenv())
-            }
-        }
-
-        rustAndroidTargets.forEach { (abi, target) ->
-            val soFile = File(repoRoot, "target/$target/debug/libdaybook_core.so")
-            if (!soFile.exists()) {
-                throw GradleException("Expected native library not found: ${soFile.absolutePath}")
-            }
-            val destDir = File(project.projectDir, "src/androidMain/jniLibs/$abi")
-            destDir.mkdirs()
-            project.copy {
-                from(soFile)
-                into(destDir)
-            }
-        }
+// Detect which ABI we're actually building for
+val targetAbi = when {
+    // Check if we're building for a specific ABI (from Android Studio or command line)
+    project.hasProperty("android.injected.build.abi") -> {
+        val abi = project.findProperty("android.injected.build.abi") as String
+        // Handle comma-separated ABIs by taking the first one
+        abi.split(",").first().trim()
     }
+    // Check if we're building for a specific device/emulator
+    project.hasProperty("android.injected.device.abi") -> {
+        val abi = project.findProperty("android.injected.device.abi") as String
+        abi.split(",").first().trim()
+    }
+    // Check if we're building for a specific target (from gradle properties)
+    project.hasProperty("target.abi") -> project.findProperty("target.abi") as String
+    // Default to arm64-v8a for modern devices
+    else -> "arm64-v8a"
+}
+
+val targetRustTriple = rustAndroidTargets[targetAbi] ?: "aarch64-linux-android"
+
+// Debug variant: build Rust in debug mode
+tasks.register<Exec>("buildRustAndroidDebug") {
+    group = "build"
+    description = "Build Rust daybook_core (debug) for Android ABIs"
+    
+    commandLine("cargo", "build", "-p", "daybook_core", "--target", targetRustTriple)
+    // Only pass essential environment variables for cargo
+    // environment("PATH", System.getenv("PATH"))
+    // environment("HOME", System.getenv("HOME"))
+    // environment("CARGO_HOME", System.getenv("CARGO_HOME"))
+    // environment("RUSTUP_HOME", System.getenv("RUSTUP_HOME"))
+    // environment("RUSTUP_TOOLCHAIN", System.getenv("RUSTUP_TOOLCHAIN"))
+}
+
+// Copy task for debug variant
+tasks.register<Copy>("copyRustAndroidDebug") {
+    group = "build"
+    description = "Copy Rust daybook_core (debug) to jniLibs"
+    
+    dependsOn("buildRustAndroidDebug")
+    
+    val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
+    val sourceSoFile = File(repoRoot, "target/$targetRustTriple/debug/libdaybook_core.so")
+    val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
+    val destSoFile = File(destDir, "libdaybook_core.so")
+    
+    // Only copy if source is newer than destination
+    onlyIf {
+        !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
+    }
+    
+    from(sourceSoFile)
+    into(destDir)
+    
+    // Declare inputs and outputs for proper up-to-date checking
+    inputs.file(sourceSoFile)
+    outputs.file(destSoFile)
 }
 
 // Release variant: build Rust in release mode
-tasks.register("buildRustAndroidRelease") {
+tasks.register<Exec>("buildRustAndroidRelease") {
     group = "build"
-    description = "Build Rust daybook_core (release) for Android ABIs and copy into jniLibs"
+    description = "Build Rust daybook_core (release) for Android ABIs"
+    
+    commandLine("cargo", "build", "-p", "daybook_core", "--release", "--target", targetRustTriple)
+}
 
-    doLast {
-        val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
-
-        rustAndroidTargets.values.toSet().forEach { target ->
-            project.exec {
-                workingDir = repoRoot
-                commandLine("cargo", "build", "-p", "daybook_core", "--release", "--target", target)
-                environment(System.getenv())
-            }
-        }
-
-        rustAndroidTargets.forEach { (abi, target) ->
-            val soFile = File(repoRoot, "target/$target/release/libdaybook_core.so")
-            if (!soFile.exists()) {
-                throw GradleException("Expected native library not found: ${soFile.absolutePath}")
-            }
-            val destDir = File(project.projectDir, "src/androidMain/jniLibs/$abi")
-            destDir.mkdirs()
-            project.copy {
-                from(soFile)
-                into(destDir)
-            }
-        }
+// Copy task for release variant
+tasks.register<Copy>("copyRustAndroidRelease") {
+    group = "build"
+    description = "Copy Rust daybook_core (release) to jniLibs"
+    
+    dependsOn("buildRustAndroidRelease")
+    
+    val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
+    val sourceSoFile = File(repoRoot, "target/$targetRustTriple/release/libdaybook_core.so")
+    val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
+    val destSoFile = File(destDir, "libdaybook_core.so")
+    
+    // Only copy if source is newer than destination
+    onlyIf {
+        !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
     }
+    
+    from(sourceSoFile)
+    into(destDir)
+    
+    // Declare inputs and outputs for proper up-to-date checking
+    inputs.file(sourceSoFile)
+    outputs.file(destSoFile)
 }
 
 // Wire tasks to Android variants
-// tasks.matching { it.name == "preDebugBuild" }.configureEach {
-//     dependsOn("buildRustAndroidDebug")
-// }
+tasks.matching { it.name == "preDebugBuild" }.configureEach {
+    dependsOn("copyRustAndroidDebug")
+}
 // tasks.matching { it.name == "preReleaseBuild" }.configureEach {
 //     dependsOn("buildRustAndroidRelease")
 // }
-
