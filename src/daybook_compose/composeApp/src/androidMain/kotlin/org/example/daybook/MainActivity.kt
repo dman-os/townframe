@@ -148,7 +148,8 @@ fun AndroidApp() {
     }
 
     CompositionLocalProvider(
-        LocalPermCtx provides permCtx
+        LocalPermCtx provides permCtx,
+        LocalPlatform provides AndroidPlatform(context)
     ) {
         val layoutDirection = LocalLayoutDirection.current
         App(

@@ -1,1 +1,6 @@
-- To type check the ./src/daybook_compose multiplatform app, use `./gradlew check 2>&1 | rg -v daybook_core.kt`
+- To type check and lint the ./src/daybook_compose multiplatform app, use `ghjk x check-dayb`.
+- Prefer `cargo clippy -p myCrate`.
+- Avoid being lazy with solutions.
+- Avoid trying to catch the error or log the error for every edgecase.
+  - Most errors are programming errosr and should crash the application.
+  - Errors that should be handled include: network issues, user input validation issues.

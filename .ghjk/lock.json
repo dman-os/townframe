@@ -1303,6 +1303,13 @@
               "desc": "Build and install daybook_compose",
               "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
             },
+            "check-dayb": {
+              "ty": "denoFile@v1",
+              "key": "check-dayb",
+              "workingDir": "./src/daybook_compose/",
+              "desc": "Run gradle check task on app.",
+              "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
+            },
             "lock-sed": {
               "ty": "denoFile@v1",
               "key": "lock-sed",
@@ -1429,6 +1436,7 @@
             "run-d-dayb",
             "run-a-dayb",
             "build-a-dayb",
+            "check-dayb",
             "lock-sed",
             "test-rust",
             "db-mig-btress",

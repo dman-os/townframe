@@ -81,7 +81,7 @@ pub fn setup_tracing() -> eyre::Result<()> {
         .with(tracing_error::ErrorLayer::default());
 
     #[cfg(target_os = "android")]
-    let registry = registry.with(tracing_android::layer("com.example.daybook")?);
+    let registry = registry.with(tracing_android::layer("org.example.daybook")?);
 
     registry.try_init().map_err(|err| eyre::eyre!(err))?;
 

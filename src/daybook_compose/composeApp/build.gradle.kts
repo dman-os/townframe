@@ -22,7 +22,7 @@ kotlin {
         }
     }
     
-    listOf(
+    /*listOf(
         iosX64(),
         iosArm64(),
         iosSimulatorArm64()
@@ -31,12 +31,12 @@ kotlin {
             baseName = "ComposeApp"
             isStatic = true
         }
-    }
+    }*/
     
     jvm("desktop")
     
     @OptIn(ExperimentalWasmDsl::class)
-    wasmJs {
+    /* wasmJs {
         outputModuleName.set("composeApp")
         browser {
             val rootDirPath = project.rootDir.path
@@ -53,7 +53,7 @@ kotlin {
             }
         }
         binaries.executable()
-    }
+    } */
     
     sourceSets {
         val desktopMain by getting

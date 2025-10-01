@@ -310,6 +310,15 @@ ghjk.task("lock-sed", async ($) =>
   }));
 
 ghjk.task(
+  "check-dayb",
+  ($) => $`./gradlew check`,
+  {
+    desc: "Run gradle check task on app.",
+    workingDir: "./src/daybook_compose/",
+  },
+);
+
+ghjk.task(
   "build-a-dayb",
   ($) => $`./gradlew assembleDebug && ./gradlew installDebug`,
   {

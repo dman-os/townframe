@@ -9,8 +9,10 @@
 
     <!--    used to take photos-->
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <!--    used for voice memos-->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <!--    used to access supporting services-->
     <uses-permission android:name="android.permission.INTERNET" />
     <!--    used for various notifications including a peristent one-->
