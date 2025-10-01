@@ -5,6 +5,11 @@ package org.example.daybook
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -14,6 +19,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,16 +33,19 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.BottomAppBar
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
-import androidx.compose.foundation.clickable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.material3.BottomSheetScaffold
+import androidx.compose.material3.SheetState
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.rememberBottomSheetScaffoldState
 import androidx.compose.runtime.rememberCoroutineScope
@@ -59,12 +68,17 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -77,7 +91,6 @@ import daybook.composeapp.generated.resources.Res
 import daybook.composeapp.generated.resources.compose_multiplatform
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import org.example.daybook.capture.screens.CaptureScreen
 import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
@@ -524,124 +537,171 @@ fun DaybookHomeScreen(
     extraAction: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    var showTabBottomSheet by remember { mutableStateOf(false) }
-    var showFeaturesMenu by remember { mutableStateOf(false) }
-
     when (navigationType) {
         DaybookNavigationType.PERMANENT_NAVIGATION_DRAWER -> {
-            // Expanded layout - use the existing AppScaffold structure
-            AppScaffold(
+            ExpandedLayout(
                 modifier = modifier,
-                navController = navController
-            ) { innerPadding ->
-                Routes(
-                    modifier = Modifier.padding(innerPadding),
-                    extraAction = extraAction,
-                    navController = navController
+                navController = navController,
+                extraAction = extraAction
+            )
+        }
+
+        DaybookNavigationType.NAVIGATION_RAIL -> {
+            MediumLayout(
+                modifier = modifier,
+                navController = navController,
+                extraAction = extraAction
+            )
+        }
+
+        DaybookNavigationType.BOTTOM_NAVIGATION -> {
+            CompactLayout(
+                modifier = modifier,
+                navController = navController,
+                extraAction = extraAction
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CompactLayout(
+    modifier: Modifier = Modifier,
+    navController: NavHostController,
+    extraAction: (() -> Unit)? = null
+) {
+    var showFeaturesMenu by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val sheetState = remember(density) {
+        SheetState(
+            skipPartiallyExpanded = false,
+            initialValue = SheetValue.Hidden,
+            density = density,
+            skipHiddenState = false
+        )
+    }
+    val bottomSheetScaffoldState = rememberBottomSheetScaffoldState(
+        bottomSheetState = sheetState
+    )
+    var sheetContent by remember { mutableStateOf(SheetContent.TABS) }
+    var isSheetManuallyOpened by rememberSaveable { mutableStateOf(false) }
+
+    // This effect will show/hide the sheet based on the isSheetManuallyOpened flag
+    LaunchedEffect(isSheetManuallyOpened) {
+        if (isSheetManuallyOpened) {
+            bottomSheetScaffoldState.bottomSheetState.expand()
+        } else {
+            bottomSheetScaffoldState.bottomSheetState.hide()
+        }
+    }
+
+    // This effect will sync the isSheetManuallyOpened flag back if the user swipes the sheet close
+    LaunchedEffect(bottomSheetScaffoldState.bottomSheetState.isVisible) {
+        if (!bottomSheetScaffoldState.bottomSheetState.isVisible) {
+            isSheetManuallyOpened = false
+        }
+    }
+
+    val centerNavBarContent: @Composable RowScope.() -> Unit = if (isSheetManuallyOpened) {
+        {
+            Button(
+                onClick = {
+                    sheetContent = when (sheetContent) {
+                        SheetContent.TABS -> SheetContent.TABLES
+                        SheetContent.TABLES -> SheetContent.TABS
+                    }
+                },
+                modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.Transparent,
+                    contentColor = MaterialTheme.colorScheme.onSurface
+                )
+            ) {
+                val text = when (sheetContent) {
+                    SheetContent.TABS -> "Switch to Tables"
+                    SheetContent.TABLES -> "Switch to Tabs"
+                }
+                Text(text)
+            }
+        }
+    } else {
+        {
+            val tablesRepo = LocalContainer.current.tablesRepo
+            val vm = viewModel { TablesViewModel(tablesRepo) }
+            val selectedTableId = vm.selectedTableId.collectAsState().value
+            val tablesState = vm.tablesState.collectAsState().value
+
+            val currentTabTitle = if (selectedTableId != null && tablesState is TablesState.Data) {
+                val selectedTable = tablesState.tables[selectedTableId]
+                if (selectedTable != null && selectedTable.selectedTab != null) {
+                    tablesState.tabs[selectedTable.selectedTab]?.title ?: "No Tab"
+                } else "No Tab"
+            } else "No Tab"
+
+            Box(
+                modifier = Modifier.weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = currentTabTitle,
+                    style = MaterialTheme.typography.titleMedium,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
-        
-        DaybookNavigationType.NAVIGATION_RAIL -> {
-            // Medium layout - navigation rail + tabs drawer
-            Scaffold(
-                modifier = modifier,
-                topBar = {
-                    TopAppBar(
-                        title = { Text("Daybook") }
-                    )
-                }
-            ) { innerPadding ->
-                Row(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-                    // Left Navigation Rail for Tables
-                    LeftTableNavigationRail()
-                    
-                    // Center Navigation Drawer for Tabs
-                    PermanentNavigationDrawer(
-                        drawerContent = {
-                            PermanentDrawerSheet(
-                                modifier = Modifier.width(280.dp)
-                            ) {
-                                TablesTabsList()
-                            }
-                        }
-                    ) {
-                        // Main content area
-                        Routes(
-                            modifier = Modifier.weight(1f),
-                            extraAction = extraAction,
-                            navController = navController
-                        )
-                    }
-                }
-            }
+    }
+
+    Scaffold(
+        modifier = modifier,
+        bottomBar = {
+            DaybookBottomNavigationBar(
+                onTabPressed = {
+                    isSheetManuallyOpened = !isSheetManuallyOpened
+                },
+                onFeaturesPressed = { showFeaturesMenu = !showFeaturesMenu },
+                centerContent = centerNavBarContent
+            )
         }
-        
-        DaybookNavigationType.BOTTOM_NAVIGATION -> {
-            // Compact layout - nested scaffolds
-            val scope = rememberCoroutineScope()
-            val bottomSheetScaffoldState = rememberBottomSheetScaffoldState()
-            
-            // 1. The root is a standard Scaffold. Its job is to host the bottomBar.
-            Scaffold(
-                modifier = modifier,
-                bottomBar = {
-                    DaybookBottomNavigationBar(
-                        onTabPressed = { 
-                            scope.launch { 
-                                bottomSheetScaffoldState.bottomSheetState.expand() 
-                            }
-                        },
-                        onFeaturesPressed = { showFeaturesMenu = !showFeaturesMenu }
-                    )
-                }
-            ) { scaffoldPadding -> // Padding provided by the outer Scaffold
-                
-                // 2. The content of the Scaffold is the BottomSheetScaffold.
-                // It lives in the area defined by the outer Scaffold's padding.
-                BottomSheetScaffold(
-                    scaffoldState = bottomSheetScaffoldState,
-                    topBar = {
-                        TopAppBar(
-                            title = { Text("Daybook") }
-                        )
+    ) { scaffoldPadding ->
+        val tablesRepo = LocalContainer.current.tablesRepo
+        val vm = viewModel { TablesViewModel(tablesRepo) }
+        BottomSheetScaffold(
+            scaffoldState = bottomSheetScaffoldState,
+            topBar = { TopAppBar(title = { Text("Daybook") }) },
+            sheetContent = {
+                SheetContentHost(
+                    sheetContent = sheetContent,
+                    onTabSelected = {
+                        // TODO: Handle tab selection
+                        isSheetManuallyOpened = false
                     },
-                    sheetContent = {
-                        // Tab selection content in the sheet
-                        TabSelectionBottomSheet(
-                            onTabSelected = { 
-                                scope.launch { 
-                                    bottomSheetScaffoldState.bottomSheetState.hide() 
-                                }
-                                // TODO: Handle tab selection
-                            },
-                            onDismiss = { 
-                                scope.launch { 
-                                    bottomSheetScaffoldState.bottomSheetState.hide() 
-                                }
-                            },
-                            modifier = Modifier.fillMaxSize()
-                        )
+                    onTableSelected = { table ->
+                        vm.selectTable(table.id)
+                        sheetContent = SheetContent.TABS // Switch back to tabs
                     },
-                    sheetPeekHeight = 0.dp, // Hide sheet by default
-                    // We apply the padding from the outer Scaffold here.
-                    modifier = Modifier.padding(scaffoldPadding)
-                ) { contentPadding ->
-                    // This is the main content area that the sheet will draw over.
-                    Box(modifier = Modifier.fillMaxSize().padding(contentPadding)) {
-                        Routes(
-                            modifier = Modifier.fillMaxSize(),
-                            extraAction = extraAction,
-                            navController = navController
-                        )
-                        
-                        // Features menu (floating action buttons)
-                        if (showFeaturesMenu) {
-                            FeaturesMenu(
-                                onDismiss = { showFeaturesMenu = false }
-                            )
-                        }
+                    onDismiss = {
+                        isSheetManuallyOpened = false
                     }
+                )
+            },
+            sheetPeekHeight = 0.dp,
+            modifier = Modifier.padding(scaffoldPadding)
+        ) { contentPadding ->
+            Box(modifier = Modifier.fillMaxSize().padding(contentPadding)) {
+                Routes(
+                    modifier = Modifier.fillMaxSize(),
+                    extraAction = extraAction,
+                    navController = navController
+                )
+
+                if (showFeaturesMenu) {
+                    FeaturesMenu(
+                        onDismiss = { showFeaturesMenu = false }
+                    )
                 }
             }
         }
@@ -650,10 +710,10 @@ fun DaybookHomeScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppScaffold(
+fun MediumLayout(
     modifier: Modifier = Modifier,
     navController: NavHostController,
-    content: @Composable (innerPadding: PaddingValues) -> Unit
+    extraAction: (() -> Unit)? = null
 ) {
     Scaffold(
         modifier = modifier,
@@ -664,28 +724,61 @@ fun AppScaffold(
         }
     ) { innerPadding ->
         Row(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-            // Left Navigation Rail for Tables
             LeftTableNavigationRail()
-            
-            // Center Navigation Drawer for Tabs
+            PermanentNavigationDrawer(
+                drawerContent = {
+                    PermanentDrawerSheet(
+                        modifier = Modifier.width(280.dp)
+                    ) {
+                        TablesTabsList()
+                    }
+                }
+            ) {
+                Routes(
+                    modifier = Modifier.weight(1f),
+                    extraAction = extraAction,
+                    navController = navController
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ExpandedLayout(
+    modifier: Modifier = Modifier,
+    navController: NavHostController,
+    extraAction: (() -> Unit)? = null
+) {
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = { Text("Daybook") }
+            )
+        }
+    ) { innerPadding ->
+        Row(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+            LeftTableNavigationRail()
             PermanentNavigationDrawer(
                 drawerContent = {
                     PermanentDrawerSheet(
                         modifier = Modifier.padding(10.dp),
                     ) {
                         Column {
-                            // Show all tabs from the selected table
                             TablesTabsList()
                         }
                     }
                 }
             ) {
                 Box(modifier = Modifier.weight(1f)) {
-                    content(innerPadding)
+                    Routes(
+                        extraAction = extraAction,
+                        navController = navController
+                    )
                 }
             }
-            
-            // Right Navigation Rail for Features
             RightFeaturesNavigationRail()
         }
     }
@@ -1030,17 +1123,38 @@ fun Routes(
 
 @Composable
 private fun LoadingScreen() {
+    val infiniteTransition = rememberInfiniteTransition(label = "loading_transition")
+    val scale by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "loading_scale"
+    )
+
     Box(
         modifier = Modifier
-            .fillMaxSize(),
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surface),
         contentAlignment = Alignment.Center
     ) {
         Column(
-            horizontalAlignment = Alignment.CenterHorizontally
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-            CircularProgressIndicator()
-            Spacer(Modifier.height(16.dp))
-            Text("Preparing Daybook…")
+            Text(
+                text = "📖",
+                fontSize = 80.sp,
+                modifier = Modifier.scale(scale)
+            )
+            Spacer(Modifier.height(24.dp))
+            Text(
+                "Preparing Daybook…",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+            )
         }
     }
 }
@@ -1071,106 +1185,141 @@ private fun ErrorScreen(
 fun DaybookBottomNavigationBar(
     onTabPressed: () -> Unit,
     onFeaturesPressed: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    centerContent: @Composable RowScope.() -> Unit
 ) {
-    val tablesRepo = LocalContainer.current.tablesRepo
-    val vm = viewModel { TablesViewModel(tablesRepo) }
-    val selectedTableId = vm.selectedTableId.collectAsState().value
-    val tablesState = vm.tablesState.collectAsState().value
-    
-    // Get current tab title
-    val currentTabTitle = if (selectedTableId != null && tablesState is TablesState.Data) {
-        val selectedTable = tablesState.tables[selectedTableId]
-        if (selectedTable != null && selectedTable.selectedTab != null) {
-            val selectedTab = tablesState.tabs[selectedTable.selectedTab]
-            selectedTab?.title ?: "No Tab"
-        } else "No Tab"
-    } else "No Tab"
-    
-    NavigationBar(modifier = modifier) {
-        // Tab button
-        NavigationBarItem(
-            selected = false,
-            onClick = onTabPressed,
-            icon = { Text("📄") },
-            label = { Text("Tabs") }
-        )
-        
-        // Current tab title (expanded) - using a custom composable
-        Box(
-            modifier = Modifier.weight(1f),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = currentTabTitle,
-                style = MaterialTheme.typography.titleMedium,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-            )
+    BottomAppBar(
+        modifier = modifier,
+        contentPadding = PaddingValues(4.dp)
+    ) {
+        // Left button
+        IconButton(onClick = onTabPressed) {
+            Text("📄", fontSize = 16.sp)
         }
-        
-        // Features button
-        NavigationBarItem(
-            selected = false,
-            onClick = onFeaturesPressed,
-            icon = { Text("⚙️") },
-            label = { Text("Features") }
-        )
+
+        // Center content
+        centerContent()
+
+        // Right button
+        IconButton(onClick = onFeaturesPressed) {
+            Text("⚙️", fontSize = 16.sp)
+        }
     }
 }
 
+enum class SheetContent { TABS, TABLES }
+
 @Composable
-fun TabSelectionBottomSheet(
+fun SheetContentHost(
+    sheetContent: SheetContent,
     onTabSelected: (Tab) -> Unit,
+    onTableSelected: (Table) -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val tablesRepo = LocalContainer.current.tablesRepo
-    val vm = viewModel { TablesViewModel(tablesRepo) }
-    val tablesState = vm.tablesState.collectAsState().value
-    val selectedTableId = vm.selectedTableId.collectAsState().value
-    
-    val tabsForSelectedTable = if (selectedTableId != null && tablesState is TablesState.Data) {
-        val selectedTable = tablesState.tables[selectedTableId]
-        if (selectedTable != null) {
-            selectedTable.tabs.mapNotNull { tabId -> tablesState.tabs[tabId] }
-        } else emptyList()
-    } else emptyList()
-    
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(16.dp)
+            .padding(top = 16.dp)
     ) {
         // Header
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(horizontal = 16.dp)
                 .padding(bottom = 16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            val title = when (sheetContent) {
+                SheetContent.TABS -> "Select Tab"
+                SheetContent.TABLES -> "Select Table"
+            }
             Text(
-                text = "Select Tab",
+                text = title,
                 style = MaterialTheme.typography.headlineSmall
             )
             Button(onClick = onDismiss) {
                 Text("Close")
             }
         }
-        
-        // Tab list similar to nav drawer
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
+
+        // Content
+        when (sheetContent) {
+            SheetContent.TABS -> TabSelectionList(onTabSelected = onTabSelected, modifier = Modifier.padding(horizontal = 16.dp))
+            SheetContent.TABLES -> TableSelectionList(onTableSelected = onTableSelected, modifier = Modifier.padding(horizontal = 16.dp))
+        }
+    }
+}
+
+@Composable
+fun TabSelectionList(
+    onTabSelected: (Tab) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val tablesRepo = LocalContainer.current.tablesRepo
+    val vm = viewModel { TablesViewModel(tablesRepo) }
+    val tablesState = vm.tablesState.collectAsState().value
+    val selectedTableId = vm.selectedTableId.collectAsState().value
+
+    val tabsForSelectedTable = if (selectedTableId != null && tablesState is TablesState.Data) {
+        val selectedTable = tablesState.tables[selectedTableId]
+        if (selectedTable != null) {
+            selectedTable.tabs.mapNotNull { tabId -> tablesState.tabs[tabId] }
+        } else emptyList()
+    } else emptyList()
+
+    Column(
+        modifier = modifier.verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        if (tabsForSelectedTable.isEmpty()) {
+            Text("No tabs in this table.", modifier = Modifier.padding(16.dp))
+        } else {
             tabsForSelectedTable.forEach { tab ->
                 NavigationDrawerItem(
-                    selected = false,
+                    selected = false, // TODO: Track selected tab
                     onClick = { onTabSelected(tab) },
                     icon = { Text("📄") },
                     label = { Text(tab.title) },
                     modifier = Modifier.fillMaxWidth()
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun TableSelectionList(
+    onTableSelected: (Table) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val tablesRepo = LocalContainer.current.tablesRepo
+    val vm = viewModel { TablesViewModel(tablesRepo) }
+    val tablesState = vm.tablesState.collectAsState().value
+    val selectedTableId = vm.selectedTableId.collectAsState().value
+
+    Column(modifier = modifier.verticalScroll(rememberScrollState())) {
+        when (tablesState) {
+            is TablesState.Data -> {
+                if (tablesState.tablesList.isEmpty()) {
+                    Text("No tables found.", modifier = Modifier.padding(16.dp))
+                } else {
+                    tablesState.tablesList.forEach { table ->
+                        NavigationDrawerItem(
+                            selected = selectedTableId == table.id,
+                            onClick = { onTableSelected(table) },
+                            icon = { Text("📁") },
+                            label = { Text(table.title) }
+                        )
+                    }
+                }
+            }
+            is TablesState.Loading -> {
+                CircularProgressIndicator(modifier = Modifier.size(24.dp))
+            }
+            is TablesState.Error -> {
+                Text("Error loading tables")
             }
         }
     }

@@ -5,12 +5,21 @@ pub struct SqlCtx {
 }
 
 impl SqlCtx {
-    pub async fn new() -> Res<Self> {
+    pub async fn new(config: crate::SqlConfig) -> Res<Self> {
         use std::str::FromStr;
+        
+        // Ensure the database directory exists for file-based databases
+        if !config.database_url.starts_with("sqlite::memory:") {
+            if let Some(path) = config.database_url.strip_prefix("sqlite://") {
+                if let Some(parent) = std::path::Path::new(path).parent() {
+                    std::fs::create_dir_all(parent)
+                        .wrap_err_with(|| format!("Failed to create database directory: {}", parent.display()))?;
+                }
+            }
+        }
+        
         let db_pool = sqlx::SqlitePool::connect_with(
-            sqlx::sqlite::SqliteConnectOptions::from_str(
-                "sqlite::memory:", // "sqlite:///tmp/daybook.db"
-            )?
+            sqlx::sqlite::SqliteConnectOptions::from_str(&config.database_url)?
             .create_if_missing(true),
         )
         .await

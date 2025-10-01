@@ -2,7 +2,7 @@ use std::any::Any;
 
 use crate::interlude::*;
 
-use automerge::{Automerge, PatchAction};
+use automerge::Automerge;
 use autosurgeon::{Hydrate, HydrateError, Prop, Reconcile, ReconcileError};
 use tokio::sync::{mpsc, oneshot};
 
@@ -16,15 +16,18 @@ pub struct AmCtx {
 }
 
 impl AmCtx {
-    pub async fn new() -> Res<Self> {
-        let peer_id = samod::PeerId::from_string("daybook_client".to_string());
+    pub async fn new(config: crate::AmConfig) -> Res<Self> {
+        let peer_id = samod::PeerId::from_string(config.peer_id);
+
+        // Ensure the storage directory exists
+        std::fs::create_dir_all(&config.storage_dir)
+            .wrap_err_with(|| format!("Failed to create storage directory: {}", config.storage_dir.display()))?;
 
         let repo = samod::Repo::build_tokio()
             .with_peer_id(peer_id.clone())
-            .with_storage(samod::storage::InMemoryStorage::new())
-            // .with_storage(samod::storage::TokioFilesystemStorage::new(
-            //     "/tmp/samod-client",
-            // ))
+            .with_storage(samod::storage::TokioFilesystemStorage::new(
+                config.storage_dir.to_string_lossy().as_ref(),
+            ))
             .load()
             .await;
 

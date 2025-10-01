@@ -62,10 +62,13 @@ impl FfiCtx {
         utils_rs::setup_tracing_once();
         let rt = crate::init_tokio()?;
         let rt = Arc::new(rt);
-        let cx = do_on_rt(&rt, async { Ctx::new().await })
+        let config = crate::Config::new()
+            .wrap_err("error creating default config")
+            .inspect_err(|err| tracing::error!(?err))?;
+        let cx = do_on_rt(&rt, async { Ctx::new(config).await })
             .await
             .wrap_err("error initializing main Ctx")
-            .inspect_err(|err| tracing::error!(%err))?;
+            .inspect_err(|err| tracing::error!(?err))?;
         Ok(Arc::new(Self { cx, rt }))
     }
 }
