@@ -4,23 +4,31 @@ pub struct SqlCtx {
     db_pool: sqlx::SqlitePool,
 }
 
+/// Configuration for SQLite storage
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// SQLite database URL
+    pub database_url: String,
+}
+
 impl SqlCtx {
-    pub async fn new(config: crate::SqlConfig) -> Res<Self> {
+    pub async fn new(config: Config) -> Res<Self> {
         use std::str::FromStr;
-        
+
         // Ensure the database directory exists for file-based databases
         if !config.database_url.starts_with("sqlite::memory:") {
             if let Some(path) = config.database_url.strip_prefix("sqlite://") {
                 if let Some(parent) = std::path::Path::new(path).parent() {
-                    std::fs::create_dir_all(parent)
-                        .wrap_err_with(|| format!("Failed to create database directory: {}", parent.display()))?;
+                    std::fs::create_dir_all(parent).wrap_err_with(|| {
+                        format!("Failed to create database directory: {}", parent.display())
+                    })?;
                 }
             }
         }
-        
+
         let db_pool = sqlx::SqlitePool::connect_with(
             sqlx::sqlite::SqliteConnectOptions::from_str(&config.database_url)?
-            .create_if_missing(true),
+                .create_if_missing(true),
         )
         .await
         .wrap_err("error initializing sqlite db")?;
@@ -38,10 +46,6 @@ impl SqlCtx {
 
         Ok(Self { db_pool })
     }
-
-    pub(crate) fn pool(&self) -> &sqlx::SqlitePool {
-        &self.db_pool
-    }
 }
 
 pub mod kv {
@@ -53,7 +57,7 @@ pub mod kv {
         let rec =
             sqlx::query_scalar::<_, String>(&format!("SELECT value FROM {TABLE} WHERE key = ?1"))
                 .bind(key)
-                .fetch_optional(cx.sql.pool())
+                .fetch_optional(&cx.sql.db_pool)
                 .await?;
         Ok(rec)
     }
@@ -65,7 +69,7 @@ pub mod kv {
         ))
         .bind(key)
         .bind(value)
-        .execute(cx.sql.pool())
+        .execute(&cx.sql.db_pool)
         .await?;
         Ok(())
     }

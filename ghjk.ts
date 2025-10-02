@@ -69,6 +69,7 @@ ghjk.env("dev")
     // ports.pipi({ packageName: "aider-chat" })[0],
     // expo router
     ports.npmi({ packageName: "eas-cli" })[0],
+    ports.npmi({ packageName: "@google/gemini-cli" })[0],
     jdk_temurin({ version: "21.0.8\\+9.0.LTS" }),
   )
   .vars({

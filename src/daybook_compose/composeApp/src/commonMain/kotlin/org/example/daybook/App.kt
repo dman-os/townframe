@@ -28,9 +28,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeContentPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.BottomAppBar
@@ -57,6 +63,8 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.PermanentDrawerSheet
 import androidx.compose.material3.PermanentNavigationDrawer
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.MaterialTheme
@@ -74,8 +82,18 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.rotate
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.Surface
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextOverflow
@@ -348,6 +366,29 @@ class TablesViewModel(
     fun selectTable(tableId: Uuid) {
         _selectedTableId.value = tableId
     }
+
+    fun selectTab(tabId: Uuid) {
+        viewModelScope.launch {
+            val currentState = _tablesState.value
+            val selectedTableId = _selectedTableId.value
+            if (currentState is TablesState.Data && selectedTableId != null) {
+                val table = currentState.tables[selectedTableId]
+                if (table != null) {
+                    val updatedTable = table.copy(selectedTab = tabId)
+                    try {
+                        // Persist selection to repo
+                        tablesRepo.ffiSetTable(selectedTableId, updatedTable)
+                        // Update local state optimistically
+                        val updatedTables = currentState.tables.toMutableMap()
+                        updatedTables[selectedTableId] = updatedTable
+                        _tablesState.value = currentState.copy(tables = updatedTables)
+                    } catch (e: FfiException) {
+                        _tablesState.value = TablesState.Error(e)
+                    }
+                }
+            }
+        }
+    }
     
     suspend fun getSelectedTable(): Table? {
         val currentState = _tablesState.value
@@ -432,7 +473,6 @@ fun App(
 
     LaunchedEffect(initAttempt) {
         initState = AppInitState.Loading
-        print("XXXX here")
         val fcx = FfiCtx.forFfi()
         val docsRepo = DocsRepo.forFfi(fcx = fcx)
         val tablesRepo = TablesRepo.forFfi(fcx = fcx)
@@ -586,7 +626,31 @@ fun CompactLayout(
         bottomSheetState = sheetState
     )
     var sheetContent by remember { mutableStateOf(SheetContent.TABS) }
+    // sheet content collapsed to tabs only (we use nav rail for table switching)
     var isSheetManuallyOpened by rememberSaveable { mutableStateOf(false) }
+    
+    var tabItemLayouts by remember { mutableStateOf(mapOf<Uuid, Rect>()) }
+    var tableItemLayouts by remember { mutableStateOf(mapOf<Uuid, Rect>()) }
+    var highlightedTable by remember { mutableStateOf<Uuid?>(null) }
+    var highlightedTab by remember { mutableStateOf<Uuid?>(null) }
+    var isDragging by remember { mutableStateOf(false) }
+
+    val tablesRepo = LocalContainer.current.tablesRepo
+    val vm = viewModel { TablesViewModel(tablesRepo) }
+    var pendingTabSelection by remember { mutableStateOf<Uuid?>(null) }
+
+    // Clear cached tab layout rects whenever the selected table or sheet content changes
+    val selectedTableIdForLayouts = vm.selectedTableId.collectAsState().value
+    LaunchedEffect(selectedTableIdForLayouts, sheetContent) {
+        // Avoid clearing cached layouts while the user is actively dragging; that
+        // causes missing hit rects mid-drag when we switch selected table on hover.
+        if (!isDragging) {
+            tabItemLayouts = mapOf()
+            tableItemLayouts = mapOf()
+            highlightedTab = null
+            highlightedTable = null
+        }
+    }
 
     // This effect will show/hide the sheet based on the isSheetManuallyOpened flag
     LaunchedEffect(isSheetManuallyOpened) {
@@ -604,34 +668,34 @@ fun CompactLayout(
         }
     }
 
-    val centerNavBarContent: @Composable RowScope.() -> Unit = if (isSheetManuallyOpened) {
-        {
+    val centerNavBarContent: @Composable RowScope.() -> Unit = {
+        // When sheet is open, show controls (add button). When closed, show current tab title.
+        if (isSheetManuallyOpened) {
+            // Add-tab button expands to fill the center area
             Button(
                 onClick = {
-                    sheetContent = when (sheetContent) {
-                        SheetContent.TABS -> SheetContent.TABLES
-                        SheetContent.TABLES -> SheetContent.TABS
+                    scope.launch {
+                        val sel = vm.getSelectedTable()
+                        if (sel != null) {
+                            val res = vm.createNewTab(sel.id)
+                            if (res.isSuccess) {
+                                val newTab = res.getOrNull()
+                                if (newTab != null) {
+                                    vm.selectTab(newTab.id)
+                                }
+                            }
+                        }
                     }
                 },
-                modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.Transparent,
-                    contentColor = MaterialTheme.colorScheme.onSurface
-                )
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
             ) {
-                val text = when (sheetContent) {
-                    SheetContent.TABS -> "Switch to Tables"
-                    SheetContent.TABLES -> "Switch to Tabs"
-                }
-                Text(text)
+                Text("Add Tab")
             }
-        }
-    } else {
-        {
+        } else {
             val tablesRepo = LocalContainer.current.tablesRepo
-            val vm = viewModel { TablesViewModel(tablesRepo) }
-            val selectedTableId = vm.selectedTableId.collectAsState().value
-            val tablesState = vm.tablesState.collectAsState().value
+            val vmLocal = viewModel { TablesViewModel(tablesRepo) }
+            val selectedTableId = vmLocal.selectedTableId.collectAsState().value
+            val tablesState = vmLocal.tablesState.collectAsState().value
 
             val currentTabTitle = if (selectedTableId != null && tablesState is TablesState.Data) {
                 val selectedTable = tablesState.tables[selectedTableId]
@@ -640,10 +704,7 @@ fun CompactLayout(
                 } else "No Tab"
             } else "No Tab"
 
-            Box(
-                modifier = Modifier.weight(1f),
-                contentAlignment = Alignment.Center
-            ) {
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Text(
                     text = currentTabTitle,
                     style = MaterialTheme.typography.titleMedium,
@@ -655,20 +716,85 @@ fun CompactLayout(
         }
     }
 
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Track tabs button window rect so we can convert local pointer positions to window coords
+    var tabsButtonWindowRect by remember { mutableStateOf<Rect?>(null) }
+
+    val tabsButtonModifier = Modifier.pointerInput(Unit) {
+        detectDragGestures(
+            onDragStart = { _ ->
+                scope.launch {
+                    isSheetManuallyOpened = true
+                    bottomSheetScaffoldState.bottomSheetState.expand()
+                    isDragging = true
+                }
+            },
+            onDrag = { change, _ ->
+                // Convert local pointer position to window coords using captured button rect
+                val localPos = change.position
+                val buttonRect = tabsButtonWindowRect
+                if (buttonRect != null) {
+                    val windowPos = Offset(buttonRect.left + localPos.x, buttonRect.top + localPos.y)
+                    val tabHit = tabItemLayouts.entries.find { (_, rect) -> rect.contains(windowPos) }
+                    highlightedTab = tabHit?.key
+
+                    // Hover-switch tables: if pointer over a table item, switch immediately
+                    // Prefer the most recently captured rects: order entries by rect area
+                    val tableHit = tableItemLayouts.entries
+                        .sortedByDescending { (_, rect) -> rect.width * rect.height }
+                        .find { (_, rect) -> rect.contains(windowPos) }
+
+                    if (tableHit != null) {
+                        val tableId = tableHit.key
+                        if (tableId != highlightedTable) {
+                            highlightedTable = tableId
+                            vm.selectTable(tableId)
+                        }
+                    }
+                } else {
+                    // Fallback: not enough context to map to window coords
+                }
+            },
+            onDragEnd = {
+                scope.launch {
+                    pendingTabSelection = highlightedTab
+                    isSheetManuallyOpened = false
+                    isDragging = false
+                }
+            },
+            onDragCancel = {
+                scope.launch {
+                    isSheetManuallyOpened = false
+                    isDragging = false
+                }
+            }
+        )
+    }
+
+    val featuresButtonModifier = Modifier
+
     Scaffold(
         modifier = modifier,
         bottomBar = {
-            DaybookBottomNavigationBar(
+                DaybookBottomNavigationBar(
                 onTabPressed = {
                     isSheetManuallyOpened = !isSheetManuallyOpened
                 },
                 onFeaturesPressed = { showFeaturesMenu = !showFeaturesMenu },
-                centerContent = centerNavBarContent
+                centerContent = {
+                    Row {
+                        // original center content
+                        centerNavBarContent()
+                    }
+                },
+                tabsButtonModifier = tabsButtonModifier,
+                onTabsButtonLayout = { rect -> tabsButtonWindowRect = rect },
+                featuresButtonModifier = featuresButtonModifier
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { scaffoldPadding ->
-        val tablesRepo = LocalContainer.current.tablesRepo
-        val vm = viewModel { TablesViewModel(tablesRepo) }
         BottomSheetScaffold(
             scaffoldState = bottomSheetScaffoldState,
             topBar = { TopAppBar(title = { Text("Daybook") }) },
@@ -676,7 +802,8 @@ fun CompactLayout(
                 SheetContentHost(
                     sheetContent = sheetContent,
                     onTabSelected = {
-                        // TODO: Handle tab selection
+                        // When the user selects a tab from the sheet, route it via the vm
+                        vm.selectTab(it.id)
                         isSheetManuallyOpened = false
                     },
                     onTableSelected = { table ->
@@ -685,13 +812,31 @@ fun CompactLayout(
                     },
                     onDismiss = {
                         isSheetManuallyOpened = false
-                    }
+                    },
+                    onTabLayout = { tabId, rect ->
+                        tabItemLayouts = tabItemLayouts + (tabId to rect)
+                        try { println("[DBG] tab layout updated: id=${tabId} total=${tabItemLayouts.size}") } catch (_: Throwable) {}
+                    },
+                    onTableLayout = { tableId, rect ->
+                        tableItemLayouts = tableItemLayouts + (tableId to rect)
+                        try { println("[DBG] table layout updated: id=${tableId} total=${tableItemLayouts.size}") } catch (_: Throwable) {}
+                    },
+                    highlightedTab = highlightedTab,
+                    highlightedTable = highlightedTable
                 )
             },
             sheetPeekHeight = 0.dp,
             modifier = Modifier.padding(scaffoldPadding)
         ) { contentPadding ->
-            Box(modifier = Modifier.fillMaxSize().padding(contentPadding)) {
+            // Capture the sheet/root content bounds for mapping window coords -> local coords
+            var sheetRootWindowRect by remember { mutableStateOf<Rect?>(null) }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(contentPadding)
+                    .onGloballyPositioned { sheetRootWindowRect = it.boundsInWindow() }
+            ) {
                 Routes(
                     modifier = Modifier.fillMaxSize(),
                     extraAction = extraAction,
@@ -705,6 +850,16 @@ fun CompactLayout(
                 }
             }
         }
+
+// Handle pending tab selection applied after drag end
+LaunchedEffect(pendingTabSelection) {
+    val pending = pendingTabSelection
+    if (pending != null) {
+        vm.selectTab(pending)
+        pendingTabSelection = null
+        highlightedTab = null
+    }
+}
     }
 }
 
@@ -1186,28 +1341,74 @@ fun DaybookBottomNavigationBar(
     onTabPressed: () -> Unit,
     onFeaturesPressed: () -> Unit,
     modifier: Modifier = Modifier,
-    centerContent: @Composable RowScope.() -> Unit
-) {
+    centerContent: @Composable RowScope.() -> Unit,
+    tabsButtonModifier: Modifier = Modifier,
+    featuresButtonModifier: Modifier = Modifier,
+    extraLeftContent: (@Composable () -> Unit)? = null
+    , onTabsButtonLayout: ((Rect) -> Unit)? = null
+)
+{
+    /*
+     * New simplified, extensible bottom bar implementation:
+     * - left area: toggle / drag-enabled tab switcher
+     * - center area: dynamic content provided by caller (or default)
+     * - right area: toggle features / FABs
+     *
+     * The API is intentionally minimal: callers pass composables for the center
+     * and modifiers for the left/right buttons so behavior can be composed
+     * elsewhere. The left button supports pointer input drag gestures via the
+     * provided modifier (caller can pass a modifier using
+     * pointerInput + detectDragGesturesAfterLongPress). Internally we layout
+     * the 3 areas in a Row inside a BottomAppBar.
+     */
+
     BottomAppBar(
         modifier = modifier,
         contentPadding = PaddingValues(4.dp)
     ) {
-        // Left button
-        IconButton(onClick = onTabPressed) {
-            Text("📄", fontSize = 16.sp)
+        // Left (tab) button area (tab button + optional extra)
+        Box(modifier = Modifier.weight(0.15f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onTabPressed,
+                    modifier = tabsButtonModifier.then(
+                        if (onTabsButtonLayout != null) Modifier.onGloballyPositioned { onTabsButtonLayout(it.boundsInWindow()) } else Modifier
+                    )
+                ) {
+                    Text("📄", fontSize = 16.sp)
+                }
+
+                // optional extra content supplied by caller (e.g., a drag-detecting helper)
+                if (extraLeftContent != null) {
+                    extraLeftContent()
+                }
+            }
         }
 
-        // Center content
-        centerContent()
+        // Center dynamic area (expandable)
+        Box(modifier = Modifier.weight(0.7f), contentAlignment = Alignment.Center) {
+            // centerContent is a RowScope receiver; call it inside a Row so callers
+            // can use RowScope.weight if they need to. We'll add a default slot for
+            // the add-new-tab action when the sheet is closed.
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                centerContent()
+            }
+        }
 
-        // Right button
-        IconButton(onClick = onFeaturesPressed) {
-            Text("⚙️", fontSize = 16.sp)
+        // Right (features) button area
+        Box(modifier = Modifier.weight(0.15f), contentAlignment = Alignment.CenterEnd) {
+            IconButton(
+                onClick = onFeaturesPressed,
+                modifier = featuresButtonModifier
+            ) {
+                Text("⚙️", fontSize = 16.sp)
+            }
         }
     }
 }
 
-enum class SheetContent { TABS, TABLES }
+
+enum class SheetContent { TABS }
 
 @Composable
 fun SheetContentHost(
@@ -1215,12 +1416,16 @@ fun SheetContentHost(
     onTabSelected: (Tab) -> Unit,
     onTableSelected: (Table) -> Unit,
     onDismiss: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onTabLayout: (tabId: Uuid, rect: Rect) -> Unit,
+    onTableLayout: (tableId: Uuid, rect: Rect) -> Unit,
+    highlightedTab: Uuid?,
+    highlightedTable: Uuid?
 ) {
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(top = 16.dp)
+            .padding(top = 16.dp, bottom = 96.dp)
     ) {
         // Header
         Row(
@@ -1231,23 +1436,73 @@ fun SheetContentHost(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            val title = when (sheetContent) {
-                SheetContent.TABS -> "Select Tab"
-                SheetContent.TABLES -> "Select Table"
-            }
+            // Show current table title as sheet title
+            val tablesRepoForTitle = LocalContainer.current.tablesRepo
+            val vmForTitle = viewModel { TablesViewModel(tablesRepoForTitle) }
+            val selectedTableIdTitle = vmForTitle.selectedTableId.collectAsState().value
+            val tablesStateTitle = vmForTitle.tablesState.collectAsState().value
+            val title = if (selectedTableIdTitle != null && tablesStateTitle is TablesState.Data) {
+                tablesStateTitle.tables[selectedTableIdTitle]?.title ?: "Select Tab"
+            } else "Select Tab"
             Text(
                 text = title,
                 style = MaterialTheme.typography.headlineSmall
             )
+            // Action buttons: allow quick creation of tabs/tables from the sheet
+            val tablesRepo = LocalContainer.current.tablesRepo
+            val vm = viewModel { TablesViewModel(tablesRepo) }
+
+            // header: no action buttons here; add-tab moved to navbar center
+
             Button(onClick = onDismiss) {
                 Text("Close")
             }
         }
 
+        Spacer(Modifier.weight(1f))
+
         // Content
         when (sheetContent) {
-            SheetContent.TABS -> TabSelectionList(onTabSelected = onTabSelected, modifier = Modifier.padding(horizontal = 16.dp))
-            SheetContent.TABLES -> TableSelectionList(onTableSelected = onTableSelected, modifier = Modifier.padding(horizontal = 16.dp))
+            SheetContent.TABS -> {
+                // Show tabs list plus a NavigationRail for table switching
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    // NavigationRail-based table switcher on the LEFT of the sheet
+                    val tablesRepo2 = LocalContainer.current.tablesRepo
+                    val vm2 = viewModel { TablesViewModel(tablesRepo2) }
+                    val tablesState = vm2.tablesState.collectAsState().value
+                    val selectedTableId = vm2.selectedTableId.collectAsState().value
+
+                    NavigationRail(modifier = Modifier.width(80.dp)) {
+                        // push items to the bottom
+                        Spacer(Modifier.weight(1f))
+                        if (tablesState is TablesState.Data) {
+                            // Render reversed so items start from bottom
+                            tablesState.tablesList.reversed().forEach { table ->
+                                NavigationRailItem(
+                                    selected = (selectedTableId == table.id) || (highlightedTable == table.id),
+                                    onClick = { onTableSelected(table) },
+                                    icon = {
+                                        Box(modifier = Modifier.onGloballyPositioned {
+                                            onTableLayout(table.id, it.boundsInWindow())
+                                        }) {
+                                            Text("📁")
+                                        }
+                                    }
+                                )
+                            }
+                        } else {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        }
+                    }
+
+                    TabSelectionList(
+                        onTabSelected = onTabSelected,
+                        modifier = Modifier.weight(1f).padding(start = 16.dp, end = 8.dp),
+                        onItemLayout = onTabLayout,
+                        highlightedTab = highlightedTab
+                    )
+                }
+            }
         }
     }
 }
@@ -1255,12 +1510,22 @@ fun SheetContentHost(
 @Composable
 fun TabSelectionList(
     onTabSelected: (Tab) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onItemLayout: (tabId: Uuid, rect: Rect) -> Unit,
+    highlightedTab: Uuid?
 ) {
     val tablesRepo = LocalContainer.current.tablesRepo
     val vm = viewModel { TablesViewModel(tablesRepo) }
     val tablesState = vm.tablesState.collectAsState().value
     val selectedTableId = vm.selectedTableId.collectAsState().value
+
+    // Ensure a table is selected when data becomes available
+    LaunchedEffect(tablesState) {
+        if (tablesState is TablesState.Data) {
+            val sel = vm.getSelectedTable()
+            if (sel != null) vm.selectTable(sel.id)
+        }
+    }
 
     val tabsForSelectedTable = if (selectedTableId != null && tablesState is TablesState.Data) {
         val selectedTable = tablesState.tables[selectedTableId]
@@ -1269,20 +1534,27 @@ fun TabSelectionList(
         } else emptyList()
     } else emptyList()
 
+    // Fill available height and render tabs starting from the bottom
     Column(
-        modifier = modifier.verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        modifier = modifier.fillMaxHeight().verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.Bottom)
     ) {
         if (tabsForSelectedTable.isEmpty()) {
             Text("No tabs in this table.", modifier = Modifier.padding(16.dp))
         } else {
-            tabsForSelectedTable.forEach { tab ->
+            // Render tabs reversed so the last tab appears at the bottom
+            tabsForSelectedTable.reversed().forEach { tab ->
+                val isHighlighted = tab.id == highlightedTab
                 NavigationDrawerItem(
-                    selected = false, // TODO: Track selected tab
+                    selected = isHighlighted,
                     onClick = { onTabSelected(tab) },
                     icon = { Text("📄") },
                     label = { Text(tab.title) },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onGloballyPositioned {
+                            onItemLayout(tab.id, it.boundsInWindow())
+                        }
                 )
             }
         }

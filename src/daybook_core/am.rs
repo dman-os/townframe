@@ -15,13 +15,26 @@ pub struct AmCtx {
     change_manager: changes::ChangeListenerManager,
 }
 
+/// Configuration for Automerge storage
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// Storage directory for Automerge documents
+    pub storage_dir: PathBuf,
+    /// Peer ID for this client
+    pub peer_id: String,
+}
+
 impl AmCtx {
-    pub async fn new(config: crate::AmConfig) -> Res<Self> {
+    pub async fn new(config: Config) -> Res<Self> {
         let peer_id = samod::PeerId::from_string(config.peer_id);
 
         // Ensure the storage directory exists
-        std::fs::create_dir_all(&config.storage_dir)
-            .wrap_err_with(|| format!("Failed to create storage directory: {}", config.storage_dir.display()))?;
+        std::fs::create_dir_all(&config.storage_dir).wrap_err_with(|| {
+            format!(
+                "Failed to create storage directory: {}",
+                config.storage_dir.display()
+            )
+        })?;
 
         let repo = samod::Repo::build_tokio()
             .with_peer_id(peer_id.clone())
