@@ -9,7 +9,9 @@ use crate::gen::user::User;
 pub use crate::wit::exports::townframe::btress_api::user_create::GuestService;
 
 impl GuestService for UserCreate {
-    #[allow(async_fn_in_trait)]
+    fn new() -> Self {
+        todo!()
+    }
     fn serve(&self, inp: Input) -> Result<User, Error> {
         let cx = crate::cx();
 

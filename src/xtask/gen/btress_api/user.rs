@@ -19,6 +19,7 @@ pub fn feature(reg: &TypeReg) -> Feature {
         },
         schema_types: vec![schema_user],
         endpoints: vec![create::epoint_type(reg, schema_user)],
+        wit_module: "townframe:btress-api".into(),
     }
 }
 mod create;

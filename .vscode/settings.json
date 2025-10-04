@@ -1,1 +1,5 @@
-{"deno.enablePaths":["/var/home/asdf/repos/rust/townframe/ghjk.ts"]}
+{
+  "deno.enablePaths": [
+    "/var/home/asdf/repos/rust/townframe/ghjk.ts"
+  ]
+}

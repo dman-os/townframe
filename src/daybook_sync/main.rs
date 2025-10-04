@@ -149,7 +149,7 @@ async fn get_doc_id(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let peer_id = samod::PeerId::from_string(query.peer_id.clone());
-    let peer_docs = dbg!(&cx.peer_docs).get(&peer_id);
+    let peer_docs = cx.peer_docs.get(&peer_id);
     if let Some(doc_id) = peer_docs {
         format!("{}", *doc_id.value()).into_response()
     } else {

@@ -1,9 +1,15 @@
 mod interlude {
     pub use utils_rs::prelude::*;
+
+    #[cfg(test)]
+    pub use reqwest::StatusCode;
+    #[cfg(test)]
+    pub use utils_rs::testing::*;
 }
 
 use crate::interlude::*;
 
+mod daybook;
 mod macros;
 mod pg;
 mod wasmcloud;
@@ -13,7 +19,7 @@ mod sanity_http;
 
 // Common helpers for tests
 
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 pub struct TestContext {
     pub test_name: String,
@@ -66,17 +72,33 @@ impl Drop for TestContext {
 #[allow(unused)]
 async fn test_cx(test_name: &'static str) -> Res<TestContext> {
     utils_rs::testing::load_envs_once();
-    let api_root_path =
-        std::path::PathBuf::from(&utils_rs::get_env_var("BTRESS_API_ROOT_PATH").unwrap());
-    let (btress_db, btress_http) = tokio::try_join!(
-        pg::TestPg::new(test_name, &api_root_path,),
-        wasmcloud::TestApp::new(test_name)
-    )?;
+    let (btress_db, btress_http) = {
+        let root_path = &format!("{root}/../btress_api", root = env!("CARGO_MANIFEST_DIR"));
+        let wasm_path = "target/wasm32-wasip2/debug/btress_http_plugged_s.wasm";
+        tokio::try_join!(
+            pg::TestPg::new(test_name, &Path::new(root_path)),
+            wasmcloud::TestApp::new(test_name, wasm_path)
+        )?
+    };
+    let (daybook_db, daybook_http) = {
+        let root_path = &format!("{root}/../daybook_api", root = env!("CARGO_MANIFEST_DIR"));
+        let wasm_path = "target/wasm32-wasip2/debug/daybook_http_plugged_s.wasm";
+        tokio::try_join!(
+            pg::TestPg::new(test_name, &Path::new(root_path)),
+            wasmcloud::TestApp::new(test_name, wasm_path)
+        )?
+    };
     let testing = TestContext::new(
         test_name.into(),
-        [("btress".to_string(), btress_db)],
+        [
+            ("btress".to_string(), btress_db),
+            ("daybook".to_string(), daybook_db),
+        ],
         [],
-        [("btress".to_string(), btress_http)],
+        [
+            ("btress".to_string(), btress_http),
+            ("daybook".to_string(), daybook_http),
+        ],
     );
     Ok(testing)
 }
@@ -106,16 +128,18 @@ impl TestRedis {
 }
  */
 
-// pub struct ExtraAssertionAgs<'a> {
-//     pub test_cx: &'a mut TestContext,
-//     pub auth_token: Option<String>,
-//     pub response_head: http::response::Parts,
-//     pub response_json: Option<serde_json::Value>,
-// }
+pub struct ExtraAssertionAgs<'a> {
+    pub http_client: reqwest::Client,
+    pub test_cx: &'a mut TestContext,
+    pub auth_token: Option<String>,
+    pub status: reqwest::StatusCode,
+    pub headers: reqwest::header::HeaderMap,
+    pub body_json: Option<serde_json::Value>,
+}
 
-// pub type EAArgs<'a> = ExtraAssertionAgs<'a>;
+pub type EAArgs<'a> = ExtraAssertionAgs<'a>;
 
-// /// BoxFuture type that's not send
-// pub type LocalBoxFuture<'a, T> = std::pin::Pin<Box<dyn futures::Future<Output = T> + 'a>>;
+/// BoxFuture type that's not send
+pub type LocalBoxFuture<'a, T> = std::pin::Pin<Box<dyn futures::Future<Output = T> + 'a>>;
 
-// pub type ExtraAssertions<'c, 'f> = dyn Fn(ExtraAssertionAgs<'c>) -> LocalBoxFuture<'f, ()>;
+pub type ExtraAssertions<'c, 'f> = dyn Fn(ExtraAssertionAgs<'c>) -> LocalBoxFuture<'f, Res<()>>;

@@ -10,16 +10,16 @@ AS $body$
         le_user    auth.users;
     BEGIN
         INSERT INTO auth.users (
-            username
-            ,email
-            -- ,pub_key
-            -- ,pri_key
-        ) VALUES (
-            username::extensions.citext
-            ,email::extensions.citext
-            -- ,pub_key
-            -- ,pri_key
-        ) RETURNING * INTO le_user;
+                username
+                ,email
+                -- ,pub_key
+                -- ,pri_key
+            ) VALUES (
+                username::extensions.citext
+                ,email::extensions.citext
+                -- ,pub_key
+                -- ,pri_key
+            ) RETURNING * INTO le_user;
         return le_user;
     END;
 $body$ LANGUAGE PLpgSQL;
@@ -36,12 +36,12 @@ AS $body$
         le_user    auth.users;
     BEGIN
         UPDATE auth.users 
-        SET 
-            username = COALESCE(new_username, username),
-            email = COALESCE(new_email, email),
-            pic_url = COALESCE(new_pic_url, pic_url)
-        WHERE id = user_id 
-        RETURNING * INTO le_user;
+            SET 
+                username = COALESCE(new_username, username),
+                email = COALESCE(new_email, email),
+                pic_url = COALESCE(new_pic_url, pic_url)
+            WHERE id = user_id 
+            RETURNING * INTO le_user;
 
         IF NOT FOUND THEN
           RETURN;
@@ -68,31 +68,31 @@ AS $body$
         -- INSERT INTO auth.credentials_deleted (row) 
         -- SELECT row_to_json(d.*)::jsonb FROM deleted AS d;
 
-	UPDATE web.sessions
-	  SET auth_session_id = NULL
-	  WHERE EXISTS (
-	      SELECT 1 
-		FROM auth.sessions 
-		WHERE 
-		    auth.sessions.user_id = target_id 
-		    AND auth.sessions.id = auth_session_id
-	  );
+        -- null out any references as well
+	    UPDATE web.sessions
+	        SET auth_session_id = NULL
+	        WHERE auth_session_id (
+	            SELECT id 
+		        FROM auth.sessions 
+		        WHERE 
+		            auth.sessions.user_id = target_id 
+	        );
 
         WITH deleted AS (
-          DELETE FROM auth.sessions
-          WHERE user_id = target_id
-          RETURNING *
-        )
-        INSERT INTO auth.sessions_deleted (row) 
-        SELECT row_to_json(d.*)::jsonb FROM deleted AS d;
+                DELETE FROM auth.sessions
+                WHERE user_id = target_id
+                RETURNING *
+            )
+            INSERT INTO auth.sessions_deleted (row) 
+            SELECT row_to_json(d.*)::jsonb FROM deleted AS d;
 
         WITH deleted AS (
-          DELETE FROM auth.users
-          WHERE id = target_id
-          RETURNING *
-        )
-        INSERT INTO auth.users_deleted (row) 
-        SELECT row_to_json(d.*)::jsonb FROM deleted AS d;
+                DELETE FROM auth.users
+                WHERE id = target_id
+                RETURNING *
+            )
+            INSERT INTO auth.users_deleted (row) 
+            SELECT row_to_json(d.*)::jsonb FROM deleted AS d;
 
         RETURN TRUE; 
     END;

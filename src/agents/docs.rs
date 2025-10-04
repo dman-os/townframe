@@ -10,13 +10,13 @@ pub struct DocsCreatedEvent {
 }
 
 #[restate_sdk::service]
-pub trait DocsService {
+pub trait DocsPipeline {
     async fn created(request: Json<DocsCreatedEvent>) -> Result<bool, HandlerError>;
 }
 
-pub struct CheckoutServiceImpl;
+pub struct DocPipelineImpl;
 
-impl DocsService for CheckoutServiceImpl {
+impl DocsPipeline for DocPipelineImpl {
     async fn created(
         &self,
         _ctx: Context<'_>,

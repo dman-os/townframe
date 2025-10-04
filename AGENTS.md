@@ -4,3 +4,4 @@
 - Avoid trying to catch the error or log the error for every edgecase.
   - Most errors are programming errors and should crash the application.
   - Errors that should be handled include: network issues, user input validation issues.
+  - Don't ever swallow errors with empty catch statemnts or catch-and-log unless explcitly told to do so.

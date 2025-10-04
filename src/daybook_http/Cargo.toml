@@ -1,0 +1,32 @@
+[package]
+name = "daybook_http"
+version.workspace = true
+edition.workspace = true
+
+
+[lib]
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+# wasmcloud-component = "0.2.0"
+wit-bindgen.workspace = true
+utils_rs.workspace = true
+api_utils_rs.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+
+futures.workspace = true
+
+
+thiserror.workspace = true
+parking_lot.workspace = true
+
+axum = { workspace = true, features = [
+  "form", "json", "macros", "multipart", "query", "original-uri",
+  "query", "tower-log", "tracing", "matched-path", 
+  ] }
+axum-extra = { workspace = true, features = ["typed-header"] }
+tower.workspace = true
+http.workspace = true

@@ -33,6 +33,7 @@ pub struct Config {}
 
 mod gen;
 mod user;
+use user::USERNAME_REGEX;
 // mod utils;
 
 fn init() -> Res<()> {
@@ -102,6 +103,3 @@ impl wit::exports::townframe::btress_api::ctx::Guest for Component {
 impl wit::exports::townframe::btress_api::user_create::Guest for Component {
     type Service = user::create::UserCreate;
 }
-
-pub static USERNAME_REGEX: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z0-9]+([_-]?[a-zA-Z0-9])*$").unwrap());

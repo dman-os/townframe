@@ -65,12 +65,12 @@ async fn app_main(wasi_req: IncomingRequest, out_param: ResponseOutparam) -> Res
 
     let router = axum::Router::new().route("/", axum::routing::get(|| async { "hello" }));
 
-    let axum_req = crate::request::Request(wasi_req)
+    let axum_req: http::Request<axum::body::Body> = crate::request::Request(wasi_req)
         .try_into()
         .wrap_err("error converting to axum req")?;
 
     use tower::ServiceExt;
-    let axum_res = router.oneshot(axum_req).await.expect("infallible");
+    let axum_res: axum::response::Response = router.oneshot(axum_req).await.expect("infallible");
 
     let wasi_res = OutgoingResponse::new({
         let headers = Headers::new();

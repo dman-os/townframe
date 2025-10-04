@@ -2,10 +2,10 @@
 macro_rules! integration_table_tests {
     ($(
         $name:ident: {
-            uri: $uri:expr,
-            method: $method:expr,
+            app: $app:expr,
+            path: $path:expr,
+            method: $method:ident,
             status: $status:expr,
-            router: $router:expr,
             cx_fn: $cx_fn:expr,
             $(body: $json_body:expr,)?
             $(check_json: $check_json:expr,)?
@@ -17,14 +17,16 @@ macro_rules! integration_table_tests {
         $(
             #[allow(unused_variables)]
             #[tokio::test]
-            async fn $name() -> $crate::prelude::eyre::Result<()> {
+            async fn $name() -> $crate::interlude::eyre::Result<()> {
                 use utils_rs::prelude::*;
-                utils_rs::setup_tracing_once();
-                let (mut test_cx, state) = $cx_fn(utils_rs::function_full!()).await?;
+                utils_rs::testing::setup_tracing();
+                let mut test_cx = $cx_fn(utils_rs::function_full!()).await?;
                 {
-                    let mut request = axum::http::Request::builder()
-                                        .method($method)
-                                        .uri($uri);
+                    let http_client = reqwest::Client::new();
+
+                    let host = test_cx.wadm_apps[$app].app_url.clone();
+                    let path = $path;
+                    let mut request = http_client.request(reqwest::Method::$method, format!("{host}{path}"));
 
                     // let token = authenticate::Authenticate
                     //     .handle(
@@ -38,73 +40,72 @@ macro_rules! integration_table_tests {
                     //     .await
                     //     .unwrap_or_log()
                     //     .token;
-                    let token: Option<String> = $crate::optional_expr!($($auth_token)?);
+                    let token: Option<String> = utils_rs::optional_expr!($($auth_token)?);
                     if let Some(token) = token.as_ref() {
                         request = request
-                                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
+                                .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
                     }
 
-                    let json: Option<serde_json::Value> = $crate::optional_expr!($($json_body)?);
+                    let json: Option<serde_json::Value> = utils_rs::optional_expr!($($json_body)?);
                     let request = if let Some(json_body) = json {
                         request
-                            .header(axum::http::header::CONTENT_TYPE, "application/json")
-                            .body(axum::body::Body::from(
+                            .header(reqwest::header::CONTENT_TYPE, "application/json")
+                            .body(reqwest::Body::from(
                                 serde_json::to_vec(&json_body).unwrap()
                             ))
-                            .unwrap_or_log()
                     } else {
                         request
-                            .body(Default::default()).unwrap_or_log()
                     };
 
-                    let app = $router.with_state(state);
-                    use tower::ServiceExt;
-                    let res = app
-                        .oneshot(request)
+                    let mut resp = request.send()
                         .await
                         .unwrap_or_log();
 
-                    let (head, body) = res.into_parts();
-                    let response_bytes = axum::body::to_bytes(body, 1024 * 1024 * 1024)
+                    let status = resp.status();
+                    let headers = std::mem::take(resp.headers_mut());
+                    let body_bytes = resp.bytes()
                             .await
                             .ok();
-                    let response_json: Option<serde_json::Value> = response_bytes
+
+                    let body_json: Option<serde_json::Value> = body_bytes
                         .as_ref()
                         .and_then(|body|
                             serde_json::from_slice(&body).ok()
                         );
 
-                    let print_response: Option<bool> = $crate::optional_expr!($($print_res)?);
+                    let print_response: Option<bool> = utils_rs::optional_expr!($($print_res)?);
                     if let Some(true) = print_response {
-                        info!(head = ?head, "reponse_json: {:#?}", response_json);
+                        info!(?status, ?headers, "{body_json:#?}");
                     }
 
                     let status_code = $status;
                     assert_eq!(
-                        head.status,
+                        status,
                         status_code,
-                        "response: {head:?}\n{response_json:?}\n{:?}",
-                        if response_json.is_some() {None} else {Some(response_bytes)}
+                        "{status:?}\n{headers:?}\n{body_json:?}\n{:?}",
+                        if body_json.is_some() {None} else {Some(body_bytes)}
                     );
 
-                    let check_json: Option<serde_json::Value> = $crate::optional_expr!($($check_json)?);
+                    let check_json: Option<serde_json::Value> = utils_rs::optional_expr!($($check_json)?);
                     if let Some(check_json) = check_json {
-                        let response_json = response_json.as_ref().unwrap();
-                        $crate::testing::check_json(
+                        let body_json = body_json.as_ref().unwrap();
+                        utils_rs::testing::check_json(
                             ("check", &check_json),
-                            ("response", &response_json)
+                            ("response", &body_json)
                         );
                     }
 
-                    use $crate::testing::{ExtraAssertions, EAArgs};
-                    let extra_assertions: Option<&ExtraAssertions> = $crate::optional_expr!($($extra_fn)?);
+                    use $crate::{ExtraAssertions, EAArgs};
+                    let extra_assertions: Option<&ExtraAssertions> = utils_rs::optional_expr!($($extra_fn)?);
                     if let Some(extra_assertions) = extra_assertions {
                         extra_assertions(EAArgs{
+                            http_client,
                             test_cx: &mut test_cx,
                             auth_token: token,
-                            response_json,
-                            response_head: head
-                        }).await;
+                            headers,
+                            status,
+                            body_json
+                        }).await?;
                     }
                 }
                 test_cx.close().await;
@@ -119,7 +120,7 @@ macro_rules! integration_table_tests {
 macro_rules! integration_table_tests_shorthand {
     (
         $s_name:ident,
-        $(uri: $s_uri:expr,)?
+        $(url: $s_url:expr,)?
         $(method: $s_method:expr,)?
         $(status: $s_status:expr,)?
         $(router: $s_router:expr,)?
@@ -135,7 +136,7 @@ macro_rules! integration_table_tests_shorthand {
                 macro_rules! $s_name {
                     ($d (
                         $d name:ident: {
-                            $d (uri: $d uri:expr,)?
+                            $d (url: $d url:expr,)?
                             $d (method: $d method:expr,)?
                             $d (status: $d status:expr,)?
                             $d (router: $d router:expr,)?
@@ -154,8 +155,8 @@ macro_rules! integration_table_tests_shorthand {
                                 $d(
                                     $d name: {
                                         utils_rs::optional_token!(
-                                            $d(uri: $d uri,)?
-                                            $(uri: $s_uri,)?
+                                            $d(url: $d url,)?
+                                            $(url: $s_url,)?
                                         );
                                         utils_rs::optional_token!(
                                             $(method: $s_method,)?
@@ -240,7 +241,7 @@ mod tests {
                 crate::integration_table_tests! {
                     $(
                         $name: {
-                            uri: "/sum",
+                            url: "/sum",
                             method: "POST",
                             status: $status,
                             router: sum_router(),
@@ -272,7 +273,7 @@ mod tests {
 
     /* crate::integration_table_tests_shorthand! {
         integ_table_test_sum_short,
-        uri: "/sum",
+        url: "/sum",
         method: "POST",
         router: sum_router(),
     }

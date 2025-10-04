@@ -36,6 +36,7 @@
           extensions = [ "rust-src" ];
           targets = [ 
             "wasm32-unknown-unknown" 
+            "wasm32-wasip2" 
             "armv7-linux-androideabi" # For armeabi-v7a
             "aarch64-linux-android" # For arm64-v8a
             "i686-linux-android" # For x86"
@@ -90,6 +91,8 @@
 
             androidComposition
             rogcat
+
+            atlas
 
             # ollama
 

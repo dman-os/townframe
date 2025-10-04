@@ -125,7 +125,7 @@ services:
     # network_mode: host
 
   flyway:
-    image: docker.io/flyway/flyway:11.4.0-alpine
+    image: docker.io/flyway/flyway:11.13.2-alpine
     profiles: [cli]
     networks: [net-one]
     env_file: [.env]

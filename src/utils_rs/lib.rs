@@ -62,17 +62,21 @@ pub fn setup_tracing_once() {
 
 pub fn setup_tracing() -> eyre::Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        if std::env::var("RUST_LOG").is_err() {
-            std::env::set_var("RUST_LOG", "info");
-        }
+    let filter = {
         if std::env::var("RUST_BACKTRACE").is_err() {
             std::env::set_var("RUST_BACKTRACE", "1");
         }
-    }
+        std::env::var("RUST_LOG").ok()
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    let filter: Option<String> = None;
+
+    let filter = filter.unwrap_or_else(|| "info".into());
 
     use tracing_subscriber::prelude::*;
     let registry = tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(filter))
         .with(
             tracing_subscriber::fmt::layer()
                 .compact()

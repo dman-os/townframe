@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "./src/agents",
   "./src/btress_api",
+  "./src/btress_http",
   # "./src/granary_web",
   # "./src/leptos_oidc",
   "./src/utils_rs",
@@ -12,7 +13,7 @@ members = [
   "./src/daybook_core",
   "./src/daybook_sync",
   "./src/daybook_api",
-  "./src/btress_http",
+  "./src/daybook_http",
   "./src/tests_http",
   # "./src/leptos_wasi/",
 ]

@@ -5,8 +5,9 @@ use http::{Method, StatusCode};
 use std::hash::{Hash, Hasher};
 
 use heck::*;
+mod btress_api;
 mod component_wit;
-mod features;
+mod daybook_api;
 mod service_rust;
 
 use std::fmt::Write;
@@ -15,33 +16,63 @@ pub fn cli() -> Res<()> {
     // use std::io::Write as WriteIo;
     let reg = TypeReg::new();
 
-    let features = features::btress_api_features(&reg);
-
-    let mut out = String::new();
-    let buf = &mut out;
-    write!(
-        buf,
-        r#"use super::*;   
-
-"#
-    )?;
-    for feature in &features {
-        service_rust::feature_module(&reg, buf, &feature)?;
-    }
-
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../btress_api/gen/");
-    std::fs::create_dir_all(&path)?;
-    std::fs::write(path.join("mod.rs"), &out)?;
-
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../btress_api/wit/");
-    std::fs::create_dir_all(&path)?;
-    for feature in &features {
+    {
+        let features = btress_api::btress_api_features(&reg);
         let mut out = String::new();
         let buf = &mut out;
-        writeln!(buf, "package townframe:btress-api;")?;
-        component_wit::feature_file(&reg, buf, &feature)?;
-        let path = path.join(format!("{}.wit", feature.tag.name.to_kebab_case()));
-        std::fs::write(path, &out)?;
+        write!(
+            buf,
+            r#"use super::*;   
+
+"#
+        )?;
+        for feature in &features {
+            service_rust::feature_module(&reg, buf, &feature)?;
+        }
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../btress_api/gen/");
+        std::fs::create_dir_all(&path)?;
+        std::fs::write(path.join("mod.rs"), &out)?;
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../btress_api/wit/");
+        std::fs::create_dir_all(&path)?;
+        for feature in &features {
+            let mut out = String::new();
+            let buf = &mut out;
+            writeln!(buf, "package townframe:btress-api;")?;
+            component_wit::feature_file(&reg, buf, &feature)?;
+            let path = path.join(format!("{}.wit", feature.tag.name.to_kebab_case()));
+            std::fs::write(path, &out)?;
+        }
+    }
+    {
+        let features = daybook_api::daybook_api_features(&reg);
+        let mut out = String::new();
+        let buf = &mut out;
+        write!(
+            buf,
+            r#"use super::*;   
+
+"#
+        )?;
+        for feature in &features {
+            service_rust::feature_module(&reg, buf, &feature)?;
+        }
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_api/gen/");
+        std::fs::create_dir_all(&path)?;
+        std::fs::write(path.join("mod.rs"), &out)?;
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_api/wit/");
+        std::fs::create_dir_all(&path)?;
+        for feature in &features {
+            let mut out = String::new();
+            let buf = &mut out;
+            writeln!(buf, "package townframe:daybook-api;")?;
+            component_wit::feature_file(&reg, buf, &feature)?;
+            let path = path.join(format!("{}.wit", feature.tag.name.to_kebab_case()));
+            std::fs::write(path, &out)?;
+        }
     }
     Ok(())
 }
@@ -207,6 +238,7 @@ pub struct Feature {
     pub tag: Tag,
     pub schema_types: Vec<TypeId>,
     pub endpoints: Vec<EndpointType>,
+    pub wit_module: String,
 }
 
 #[derive(bon::Builder)]

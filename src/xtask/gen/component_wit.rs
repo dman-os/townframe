@@ -46,6 +46,7 @@ pub(crate) fn feature_file(
         tag,
         schema_types,
         endpoints,
+        wit_module: _,
     }: &Feature,
 ) -> Res<()> {
     let mut imports = vec![
@@ -121,6 +122,7 @@ pub fn endpoint_interface(
         writeln!(
             buf,
             r#"resource service {{
+    constructor();
     serve: func(inp: input) -> result<output, error>;
 }}"#
         )?;

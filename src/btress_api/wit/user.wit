@@ -47,6 +47,7 @@ interface user-create {
     }
     type output = user;
     resource service {
+        constructor();
         serve: func(inp: input) -> result<output, error>;
     }
 }

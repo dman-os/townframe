@@ -7,7 +7,7 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    pub async fn new(test_name: &'static str) -> Res<Self> {
+    pub async fn new(test_name: &'static str, wasm_path: &'static str) -> Res<Self> {
         let app_name = test_name.replace("::tests::", "_").replace("::", "_");
 
         let host =
@@ -34,7 +34,7 @@ impl TestApp {
             &app_name,
             http_port,
             &format!(
-                "file://{root}/../../target/wasm32-wasip2/debug/btress_http_plugged_s.wasm",
+                "file://{root}/../../{wasm_path}",
                 root = env!("CARGO_MANIFEST_DIR")
             ),
         );
@@ -45,7 +45,6 @@ impl TestApp {
 
         loop {
             let status = client.get_manifest_status(&app_name).await?;
-            info!(?status, "XXX");
             match status.info.status_type {
                 wadm_types::api::StatusType::Undeployed
                 | wadm_types::api::StatusType::Waiting

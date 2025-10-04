@@ -1,22 +1,42 @@
 use crate::interlude::*;
 
 pub fn setup_tracing() -> eyre::Result<()> {
-    color_eyre::install()?;
-    if std::env::var("RUST_LOG_TEST").is_err() {
-        std::env::set_var("RUST_LOG_TEST", "info");
-    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let filter = {
+        // if std::env::var("RUST_BACKTRACE_TEST").is_err() {
+        //     std::env::set_var("RUST_BACKTRACE", "1");
+        // }
+        std::env::var("RUST_LOG_TEST").ok()
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    let filter: Option<String> = None;
+
+    let filter = filter.unwrap_or_else(|| "info".into());
 
     use tracing_subscriber::prelude::*;
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::from_env("RUST_LOG_TEST"))
-        .with(tracing_subscriber::EnvFilter::from_default_env())
+    let registry = tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(filter))
         .with(
             tracing_subscriber::fmt::layer()
                 .compact()
                 .with_timer(tracing_subscriber::fmt::time::uptime()),
         )
-        .try_init()
-        .map_err(|err| eyre::eyre!(err))?;
+        .with(tracing_error::ErrorLayer::default());
+
+    #[cfg(target_os = "android")]
+    let registry = registry.with(tracing_android::layer("org.example.daybook")?);
+
+    registry.try_init().map_err(|err| eyre::eyre!(err))?;
+
+    // color_eyre::install()?;
+    let (eyre_panic_hook, eyre_hook) =
+        color_eyre::config::HookBuilder::default().try_into_hooks()?;
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let report = eyre_panic_hook.panic_report(panic_info);
+        tracing::error!("{report}");
+    }));
+    eyre_hook.install()?;
 
     Ok(())
 }

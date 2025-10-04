@@ -10,7 +10,7 @@ mod cart_object;
 mod docs;
 
 use crate::cart_object::CartObject;
-use crate::docs::DocsService;
+use crate::docs::DocsPipeline;
 
 fn main() -> Res<()> {
     tokio::runtime::Builder::new_multi_thread()
@@ -35,7 +35,7 @@ async fn app_main() -> Res<()> {
     HttpServer::new(
         Endpoint::builder()
             .bind(cart_object::CartObjectImpl.serve())
-            .bind(checkout_service::CheckoutServiceImpl.serve())
+            .bind(docs::DocPipelineImpl.serve())
             .build(),
     )
     .listen_and_serve(addr)

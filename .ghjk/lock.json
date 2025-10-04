@@ -1220,7 +1220,6 @@
                 "bciqmrfsq4ay7kjzlolyqkyxce4rso7kbxdpo3ccy756hcgxjxfe6clq",
                 "bciqkksz2d5trxsu3nmz654rgpcgw3sytr45njq2jn3yzsthqsagzy2i",
                 "bciqlger7l36c7se5x2rpenndenyh2wotg36do7zmn5xyot6fmx27hbq",
-                "bciqabfrzjnxq7qv2abs7qovzjzidgw67yg55zq7ksy7gkrhng2mmlki",
                 "bciqcwar2qg4avxzuw6x232qcl65bhlo5kkiaq5tlr6nlhtumyjb5rpy",
                 "bciqhkopahseugyce773uxsdne7md3hzakphgp7jczxplcmlhidtyrvy",
                 "bciqkpzir7fijfkm3mr6uxar5xvwrbrtb7ya7vconaxqgphpq6e2kpxy",
@@ -1243,6 +1242,16 @@
               "ty": "denoFile@v1",
               "key": "restate",
               "workingDir": "./tools",
+              "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
+            },
+            "deploy-daybook": {
+              "ty": "denoFile@v1",
+              "key": "deploy-daybook",
+              "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
+            },
+            "build-daybook-http": {
+              "ty": "denoFile@v1",
+              "key": "build-daybook-http",
               "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
             },
             "deploy-btress": {
@@ -1321,6 +1330,11 @@
               "key": "test-rust",
               "desc": "Run rust tests",
               "envKey": "bciqkkssrdfxz24nkaeipgheyinlb4f3sdam5i2inaopdkldpliuc53a"
+            },
+            "db-mig-daybook": {
+              "ty": "denoFile@v1",
+              "key": "db-mig-daybook",
+              "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
             },
             "db-mig-btress": {
               "ty": "denoFile@v1",
@@ -1428,6 +1442,8 @@
           },
           "tasksNamed": [
             "restate",
+            "deploy-daybook",
+            "build-daybook-http",
             "deploy-btress",
             "build-btress-http",
             "dev",
@@ -1440,6 +1456,7 @@
             "check-dayb",
             "lock-sed",
             "test-rust",
+            "db-mig-daybook",
             "db-mig-btress",
             "db-seed-btress",
             "db-seed",
@@ -2565,40 +2582,6 @@
           "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.2/ports/npmi.ts"
         },
         "packageName": "eas-cli"
-      },
-      "bciqabfrzjnxq7qv2abs7qovzjzidgw67yg55zq7ksy7gkrhng2mmlki": {
-        "port": {
-          "ty": "denoWorker@v1",
-          "name": "npmi_npm",
-          "platforms": [
-            "x86_64-linux",
-            "aarch64-linux",
-            "x86_64-darwin",
-            "aarch64-darwin",
-            "x86_64-windows",
-            "aarch64-windows",
-            "x86_64-freebsd",
-            "aarch64-freebsd",
-            "x86_64-netbsd",
-            "aarch64-netbsd",
-            "x86_64-aix",
-            "aarch64-aix",
-            "x86_64-solaris",
-            "aarch64-solaris",
-            "x86_64-illumos",
-            "aarch64-illumos",
-            "x86_64-android",
-            "aarch64-android"
-          ],
-          "version": "0.1.0",
-          "buildDeps": [
-            {
-              "name": "node_org"
-            }
-          ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.2/ports/npmi.ts"
-        },
-        "packageName": "@google/gemini-cli"
       },
       "bciqcwar2qg4avxzuw6x232qcl65bhlo5kkiaq5tlr6nlhtumyjb5rpy": {
         "version": "21.0.8\\+9.0.LTS",

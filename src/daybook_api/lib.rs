@@ -31,9 +31,8 @@ pub struct SharedServiceContext(pub ServiceContext);
 #[derive(Debug)]
 pub struct Config {}
 
+mod doc;
 mod gen;
-mod user;
-// mod utils;
 
 fn init() -> Res<()> {
     CX.set(Arc::new(Context {
@@ -59,7 +58,7 @@ pub const CX: tokio::sync::OnceCell<SharedContext> = tokio::sync::OnceCell::cons
 
 mod wit {
     wit_bindgen::generate!({
-        path: "../btress_api/wit",
+        path: "../daybook_api/wit",
         world: "api",
         // generate_all,
         // async: true,
@@ -77,13 +76,11 @@ mod wit {
 
             "townframe:api-utils/utils": api_utils_rs::wit::utils,
 
-            // "townframe:btress-api/user": crate::gen::user,
-            "townframe:btress-api/user-create": crate::gen::user::user_create,
-            "townframe:btress-api/user-create/error-email-occupied": crate::gen::user::user_create::ErrorEmailOccupied,
-            "townframe:btress-api/user-create/error-username-occupied": crate::gen::user::user_create::ErrorUsernameOccupied,
-            "townframe:btress-api/user-create/input": crate::gen::user::user_create::Input,
-            "townframe:btress-api/user/user": crate::gen::user::User,
-            "townframe:btress-api/user-create/error": crate::gen::user::user_create::Error,
+            "townframe:daybook-api/doc-create": crate::gen::doc::doc_create,
+            "townframe:daybook-api/doc-create/error-id-occupied": crate::gen::doc::doc_create::ErrorIdOccupied,
+            "townframe:daybook-api/doc-create/input": crate::gen::doc::doc_create::Input,
+            "townframe:daybook-api/doc/doc": crate::gen::doc::Doc,
+            "townframe:daybook-api/doc-create/error": crate::gen::doc::doc_create::Error,
         }
     });
 }
@@ -92,16 +89,13 @@ wit::export!(Component with_types_in wit);
 
 struct Component;
 
-impl wit::exports::townframe::btress_api::ctx::Guest for Component {
+impl wit::exports::townframe::daybook_api::ctx::Guest for Component {
     #[allow(async_fn_in_trait)]
     fn init() -> Result<(), String> {
         crate::init().map_err(|err| format!("{err:?}"))?;
         Ok(())
     }
 }
-impl wit::exports::townframe::btress_api::user_create::Guest for Component {
-    type Service = user::create::UserCreate;
+impl wit::exports::townframe::daybook_api::doc_create::Guest for Component {
+    type Service = doc::create::DocCreate;
 }
-
-pub static USERNAME_REGEX: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z0-9]+([_-]?[a-zA-Z0-9])*$").unwrap());

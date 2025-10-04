@@ -5,8 +5,6 @@ import jdk_temurin from "./tools/jdk_temurin.port.ts";
 import rust from "./tools/rust.port.ts";
 import * as ports from "@ghjk/ports_wip";
 
-import * as std_url from "jsr:@std/url@0.215.0";
-
 const DOCKER_CMD = Deno.env.get("DOCKER_CMD") ?? "podman";
 const RUST_VERSION = "nightly-2025-09-01";
 const GHJK_VERSION = "v0.3.2";
@@ -69,7 +67,7 @@ ghjk.env("dev")
     // ports.pipi({ packageName: "aider-chat" })[0],
     // expo router
     ports.npmi({ packageName: "eas-cli" })[0],
-    ports.npmi({ packageName: "@google/gemini-cli" })[0],
+    // ports.npmi({ packageName: "@google/gemini-cli" })[0],
     jdk_temurin({ version: "21.0.8\\+9.0.LTS" }),
   )
   .vars({
@@ -251,6 +249,15 @@ ghjk.task(
 );
 
 ghjk.task(
+  "db-mig-daybook",
+  ($) =>
+    $`ghjk x flyway migrate`.env({
+      DB_NAME: "daybook",
+      MIG_DIR: $.workingDir.join("./src/daybook_api/migrations").toString(),
+    }),
+);
+
+ghjk.task(
   "db-seed",
   { dependsOn: ["db-seed-btress"] },
 );
@@ -270,7 +277,7 @@ ghjk.task(
 
 ghjk.task(
   "test-rust",
-  ($) => $`cargo nextest run -p btress_api`,
+  ($) => $`cargo nextest run -p tests_http`,
   {
     desc: "Run rust tests",
     vars: {
@@ -312,7 +319,53 @@ ghjk.task("lock-sed", async ($) =>
 
 ghjk.task(
   "check-dayb",
-  ($) => $`./gradlew check`,
+  async ($) => {
+    // Stream gradle combined stdout/stderr and reveal output only when a failure marker appears.
+    // Worse-is-better: no swallow-catches, fail fast on non-zero exit, minimal code paths.
+    // Match clear failure markers only: 'BUILD FAILED', 'FAILURE:' lines, kotlin 'e:' compiler errors, or 'Exception' words
+    const failureRe = /(^|\n)(FAILED|FAILURE:|^e:|\bFAILED\b|\bException\b)/im;
+
+    // Run via shell to ensure gradle wrapper is executed correctly
+    const proc = Deno.run({ cmd: ["/bin/sh", "-lc", "./gradlew check"], stdout: "piped", stderr: "piped", cwd: $.workingDir.toString() });
+    const decoder = new TextDecoder();
+
+    const outReader = proc.stdout.readable.getReader();
+    const errReader = proc.stderr.readable.getReader();
+
+    let buffer = "";
+    let revealed = false;
+
+    // collect all output into buffer; do not reveal mid-stream to avoid false positives
+    const handle = (chunk: Uint8Array | null) => {
+      if (!chunk) return;
+      const s = decoder.decode(chunk);
+      buffer += s;
+    };
+
+    // pump both streams concurrently
+    const pump = async (reader: ReadableStreamDefaultReader<Uint8Array>) => {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        handle(value || null);
+      }
+    };
+
+    await Promise.all([pump(outReader), pump(errReader)]);
+
+    const status = await proc.status();
+    outReader.releaseLock();
+    errReader.releaseLock();
+    proc.close();
+
+    if (status.code !== 0 || failureRe.test(buffer)) {
+      // print full output on failure
+      console.log(buffer);
+      throw new Error("gradle check reported FAILED/ERROR");
+    }
+
+    return "";
+  },
   {
     desc: "Run gradle check task on app.",
     workingDir: "./src/daybook_compose/",
@@ -394,6 +447,20 @@ ghjk.task("deploy-btress", async ($) => {
   await $`wash app deploy ./src/btress_http/local.wadm.yaml --replace`
 }, {
   // dependsOn: "build-btress"
+});
+
+ghjk.task("build-daybook-http", async ($) => {
+  await $`cargo b -p daybook_api -p daybook_http --target wasm32-wasip2`
+  await $`wac plug --plug daybook_api.wasm daybook_http.wasm -o daybook_http_plugged.wasm`
+    .cwd("./target/wasm32-wasip2/debug/")
+}, {
+});
+
+ghjk.task("deploy-daybook", async ($) => {
+  await $`wash build`.cwd("./src/daybook_http/");
+  await $`wash app deploy ./src/daybook_http/local.wadm.yaml --replace`
+}, {
+  // dependsOn: "build-daybook"
 });
 
 ghjk.task(

@@ -6,6 +6,7 @@
 
 - [ ] Get uniffi working on android
 - [ ] Save a photo
+- [ ] DRY up all the wit bindgen
 
 ---
 

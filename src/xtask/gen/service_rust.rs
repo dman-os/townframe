@@ -94,6 +94,7 @@ pub fn feature_module(
         tag,
         schema_types,
         endpoints,
+        wit_module,
     }: &Feature,
 ) -> Res<()> {
     writeln!(
@@ -121,7 +122,10 @@ pub const TAG: api::Tag = api::Tag {{
         {
             let mut exp = ExportedTypesAppender {
                 into: exp_root.clone(),
-                wit_prefix: Some(tag.name.to_kebab_case()),
+                wit_prefix: Some(format!(
+                    "{wit_module}/{tag}",
+                    tag = tag.name.to_kebab_case()
+                )),
                 rust_prefix: Some(tag.name.to_snek_case()),
             };
             for id in schema_types {
@@ -148,7 +152,7 @@ pub const TAG: api::Tag = api::Tag {{
         {
             let mut exp = ExportedTypesAppender {
                 into: exp_root.clone(),
-                wit_prefix: default(),
+                wit_prefix: Some(wit_module.clone()),
                 rust_prefix: Some(tag.name.to_snek_case()),
             };
             for epoint in endpoints {
@@ -179,10 +183,7 @@ with: {{
                 let mut out = indenter::indented(buf).with_str("    ");
                 let buf = &mut out;
                 for (wit_path, rust_path) in Arc::try_unwrap(exp_root).expect("arc was held") {
-                    writeln!(
-                        buf,
-                        "\"townframe:btress-api/{wit_path}\": crate::gen::{rust_path},",
-                    )?;
+                    writeln!(buf, "\"{wit_path}\": crate::gen::{rust_path},",)?;
                 }
             }
             writeln!(buf, "}}")?;

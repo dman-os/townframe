@@ -8,5 +8,5 @@ world api {
     include townframe:api-utils/imports;
 
     export ctx;
-    export user-create;
+    export doc-create;
 }

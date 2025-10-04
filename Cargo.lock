@@ -1215,6 +1215,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "daybook_http"
+version = "0.1.0"
+dependencies = [
+ "api_utils_rs",
+ "axum 0.8.4",
+ "axum-extra",
+ "futures",
+ "http",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.16",
+ "tower",
+ "utils_rs",
+ "wit-bindgen 0.45.1",
+]
+
+[[package]]
 name = "daybook_sync"
 version = "0.1.0"
 dependencies = [

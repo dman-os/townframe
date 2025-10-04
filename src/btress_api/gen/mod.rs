@@ -101,10 +101,10 @@ pub mod user {
             with: {
                 "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
                 "townframe:api-utils/utils": api_utils_rs::wit::utils,
-                "townframe:btress-api/user-create/error-username-occupied": crate::gen::user::user_create::ErrorUsernameOccupied,
                 "townframe:btress-api/user-create/input": crate::gen::user::user_create::Input,
                 "townframe:btress-api/user-create/error": crate::gen::user::user_create::Error,
                 "townframe:btress-api/user/user": crate::gen::user::User,
+                "townframe:btress-api/user-create/error-username-occupied": crate::gen::user::user_create::ErrorUsernameOccupied,
                 "townframe:btress-api/user-create/error-email-occupied": crate::gen::user::user_create::ErrorEmailOccupied,
             }
         });

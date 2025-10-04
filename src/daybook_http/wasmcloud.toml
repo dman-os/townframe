@@ -1,0 +1,16 @@
+name = "daybook_http"
+version = "0.1.0"
+language = "rust"
+type = "component"
+path = "./../../"
+build = "./../../target/wash"
+
+[component]
+wit_world = "server"
+wasm_target = "wasm32-wasip2"
+build_command = "ghjk x build-daybook-http"
+build_artifact = "./target/wasm32-wasip2/debug/daybook_http_plugged.wasm"
+
+# [rust]
+# target_path = "./../../target"
+# debug = true
