@@ -86,6 +86,33 @@ New version
   - This system doens't allow one handler to suspend and wait on another
 
 ```
+- Doc
+  - Composite
+  - Structured
+  - Text
+  - Image
+  - Video
+  - Audio
+  - PDF
+  - Docx
+
+- DocMeta
+- DocMarker
+  - Embedding
+  - Type
+
+- Event
+- EventListener
+
+- Services
+  - DocPipeline
+    - documentCreated()
+  - DocEmbeddings
+    - embedDoc()
+    - nearestKDocs()
+  - DocMetadata
+    - extractMetadata()
+  - DocChatAgent
 ```
 
 ## dev-log

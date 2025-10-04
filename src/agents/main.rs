@@ -7,10 +7,10 @@ use crate::interlude::*;
 
 mod auxiliary;
 mod cart_object;
-mod checkout_service;
+mod docs;
 
 use crate::cart_object::CartObject;
-use crate::checkout_service::CheckoutService;
+use crate::docs::DocsService;
 
 fn main() -> Res<()> {
     tokio::runtime::Builder::new_multi_thread()

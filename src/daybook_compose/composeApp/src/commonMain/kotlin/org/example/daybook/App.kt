@@ -1,10 +1,8 @@
-
 @file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)
 
 package org.example.daybook
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -13,13 +11,10 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,47 +22,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeContentPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
-import androidx.compose.material3.BottomAppBar
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.ui.graphics.Color
-import androidx.compose.foundation.layout.wrapContentHeight
-import androidx.compose.material3.BottomSheetScaffold
-import androidx.compose.material3.SheetState
-import androidx.compose.material3.SheetValue
-import androidx.compose.material3.rememberBottomSheetScaffoldState
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.zIndex
-import kotlinx.coroutines.launch
-import androidx.compose.material3.NavigationDrawerItem
-import androidx.compose.material3.NavigationRail
-import androidx.compose.material3.NavigationRailItem
-import androidx.compose.material3.PermanentDrawerSheet
-import androidx.compose.material3.PermanentNavigationDrawer
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -76,66 +39,52 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.draw.rotate
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
-import androidx.compose.material3.Surface
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import daybook.composeapp.generated.resources.Res
 import daybook.composeapp.generated.resources.compose_multiplatform
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import org.example.daybook.capture.screens.CaptureScreen
+import org.example.daybook.tables.CompactLayout
+import org.example.daybook.tables.ExpandedLayout
+import org.example.daybook.tables.MediumLayout
 import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
 import org.example.daybook.uniffi.DocsRepo
 import org.example.daybook.uniffi.FfiCtx
-import org.example.daybook.uniffi.TablesRepo
-import org.example.daybook.uniffi.Window
-import org.example.daybook.uniffi.Tab
+import org.example.daybook.uniffi.FfiException
+import org.example.daybook.uniffi.ListenerRegistration
 import org.example.daybook.uniffi.Panel
+import org.example.daybook.uniffi.Tab
 import org.example.daybook.uniffi.Table
 import org.example.daybook.uniffi.TablesEvent
 import org.example.daybook.uniffi.TablesEventListener
-import org.example.daybook.uniffi.ListenerRegistration
+import org.example.daybook.uniffi.TablesRepo
 import org.example.daybook.uniffi.Uuid
-import org.example.daybook.uniffi.FfiException
+import org.example.daybook.uniffi.Window
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.ui.tooling.preview.Preview
 
 enum class DaybookNavigationType {
-    BOTTOM_NAVIGATION,
-    NAVIGATION_RAIL,
-    PERMANENT_NAVIGATION_DRAWER
+    BOTTOM_NAVIGATION, NAVIGATION_RAIL, PERMANENT_NAVIGATION_DRAWER
 }
 
 enum class DaybookContentType {
-    LIST_ONLY,
-    LIST_AND_DETAIL
+    LIST_ONLY, LIST_AND_DETAIL
 }
 
 val LocalPermCtx = compositionLocalOf<PermissionsContext?> { null }
@@ -147,16 +96,11 @@ data class PermissionsContext(
     val hasOverlay: Boolean = false,
     val requestAllPermissions: () -> Unit = {},
 ) {
-    val hasAll = hasCamera and
-            hasNotifications and
-            hasMicrophone and
-            hasOverlay
+    val hasAll = hasCamera and hasNotifications and hasMicrophone and hasOverlay
 }
 
 data class AppContainer(
-    val ffiCtx: FfiCtx,
-    val docsRepo: DocsRepo,
-    val tablesRepo: TablesRepo
+    val ffiCtx: FfiCtx, val docsRepo: DocsRepo, val tablesRepo: TablesRepo
 )
 
 val LocalContainer = staticCompositionLocalOf<AppContainer> {
@@ -168,9 +112,7 @@ data class AppConfig(
 )
 
 enum class AppScreens {
-    Home,
-    Capture,
-    Tables
+    Home, Capture, Tables
 }
 
 private sealed interface AppInitState {
@@ -192,6 +134,7 @@ sealed interface TablesState {
         val panelsList: List<Panel> get() = panels.values.toList()
         val tablesList: List<Table> get() = tables.values.toList()
     }
+
     data class Error(val error: FfiException) : TablesState
     object Loading : TablesState
 }
@@ -201,7 +144,7 @@ class TablesViewModel(
 ) : ViewModel() {
     private val _tablesState = MutableStateFlow(TablesState.Loading as TablesState)
     val tablesState = _tablesState.asStateFlow()
-    
+
     // Selected table state
     private val _selectedTableId = MutableStateFlow<Uuid?>(null)
     val selectedTableId = _selectedTableId.asStateFlow()
@@ -219,18 +162,22 @@ class TablesViewModel(
                         // Full refresh when list structure changes
                         refreshTables()
                     }
+
                     is TablesEvent.WindowChanged -> {
                         // Targeted refresh for specific window
                         updateWindow(event.id)
                     }
+
                     is TablesEvent.TabChanged -> {
                         // Targeted refresh for specific tab
                         updateTab(event.id)
                     }
+
                     is TablesEvent.PanelChanged -> {
                         // Targeted refresh for specific panel
                         updatePanel(event.id)
                     }
+
                     is TablesEvent.TableChanged -> {
                         // Targeted refresh for specific table
                         updateTable(event.id)
@@ -260,9 +207,8 @@ class TablesViewModel(
                 windows = windows.associateBy { it.id },
                 tabs = tabs.associateBy { it.id },
                 panels = panels.associateBy { it.id },
-                tables = tables.associateBy { it.id }
-            )
-            
+                tables = tables.associateBy { it.id })
+
             // Auto-select first table if none is selected
             if (_selectedTableId.value == null && tables.isNotEmpty()) {
                 _selectedTableId.value = tables.first().id
@@ -279,14 +225,14 @@ class TablesViewModel(
             if (currentState is TablesState.Data) {
                 val updatedWindow = tablesRepo.ffiGetWindow(windowId)
                 val updatedWindows = currentState.windows.toMutableMap()
-                
+
                 if (updatedWindow != null) {
                     updatedWindows[windowId] = updatedWindow
                 } else {
                     // Window was deleted, remove from map
                     updatedWindows.remove(windowId)
                 }
-                
+
                 _tablesState.value = currentState.copy(windows = updatedWindows)
             }
         } catch (e: FfiException) {
@@ -300,14 +246,14 @@ class TablesViewModel(
             if (currentState is TablesState.Data) {
                 val updatedTab = tablesRepo.ffiGetTab(tabId)
                 val updatedTabs = currentState.tabs.toMutableMap()
-                
+
                 if (updatedTab != null) {
                     updatedTabs[tabId] = updatedTab
                 } else {
                     // Tab was deleted, remove from map
                     updatedTabs.remove(tabId)
                 }
-                
+
                 _tablesState.value = currentState.copy(tabs = updatedTabs)
             }
         } catch (e: FfiException) {
@@ -321,14 +267,14 @@ class TablesViewModel(
             if (currentState is TablesState.Data) {
                 val updatedPanel = tablesRepo.ffiGetPanel(panelId)
                 val updatedPanels = currentState.panels.toMutableMap()
-                
+
                 if (updatedPanel != null) {
                     updatedPanels[panelId] = updatedPanel
                 } else {
                     // Panel was deleted, remove from map
                     updatedPanels.remove(panelId)
                 }
-                
+
                 _tablesState.value = currentState.copy(panels = updatedPanels)
             }
         } catch (e: FfiException) {
@@ -342,14 +288,14 @@ class TablesViewModel(
             if (currentState is TablesState.Data) {
                 val updatedTable = tablesRepo.ffiGetTable(tableId)
                 val updatedTables = currentState.tables.toMutableMap()
-                
+
                 if (updatedTable != null) {
                     updatedTables[tableId] = updatedTable
                 } else {
                     // Table was deleted, remove from map
                     updatedTables.remove(tableId)
                 }
-                
+
                 _tablesState.value = currentState.copy(tables = updatedTables)
             }
         } catch (e: FfiException) {
@@ -362,7 +308,7 @@ class TablesViewModel(
             refreshTables()
         }
     }
-    
+
     fun selectTable(tableId: Uuid) {
         _selectedTableId.value = tableId
     }
@@ -389,7 +335,7 @@ class TablesViewModel(
             }
         }
     }
-    
+
     suspend fun getSelectedTable(): Table? {
         val currentState = _tablesState.value
         val selectedId = _selectedTableId.value
@@ -404,7 +350,7 @@ class TablesViewModel(
             }
         }
     }
-    
+
     suspend fun getTabsForSelectedTable(): List<Tab> {
         val selectedTable = getSelectedTable()
         val currentState = _tablesState.value
@@ -476,16 +422,14 @@ fun App(
         val fcx = FfiCtx.forFfi()
         val docsRepo = DocsRepo.forFfi(fcx = fcx)
         val tablesRepo = TablesRepo.forFfi(fcx = fcx)
-        
+
         // Initialize first-time data if needed
         val tablesViewModel = TablesViewModel(tablesRepo)
         tablesViewModel.initializeFirstTime()
-        
+
         initState = AppInitState.Ready(
             AppContainer(
-                ffiCtx = fcx,
-                docsRepo = docsRepo,
-                tablesRepo = tablesRepo
+                ffiCtx = fcx, docsRepo = docsRepo, tablesRepo = tablesRepo
             )
         )
     }
@@ -498,9 +442,9 @@ fun App(
 
             is AppInitState.Error -> {
                 ErrorScreen(
+                    title = "Failed to initialize",
                     message = state.throwable.message ?: "Unknown error",
-                    onRetry = { initAttempt += 1 }
-                )
+                    onRetry = { initAttempt += 1 })
             }
 
             is AppInitState.Ready -> {
@@ -537,7 +481,7 @@ fun AdaptiveAppLayout(
 ) {
     val platform = getPlatform()
     val screenWidth = platform.getScreenWidthDp()
-    
+
     val navigationType: DaybookNavigationType
     val contentType: DaybookContentType
 
@@ -547,11 +491,13 @@ fun AdaptiveAppLayout(
             navigationType = DaybookNavigationType.BOTTOM_NAVIGATION
             contentType = DaybookContentType.LIST_ONLY
         }
+
         screenWidth.value < 840f -> {
             // Medium screens (phones in landscape, small tablets)
             navigationType = DaybookNavigationType.NAVIGATION_RAIL
             contentType = DaybookContentType.LIST_ONLY
         }
+
         else -> {
             // Expanded screens (tablets, desktop)
             navigationType = DaybookNavigationType.PERMANENT_NAVIGATION_DRAWER
@@ -580,449 +526,31 @@ fun DaybookHomeScreen(
     when (navigationType) {
         DaybookNavigationType.PERMANENT_NAVIGATION_DRAWER -> {
             ExpandedLayout(
-                modifier = modifier,
-                navController = navController,
-                extraAction = extraAction
+                modifier = modifier, navController = navController, extraAction = extraAction
             )
         }
 
         DaybookNavigationType.NAVIGATION_RAIL -> {
             MediumLayout(
-                modifier = modifier,
-                navController = navController,
-                extraAction = extraAction
+                modifier = modifier, navController = navController, extraAction = extraAction
             )
         }
 
         DaybookNavigationType.BOTTOM_NAVIGATION -> {
             CompactLayout(
-                modifier = modifier,
-                navController = navController,
-                extraAction = extraAction
+                modifier = modifier, navController = navController, extraAction = extraAction
             )
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun CompactLayout(
-    modifier: Modifier = Modifier,
-    navController: NavHostController,
-    extraAction: (() -> Unit)? = null
-) {
-    var showFeaturesMenu by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    val density = LocalDensity.current
-    val sheetState = remember(density) {
-        SheetState(
-            skipPartiallyExpanded = false,
-            initialValue = SheetValue.Hidden,
-            density = density,
-            skipHiddenState = false
-        )
-    }
-    val bottomSheetScaffoldState = rememberBottomSheetScaffoldState(
-        bottomSheetState = sheetState
-    )
-    var sheetContent by remember { mutableStateOf(SheetContent.TABS) }
-    // sheet content collapsed to tabs only (we use nav rail for table switching)
-    var isSheetManuallyOpened by rememberSaveable { mutableStateOf(false) }
-    
-    var tabItemLayouts by remember { mutableStateOf(mapOf<Uuid, Rect>()) }
-    var tableItemLayouts by remember { mutableStateOf(mapOf<Uuid, Rect>()) }
-    var highlightedTable by remember { mutableStateOf<Uuid?>(null) }
-    var highlightedTab by remember { mutableStateOf<Uuid?>(null) }
-    var isDragging by remember { mutableStateOf(false) }
-
-    val tablesRepo = LocalContainer.current.tablesRepo
-    val vm = viewModel { TablesViewModel(tablesRepo) }
-    var pendingTabSelection by remember { mutableStateOf<Uuid?>(null) }
-
-    // Clear cached tab layout rects whenever the selected table or sheet content changes
-    val selectedTableIdForLayouts = vm.selectedTableId.collectAsState().value
-    LaunchedEffect(selectedTableIdForLayouts, sheetContent) {
-        // Avoid clearing cached layouts while the user is actively dragging; that
-        // causes missing hit rects mid-drag when we switch selected table on hover.
-        if (!isDragging) {
-            tabItemLayouts = mapOf()
-            tableItemLayouts = mapOf()
-            highlightedTab = null
-            highlightedTable = null
-        }
-    }
-
-    // This effect will show/hide the sheet based on the isSheetManuallyOpened flag
-    LaunchedEffect(isSheetManuallyOpened) {
-        if (isSheetManuallyOpened) {
-            bottomSheetScaffoldState.bottomSheetState.expand()
-        } else {
-            bottomSheetScaffoldState.bottomSheetState.hide()
-        }
-    }
-
-    // This effect will sync the isSheetManuallyOpened flag back if the user swipes the sheet close
-    LaunchedEffect(bottomSheetScaffoldState.bottomSheetState.isVisible) {
-        if (!bottomSheetScaffoldState.bottomSheetState.isVisible) {
-            isSheetManuallyOpened = false
-        }
-    }
-
-    val centerNavBarContent: @Composable RowScope.() -> Unit = {
-        // When sheet is open, show controls (add button). When closed, show current tab title.
-        if (isSheetManuallyOpened) {
-            // Add-tab button expands to fill the center area
-            Button(
-                onClick = {
-                    scope.launch {
-                        val sel = vm.getSelectedTable()
-                        if (sel != null) {
-                            val res = vm.createNewTab(sel.id)
-                            if (res.isSuccess) {
-                                val newTab = res.getOrNull()
-                                if (newTab != null) {
-                                    vm.selectTab(newTab.id)
-                                }
-                            }
-                        }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
-            ) {
-                Text("Add Tab")
-            }
-        } else {
-            val tablesRepo = LocalContainer.current.tablesRepo
-            val vmLocal = viewModel { TablesViewModel(tablesRepo) }
-            val selectedTableId = vmLocal.selectedTableId.collectAsState().value
-            val tablesState = vmLocal.tablesState.collectAsState().value
-
-            val currentTabTitle = if (selectedTableId != null && tablesState is TablesState.Data) {
-                val selectedTable = tablesState.tables[selectedTableId]
-                if (selectedTable != null && selectedTable.selectedTab != null) {
-                    tablesState.tabs[selectedTable.selectedTab]?.title ?: "No Tab"
-                } else "No Tab"
-            } else "No Tab"
-
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                Text(
-                    text = currentTabTitle,
-                    style = MaterialTheme.typography.titleMedium,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-    }
-
-    val snackbarHostState = remember { SnackbarHostState() }
-
-    // Track tabs button window rect so we can convert local pointer positions to window coords
-    var tabsButtonWindowRect by remember { mutableStateOf<Rect?>(null) }
-
-    val tabsButtonModifier = Modifier.pointerInput(Unit) {
-        detectDragGestures(
-            onDragStart = { _ ->
-                scope.launch {
-                    isSheetManuallyOpened = true
-                    bottomSheetScaffoldState.bottomSheetState.expand()
-                    isDragging = true
-                }
-            },
-            onDrag = { change, _ ->
-                // Convert local pointer position to window coords using captured button rect
-                val localPos = change.position
-                val buttonRect = tabsButtonWindowRect
-                if (buttonRect != null) {
-                    val windowPos = Offset(buttonRect.left + localPos.x, buttonRect.top + localPos.y)
-                    val tabHit = tabItemLayouts.entries.find { (_, rect) -> rect.contains(windowPos) }
-                    highlightedTab = tabHit?.key
-
-                    // Hover-switch tables: if pointer over a table item, switch immediately
-                    // Prefer the most recently captured rects: order entries by rect area
-                    val tableHit = tableItemLayouts.entries
-                        .sortedByDescending { (_, rect) -> rect.width * rect.height }
-                        .find { (_, rect) -> rect.contains(windowPos) }
-
-                    if (tableHit != null) {
-                        val tableId = tableHit.key
-                        if (tableId != highlightedTable) {
-                            highlightedTable = tableId
-                            vm.selectTable(tableId)
-                        }
-                    }
-                } else {
-                    // Fallback: not enough context to map to window coords
-                }
-            },
-            onDragEnd = {
-                scope.launch {
-                    pendingTabSelection = highlightedTab
-                    isSheetManuallyOpened = false
-                    isDragging = false
-                }
-            },
-            onDragCancel = {
-                scope.launch {
-                    isSheetManuallyOpened = false
-                    isDragging = false
-                }
-            }
-        )
-    }
-
-    val featuresButtonModifier = Modifier
-
-    Scaffold(
-        modifier = modifier,
-        bottomBar = {
-                DaybookBottomNavigationBar(
-                onTabPressed = {
-                    isSheetManuallyOpened = !isSheetManuallyOpened
-                },
-                onFeaturesPressed = { showFeaturesMenu = !showFeaturesMenu },
-                centerContent = {
-                    Row {
-                        // original center content
-                        centerNavBarContent()
-                    }
-                },
-                tabsButtonModifier = tabsButtonModifier,
-                onTabsButtonLayout = { rect -> tabsButtonWindowRect = rect },
-                featuresButtonModifier = featuresButtonModifier
-            )
-        },
-        snackbarHost = { SnackbarHost(snackbarHostState) }
-    ) { scaffoldPadding ->
-        BottomSheetScaffold(
-            scaffoldState = bottomSheetScaffoldState,
-            topBar = { TopAppBar(title = { Text("Daybook") }) },
-            sheetContent = {
-                SheetContentHost(
-                    sheetContent = sheetContent,
-                    onTabSelected = {
-                        // When the user selects a tab from the sheet, route it via the vm
-                        vm.selectTab(it.id)
-                        isSheetManuallyOpened = false
-                    },
-                    onTableSelected = { table ->
-                        vm.selectTable(table.id)
-                        sheetContent = SheetContent.TABS // Switch back to tabs
-                    },
-                    onDismiss = {
-                        isSheetManuallyOpened = false
-                    },
-                    onTabLayout = { tabId, rect ->
-                        tabItemLayouts = tabItemLayouts + (tabId to rect)
-                        try { println("[DBG] tab layout updated: id=${tabId} total=${tabItemLayouts.size}") } catch (_: Throwable) {}
-                    },
-                    onTableLayout = { tableId, rect ->
-                        tableItemLayouts = tableItemLayouts + (tableId to rect)
-                        try { println("[DBG] table layout updated: id=${tableId} total=${tableItemLayouts.size}") } catch (_: Throwable) {}
-                    },
-                    highlightedTab = highlightedTab,
-                    highlightedTable = highlightedTable
-                )
-            },
-            sheetPeekHeight = 0.dp,
-            modifier = Modifier.padding(scaffoldPadding)
-        ) { contentPadding ->
-            // Capture the sheet/root content bounds for mapping window coords -> local coords
-            var sheetRootWindowRect by remember { mutableStateOf<Rect?>(null) }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(contentPadding)
-                    .onGloballyPositioned { sheetRootWindowRect = it.boundsInWindow() }
-            ) {
-                Routes(
-                    modifier = Modifier.fillMaxSize(),
-                    extraAction = extraAction,
-                    navController = navController
-                )
-
-                if (showFeaturesMenu) {
-                    FeaturesMenu(
-                        onDismiss = { showFeaturesMenu = false }
-                    )
-                }
-            }
-        }
-
-// Handle pending tab selection applied after drag end
-LaunchedEffect(pendingTabSelection) {
-    val pending = pendingTabSelection
-    if (pending != null) {
-        vm.selectTab(pending)
-        pendingTabSelection = null
-        highlightedTab = null
-    }
-}
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun MediumLayout(
-    modifier: Modifier = Modifier,
-    navController: NavHostController,
-    extraAction: (() -> Unit)? = null
-) {
-    Scaffold(
-        modifier = modifier,
-        topBar = {
-            TopAppBar(
-                title = { Text("Daybook") }
-            )
-        }
-    ) { innerPadding ->
-        Row(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-            LeftTableNavigationRail()
-            PermanentNavigationDrawer(
-                drawerContent = {
-                    PermanentDrawerSheet(
-                        modifier = Modifier.width(280.dp)
-                    ) {
-                        TablesTabsList()
-                    }
-                }
-            ) {
-                Routes(
-                    modifier = Modifier.weight(1f),
-                    extraAction = extraAction,
-                    navController = navController
-                )
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ExpandedLayout(
-    modifier: Modifier = Modifier,
-    navController: NavHostController,
-    extraAction: (() -> Unit)? = null
-) {
-    Scaffold(
-        modifier = modifier,
-        topBar = {
-            TopAppBar(
-                title = { Text("Daybook") }
-            )
-        }
-    ) { innerPadding ->
-        Row(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-            LeftTableNavigationRail()
-            PermanentNavigationDrawer(
-                drawerContent = {
-                    PermanentDrawerSheet(
-                        modifier = Modifier.padding(10.dp),
-                    ) {
-                        Column {
-                            TablesTabsList()
-                        }
-                    }
-                }
-            ) {
-                Box(modifier = Modifier.weight(1f)) {
-                    Routes(
-                        extraAction = extraAction,
-                        navController = navController
-                    )
-                }
-            }
-            RightFeaturesNavigationRail()
-        }
-    }
-}
-
-@Composable
-fun LeftTableNavigationRail() {
-    val tablesRepo = LocalContainer.current.tablesRepo
-    val vm = viewModel { TablesViewModel(tablesRepo) }
-    val tablesState = vm.tablesState.collectAsState().value
-    val selectedTableId = vm.selectedTableId.collectAsState().value
-    
-    NavigationRail(
-        modifier = Modifier.width(80.dp)
-    ) {
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        // Add Table Button
-        FloatingActionButton(
-            onClick = { 
-                vm.viewModelScope.launch {
-                    vm.createNewTable()
-                }
-            },
-            modifier = Modifier.size(48.dp)
-        ) {
-            Text("+")
-        }
-        
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        // Table List
-        when (tablesState) {
-            is TablesState.Data -> {
-                tablesState.tablesList.forEach { table ->
-                    NavigationRailItem(
-                        selected = selectedTableId == table.id,
-                        onClick = { vm.selectTable(table.id) },
-                        icon = {
-                            Text("📁")
-                        },
-                        label = { Text(table.title) }
-                    )
-                }
-            }
-            is TablesState.Loading -> {
-                CircularProgressIndicator(modifier = Modifier.size(24.dp))
-            }
-            is TablesState.Error -> {
-                Text("Error")
-            }
-        }
-    }
-}
-
-@Composable
-fun RightFeaturesNavigationRail() {
-    NavigationRail(
-        modifier = Modifier.width(80.dp)
-    ) {
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        // Placeholder feature buttons
-        NavigationRailItem(
-            selected = false,
-            onClick = { /* TODO: Settings */ },
-            icon = {
-                Text("⚙️")
-            },
-            label = { Text("Settings") }
-        )
-        
-        NavigationRailItem(
-            selected = false,
-            onClick = { /* TODO: Features */ },
-            icon = {
-                Text("⚙️")
-            },
-            label = { Text("Features") }
-        )
-    }
-}
 
 @Composable
 fun TablesTabsList() {
     val tablesRepo = LocalContainer.current.tablesRepo
     val vm = viewModel { TablesViewModel(tablesRepo) }
     val tablesState = vm.tablesState.collectAsState()
-    
+
     LaunchedEffect(tablesState.value) {
         if (tablesState.value is TablesState.Data) {
             val selectedTable = vm.getSelectedTable()
@@ -1031,10 +559,10 @@ fun TablesTabsList() {
             }
         }
     }
-    
+
     val currentState = tablesState.value
     val selectedTableId = vm.selectedTableId.collectAsState()
-    
+
     when (currentState) {
         is TablesState.Data -> {
             val selectedTable = selectedTableId.value?.let { currentState.tables[it] }
@@ -1045,51 +573,45 @@ fun TablesTabsList() {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Tabs in ${selectedTable.title}",
-                            modifier = Modifier.weight(1f)
+                            text = "Tabs in ${selectedTable.title}", modifier = Modifier.weight(1f)
                         )
                         // Add new tab button
                         FloatingActionButton(
-                            onClick = { 
+                            onClick = {
                                 vm.viewModelScope.launch {
                                     vm.createNewTab(selectedTable.id)
                                 }
-                            },
-                            modifier = Modifier.size(32.dp)
+                            }, modifier = Modifier.size(32.dp)
                         ) {
                             Text("+", fontSize = 12.sp)
                         }
                     }
-                    
-                    selectedTable.tabs.mapNotNull { tabId -> currentState.tabs[tabId] }.forEach { tab ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            NavigationDrawerItem(
-                                selected = false, // TODO: Track selected tab
-                                onClick = { /* TODO: Select tab */ },
-                                icon = {
-                                    Text("📄")
-                                },
-                                badge = {
-                                    // Close tab button
-                                    FloatingActionButton(
-                                        onClick = { 
-                                            vm.viewModelScope.launch {
-                                                vm.removeTab(tab.id)
-                                            }
-                                        },
-                                        modifier = Modifier.size(24.dp).padding(end = 8.dp)
-                                    ) {
-                                        Text("×", fontSize = 10.sp)
-                                    }
-                                },
-                                label = { Text(tab.title) },
-                                modifier = Modifier.weight(1f)
-                            )
+
+                    selectedTable.tabs.mapNotNull { tabId -> currentState.tabs[tabId] }
+                        .forEach { tab ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                NavigationDrawerItem(
+                                    selected = false, // TODO: Track selected tab
+                                    onClick = { /* TODO: Select tab */ }, icon = {
+                                        Text("📄")
+                                    }, badge = {
+                                        // Close tab button
+                                        FloatingActionButton(
+                                            onClick = {
+                                                vm.viewModelScope.launch {
+                                                    vm.removeTab(tab.id)
+                                                }
+                                            }, modifier = Modifier.size(24.dp).padding(end = 8.dp)
+                                        ) {
+                                            Text("×", fontSize = 10.sp)
+                                        }
+                                    }, label = { Text(tab.title) }, modifier = Modifier.weight(1f)
+                                )
+                            }
                         }
-                    }
                 }
             } else {
                 Text(
@@ -1098,12 +620,14 @@ fun TablesTabsList() {
                 )
             }
         }
+
         is TablesState.Loading -> {
             Text(
                 text = "Loading...",
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
             )
         }
+
         is TablesState.Error -> {
             Text(
                 text = "Error loading tables",
@@ -1122,12 +646,12 @@ fun TablesScreen() {
 
     val tablesState = vm.tablesState.collectAsState().value
     val selectedTableId = vm.selectedTableId.collectAsState().value
-    
+
     // Get selected table from state instead of calling suspend function
     val selectedTable = if (tablesState is TablesState.Data && selectedTableId != null) {
         tablesState.tables[selectedTableId]
     } else null
-    
+
     val tabsForSelectedTable = if (selectedTable != null && tablesState is TablesState.Data) {
         selectedTable.tabs.mapNotNull { tabId -> tablesState.tabs[tabId] }
     } else emptyList()
@@ -1135,31 +659,26 @@ fun TablesScreen() {
     when (tablesState) {
         is TablesState.Error -> {
             Column(
-                modifier = Modifier
-                    .safeContentPadding()
-                    .fillMaxSize(),
+                modifier = Modifier.safeContentPadding().fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text("Error loading tables: ${tablesState.error.message()}")
             }
         }
+
         is TablesState.Loading -> {
             Column(
-                modifier = Modifier
-                    .safeContentPadding()
-                    .fillMaxSize(),
+                modifier = Modifier.safeContentPadding().fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 CircularProgressIndicator()
                 Text("Loading tables...")
             }
         }
+
         is TablesState.Data -> {
             Column(
-                modifier = Modifier
-                    .safeContentPadding()
-                    .fillMaxSize()
-                    .padding(16.dp),
+                modifier = Modifier.safeContentPadding().fillMaxSize().padding(16.dp),
             ) {
                 // Selected Table Info
                 if (selectedTable != null) {
@@ -1167,12 +686,12 @@ fun TablesScreen() {
                         text = "Selected Table: ${selectedTable.title}",
                         modifier = Modifier.padding(bottom = 16.dp)
                     )
-                    
+
                     Text(
                         text = "Tabs in this table: ${tabsForSelectedTable.size}",
                         modifier = Modifier.padding(bottom = 8.dp)
                     )
-                    
+
                     // Show tabs for selected table
                     tabsForSelectedTable.forEach { tab ->
                         Text(
@@ -1180,26 +699,24 @@ fun TablesScreen() {
                             modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
                         )
                     }
-                    
+
                     Spacer(modifier = Modifier.height(24.dp))
                 }
-                
+
                 // Overall State Summary
                 Text(
-                    text = "Overall State:",
-                    modifier = Modifier.padding(bottom = 8.dp)
+                    text = "Overall State:", modifier = Modifier.padding(bottom = 8.dp)
                 )
                 Text("  • Windows: ${tablesState.windows.size}")
                 Text("  • Tables: ${tablesState.tables.size}")
                 Text("  • Tabs: ${tablesState.tabs.size}")
                 Text("  • Panels: ${tablesState.panels.size}")
-                
+
                 Spacer(modifier = Modifier.height(24.dp))
-                
+
                 // All Tables List
                 Text(
-                    text = "All Tables:",
-                    modifier = Modifier.padding(bottom = 8.dp)
+                    text = "All Tables:", modifier = Modifier.padding(bottom = 8.dp)
                 )
                 tablesState.tablesList.forEach { table ->
                     val isSelected = table.id == selectedTableId
@@ -1223,9 +740,7 @@ fun Routes(
     NavHost(
         startDestination = AppScreens.Home.name,
         navController = navController,
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+        modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState())
     ) {
         composable(route = AppScreens.Capture.name) {
             CaptureScreen()
@@ -1236,9 +751,7 @@ fun Routes(
         composable(route = AppScreens.Home.name) {
             var showContent by remember { mutableStateOf(false) }
             Column(
-                modifier = Modifier
-                    .safeContentPadding()
-                    .fillMaxSize(),
+                modifier = Modifier.safeContentPadding().fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Button(onClick = {
@@ -1248,7 +761,7 @@ fun Routes(
                     Text("Click me!")
                 }
                 run {
-                   val permCtx = LocalPermCtx.current
+                    val permCtx = LocalPermCtx.current
                     if (permCtx != null) {
                         if (permCtx.hasAll) {
                             Text("All permissions avail")
@@ -1264,8 +777,7 @@ fun Routes(
                 AnimatedVisibility(showContent) {
                     val greeting = remember { Greeting().greet() }
                     Column(
-                        Modifier.fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                        Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Image(painterResource(Res.drawable.compose_multiplatform), null)
                         Text("Compose: $greeting")
@@ -1280,19 +792,13 @@ fun Routes(
 private fun LoadingScreen() {
     val infiniteTransition = rememberInfiniteTransition(label = "loading_transition")
     val scale by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "loading_scale"
+        initialValue = 1f, targetValue = 1.1f, animationSpec = infiniteRepeatable(
+            animation = tween(600, easing = FastOutSlowInEasing), repeatMode = RepeatMode.Reverse
+        ), label = "loading_scale"
     )
 
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface),
         contentAlignment = Alignment.Center
     ) {
         Column(
@@ -1300,9 +806,7 @@ private fun LoadingScreen() {
             verticalArrangement = Arrangement.Center
         ) {
             Text(
-                text = "📖",
-                fontSize = 80.sp,
-                modifier = Modifier.scale(scale)
+                text = "📖", fontSize = 80.sp, modifier = Modifier.scale(scale)
             )
             Spacer(Modifier.height(24.dp))
             Text(
@@ -1316,18 +820,17 @@ private fun LoadingScreen() {
 
 @Composable
 private fun ErrorScreen(
+    title: String,
     message: String,
     onRetry: () -> Unit,
 ) {
     Box(
-        modifier = Modifier
-            .fillMaxSize(),
-        contentAlignment = Alignment.Center
+        modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("Failed to initialize")
+            Text(title)
             Spacer(Modifier.height(8.dp))
             Text(message)
             Spacer(Modifier.height(16.dp))
@@ -1336,327 +839,3 @@ private fun ErrorScreen(
     }
 }
 
-@Composable
-fun DaybookBottomNavigationBar(
-    onTabPressed: () -> Unit,
-    onFeaturesPressed: () -> Unit,
-    modifier: Modifier = Modifier,
-    centerContent: @Composable RowScope.() -> Unit,
-    tabsButtonModifier: Modifier = Modifier,
-    featuresButtonModifier: Modifier = Modifier,
-    extraLeftContent: (@Composable () -> Unit)? = null
-    , onTabsButtonLayout: ((Rect) -> Unit)? = null
-)
-{
-    /*
-     * New simplified, extensible bottom bar implementation:
-     * - left area: toggle / drag-enabled tab switcher
-     * - center area: dynamic content provided by caller (or default)
-     * - right area: toggle features / FABs
-     *
-     * The API is intentionally minimal: callers pass composables for the center
-     * and modifiers for the left/right buttons so behavior can be composed
-     * elsewhere. The left button supports pointer input drag gestures via the
-     * provided modifier (caller can pass a modifier using
-     * pointerInput + detectDragGesturesAfterLongPress). Internally we layout
-     * the 3 areas in a Row inside a BottomAppBar.
-     */
-
-    BottomAppBar(
-        modifier = modifier,
-        contentPadding = PaddingValues(4.dp)
-    ) {
-        // Left (tab) button area (tab button + optional extra)
-        Box(modifier = Modifier.weight(0.15f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = onTabPressed,
-                    modifier = tabsButtonModifier.then(
-                        if (onTabsButtonLayout != null) Modifier.onGloballyPositioned { onTabsButtonLayout(it.boundsInWindow()) } else Modifier
-                    )
-                ) {
-                    Text("📄", fontSize = 16.sp)
-                }
-
-                // optional extra content supplied by caller (e.g., a drag-detecting helper)
-                if (extraLeftContent != null) {
-                    extraLeftContent()
-                }
-            }
-        }
-
-        // Center dynamic area (expandable)
-        Box(modifier = Modifier.weight(0.7f), contentAlignment = Alignment.Center) {
-            // centerContent is a RowScope receiver; call it inside a Row so callers
-            // can use RowScope.weight if they need to. We'll add a default slot for
-            // the add-new-tab action when the sheet is closed.
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                centerContent()
-            }
-        }
-
-        // Right (features) button area
-        Box(modifier = Modifier.weight(0.15f), contentAlignment = Alignment.CenterEnd) {
-            IconButton(
-                onClick = onFeaturesPressed,
-                modifier = featuresButtonModifier
-            ) {
-                Text("⚙️", fontSize = 16.sp)
-            }
-        }
-    }
-}
-
-
-enum class SheetContent { TABS }
-
-@Composable
-fun SheetContentHost(
-    sheetContent: SheetContent,
-    onTabSelected: (Tab) -> Unit,
-    onTableSelected: (Table) -> Unit,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
-    onTabLayout: (tabId: Uuid, rect: Rect) -> Unit,
-    onTableLayout: (tableId: Uuid, rect: Rect) -> Unit,
-    highlightedTab: Uuid?,
-    highlightedTable: Uuid?
-) {
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(top = 16.dp, bottom = 96.dp)
-    ) {
-        // Header
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Show current table title as sheet title
-            val tablesRepoForTitle = LocalContainer.current.tablesRepo
-            val vmForTitle = viewModel { TablesViewModel(tablesRepoForTitle) }
-            val selectedTableIdTitle = vmForTitle.selectedTableId.collectAsState().value
-            val tablesStateTitle = vmForTitle.tablesState.collectAsState().value
-            val title = if (selectedTableIdTitle != null && tablesStateTitle is TablesState.Data) {
-                tablesStateTitle.tables[selectedTableIdTitle]?.title ?: "Select Tab"
-            } else "Select Tab"
-            Text(
-                text = title,
-                style = MaterialTheme.typography.headlineSmall
-            )
-            // Action buttons: allow quick creation of tabs/tables from the sheet
-            val tablesRepo = LocalContainer.current.tablesRepo
-            val vm = viewModel { TablesViewModel(tablesRepo) }
-
-            // header: no action buttons here; add-tab moved to navbar center
-
-            Button(onClick = onDismiss) {
-                Text("Close")
-            }
-        }
-
-        Spacer(Modifier.weight(1f))
-
-        // Content
-        when (sheetContent) {
-            SheetContent.TABS -> {
-                // Show tabs list plus a NavigationRail for table switching
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    // NavigationRail-based table switcher on the LEFT of the sheet
-                    val tablesRepo2 = LocalContainer.current.tablesRepo
-                    val vm2 = viewModel { TablesViewModel(tablesRepo2) }
-                    val tablesState = vm2.tablesState.collectAsState().value
-                    val selectedTableId = vm2.selectedTableId.collectAsState().value
-
-                    NavigationRail(modifier = Modifier.width(80.dp)) {
-                        // push items to the bottom
-                        Spacer(Modifier.weight(1f))
-                        if (tablesState is TablesState.Data) {
-                            // Render reversed so items start from bottom
-                            tablesState.tablesList.reversed().forEach { table ->
-                                NavigationRailItem(
-                                    selected = (selectedTableId == table.id) || (highlightedTable == table.id),
-                                    onClick = { onTableSelected(table) },
-                                    icon = {
-                                        Box(modifier = Modifier.onGloballyPositioned {
-                                            onTableLayout(table.id, it.boundsInWindow())
-                                        }) {
-                                            Text("📁")
-                                        }
-                                    }
-                                )
-                            }
-                        } else {
-                            CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                        }
-                    }
-
-                    TabSelectionList(
-                        onTabSelected = onTabSelected,
-                        modifier = Modifier.weight(1f).padding(start = 16.dp, end = 8.dp),
-                        onItemLayout = onTabLayout,
-                        highlightedTab = highlightedTab
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun TabSelectionList(
-    onTabSelected: (Tab) -> Unit,
-    modifier: Modifier = Modifier,
-    onItemLayout: (tabId: Uuid, rect: Rect) -> Unit,
-    highlightedTab: Uuid?
-) {
-    val tablesRepo = LocalContainer.current.tablesRepo
-    val vm = viewModel { TablesViewModel(tablesRepo) }
-    val tablesState = vm.tablesState.collectAsState().value
-    val selectedTableId = vm.selectedTableId.collectAsState().value
-
-    // Ensure a table is selected when data becomes available
-    LaunchedEffect(tablesState) {
-        if (tablesState is TablesState.Data) {
-            val sel = vm.getSelectedTable()
-            if (sel != null) vm.selectTable(sel.id)
-        }
-    }
-
-    val tabsForSelectedTable = if (selectedTableId != null && tablesState is TablesState.Data) {
-        val selectedTable = tablesState.tables[selectedTableId]
-        if (selectedTable != null) {
-            selectedTable.tabs.mapNotNull { tabId -> tablesState.tabs[tabId] }
-        } else emptyList()
-    } else emptyList()
-
-    // Fill available height and render tabs starting from the bottom
-    Column(
-        modifier = modifier.fillMaxHeight().verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.Bottom)
-    ) {
-        if (tabsForSelectedTable.isEmpty()) {
-            Text("No tabs in this table.", modifier = Modifier.padding(16.dp))
-        } else {
-            // Render tabs reversed so the last tab appears at the bottom
-            tabsForSelectedTable.reversed().forEach { tab ->
-                val isHighlighted = tab.id == highlightedTab
-                NavigationDrawerItem(
-                    selected = isHighlighted,
-                    onClick = { onTabSelected(tab) },
-                    icon = { Text("📄") },
-                    label = { Text(tab.title) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .onGloballyPositioned {
-                            onItemLayout(tab.id, it.boundsInWindow())
-                        }
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun TableSelectionList(
-    onTableSelected: (Table) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val tablesRepo = LocalContainer.current.tablesRepo
-    val vm = viewModel { TablesViewModel(tablesRepo) }
-    val tablesState = vm.tablesState.collectAsState().value
-    val selectedTableId = vm.selectedTableId.collectAsState().value
-
-    Column(modifier = modifier.verticalScroll(rememberScrollState())) {
-        when (tablesState) {
-            is TablesState.Data -> {
-                if (tablesState.tablesList.isEmpty()) {
-                    Text("No tables found.", modifier = Modifier.padding(16.dp))
-                } else {
-                    tablesState.tablesList.forEach { table ->
-                        NavigationDrawerItem(
-                            selected = selectedTableId == table.id,
-                            onClick = { onTableSelected(table) },
-                            icon = { Text("📁") },
-                            label = { Text(table.title) }
-                        )
-                    }
-                }
-            }
-            is TablesState.Loading -> {
-                CircularProgressIndicator(modifier = Modifier.size(24.dp))
-            }
-            is TablesState.Error -> {
-                Text("Error loading tables")
-            }
-        }
-    }
-}
-
-@Composable
-fun FeaturesMenu(
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val animationProgress by animateFloatAsState(
-        targetValue = 1f,
-        animationSpec = tween(durationMillis = 300),
-        label = "features_menu_animation"
-    )
-    
-    Box(
-        modifier = modifier.fillMaxSize(),
-        contentAlignment = Alignment.BottomEnd
-    ) {
-        // Background overlay with click handling
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.3f * animationProgress))
-                .clickable { onDismiss() }
-        )
-        
-        // Floating action buttons
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            // Add Table FAB
-            FloatingActionButton(
-                onClick = { 
-                    // TODO: Handle add table
-                    onDismiss()
-                },
-                modifier = Modifier.size(56.dp)
-            ) {
-                Text("📁", fontSize = 20.sp)
-            }
-            
-            // Add Tab FAB
-            FloatingActionButton(
-                onClick = { 
-                    // TODO: Handle add tab
-                    onDismiss()
-                },
-                modifier = Modifier.size(56.dp)
-            ) {
-                Text("📄", fontSize = 20.sp)
-            }
-            
-            // Settings FAB
-            FloatingActionButton(
-                onClick = { 
-                    // TODO: Handle settings
-                    onDismiss()
-                },
-                modifier = Modifier.size(56.dp)
-            ) {
-                Text("⚙️", fontSize = 20.sp)
-            }
-        }
-    }
-}

@@ -137,7 +137,7 @@ impl AmCtx {
             let mut attempt = 0u32;
             loop {
                 if attempt > 0 {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
                 attempt += 1;
                 match tokio_tungstenite::connect_async("ws://0.0.0.0:8090").await {

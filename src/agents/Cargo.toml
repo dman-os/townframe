@@ -4,6 +4,8 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
+genai = "0.4.1"
+llm = "1.3.4"
 restate-sdk = "0.7.0"
 
 # serde

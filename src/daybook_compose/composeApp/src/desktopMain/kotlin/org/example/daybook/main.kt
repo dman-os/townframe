@@ -13,7 +13,8 @@ fun main() = application {
     val windowState = rememberWindowState(
         // FIXME: niri/xwayland doesn't like the javafx resize-logic
         // so we explicitly set it
-        size = DpSize((0.75 * 2560).dp, (1600 - 20).dp)
+        size = DpSize((0.2 * 2560).dp, (1600 * 0.75).dp)
+        // size = DpSize((0.75 * 2560).dp, (1600 - 20).dp)
         // size = DpSize((0.75 * 1600).dp, (900 - 20).dp)
     )
     Window(

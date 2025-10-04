@@ -1,0 +1,157 @@
+@file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)
+
+package org.example.daybook.tables
+
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.PermanentDrawerSheet
+import androidx.compose.material3.PermanentNavigationDrawer
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavHostController
+import kotlinx.coroutines.launch
+import org.example.daybook.LocalContainer
+import org.example.daybook.Routes
+import org.example.daybook.TablesState
+import org.example.daybook.TablesTabsList
+import org.example.daybook.TablesViewModel
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ExpandedLayout(
+    modifier: Modifier = Modifier,
+    navController: NavHostController,
+    extraAction: (() -> Unit)? = null
+) {
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = { Text("Daybook") }
+            )
+        }
+    ) { innerPadding ->
+        Row(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+            ExpandedTablesRail()
+            PermanentNavigationDrawer(
+                drawerContent = {
+                    PermanentDrawerSheet(
+                        modifier = Modifier.padding(10.dp),
+                    ) {
+                        Column {
+                            TablesTabsList()
+                        }
+                    }
+                }
+            ) {
+                Box(modifier = Modifier.weight(1f)) {
+                    Routes(
+                        extraAction = extraAction,
+                        navController = navController
+                    )
+                }
+            }
+            FeaturesRail()
+        }
+    }
+}
+
+@Composable
+fun ExpandedTablesRail() {
+    val tablesRepo = LocalContainer.current.tablesRepo
+    val vm = viewModel { TablesViewModel(tablesRepo) }
+    val tablesState = vm.tablesState.collectAsState().value
+    val selectedTableId = vm.selectedTableId.collectAsState().value
+
+    NavigationRail(
+        modifier = Modifier.width(80.dp)
+    ) {
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Add Table Button
+        FloatingActionButton(
+            onClick = {
+                vm.viewModelScope.launch {
+                    vm.createNewTable()
+                }
+            },
+            modifier = Modifier.size(48.dp)
+        ) {
+            Text("+")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Table List
+        when (tablesState) {
+            is TablesState.Data -> {
+                tablesState.tablesList.forEach { table ->
+                    NavigationRailItem(
+                        selected = selectedTableId == table.id,
+                        onClick = { vm.selectTable(table.id) },
+                        icon = {
+                            Text("📁")
+                        },
+                        label = { Text(table.title) }
+                    )
+                }
+            }
+
+            is TablesState.Loading -> {
+                CircularProgressIndicator(modifier = Modifier.size(24.dp))
+            }
+
+            is TablesState.Error -> {
+                Text("Error")
+            }
+        }
+    }
+}
+
+@Composable
+fun FeaturesRail() {
+    NavigationRail(
+        modifier = Modifier.width(80.dp)
+    ) {
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Placeholder feature buttons
+        NavigationRailItem(
+            selected = false,
+            onClick = { /* TODO: Settings */ },
+            icon = {
+                Text("⚙️")
+            },
+            label = { Text("Settings") }
+        )
+
+        NavigationRailItem(
+            selected = false,
+            onClick = { /* TODO: Features */ },
+            icon = {
+                Text("⚙️")
+            },
+            label = { Text("Features") }
+        )
+    }
+}
+

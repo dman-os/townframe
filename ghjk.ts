@@ -321,7 +321,7 @@ ghjk.task(
 
 ghjk.task(
   "build-a-dayb",
-  ($) => $`./gradlew assembleDebug && ./gradlew installDebug`,
+  ($) => $`./gradlew installDebug`,
   {
     desc: "Build and install daybook_compose",
     workingDir: "./src/daybook_compose/",

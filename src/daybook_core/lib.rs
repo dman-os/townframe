@@ -57,7 +57,10 @@ impl Config {
                     peer_id: "daybook_client".to_string(),
                 },
                 sql::Config {
-                    database_url: format!("sqlite://{}", db_path.display()),
+                    database_url: {
+                        let db_path = app_dir.join("sqlite.db");
+                        format!("sqlite://{}", db_path.display())
+                    },
                 },
             )
         };
@@ -74,7 +77,7 @@ impl Config {
                 },
                 sql::Config {
                     database_url: {
-                        let db_path = dirs.data_dir().join("daybook.db");
+                        let db_path = dirs.data_dir().join("sqlite.db");
                         format!("sqlite://{}", db_path.display())
                     },
                 },
