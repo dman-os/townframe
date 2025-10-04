@@ -144,7 +144,7 @@ class TablesViewModel(
 ) : ViewModel() {
     private val _tablesState = MutableStateFlow(TablesState.Loading as TablesState)
     val tablesState = _tablesState.asStateFlow()
-
+    
     // Selected table state
     private val _selectedTableId = MutableStateFlow<Uuid?>(null)
     val selectedTableId = _selectedTableId.asStateFlow()
@@ -208,7 +208,7 @@ class TablesViewModel(
                 tabs = tabs.associateBy { it.id },
                 panels = panels.associateBy { it.id },
                 tables = tables.associateBy { it.id })
-
+            
             // Auto-select first table if none is selected
             if (_selectedTableId.value == null && tables.isNotEmpty()) {
                 _selectedTableId.value = tables.first().id
@@ -225,14 +225,14 @@ class TablesViewModel(
             if (currentState is TablesState.Data) {
                 val updatedWindow = tablesRepo.ffiGetWindow(windowId)
                 val updatedWindows = currentState.windows.toMutableMap()
-
+                
                 if (updatedWindow != null) {
                     updatedWindows[windowId] = updatedWindow
                 } else {
                     // Window was deleted, remove from map
                     updatedWindows.remove(windowId)
                 }
-
+                
                 _tablesState.value = currentState.copy(windows = updatedWindows)
             }
         } catch (e: FfiException) {
@@ -246,14 +246,14 @@ class TablesViewModel(
             if (currentState is TablesState.Data) {
                 val updatedTab = tablesRepo.ffiGetTab(tabId)
                 val updatedTabs = currentState.tabs.toMutableMap()
-
+                
                 if (updatedTab != null) {
                     updatedTabs[tabId] = updatedTab
                 } else {
                     // Tab was deleted, remove from map
                     updatedTabs.remove(tabId)
                 }
-
+                
                 _tablesState.value = currentState.copy(tabs = updatedTabs)
             }
         } catch (e: FfiException) {
@@ -267,14 +267,14 @@ class TablesViewModel(
             if (currentState is TablesState.Data) {
                 val updatedPanel = tablesRepo.ffiGetPanel(panelId)
                 val updatedPanels = currentState.panels.toMutableMap()
-
+                
                 if (updatedPanel != null) {
                     updatedPanels[panelId] = updatedPanel
                 } else {
                     // Panel was deleted, remove from map
                     updatedPanels.remove(panelId)
                 }
-
+                
                 _tablesState.value = currentState.copy(panels = updatedPanels)
             }
         } catch (e: FfiException) {
@@ -288,14 +288,14 @@ class TablesViewModel(
             if (currentState is TablesState.Data) {
                 val updatedTable = tablesRepo.ffiGetTable(tableId)
                 val updatedTables = currentState.tables.toMutableMap()
-
+                
                 if (updatedTable != null) {
                     updatedTables[tableId] = updatedTable
                 } else {
                     // Table was deleted, remove from map
                     updatedTables.remove(tableId)
                 }
-
+                
                 _tablesState.value = currentState.copy(tables = updatedTables)
             }
         } catch (e: FfiException) {
@@ -308,7 +308,7 @@ class TablesViewModel(
             refreshTables()
         }
     }
-
+    
     fun selectTable(tableId: Uuid) {
         _selectedTableId.value = tableId
     }
@@ -335,7 +335,7 @@ class TablesViewModel(
             }
         }
     }
-
+    
     suspend fun getSelectedTable(): Table? {
         val currentState = _tablesState.value
         val selectedId = _selectedTableId.value
@@ -350,7 +350,7 @@ class TablesViewModel(
             }
         }
     }
-
+    
     suspend fun getTabsForSelectedTable(): List<Tab> {
         val selectedTable = getSelectedTable()
         val currentState = _tablesState.value
@@ -422,11 +422,11 @@ fun App(
         val fcx = FfiCtx.forFfi()
         val docsRepo = DocsRepo.forFfi(fcx = fcx)
         val tablesRepo = TablesRepo.forFfi(fcx = fcx)
-
+        
         // Initialize first-time data if needed
         val tablesViewModel = TablesViewModel(tablesRepo)
         tablesViewModel.initializeFirstTime()
-
+        
         initState = AppInitState.Ready(
             AppContainer(
                 ffiCtx = fcx, docsRepo = docsRepo, tablesRepo = tablesRepo
@@ -481,7 +481,7 @@ fun AdaptiveAppLayout(
 ) {
     val platform = getPlatform()
     val screenWidth = platform.getScreenWidthDp()
-
+    
     val navigationType: DaybookNavigationType
     val contentType: DaybookContentType
 
@@ -546,98 +546,6 @@ fun DaybookHomeScreen(
 
 
 @Composable
-fun TablesTabsList() {
-    val tablesRepo = LocalContainer.current.tablesRepo
-    val vm = viewModel { TablesViewModel(tablesRepo) }
-    val tablesState = vm.tablesState.collectAsState()
-
-    LaunchedEffect(tablesState.value) {
-        if (tablesState.value is TablesState.Data) {
-            val selectedTable = vm.getSelectedTable()
-            if (selectedTable != null) {
-                vm.selectTable(selectedTable.id)
-            }
-        }
-    }
-
-    val currentState = tablesState.value
-    val selectedTableId = vm.selectedTableId.collectAsState()
-
-    when (currentState) {
-        is TablesState.Data -> {
-            val selectedTable = selectedTableId.value?.let { currentState.tables[it] }
-            if (selectedTable != null) {
-                Column {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Tabs in ${selectedTable.title}", modifier = Modifier.weight(1f)
-                        )
-                        // Add new tab button
-                        FloatingActionButton(
-                            onClick = {
-                                vm.viewModelScope.launch {
-                                    vm.createNewTab(selectedTable.id)
-                                }
-                            }, modifier = Modifier.size(32.dp)
-                        ) {
-                            Text("+", fontSize = 12.sp)
-                        }
-                    }
-
-                    selectedTable.tabs.mapNotNull { tabId -> currentState.tabs[tabId] }
-                        .forEach { tab ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                NavigationDrawerItem(
-                                    selected = false, // TODO: Track selected tab
-                                    onClick = { /* TODO: Select tab */ }, icon = {
-                                        Text("📄")
-                                    }, badge = {
-                                        // Close tab button
-                                        FloatingActionButton(
-                                            onClick = {
-                                                vm.viewModelScope.launch {
-                                                    vm.removeTab(tab.id)
-                                                }
-                                            }, modifier = Modifier.size(24.dp).padding(end = 8.dp)
-                                        ) {
-                                            Text("×", fontSize = 10.sp)
-                                        }
-                                    }, label = { Text(tab.title) }, modifier = Modifier.weight(1f)
-                                )
-                            }
-                        }
-                }
-            } else {
-                Text(
-                    text = "No table selected",
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                )
-            }
-        }
-
-        is TablesState.Loading -> {
-            Text(
-                text = "Loading...",
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-            )
-        }
-
-        is TablesState.Error -> {
-            Text(
-                text = "Error loading tables",
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-            )
-        }
-    }
-}
-
-@Composable
 fun TablesScreen() {
     val tablesRepo = LocalContainer.current.tablesRepo
     val vm = viewModel {
@@ -646,12 +554,12 @@ fun TablesScreen() {
 
     val tablesState = vm.tablesState.collectAsState().value
     val selectedTableId = vm.selectedTableId.collectAsState().value
-
+    
     // Get selected table from state instead of calling suspend function
     val selectedTable = if (tablesState is TablesState.Data && selectedTableId != null) {
         tablesState.tables[selectedTableId]
     } else null
-
+    
     val tabsForSelectedTable = if (selectedTable != null && tablesState is TablesState.Data) {
         selectedTable.tabs.mapNotNull { tabId -> tablesState.tabs[tabId] }
     } else emptyList()
@@ -686,12 +594,12 @@ fun TablesScreen() {
                         text = "Selected Table: ${selectedTable.title}",
                         modifier = Modifier.padding(bottom = 16.dp)
                     )
-
+                    
                     Text(
                         text = "Tabs in this table: ${tabsForSelectedTable.size}",
                         modifier = Modifier.padding(bottom = 8.dp)
                     )
-
+                    
                     // Show tabs for selected table
                     tabsForSelectedTable.forEach { tab ->
                         Text(
@@ -699,10 +607,10 @@ fun TablesScreen() {
                             modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
                         )
                     }
-
+                    
                     Spacer(modifier = Modifier.height(24.dp))
                 }
-
+                
                 // Overall State Summary
                 Text(
                     text = "Overall State:", modifier = Modifier.padding(bottom = 8.dp)
@@ -711,9 +619,9 @@ fun TablesScreen() {
                 Text("  • Tables: ${tablesState.tables.size}")
                 Text("  • Tabs: ${tablesState.tabs.size}")
                 Text("  • Panels: ${tablesState.panels.size}")
-
+                
                 Spacer(modifier = Modifier.height(24.dp))
-
+                
                 // All Tables List
                 Text(
                     text = "All Tables:", modifier = Modifier.padding(bottom = 8.dp)
@@ -761,7 +669,7 @@ fun Routes(
                     Text("Click me!")
                 }
                 run {
-                    val permCtx = LocalPermCtx.current
+                   val permCtx = LocalPermCtx.current
                     if (permCtx != null) {
                         if (permCtx.hasAll) {
                             Text("All permissions avail")

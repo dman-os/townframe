@@ -17,7 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import org.example.daybook.Routes
-import org.example.daybook.TablesTabsList
+import org.example.daybook.tables.TablesTabsList
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

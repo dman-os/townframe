@@ -16,15 +16,20 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.PermanentDrawerSheet
 import androidx.compose.material3.PermanentNavigationDrawer
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
@@ -32,7 +37,7 @@ import kotlinx.coroutines.launch
 import org.example.daybook.LocalContainer
 import org.example.daybook.Routes
 import org.example.daybook.TablesState
-import org.example.daybook.TablesTabsList
+// TablesTabsList lives in the same package (`org.example.daybook.tables`) so no import required
 import org.example.daybook.TablesViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -155,3 +160,95 @@ fun FeaturesRail() {
     }
 }
 
+
+@Composable
+fun TablesTabsList() {
+    val tablesRepo = LocalContainer.current.tablesRepo
+    val vm = viewModel { TablesViewModel(tablesRepo) }
+    val tablesState = vm.tablesState.collectAsState()
+
+    LaunchedEffect(tablesState.value) {
+        if (tablesState.value is TablesState.Data) {
+            val selectedTable = vm.getSelectedTable()
+            if (selectedTable != null) {
+                vm.selectTable(selectedTable.id)
+            }
+        }
+    }
+
+    val currentState = tablesState.value
+    val selectedTableId = vm.selectedTableId.collectAsState()
+
+    when (currentState) {
+        is TablesState.Data -> {
+            val selectedTable = selectedTableId.value?.let { currentState.tables[it] }
+            if (selectedTable != null) {
+                Column {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Tabs in ${selectedTable.title}", modifier = Modifier.weight(1f)
+                        )
+                        // Add new tab button
+                        FloatingActionButton(
+                            onClick = {
+                                vm.viewModelScope.launch {
+                                    vm.createNewTab(selectedTable.id)
+                                }
+                            }, modifier = Modifier.size(32.dp)
+                        ) {
+                            Text("+", fontSize = 12.sp)
+                        }
+                    }
+
+                    selectedTable.tabs.mapNotNull { tabId -> currentState.tabs[tabId] }
+                        .forEach { tab ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                NavigationDrawerItem(
+                                    selected = false, // TODO: Track selected tab
+                                    onClick = { /* TODO: Select tab */ }, icon = {
+                                        Text("📄")
+                                    }, badge = {
+                                        // Close tab button
+                                        FloatingActionButton(
+                                            onClick = {
+                                                vm.viewModelScope.launch {
+                                                    vm.removeTab(tab.id)
+                                                }
+                                            }, modifier = Modifier.size(24.dp).padding(end = 8.dp)
+                                        ) {
+                                            Text("×", fontSize = 10.sp)
+                                        }
+                                    }, label = { Text(tab.title) }, modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                }
+            } else {
+                Text(
+                    text = "No table selected",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+        }
+
+        is TablesState.Loading -> {
+            Text(
+                text = "Loading...",
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+        }
+
+        is TablesState.Error -> {
+            Text(
+                text = "Error loading tables",
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+        }
+    }
+}
