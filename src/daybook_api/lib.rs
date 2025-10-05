@@ -31,8 +31,8 @@ pub struct SharedServiceContext(pub ServiceContext);
 #[derive(Debug)]
 pub struct Config {}
 
+// mod bindings;
 mod doc;
-mod gen;
 
 fn init() -> Res<()> {
     // CX.set(Arc::new(Context {
@@ -85,11 +85,16 @@ mod wit {
 
             "townframe:api-utils/utils": api_utils_rs::wit::utils,
 
-            "townframe:daybook-api/doc-create": crate::gen::doc::doc_create,
-            "townframe:daybook-api/doc-create/error-id-occupied": crate::gen::doc::doc_create::ErrorIdOccupied,
-            "townframe:daybook-api/doc-create/input": crate::gen::doc::doc_create::Input,
-            "townframe:daybook-api/doc/doc": crate::gen::doc::Doc,
-            "townframe:daybook-api/doc-create/error": crate::gen::doc::doc_create::Error,
+            "townframe:daybook-api/doc/doc-kind": daybook_types::doc::DocKind,
+            "townframe:daybook-api/doc/doc-tag": daybook_types::doc::DocTag,
+            "townframe:daybook-api/doc/doc-image": daybook_types::doc::DocImage,
+            "townframe:daybook-api/doc/doc": daybook_types::doc::Doc,
+            "townframe:daybook-api/doc-create/input": daybook_types::doc::doc_create::Input,
+            "townframe:daybook-api/doc-create/error-id-occupied": daybook_types::doc::doc_create::ErrorIdOccupied,
+            "townframe:daybook-api/doc/doc-tag-kind": daybook_types::doc::DocTagKind,
+            "townframe:daybook-api/doc-create/error": daybook_types::doc::doc_create::Error,
+            "townframe:daybook-api/doc/doc-blob": daybook_types::doc::DocBlob,
+            "townframe:daybook-api/doc/doc-content": daybook_types::doc::DocContent,
         }
     });
 }

@@ -22,7 +22,8 @@ pub fn cli() -> Res<()> {
         let buf = &mut out;
         write!(
             buf,
-            r#"use super::*;   
+            r#"//! @generated
+use super::*;   
 
 "#
         )?;
@@ -39,7 +40,11 @@ pub fn cli() -> Res<()> {
         for feature in &features {
             let mut out = String::new();
             let buf = &mut out;
-            writeln!(buf, "package townframe:btress-api;")?;
+            writeln!(
+                buf,
+                r#"// @generated
+package townframe:btress-api;"#
+            )?;
             component_wit::feature_file(&reg, buf, &feature)?;
             let path = path.join(format!("{}.wit", feature.tag.name.to_kebab_case()));
             std::fs::write(path, &out)?;
@@ -47,32 +52,56 @@ pub fn cli() -> Res<()> {
     }
     {
         let features = daybook_api::daybook_api_features(&reg);
-        let mut out = String::new();
-        let buf = &mut out;
-        write!(
-            buf,
-            r#"use super::*;   
-
-"#
-        )?;
-        for feature in &features {
-            service_rust::feature_module(&reg, buf, &feature)?;
-        }
-
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_api/gen/");
-        std::fs::create_dir_all(&path)?;
-        std::fs::write(path.join("mod.rs"), &out)?;
 
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_api/wit/");
         std::fs::create_dir_all(&path)?;
         for feature in &features {
             let mut out = String::new();
             let buf = &mut out;
-            writeln!(buf, "package townframe:daybook-api;")?;
+            writeln!(
+                buf,
+                r#"// @generated
+package townframe:daybook-api;"#
+            )?;
             component_wit::feature_file(&reg, buf, &feature)?;
             let path = path.join(format!("{}.wit", feature.tag.name.to_kebab_case()));
             std::fs::write(path, &out)?;
         }
+
+        let mut out = String::new();
+        let buf = &mut out;
+        write!(
+            buf,
+            r#"//! @generated
+use super::*;   
+
+"#
+        )?;
+        let mut exports = vec![];
+        for feature in features {
+            exports.push((service_rust::feature_module(&reg, buf, &feature)?, feature));
+        }
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_types/");
+        std::fs::create_dir_all(&path)?;
+        std::fs::write(path.join("types.rs"), &out)?;
+
+        let mut out = String::new();
+        let buf = &mut out;
+        write!(
+            buf,
+            r#"//! @generated
+use super::*;   
+
+"#
+        )?;
+        for (export, feature) in exports {
+            service_rust::wit_bindgen_module(buf, &feature, "daybook_types::types", export)?;
+        }
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_api/");
+        std::fs::create_dir_all(&path)?;
+        std::fs::write(path.join("bindings.rs"), &out)?;
     }
     Ok(())
 }
@@ -83,6 +112,8 @@ pub type TypeId = u64;
 pub enum Type {
     Primitives(Primitives),
     Record(Record),
+    Enum(Enum),
+    Variant(Variant),
     List(TypeId),
     Map(TypeId, TypeId),
     Option(TypeId),
@@ -101,12 +132,39 @@ pub enum Primitives {
     Json,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RustAttrs {
+    /// If true, emit serde derives
+    pub emit_serde: bool,
+    /// If true, emit automerge/autosurgeon derives
+    pub emit_autosurgeon: bool,
+    /// If true, emit uniffi derives
+    pub emit_uniffi: bool,
+    /// If true, emit utoipa ToSchema derives
+    pub emit_utoipa: bool,
+}
+
+impl Default for RustAttrs {
+    fn default() -> Self {
+        Self {
+            emit_serde: true,
+            emit_utoipa: true,
+            emit_autosurgeon: false,
+            emit_uniffi: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, bon::Builder)]
 #[builder(on(CHeapStr, into))]
 pub struct Record {
+    #[builder(start_fn)]
+    name: CHeapStr,
     #[builder(field)]
     fields: Vec<(CHeapStr, RecordField)>,
-    name: CHeapStr,
+    /// Grouped rust-side attribute flags
+    #[builder(default)]
+    pub rust_attrs: RustAttrs,
 }
 
 impl<S: record_builder::State> RecordBuilder<S> {
@@ -133,6 +191,9 @@ pub struct RecordField {
     ty: TypeId,
     desc: Option<String>,
     example: Option<String>,
+    /// If true, emit autosurgeon key attribute for this field
+    #[builder(default = false)]
+    pub autosurgeon_key: bool,
 }
 
 impl<S: record_field_builder::State> RecordFieldBuilder<S> {
@@ -153,6 +214,84 @@ impl RecordField {
     pub fn uuid(reg: &TypeReg) -> RecordFieldBuilder {
         Self::builder(reg.uuid())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, bon::Builder)]
+#[builder(on(CHeapStr, into))]
+pub struct Enum {
+    #[builder(start_fn)]
+    name: CHeapStr,
+    #[builder(field)]
+    variants: Vec<(CHeapStr, EnumVariant)>,
+    /// Grouped rust-side attribute flags
+    #[builder(default)]
+    pub rust_attrs: RustAttrs,
+}
+
+impl<S: enum_builder::State> EnumBuilder<S> {
+    pub fn with_variant(mut self, name: impl Into<CHeapStr>, value: EnumVariant) -> Self {
+        self.variants.push((name.into(), value));
+        self
+    }
+
+    pub fn with_variants(
+        mut self,
+        items: impl IntoIterator<Item = (impl Into<CHeapStr>, EnumVariant)>,
+    ) -> Self {
+        for (name, value) in items {
+            self = self.with_variant(name, value);
+        }
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, bon::Builder)]
+#[builder(on(String, into))]
+pub struct EnumVariant {
+    desc: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, bon::Builder)]
+#[builder(on(CHeapStr, into))]
+pub struct Variant {
+    #[builder(start_fn)]
+    name: CHeapStr,
+    #[builder(field)]
+    variants: Vec<(CHeapStr, VariantVariant)>,
+    /// Grouped rust-side attribute flags
+    #[builder(default)]
+    pub rust_attrs: RustAttrs,
+}
+
+impl<S: variant_builder::State> VariantBuilder<S> {
+    pub fn with_variant(mut self, name: impl Into<CHeapStr>, value: VariantVariant) -> Self {
+        self.variants.push((name.into(), value));
+        self
+    }
+
+    pub fn with_variants(
+        mut self,
+        items: impl IntoIterator<Item = (impl Into<CHeapStr>, VariantVariant)>,
+    ) -> Self {
+        for (name, value) in items {
+            self = self.with_variant(name, value);
+        }
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, bon::Builder)]
+#[builder(on(String, into))]
+pub struct VariantVariant {
+    #[builder(start_fn)]
+    ty: VariantVariantType,
+    desc: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum VariantVariantType {
+    Unit,
+    Wrapped(TypeId),
 }
 
 pub struct TypeReg {
@@ -270,6 +409,9 @@ pub struct InputType {
     desc: CHeapStr,
     #[builder(default)]
     main_source: InputFieldSource,
+    /// Grouped rust-side attribute flags
+    #[builder(default)]
+    pub rust_attrs: RustAttrs,
 }
 
 impl<S: input_type_builder::State> InputTypeBuilder<S> {
@@ -339,6 +481,9 @@ pub struct ErrorType {
     id: CHeapStr,
     #[builder(field)]
     variants: IndexMap<CHeapStr, ErrorVariant>,
+    /// Grouped rust-side attribute flags
+    #[builder(default)]
+    pub rust_attrs: RustAttrs,
 }
 
 impl<S: error_type_builder::State> ErrorTypeBuilder<S> {

@@ -10,7 +10,7 @@ path = "lib.rs"
 # futures
 async-trait.workspace = true
 futures.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros"] }
 
 # serde
 serde.workspace = true
@@ -42,6 +42,15 @@ tracing-unwrap.workspace = true
 tracing-appender.workspace = true
 tracing-error.workspace = true
 color-eyre.workspace = true
+
+automerge = { workspace = true, optional = true }
+autosurgeon = { workspace = true, optional = true }
+
+[features]
+# Enable autosurgeon/automerge helpers (default off)
+# Reference optional deps using the `dep:` prefix so Cargo links them to features
+automerge = ["dep:autosurgeon", "dep:automerge"]
+default = ["automerge"]
 
 
 [target.'cfg(target_os = "android")'.dependencies]

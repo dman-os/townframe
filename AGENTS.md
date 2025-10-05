@@ -1,7 +1,9 @@
+- Don't be lazy with solutions.
+- Don't catch or log errors every edgecase.
+  - Most errors are programming errors and should crash the program.
+  - Errors that should be handled include
+    - Network errors
+    - User input validation
+  - Don't swallow errors with empty catch statements or catch-and-log unless explcitly told to do so.
 - To type check and lint the ./src/daybook_compose multiplatform app, use `ghjk x check-dayb`.
 - Prefer `cargo clippy --all-targets --all-features -p myCrate`.
-- Avoid being lazy with solutions.
-- Avoid trying to catch the error or log the error for every edgecase.
-  - Most errors are programming errors and should crash the application.
-  - Errors that should be handled include: network issues, user input validation issues.
-  - Don't ever swallow errors with empty catch statemnts or catch-and-log unless explcitly told to do so.

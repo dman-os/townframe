@@ -1,48 +1,47 @@
 use crate::interlude::*;
 
 use crate::ffi::{FfiError, SharedFfiCtx};
-
-#[derive(Debug, Clone, Reconcile, Hydrate, uniffi::Record)]
+use daybook_types::doc as generated_doc;
+// Local Doc type used inside daybook_core so we can derive autosurgeon/uniffi
+// traits reliably within this crate and convert to/from generated types.
+#[derive(Debug, Clone, uniffi::Record, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Doc {
-    #[key]
-    pub id: Uuid,
-    #[autosurgeon(with = "crate::am::autosurgeon_date")]
-    pub timestamp: OffsetDateTime,
+    pub id: String,
+    #[serde(with = "api_utils_rs::codecs::sane_iso8601")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "api_utils_rs::codecs::sane_iso8601")]
+    pub updated_at: OffsetDateTime,
+    pub content: generated_doc::DocKind,
+    pub tags: Vec<generated_doc::DocTag>,
 }
 
-#[derive(Reconcile, Hydrate, Default)]
+impl TryFrom<generated_doc::Doc> for Doc {
+    type Error = utils_rs::prelude::serde_json::Error;
+    fn try_from(g: generated_doc::Doc) -> Result<Self, Self::Error> {
+        // round-trip via serde Value to convert between crates
+        let v = utils_rs::prelude::serde_json::to_value(&g)?;
+        let out = utils_rs::prelude::serde_json::from_value(v)?;
+        Ok(out)
+    }
+}
+
+impl TryFrom<Doc> for generated_doc::Doc {
+    type Error = utils_rs::prelude::serde_json::Error;
+    fn try_from(d: Doc) -> Result<Self, Self::Error> {
+        let v = utils_rs::prelude::serde_json::to_value(&d)?;
+        let out = utils_rs::prelude::serde_json::from_value(v)?;
+        Ok(out)
+    }
+}
+
+#[derive(Default)]
 pub struct DocsAm {
-    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     map: HashMap<Uuid, Doc>,
 }
 impl DocsAm {
     // const PATH: &[&str] = &["docs"];
     pub const PROP: &str = "docs";
-
-    async fn load(cx: &Ctx) -> Res<Self> {
-        cx.acx
-            .hydrate_path::<Self>(automerge::ROOT, vec![Self::PROP.into()])
-            .await?
-            .ok_or_eyre("unable to find obj in am")
-    }
-
-    async fn flush(&self, cx: &Ctx) -> Res<()> {
-        cx.acx
-            .reconcile_prop(automerge::ROOT, Self::PROP, self)
-            .await
-    }
-
-    /// Register a change listener for docs changes
-    async fn register_change_listener<F>(cx: &Ctx, on_change: F) -> Res<()>
-    where
-        F: Fn(Vec<crate::am::changes::ChangeNotification>) + Send + Sync + 'static,
-    {
-        cx.acx
-            .change_manager()
-            .register_change_listener(vec![Self::PROP.into()], on_change)
-            .await;
-        Ok(())
-    }
 }
 
 #[derive(uniffi::Object)]
@@ -62,7 +61,7 @@ crate::repo_listeners!(DocsRepo, DocsEvent);
 
 impl DocsRepo {
     async fn load(fcx: SharedFfiCtx) -> Res<Arc<Self>> {
-        let am = DocsAm::load(&fcx.cx).await?;
+        let am = DocsAm::default();
         let am = Arc::new(tokio::sync::RwLock::new(am));
         let registry = crate::repos::ListenersRegistry::new();
 
@@ -71,16 +70,6 @@ impl DocsRepo {
             am,
             registry: registry.clone(),
         });
-
-        // Register change listener to automatically notify repo listeners
-        DocsAm::register_change_listener(&fcx.cx, {
-            let registry = registry.clone();
-            move |_notifications| {
-                // Notify repo listeners that the docs list changed
-                registry.notify(DocsEvent::ListChanged);
-            }
-        })
-        .await?;
 
         Ok(repo)
     }
@@ -93,7 +82,6 @@ impl DocsRepo {
     async fn set(&self, id: Uuid, val: Doc) -> Res<Option<Doc>> {
         let mut am = self.am.clone().write_owned().await;
         let ret = am.map.insert(id, val);
-        am.flush(&self.fcx.cx).await?;
         // Notify listeners that the list changed
         self.registry.notify(DocsEvent::ListChanged);
         Ok(ret)
@@ -115,27 +103,33 @@ impl DocsRepo {
         Ok(this)
     }
 
+    // FFI-friendly JSON wrappers: use String (JSON) over generated `Doc` type so
+    // UniFFI doesn't require Lift/Lower impls for `daybook_types::doc::Doc`.
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_get(self: Arc<Self>, id: Uuid) -> Result<Option<Doc>, FfiError> {
+    async fn ffi_get_json(self: Arc<Self>, id: Uuid) -> Result<Option<String>, FfiError> {
         let this = self.clone();
         let out = self.fcx.do_on_rt(async move { this.get(id).await }).await?;
-        Ok(out)
+        match out {
+            Some(doc) => Ok(Some(serde_json::to_string(&doc)?)),
+            None => Ok(None),
+        }
     }
 
-    #[tracing::instrument(err, skip(self, doc))]
-    async fn ffi_set(self: Arc<Self>, id: Uuid, doc: Doc) -> Result<Option<Doc>, FfiError> {
+    #[tracing::instrument(err, skip(self, doc_json))]
+    async fn ffi_set_json(self: Arc<Self>, id: Uuid, doc_json: String) -> Result<Option<String>, FfiError> {
         let this = self.clone();
+        let doc: Doc = serde_json::from_str(&doc_json)?;
         let out = self
             .fcx
             .do_on_rt(async move { this.set(id, doc).await })
             .await?;
-        Ok(out)
+        Ok(out.map(|d| serde_json::to_string(&d).unwrap_or_default()))
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_list(self: Arc<Self>) -> Result<Vec<Doc>, FfiError> {
+    async fn ffi_list_json(self: Arc<Self>) -> Result<Vec<String>, FfiError> {
         let this = self.clone();
         let out = self.fcx.do_on_rt(async move { this.list().await }).await?;
-        Ok(out)
+        Ok(out.into_iter().map(|d| serde_json::to_string(&d).unwrap_or_default()).collect())
     }
 }

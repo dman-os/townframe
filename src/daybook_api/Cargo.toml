@@ -15,6 +15,7 @@ censor_internal_errors = []
 utils_rs.workspace = true
 api_utils_rs.workspace = true
 macros.workspace = true
+daybook_types = { workspace = true, features = ["serde"] }
 
 # futures
 async-trait.workspace = true

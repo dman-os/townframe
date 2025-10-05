@@ -59,8 +59,6 @@ pub mod wit {
     use townframe::api_utils::utils::Datetime;
     use wasmcloud::postgres::types::PgValue;
 
-    // impl From<String> for crate::wit::townframe::a i_utils::utils::ErrorInternal {}
-
     impl PgValue {
         pub fn to_text(self) -> String {
             match self {

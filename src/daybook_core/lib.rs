@@ -18,6 +18,11 @@ use interlude::*;
 
 uniffi::setup_scaffolding!();
 
+// Re-export scaffolding for UniFFI components so their symbols are exported from this
+// shared library at link-time. This helps when composing multiple UniFFI components
+// into a single crate.
+daybook_types::uniffi_reexport_scaffolding!();
+
 mod am;
 mod docs;
 mod ffi;
@@ -39,7 +44,7 @@ impl Config {
     /// Create a new config with platform-specific defaults
     pub fn new() -> Res<Self> {
         #[cfg(target_os = "android")]
-        let (am, sql) = {
+        let sql = {
             // On Android, use the app's internal storage directory
             // This will be something like /data/data/org.example.daybook/files/samod
             let app_dir = std::env::var("ANDROID_DATA")
@@ -51,39 +56,33 @@ impl Config {
                 })
                 .unwrap_or_else(|_| PathBuf::from("/data/data/org.example.daybook/files"));
 
-            (
-                am::Config {
-                    storage_dir: app_dir.join("samod"),
-                    peer_id: "daybook_client".to_string(),
+            sql::Config {
+                database_url: {
+                    let db_path = app_dir.join("sqlite.db");
+                    format!("sqlite://{}", db_path.display())
                 },
-                sql::Config {
-                    database_url: {
-                        let db_path = app_dir.join("sqlite.db");
-                        format!("sqlite://{}", db_path.display())
-                    },
-                },
-            )
+            }
         };
 
         #[cfg(not(target_os = "android"))]
-        let (am, sql) = {
+        let sql = {
             // On desktop platforms, use XDG directories
             let dirs = directories::ProjectDirs::from("org", "daybook", "daybook")
                 .ok_or_eyre("failed to get xdg directories")?;
-            (
-                am::Config {
-                    storage_dir: dirs.data_dir().join("samod"),
-                    peer_id: "daybook_client".to_string(),
+            sql::Config {
+                database_url: {
+                    let db_path = dirs.data_dir().join("sqlite.db");
+                    format!("sqlite://{}", db_path.display())
                 },
-                sql::Config {
-                    database_url: {
-                        let db_path = dirs.data_dir().join("sqlite.db");
-                        format!("sqlite://{}", db_path.display())
-                    },
-                },
-            )
+            }
         };
-        Ok(Self { am, sql })
+        Ok(Self { 
+            am: am::Config {
+                storage_dir: PathBuf::from("/tmp/daybook"),
+                peer_id: "daybook_client".to_string(),
+            },
+            sql 
+        })
     }
 }
 

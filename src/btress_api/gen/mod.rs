@@ -1,19 +1,28 @@
-use super::*;
+//! @generated
+use super::*;   
 
 pub mod user {
     use super::*;
 
+    #[cfg(feature = "automerge")]
+    pub type OffsetDateTime = time::OffsetDateTime;
+    #[cfg(not(feature = "automerge"))]
+    pub type OffsetDateTime = Datetime;
+
+    #[cfg(feature = "utoipa")]
     pub const TAG: api::Tag = api::Tag {
         name: "user",
         desc: "User mgmt.",
     };
 
-    #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-    #[serde(rename_all = "camelCase")]
+    #[derive(Debug, Clone)]
+    #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+    #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
     pub struct User {
         pub id: String,
-        pub created_at: Datetime,
-        pub updated_at: Datetime,
+        pub created_at: OffsetDateTime,
+        pub updated_at: OffsetDateTime,
         pub email: Option<String>,
         pub username: String,
     }
@@ -24,45 +33,38 @@ pub mod user {
         #[derive(Debug, Clone)]
         pub struct UserCreate;
 
-        pub type Output = SchemaRef<User>;
 
-        #[derive(Debug, Clone, Serialize, Deserialize, garde::Validate, utoipa::ToSchema)]
-        #[serde(rename_all = "camelCase")]
+        #[cfg(feature = "utoipa")]
+        pub type Output = SchemaRef<User>;
+        #[cfg(not(feature = "utoipa"))]
+        pub type Output = User;
+
+
+        #[derive(Debug, Clone, garde::Validate)]
+        #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+        #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+        #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
         pub struct Input {
-            #[schema(min_length = 3, max_length = 25, pattern = "USERNAME_REGEX")]
+            #[cfg_attr(feature = "utoipa", schema(min_length = 3, max_length = 25, pattern = "USERNAME_REGEX"))]
             #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 25))]
             pub username: String,
             #[garde(email)]
             pub email: Option<String>,
-            #[schema(min_length = 8, max_length = 1024)]
+            #[cfg_attr(feature = "utoipa", schema(min_length = 8, max_length = 1024))]
             #[garde(length(min = 8, max = 1024))]
             pub password: String,
         }
 
-        #[derive(
-            Debug,
-            Clone,
-            Serialize,
-            Deserialize,
-            thiserror::Error,
-            displaydoc::Display,
-            utoipa::ToSchema,
-        )]
-        #[serde(rename_all = "camelCase", tag = "error")]
+        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, utoipa::ToSchema)]
+        #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+        #[cfg_attr(feature = "serde", serde(rename_all = "camelCase", tag = "error"))]
         /// Username occupied: {username}
         pub struct ErrorUsernameOccupied {
             pub username: String,
         }
-        #[derive(
-            Debug,
-            Clone,
-            Serialize,
-            Deserialize,
-            thiserror::Error,
-            displaydoc::Display,
-            utoipa::ToSchema,
-        )]
-        #[serde(rename_all = "camelCase", tag = "error")]
+        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, utoipa::ToSchema)]
+        #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+        #[cfg_attr(feature = "serde", serde(rename_all = "camelCase", tag = "error"))]
         /// Email occupied: {email:?}
         pub struct ErrorEmailOccupied {
             /// example: alice@example.com
@@ -70,43 +72,26 @@ pub mod user {
         }
         #[derive(
             Debug,
-            Serialize,
             thiserror::Error,
             displaydoc::Display,
-            macros::HttpError,
-            utoipa::ToSchema,
         )]
-        #[serde(rename_all = "camelCase", tag = "error")]
+        #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema, macros::HttpError))]
+        #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+        #[cfg_attr(feature = "serde", serde(rename_all = "camelCase", tag = "error"))]
         pub enum Error {
             /// Username occupied {0}
-            #[http(code(StatusCode::BAD_REQUEST), desc("Username occupied"))]
+            #[cfg_attr(feature = "utoipa", http(code(StatusCode::BAD_REQUEST), desc("Username occupied")))]
             UsernameOccupied(#[from] ErrorUsernameOccupied),
             /// Email occupied {0}
-            #[http(code(StatusCode::BAD_REQUEST), desc("Email occupied"))]
+            #[cfg_attr(feature = "utoipa", http(code(StatusCode::BAD_REQUEST), desc("Email occupied")))]
             EmailOccupied(#[from] ErrorEmailOccupied),
             /// Invalid input {0}
-            #[http(code(StatusCode::BAD_REQUEST), desc("Invalid input"))]
+            #[cfg_attr(feature = "utoipa", http(code(StatusCode::BAD_REQUEST), desc("Invalid input")))]
             InvalidInput(#[from] ErrorsValidation),
             /// Internal server error {0}
-            #[http(code(StatusCode::INTERNAL_SERVER_ERROR), desc("Internal server error"))]
+            #[cfg_attr(feature = "utoipa", http(code(StatusCode::INTERNAL_SERVER_ERROR), desc("Internal server error")))]
             Internal(#[from] ErrorInternal),
         }
     }
 
-    pub mod wit {
-        wit_bindgen::generate!({
-            world: "feat-user",
-            async: true,
-            additional_derives: [serde::Serialize, serde::Deserialize],
-            with: {
-                "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
-                "townframe:api-utils/utils": api_utils_rs::wit::utils,
-                "townframe:btress-api/user-create/input": crate::gen::user::user_create::Input,
-                "townframe:btress-api/user-create/error": crate::gen::user::user_create::Error,
-                "townframe:btress-api/user/user": crate::gen::user::User,
-                "townframe:btress-api/user-create/error-username-occupied": crate::gen::user::user_create::ErrorUsernameOccupied,
-                "townframe:btress-api/user-create/error-email-occupied": crate::gen::user::user_create::ErrorEmailOccupied,
-            }
-        });
-    }
 }

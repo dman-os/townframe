@@ -4,7 +4,7 @@
 
 ### Stack
 
-- [ ] Get uniffi working on android
+- [x] Get uniffi working on android
 - [ ] Save a photo
 - [ ] DRY up all the wit bindgen
 - [ ] Move http tests into api crates

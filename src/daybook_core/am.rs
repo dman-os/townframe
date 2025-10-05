@@ -211,13 +211,11 @@ mod version_updates {
     use automerge::{transaction::Transactable, ActorId, AutoCommit, ROOT};
     use autosurgeon::reconcile_prop;
 
-    use crate::docs::DocsAm;
     use crate::tables::TablesAm;
 
     pub fn version_latest() -> Res<Vec<u8>> {
         let mut doc = AutoCommit::new().with_actor(ActorId::random());
         doc.put(ROOT, "version", "0")?;
-        reconcile_prop(&mut doc, ROOT, DocsAm::PROP, DocsAm::default())?;
         reconcile_prop(&mut doc, ROOT, TablesAm::PROP, TablesAm::default())?;
         Ok(doc.save_nocompress())
     }

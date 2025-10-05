@@ -1,0 +1,39 @@
+[package]
+name = "daybook_types"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[features]
+default = ["uniffi", "automerge", "serde", "utoipa"]
+uniffi = ["dep:uniffi"]
+automerge = [
+    "dep:automerge",
+    "dep:autosurgeon", 
+    "utils_rs/automerge"
+]
+utoipa = [
+    "dep:utoipa"
+]
+serde = ["dep:serde"]
+
+[dependencies]
+utils_rs.workspace = true
+api_utils_rs.workspace = true
+macros.workspace = true
+
+serde = { workspace = true, optional = true }
+
+garde.workspace = true
+
+thiserror.workspace = true
+displaydoc.workspace = true
+
+autosurgeon = { workspace = true, features = ["uuid"], optional = true }
+automerge = { workspace = true, optional = true }
+uniffi = { workspace = true, optional = true }
+
+utoipa = { workspace = true, optional = true }
+time.workspace = true

@@ -6,6 +6,10 @@ edition.workspace = true
 [lib]
 path = "lib.rs"
 
+[features]
+default = []
+automerge = ["utils_rs/automerge"]
+
 [dependencies]
 utils_rs.workspace = true
 

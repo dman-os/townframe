@@ -4,6 +4,8 @@ impl TypeReg {
     pub fn wit_name(&self, ty: TypeId) -> Option<CHeapStr> {
         Some(match self.types.get(&ty)?.value() {
             Type::Record(record) => record.name.to_kebab_case().into(),
+            Type::Enum(r#enum) => r#enum.name.to_kebab_case().into(),
+            Type::Variant(variant) => variant.name.to_kebab_case().into(),
             Type::Primitives(Primitives::String) => "string".into(),
             Type::Primitives(Primitives::U64) => "u64".into(),
             Type::Primitives(Primitives::F64) => "f64".into(),
@@ -245,13 +247,21 @@ fn input_type(this: &InputType, reg: &TypeReg, buf: &mut impl Write) -> Res<()> 
 fn schema_type(reg: &TypeReg, buf: &mut impl Write, id: TypeId) -> Res<()> {
     let borrow = reg.types.get(&id).unwrap();
     match borrow.value() {
-        Type::Record(record) => schema_record(record, reg, buf)?,
+        Type::Record(record) => schema_record(reg, buf, record)?,
+        Type::Enum(r#enum) => schema_enum(buf, r#enum)?,
+        Type::Variant(variant) => schema_variant(reg, buf, variant)?,
+        Type::Alias(name, ty_id) => writeln!(
+            buf,
+            "type {alias} = {other};",
+            alias = AsKebabCase(&name[..]),
+            other = reg.wit_name(*ty_id).expect("unregistered inner type")
+        )?,
         ty => eyre::bail!("found unsupported schema type: {ty:?}"),
     };
     Ok(())
 }
 
-fn schema_record(this: &Record, reg: &TypeReg, buf: &mut impl Write) -> Res<()> {
+fn schema_record(reg: &TypeReg, buf: &mut impl Write, this: &Record) -> Res<()> {
     writeln!(
         buf,
         r#"record {name} {{"#,
@@ -265,6 +275,50 @@ fn schema_record(this: &Record, reg: &TypeReg, buf: &mut impl Write) -> Res<()> 
         }
         record_field(field, reg, buf, &field_name[..])?;
         writeln!(buf, ",")?;
+    }
+    writeln!(buf, "}}")?;
+    Ok(())
+}
+
+fn schema_enum(buf: &mut impl Write, this: &Enum) -> Res<()> {
+    writeln!(
+        buf,
+        r#"enum {name} {{"#,
+        name = heck::AsKebabCase(&this.name[..]),
+    )?;
+    for (name, EnumVariant { desc }) in &this.variants {
+        let mut out = &mut indenter::indented(buf).with_str("    ");
+        let buf = &mut out;
+        if let Some(desc) = desc {
+            writeln!(buf, "/// {desc}")?;
+        }
+        writeln!(buf, "{name},", name = AsKebabCase(&name[..]))?;
+    }
+    writeln!(buf, "}}")?;
+    Ok(())
+}
+
+fn schema_variant(reg: &TypeReg, buf: &mut impl Write, this: &Variant) -> Res<()> {
+    writeln!(
+        buf,
+        r#"variant {name} {{"#,
+        name = heck::AsKebabCase(&this.name[..]),
+    )?;
+    for (name, VariantVariant { ty, desc }) in &this.variants {
+        let mut out = &mut indenter::indented(buf).with_str("    ");
+        let buf = &mut out;
+        if let Some(desc) = desc {
+            writeln!(buf, "/// {desc}")?;
+        }
+        write!(buf, "{name}", name = AsKebabCase(&name[..]))?;
+        match ty {
+            VariantVariantType::Unit => writeln!(buf, ",")?,
+            VariantVariantType::Wrapped(ty) => writeln!(
+                buf,
+                "({ty_name}), ",
+                ty_name = reg.wit_name(*ty).expect("unregistered variant type")
+            )?,
+        }
     }
     writeln!(buf, "}}")?;
     Ok(())

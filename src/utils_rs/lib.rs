@@ -1,6 +1,9 @@
 mod macros;
 pub mod testing;
 
+#[cfg(feature = "automerge")]
+pub mod am;
+
 pub mod prelude {
     pub use crate::interlude::*;
 

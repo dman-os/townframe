@@ -1,8 +1,7 @@
 use super::*;
 pub fn feature(reg: &TypeReg) -> Feature {
     let schema_user = reg.add_type(Type::Record(
-        Record::builder()
-            .name("User")
+        Record::builder("User")
             .with_fields([
                 ("id", RecordField::uuid(&reg).build()),
                 ("created_at", RecordField::date_time(&reg).build()),

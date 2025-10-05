@@ -30,6 +30,14 @@ impl From<eyre::Report> for FfiError {
     }
 }
 
+impl From<utils_rs::prelude::serde_json::Error> for FfiError {
+    fn from(err: utils_rs::prelude::serde_json::Error) -> Self {
+        // Wrap serde_json error into an eyre::Report so existing From<Report>
+        // implementation can be reused.
+        Self::from(eyre::Report::new(err))
+    }
+}
+
 #[uniffi::export]
 impl FfiError {
     fn message(&self) -> String {

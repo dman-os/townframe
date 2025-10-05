@@ -22,6 +22,7 @@ impl DocsPipeline for DocPipelineImpl {
         _ctx: Context<'_>,
         Json(DocsCreatedEvent { id: _, tickets: _ }): Json<DocsCreatedEvent>,
     ) -> Result<bool, HandlerError> {
+        use daybook_types::types::doc::Doc;
         Ok(true)
     }
 }

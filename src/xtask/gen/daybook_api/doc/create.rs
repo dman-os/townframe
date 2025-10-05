@@ -25,6 +25,7 @@ fn error(reg: &TypeReg) -> ErrorType {
                     .http_code(StatusCode::BAD_REQUEST)
                     .message("Id occupied")
                     .message_with_fields(": {id}")
+                    // .rust_attrs(RustAttrs { emit_serde: true, emit_autosurgeon: true, emit_uniffi: true, emit_utoipa: true })
                     .with_field(
                         "id",
                         ErrorField::builder()
