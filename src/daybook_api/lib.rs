@@ -35,26 +35,35 @@ mod doc;
 mod gen;
 
 fn init() -> Res<()> {
-    CX.set(Arc::new(Context {
-        config: Config {},
-        db: StdDb::PgWasi {},
-        // rt: tokio::runtime::Builder::new_current_thread()
-        //     .enable_all()
-        //     .build()
-        //     .wrap_err(ERROR_TOKIO)?,
-    }))
-    .map_err(|_| ferr!("double component intialization"))?;
+    // CX.set(Arc::new(Context {
+    //     config: Config {},
+    //     db: StdDb::PgWasi {},
+    //     // rt: tokio::runtime::Builder::new_current_thread()
+    //     //     .enable_all()
+    //     //     .build()
+    //     //     .wrap_err(ERROR_TOKIO)?,
+    // }))
+    // .map_err(|_| ferr!("double component intialization"))?;
     Ok(())
 }
 
 fn cx() -> SharedContext {
     crate::CX
-        .get()
-        .expect("component was not initialized")
+        .get_or_init(|| {
+            Arc::new(Context {
+                config: Config {},
+                db: StdDb::PgWasi {},
+                // rt: tokio::runtime::Builder::new_current_thread()
+                //     .enable_all()
+                //     .build()
+                //     .wrap_err(ERROR_TOKIO)?,
+            })
+        })
+        // .expect("component was not initialized")
         .clone()
 }
 
-pub const CX: tokio::sync::OnceCell<SharedContext> = tokio::sync::OnceCell::const_new();
+pub const CX: std::sync::OnceLock<SharedContext> = std::sync::OnceLock::new();
 
 mod wit {
     wit_bindgen::generate!({
@@ -90,7 +99,6 @@ wit::export!(Component with_types_in wit);
 struct Component;
 
 impl wit::exports::townframe::daybook_api::ctx::Guest for Component {
-    #[allow(async_fn_in_trait)]
     fn init() -> Result<(), String> {
         crate::init().map_err(|err| format!("{err:?}"))?;
         Ok(())

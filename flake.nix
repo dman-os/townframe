@@ -92,8 +92,6 @@
             androidComposition
             rogcat
 
-            atlas
-
             # ollama
 
             # android-tools

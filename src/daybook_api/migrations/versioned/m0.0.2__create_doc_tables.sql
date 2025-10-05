@@ -6,13 +6,13 @@ COMMENT ON
 
 CALL util.apply_default_schema_config('doc');
 
-CREATE TABLE docs.docs (
+CREATE TABLE doc.docs (
     -- always put created_at and updated_at at top
     created_at      TIMESTAMPTZ         NOT NULL    DEFAULT CURRENT_TIMESTAMP
 ,   updated_at      TIMESTAMPTZ         NOT NULL    DEFAULT CURRENT_TIMESTAMP
 
 
-,   id            TEXT                        NOT NULL  DEFAULT
+,   id            TEXT                        NOT NULL
 -- ,   username      extensions.CITEXT           NOT NULL
 
     -- all constraints (besides not null) go after the columns

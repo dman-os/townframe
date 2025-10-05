@@ -14,9 +14,9 @@ async fn sanity_get_root_returns_hello() -> Res<()> {
         // Call endpoint
         let http_client = reqwest::Client::new();
 
-        let host = test_cx.wadm_apps["btress"].app_url.clone();
-        let path = "/";
-        let req = http_client.request(reqwest::Method::GET, format!("{host}{path}"));
+        let url = test_cx.wadm_apps["btress"].app_url.clone();
+        let url = url.join("/")?;
+        let req = http_client.request(reqwest::Method::GET, dbg!(url.to_string()));
 
         let resp = req.send().await.wrap_err("error sending http request")?;
         ensure!(resp.status() == 200, "status was {}", resp.status());

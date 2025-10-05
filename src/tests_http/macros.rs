@@ -19,14 +19,14 @@ macro_rules! integration_table_tests {
             #[tokio::test]
             async fn $name() -> $crate::interlude::eyre::Result<()> {
                 use utils_rs::prelude::*;
-                utils_rs::testing::setup_tracing();
+                utils_rs::testing::setup_tracing()?;
                 let mut test_cx = $cx_fn(utils_rs::function_full!()).await?;
                 {
                     let http_client = reqwest::Client::new();
 
-                    let host = test_cx.wadm_apps[$app].app_url.clone();
-                    let path = $path;
-                    let mut request = http_client.request(reqwest::Method::$method, format!("{host}{path}"));
+                    let url = test_cx.wadm_apps[$app].app_url.clone();
+                    let url = url.join($path)?;
+                    let mut request = http_client.request(reqwest::Method::$method, url.to_string());
 
                     // let token = authenticate::Authenticate
                     //     .handle(
@@ -89,7 +89,7 @@ macro_rules! integration_table_tests {
                     let check_json: Option<serde_json::Value> = utils_rs::optional_expr!($($check_json)?);
                     if let Some(check_json) = check_json {
                         let body_json = body_json.as_ref().unwrap();
-                        utils_rs::testing::check_json(
+                        utils_rs::testing::assert_eq_json(
                             ("check", &check_json),
                             ("response", &body_json)
                         );

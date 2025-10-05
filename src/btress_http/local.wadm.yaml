@@ -11,11 +11,30 @@ spec:
       type: component
       properties:
         image: file://../../target/wasm32-wasip2/debug/btress_http_plugged_s.wasm
+        config:
+          - name: pg
       traits:
         # Govern the spread/scheduling of the component
         - type: spreadscaler
           properties:
             instances: 1
+        # Link the sqldb-provider to the component, specifying the postgres cluster URL
+        - type: link
+          properties:
+            target: sqldb-postgres
+            namespace: wasmcloud
+            package: sqldb-postgres
+            interfaces: [query, prepared]
+            # NOTE: When configuration is specified below only by name, it references a named configuration
+            # (ex. one set via `wash config put`)
+            target_config:
+              - name: pg
+                properties:
+                  # POSTGRES_HOST: localhost
+                  # POSTGRES_PORT: 5432
+                  POSTGRES_USERNAME: postgres
+                  POSTGRES_PASSWORD: postgres
+                  POSTGRES_DATABASE: postgres
         # - type: link
         #   properties:
         #     target: api-component
@@ -32,6 +51,10 @@ spec:
     #       properties:
     #         instances: 1
 
+    - name: sqldb-postgres
+      type: capability
+      properties:
+        image: ghcr.io/wasmcloud/sqldb-postgres:0.10.0
     # Add a capability provider that enables HTTP access
     - name: httpserver
       type: capability

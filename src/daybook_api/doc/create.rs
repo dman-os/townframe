@@ -27,7 +27,7 @@ impl GuestService for DocCreate {
             id as "id!"
             ,created_at as "created_at!"
             ,updated_at as "updated_at!"
-        FROM doc.create_doc($1, $2)
+        FROM doc.create_doc($1)
             "#
             .into(),
             &[PgValue::Text(inp.id.clone())],
@@ -35,7 +35,11 @@ impl GuestService for DocCreate {
         .map_err(|err| {
             use postgres::types::QueryError::*;
             match err {
-                Unexpected(msg) if msg.contains("docs_id_key") => {
+                Unexpected(msg)
+                    if msg.contains(
+                        "duplicate key value violates unique constraint \"docs_pkey\"",
+                    ) =>
+                {
                     ErrorIdOccupied { id: inp.id }.into()
                 }
                 Unexpected(msg) | InvalidParams(msg) | InvalidQuery(msg) => {

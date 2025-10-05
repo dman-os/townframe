@@ -49,7 +49,7 @@ pub fn load_envs_once() {
 }
 
 /// Not deep equality but deep "`is_subset_of`" check.
-pub fn check_json(
+pub fn assert_eq_json(
     (check_name, check): (&str, &serde_json::Value),
     (json_name, json): (&str, &serde_json::Value),
 ) {
@@ -57,7 +57,7 @@ pub fn check_json(
     match (check, json) {
         (Array(check), Array(response)) => {
             for ii in 0..check.len() {
-                check_json(
+                assert_eq_json(
                     (&format!("{check_name}[{ii}]"), &check[ii]),
                     (&format!("{json_name}[{ii}]"), &response[ii]),
                 );
@@ -65,7 +65,7 @@ pub fn check_json(
         }
         (Object(check), Object(response)) => {
             for (key, val) in check {
-                check_json(
+                assert_eq_json(
                     (&format!("{check_name}.{key}"), val),
                     (
                         &format!("{json_name}.{key}"),

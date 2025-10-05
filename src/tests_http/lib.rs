@@ -46,13 +46,13 @@ impl TestContext {
 
     /// Call this after all holders of the [`SharedContext`] have been dropped.
     pub async fn close(mut self) {
-        for (_, _db) in self.pg_pools.drain() {
-            // db.close().await;
-        }
         for (_, app) in self.wadm_apps.drain() {
             if let Err(err) = app.close().await {
                 tracing::error!("error closing app: {err:?}");
             }
+            // db.close().await;
+        }
+        for (_, _db) in self.pg_pools.drain() {
             // db.close().await;
         }
     }
@@ -72,32 +72,38 @@ impl Drop for TestContext {
 #[allow(unused)]
 async fn test_cx(test_name: &'static str) -> Res<TestContext> {
     utils_rs::testing::load_envs_once();
-    let (btress_db, btress_http) = {
-        let root_path = &format!("{root}/../btress_api", root = env!("CARGO_MANIFEST_DIR"));
-        let wasm_path = "target/wasm32-wasip2/debug/btress_http_plugged_s.wasm";
-        tokio::try_join!(
-            pg::TestPg::new(test_name, &Path::new(root_path)),
-            wasmcloud::TestApp::new(test_name, wasm_path)
-        )?
-    };
-    let (daybook_db, daybook_http) = {
-        let root_path = &format!("{root}/../daybook_api", root = env!("CARGO_MANIFEST_DIR"));
-        let wasm_path = "target/wasm32-wasip2/debug/daybook_http_plugged_s.wasm";
-        tokio::try_join!(
-            pg::TestPg::new(test_name, &Path::new(root_path)),
-            wasmcloud::TestApp::new(test_name, wasm_path)
-        )?
-    };
+    let ((btress_name, btress_db, btress_http), (daybook_name, daybook_db, daybook_http)) = tokio::try_join!(
+        async {
+            let app_name = "btress";
+            let root_path = &format!("{root}/../btress_api", root = env!("CARGO_MANIFEST_DIR"));
+            let wasm_path = "target/wasm32-wasip2/debug/btress_http_plugged_s.wasm";
+            let (app, db) = tokio::try_join!(
+                wasmcloud::TestApp::new(app_name, test_name, wasm_path),
+                pg::TestPg::new(app_name, test_name, &Path::new(root_path))
+            )?;
+            eyre::Ok((app_name, db, app))
+        },
+        async {
+            let app_name = "daybook";
+            let root_path = &format!("{root}/../daybook_api", root = env!("CARGO_MANIFEST_DIR"));
+            let wasm_path = "target/wasm32-wasip2/debug/daybook_http_plugged_s.wasm";
+            let (app, db) = tokio::try_join!(
+                wasmcloud::TestApp::new(app_name, test_name, wasm_path),
+                pg::TestPg::new(app_name, test_name, &Path::new(root_path))
+            )?;
+            eyre::Ok((app_name, db, app))
+        },
+    )?;
     let testing = TestContext::new(
         test_name.into(),
         [
-            ("btress".to_string(), btress_db),
-            ("daybook".to_string(), daybook_db),
+            (btress_name.to_string(), btress_db),
+            (daybook_name.to_string(), daybook_db),
         ],
         [],
         [
-            ("btress".to_string(), btress_http),
-            ("daybook".to_string(), daybook_http),
+            (daybook_name.to_string(), daybook_http),
+            (btress_name.to_string(), btress_http),
         ],
     );
     Ok(testing)

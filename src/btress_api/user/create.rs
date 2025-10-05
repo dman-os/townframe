@@ -43,11 +43,21 @@ impl GuestService for UserCreate {
         .map_err(|err| {
             use postgres::types::QueryError::*;
             match err {
-                Unexpected(msg) if msg.contains("users_username_key") => ErrorUsernameOccupied {
-                    username: inp.username,
+                Unexpected(msg)
+                    if msg.contains(
+                        "duplicate key value violates unique constraint \"users_username_key\"",
+                    ) =>
+                {
+                    ErrorUsernameOccupied {
+                        username: inp.username,
+                    }
+                    .into()
                 }
-                .into(),
-                Unexpected(msg) if msg.contains("users_email_key") => {
+                Unexpected(msg)
+                    if msg.contains(
+                        "duplicate key value violates unique constraint \"users_email_key\"",
+                    ) =>
+                {
                     ErrorEmailOccupied { email: inp.email }.into()
                 }
                 Unexpected(msg) | InvalidParams(msg) | InvalidQuery(msg) => {

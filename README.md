@@ -38,13 +38,13 @@ Repo guide:
 
 - `./src/granary_web/`: Web app for granary (haitus).
 
-- `./ghjk.ts`: [`ghjk`(https://github.com/metatypedev/ghjk)] file.
+- `./ghjk.ts`: [`ghjk`](https://github.com/metatypedev/ghjk) file.
 
   - Contans a lot of necessary scripts accessible through `ghjk x`.
 
   - Provisions a bunch of development tools.
 
-- `./flake.nix`: Nix flake that provides
+- `./flake.nix`: Nix flake with:
 
   - Provisions a bunch of development toolchains and libraries.
 

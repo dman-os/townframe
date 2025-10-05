@@ -8,7 +8,7 @@ pub const METHOD: Method = Method::POST;
 pub async fn service(Json(inp): Json<Input>) -> Response {
     let service = Service::new();
     match service.serve(&inp) {
-        Ok(val) => Json(val).into_response(),
+        Ok(val) => (StatusCode::CREATED, Json(val)).into_response(),
         Err(err) => match &err {
             Error::IdOccupied(..) => (StatusCode::BAD_REQUEST, Json(err)).into_response(),
             Error::InvalidInput(..) => (StatusCode::BAD_REQUEST, Json(err)).into_response(),

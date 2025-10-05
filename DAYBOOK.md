@@ -7,6 +7,9 @@
 - [ ] Get uniffi working on android
 - [ ] Save a photo
 - [ ] DRY up all the wit bindgen
+- [ ] Move http tests into api crates
+- [ ] Code generator for http wrapper
+- [ ] PgLite based testing
 
 ---
 

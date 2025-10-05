@@ -16,24 +16,28 @@ spec:
         - type: spreadscaler
           properties:
             instances: 1
-        # - type: link
-        #   properties:
-        #     target: api-component
-        #     namespace: townframe
-        #     package: daybook-api
-        #     interfaces: [ctx, user-create]
+        # Link the sqldb-provider to the component, specifying the postgres cluster URL
+        - type: link
+          properties:
+            target: postgres
+            namespace: wasmcloud
+            package: postgres
+            interfaces: [query, prepared]
+            target_config:
+              - name: pg
+                properties:
+                  POSTGRES_USERNAME: postgres
+                  POSTGRES_PASSWORD: postgres
+                  POSTGRES_DATABASE: daybook
+                  POSTGRES_HOST: localhost
+                  POSTGRES_PORT: '5432'
 
-    # - name: api-component
-    #   type: component
-    #   properties:
-    #     image: file://../../target/wasm32-wasip2/debug/daybook_api_s.wasm
-    #   traits:
-    #     - type: spreadscaler
-    #       properties:
-    #         instances: 1
-
+    - name: postgres
+      type: capability
+      properties:
+        image: ghcr.io/wasmcloud/sqldb-postgres:0.10.0
     # Add a capability provider that enables HTTP access
-    - name: httpserver
+    - name: http-server
       type: capability
       properties:
         image: ghcr.io/wasmcloud/http-server:0.27.0

@@ -7,8 +7,11 @@ pub struct TestPg {
 }
 
 impl TestPg {
-    pub async fn new(test_name: &str, migrations_root: &Path) -> Res<Self> {
-        let db_name = test_name.replace("::tests::", "_").replace("::", "_");
+    pub async fn new(app_name: &str, test_name: &str, migrations_root: &Path) -> Res<Self> {
+        let db_name = format!(
+            "{app_name}_{test_name}",
+            test_name = test_name.replace("::tests::", "_").replace("::", "_")
+        );
 
         use sqlx::prelude::*;
         let opts = sqlx::postgres::PgConnectOptions::default()
@@ -73,10 +76,10 @@ impl TestPg {
             pool,
             clean_up_closure: Some(Box::new(move || {
                 Box::pin(async move {
-                    connection
-                        .execute(&format!(r###"DROP DATABASE {db_name}"###)[..])
-                        .await
-                        .expect("Failed to drop test database.");
+                    // connection
+                    //     .execute(&format!(r###"DROP DATABASE {db_name}"###)[..])
+                    //     .await
+                    //     .expect("Failed to drop test database.");
                 })
             })),
         })

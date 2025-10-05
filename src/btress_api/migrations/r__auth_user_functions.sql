@@ -71,11 +71,11 @@ AS $body$
         -- null out any references as well
 	    UPDATE web.sessions
 	        SET auth_session_id = NULL
-	        WHERE auth_session_id (
+	        WHERE auth_session_id IN (
 	            SELECT id 
-		        FROM auth.sessions 
-		        WHERE 
-		            auth.sessions.user_id = target_id 
+		            FROM auth.sessions 
+		            WHERE 
+		                auth.sessions.user_id = target_id 
 	        );
 
         WITH deleted AS (
