@@ -2,6 +2,10 @@ use crate::interlude::*;
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 #[serde(crate = "serde", rename_all = "camelCase")]
+#[cfg_attr(
+    feature = "automerge",
+    derive(autosurgeon::Hydrate, autosurgeon::Reconcile)
+)]
 pub struct ErrorsValidation {
     pub issues: Vec<(String, String)>,
 }
@@ -60,6 +64,10 @@ impl From<garde::Report> for ErrorsValidation {
     displaydoc::Display,
 )]
 #[serde(crate = "serde", rename_all = "camelCase")]
+#[cfg_attr(
+    feature = "automerge",
+    derive(autosurgeon::Hydrate, autosurgeon::Reconcile)
+)]
 /// internal error: {message}
 pub struct ErrorInternal {
     pub message: String,

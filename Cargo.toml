@@ -2,25 +2,29 @@
 resolver = "3"
 members = [
   "./src/agents",
+  "./src/api_utils_rs",
+  "./src/autosurgeon/autosurgeon",
+  "./src/autosurgeon/autosurgeon-derive/",
   "./src/btress_api",
   "./src/btress_http",
+  "./src/daybook_api",
+  "./src/daybook_core",
+  "./src/daybook_http",
+  "./src/daybook_sync",
+  "./src/macros",
+  "./src/tests_http",
+  "./src/utils_rs",
+  "./src/xtask",
+  "./src/sdk-shared-core/",
+  # "./src/xtask",
   # "./src/granary_web",
   # "./src/leptos_oidc",
-  "./src/utils_rs",
-  "./src/api_utils_rs",
-  "./src/xtask",
-  "./src/macros",
-  "./src/daybook_core",
-  "./src/daybook_sync",
-  "./src/daybook_api",
-  "./src/daybook_http",
-  "./src/daybook_types",
-  "./src/tests_http",
   # "./src/leptos_wasi/",
 ]
 exclude = [
   "./src/samod"
 ]
+# rust-version = "1.65"
 
 [workspace.package]
 version = "0.1.0"
@@ -33,7 +37,6 @@ utils_rs = { path = "./src/utils_rs", default-features = false }
 api_utils_rs = { path = "./src/api_utils_rs" }
 btress_api = { path = "./src/btress_api" }
 macros = { path = "./src/macros" }
-daybook_types = { path = "./src/daybook_types", default-features = false }
 
 # futures
 async-trait = "0.1"
@@ -99,9 +102,10 @@ gloo = { version = "0.11.0", default-features = false }
 # wasm
 wit-bindgen = "0.45.1"
 
-automerge = "0.6"
-autosurgeon = "0.8.7"
-automerge-test = "0.5"
+automerge = "0.7"
+# autosurgeon = "0.9"
+autosurgeon = { path = "src/autosurgeon/autosurgeon" }
+automerge-test = "0.6"
 samod = { version = "0.4.0" }
 # samod = { path = "src/samod/samod" }
 
@@ -118,3 +122,6 @@ sqlx = { version = "0.8.6", features = [
 
 
 uniffi = { version = "0.29.4" }
+
+[patch.crates-io]
+restate-sdk-shared-core = { path = "./src/sdk-shared-core/" }

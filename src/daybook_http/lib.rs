@@ -1,5 +1,5 @@
 mod interlude {
-    pub use utils_rs::prelude::*;
+    pub use api_utils_rs::{api, prelude::*};
 
     pub(crate) use crate::method_router;
 
@@ -11,14 +11,14 @@ mod interlude {
 }
 
 mod wit {
-    pub mod serde {
-        wit_bindgen::generate!({
-            world: "imports",
-            generate_all,
-            additional_derives: [serde::Serialize, serde::Deserialize],
-            // async: true,
-        });
-    }
+    // pub mod serde {
+    //     wit_bindgen::generate!({
+    //         world: "imports",
+    //         generate_all,
+    //         additional_derives: [serde::Serialize, serde::Deserialize],
+    //         // async: true,
+    //     });
+    // }
     wit_bindgen::generate!({
         world: "server",
         // generate_all,
@@ -26,10 +26,6 @@ mod wit {
         with: {
             "wasi:logging/logging@0.1.0-draft": api_utils_rs::wit::wasi::logging::logging,
 
-            // "wasi:io/poll@0.2.6": crate::wit::non_serde::wasi::io::poll,
-            // "wasi:io/error@0.2.6": crate::wit::non_serde::wasi::io::error,
-            // "wasi:io/streams@0.2.6": crate::wit::non_serde::wasi::io::streams,
-            // "wasi:http/types@0.2.6": crate::wit::non_serde::wasi::http::types,
             "wasi:io/poll@0.2.6": generate,
             "wasi:io/error@0.2.6": generate,
             "wasi:io/streams@0.2.6": generate,
@@ -40,14 +36,28 @@ mod wit {
 
             "townframe:api-utils/utils": api_utils_rs::wit::utils,
 
-            "townframe:daybook-api/ctx": crate::wit::serde::townframe::daybook_api::ctx,
-            "townframe:daybook-api/doc": crate::wit::serde::townframe::daybook_api::doc,
-            "townframe:daybook-api/doc-create": crate::wit::serde::townframe::daybook_api::doc_create,
+            "townframe:daybook-api/ctx": generate,
+            "townframe:daybook-api/doc": crate::gen::doc,
+            "townframe:daybook-api/doc/doc": crate::gen::doc::Doc,
+            "townframe:daybook-api/doc/doc-kind": generate,
+            "townframe:daybook-api/doc/doc-tag": crate::gen::doc::DocTag,
+            "townframe:daybook-api/doc/doc-blob": crate::gen::doc::DocBlob,
+            "townframe:daybook-api/doc/doc-content": crate::gen::doc::DocContent,
+            // "townframe:daybook-api/doc/doc-kind": crate::gen::doc::DocKind,
+            "townframe:daybook-api/doc/doc-image": crate::gen::doc::DocImage,
+
+            "townframe:daybook-api/doc-create/input": crate::gen::doc::doc_create::Input,
+            "townframe:daybook-api/doc-create/error-id-occupied": crate::gen::doc::doc_create::ErrorIdOccupied,
+            // "townframe:daybook-api/doc/doc-tag-kind": crate::gen::doc::DocTagKind,
+            "townframe:daybook-api/doc/doc-tag-kind": generate,
+            "townframe:daybook-api/doc-create": generate,
+            "townframe:daybook-api/doc-create/error": crate::gen::doc::doc_create::Error,
         }
     });
 }
 
 mod doc;
+mod gen;
 mod request;
 
 use crate::interlude::*;
@@ -82,7 +92,7 @@ impl HttpIncomingGuest for Component {
 }
 
 async fn app_main(wasi_req: IncomingRequest, out_param: ResponseOutparam) -> Res<()> {
-    wit::serde::townframe::daybook_api::ctx::init()
+    wit::townframe::daybook_api::ctx::init()
         .map_err(|err| ferr!("error on daybook_api init: {err}"))?;
 
     let router = axum::Router::new()

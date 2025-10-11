@@ -16,7 +16,6 @@ path = "lib.rs"
 [dependencies]
 # internal
 utils_rs.workspace = true
-daybook_types = { workspace = true, features = ["serde", "automerge", "uniffi"] }
 
 # serde
 serde.workspace = true

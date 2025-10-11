@@ -18,14 +18,10 @@ use interlude::*;
 
 uniffi::setup_scaffolding!();
 
-// Re-export scaffolding for UniFFI components so their symbols are exported from this
-// shared library at link-time. This helps when composing multiple UniFFI components
-// into a single crate.
-daybook_types::uniffi_reexport_scaffolding!();
-
 mod am;
 mod docs;
 mod ffi;
+mod gen;
 mod globals;
 mod macros;
 mod repos;
@@ -76,12 +72,12 @@ impl Config {
                 },
             }
         };
-        Ok(Self { 
+        Ok(Self {
             am: am::Config {
                 storage_dir: PathBuf::from("/tmp/daybook"),
                 peer_id: "daybook_client".to_string(),
             },
-            sql 
+            sql,
         })
     }
 }

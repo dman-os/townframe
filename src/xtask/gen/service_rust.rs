@@ -2,9 +2,14 @@ use super::*;
 
 use std::fmt::Write;
 
-impl TypeReg {
+pub struct RustGenCtx<'a> {
+    pub reg: &'a TypeReg,
+    pub attrs: RustAttrs,
+}
+
+impl RustGenCtx<'_> {
     pub fn rust_name(&self, ty: TypeId) -> Option<CHeapStr> {
-        Some(match self.types.get(&ty)?.value() {
+        Some(match self.reg.types.get(&ty)?.value() {
             Type::Record(record) => record.name.to_pascal_case().into(),
             Type::Enum(r#enum) => r#enum.name.to_pascal_case().into(),
             Type::Variant(variant) => variant.name.to_pascal_case().into(),
@@ -13,7 +18,13 @@ impl TypeReg {
             Type::Primitives(Primitives::F64) => "f64".into(),
             Type::Primitives(Primitives::Bool) => "bool".into(),
             Type::Primitives(Primitives::Uuid) => "String".into(),
-            Type::Primitives(Primitives::DateTime) => "OffsetDateTime".into(),
+            Type::Primitives(Primitives::DateTime) => {
+                if self.attrs.automerge {
+                    "OffsetDateTime".into()
+                } else {
+                    "Datetime".into()
+                }
+            }
             Type::Primitives(Primitives::Json) => "serde_json::Value".into(),
             Type::List(ty) => format!(
                 "Vec<{}>",
@@ -89,7 +100,7 @@ impl ExportedTypesAppender {
 }
 
 pub fn feature_module(
-    reg: &TypeReg,
+    cx: &RustGenCtx,
     buf: &mut impl Write,
     Feature {
         tag,
@@ -107,23 +118,19 @@ pub fn feature_module(
     {
         let mut out = indenter::indented(buf).with_str("    ");
         let buf = &mut out;
-        writeln!(
-            buf,
-            r#"use super::*;
+        if cx.attrs.utoipa {
+            writeln!(
+                buf,
+                r#"use super::*;
 
-#[cfg(feature = "automerge")]
-pub type OffsetDateTime = time::OffsetDateTime;
-#[cfg(not(feature = "automerge"))]
-pub type OffsetDateTime = Datetime;
-
-#[cfg(feature = "utoipa")]
 pub const TAG: api::Tag = api::Tag {{
     name: "{tag_name}",
     desc: "{tag_desc}",
 }};"#,
-            tag_name = tag.name,
-            tag_desc = tag.desc,
-        )?;
+                tag_name = tag.name,
+                tag_desc = tag.desc,
+            )?;
+        }
 
         {
             let mut exp = ExportedTypesAppender {
@@ -136,7 +143,7 @@ pub const TAG: api::Tag = api::Tag {{
             };
             for id in schema_types {
                 writeln!(buf)?;
-                schema_type(reg, buf, &mut exp, *id)?;
+                schema_type(cx, buf, &mut exp, *id)?;
             }
         }
         /*{
@@ -163,7 +170,7 @@ pub const TAG: api::Tag = api::Tag {{
             };
             for epoint in endpoints {
                 writeln!(buf)?;
-                endpoint_module(reg, buf, &mut exp, epoint)?;
+                endpoint_module(cx, buf, &mut exp, epoint)?;
             }
         }
         writeln!(buf)?;
@@ -172,7 +179,7 @@ pub const TAG: api::Tag = api::Tag {{
     Ok(exp_root)
 }
 
-pub fn wit_bindgen_module(
+pub fn _wit_bindgen_module(
     buf: &mut impl Write,
     Feature { tag, .. }: &Feature,
     rust_root_module: &str,
@@ -214,9 +221,9 @@ with: {{
 }
 
 fn endpoint_module(
-    reg: &TypeReg,
+    cx: &RustGenCtx,
     buf: &mut impl Write,
-    exp: &ExportedTypesAppender,
+    exp: &mut ExportedTypesAppender,
     epoint: &EndpointType,
 ) -> Res<()> {
     writeln!(
@@ -238,11 +245,11 @@ pub struct {id};"#,
             id = AsPascalCase(&epoint.id[..]),
         )?;
         writeln!(buf)?;
-        output_type(reg, buf, &mut exp, &epoint.output)?;
+        output_type(cx, buf, &mut exp, &epoint.output)?;
         writeln!(buf)?;
-        input_type(reg, buf, &mut exp, &epoint.input)?;
+        input_type(cx, buf, &mut exp, &epoint.input)?;
         writeln!(buf)?;
-        error_type(reg, buf, &mut exp, &epoint.error)?;
+        error_type(cx, buf, &mut exp, &epoint.error)?;
         /*
                 // http_impl(&epoint, reg, buf)?;
                 writeln!(
@@ -311,21 +318,21 @@ pub struct {id};"#,
 // pub fn http_impl(reg: &TypeReg, buf: &mut impl Write, epoint: &EndpointType) -> Res<()> {}
 
 fn schema_type(
-    reg: &TypeReg,
+    cx: &RustGenCtx,
     buf: &mut impl Write,
     exp: &ExportedTypesAppender,
     id: TypeId,
 ) -> Res<()> {
-    let borrow = reg.types.get(&id).unwrap();
+    let borrow = cx.reg.types.get(&id).unwrap();
     match borrow.value() {
-        Type::Record(record) => schema_record(reg, buf, exp, record)?,
-        Type::Enum(r#enum) => schema_enum(buf, exp, r#enum)?,
-        Type::Variant(variant) => schema_variant(reg, buf, exp, variant)?,
+        Type::Record(record) => schema_record(cx, buf, exp, record)?,
+        Type::Enum(r#enum) => schema_enum(cx, buf, exp, r#enum)?,
+        Type::Variant(variant) => schema_variant(cx, buf, exp, variant)?,
         Type::Alias(name, ty_id) => writeln!(
             buf,
             "pub type {alias} = {other};",
             alias = AsPascalCase(&name[..]),
-            other = reg.rust_name(*ty_id).expect("unregistered inner type")
+            other = cx.rust_name(*ty_id).expect("unregistered inner type")
         )?,
         ty => eyre::bail!("found unsupported schema type: {ty:?}"),
     };
@@ -333,7 +340,7 @@ fn schema_type(
 }
 
 fn schema_record(
-    reg: &TypeReg,
+    cx: &RustGenCtx,
     buf: &mut impl Write,
     exp: &ExportedTypesAppender,
     this: &Record,
@@ -343,37 +350,26 @@ fn schema_record(
         AsPascalCase(&this.name[..]).to_string(),
     );
 
-    // Base derives always present (utoipa ToSchema emitted via rust_attrs)
-    writeln!(buf, "#[derive(Debug, Clone)]")?;
-    if this.rust_attrs.emit_utoipa {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"utoipa\", derive(utoipa::ToSchema))]"
-        )?;
+    // Build derives according to generation-time flags
+    let mut derives: Vec<&str> = vec!["Debug", "Clone"];
+    if cx.attrs.automerge {
+        derives.push("Hydrate");
+        derives.push("Reconcile");
     }
-    if this.rust_attrs.emit_serde {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]"
-        )?;
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"serde\", serde(rename_all = \"camelCase\"))]"
-        )?;
+    if cx.attrs.utoipa {
+        derives.push("utoipa::ToSchema");
     }
-    // Only apply autosurgeon and uniffi derives to records (structs)
-    // Emit uniffi derive for records when requested
-    if this.rust_attrs.emit_autosurgeon {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"automerge\", derive(Reconcile, Hydrate))]"
-        )?;
+    if cx.attrs.serde {
+        derives.push("Serialize");
+        derives.push("Deserialize");
     }
-    if this.rust_attrs.emit_uniffi {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"uniffi\", derive(uniffi::Record))]"
-        )?;
+    // only records get autosurgeon/automerge derives
+    if cx.attrs.uniffi {
+        derives.push("uniffi::Record");
+    }
+    writeln!(buf, "#[derive({})]", derives.join(", "))?;
+    if cx.attrs.serde {
+        writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
     }
     write!(
         buf,
@@ -383,11 +379,10 @@ fn schema_record(
     for (field_name, field) in &this.fields {
         record_field(
             field,
-            reg,
+            cx,
             &mut indenter::indented(buf).with_str("    "),
             &field_name,
             true,
-            &this.rust_attrs,
         )?;
         writeln!(buf, ",")?;
     }
@@ -395,40 +390,36 @@ fn schema_record(
     Ok(())
 }
 
-fn schema_enum(buf: &mut impl Write, exp: &ExportedTypesAppender, this: &Enum) -> Res<()> {
+fn schema_enum(
+    cx: &RustGenCtx,
+    buf: &mut impl Write,
+    exp: &ExportedTypesAppender,
+    this: &Enum,
+) -> Res<()> {
     exp.append(
         AsKebabCase(&this.name[..]).to_string(),
         AsPascalCase(&this.name[..]).to_string(),
     );
 
-    writeln!(buf, "#[derive(Debug, Clone)]")?;
-    if this.rust_attrs.emit_utoipa {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"utoipa\", derive(utoipa::ToSchema))]"
-        )?;
+    // Emit derives according to ctx flags (generate attributes directly)
+    let mut derives: Vec<&str> = vec!["Debug", "Clone"];
+    if cx.attrs.automerge {
+        derives.push("Hydrate");
+        derives.push("Reconcile");
     }
-    if this.rust_attrs.emit_serde {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]"
-        )?;
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"serde\", serde(rename_all = \"camelCase\", untagged))]"
-        )?;
+    if cx.attrs.utoipa {
+        derives.push("utoipa::ToSchema");
     }
-    if this.rust_attrs.emit_autosurgeon {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"automerge\", derive(Reconcile, Hydrate))]"
-        )?;
+    if cx.attrs.serde {
+        derives.push("Serialize");
+        derives.push("Deserialize");
     }
-    if this.rust_attrs.emit_uniffi {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"uniffi\", derive(uniffi::Enum))]"
-        )?;
+    if cx.attrs.uniffi {
+        derives.push("uniffi::Enum");
+    }
+    writeln!(buf, "#[derive({})]", derives.join(", "))?;
+    if cx.attrs.serde {
+        writeln!(buf, "#[serde(rename_all = \"camelCase\", untagged)]")?;
     }
     // For enums we keep serde derives only; autosurgeon derive is only emitted for records
     write!(
@@ -445,11 +436,41 @@ fn schema_enum(buf: &mut impl Write, exp: &ExportedTypesAppender, this: &Enum) -
         writeln!(buf, "{name},", name = AsPascalCase(&name[..]))?;
     }
     writeln!(buf, "}}")?;
+    writeln!(
+        buf,
+        r#"impl {rust_name} {{
+    pub unsafe fn _lift(val:u8) -> {rust_name} {{
+        if !cfg!(debug_assertions){{
+            return unsafe {{
+                ::core::mem::transmute(val)
+            }};
+        }}
+        match val {{
+"#,
+        rust_name = heck::AsPascalCase(&this.name[..])
+    )?;
+    for (ii, (name, _)) in this.variants.iter().enumerate() {
+        writeln!(
+            buf,
+            "            {ii} => {enum_name}::{var_name},",
+            enum_name = heck::AsPascalCase(&this.name[..]),
+            var_name = heck::AsPascalCase(&name[..]),
+        )?;
+    }
+    writeln!(
+        buf,
+        r#"
+            _ => panic!("invalid enum discriminant"),
+        }}
+    }}
+}}
+"#,
+    )?;
     Ok(())
 }
 
 fn schema_variant(
-    reg: &TypeReg,
+    cx: &RustGenCtx,
     buf: &mut impl Write,
     exp: &ExportedTypesAppender,
     this: &Variant,
@@ -459,34 +480,24 @@ fn schema_variant(
         AsPascalCase(&this.name[..]).to_string(),
     );
 
-    writeln!(buf, "#[derive(Debug, Clone)]")?;
-    if this.rust_attrs.emit_utoipa {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"utoipa\", derive(utoipa::ToSchema))]"
-        )?;
+    let mut derives: Vec<&str> = vec!["Debug", "Clone"];
+    if cx.attrs.automerge {
+        derives.push("Hydrate");
+        derives.push("Reconcile");
     }
-    if this.rust_attrs.emit_serde {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]"
-        )?;
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"serde\", serde(rename_all = \"camelCase\", tag = \"ty\"))]"
-        )?;
+    if cx.attrs.utoipa {
+        derives.push("utoipa::ToSchema");
     }
-    if this.rust_attrs.emit_autosurgeon {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"automerge\", derive(Reconcile, Hydrate))]"
-        )?;
+    if cx.attrs.serde {
+        derives.push("Serialize");
+        derives.push("Deserialize");
     }
-    if this.rust_attrs.emit_uniffi {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"uniffi\", derive(uniffi::Enum))]"
-        )?;
+    if cx.attrs.uniffi {
+        derives.push("uniffi::Enum");
+    }
+    writeln!(buf, "#[derive({})]", derives.join(", "))?;
+    if cx.attrs.serde {
+        writeln!(buf, "#[serde(rename_all = \"camelCase\", tag = \"ty\")]")?;
     }
     // autosurgeon derives are only emitted for records — enums are intentionally left with serde only
     write!(
@@ -506,7 +517,7 @@ fn schema_variant(
             VariantVariantType::Wrapped(ty) => writeln!(
                 buf,
                 "({ty_name}), ",
-                ty_name = reg.rust_name(*ty).expect("unregistered variant type")
+                ty_name = cx.rust_name(*ty).expect("unregistered variant type")
             )?,
         }
     }
@@ -515,61 +526,59 @@ fn schema_variant(
 }
 
 fn output_type(
-    reg: &TypeReg,
+    cx: &RustGenCtx,
     buf: &mut impl Write,
     exp: &ExportedTypesAppender,
     this: &OutputType,
 ) -> Res<()> {
     let rust_name: String = match this {
-        OutputType::Ref(ty_id) => reg
+        OutputType::Ref(ty_id) => cx
             .rust_name(*ty_id)
             .expect("unregistered field type")
             .into(),
         OutputType::Record(record) => {
             exp.append("output".to_string(), "Output".to_string());
-            schema_record(reg, buf, exp, record)?;
+            schema_record(cx, buf, exp, record)?;
             if record.name.eq_ignore_ascii_case("Output") {
                 return Ok(());
             }
             record.name.to_pascal_case()
         }
     };
-    writeln!(
-        buf,
-        r#"
-#[cfg(feature = "utoipa")]
-pub type Output = SchemaRef<{rust_name}>;
-#[cfg(not(feature = "utoipa"))]
-pub type Output = {rust_name};
-"#,
-        rust_name = rust_name,
-    )?;
+    if cx.attrs.utoipa {
+        writeln!(buf, r#"pub type Output = SchemaRef<{rust_name}>;"#,)?;
+    } else {
+        writeln!(buf, r#"pub type Output = {rust_name};"#,)?;
+    }
     Ok(())
 }
 
 fn input_type(
-    reg: &TypeReg,
+    cx: &RustGenCtx,
     buf: &mut impl Write,
     exp: &ExportedTypesAppender,
     this: &InputType,
 ) -> Res<()> {
     exp.append("input".to_string(), "Input".to_string());
-    writeln!(buf, "#[derive(Debug, Clone, garde::Validate)]")?;
-    if this.rust_attrs.emit_utoipa {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"utoipa\", derive(utoipa::ToSchema))]"
-        )?;
+    // Include garde::Validate derive only when garde emission is enabled
+    let mut derives = vec!["Debug", "Clone"];
+    if cx.attrs.automerge {
+        derives.push("Hydrate");
+        derives.push("Reconcile");
     }
-    if this.rust_attrs.emit_serde {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]"
-        )?;
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"serde\", serde(rename_all = \"camelCase\"))]"
-        )?;
+    if cx.attrs.garde {
+        derives.push("garde::Validate");
+    }
+    if cx.attrs.utoipa {
+        derives.push("utoipa::ToSchema");
+    }
+    if cx.attrs.serde {
+        derives.push("Serialize");
+        derives.push("Deserialize");
+    }
+    writeln!(buf, "#[derive({})]", derives.join(", "))?;
+    if cx.attrs.serde {
+        writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
     }
     writeln!(buf, "pub struct Input {{")?;
 
@@ -582,7 +591,7 @@ fn input_type(
                 writeln!(buf, "/// {}", desc)?;
             }
 
-            if this.rust_attrs.emit_utoipa {
+            if cx.attrs.utoipa {
                 // Add utoipa schema attributes for validations
                 let mut schema_attrs = Vec::new();
                 for validation in &field.validations {
@@ -601,57 +610,63 @@ fn input_type(
                 }
 
                 if !schema_attrs.is_empty() {
-                    writeln!(buf, "#[cfg_attr(feature = \"utoipa\", schema({}))]", schema_attrs.join(", "))?;
+                    if cx.attrs.utoipa {
+                        writeln!(buf, "#[schema({})]", schema_attrs.join(", "))?;
+                    }
                 }
             }
-
-            // Add garde validation attributes
-            let mut garde_attrs = Vec::new();
-            let mut length_validations = (None, None);
-            for validation in &field.validations {
-                match validation {
-                    FieldValidations::Ascii => garde_attrs.push("ascii".to_string()),
-                    FieldValidations::Email => garde_attrs.push("email".to_string()),
-                    FieldValidations::MinLength(len) => {
-                        if length_validations.0.is_some() {
-                            eyre::bail!(
+            if cx.attrs.garde {
+                // Add garde validation attributes
+                let mut garde_attrs = Vec::new();
+                let mut length_validations = (None, None);
+                for validation in &field.validations {
+                    match validation {
+                        FieldValidations::Ascii => garde_attrs.push("ascii".to_string()),
+                        FieldValidations::Email => garde_attrs.push("email".to_string()),
+                        FieldValidations::MinLength(len) => {
+                            if length_validations.0.is_some() {
+                                eyre::bail!(
                                 "duplicate min length validations: {len} && {length_validations:?}"
                             )
+                            }
+                            length_validations.0 = Some(len);
                         }
-                        length_validations.0 = Some(len);
-                    }
-                    FieldValidations::MaxLength(len) => {
-                        if length_validations.1.is_some() {
-                            eyre::bail!(
+                        FieldValidations::MaxLength(len) => {
+                            if length_validations.1.is_some() {
+                                eyre::bail!(
                                 "duplicate max length validations: {len} && {length_validations:?}"
                             )
+                            }
+                            length_validations.1 = Some(len);
                         }
-                        length_validations.1 = Some(len);
+                        FieldValidations::Pattern(pattern) => {
+                            garde_attrs.push(format!(r#"pattern({})"#, pattern.as_str()))
+                        }
+                        _ => {} // Handle other validation types as needed
                     }
-                    FieldValidations::Pattern(pattern) => {
-                        garde_attrs.push(format!(r#"pattern({})"#, pattern.as_str()))
-                    }
-                    _ => {} // Handle other validation types as needed
                 }
-            }
-            match length_validations {
-                (None, None) => {}
-                (None, Some(max)) => garde_attrs.push(format!("length(max = {max})")),
-                (Some(min), None) => garde_attrs.push(format!("length(min = {min})")),
-                (Some(min), Some(max)) => {
-                    garde_attrs.push(format!("length(min = {min}, max = {max})"))
+                match length_validations {
+                    (None, None) => {}
+                    (None, Some(max)) => garde_attrs.push(format!("length(max = {max})")),
+                    (Some(min), None) => garde_attrs.push(format!("length(min = {min})")),
+                    (Some(min), Some(max)) => {
+                        garde_attrs.push(format!("length(min = {min}, max = {max})"))
+                    }
+                }
+
+                if !garde_attrs.is_empty() {
+                    writeln!(buf, "#[garde({})]", garde_attrs.join(", "))?;
                 }
             }
 
-            if !garde_attrs.is_empty() {
-                writeln!(buf, "#[garde({})]", garde_attrs.join(", "))?;
-            }
-            if field.source != this.main_source {
-                writeln!(buf, "#[serde(skip)]")?;
+            if cx.attrs.serde {
+                if field.source != this.main_source {
+                    writeln!(buf, "#[serde(skip)]")?;
+                }
             }
 
             // Write the field definition
-            record_field(&field.inner, reg, buf, &field_name, true, &this.rust_attrs)?;
+            record_field(&field.inner, cx, buf, &field_name, true)?;
             writeln!(buf, ",")?;
         }
     }
@@ -661,7 +676,7 @@ fn input_type(
 }
 
 fn error_type(
-    reg: &TypeReg,
+    cx: &RustGenCtx,
     buf: &mut impl Write,
     exp: &ExportedTypesAppender,
     this: &ErrorType,
@@ -689,18 +704,23 @@ fn error_type(
             format!("error-{}", AsKebabCase(&name[..])),
             format!("Error{}", AsPascalCase(&name[..])),
         );
-        // Core derives always present
-        writeln!(
-            buf,
-            "#[derive(Debug, Clone, thiserror::Error, displaydoc::Display, utoipa::ToSchema)]"
-        )?;
+        // Build derives for error struct
+        let mut err_derives = vec!["Debug", "Clone", "thiserror::Error", "displaydoc::Display"];
+        if cx.attrs.utoipa {
+            err_derives.push("utoipa::ToSchema");
+        }
+        if cx.attrs.serde {
+            err_derives.push("Serialize");
+            err_derives.push("Deserialize");
+        }
+        if cx.attrs.automerge {
+            err_derives.push("Hydrate");
+            err_derives.push("Reconcile");
+        }
+        writeln!(buf, "#[derive({})]", err_derives.join(", "))?;
         // Optional serde derives and serde attributes when enabled for this ErrorType
-        if this.rust_attrs.emit_serde {
-            writeln!(
-                buf,
-                "#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]"
-            )?;
-            writeln!(buf, "#[cfg_attr(feature = \"serde\", serde(rename_all = \"camelCase\", tag = \"error\"))]")?;
+        if cx.attrs.serde {
+            writeln!(buf, "#[serde(rename_all = \"camelCase\", tag = \"error\")]")?;
         }
         writeln!(buf, "/// {message}{message_with_fields}",)?;
         writeln!(
@@ -728,36 +748,33 @@ fn error_type(
                 if *thiserror_from {
                     writeln!(buf, "#[from]")?;
                 }
-                record_field(inner, reg, buf, &field_name, true, &this.rust_attrs)?;
+                record_field(inner, cx, buf, &field_name, true)?;
                 writeln!(buf, ",")?;
             }
         }
         writeln!(buf, "}}")?;
+        writeln!(buf)?;
     }
     exp.append("error".to_string(), "Error".to_string());
-    writeln!(
-        buf,
-        r#"#[derive(
-    Debug,
-    thiserror::Error,
-    displaydoc::Display,
-)]"#
-    )?;
-    if this.rust_attrs.emit_utoipa {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"utoipa\", derive(utoipa::ToSchema, macros::HttpError))]"
-        )?;
+    // enum-level derives will be composed below; avoid duplicate derive block here
+    // Build derives for the error enum
+    let mut enum_derives = vec!["Debug", "thiserror::Error", "displaydoc::Display"];
+    if cx.attrs.utoipa {
+        enum_derives.push("utoipa::ToSchema");
+        // macros::HttpError is an auxiliary derive macro; emit when utoipa is requested
+        enum_derives.push("macros::HttpError");
     }
-    if this.rust_attrs.emit_serde {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]"
-        )?;
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"serde\", serde(rename_all = \"camelCase\", tag = \"error\"))]"
-        )?;
+    if cx.attrs.serde {
+        enum_derives.push("Serialize");
+        enum_derives.push("Deserialize");
+    }
+    if cx.attrs.automerge {
+        enum_derives.push("Hydrate");
+        enum_derives.push("Reconcile");
+    }
+    writeln!(buf, "#[derive({})]", enum_derives.join(", "))?;
+    if cx.attrs.serde {
+        writeln!(buf, "#[serde(rename_all = \"camelCase\", tag = \"error\")]")?;
     }
 
     writeln!(buf, "pub enum Error {{")?;
@@ -774,10 +791,10 @@ fn error_type(
         let mut out = &mut indenter::indented(buf).with_str("    ");
         let buf = &mut out;
         writeln!(buf, r#"/// {message} {{0}}"#,)?;
-        if this.rust_attrs.emit_utoipa {
+        if cx.attrs.utoipa {
             writeln!(
                 buf,
-                r#"#[cfg_attr(feature = "utoipa", http(code(StatusCode::{code_name}), desc("{message}")))]"#,
+                r#"#[http(code(StatusCode::{code_name}), desc("{message}"))]"#,
                 code_name = http_status_code_name(*http_code),
             )?;
         }
@@ -802,21 +819,18 @@ fn error_type(
 
 fn record_field(
     this: &RecordField,
-    reg: &TypeReg,
+    cx: &RustGenCtx,
     buf: &mut impl Write,
     name: &str,
     pub_visibility: bool,
-    rust_attrs: &RustAttrs,
 ) -> std::fmt::Result {
     // Emit autosurgeon key attribute for fields when requested
-    if this.autosurgeon_key {
-        writeln!(
-            buf,
-            "#[cfg_attr(feature = \"automerge\", autosurgeon(key))]"
-        )?;
+    if cx.attrs.automerge && this.autosurgeon_key {
+        writeln!(buf, "#[autosurgeon(key)]")?;
     }
 
-    match reg
+    match cx
+        .reg
         .types
         .get(&this.ty)
         .as_deref()
@@ -824,17 +838,17 @@ fn record_field(
     {
         Type::Primitives(Primitives::DateTime) => {
             // Emit autosurgeon date helper at field-level when the parent record requested autosurgeon
-            if rust_attrs.emit_autosurgeon {
-                if rust_attrs.emit_serde {
+            if cx.attrs.automerge {
+                if cx.attrs.serde {
                     // Emit serde codec helper for sane ISO8601 on datetime fields
                     writeln!(
                         buf,
-                        "#[cfg_attr(all(feature = \"serde\", feature = \"automerge\"), serde(with = \"api_utils_rs::codecs::sane_iso8601\"))]",
+                        "#[serde(with = \"api_utils_rs::codecs::sane_iso8601\")]",
                     )?;
                 }
                 writeln!(
                     buf,
-                    "#[cfg_attr(feature = \"automerge\", autosurgeon(with = \"utils_rs::am::autosurgeon_date\"))]",
+                    "#[autosurgeon(with = \"utils_rs::am::autosurgeon_date\")]",
                 )?;
             }
         }
@@ -845,6 +859,6 @@ fn record_field(
         "{vis}{field_name}: {ty_name}",
         vis = if pub_visibility { "pub " } else { "" },
         field_name = heck::AsSnekCase(name),
-        ty_name = reg.rust_name(this.ty).expect("unregistered field type"),
+        ty_name = cx.rust_name(this.ty).expect("unregistered field type"),
     )
 }

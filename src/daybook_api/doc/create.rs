@@ -3,10 +3,10 @@ use api_utils_rs::wit::wasmcloud::postgres::types::PgValue;
 
 use crate::interlude::*;
 
-pub use daybook_types::types::doc::doc_create::*;
+pub use crate::gen::doc::doc_create::*;
 // pub use crate::gen::doc::wit::exports::townframe::daybook_api::doc_create::GuestHandler;
+use crate::gen::doc::Doc;
 pub use crate::wit::exports::townframe::daybook_api::doc_create::GuestService;
-use daybook_types::types::doc::Doc;
 
 impl GuestService for DocCreate {
     fn new() -> Self {
@@ -62,6 +62,8 @@ impl GuestService for DocCreate {
                 .swap_remove("updated_at!")
                 .expect("bad response")
                 .to_datetime(),
+            content: todo!(),
+            tags: todo!(),
         };
         Ok(out)
     }

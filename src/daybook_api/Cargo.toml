@@ -8,14 +8,17 @@ crate-type = ["cdylib"]
 path = "lib.rs"
 
 [features]
-default = []
+default = ["utoipa", "serde"]
+serde = []
+utoipa = []
+automerge = []
+uniffi = []
 censor_internal_errors = []
 
 [dependencies]
 utils_rs.workspace = true
 api_utils_rs.workspace = true
 macros.workspace = true
-daybook_types = { workspace = true, features = ["serde"] }
 
 # futures
 async-trait.workspace = true

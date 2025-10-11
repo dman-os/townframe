@@ -32,7 +32,7 @@ impl TypeReg {
             Type::Tuple(items) => {
                 let joined = items
                     .into_iter()
-                    .map(|id| self.rust_name(*id).expect("unregistered inner type"))
+                    .map(|id| self.wit_name(*id).expect("unregistered inner type"))
                     .fold(">".to_string(), |acc, curr| format!("{acc},{curr}"));
                 format!("tuple<{joined}").into()
             }

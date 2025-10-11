@@ -13,7 +13,6 @@ pub fn feature(reg: &TypeReg) -> Feature {
                 ("length_octets", RecordField::builder(reg.u64()).build()),
                 ("hash", RecordField::builder(schema_multihash).build()),
             ])
-            .rust_attrs(RustAttrs { emit_serde: true, emit_autosurgeon: true, emit_uniffi: true, emit_utoipa: true })
             .build(),
     ));
     let schema_doc_image = reg.add_type(Type::Record(
@@ -29,7 +28,6 @@ pub fn feature(reg: &TypeReg) -> Feature {
                 ),
                 ("blob", RecordField::builder(schema_doc_id).build()),
             ])
-            .rust_attrs(RustAttrs { emit_serde: true, emit_autosurgeon: true, emit_uniffi: true, emit_utoipa: true })
             .build(),
     ));
     // NOTE:
@@ -47,7 +45,6 @@ pub fn feature(reg: &TypeReg) -> Feature {
                     .iter()
                     .map(|(key, _)| (*key, EnumVariant::builder().build())),
             )
-            .rust_attrs(RustAttrs { emit_serde: true, emit_autosurgeon: true, emit_uniffi: true, emit_utoipa: true })
             .build(),
     ));
     let schema_doc_content = reg.add_type(Type::Variant(
@@ -58,7 +55,6 @@ pub fn feature(reg: &TypeReg) -> Feature {
                     VariantVariant::builder(VariantVariantType::Wrapped(val)).build(),
                 )
             }))
-            .rust_attrs(RustAttrs { emit_serde: true, emit_autosurgeon: true, emit_uniffi: true, emit_utoipa: true })
             .build(),
     ));
     let schema_doc_tag_variants = vec![
@@ -80,13 +76,11 @@ pub fn feature(reg: &TypeReg) -> Feature {
                     .iter()
                     .map(|(key, _)| (*key, EnumVariant::builder().build())),
             )
-            .rust_attrs(RustAttrs { emit_serde: true, emit_autosurgeon: true, emit_uniffi: true, emit_utoipa: true })
             .build(),
     ));
     let schema_doc_tag = reg.add_type(Type::Variant(
         Variant::builder("DocTag")
             .with_variants(schema_doc_tag_variants)
-            .rust_attrs(RustAttrs { emit_serde: true, emit_autosurgeon: true, emit_uniffi: true, emit_utoipa: true })
             .build(),
     ));
     let schema_doc = reg.add_type(Type::Record(
@@ -108,7 +102,6 @@ pub fn feature(reg: &TypeReg) -> Feature {
                     RecordField::builder(reg.list(schema_doc_tag)).build(),
                 ),
             ])
-            .rust_attrs(RustAttrs { emit_serde: true, emit_autosurgeon: true, emit_uniffi: true, emit_utoipa: true })
             .build(),
     ));
     Feature {

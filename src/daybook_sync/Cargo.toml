@@ -8,8 +8,11 @@ name = "daybook_sync"
 path = "main.rs"
 
 [dependencies]
-utils_rs.workspace = true
+api_utils_rs.workspace = true
+utils_rs = { workspace = true, features = ["automerge"] }
 
+autosurgeon = { workspace = true, features = ["uuid"] }
+automerge = { workspace = true }
 samod = { workspace = true, features = ["tokio", "tungstenite", "axum"] }
 
 serde.workspace = true
@@ -21,3 +24,10 @@ tower.workspace = true
 tower-http = { workspace = true, features = ["full"] }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "time", "fs", "parking_lot"] }
+
+garde.workspace = true
+
+thiserror.workspace = true
+displaydoc.workspace = true
+
+macros.workspace = true

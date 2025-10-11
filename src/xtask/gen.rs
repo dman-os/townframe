@@ -27,8 +27,12 @@ use super::*;
 
 "#
         )?;
+        let cx = service_rust::RustGenCtx {
+            reg: &reg,
+            attrs: RustAttrs::default(),
+        };
         for feature in &features {
-            service_rust::feature_module(&reg, buf, &feature)?;
+            service_rust::feature_module(&cx, buf, &feature)?;
         }
 
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../btress_api/gen/");
@@ -50,58 +54,64 @@ package townframe:btress-api;"#
             std::fs::write(path, &out)?;
         }
     }
-    {
-        let features = daybook_api::daybook_api_features(&reg);
+    // Generate different feature modules with specific attribute sets
+    let mapping = vec![
+        (
+            "../daybook_api/gen/mod.rs",
+            RustAttrs {
+                serde: true,
+                utoipa: true,
+                automerge: false,
+                uniffi: false,
+                garde: true,
+            },
+        ),
+        (
+            "../daybook_core/gen/mod.rs",
+            RustAttrs {
+                serde: true,
+                utoipa: false,
+                automerge: true,
+                uniffi: true,
+                garde: true,
+            },
+        ),
+        (
+            "../daybook_sync/gen/mod.rs",
+            RustAttrs {
+                serde: true,
+                utoipa: true,
+                automerge: true,
+                uniffi: false,
+                garde: true,
+            },
+        ),
+        (
+            "../daybook_http/gen/mod.rs",
+            RustAttrs {
+                serde: true,
+                utoipa: true,
+                automerge: false,
+                uniffi: false,
+                garde: false,
+            },
+        ),
+    ];
 
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_api/wit/");
-        std::fs::create_dir_all(&path)?;
+    let features = daybook_api::daybook_api_features(&reg);
+    for (out_path, attrs) in mapping {
+        let mut out = String::new();
+        let buf = &mut out;
+        write!(buf, "//! @generated\nuse super::*;\n\n")?;
+        let cx = service_rust::RustGenCtx { reg: &reg, attrs };
         for feature in &features {
-            let mut out = String::new();
-            let buf = &mut out;
-            writeln!(
-                buf,
-                r#"// @generated
-package townframe:daybook-api;"#
-            )?;
-            component_wit::feature_file(&reg, buf, &feature)?;
-            let path = path.join(format!("{}.wit", feature.tag.name.to_kebab_case()));
-            std::fs::write(path, &out)?;
+            service_rust::feature_module(&cx, buf, feature)?;
         }
-
-        let mut out = String::new();
-        let buf = &mut out;
-        write!(
-            buf,
-            r#"//! @generated
-use super::*;   
-
-"#
-        )?;
-        let mut exports = vec![];
-        for feature in features {
-            exports.push((service_rust::feature_module(&reg, buf, &feature)?, feature));
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(out_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_types/");
-        std::fs::create_dir_all(&path)?;
-        std::fs::write(path.join("types.rs"), &out)?;
-
-        let mut out = String::new();
-        let buf = &mut out;
-        write!(
-            buf,
-            r#"//! @generated
-use super::*;   
-
-"#
-        )?;
-        for (export, feature) in exports {
-            service_rust::wit_bindgen_module(buf, &feature, "daybook_types::types", export)?;
-        }
-
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_api/");
-        std::fs::create_dir_all(&path)?;
-        std::fs::write(path.join("bindings.rs"), &out)?;
+        std::fs::write(path, &out)?;
     }
     Ok(())
 }
@@ -135,22 +145,25 @@ pub enum Primitives {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RustAttrs {
     /// If true, emit serde derives
-    pub emit_serde: bool,
+    pub serde: bool,
     /// If true, emit automerge/autosurgeon derives
-    pub emit_autosurgeon: bool,
+    pub automerge: bool,
     /// If true, emit uniffi derives
-    pub emit_uniffi: bool,
+    pub uniffi: bool,
     /// If true, emit utoipa ToSchema derives
-    pub emit_utoipa: bool,
+    pub utoipa: bool,
+    /// If true, emit garde validation attributes
+    pub garde: bool,
 }
 
 impl Default for RustAttrs {
     fn default() -> Self {
         Self {
-            emit_serde: true,
-            emit_utoipa: true,
-            emit_autosurgeon: false,
-            emit_uniffi: false,
+            serde: true,
+            utoipa: true,
+            automerge: false,
+            uniffi: false,
+            garde: false,
         }
     }
 }
@@ -162,9 +175,6 @@ pub struct Record {
     name: CHeapStr,
     #[builder(field)]
     fields: Vec<(CHeapStr, RecordField)>,
-    /// Grouped rust-side attribute flags
-    #[builder(default)]
-    pub rust_attrs: RustAttrs,
 }
 
 impl<S: record_builder::State> RecordBuilder<S> {
@@ -223,9 +233,6 @@ pub struct Enum {
     name: CHeapStr,
     #[builder(field)]
     variants: Vec<(CHeapStr, EnumVariant)>,
-    /// Grouped rust-side attribute flags
-    #[builder(default)]
-    pub rust_attrs: RustAttrs,
 }
 
 impl<S: enum_builder::State> EnumBuilder<S> {
@@ -258,9 +265,6 @@ pub struct Variant {
     name: CHeapStr,
     #[builder(field)]
     variants: Vec<(CHeapStr, VariantVariant)>,
-    /// Grouped rust-side attribute flags
-    #[builder(default)]
-    pub rust_attrs: RustAttrs,
 }
 
 impl<S: variant_builder::State> VariantBuilder<S> {
@@ -409,9 +413,6 @@ pub struct InputType {
     desc: CHeapStr,
     #[builder(default)]
     main_source: InputFieldSource,
-    /// Grouped rust-side attribute flags
-    #[builder(default)]
-    pub rust_attrs: RustAttrs,
 }
 
 impl<S: input_type_builder::State> InputTypeBuilder<S> {
@@ -481,9 +482,6 @@ pub struct ErrorType {
     id: CHeapStr,
     #[builder(field)]
     variants: IndexMap<CHeapStr, ErrorVariant>,
-    /// Grouped rust-side attribute flags
-    #[builder(default)]
-    pub rust_attrs: RustAttrs,
 }
 
 impl<S: error_type_builder::State> ErrorTypeBuilder<S> {

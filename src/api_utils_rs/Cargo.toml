@@ -7,11 +7,14 @@ edition.workspace = true
 path = "lib.rs"
 
 [features]
-default = []
-automerge = ["utils_rs/automerge"]
+default = ["automerge"]
+automerge = ["utils_rs/automerge", "dep:autosurgeon", "dep:automerge"]
 
 [dependencies]
 utils_rs.workspace = true
+
+autosurgeon = { workspace = true, optional = true }
+automerge = { workspace = true, optional = true }
 
 # futures
 async-trait.workspace = true
