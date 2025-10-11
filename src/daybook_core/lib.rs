@@ -25,14 +25,13 @@ mod gen;
 mod globals;
 mod macros;
 mod repos;
-mod samod;
 mod sql;
 mod tables;
 
 /// Configuration for the daybook core storage systems
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub am: am::Config,
+    pub am: utils_rs::am::Config,
     pub sql: sql::Config,
 }
 
@@ -40,7 +39,7 @@ impl Config {
     /// Create a new config with platform-specific defaults
     pub fn new() -> Res<Self> {
         #[cfg(target_os = "android")]
-        let sql = {
+        let (am, sql) = {
             // On Android, use the app's internal storage directory
             // This will be something like /data/data/org.example.daybook/files/samod
             let app_dir = std::env::var("ANDROID_DATA")
@@ -52,41 +51,51 @@ impl Config {
                 })
                 .unwrap_or_else(|_| PathBuf::from("/data/data/org.example.daybook/files"));
 
-            sql::Config {
-                database_url: {
-                    let db_path = app_dir.join("sqlite.db");
-                    format!("sqlite://{}", db_path.display())
+            (
+                am::Config {
+                    storage_dir: app_dir.join("samod"),
+
+                    peer_id: "daybook_client".to_string(),
                 },
-            }
+                sql::Config {
+                    database_url: {
+                        let db_path = app_dir.join("sqlite.db");
+                        format!("sqlite://{}", db_path.display())
+                    },
+                },
+            )
         };
 
         #[cfg(not(target_os = "android"))]
-        let sql = {
+        let (am, sql) = {
             // On desktop platforms, use XDG directories
             let dirs = directories::ProjectDirs::from("org", "daybook", "daybook")
                 .ok_or_eyre("failed to get xdg directories")?;
-            sql::Config {
-                database_url: {
-                    let db_path = dirs.data_dir().join("sqlite.db");
-                    format!("sqlite://{}", db_path.display())
+            (
+                utils_rs::am::Config {
+                    storage_dir: dirs.data_dir().join("samod"),
+                    peer_id: "daybook_client".to_string(),
                 },
-            }
+                sql::Config {
+                    database_url: {
+                        let db_path = dirs.data_dir().join("sqlite.db");
+                        format!("sqlite://{}", db_path.display())
+                    },
+                },
+            )
         };
-        Ok(Self {
-            am: am::Config {
-                storage_dir: PathBuf::from("/tmp/daybook"),
-                peer_id: "daybook_client".to_string(),
-            },
-            sql,
-        })
+        Ok(Self { am, sql })
     }
 }
 
 struct Ctx {
-    config: Config,
-    acx: am::AmCtx,
+    // config: Config,
+    acx: utils_rs::am::AmCtx,
     // rt: tokio::runtime::Handle,
     sql: sql::SqlCtx,
+
+    doc_app: tokio::sync::OnceCell<::samod::DocHandle>,
+    doc_drawer: tokio::sync::OnceCell<::samod::DocHandle>,
 }
 
 type SharedCtx = Arc<Ctx>;
@@ -94,16 +103,33 @@ type SharedCtx = Arc<Ctx>;
 impl Ctx {
     async fn new(config: Config) -> Result<Arc<Self>, eyre::Report> {
         let sql = sql::SqlCtx::new(config.sql.clone()).await?;
-        let acx = am::AmCtx::new(config.am.clone()).await?;
+        let acx =
+            utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
+                .await?;
+        acx.spawn_connector("ws://0.0.0.0:8090".into());
+
         let cx = Arc::new(Self {
-            config,
+            // config,
             acx,
             // rt: tokio::runtime::Handle::current(),
             sql,
+            doc_app: default(),
+            doc_drawer: default(),
         });
         // Initialize automerge document from globals/kv and start sync worker lazily.
-        cx.acx.init_from_globals(cx.clone()).await?;
+        am::init_from_globals(&cx).await?;
         Ok(cx)
+    }
+
+    fn doc_app(&self) -> &samod::DocHandle {
+        &self.doc_app.get().expect_or_log("ctx was not initialized")
+    }
+
+    fn doc_drawer(&self) -> &samod::DocHandle {
+        &self
+            .doc_drawer
+            .get()
+            .expect_or_log("ctx was not initialized")
     }
 }
 

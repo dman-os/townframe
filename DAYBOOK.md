@@ -10,6 +10,7 @@
 - [ ] Move http tests into api crates
 - [ ] Code generator for http wrapper
 - [ ] PgLite based testing
+- [ ] Policy against tokio mutexes (cancel safety)
 
 ---
 

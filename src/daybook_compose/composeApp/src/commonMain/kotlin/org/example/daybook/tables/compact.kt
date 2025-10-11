@@ -80,6 +80,7 @@ import androidx.navigation.NavHostController
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.example.daybook.AppScreens
 import org.example.daybook.LocalContainer
 import org.example.daybook.Routes
 import org.example.daybook.TablesState
@@ -196,9 +197,18 @@ fun CompactLayout(
     val snackbarHostState = remember { SnackbarHostState() }
     // Define the available feature buttons (content + activation action)
     val features = listOf(
-        FeatureItem("feat_add_tab", "＋", "Add Tab") { scope.launch { snackbarHostState.showSnackbar("Activated: Add Tab") } },
-        FeatureItem("feat_add_table", "📁", "Add Table") { scope.launch { snackbarHostState.showSnackbar("Activated: Add Table") } },
-        FeatureItem("feat_settings", "⚙️", "Settings") { scope.launch { snackbarHostState.showSnackbar("Activated: Settings") } },
+        // FeatureItem("feat_add_tab", "＋", "Add Tab") { scope.launch { snackbarHostState.showSnackbar("Activated: Add Tab") } },
+        // FeatureItem("feat_add_table", "📁", "Add Table") { scope.launch { snackbarHostState.showSnackbar("Activated: Add Table") } },
+        // FeatureItem("feat_settings", "⚙️", "Settings") { scope.launch { snackbarHostState.showSnackbar("Activated: Settings") } },
+        FeatureItem("nav_home", "H", "Home") { scope.launch { navController.navigate(
+            AppScreens.Home.name
+        ) } },
+        FeatureItem("nav_tables", "T", "Tables") { scope.launch { navController.navigate(
+            AppScreens.Tables.name
+        ) } },
+        FeatureItem("nav_capture", "＋", "Capture") { scope.launch { navController.navigate(
+            AppScreens.Capture.name
+        ) } },
     )
 
     // Create controllers and ready-state trackers for each feature

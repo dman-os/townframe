@@ -9,7 +9,9 @@ mod gen;
 use crate::interlude::*;
 
 use axum::Router;
+use samod::{DocumentId, PeerId};
 use tower_http::ServiceBuilderExt;
+use utils_rs::am::changes::ChangeFilter;
 
 fn main() -> Res<()> {
     utils_rs::setup_tracing()?;
@@ -22,7 +24,7 @@ fn main() -> Res<()> {
 
 async fn app_main() -> Res<()> {
     let config = Config {};
-    let cx = Ctx::new(config).await;
+    let cx = Ctx::new(config).await?;
 
     let app = Router::new()
         .route("/", axum::routing::any(connect))
@@ -78,29 +80,36 @@ struct Config {}
 
 struct Ctx {
     config: Config,
-    repo: samod::Repo,
-    peer_docs: Arc<DHashMap<samod::PeerId, samod::DocumentId>>,
-    doc_peers: Arc<DHashMap<samod::DocumentId, samod::PeerId>>,
+    acx: utils_rs::am::AmCtx,
+    peer_docs: Arc<DHashMap<PeerId, DocumentId>>,
+    doc_peers: Arc<DHashMap<DocumentId, PeerId>>,
 }
 type SharedCtx = Arc<Ctx>;
 
 impl Ctx {
-    async fn new(config: Config) -> SharedCtx {
-        let peer_docs: Arc<DHashMap<samod::PeerId, samod::DocumentId>> = default();
-        let doc_peers: Arc<DHashMap<samod::DocumentId, samod::PeerId>> = default();
-        let repo = samod::Repo::build_tokio()
-            .with_peer_id(samod::PeerId::from_string("daybook_sync".to_string()))
-            .with_storage(samod::storage::TokioFilesystemStorage::new(
-                "/tmp/samod-sync",
-            ))
+    async fn new(config: Config) -> Res<SharedCtx> {
+        let peer_docs: Arc<DHashMap<PeerId, DocumentId>> = default();
+        let doc_peers: Arc<DHashMap<DocumentId, PeerId>> = default();
+        let (doc_tx, mut doc_rx) = tokio::sync::mpsc::unbounded_channel::<DocumentId>();
+
+        let acx = utils_rs::am::AmCtx::boot(
+            utils_rs::am::Config {
+                peer_id: "daybook_sync".to_string(),
+                storage_dir: "/tmp/samod-sync".into(),
+            },
             // we only announce docs to peers that forwarded them in the first place
             // FIXME: this gets run at startup for all doc/peers leading to the first
             // peer getting access to all docs. put it behind a kv store
-            .with_announce_policy({
+            Some({
                 let peer_docs = peer_docs.clone();
                 let doc_peers = doc_peers.clone();
-                move |doc_id, peer_id| {
+                move |doc_id: DocumentId, peer_id| {
                     info!(%doc_id, %peer_id, ?peer_docs, ?doc_peers, "announcing");
+
+                    doc_tx
+                        .send(doc_id.clone())
+                        .expect_or_log("doc channel closed");
+
                     if let Some(doc_of_peer) = peer_docs.get(&peer_id) {
                         return *doc_of_peer.value() == doc_id;
                     }
@@ -113,15 +122,49 @@ impl Ctx {
                     doc_peers.insert(doc_id, peer_id);
                     false
                 }
-            })
-            .load()
-            .await;
-        Arc::new(Self {
-            repo,
+            }),
+        )
+        .await?;
+
+        let cx = Arc::new(Self {
+            acx,
             config,
             peer_docs,
             doc_peers,
-        })
+        });
+        tokio::spawn({
+            let cx = cx.clone();
+            async move {
+                let mut doc_change_worker = vec![];
+                while let Some(doc_id) = doc_rx.recv().await {
+                    let Some(handle) = cx
+                        .acx
+                        .find_doc(doc_id.clone())
+                        .await
+                        .expect_or_log("repo stopped")
+                    else {
+                        warn!("announced doc_id not found in repo: {doc_id}");
+                        continue;
+                    };
+                    let change_worker = cx.acx.change_manager().clone().spawn_doc_listener(handle);
+                    doc_change_worker.push(change_worker);
+                }
+            }
+            .instrument(tracing::info_span!("start doc listener task"))
+        });
+        cx.acx
+            .change_manager()
+            .add_listener(
+                ChangeFilter {
+                    path: vec![],
+                    doc_id: None,
+                },
+                |change| {
+                    info!(?change, "XXX change");
+                },
+            )
+            .await;
+        Ok(cx)
     }
 }
 
@@ -136,7 +179,7 @@ async fn connect(
 #[tracing::instrument(skip(cx), ret)]
 async fn handle_socket(cx: SharedCtx, socket: axum::extract::ws::WebSocket) {
     let _handle = tokio::spawn(async move {
-        let fin = cx.repo.accept_axum(socket).await;
+        let fin = cx.acx.repo().accept_axum(socket).await;
         info!(?fin, "connection finsihed");
     });
 }
@@ -152,7 +195,7 @@ async fn get_doc_id(
     query: axum::extract::Query<GetDocIdQuery>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let peer_id = samod::PeerId::from_string(query.peer_id.clone());
+    let peer_id = PeerId::from_string(query.peer_id.clone());
     let peer_docs = cx.peer_docs.get(&peer_id);
     if let Some(doc_id) = peer_docs {
         format!("{}", *doc_id.value()).into_response()

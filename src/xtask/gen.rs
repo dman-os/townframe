@@ -76,7 +76,7 @@ package townframe:btress-api;"#
                 utoipa: false,
                 automerge: true,
                 uniffi: true,
-                garde: true,
+                garde: false,
             },
         ),
         (
@@ -86,7 +86,7 @@ package townframe:btress-api;"#
                 utoipa: true,
                 automerge: true,
                 uniffi: false,
-                garde: true,
+                garde: false,
             },
         ),
         (

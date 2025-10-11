@@ -3,7 +3,10 @@ use crate::interlude::*;
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub enum InitState {
     None,
-    Created { doc_id: samod::DocumentId },
+    Created {
+        doc_id_app: samod::DocumentId,
+        doc_id_drawer: samod::DocumentId,
+    },
 }
 
 const INIT_STATE_KEY: &str = "init_state";

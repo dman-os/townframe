@@ -80,6 +80,7 @@ tracing-subscriber = { version = "0.3", features = [
 tracing-unwrap = "1.0"
 tracing-appender = "0.2.3"
 tracing-error = "0.2.1"
+tracing-futures = "0.2.5"
 
 kanidm_client = "1.7.2"
 kanidm_proto = "1.7.2"

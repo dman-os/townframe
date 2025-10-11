@@ -103,12 +103,12 @@ pub mod doc {
     pub struct Doc {
         pub id: Mutlihash,
         #[serde(with = "api_utils_rs::codecs::sane_iso8601")]
-        #[autosurgeon(with = "utils_rs::am::autosurgeon_date")]
+        #[autosurgeon(with = "utils_rs::am::codecs::autosurgeon_date")]
         pub created_at: OffsetDateTime,
         #[serde(with = "api_utils_rs::codecs::sane_iso8601")]
-        #[autosurgeon(with = "utils_rs::am::autosurgeon_date")]
+        #[autosurgeon(with = "utils_rs::am::codecs::autosurgeon_date")]
         pub updated_at: OffsetDateTime,
-        pub content: DocKind,
+        pub content: DocContent,
         pub tags: Vec<DocTag>,
     }
 
@@ -120,12 +120,11 @@ pub mod doc {
 
         pub type Output = SchemaRef<Doc>;
 
-        #[derive(Debug, Clone, Hydrate, Reconcile, garde::Validate, utoipa::ToSchema, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Hydrate, Reconcile, utoipa::ToSchema, Serialize, Deserialize)]
         #[serde(rename_all = "camelCase")]
         pub struct Input {
             #[schema(min_length = 1, max_length = 1024)]
-            #[garde(length(min = 1, max = 1024))]
-            pub id: String,
+            pub id: Uuid,
         }
 
         #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, utoipa::ToSchema, Serialize, Deserialize, Hydrate, Reconcile)]

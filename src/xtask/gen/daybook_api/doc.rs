@@ -93,10 +93,7 @@ pub fn feature(reg: &TypeReg) -> Feature {
                 //     "kind",
                 //     RecordField::builder(schema_doc_content_kind).build(),
                 // ),
-                (
-                    "content",
-                    RecordField::builder(schema_doc_content_kind).build(),
-                ),
+                ("content", RecordField::builder(schema_doc_content).build()),
                 (
                     "tags",
                     RecordField::builder(reg.list(schema_doc_tag)).build(),

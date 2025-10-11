@@ -52,7 +52,6 @@ uniffi = { workspace = true, features = ["cli"] }
 autosurgeon = { workspace = true, features = ["uuid"] }
 automerge = { workspace = true }
 samod = { workspace = true, features = ["tokio", "tungstenite"] }
-tokio-tungstenite = { version = "0.27.0", features = ["url"] }
 
 # http
 reqwest.workspace = true

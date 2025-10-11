@@ -1,55 +1,162 @@
 use crate::interlude::*;
-use automerge::ObjId;
-use autosurgeon::{Hydrate, HydrateError, ReadDoc, Reconcile, Reconciler};
 
-pub mod autosurgeon_date {
-    use super::*;
+pub mod changes;
+pub mod codecs;
 
-    pub fn reconcile<R: Reconciler>(
-        ts: &OffsetDateTime,
-        mut reconciler: R,
-    ) -> Result<(), R::Error> {
-        reconciler.timestamp(ts.unix_timestamp())
-    }
+use automerge::Automerge;
+use autosurgeon::{Hydrate, HydrateError, Prop, ReadDoc, Reconcile, Reconciler};
+use samod::{DocHandle, DocumentId};
 
-    struct Wrapper(i64);
-    impl Hydrate for Wrapper {
-        fn hydrate_timestamp(ts: i64) -> Result<Self, HydrateError> {
-            Ok(Self(ts))
-        }
-    }
+use changes::ChangeListenerManager;
 
-    pub fn hydrate<'a, D: ReadDoc>(
-        doc: &D,
-        obj: &ObjId,
-        prop: autosurgeon::Prop<'a>,
-    ) -> Result<OffsetDateTime, HydrateError> {
-        let Wrapper(inner) = Wrapper::hydrate(doc, obj, prop)?;
-        OffsetDateTime::from_unix_timestamp(inner).map_err(|err| {
-            HydrateError::unexpected(
-                "an valid unix timestamp",
-                format!("error parsing timestamp int {err}"),
-            )
-        })
-    }
+/// Configuration for Automerge storage
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// Storage directory for Automerge documents
+    pub storage_dir: PathBuf,
+    /// Peer ID for this client
+    pub peer_id: String,
 }
 
-pub mod automerge_skip {
-    use super::*;
-    use autosurgeon::{HydrateError, ReadDoc, Reconciler};
+pub struct AmCtx {
+    repo: samod::Repo,
+    // peer_id: samod::PeerId,
+    // doc_handle: tokio::sync::OnceCell<DocHandle>,
+    change_manager: Arc<ChangeListenerManager>,
+}
 
-    pub fn reconcile<T: Default, R: Reconciler>(
-        _value: &T,
-        _reconciler: R,
-    ) -> Result<(), R::Error> {
+impl AmCtx {
+    pub async fn boot<A: samod::AnnouncePolicy>(
+        config: Config,
+        announce_policy: Option<A>,
+    ) -> Res<Self> {
+        let peer_id = samod::PeerId::from_string(config.peer_id);
+
+        // Ensure the storage directory exists
+        std::fs::create_dir_all(&config.storage_dir).wrap_err_with(|| {
+            format!(
+                "Failed to create storage directory: {}",
+                config.storage_dir.display()
+            )
+        })?;
+
+        let repo = samod::Repo::build_tokio()
+            .with_peer_id(peer_id.clone())
+            .with_storage(samod::storage::TokioFilesystemStorage::new(
+                config.storage_dir.to_string_lossy().as_ref(),
+            ));
+        let repo = if let Some(policy) = announce_policy {
+            repo.with_announce_policy(policy).load().await
+        } else {
+            repo.load().await
+        };
+
+        let change_manager = ChangeListenerManager::boot();
+        let out = Self {
+            repo,
+            // peer_id,
+            change_manager,
+        };
+
+        Ok(out)
+    }
+
+    /// Maintains connection to the sync server
+    pub fn spawn_connector(&self, addr: std::borrow::Cow<'static, str>) {
+        let repo = self.repo.clone();
+        tokio::spawn(
+            async move {
+                let mut attempt = 0u32;
+                loop {
+                    if attempt > 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                    attempt += 1;
+                    match tokio_tungstenite::connect_async(&addr[..]).await {
+                        Ok((conn, resp)) => {
+                            if resp.status().as_u16() != 101 {
+                                error!(?resp, "bad response connecting to server");
+                                continue;
+                            }
+                            let fin = repo
+                                .connect_tungstenite(conn, samod::ConnDirection::Outgoing)
+                                .await;
+                            error!(?fin, "connection closed");
+                        }
+                        Err(err) => {
+                            error!(?attempt, "error connecting to sync server {err}");
+                            continue;
+                        }
+                    }
+                }
+            }
+            .instrument(tracing::info_span!("sync server connector task")),
+        );
+    }
+
+    pub async fn reconcile_prop<'a, D, P>(
+        &self,
+        handle: DocHandle,
+        obj_id: automerge::ObjId,
+        prop_name: P,
+        update: &D,
+    ) -> Res<()>
+    where
+        D: Hydrate + Reconcile + Send + Sync + 'static,
+        P: Into<Prop<'a>> + Send + Sync + 'static,
+    {
+        tokio::task::block_in_place(move || {
+            handle.with_document(move |doc| {
+                doc.transact(move |tx| {
+                    autosurgeon::reconcile_prop(tx, obj_id, prop_name, update)
+                        .wrap_err("error reconciling")?;
+                    eyre::Ok(())
+                })
+            })
+        })
+        .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
         Ok(())
     }
 
-    pub fn hydrate<'a, D: ReadDoc, T: Default>(
-        _doc: &D,
-        _obj: &ObjId,
-        _prop: autosurgeon::Prop<'a>,
-    ) -> Result<T, HydrateError> {
-        Ok(T::default())
+    // FIXME: this actually returns an error on failing to find it
+    pub async fn hydrate_path<D: Hydrate + Reconcile + Send + Sync + 'static>(
+        &self,
+        handle: DocHandle,
+        obj_id: automerge::ObjId,
+        path: Vec<Prop<'static>>,
+    ) -> Res<Option<D>> {
+        tokio::task::block_in_place(move || {
+            handle.with_document(move |doc| {
+                let value: Option<D> =
+                    autosurgeon::hydrate_path(doc, &obj_id, path).wrap_err("error hydrating")?;
+                eyre::Ok(value)
+            })
+        })
+    }
+
+    pub async fn add_doc(&self, doc: Automerge) -> Res<DocHandle> {
+        let handle = self.repo.create(doc).await?;
+        self.change_manager
+            .clone()
+            .spawn_doc_listener(handle.clone());
+        Ok(handle)
+    }
+
+    pub async fn find_doc(&self, doc_id: DocumentId) -> Res<Option<DocHandle>> {
+        let Some(handle) = self.repo.find(doc_id).await? else {
+            return Ok(None);
+        };
+        self.change_manager
+            .clone()
+            .spawn_doc_listener(handle.clone());
+        Ok(Some(handle))
+    }
+
+    pub fn repo(&self) -> &samod::Repo {
+        &self.repo
+    }
+
+    pub fn change_manager(&self) -> &Arc<ChangeListenerManager> {
+        &self.change_manager
     }
 }

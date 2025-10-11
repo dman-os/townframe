@@ -1,5 +1,5 @@
 //! @generated
-use super::*;
+use super::*;   
 
 pub mod user {
     use super::*;
@@ -40,30 +40,14 @@ pub mod user {
             pub password: String,
         }
 
-        #[derive(
-            Debug,
-            Clone,
-            thiserror::Error,
-            displaydoc::Display,
-            utoipa::ToSchema,
-            Serialize,
-            Deserialize,
-        )]
+        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, utoipa::ToSchema, Serialize, Deserialize)]
         #[serde(rename_all = "camelCase", tag = "error")]
         /// Username occupied: {username}
         pub struct ErrorUsernameOccupied {
             pub username: String,
         }
 
-        #[derive(
-            Debug,
-            Clone,
-            thiserror::Error,
-            displaydoc::Display,
-            utoipa::ToSchema,
-            Serialize,
-            Deserialize,
-        )]
+        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, utoipa::ToSchema, Serialize, Deserialize)]
         #[serde(rename_all = "camelCase", tag = "error")]
         /// Email occupied: {email:?}
         pub struct ErrorEmailOccupied {
@@ -71,15 +55,7 @@ pub mod user {
             pub email: Option<String>,
         }
 
-        #[derive(
-            Debug,
-            thiserror::Error,
-            displaydoc::Display,
-            utoipa::ToSchema,
-            macros::HttpError,
-            Serialize,
-            Deserialize,
-        )]
+        #[derive(Debug, thiserror::Error, displaydoc::Display, utoipa::ToSchema, macros::HttpError, Serialize, Deserialize)]
         #[serde(rename_all = "camelCase", tag = "error")]
         pub enum Error {
             /// Username occupied {0}
@@ -96,4 +72,5 @@ pub mod user {
             Internal(#[from] ErrorInternal),
         }
     }
+
 }

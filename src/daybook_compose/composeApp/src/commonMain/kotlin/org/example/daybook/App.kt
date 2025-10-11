@@ -64,7 +64,7 @@ import org.example.daybook.tables.ExpandedLayout
 import org.example.daybook.tables.MediumLayout
 import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
-import org.example.daybook.uniffi.DocsRepo
+import org.example.daybook.uniffi.DrawerRepo
 import org.example.daybook.uniffi.FfiCtx
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.ListenerRegistration
@@ -100,7 +100,7 @@ data class PermissionsContext(
 }
 
 data class AppContainer(
-    val ffiCtx: FfiCtx, val docsRepo: DocsRepo, val tablesRepo: TablesRepo
+    val ffiCtx: FfiCtx, val drawerRepo: DrawerRepo, val tablesRepo: TablesRepo
 )
 
 val LocalContainer = staticCompositionLocalOf<AppContainer> {
@@ -420,7 +420,7 @@ fun App(
     LaunchedEffect(initAttempt) {
         initState = AppInitState.Loading
         val fcx = FfiCtx.forFfi()
-        val docsRepo = DocsRepo.forFfi(fcx = fcx)
+        val drawerRepo = DrawerRepo.forFfi(fcx = fcx)
         val tablesRepo = TablesRepo.forFfi(fcx = fcx)
         
         // Initialize first-time data if needed
@@ -429,7 +429,7 @@ fun App(
         
         initState = AppInitState.Ready(
             AppContainer(
-                ffiCtx = fcx, docsRepo = docsRepo, tablesRepo = tablesRepo
+                ffiCtx = fcx, drawerRepo = drawerRepo, tablesRepo = tablesRepo
             )
         )
     }
@@ -453,7 +453,7 @@ fun App(
                 // Ensure FFI resources are closed when the composition leaves
                 androidx.compose.runtime.DisposableEffect(appContainer) {
                     onDispose {
-                        appContainer.docsRepo.close()
+                        appContainer.drawerRepo.close()
                         appContainer.tablesRepo.close()
                         appContainer.ffiCtx.close()
                     }

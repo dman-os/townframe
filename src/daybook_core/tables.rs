@@ -67,11 +67,11 @@ pub struct TablesAm {
     panels: HashMap<Uuid, Panel>,
 
     // Indices for tracking relationships (not stored in CRDT)
-    #[autosurgeon(with = "crate::am::automerge_skip")]
+    #[autosurgeon(with = "utils_rs::am::codecs::automerge_skip")]
     panel_to_tab: HashMap<Uuid, Uuid>, // panel_id -> tab_id
-    #[autosurgeon(with = "crate::am::automerge_skip")]
+    #[autosurgeon(with = "utils_rs::am::codecs::automerge_skip")]
     tab_to_table: HashMap<Uuid, Uuid>, // tab_id -> table_id
-    #[autosurgeon(with = "crate::am::automerge_skip")]
+    #[autosurgeon(with = "utils_rs::am::codecs::automerge_skip")]
     tab_to_window: HashMap<Uuid, Uuid>, // tab_id -> window_id
 }
 
@@ -81,7 +81,11 @@ impl TablesAm {
     async fn load(cx: &Ctx) -> Res<Self> {
         let mut am = cx
             .acx
-            .hydrate_path::<Self>(automerge::ROOT, vec![Self::PROP.into()])
+            .hydrate_path::<Self>(
+                cx.doc_app().clone(),
+                automerge::ROOT,
+                vec![Self::PROP.into()],
+            )
             .await?
             .ok_or_eyre("unable to find obj in am")?;
 
@@ -92,18 +96,24 @@ impl TablesAm {
 
     async fn flush(&self, cx: &Ctx) -> Res<()> {
         cx.acx
-            .reconcile_prop(automerge::ROOT, Self::PROP, self)
+            .reconcile_prop(cx.doc_app().clone(), automerge::ROOT, Self::PROP, self)
             .await
     }
 
     /// Register a change listener for tables changes
     async fn register_change_listener<F>(cx: &Ctx, on_change: F) -> Res<()>
     where
-        F: Fn(Vec<crate::am::changes::ChangeNotification>) + Send + Sync + 'static,
+        F: Fn(Vec<utils_rs::am::changes::ChangeNotification>) + Send + Sync + 'static,
     {
         cx.acx
             .change_manager()
-            .register_change_listener(vec![Self::PROP.into()], on_change)
+            .add_listener(
+                utils_rs::am::changes::ChangeFilter {
+                    path: vec![Self::PROP.into()],
+                    doc_id: Some(cx.doc_app().document_id().clone()),
+                },
+                on_change,
+            )
             .await;
         Ok(())
     }

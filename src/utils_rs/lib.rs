@@ -12,8 +12,6 @@ pub mod prelude {
     pub use regex;
     pub use serde_json;
     pub use tokio;
-    pub use tracing::{self, debug, error, info, trace, warn};
-    pub use tracing_unwrap::*;
 }
 
 mod interlude {
@@ -35,6 +33,10 @@ mod interlude {
     pub use uuid::{self, Uuid};
 
     pub use crate::expect_tags::*;
+
+    pub use tracing::{self, debug, error, info, trace, warn};
+    pub use tracing_futures::Instrument;
+    pub use tracing_unwrap::*;
 }
 
 use crate::interlude::*;

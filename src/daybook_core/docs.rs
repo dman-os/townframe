@@ -4,33 +4,70 @@ use crate::ffi::{FfiError, SharedFfiCtx};
 
 use crate::gen::doc::Doc;
 
-#[derive(Default)]
-pub struct DocsAm {
+#[derive(Default, Reconcile, Hydrate)]
+pub struct DrawerAm {
+    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     map: HashMap<Uuid, Doc>,
 }
-impl DocsAm {
+
+impl DrawerAm {
     // const PATH: &[&str] = &["docs"];
     pub const PROP: &str = "docs";
+
+    async fn load(cx: &Ctx) -> Res<Self> {
+        cx.acx
+            .hydrate_path::<Self>(
+                cx.doc_drawer().clone(),
+                automerge::ROOT,
+                vec![Self::PROP.into()],
+            )
+            .await?
+            .ok_or_eyre("unable to find obj in am")
+    }
+
+    async fn flush(&self, cx: &Ctx) -> Res<()> {
+        cx.acx
+            .reconcile_prop(cx.doc_drawer().clone(), automerge::ROOT, Self::PROP, self)
+            .await
+    }
+
+    async fn register_change_listener<F>(cx: &Ctx, on_change: F) -> Res<()>
+    where
+        F: Fn(Vec<utils_rs::am::changes::ChangeNotification>) + Send + Sync + 'static,
+    {
+        cx.acx
+            .change_manager()
+            .add_listener(
+                utils_rs::am::changes::ChangeFilter {
+                    doc_id: Some(cx.doc_drawer().document_id().clone()),
+                    path: vec![Self::PROP.into()],
+                },
+                on_change,
+            )
+            .await;
+
+        Ok(())
+    }
 }
 
 #[derive(uniffi::Object)]
-struct DocsRepo {
+struct DrawerRepo {
     fcx: SharedFfiCtx,
-    am: Arc<tokio::sync::RwLock<DocsAm>>,
+    am: Arc<tokio::sync::RwLock<DrawerAm>>,
     registry: Arc<crate::repos::ListenersRegistry>,
 }
 
 // Minimal event enum so Kotlin can refresh via ffiList on changes
 #[derive(Debug, Clone, uniffi::Enum)]
-pub enum DocsEvent {
+pub enum DrawerEvent {
     ListChanged,
 }
 
-crate::repo_listeners!(DocsRepo, DocsEvent);
+crate::repo_listeners!(DrawerRepo, DrawerEvent);
 
-impl DocsRepo {
+impl DrawerRepo {
     async fn load(fcx: SharedFfiCtx) -> Res<Arc<Self>> {
-        let am = DocsAm::default();
+        let am = DrawerAm::load(&fcx.cx).await?;
         let am = Arc::new(tokio::sync::RwLock::new(am));
         let registry = crate::repos::ListenersRegistry::new();
 
@@ -39,6 +76,16 @@ impl DocsRepo {
             am,
             registry: registry.clone(),
         });
+
+        DrawerAm::register_change_listener(&fcx.cx, {
+            let registry = registry.clone();
+
+            move |_notifications| {
+                // Notify repo listeners that the docs list changed
+                registry.notify(DrawerEvent::ListChanged);
+            }
+        })
+        .await?;
 
         Ok(repo)
     }
@@ -51,8 +98,8 @@ impl DocsRepo {
     async fn set(&self, id: Uuid, val: Doc) -> Res<Option<Doc>> {
         let mut am = self.am.clone().write_owned().await;
         let ret = am.map.insert(id, val);
-        // Notify listeners that the list changed
-        self.registry.notify(DocsEvent::ListChanged);
+        am.flush(&self.fcx.cx).await?;
+        self.registry.notify(DrawerEvent::ListChanged);
         Ok(ret)
     }
 
@@ -63,49 +110,38 @@ impl DocsRepo {
 }
 
 #[uniffi::export]
-impl DocsRepo {
+impl DrawerRepo {
     #[uniffi::constructor]
     #[tracing::instrument(err, skip(fcx))]
     async fn for_ffi(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
         let cx = fcx.clone();
-        let this = fcx.do_on_rt(Self::load(cx)).await?;
+        let this = fcx
+            .do_on_rt(Self::load(cx))
+            .await
+            .inspect_err(|err| tracing::error!(?err))?;
         Ok(this)
     }
 
-    // FFI-friendly JSON wrappers: use String (JSON) over generated `Doc` type so
-    // UniFFI doesn't require Lift/Lower impls for `daybook_types::doc::Doc`.
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_get_json(self: Arc<Self>, id: Uuid) -> Result<Option<String>, FfiError> {
+    async fn ffi_get(self: Arc<Self>, id: Uuid) -> Result<Option<Doc>, FfiError> {
         let this = self.clone();
-        let out = self.fcx.do_on_rt(async move { this.get(id).await }).await?;
-        match out {
-            Some(doc) => Ok(Some(serde_json::to_string(&doc)?)),
-            None => Ok(None),
-        }
+        Ok(self.fcx.do_on_rt(async move { this.get(id).await }).await?)
     }
 
-    #[tracing::instrument(err, skip(self, doc_json))]
-    async fn ffi_set_json(
-        self: Arc<Self>,
-        id: Uuid,
-        doc_json: String,
-    ) -> Result<Option<String>, FfiError> {
+    #[tracing::instrument(err, skip(self))]
+    async fn ffi_set(self: Arc<Self>, id: Uuid, doc: Doc) -> Result<Option<Doc>, FfiError> {
         let this = self.clone();
-        let doc: Doc = serde_json::from_str(&doc_json)?;
         let out = self
             .fcx
             .do_on_rt(async move { this.set(id, doc).await })
             .await?;
-        Ok(out.map(|d| serde_json::to_string(&d).unwrap_or_default()))
+        Ok(out)
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_list_json(self: Arc<Self>) -> Result<Vec<String>, FfiError> {
+    async fn ffi_list(self: Arc<Self>) -> Result<Vec<Doc>, FfiError> {
         let this = self.clone();
         let out = self.fcx.do_on_rt(async move { this.list().await }).await?;
-        Ok(out
-            .into_iter()
-            .map(|d| serde_json::to_string(&d).unwrap_or_default())
-            .collect())
+        Ok(out.into_iter().collect())
     }
 }

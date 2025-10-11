@@ -1246,7 +1246,6 @@ dependencies = [
  "thiserror 2.0.16",
  "time",
  "tokio",
- "tokio-tungstenite 0.27.0",
  "tracing",
  "tracing-subscriber",
  "tracing-unwrap",
@@ -5240,6 +5239,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-futures"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97d095ae15e245a057c8e8451bab9b3ee1e1f68e9ba2b4fbc18d0ac5237835f2"
+dependencies = [
+ "pin-project",
+ "tracing",
+]
+
+[[package]]
 name = "tracing-log"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5640,15 +5649,18 @@ dependencies = [
  "futures",
  "indexmap 2.11.0",
  "regex",
+ "samod",
  "serde",
  "serde_json",
  "thiserror 2.0.16",
  "time",
  "tokio",
+ "tokio-tungstenite 0.27.0",
  "tracing",
  "tracing-android",
  "tracing-appender",
  "tracing-error",
+ "tracing-futures",
  "tracing-subscriber",
  "tracing-unwrap",
  "uuid",

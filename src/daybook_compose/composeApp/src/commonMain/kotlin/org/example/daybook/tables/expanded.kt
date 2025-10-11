@@ -39,6 +39,7 @@ import org.example.daybook.Routes
 import org.example.daybook.TablesState
 // TablesTabsList lives in the same package (`org.example.daybook.tables`) so no import required
 import org.example.daybook.TablesViewModel
+import org.example.daybook.AppScreens
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -56,6 +57,7 @@ fun ExpandedLayout(
         }
     ) { innerPadding ->
         Row(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+            FeaturesRail(navController = navController)
             ExpandedTablesRail()
             PermanentNavigationDrawer(
                 drawerContent = {
@@ -75,7 +77,6 @@ fun ExpandedLayout(
                     )
                 }
             }
-            FeaturesRail()
         }
     }
 }
@@ -90,8 +91,6 @@ fun ExpandedTablesRail() {
     NavigationRail(
         modifier = Modifier.width(80.dp)
     ) {
-        Spacer(modifier = Modifier.height(16.dp))
-
         // Add Table Button
         FloatingActionButton(
             onClick = {
@@ -133,29 +132,43 @@ fun ExpandedTablesRail() {
 }
 
 @Composable
-fun FeaturesRail() {
+fun FeaturesRail(
+    navController: NavHostController,
+) {
     NavigationRail(
         modifier = Modifier.width(80.dp)
     ) {
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Placeholder feature buttons
         NavigationRailItem(
             selected = false,
-            onClick = { /* TODO: Settings */ },
+            onClick = { navController.navigate(
+                AppScreens.Home.name
+            ) },
             icon = {
-                Text("⚙️")
+                Text("H")
             },
-            label = { Text("Settings") }
+            label = { Text("Home") }
         )
 
         NavigationRailItem(
             selected = false,
-            onClick = { /* TODO: Features */ },
+            onClick = { navController.navigate(
+                AppScreens.Home.name
+            ) },
             icon = {
-                Text("⚙️")
+                Text("H")
             },
-            label = { Text("Features") }
+            label = { Text("Home") }
+        )
+
+        NavigationRailItem(
+            selected = false,
+            onClick = { navController.navigate(
+                AppScreens.Capture.name
+            ) },
+            icon = {
+                Text("+")
+            },
+            label = { Text("Capture") }
         )
     }
 }

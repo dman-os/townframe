@@ -9,19 +9,19 @@ import androidx.compose.runtime.collectAsState
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.LocalContainer
 import org.example.daybook.uniffi.Doc
-import org.example.daybook.uniffi.DocsRepo
+import org.example.daybook.uniffi.DocContent
+import org.example.daybook.uniffi.DrawerEvent
+import org.example.daybook.uniffi.DrawerEventListener
+import org.example.daybook.uniffi.DrawerRepo
 import org.example.daybook.uniffi.FfiException
-import org.example.daybook.uniffi.Uuid
-import org.example.daybook.uniffi.DocsEvent
-import org.example.daybook.uniffi.DocsEventListener
 import org.example.daybook.uniffi.ListenerRegistration
 import kotlin.time.Clock
+import kotlin.uuid.Uuid
 
 enum class CaptureMode {
     Text,
@@ -36,7 +36,7 @@ sealed interface DocsListState {
 }
 
 class CaptureScreenViewModel(
-    val docsRepo: DocsRepo,
+    val drawerRepo: DrawerRepo,
     val initialMode: CaptureMode = CaptureMode.Text,
     val availableModes: Set<CaptureMode> = setOf(CaptureMode.Text),
 ) : ViewModel() {
@@ -50,12 +50,12 @@ class CaptureScreenViewModel(
     private var listenerRegistration: ListenerRegistration? = null
 
     // Listener instance implemented on Kotlin side
-    private val listener = object : DocsEventListener {
-        override fun onDocsEvent(event: DocsEvent) {
+    private val listener = object : DrawerEventListener {
+        override fun onDrawerEvent(event: DrawerEvent) {
             // Ensure UI updates happen on main thread
             viewModelScope.launch {
                 when (event) {
-                    DocsEvent.LIST_CHANGED -> {
+                    DrawerEvent.LIST_CHANGED -> {
                         // Refresh from source of truth in Rust
                         refreshDocs()
                     }
@@ -69,14 +69,14 @@ class CaptureScreenViewModel(
         loadLatestDocs()
         // register listener
         viewModelScope.launch {
-            listenerRegistration = docsRepo.ffiRegisterListener(listener)
+            listenerRegistration = drawerRepo.ffiRegisterListener(listener)
         }
     }
 
     private suspend fun refreshDocs() {
         _docsList.value = DocsListState.Loading
         try {
-            _docsList.value = DocsListState.Data(docsRepo.ffiList())
+            _docsList.value = DocsListState.Data(drawerRepo.ffiList())
         } catch (err: FfiException) {
             _docsList.value = DocsListState.Error(err)
         }
@@ -90,9 +90,15 @@ class CaptureScreenViewModel(
 
     fun addOne() {
         viewModelScope.launch {
-            val id = Uuid.random()
-            docsRepo.ffiSet(
-                id, Doc(id, Clock.System.now())
+            val id = Uuid.random();
+            drawerRepo.ffiSet(
+                id, Doc(
+                    id = id.toString(),
+                    createdAt = Clock.System.now(),
+                    updatedAt = Clock.System.now(),
+                    content = DocContent.Text("hello"),
+                    tags = listOf()
+                )
             )
         }
     }
@@ -106,9 +112,9 @@ class CaptureScreenViewModel(
 
 @Composable
 fun CaptureScreen() {
-    val docsRepo = LocalContainer.current.docsRepo
+    val drawerRepo = LocalContainer.current.drawerRepo
     val vm = viewModel {
-        CaptureScreenViewModel(docsRepo = docsRepo)
+        CaptureScreenViewModel(drawerRepo = drawerRepo)
     }
 
     val docsList = vm.docsList.collectAsState().value
@@ -117,9 +123,11 @@ fun CaptureScreen() {
         is DocsListState.Error -> {
             Text("error loading docs: ${docsList.error.message()}")
         }
+
         is DocsListState.Loading -> {
             Text("Loading...")
         }
+
         is DocsListState.Data -> {
             Button(
                 onClick = {

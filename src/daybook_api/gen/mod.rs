@@ -104,7 +104,7 @@ pub mod doc {
         pub id: Mutlihash,
         pub created_at: Datetime,
         pub updated_at: Datetime,
-        pub content: DocKind,
+        pub content: DocContent,
         pub tags: Vec<DocTag>,
     }
 

@@ -17,7 +17,13 @@ impl RustGenCtx<'_> {
             Type::Primitives(Primitives::U64) => "u64".into(),
             Type::Primitives(Primitives::F64) => "f64".into(),
             Type::Primitives(Primitives::Bool) => "bool".into(),
-            Type::Primitives(Primitives::Uuid) => "String".into(),
+            Type::Primitives(Primitives::Uuid) => {
+                if self.attrs.automerge {
+                    "Uuid".into()
+                } else {
+                    "String".into()
+                }
+            }
             Type::Primitives(Primitives::DateTime) => {
                 if self.attrs.automerge {
                     "OffsetDateTime".into()
@@ -848,7 +854,7 @@ fn record_field(
                 }
                 writeln!(
                     buf,
-                    "#[autosurgeon(with = \"utils_rs::am::autosurgeon_date\")]",
+                    "#[autosurgeon(with = \"utils_rs::am::codecs::autosurgeon_date\")]",
                 )?;
             }
         }
