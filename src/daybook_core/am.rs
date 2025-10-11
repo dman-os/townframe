@@ -101,11 +101,7 @@ impl AmCtx {
 
             while let Some(changes) = handle.changes().next().await {
                 let (new_heads, all_changes) = handle.with_document(|doc| {
-                    let patches = doc.diff(
-                        &heads,
-                        &changes.new_heads,
-                        automerge::patches::TextRepresentation::String(doc.text_encoding()),
-                    );
+                    let patches = doc.diff(&heads, &changes.new_heads);
 
                     let mut collected_changes = Vec::new();
 

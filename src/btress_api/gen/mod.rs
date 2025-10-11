@@ -27,13 +27,16 @@ pub mod user {
 
         pub type Output = SchemaRef<User>;
 
-        #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+        #[derive(Debug, Clone, garde::Validate, utoipa::ToSchema, Serialize, Deserialize)]
         #[serde(rename_all = "camelCase")]
         pub struct Input {
             #[schema(min_length = 3, max_length = 25, pattern = "USERNAME_REGEX")]
+            #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 25))]
             pub username: String,
+            #[garde(email)]
             pub email: Option<String>,
             #[schema(min_length = 8, max_length = 1024)]
+            #[garde(length(min = 8, max = 1024))]
             pub password: String,
         }
 

@@ -9,7 +9,7 @@ pub mod prelude {
     pub use crate::api::*;
     pub use crate::interlude::*;
 
-    pub use crate::wit::townframe::api_utils::utils::{Datetime, Uuid};
+    pub use crate::wit::townframe::api_utils::utils::Datetime;
     pub use crate::wit::utils::{ErrorInternal, ErrorsValidation};
     pub use crate::wit::wasi::clocks::wall_clock;
 

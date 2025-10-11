@@ -29,7 +29,10 @@ use super::*;
         )?;
         let cx = service_rust::RustGenCtx {
             reg: &reg,
-            attrs: RustAttrs::default(),
+            attrs: RustAttrs {
+                garde: true,
+                ..default()
+            },
         };
         for feature in &features {
             service_rust::feature_module(&cx, buf, &feature)?;

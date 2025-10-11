@@ -106,7 +106,7 @@ automerge = "0.7"
 # autosurgeon = "0.9"
 autosurgeon = { path = "src/autosurgeon/autosurgeon" }
 automerge-test = "0.6"
-samod = { version = "0.4.0" }
+samod = { version = "0.5.0" }
 # samod = { path = "src/samod/samod" }
 
 sqlx = { version = "0.8.6", features = [

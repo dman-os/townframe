@@ -118,11 +118,11 @@ pub fn feature_module(
     {
         let mut out = indenter::indented(buf).with_str("    ");
         let buf = &mut out;
+        writeln!(buf, "use super::*;")?;
         if cx.attrs.utoipa {
             writeln!(
                 buf,
-                r#"use super::*;
-
+                r#"
 pub const TAG: api::Tag = api::Tag {{
     name: "{tag_name}",
     desc: "{tag_desc}",

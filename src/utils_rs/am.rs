@@ -53,30 +53,3 @@ pub mod automerge_skip {
         Ok(T::default())
     }
 }
-
-pub mod autosurgeon_tuple_2 {
-    use super::*;
-
-    pub fn reconcile<R: Reconciler, T1: Reconcile, T2: Reconcile>(
-        (one, two): &(T1, T2),
-        mut reconciler: R,
-    ) -> Result<(), R::Error> {
-        use autosurgeon::reconcile::SeqReconciler;
-        let mut seq = reconciler.seq()?;
-        let len = seq.len()?;
-        if len == 0 {
-            seq.insert(0, one)?;
-            seq.insert(1, two)?;
-        } else if len == 1 {
-            seq.set(0, one)?;
-            seq.insert(1, two)?;
-        } else {
-            seq.set(0, one)?;
-            seq.set(1, two)?;
-            for ii in len..2 {
-                seq.delete(ii)?;
-            }
-        }
-        Ok(())
-    }
-}

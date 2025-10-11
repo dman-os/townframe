@@ -25,6 +25,7 @@ api_utils_rs.workspace = true
 # error
 color-eyre.workspace = true
 thiserror.workspace = true
+displaydoc.workspace = true
 
 # log
 tracing.workspace = true
@@ -37,6 +38,8 @@ time.workspace = true
 rust_decimal = "1.37.2"
 parking_lot.workspace = true
 url.workspace = true
+garde.workspace = true
+
 
 # async
 tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs"] }
@@ -55,6 +58,7 @@ tokio-tungstenite = { version = "0.27.0", features = ["url"] }
 reqwest.workspace = true
 
 sqlx = { workspace = true, features = ["sqlite"] }
+
 pastey = "0.1"
 struct-patch = "0.10.4"
 directories = "6.0.0"
