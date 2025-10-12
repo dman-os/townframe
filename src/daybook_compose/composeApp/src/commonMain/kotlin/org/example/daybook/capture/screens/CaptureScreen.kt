@@ -13,8 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.LocalContainer
-import org.example.daybook.uniffi.Doc
-import org.example.daybook.uniffi.DocContent
+// removed Doc/DocContent imports - using Uuid list for drawer
 import org.example.daybook.uniffi.DrawerEvent
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepo
@@ -30,7 +29,7 @@ enum class CaptureMode {
 }
 
 sealed interface DocsListState {
-    data class Data(val docs: List<Doc>) : DocsListState
+    data class Data(val docs: List<Uuid>) : DocsListState
     data class Error(val error: FfiException) : DocsListState
     object Loading : DocsListState
 }
@@ -91,15 +90,8 @@ class CaptureScreenViewModel(
     fun addOne() {
         viewModelScope.launch {
             val id = Uuid.random();
-            drawerRepo.ffiSet(
-                id, Doc(
-                    id = id.toString(),
-                    createdAt = Clock.System.now(),
-                    updatedAt = Clock.System.now(),
-                    content = DocContent.Text("hello"),
-                    tags = listOf()
-                )
-            )
+            // insert id into drawer set
+            drawerRepo.ffiInsert(id)
         }
     }
 

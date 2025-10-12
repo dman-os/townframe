@@ -83,7 +83,7 @@ package townframe:btress-api;"#
             "../daybook_sync/gen/mod.rs",
             RustAttrs {
                 serde: true,
-                utoipa: true,
+                utoipa: false,
                 automerge: true,
                 uniffi: false,
                 garde: false,
@@ -131,7 +131,7 @@ pub enum Type {
     Map(TypeId, TypeId),
     Option(TypeId),
     Tuple(Vec<TypeId>),
-    Alias(CHeapStr, TypeId),
+    Alias(Alias),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -301,6 +301,15 @@ pub enum VariantVariantType {
     Wrapped(TypeId),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, bon::Builder)]
+#[builder(on(CHeapStr, into))]
+struct Alias {
+    #[builder(start_fn)]
+    name: CHeapStr,
+    #[builder(start_fn)]
+    ty: TypeId,
+}
+
 pub struct TypeReg {
     types: DHashMap<TypeId, Type>,
     validation_errors_id: TypeId,
@@ -313,10 +322,13 @@ impl TypeReg {
             validation_errors_id: 0,
         };
         this.validation_errors_id = this.add_type(Type::Alias(
-            "ErrorsValidation".into(),
-            this.add_type(Type::List(
-                this.add_type(Type::Tuple(vec![this.string(), this.string()])),
-            )),
+            Alias::builder(
+                "ErrorsValidation",
+                this.add_type(Type::List(
+                    this.add_type(Type::Tuple(vec![this.string(), this.string()])),
+                )),
+            )
+            .build(),
         ));
         this
     }

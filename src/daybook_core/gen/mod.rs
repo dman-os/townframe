@@ -6,7 +6,7 @@ pub mod doc {
 
     pub type MimeType = String;
 
-    pub type DocId = String;
+    pub type Multihash = String;
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, uniffi::Record)]
     #[serde(rename_all = "camelCase")]
@@ -14,18 +14,18 @@ pub mod doc {
         pub mime: MimeType,
         pub width_px: u64,
         pub height_px: u64,
-        pub blurhash: Option<Mutlihash>,
-        pub blob: Mutlihash,
+        pub blurhash: Option<DocId>,
+        pub blob: DocId,
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, uniffi::Record)]
     #[serde(rename_all = "camelCase")]
     pub struct DocBlob {
         pub length_octets: u64,
-        pub hash: DocId,
+        pub hash: Multihash,
     }
 
-    pub type Mutlihash = String;
+    pub type DocId = Uuid;
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, uniffi::Enum)]
     #[serde(rename_all = "camelCase", untagged)]
@@ -35,11 +35,14 @@ pub mod doc {
         Image,
     }
     impl DocKind {
-        pub unsafe fn _lift(val: u8) -> DocKind {
-            if !cfg!(debug_assertions) {
-                return unsafe { ::core::mem::transmute(val) };
+        pub unsafe fn _lift(val:u8) -> DocKind {
+            if !cfg!(debug_assertions){
+                return unsafe {
+                    ::core::mem::transmute(val)
+                };
             }
             match val {
+
                 0 => DocKind::Text,
                 1 => DocKind::Blob,
                 2 => DocKind::Image,
@@ -49,13 +52,16 @@ pub mod doc {
         }
     }
 
+
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, uniffi::Enum)]
     #[serde(rename_all = "camelCase", tag = "ty")]
     pub enum DocContent {
-        Text(String),
-        Blob(DocBlob),
-        Image(DocImage),
+        Text(String), 
+        Blob(DocBlob), 
+        Image(DocImage), 
     }
+
+    pub type DocRef = DocId;
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, uniffi::Enum)]
     #[serde(rename_all = "camelCase", untagged)]
@@ -64,11 +70,14 @@ pub mod doc {
         LabelGeneric,
     }
     impl DocTagKind {
-        pub unsafe fn _lift(val: u8) -> DocTagKind {
-            if !cfg!(debug_assertions) {
-                return unsafe { ::core::mem::transmute(val) };
+        pub unsafe fn _lift(val:u8) -> DocTagKind {
+            if !cfg!(debug_assertions){
+                return unsafe {
+                    ::core::mem::transmute(val)
+                };
             }
             match val {
+
                 0 => DocTagKind::RefGeneric,
                 1 => DocTagKind::LabelGeneric,
 
@@ -77,18 +86,19 @@ pub mod doc {
         }
     }
 
+
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, uniffi::Enum)]
     #[serde(rename_all = "camelCase", tag = "ty")]
     pub enum DocTag {
         /// A link to another document.
-        RefGeneric(Mutlihash),
-        LabelGeneric(String),
+        RefGeneric(DocRef), 
+        LabelGeneric(String), 
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, uniffi::Record)]
     #[serde(rename_all = "camelCase")]
     pub struct Doc {
-        pub id: Mutlihash,
+        pub id: DocId,
         #[serde(with = "api_utils_rs::codecs::sane_iso8601")]
         #[autosurgeon(with = "utils_rs::am::codecs::autosurgeon_date")]
         pub created_at: OffsetDateTime,
@@ -113,25 +123,14 @@ pub mod doc {
             pub id: Uuid,
         }
 
-        #[derive(
-            Debug,
-            Clone,
-            thiserror::Error,
-            displaydoc::Display,
-            Serialize,
-            Deserialize,
-            Hydrate,
-            Reconcile,
-        )]
+        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
         #[serde(rename_all = "camelCase", tag = "error")]
         /// Id occupied: {id}
         pub struct ErrorIdOccupied {
             pub id: String,
         }
 
-        #[derive(
-            Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile,
-        )]
+        #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
         #[serde(rename_all = "camelCase", tag = "error")]
         pub enum Error {
             /// Id occupied {0}
@@ -142,4 +141,5 @@ pub mod doc {
             Internal(#[from] ErrorInternal),
         }
     }
+
 }

@@ -3,9 +3,13 @@ use super::*;
 mod create;
 
 pub fn feature(reg: &TypeReg) -> Feature {
-    let schema_mime_ty = reg.add_type(Type::Alias("MimeType".into(), reg.string()));
-    let schema_multihash = reg.add_type(Type::Alias("DocId".into(), reg.string()));
-    let schema_doc_id = reg.add_type(Type::Alias("Mutlihash".into(), reg.string()));
+    let schema_mime_ty = reg.add_type(Type::Alias(
+        Alias::builder("MimeType", reg.string()).build(),
+    ));
+    let schema_multihash = reg.add_type(Type::Alias(
+        Alias::builder("Multihash", reg.string()).build(),
+    ));
+    let schema_doc_id = reg.add_type(Type::Alias(Alias::builder("DocId", reg.uuid()).build()));
 
     let schema_doc_blob = reg.add_type(Type::Record(
         Record::builder("DocBlob")
@@ -57,10 +61,11 @@ pub fn feature(reg: &TypeReg) -> Feature {
             }))
             .build(),
     ));
+    let schema_doc_ref = reg.add_type(Type::Alias(Alias::builder("DocRef", schema_doc_id).build()));
     let schema_doc_tag_variants = vec![
         (
             "ref_generic",
-            VariantVariant::builder(VariantVariantType::Wrapped(schema_doc_id))
+            VariantVariant::builder(VariantVariantType::Wrapped(schema_doc_ref))
                 .desc("A link to another document.")
                 .build(),
         ),
@@ -68,6 +73,8 @@ pub fn feature(reg: &TypeReg) -> Feature {
             "label_generic",
             VariantVariant::builder(VariantVariantType::Wrapped(reg.string())).build(),
         ),
+        // path_generic
+        // version_branch
     ];
     let schema_doc_tag_kind = reg.add_type(Type::Enum(
         Enum::builder("DocTagKind")
@@ -114,6 +121,7 @@ pub fn feature(reg: &TypeReg) -> Feature {
             schema_doc_id,
             schema_doc_content_kind,
             schema_doc_content,
+            schema_doc_ref,
             schema_doc_tag_kind,
             schema_doc_tag,
             schema_doc,

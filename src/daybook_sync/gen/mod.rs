@@ -4,35 +4,30 @@ use super::*;
 pub mod doc {
     use super::*;
 
-    pub const TAG: api::Tag = api::Tag {
-        name: "doc",
-        desc: "Doc mgmt.",
-    };
-
     pub type MimeType = String;
 
-    pub type DocId = String;
+    pub type Multihash = String;
 
-    #[derive(Debug, Clone, Hydrate, Reconcile, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct DocImage {
         pub mime: MimeType,
         pub width_px: u64,
         pub height_px: u64,
-        pub blurhash: Option<Mutlihash>,
-        pub blob: Mutlihash,
+        pub blurhash: Option<DocId>,
+        pub blob: DocId,
     }
 
-    #[derive(Debug, Clone, Hydrate, Reconcile, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct DocBlob {
         pub length_octets: u64,
-        pub hash: DocId,
+        pub hash: Multihash,
     }
 
-    pub type Mutlihash = String;
+    pub type DocId = Uuid;
 
-    #[derive(Debug, Clone, Hydrate, Reconcile, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", untagged)]
     pub enum DocKind {
         Text,
@@ -58,7 +53,7 @@ pub mod doc {
     }
 
 
-    #[derive(Debug, Clone, Hydrate, Reconcile, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", tag = "ty")]
     pub enum DocContent {
         Text(String), 
@@ -66,7 +61,9 @@ pub mod doc {
         Image(DocImage), 
     }
 
-    #[derive(Debug, Clone, Hydrate, Reconcile, utoipa::ToSchema, Serialize, Deserialize)]
+    pub type DocRef = DocId;
+
+    #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", untagged)]
     pub enum DocTagKind {
         RefGeneric,
@@ -90,18 +87,18 @@ pub mod doc {
     }
 
 
-    #[derive(Debug, Clone, Hydrate, Reconcile, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", tag = "ty")]
     pub enum DocTag {
         /// A link to another document.
-        RefGeneric(Mutlihash), 
+        RefGeneric(DocRef), 
         LabelGeneric(String), 
     }
 
-    #[derive(Debug, Clone, Hydrate, Reconcile, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Doc {
-        pub id: Mutlihash,
+        pub id: DocId,
         #[serde(with = "api_utils_rs::codecs::sane_iso8601")]
         #[autosurgeon(with = "utils_rs::am::codecs::autosurgeon_date")]
         pub created_at: OffsetDateTime,
@@ -118,33 +115,29 @@ pub mod doc {
         #[derive(Debug, Clone)]
         pub struct DocCreate;
 
-        pub type Output = SchemaRef<Doc>;
+        pub type Output = Doc;
 
-        #[derive(Debug, Clone, Hydrate, Reconcile, utoipa::ToSchema, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
         #[serde(rename_all = "camelCase")]
         pub struct Input {
-            #[schema(min_length = 1, max_length = 1024)]
             pub id: Uuid,
         }
 
-        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, utoipa::ToSchema, Serialize, Deserialize, Hydrate, Reconcile)]
+        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
         #[serde(rename_all = "camelCase", tag = "error")]
         /// Id occupied: {id}
         pub struct ErrorIdOccupied {
             pub id: String,
         }
 
-        #[derive(Debug, thiserror::Error, displaydoc::Display, utoipa::ToSchema, macros::HttpError, Serialize, Deserialize, Hydrate, Reconcile)]
+        #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
         #[serde(rename_all = "camelCase", tag = "error")]
         pub enum Error {
             /// Id occupied {0}
-            #[http(code(StatusCode::BAD_REQUEST), desc("Id occupied"))]
             IdOccupied(#[from] ErrorIdOccupied),
             /// Invalid input {0}
-            #[http(code(StatusCode::BAD_REQUEST), desc("Invalid input"))]
             InvalidInput(#[from] ErrorsValidation),
             /// Internal server error {0}
-            #[http(code(StatusCode::INTERNAL_SERVER_ERROR), desc("Internal server error"))]
             Internal(#[from] ErrorInternal),
         }
     }

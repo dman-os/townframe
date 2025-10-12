@@ -36,7 +36,7 @@ impl TypeReg {
                     .fold(">".to_string(), |acc, curr| format!("{acc},{curr}"));
                 format!("tuple<{joined}").into()
             }
-            Type::Alias(alias, _) => alias.to_kebab_case().into(),
+            Type::Alias(alias) => alias.name.to_kebab_case().into(),
         })
     }
 }
@@ -250,11 +250,11 @@ fn schema_type(reg: &TypeReg, buf: &mut impl Write, id: TypeId) -> Res<()> {
         Type::Record(record) => schema_record(reg, buf, record)?,
         Type::Enum(r#enum) => schema_enum(buf, r#enum)?,
         Type::Variant(variant) => schema_variant(reg, buf, variant)?,
-        Type::Alias(name, ty_id) => writeln!(
+        Type::Alias(Alias { name, ty }) => writeln!(
             buf,
             "type {alias} = {other};",
             alias = AsKebabCase(&name[..]),
-            other = reg.wit_name(*ty_id).expect("unregistered inner type")
+            other = reg.wit_name(*ty).expect("unregistered inner type")
         )?,
         ty => eyre::bail!("found unsupported schema type: {ty:?}"),
     };

@@ -81,10 +81,10 @@ impl AmCtx {
                             let fin = repo
                                 .connect_tungstenite(conn, samod::ConnDirection::Outgoing)
                                 .await;
-                            error!(?fin, "connection closed");
+                            warn!(?fin, "connection closed");
                         }
                         Err(err) => {
-                            error!(?attempt, "error connecting to sync server {err}");
+                            warn!(?attempt, "error connecting to sync server {err}");
                             continue;
                         }
                     }

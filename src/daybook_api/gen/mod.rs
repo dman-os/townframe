@@ -11,7 +11,7 @@ pub mod doc {
 
     pub type MimeType = String;
 
-    pub type DocId = String;
+    pub type Multihash = String;
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -19,18 +19,18 @@ pub mod doc {
         pub mime: MimeType,
         pub width_px: u64,
         pub height_px: u64,
-        pub blurhash: Option<Mutlihash>,
-        pub blob: Mutlihash,
+        pub blurhash: Option<DocId>,
+        pub blob: DocId,
     }
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct DocBlob {
         pub length_octets: u64,
-        pub hash: DocId,
+        pub hash: Multihash,
     }
 
-    pub type Mutlihash = String;
+    pub type DocId = String;
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", untagged)]
@@ -66,6 +66,8 @@ pub mod doc {
         Image(DocImage), 
     }
 
+    pub type DocRef = DocId;
+
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", untagged)]
     pub enum DocTagKind {
@@ -94,14 +96,14 @@ pub mod doc {
     #[serde(rename_all = "camelCase", tag = "ty")]
     pub enum DocTag {
         /// A link to another document.
-        RefGeneric(Mutlihash), 
+        RefGeneric(DocRef), 
         LabelGeneric(String), 
     }
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Doc {
-        pub id: Mutlihash,
+        pub id: DocId,
         pub created_at: Datetime,
         pub updated_at: Datetime,
         pub content: DocContent,

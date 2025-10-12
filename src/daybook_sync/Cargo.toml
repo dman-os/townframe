@@ -10,6 +10,7 @@ path = "main.rs"
 [dependencies]
 api_utils_rs.workspace = true
 utils_rs = { workspace = true, features = ["automerge"] }
+macros.workspace = true
 
 autosurgeon = { workspace = true, features = ["uuid"] }
 automerge = { workspace = true }
@@ -17,6 +18,7 @@ samod = { workspace = true, features = ["tokio", "tungstenite", "axum"] }
 
 serde.workspace = true
 
+utoipa.workspace = true
 http.workspace = true
 axum = { workspace = true, features = ["form", "json", "macros", "multipart", "query", "original-uri", "query", "tower-log", "tracing", "matched-path", "ws", "tokio", "http2"] }
 axum-extra = { workspace = true, features = [] }
@@ -30,4 +32,3 @@ garde.workspace = true
 thiserror.workspace = true
 displaydoc.workspace = true
 
-macros.workspace = true

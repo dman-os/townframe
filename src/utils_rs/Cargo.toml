@@ -23,7 +23,7 @@ serde_json.workspace = true
 # ds
 ahash.workspace = true
 dashmap = "6.1"
-uuid = { version = "1", features = ["v7", "serde"] }
+uuid = { version = "1", features = ["serde"] }
 indexmap = "2.11"
 regex = "1"
 time.workspace = true

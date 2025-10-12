@@ -1,6 +1,5 @@
 use crate::interlude::*;
 
-use automerge::PatchAction;
 use autosurgeon::Prop;
 use samod::DocumentId;
 use tokio::{
@@ -10,9 +9,8 @@ use tokio::{
 
 #[derive(Debug, Clone)]
 pub struct ChangeNotification {
-    pub path: Vec<Prop<'static>>,
-    pub action: PatchAction,
-    pub timestamp: std::time::Instant,
+    pub patch: automerge::Patch,
+    // TODO: timestamp
 }
 
 pub struct ChangeFilter {
@@ -62,18 +60,14 @@ impl ChangeListenerManager {
                 while let Some(changes) = doc_change_stream.next().await {
                     let (new_heads, all_changes) = handle.with_document(|doc| {
                         let patches = doc.diff(&heads, &changes.new_heads);
+                        let meta = doc.get_changes_meta(&changes.new_heads);
 
                         let mut collected_changes = Vec::new();
 
                         for patch in patches {
-                            // Convert automerge path to autosurgeon path
-                            let autosurgeon_path: Vec<Prop<'static>> = patch
-                                .path
-                                .into_iter()
-                                .map(|(_, prop)| prop.into())
-                                .collect();
-
-                            collected_changes.push((autosurgeon_path, patch.action));
+                            collected_changes.push(ChangeNotification {
+                                patch,
+                            });
                         }
 
                         (changes.new_heads, collected_changes)
@@ -82,7 +76,14 @@ impl ChangeListenerManager {
                     info!(?all_changes, "changes observed");
 
                     // Notify listeners about changes
-                    this.notify_listeners(handle.document_id(), all_changes);
+                    if !all_changes.is_empty() {
+                        if let Err(err) = this
+                            .change_tx
+                            .send((handle.document_id().clone(), all_changes))
+                        {
+                            warn!("failed to send change notifications: {err}");
+                        }
+                    }
 
                     heads = new_heads;
                 }
@@ -134,7 +135,7 @@ impl ChangeListenerManager {
                         let mut relevant_notifications = Vec::new();
 
                         for notification in &notifications {
-                            if path_matches(&listener.filter.path, &notification.path) {
+                            if path_matches(&listener.filter.path, &notification.patch.path[..]) {
                                 relevant_notifications.push(notification.clone());
                             }
                         }
@@ -158,36 +159,25 @@ impl ChangeListenerManager {
     }
 
     /// Notify all relevant listeners about changes
-    fn notify_listeners(&self, id: &DocumentId, changes: Vec<(Vec<Prop<'static>>, PatchAction)>) {
-        if changes.is_empty() {
+    fn notify_listeners(&self, id: &DocumentId, notifs: Vec<ChangeNotification>) {
+        if notifs.is_empty() {
             return;
         }
-
-        let timestamp = std::time::Instant::now();
-        let notifications: Vec<ChangeNotification> = changes
-            .into_iter()
-            .map(|(path, action)| ChangeNotification {
-                path,
-                action,
-                timestamp,
-            })
-            .collect();
-
         // Send notifications to the worker via channel
-        if let Err(e) = self.change_tx.send((id.clone(), notifications)) {
+        if let Err(e) = self.change_tx.send((id.clone(), notifs)) {
             warn!("Failed to send change notifications: {}", e);
         }
     }
 }
 
 /// Check if a change path matches a listener path (including subpaths)
-fn path_matches(listener_path: &[Prop<'static>], change_path: &[Prop<'static>]) -> bool {
+fn path_matches(listener_path: &[Prop<'static>], change_path: &[(automerge::ObjId, automerge::Prop)]) -> bool {
     if listener_path.len() > change_path.len() {
         return false;
     }
 
     for (i, listener_prop) in listener_path.iter().enumerate() {
-        if !prop_matches(listener_prop, &change_path[i]) {
+        if !prop_matches(listener_prop, &change_path[i].1) {
             return false;
         }
     }
@@ -195,10 +185,10 @@ fn path_matches(listener_path: &[Prop<'static>], change_path: &[Prop<'static>]) 
 }
 
 /// Check if two properties match (handles different property types)
-fn prop_matches(listener_prop: &Prop<'static>, change_prop: &Prop<'static>) -> bool {
+fn prop_matches(listener_prop: &Prop<'static>, change_prop: &automerge::Prop) -> bool {
     match (listener_prop, change_prop) {
-        (Prop::Key(listener_key), Prop::Key(change_key)) => listener_key == change_key,
-        (Prop::Index(listener_idx), Prop::Index(change_idx)) => listener_idx == change_idx,
+        (Prop::Key(listener_key), automerge::Prop::Map(change_key)) => listener_key == change_key,
+        (Prop::Index(listener_idx), automerge::Prop::Seq(change_idx)) => *listener_idx == (*change_idx as u32),
         _ => false,
     }
 }

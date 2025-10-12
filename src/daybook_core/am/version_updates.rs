@@ -17,7 +17,7 @@ pub mod app {
 }
 
 pub mod drawer {
-    use crate::docs::DrawerAm;
+    use crate::drawer::DrawerAm;
 
     pub fn version_latest() -> Res<Vec<u8>> {
         let mut doc = AutoCommit::new().with_actor(ActorId::random());

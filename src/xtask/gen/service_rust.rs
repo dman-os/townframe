@@ -55,7 +55,7 @@ impl RustGenCtx<'_> {
                     .fold(")".to_string(), |acc, curr| format!("{acc},{curr}"));
                 format!("({joined}").into()
             }
-            Type::Alias(alias, _) => alias.to_pascal_case().into(),
+            Type::Alias(alias) => alias.name.to_pascal_case().into(),
         })
     }
 }
@@ -334,11 +334,11 @@ fn schema_type(
         Type::Record(record) => schema_record(cx, buf, exp, record)?,
         Type::Enum(r#enum) => schema_enum(cx, buf, exp, r#enum)?,
         Type::Variant(variant) => schema_variant(cx, buf, exp, variant)?,
-        Type::Alias(name, ty_id) => writeln!(
+        Type::Alias(Alias { name, ty }) => writeln!(
             buf,
             "pub type {alias} = {other};",
             alias = AsPascalCase(&name[..]),
-            other = cx.rust_name(*ty_id).expect("unregistered inner type")
+            other = cx.rust_name(*ty).expect("unregistered inner type")
         )?,
         ty => eyre::bail!("found unsupported schema type: {ty:?}"),
     };

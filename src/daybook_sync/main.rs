@@ -136,7 +136,11 @@ impl Ctx {
             let cx = cx.clone();
             async move {
                 let mut doc_change_worker = vec![];
+                let mut listen_list = std::collections::HashSet::new();
                 while let Some(doc_id) = doc_rx.recv().await {
+                    if listen_list.contains(&doc_id) {
+                        continue;
+                    }
                     let Some(handle) = cx
                         .acx
                         .find_doc(doc_id.clone())
@@ -147,6 +151,7 @@ impl Ctx {
                         continue;
                     };
                     let change_worker = cx.acx.change_manager().clone().spawn_doc_listener(handle);
+                    listen_list.insert(doc_id);
                     doc_change_worker.push(change_worker);
                 }
             }
@@ -159,8 +164,8 @@ impl Ctx {
                     path: vec![],
                     doc_id: None,
                 },
-                |change| {
-                    info!(?change, "XXX change");
+                |changes| {
+                    info!(?changes, "XXX change");
                 },
             )
             .await;

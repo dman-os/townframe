@@ -2,12 +2,13 @@ use crate::interlude::*;
 
 use crate::ffi::{FfiError, SharedFfiCtx};
 
-use crate::gen::doc::Doc;
+use crate::gen::doc::DocId;
 
 #[derive(Default, Reconcile, Hydrate)]
 pub struct DrawerAm {
+    // FIXME: replace with hashset
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    map: HashMap<Uuid, Doc>,
+    map: HashMap<DocId, bool>,
 }
 
 impl DrawerAm {
@@ -90,22 +91,31 @@ impl DrawerRepo {
         Ok(repo)
     }
 
-    async fn get(&self, id: Uuid) -> Res<Option<Doc>> {
+    async fn contains(&self, id: Uuid) -> Res<bool> {
         let am = self.am.read().await;
-        Ok(am.map.get(&id).cloned())
+        Ok(am.map.contains_key(&id))
     }
 
-    async fn set(&self, id: Uuid, val: Doc) -> Res<Option<Doc>> {
+    async fn insert(&self, id: Uuid) -> Res<bool> {
         let mut am = self.am.clone().write_owned().await;
-        let ret = am.map.insert(id, val);
+        // return true when a new entry was added
+        let was_present = am.map.insert(id, true).is_some();
         am.flush(&self.fcx.cx).await?;
         self.registry.notify(DrawerEvent::ListChanged);
-        Ok(ret)
+        Ok(!was_present)
     }
 
-    async fn list(&self) -> Res<Vec<Doc>> {
+    async fn remove(&self, id: Uuid) -> Res<bool> {
+        let mut am = self.am.clone().write_owned().await;
+        let existed = am.map.remove(&id).is_some();
+        am.flush(&self.fcx.cx).await?;
+        self.registry.notify(DrawerEvent::ListChanged);
+        Ok(existed)
+    }
+
+    async fn list(&self) -> Res<Vec<DocId>> {
         let am = self.am.read().await;
-        Ok(am.map.values().cloned().collect())
+        Ok(am.map.keys().cloned().collect())
     }
 }
 
@@ -123,25 +133,35 @@ impl DrawerRepo {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_get(self: Arc<Self>, id: Uuid) -> Result<Option<Doc>, FfiError> {
+    async fn ffi_contains(self: Arc<Self>, id: Uuid) -> Result<bool, FfiError> {
         let this = self.clone();
-        Ok(self.fcx.do_on_rt(async move { this.get(id).await }).await?)
+        Ok(self.fcx.do_on_rt(async move { this.contains(id).await }).await?)
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_set(self: Arc<Self>, id: Uuid, doc: Doc) -> Result<Option<Doc>, FfiError> {
+    async fn ffi_insert(self: Arc<Self>, id: Uuid) -> Result<bool, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
-            .do_on_rt(async move { this.set(id, doc).await })
+            .do_on_rt(async move { this.insert(id).await })
             .await?;
         Ok(out)
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_list(self: Arc<Self>) -> Result<Vec<Doc>, FfiError> {
+    async fn ffi_remove(self: Arc<Self>, id: Uuid) -> Result<bool, FfiError> {
+        let this = self.clone();
+        let out = self
+            .fcx
+            .do_on_rt(async move { this.remove(id).await })
+            .await?;
+        Ok(out)
+    }
+
+    #[tracing::instrument(err, skip(self))]
+    async fn ffi_list(self: Arc<Self>) -> Result<Vec<DocId>, FfiError> {
         let this = self.clone();
         let out = self.fcx.do_on_rt(async move { this.list().await }).await?;
-        Ok(out.into_iter().collect())
+        Ok(out)
     }
 }

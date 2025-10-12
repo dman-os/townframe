@@ -401,7 +401,6 @@ dependencies = [
  "automerge",
  "automerge-test",
  "autosurgeon-derive",
- "pastey",
  "similar",
  "thiserror 1.0.69",
  "uuid",
@@ -1294,6 +1293,7 @@ dependencies = [
  "tower",
  "tower-http 0.6.6",
  "utils_rs",
+ "utoipa",
 ]
 
 [[package]]

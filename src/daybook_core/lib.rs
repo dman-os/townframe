@@ -19,7 +19,7 @@ use interlude::*;
 uniffi::setup_scaffolding!();
 
 mod am;
-mod docs;
+mod drawer;
 mod ffi;
 mod gen;
 mod globals;
