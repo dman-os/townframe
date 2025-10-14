@@ -110,6 +110,16 @@ pub mod doc {
         pub tags: Vec<DocTag>,
     }
 
+    #[derive(
+        Debug, Clone, Hydrate, Reconcile, Patch, PartialEq, Serialize, Deserialize, uniffi::Record,
+    )]
+    #[serde(rename_all = "camelCase")]
+    #[patch(attribute(derive(Debug, Default, uniffi::Record)))]
+    pub struct DocAddedEvent {
+        pub id: DocId,
+        pub heads: Vec<String>,
+    }
+
     pub mod doc_create {
         use super::*;
 

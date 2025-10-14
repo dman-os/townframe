@@ -152,22 +152,6 @@ pub const TAG: api::Tag = api::Tag {{
                 schema_type(cx, buf, &mut exp, *id)?;
             }
         }
-        /*{
-                writeln!(
-                    buf,
-                    r#"pub fn router() -> axum::Router<SharedContext> {{
-        axum::Router::new()"#
-                )?;
-                for epoint in endpoints {
-                    writeln!(
-                        buf,
-                        "    .merge(EndpointWrapper::new({module}::{epoint}))",
-                        module = heck::AsSnekCase(&epoint.id[..]),
-                        epoint = heck::AsPascalCase(&epoint.id[..])
-                    )?;
-                }
-                writeln!(buf, "}}")?;
-            }*/
         {
             let mut exp = ExportedTypesAppender {
                 into: exp_root.clone(),

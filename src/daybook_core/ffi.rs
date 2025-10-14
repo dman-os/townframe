@@ -65,7 +65,7 @@ impl FfiCtx {
         let config = crate::Config::new()
             .wrap_err("error creating default config")
             .inspect_err(|err| tracing::error!(?err))?;
-        let cx = do_on_rt(&rt, async { Ctx::new(config).await })
+        let cx = do_on_rt(&rt, async { Ctx::init(config).await })
             .await
             .wrap_err("error initializing main Ctx")
             .inspect_err(|err| tracing::error!(?err))?;
@@ -83,5 +83,5 @@ where
         let res = future.await;
         tx.send(res)
     });
-    rx.await.expect_or_log(ERROR_CHANNEL)
+    rx.await.expect(ERROR_CHANNEL)
 }

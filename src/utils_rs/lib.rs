@@ -29,6 +29,7 @@ mod interlude {
     };
     pub use indexmap::{indexmap, IndexMap};
     pub use serde::{Deserialize, Serialize};
+    pub use serde_json::json;
     pub use time::{self, OffsetDateTime};
     pub use uuid::{self, Uuid};
 
@@ -40,6 +41,8 @@ mod interlude {
 }
 
 use crate::interlude::*;
+
+use std::io::Write;
 
 mod expect_tags {
     pub const ERROR_TOKIO: &str = "tokio error";
@@ -100,6 +103,10 @@ pub fn setup_tracing() -> eyre::Result<()> {
     std::panic::set_hook(Box::new(move |panic_info| {
         let report = eyre_panic_hook.panic_report(panic_info);
         tracing::error!("{report}");
+
+        // - Tokio does not exit the process when a task panics, so we define a custom
+        //   panic hook to implement this behaviour.
+        std::process::exit(1);
     }));
     eyre_hook.install()?;
 
@@ -232,108 +239,108 @@ mod cheapstr {
     }
 }
 
-/* const SHA2_256: u64 = 0x12;
+#[cfg(feature = "hash")]
+pub mod hash {
+    use super::*;
 
-pub fn hash_obj<T: serde::Serialize>(obj: &T) -> String {
-    use sha2::Digest;
-    let mut hash = sha2::Sha256::new();
-    json_canon::to_writer(&mut hash, obj).expect_or_log("error serializing manifest");
-    let hash = hash.finalize();
+    const SHA2_256: u64 = 0x12;
+    pub fn hash_obj<T: serde::Serialize>(obj: &T) -> String {
+        use sha2::Digest;
+        let mut hash = sha2::Sha256::new();
+        json_canon::to_writer(&mut hash, obj).expect("error serializing manifest");
+        let hash = hash.finalize();
 
-    let hash =
-        multihash::Multihash::<32>::wrap(SHA2_256, &hash[..]).expect_or_log("error multihashing");
-    encode_base32_multibase(hash.digest())
-}
+        let hash =
+            multihash::Multihash::<32>::wrap(SHA2_256, &hash[..]).expect("error multihashing");
+        encode_base32_multibase(hash.digest())
+    }
 
-pub fn hash_str(string: &str) -> String {
-    hash_bytes(string.as_bytes())
-}
+    pub fn hash_str(string: &str) -> String {
+        hash_bytes(string.as_bytes())
+    }
 
-pub fn hash_bytes(bytes: &[u8]) -> String {
-    use sha2::Digest;
-    let mut hash = sha2::Sha256::new();
-    hash.write(bytes).expect_or_log("error writing to hasher");
-    let hash = hash.finalize();
+    pub fn hash_bytes(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        let mut hash = sha2::Sha256::new();
+        hash.write(bytes).expect("error writing to hasher");
+        let hash = hash.finalize();
 
-    let hash =
-        multihash::Multihash::<32>::wrap(SHA2_256, &hash[..]).expect_or_log("error multihashing");
-    encode_base32_multibase(hash.digest())
-}
+        let hash =
+            multihash::Multihash::<32>::wrap(SHA2_256, &hash[..]).expect("error multihashing");
+        encode_base32_multibase(hash.digest())
+    }
 
-pub async fn hash_reader<T: tokio::io::AsyncRead>(reader: T) -> Res<String> {
-    use sha2::Digest;
-    use tokio::io::*;
-    let mut hash = sha2::Sha256::new();
-    let mut buf = vec![0u8; 65536];
+    pub async fn hash_reader<T: tokio::io::AsyncRead>(reader: T) -> Res<String> {
+        use sha2::Digest;
+        use tokio::io::*;
+        let mut hash = sha2::Sha256::new();
+        let mut buf = vec![0u8; 65536];
 
-    let reader = tokio::io::BufReader::new(reader);
+        let reader = tokio::io::BufReader::new(reader);
 
-    let mut reader = std::pin::pin!(reader);
+        let mut reader = std::pin::pin!(reader);
 
-    loop {
-        // Read a chunk of data
-        let bytes_read = reader.read(&mut buf).await?;
+        loop {
+            // Read a chunk of data
+            let bytes_read = reader.read(&mut buf).await?;
 
-        // Break the loop if we reached EOF
-        if bytes_read == 0 {
-            break;
+            // Break the loop if we reached EOF
+            if bytes_read == 0 {
+                break;
+            }
+            hash.write(&buf[..bytes_read])
+                .expect("error writing to hasher");
         }
-        hash.write(&buf[..bytes_read])
-            .expect_or_log("error writing to hasher");
+        let hash = hash.finalize();
+
+        let hash =
+            multihash::Multihash::<32>::wrap(SHA2_256, &hash[..]).expect("error multihashing");
+        let hash = encode_base32_multibase(hash.digest());
+        Ok(hash)
     }
-    let hash = hash.finalize();
 
-    let hash =
-        multihash::Multihash::<32>::wrap(SHA2_256, &hash[..]).expect_or_log("error multihashing");
-    let hash = encode_base32_multibase(hash.digest());
-    Ok(hash)
-}
-
-pub fn encode_base32_multibase<T: AsRef<[u8]>>(source: T) -> String {
-    format!(
-        "b{}",
-        data_encoding::BASE32_NOPAD
-            .encode(source.as_ref())
-            .to_lowercase()
-    )
-}
-
-#[allow(unused)]
-// Consider z-base32 https://en.wikipedia.org/wiki/Base32#z-base-32
-pub fn decode_base32_multibase(source: &str) -> eyre::Result<Vec<u8>> {
-    match (
-        &source[0..1],
-        data_encoding::BASE32_NOPAD.decode(source[1..].as_bytes()),
-    ) {
-        ("b", Ok(bytes)) => Ok(bytes),
-        (prefix, Ok(_)) => Err(eyre::format_err!(
-            "unexpected multibase prefix for base32 multibase: {prefix}"
-        )),
-        (_, Err(err)) => Err(eyre::format_err!("error decoding base32: {err}")),
+    pub fn encode_base32_multibase<T: AsRef<[u8]>>(source: T) -> String {
+        let mut base32 = data_encoding::BASE32_NOPAD.encode(source.as_ref());
+        base32.make_ascii_lowercase();
+        format!("b{base32}")
     }
-}
 
-#[allow(unused)]
-pub fn encode_hex_multibase<T: AsRef<[u8]>>(source: T) -> String {
-    format!(
-        "f{}",
-        data_encoding::HEXLOWER_PERMISSIVE.encode(source.as_ref())
-    )
-}
+    // Consider z-base32 https://en.wikipedia.org/wiki/Base32#z-base-32
+    pub fn decode_base32_multibase(source: &str) -> eyre::Result<Vec<u8>> {
+        match (
+            &source[0..1],
+            data_encoding::BASE32_NOPAD.decode(source[1..].to_uppercase().as_bytes()),
+        ) {
+            ("b", Ok(bytes)) => Ok(bytes),
+            (prefix, Ok(_)) => Err(eyre::format_err!(
+                "unexpected multibase prefix for base32 multibase: {prefix}"
+            )),
+            (_, Err(err)) => Err(eyre::format_err!("error decoding base32 ({source}): {err}")),
+        }
+    }
 
-#[allow(unused)]
-pub fn decode_hex_multibase(source: &str) -> eyre::Result<Vec<u8>> {
-    match (
-        &source[0..1],
-        data_encoding::HEXLOWER_PERMISSIVE.decode(source[1..].as_bytes()),
-    ) {
-        ("f", Ok(bytes)) => Ok(bytes),
-        (prefix, Ok(_)) => Err(eyre::format_err!(
-            "unexpected multibase prefix for hex multibase: {prefix}"
-        )),
-        (_, Err(err)) => Err(eyre::format_err!("error decoding hex: {err}")),
+    pub fn encode_hex_multibase<T: AsRef<[u8]>>(source: T) -> String {
+        format!(
+            "f{}",
+            data_encoding::HEXLOWER_PERMISSIVE.encode(source.as_ref())
+        )
+    }
+
+    pub fn decode_hex_multibase(source: &str) -> eyre::Result<Vec<u8>> {
+        match (
+            &source[0..1],
+            data_encoding::HEXLOWER_PERMISSIVE.decode(source[1..].as_bytes()),
+        ) {
+            ("f", Ok(bytes)) => Ok(bytes),
+            (prefix, Ok(_)) => Err(eyre::format_err!(
+                "unexpected multibase prefix for hex multibase: {prefix}"
+            )),
+            (_, Err(err)) => Err(eyre::format_err!("error decoding hex: {err}")),
+        }
     }
 }
+
+/*
 
 /// A simpler version of [`tokio::fs::try_exists`] that returns
 /// false on a non-existent file and not just on a broken symlink.

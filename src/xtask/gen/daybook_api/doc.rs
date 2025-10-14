@@ -3,57 +3,57 @@ use super::*;
 mod create;
 
 pub fn feature(reg: &TypeReg) -> Feature {
-    let schema_mime_ty = reg.add_type(Type::Alias(
+    let mime_ty = reg.add_type(Type::Alias(
         Alias::builder("MimeType", reg.string()).build(),
     ));
-    let schema_multihash = reg.add_type(Type::Alias(
+    let multihash = reg.add_type(Type::Alias(
         Alias::builder("Multihash", reg.string()).build(),
     ));
-    let schema_doc_id = reg.add_type(Type::Alias(Alias::builder("DocId", reg.string()).build()));
+    let doc_id = reg.add_type(Type::Alias(Alias::builder("DocId", reg.string()).build()));
 
-    let schema_doc_blob = reg.add_type(Type::Record(
+    let doc_blob = reg.add_type(Type::Record(
         Record::builder("DocBlob")
             .with_fields([
                 ("length_octets", RecordField::builder(reg.u64()).build()),
-                ("hash", RecordField::builder(schema_multihash).build()),
+                ("hash", RecordField::builder(multihash).build()),
             ])
             .build(),
     ));
-    let schema_doc_image = reg.add_type(Type::Record(
+    let doc_image = reg.add_type(Type::Record(
         Record::builder("DocImage")
             .with_fields([
-                ("mime", RecordField::builder(schema_mime_ty).build()),
+                ("mime", RecordField::builder(mime_ty).build()),
                 ("width_px", RecordField::builder(reg.u64()).build()),
                 ("height_px", RecordField::builder(reg.u64()).build()),
                 (
                     // FIXME: find something better than blurhash
                     "blurhash",
-                    RecordField::builder(schema_doc_id).optional(reg).build(),
+                    RecordField::builder(doc_id).optional(reg).build(),
                 ),
-                ("blob", RecordField::builder(schema_doc_id).build()),
+                ("blob", RecordField::builder(doc_id).build()),
             ])
             .build(),
     ));
     // NOTE:
     //  - If breaking changes are needed on the schema of contents and tags
     //    declare v2 like `text2`
-    let schema_doc_content_variants = vec![
+    let doc_content_variants = vec![
         ("text", reg.string()),
-        ("blob", schema_doc_blob),
-        ("image", schema_doc_image),
+        ("blob", doc_blob),
+        ("image", doc_image),
     ];
-    let schema_doc_content_kind = reg.add_type(Type::Enum(
+    let doc_content_kind = reg.add_type(Type::Enum(
         Enum::builder("DocKind")
             .with_variants(
-                schema_doc_content_variants
+                doc_content_variants
                     .iter()
                     .map(|(key, _)| (*key, EnumVariant::builder().build())),
             )
             .build(),
     ));
-    let schema_doc_content = reg.add_type(Type::Variant(
+    let doc_content = reg.add_type(Type::Variant(
         Variant::builder("DocContent")
-            .with_variants(schema_doc_content_variants.into_iter().map(|(key, val)| {
+            .with_variants(doc_content_variants.into_iter().map(|(key, val)| {
                 (
                     key,
                     VariantVariant::builder(VariantVariantType::Wrapped(val)).build(),
@@ -61,11 +61,11 @@ pub fn feature(reg: &TypeReg) -> Feature {
             }))
             .build(),
     ));
-    let schema_doc_ref = reg.add_type(Type::Alias(Alias::builder("DocRef", schema_doc_id).build()));
-    let schema_doc_tag_variants = vec![
+    let doc_ref = reg.add_type(Type::Alias(Alias::builder("DocRef", doc_id).build()));
+    let doc_tag_variants = vec![
         (
             "ref_generic",
-            VariantVariant::builder(VariantVariantType::Wrapped(schema_doc_ref))
+            VariantVariant::builder(VariantVariantType::Wrapped(doc_ref))
                 .desc("A link to another document.")
                 .build(),
         ),
@@ -76,57 +76,68 @@ pub fn feature(reg: &TypeReg) -> Feature {
         // path_generic
         // version_branch
     ];
-    let schema_doc_tag_kind = reg.add_type(Type::Enum(
+    let doc_tag_kind = reg.add_type(Type::Enum(
         Enum::builder("DocTagKind")
             .with_variants(
-                schema_doc_tag_variants
+                doc_tag_variants
                     .iter()
                     .map(|(key, _)| (*key, EnumVariant::builder().build())),
             )
             .build(),
     ));
-    let schema_doc_tag = reg.add_type(Type::Variant(
+    let doc_tag = reg.add_type(Type::Variant(
         Variant::builder("DocTag")
-            .with_variants(schema_doc_tag_variants)
+            .with_variants(doc_tag_variants)
             .build(),
     ));
-    let schema_doc = reg.add_type(Type::Record(
+    let doc = reg.add_type(Type::Record(
         Record::builder("Doc")
             .with_fields([
-                ("id", RecordField::builder(schema_doc_id).build()),
+                ("id", RecordField::builder(doc_id).build()),
                 ("created_at", RecordField::date_time(&reg).build()),
                 ("updated_at", RecordField::date_time(&reg).build()),
                 // (
                 //     "kind",
-                //     RecordField::builder(schema_doc_content_kind).build(),
+                //     RecordField::builder(doc_content_kind).build(),
                 // ),
-                ("content", RecordField::builder(schema_doc_content).build()),
+                ("content", RecordField::builder(doc_content).build()),
+                ("tags", RecordField::builder(reg.list(doc_tag)).build()),
+            ])
+            .build(),
+    ));
+
+    let doc_added_event = reg.add_type(Type::Record(
+        Record::builder("DocAddedEvent")
+            .with_fields([
+                ("id", RecordField::builder(doc_id).build()),
                 (
-                    "tags",
-                    RecordField::builder(reg.list(schema_doc_tag)).build(),
+                    "heads",
+                    RecordField::builder(reg.list(reg.string())).build(),
                 ),
             ])
             .build(),
     ));
+
     Feature {
         tag: Tag {
             name: "doc".into(),
             desc: "Doc mgmt.".into(),
         },
         schema_types: vec![
-            schema_mime_ty,
-            schema_multihash,
-            schema_doc_image,
-            schema_doc_blob,
-            schema_doc_id,
-            schema_doc_content_kind,
-            schema_doc_content,
-            schema_doc_ref,
-            schema_doc_tag_kind,
-            schema_doc_tag,
-            schema_doc,
+            mime_ty,
+            multihash,
+            doc_image,
+            doc_blob,
+            doc_id,
+            doc_content_kind,
+            doc_content,
+            doc_ref,
+            doc_tag_kind,
+            doc_tag,
+            doc,
+            doc_added_event,
         ],
-        endpoints: vec![create::epoint_type(reg, schema_doc)],
+        endpoints: vec![create::epoint_type(reg, doc)],
         wit_module: "townframe:daybook-api".into(),
     }
 }

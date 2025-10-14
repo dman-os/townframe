@@ -61,47 +61,40 @@ package townframe:btress-api;"#
     // Generate different feature modules with specific attribute sets
     let mapping = vec![
         (
+            "../agents/gen/mod.rs",
+            RustAttrs {
+                automerge: true,
+                ..default()
+            },
+        ),
+        (
             "../daybook_api/gen/mod.rs",
             RustAttrs {
-                serde: true,
-                utoipa: true,
-                automerge: false,
-                uniffi: false,
                 garde: true,
-                patch: false,
+                ..default()
             },
         ),
         (
             "../daybook_core/gen/mod.rs",
             RustAttrs {
-                serde: true,
-                utoipa: false,
                 automerge: true,
                 uniffi: true,
-                garde: false,
                 patch: true,
+                ..default()
             },
         ),
         (
             "../daybook_sync/gen/mod.rs",
             RustAttrs {
-                serde: true,
-                utoipa: false,
                 automerge: true,
-                uniffi: false,
-                garde: false,
-                patch: false,
+                ..default()
             },
         ),
         (
             "../daybook_http/gen/mod.rs",
             RustAttrs {
-                serde: true,
                 utoipa: true,
-                automerge: false,
-                uniffi: false,
-                garde: false,
-                patch: false,
+                ..default()
             },
         ),
     ];
@@ -170,7 +163,7 @@ impl Default for RustAttrs {
     fn default() -> Self {
         Self {
             serde: true,
-            utoipa: true,
+            utoipa: false,
             automerge: false,
             uniffi: false,
             garde: false,
@@ -501,8 +494,6 @@ pub enum OutputType {
 #[builder(on(String, into))]
 #[builder(on(CHeapStr, into))]
 pub struct ErrorType {
-    #[builder(start_fn)]
-    id: CHeapStr,
     #[builder(field)]
     variants: IndexMap<CHeapStr, ErrorVariant>,
 }

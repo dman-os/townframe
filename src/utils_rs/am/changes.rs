@@ -9,7 +9,8 @@ use tokio::{
 
 #[derive(Debug, Clone)]
 pub struct ChangeNotification {
-    pub patch: automerge::Patch,
+    pub patch: Arc<automerge::Patch>,
+    pub heads: Arc<[automerge::ChangeHash]>,
     // TODO: timestamp
 }
 
@@ -53,20 +54,26 @@ impl ChangeListenerManager {
             async move {
                 info!("listening on doc");
 
-                let mut heads = handle.with_document(|doc| doc.get_heads());
+                let heads = handle.with_document(|doc| doc.get_heads());
+                let mut heads: Arc<[automerge::ChangeHash]> = heads.into();
+
                 use futures::StreamExt;
 
                 let mut doc_change_stream = handle.changes();
                 while let Some(changes) = doc_change_stream.next().await {
                     let (new_heads, all_changes) = handle.with_document(|doc| {
-                        let patches = doc.diff(&heads, &changes.new_heads);
+                        let patches = doc.diff(&heads, &changes.new_heads[..]);
                         let mut collected_changes = Vec::new();
-
+                        let new_heads: Arc<[automerge::ChangeHash]> = changes.new_heads.into();
                         for patch in patches {
-                            collected_changes.push(ChangeNotification { patch });
+                            let patch = Arc::new(patch);
+                            collected_changes.push(ChangeNotification {
+                                patch,
+                                heads: new_heads.clone(),
+                            });
                         }
 
-                        (changes.new_heads, collected_changes)
+                        (new_heads, collected_changes)
                     });
 
                     info!(?all_changes, "changes observed");

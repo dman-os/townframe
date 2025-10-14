@@ -101,7 +101,7 @@ struct Ctx {
 type SharedCtx = Arc<Ctx>;
 
 impl Ctx {
-    async fn new(config: Config) -> Result<Arc<Self>, eyre::Report> {
+    async fn init(config: Config) -> Result<Arc<Self>, eyre::Report> {
         let sql = sql::SqlCtx::new(config.sql.clone()).await?;
         let acx =
             utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
@@ -122,14 +122,11 @@ impl Ctx {
     }
 
     fn doc_app(&self) -> &samod::DocHandle {
-        &self.doc_app.get().expect_or_log("ctx was not initialized")
+        &self.doc_app.get().expect("ctx was not initialized")
     }
 
     fn doc_drawer(&self) -> &samod::DocHandle {
-        &self
-            .doc_drawer
-            .get()
-            .expect_or_log("ctx was not initialized")
+        &self.doc_drawer.get().expect("ctx was not initialized")
     }
 }
 

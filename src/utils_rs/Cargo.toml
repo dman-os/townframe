@@ -7,8 +7,9 @@ edition.workspace = true
 path = "lib.rs"
 
 [features]
+default = ["automerge", "hash"]
 automerge = ["dep:autosurgeon", "dep:automerge", "dep:samod", "dep:tokio-tungstenite"]
-default = ["automerge"]
+hash = ["dep:multihash", "dep:json-canon", "dep:sha2", "dep:data-encoding", "tokio/io-util"]
 
 [dependencies]
 # futures
@@ -16,9 +17,13 @@ async-trait.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros"] }
 
-# serde
+# encoding
 serde.workspace = true
 serde_json.workspace = true
+multihash = { workspace = true, optional = true }
+data-encoding = { version = "2.9", optional = true }
+sha2 = { version = "=0.11.0-pre.5", optional = true }
+json-canon = { version = "0.1.3", optional = true }
 
 # ds
 ahash.workspace = true

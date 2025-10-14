@@ -46,6 +46,7 @@ ghjk.env("main")
     ports.cargobi({ crateName: "kanidm_tools", locked: true }),
     ports.cargobi({ crateName: "cargo-nextest", locked: true }),
     ports.cargobi({ crateName: "cargo-ndk", locked: true }),
+    ports.cargobi({ crateName: "cargo-progenitor", locked: true }),
     ports.mold({ replaceLd: true }),
     // ports.cargobi({ crateName: "cargo-edit", locked: true }),
   );

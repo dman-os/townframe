@@ -7,7 +7,7 @@ edition.workspace = true
 path = "lib.rs"
 
 [dependencies]
-reqwest = { workspace = true, features = ["json", "gzip", "deflate", "brotli", "charset"], default-features = false }
+reqwest = { workspace = true, features = ["json",  "charset"] }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["rt", "time", "macros"] }
 

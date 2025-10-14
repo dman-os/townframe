@@ -17,7 +17,7 @@ fn input(reg: &TypeReg) -> InputType {
 }
 
 fn error(reg: &TypeReg) -> ErrorType {
-    ErrorType::builder("DocCreateError")
+    ErrorType::builder()
         .with_variants([
             (
                 "idOccupied",

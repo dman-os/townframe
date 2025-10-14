@@ -3,7 +3,7 @@ use crate::interlude::*;
 pub mod changes;
 pub mod codecs;
 
-use automerge::Automerge;
+use automerge::{Automerge, ChangeHash};
 use autosurgeon::{Hydrate, HydrateError, Prop, ReadDoc, Reconcile, Reconciler};
 use samod::{DocHandle, DocumentId};
 
@@ -23,6 +23,7 @@ pub struct AmCtx {
     // peer_id: samod::PeerId,
     // doc_handle: tokio::sync::OnceCell<DocHandle>,
     change_manager: Arc<ChangeListenerManager>,
+    handle_cache: Arc<DHashMap<DocumentId, DocHandle>>,
 }
 
 impl AmCtx {
@@ -56,6 +57,7 @@ impl AmCtx {
             repo,
             // peer_id,
             change_manager,
+            handle_cache: default(),
         };
 
         Ok(out)
@@ -94,15 +96,15 @@ impl AmCtx {
         );
     }
 
-    pub async fn reconcile_prop<'a, D, P>(
+    pub async fn reconcile_prop<'a, T, P>(
         &self,
         handle: DocHandle,
         obj_id: automerge::ObjId,
         prop_name: P,
-        update: &D,
+        update: &T,
     ) -> Res<()>
     where
-        D: Hydrate + Reconcile + Send + Sync + 'static,
+        T: Hydrate + Reconcile + Send + Sync + 'static,
         P: Into<Prop<'a>> + Send + Sync + 'static,
     {
         tokio::task::block_in_place(move || {
@@ -119,16 +121,33 @@ impl AmCtx {
     }
 
     // FIXME: this actually returns an error on failing to find it
-    pub async fn hydrate_path<D: Hydrate + Reconcile + Send + Sync + 'static>(
+    pub async fn hydrate_path<T: Hydrate + Reconcile + Send + Sync + 'static>(
         &self,
         handle: DocHandle,
         obj_id: automerge::ObjId,
         path: Vec<Prop<'static>>,
-    ) -> Res<Option<D>> {
+    ) -> Res<Option<T>> {
         tokio::task::block_in_place(move || {
             handle.with_document(move |doc| {
-                let value: Option<D> =
+                let value: Option<T> =
                     autosurgeon::hydrate_path(doc, &obj_id, path).wrap_err("error hydrating")?;
+                eyre::Ok(value)
+            })
+        })
+    }
+
+    pub async fn hydrate_path_at_head<T: autosurgeon::Hydrate>(
+        &self,
+        handle: DocHandle,
+        head: &[automerge::ChangeHash],
+        obj_id: automerge::ObjId,
+        path: Vec<Prop<'static>>,
+    ) -> Res<Option<T>> {
+        tokio::task::block_in_place(move || {
+            handle.with_document(move |doc| {
+                let version = doc.fork_at(&head)?;
+                let value: Option<T> = autosurgeon::hydrate_path(&version, &obj_id, path)
+                    .wrap_err("error hydrating")?;
                 eyre::Ok(value)
             })
         })
@@ -136,13 +155,19 @@ impl AmCtx {
 
     pub async fn add_doc(&self, doc: Automerge) -> Res<DocHandle> {
         let handle = self.repo.create(doc).await?;
+        self.handle_cache
+            .insert(handle.document_id().clone(), handle.clone());
         Ok(handle)
     }
 
     pub async fn find_doc(&self, doc_id: DocumentId) -> Res<Option<DocHandle>> {
-        let Some(handle) = self.repo.find(doc_id).await? else {
+        if let Some(handle) = self.handle_cache.get(&doc_id) {
+            return Ok(Some(handle.clone()));
+        }
+        let Some(handle) = self.repo.find(doc_id.clone()).await? else {
             return Ok(None);
         };
+        self.handle_cache.insert(doc_id, handle.clone());
         Ok(Some(handle))
     }
 
@@ -153,4 +178,23 @@ impl AmCtx {
     pub fn change_manager(&self) -> &Arc<ChangeListenerManager> {
         &self.change_manager
     }
+}
+
+#[cfg(feature = "hash")]
+pub fn parse_commit_heads<S: AsRef<str>>(heads: &[S]) -> Res<Arc<[ChangeHash]>> {
+    heads
+        .iter()
+        .map(|commit| {
+            crate::hash::decode_base32_multibase(commit.as_ref())
+                .and_then(|bytes| bytes.as_slice().try_into().wrap_err("invalid change hash"))
+        })
+        .collect()
+}
+
+#[cfg(feature = "hash")]
+pub fn serialize_commit_heads(heads: &[ChangeHash]) -> Vec<String> {
+    heads
+        .iter()
+        .map(|commit| crate::hash::encode_base32_multibase(&commit.0))
+        .collect()
 }

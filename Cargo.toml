@@ -38,6 +38,8 @@ api_utils_rs = { path = "./src/api_utils_rs" }
 btress_api = { path = "./src/btress_api" }
 macros = { path = "./src/macros" }
 
+syn = { version = "2", features = ["extra-traits"] }
+
 # futures
 async-trait = "0.1"
 futures = "0.3"
@@ -50,10 +52,13 @@ once_cell = "1"
 parking_lot = "0.12"
 bytes = "1"
 url = "2.5.7"
-# serde
+
+# encoding
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+multihash = "0.19.3"
 
+# web
 leptos = { version = "0.8", default-features = false }
 leptos-use = { version = "0.16", default-features = false }
 leptos_router = { version = "0.8", default-features = false }
@@ -81,12 +86,15 @@ tracing-appender = "0.2.3"
 tracing-error = "0.2.1"
 tracing-futures = "0.2.5"
 
+# auth
 kanidm_client = "1.7.2"
 kanidm_proto = "1.7.2"
+
+# os
 dotenv-flow = "0.16.2"
 
 # http
-axum = { version = "0.8.4", default-features = false }
+axum = { version = "0.8.6", default-features = false }
 axum-extra = { version = "0.10.1", default-features = false }
 http = "1"
 utoipa = { version = "5.4.0", features = ["debug", "uuid", "time", "smallvec",  "preserve_order"] }
@@ -94,7 +102,6 @@ utoipa = { version = "5.4.0", features = ["debug", "uuid", "time", "smallvec",  
 # http
 tower = "0.5"
 tower-http = "0.6"
-
 reqwest = { version = "0.12", default-features = false }
 gloo = { version = "0.11.0", default-features = false }
 
@@ -102,6 +109,7 @@ gloo = { version = "0.11.0", default-features = false }
 # wasm
 wit-bindgen = "0.45.1"
 
+# sync
 automerge = "0.7"
 # autosurgeon = "0.9"
 autosurgeon = { path = "src/autosurgeon/autosurgeon" }
@@ -109,6 +117,7 @@ automerge-test = "0.6"
 samod = { version = "0.5.0" }
 # samod = { path = "src/samod/samod" }
 
+# db
 sqlx = { version = "0.8.6", features = [
   "runtime-tokio",
   # "tls-rustls-ring-webpki",
@@ -120,7 +129,7 @@ sqlx = { version = "0.8.6", features = [
   "ipnetwork",
 ] }
 
-
+# ffi
 uniffi = { version = "0.29.4" }
 
 [patch.crates-io]

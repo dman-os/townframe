@@ -42,7 +42,7 @@ fn input(reg: &TypeReg) -> InputType {
 }
 
 fn error(reg: &TypeReg) -> ErrorType {
-    ErrorType::builder("UserCreateError")
+    ErrorType::builder()
         .with_variants([
             (
                 "usernameOccupied",

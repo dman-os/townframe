@@ -41,6 +41,7 @@ pub fn setup_tracing() -> eyre::Result<()> {
     Ok(())
 }
 
+// FIXME: this is sync?
 pub fn load_envs_once() {
     static LOADER: LazyLock<()> = LazyLock::new(|| {
         crate::dotenv_hierarchical().unwrap();

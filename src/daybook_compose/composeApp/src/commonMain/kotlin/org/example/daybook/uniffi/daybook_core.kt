@@ -3977,6 +3977,70 @@ public object FfiConverterTypeDoc: FfiConverterRustBuffer<Doc> {
 
 
 
+data class DocAddedEvent (
+    var `id`: kotlin.String, 
+    var `heads`: List<kotlin.String>
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDocAddedEvent: FfiConverterRustBuffer<DocAddedEvent> {
+    override fun read(buf: ByteBuffer): DocAddedEvent {
+        return DocAddedEvent(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DocAddedEvent) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterSequenceString.allocationSize(value.`heads`)
+    )
+
+    override fun write(value: DocAddedEvent, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterSequenceString.write(value.`heads`, buf)
+    }
+}
+
+
+
+data class DocAddedEventPatch (
+    var `id`: kotlin.String?, 
+    var `heads`: List<kotlin.String>?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDocAddedEventPatch: FfiConverterRustBuffer<DocAddedEventPatch> {
+    override fun read(buf: ByteBuffer): DocAddedEventPatch {
+        return DocAddedEventPatch(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DocAddedEventPatch) = (
+            FfiConverterOptionalString.allocationSize(value.`id`) +
+            FfiConverterOptionalSequenceString.allocationSize(value.`heads`)
+    )
+
+    override fun write(value: DocAddedEventPatch, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`id`, buf)
+            FfiConverterOptionalSequenceString.write(value.`heads`, buf)
+    }
+}
+
+
+
 data class DocBlob (
     var `lengthOctets`: kotlin.ULong, 
     var `hash`: kotlin.String
@@ -5312,6 +5376,38 @@ public object FfiConverterOptionalOptionalTypeUuid: FfiConverterRustBuffer<Uuid?
         } else {
             buf.put(1)
             FfiConverterOptionalTypeUuid.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalSequenceString: FfiConverterRustBuffer<List<kotlin.String>?> {
+    override fun read(buf: ByteBuffer): List<kotlin.String>? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterSequenceString.read(buf)
+    }
+
+    override fun allocationSize(value: List<kotlin.String>?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterSequenceString.allocationSize(value)
+        }
+    }
+
+    override fun write(value: List<kotlin.String>?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterSequenceString.write(value, buf)
         }
     }
 }

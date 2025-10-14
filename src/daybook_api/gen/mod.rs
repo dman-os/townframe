@@ -4,16 +4,11 @@ use super::*;
 pub mod doc {
     use super::*;
 
-    pub const TAG: api::Tag = api::Tag {
-        name: "doc",
-        desc: "Doc mgmt.",
-    };
-
     pub type MimeType = String;
 
     pub type Multihash = String;
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct DocImage {
         pub mime: MimeType,
@@ -23,7 +18,7 @@ pub mod doc {
         pub blob: DocId,
     }
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct DocBlob {
         pub length_octets: u64,
@@ -32,7 +27,7 @@ pub mod doc {
 
     pub type DocId = String;
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", untagged)]
     pub enum DocKind {
         Text,
@@ -54,7 +49,7 @@ pub mod doc {
         }
     }
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", tag = "ty")]
     pub enum DocContent {
         Text(String),
@@ -64,7 +59,7 @@ pub mod doc {
 
     pub type DocRef = DocId;
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", untagged)]
     pub enum DocTagKind {
         RefGeneric,
@@ -84,7 +79,7 @@ pub mod doc {
         }
     }
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", tag = "ty")]
     pub enum DocTag {
         /// A link to another document.
@@ -92,7 +87,7 @@ pub mod doc {
         LabelGeneric(String),
     }
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Doc {
         pub id: DocId,
@@ -102,56 +97,43 @@ pub mod doc {
         pub tags: Vec<DocTag>,
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct DocAddedEvent {
+        pub id: DocId,
+        pub heads: Vec<String>,
+    }
+
     pub mod doc_create {
         use super::*;
 
         #[derive(Debug, Clone)]
         pub struct DocCreate;
 
-        pub type Output = SchemaRef<Doc>;
+        pub type Output = Doc;
 
-        #[derive(Debug, Clone, garde::Validate, utoipa::ToSchema, Serialize, Deserialize)]
+        #[derive(Debug, Clone, garde::Validate, Serialize, Deserialize)]
         #[serde(rename_all = "camelCase")]
         pub struct Input {
-            #[schema(min_length = 1, max_length = 1024)]
             #[garde(length(min = 1, max = 1024))]
             pub id: String,
         }
 
-        #[derive(
-            Debug,
-            Clone,
-            thiserror::Error,
-            displaydoc::Display,
-            utoipa::ToSchema,
-            Serialize,
-            Deserialize,
-        )]
+        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]
         #[serde(rename_all = "camelCase", tag = "error")]
         /// Id occupied: {id}
         pub struct ErrorIdOccupied {
             pub id: String,
         }
 
-        #[derive(
-            Debug,
-            thiserror::Error,
-            displaydoc::Display,
-            utoipa::ToSchema,
-            macros::HttpError,
-            Serialize,
-            Deserialize,
-        )]
+        #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]
         #[serde(rename_all = "camelCase", tag = "error")]
         pub enum Error {
             /// Id occupied {0}
-            #[http(code(StatusCode::BAD_REQUEST), desc("Id occupied"))]
             IdOccupied(#[from] ErrorIdOccupied),
             /// Invalid input {0}
-            #[http(code(StatusCode::BAD_REQUEST), desc("Invalid input"))]
             InvalidInput(#[from] ErrorsValidation),
             /// Internal server error {0}
-            #[http(code(StatusCode::INTERNAL_SERVER_ERROR), desc("Internal server error"))]
             Internal(#[from] ErrorInternal),
         }
     }

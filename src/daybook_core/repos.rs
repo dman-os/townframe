@@ -14,7 +14,7 @@ impl ErasedListener {
         Self {
             on_event_cb: Arc::new(move |ev| {
                 let ev: Arc<Ev> = Arc::downcast(ev)
-                    .expect_or_log("error downcasting event, wrong event sent to listener");
+                    .expect("error downcasting event, wrong event sent to listener");
                 on_event_cb(ev)
             }),
         }

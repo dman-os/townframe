@@ -102,6 +102,13 @@ pub mod doc {
         pub tags: Vec<DocTag>,
     }
 
+    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct DocAddedEvent {
+        pub id: DocId,
+        pub heads: Vec<String>,
+    }
+
     pub mod doc_create {
         use super::*;
 

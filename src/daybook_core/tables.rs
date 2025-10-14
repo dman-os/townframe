@@ -239,7 +239,7 @@ impl TablesRepo {
                 let mut events = Vec::new();
 
                 for notification in notifications {
-                    match notification.patch.action {
+                    match &notification.patch.action {
                         automerge::PatchAction::PutMap { key, .. } => {
                             // Check if this is a specific item change
                             if let Ok(uuid) = Uuid::parse_str(&key) {

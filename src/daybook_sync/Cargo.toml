@@ -9,7 +9,7 @@ path = "main.rs"
 
 [dependencies]
 api_utils_rs.workspace = true
-utils_rs = { workspace = true, features = ["automerge"] }
+utils_rs = { workspace = true, features = ["automerge", "hash"] }
 macros.workspace = true
 
 autosurgeon = { workspace = true, features = ["uuid"] }
@@ -32,3 +32,8 @@ garde.workspace = true
 thiserror.workspace = true
 displaydoc.workspace = true
 
+futures.workspace = true
+reqwest = { workspace = true, features = ["json", "stream"] }
+
+url.workspace = true
+generational-box = "0.6.2"
