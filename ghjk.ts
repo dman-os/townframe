@@ -389,7 +389,7 @@ ghjk.task(
 
 ghjk.task(
   "run-d-dayb",
-  ($) => $`./gradlew run`.env({
+  ($) => $`./gradlew run --no-daemon`.env({
     LD_LIBRARY_PATH: `${$.env.LD_LIBRARY_PATH}:${$.workingDir.join("../../target/debug/").toString()}`
   }),
   {

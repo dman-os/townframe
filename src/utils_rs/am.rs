@@ -136,9 +136,6 @@ impl AmCtx {
 
     pub async fn add_doc(&self, doc: Automerge) -> Res<DocHandle> {
         let handle = self.repo.create(doc).await?;
-        self.change_manager
-            .clone()
-            .spawn_doc_listener(handle.clone());
         Ok(handle)
     }
 
@@ -146,9 +143,6 @@ impl AmCtx {
         let Some(handle) = self.repo.find(doc_id).await? else {
             return Ok(None);
         };
-        self.change_manager
-            .clone()
-            .spawn_doc_listener(handle.clone());
         Ok(Some(handle))
     }
 

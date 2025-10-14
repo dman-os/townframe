@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.LocalContainer
 // removed Doc/DocContent imports - using Uuid list for drawer
+import org.example.daybook.uniffi.Doc
+import org.example.daybook.uniffi.DocContent
 import org.example.daybook.uniffi.DrawerEvent
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepo
@@ -29,7 +31,7 @@ enum class CaptureMode {
 }
 
 sealed interface DocsListState {
-    data class Data(val docs: List<Uuid>) : DocsListState
+    data class Data(val docs: List<Doc>) : DocsListState
     data class Error(val error: FfiException) : DocsListState
     object Loading : DocsListState
 }
@@ -75,7 +77,15 @@ class CaptureScreenViewModel(
     private suspend fun refreshDocs() {
         _docsList.value = DocsListState.Loading
         try {
-            _docsList.value = DocsListState.Data(drawerRepo.ffiList())
+            val ids = drawerRepo.ffiList()
+            val docs = ids.mapNotNull { idStr ->
+                try {
+                    drawerRepo.ffiGet(idStr)
+                } catch (e: FfiException) {
+                    null
+                }
+            }
+            _docsList.value = DocsListState.Data(docs)
         } catch (err: FfiException) {
             _docsList.value = DocsListState.Error(err)
         }
@@ -89,9 +99,16 @@ class CaptureScreenViewModel(
 
     fun addOne() {
         viewModelScope.launch {
-            val id = Uuid.random();
-            // insert id into drawer set
-            drawerRepo.ffiInsert(id)
+            val id = Uuid.random()
+            // create a new Doc and send as a single-item batch to ffi_update_batch
+            val doc = Doc(
+                id = id.toString(),
+                createdAt = Clock.System.now(),
+                updatedAt = Clock.System.now(),
+                content = DocContent.Text("hello"),
+                tags = listOf()
+            )
+            drawerRepo.ffiAdd(doc)
         }
     }
 

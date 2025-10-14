@@ -60,14 +60,10 @@ impl ChangeListenerManager {
                 while let Some(changes) = doc_change_stream.next().await {
                     let (new_heads, all_changes) = handle.with_document(|doc| {
                         let patches = doc.diff(&heads, &changes.new_heads);
-                        let meta = doc.get_changes_meta(&changes.new_heads);
-
                         let mut collected_changes = Vec::new();
 
                         for patch in patches {
-                            collected_changes.push(ChangeNotification {
-                                patch,
-                            });
+                            collected_changes.push(ChangeNotification { patch });
                         }
 
                         (changes.new_heads, collected_changes)
@@ -113,21 +109,21 @@ impl ChangeListenerManager {
     ) -> JoinHandle<Res<()>> {
         tokio::spawn(
             async move {
+                // Group notifications by listener
+                let mut listener_notifications: std::collections::HashMap<
+                    usize,
+                    Vec<ChangeNotification>,
+                > = std::collections::HashMap::new();
                 while let Some((id, notifications)) = change_rx.recv().await {
-                    let listeners_guard = self.listeners.read().await;
+                    listener_notifications.clear();
 
-                    // Group notifications by listener
-                    let mut listener_notifications: std::collections::HashMap<
-                        usize,
-                        Vec<ChangeNotification>,
-                    > = std::collections::HashMap::new();
-
-                    for (listener_idx, listener) in listeners_guard.iter().enumerate() {
+                    let listeners = self.listeners.read().await;
+                    for (listener_idx, listener) in listeners.iter().enumerate() {
                         if listener
                             .filter
                             .doc_id
                             .as_ref()
-                            .map(|target| *target == id)
+                            .map(|target| *target != id)
                             .unwrap_or_default()
                         {
                             continue;
@@ -146,8 +142,8 @@ impl ChangeListenerManager {
                     }
 
                     // Send batched notifications to each listener
-                    for (listener_idx, notifications) in listener_notifications {
-                        if let Some(listener) = listeners_guard.get(listener_idx) {
+                    for (listener_idx, notifications) in listener_notifications.drain() {
+                        if let Some(listener) = listeners.get(listener_idx) {
                             (listener.on_change)(notifications);
                         }
                     }
@@ -157,21 +153,13 @@ impl ChangeListenerManager {
             .instrument(tracing::info_span!("change notif switchboard task")),
         )
     }
-
-    /// Notify all relevant listeners about changes
-    fn notify_listeners(&self, id: &DocumentId, notifs: Vec<ChangeNotification>) {
-        if notifs.is_empty() {
-            return;
-        }
-        // Send notifications to the worker via channel
-        if let Err(e) = self.change_tx.send((id.clone(), notifs)) {
-            warn!("Failed to send change notifications: {}", e);
-        }
-    }
 }
 
 /// Check if a change path matches a listener path (including subpaths)
-fn path_matches(listener_path: &[Prop<'static>], change_path: &[(automerge::ObjId, automerge::Prop)]) -> bool {
+fn path_matches(
+    listener_path: &[Prop<'static>],
+    change_path: &[(automerge::ObjId, automerge::Prop)],
+) -> bool {
     if listener_path.len() > change_path.len() {
         return false;
     }
@@ -188,7 +176,9 @@ fn path_matches(listener_path: &[Prop<'static>], change_path: &[(automerge::ObjI
 fn prop_matches(listener_prop: &Prop<'static>, change_prop: &automerge::Prop) -> bool {
     match (listener_prop, change_prop) {
         (Prop::Key(listener_key), automerge::Prop::Map(change_key)) => listener_key == change_key,
-        (Prop::Index(listener_idx), automerge::Prop::Seq(change_idx)) => *listener_idx == (*change_idx as u32),
+        (Prop::Index(listener_idx), automerge::Prop::Seq(change_idx)) => {
+            *listener_idx == (*change_idx as u32)
+        }
         _ => false,
     }
 }

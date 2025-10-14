@@ -48,6 +48,12 @@ pub async fn init_from_globals(cx: &Ctx) -> Res<()> {
     if doc_handles.len() != 2 {
         unreachable!();
     }
+    for handle in &doc_handles {
+        cx.acx
+            .change_manager()
+            .clone()
+            .spawn_doc_listener(handle.clone());
+    }
     if update_state {
         crate::globals::set_init_state(
             cx,

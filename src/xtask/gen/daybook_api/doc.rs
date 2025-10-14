@@ -9,7 +9,7 @@ pub fn feature(reg: &TypeReg) -> Feature {
     let schema_multihash = reg.add_type(Type::Alias(
         Alias::builder("Multihash", reg.string()).build(),
     ));
-    let schema_doc_id = reg.add_type(Type::Alias(Alias::builder("DocId", reg.uuid()).build()));
+    let schema_doc_id = reg.add_type(Type::Alias(Alias::builder("DocId", reg.string()).build()));
 
     let schema_doc_blob = reg.add_type(Type::Record(
         Record::builder("DocBlob")

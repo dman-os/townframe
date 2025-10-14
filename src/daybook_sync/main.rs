@@ -6,6 +6,8 @@ mod interlude {
 
 mod gen;
 
+use std::collections::HashSet;
+
 use crate::interlude::*;
 
 use axum::Router;
@@ -28,7 +30,6 @@ async fn app_main() -> Res<()> {
 
     let app = Router::new()
         .route("/", axum::routing::any(connect))
-        .route("/doc_id", axum::routing::get(get_doc_id))
         .with_state(cx)
         // tracing layer
         .layer(
@@ -81,16 +82,17 @@ struct Config {}
 struct Ctx {
     config: Config,
     acx: utils_rs::am::AmCtx,
-    peer_docs: Arc<DHashMap<PeerId, DocumentId>>,
+    peer_docs: Arc<DHashMap<PeerId, HashSet<DocumentId>>>,
     doc_peers: Arc<DHashMap<DocumentId, PeerId>>,
 }
 type SharedCtx = Arc<Ctx>;
 
 impl Ctx {
     async fn new(config: Config) -> Res<SharedCtx> {
-        let peer_docs: Arc<DHashMap<PeerId, DocumentId>> = default();
+        let peer_docs: Arc<DHashMap<PeerId, HashSet<DocumentId>>> = default();
         let doc_peers: Arc<DHashMap<DocumentId, PeerId>> = default();
-        let (doc_tx, mut doc_rx) = tokio::sync::mpsc::unbounded_channel::<DocumentId>();
+        let (doc_id_tx, doc_id_rx) = tokio::sync::mpsc::unbounded_channel::<DocumentId>();
+        let announcer_tx = doc_id_tx.clone();
 
         let acx = utils_rs::am::AmCtx::boot(
             utils_rs::am::Config {
@@ -103,22 +105,23 @@ impl Ctx {
             Some({
                 let peer_docs = peer_docs.clone();
                 let doc_peers = doc_peers.clone();
+                let doc_id_tx = announcer_tx.clone();
                 move |doc_id: DocumentId, peer_id| {
                     info!(%doc_id, %peer_id, ?peer_docs, ?doc_peers, "announcing");
 
-                    doc_tx
+                    doc_id_tx
                         .send(doc_id.clone())
                         .expect_or_log("doc channel closed");
 
-                    if let Some(doc_of_peer) = peer_docs.get(&peer_id) {
-                        return *doc_of_peer.value() == doc_id;
-                    }
                     if let Some(peer_of_doc) = doc_peers.get(&doc_id) {
-                        if *peer_of_doc.value() == peer_id {
-                            unimplemented!("this can't happen");
+                        if *peer_of_doc.value() != peer_id {
+                            return false;
                         }
                     }
-                    peer_docs.insert(peer_id.clone(), doc_id.clone());
+                    peer_docs
+                        .entry(peer_id.clone())
+                        .or_default()
+                        .insert(doc_id.clone());
                     doc_peers.insert(doc_id, peer_id);
                     false
                 }
@@ -135,27 +138,10 @@ impl Ctx {
         tokio::spawn({
             let cx = cx.clone();
             async move {
-                let mut doc_change_worker = vec![];
-                let mut listen_list = std::collections::HashSet::new();
-                while let Some(doc_id) = doc_rx.recv().await {
-                    if listen_list.contains(&doc_id) {
-                        continue;
-                    }
-                    let Some(handle) = cx
-                        .acx
-                        .find_doc(doc_id.clone())
-                        .await
-                        .expect_or_log("repo stopped")
-                    else {
-                        warn!("announced doc_id not found in repo: {doc_id}");
-                        continue;
-                    };
-                    let change_worker = cx.acx.change_manager().clone().spawn_doc_listener(handle);
-                    listen_list.insert(doc_id);
-                    doc_change_worker.push(change_worker);
-                }
+                spawn_doc_setup_worker(cx, doc_id_rx, doc_id_tx)
+                    .await
+                    .unwrap_or_log();
             }
-            .instrument(tracing::info_span!("start doc listener task"))
         });
         cx.acx
             .change_manager()
@@ -164,13 +150,97 @@ impl Ctx {
                     path: vec![],
                     doc_id: None,
                 },
-                |changes| {
-                    info!(?changes, "XXX change");
+                {
+                    // let cx = cx.clone();
+                    move |changes| {
+                        info!(?changes, "XXX change");
+                    }
                 },
             )
             .await;
         Ok(cx)
     }
+}
+
+async fn spawn_doc_setup_worker(
+    cx: SharedCtx,
+    mut doc_id_rx: tokio::sync::mpsc::UnboundedReceiver<DocumentId>,
+    doc_id_tx: tokio::sync::mpsc::UnboundedSender<DocumentId>,
+) -> Res<()> {
+    let mut doc_change_worker = vec![];
+    let mut listen_list = std::collections::HashSet::new();
+    while let Some(doc_id) = doc_id_rx.recv().await {
+        if listen_list.contains(&doc_id) {
+            continue;
+        }
+        let handle = match cx.acx.find_doc(doc_id.clone()).await {
+            Err(err) => {
+                warn!("error looking up doc_id: {err}");
+                continue;
+            }
+            Ok(None) => {
+                warn!(?doc_id, "doc not found in repo during setup, trying again");
+                tokio::task::spawn({
+                    let doc_id_tx = doc_id_tx.clone();
+                    let doc_id = doc_id.clone();
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        // requeue for later handling
+                        doc_id_tx
+                            .send(doc_id)
+                            .expect_or_log("failed to requeue doc_id");
+                    }
+                });
+                continue;
+            }
+            Ok(Some(val)) => val,
+        };
+
+        // inspect schema and attach schema-specific listeners
+        // Try to hydrate the $schema property via AmCtx helper
+        let schema_opt = cx
+            .acx
+            .hydrate_path::<String>(handle.clone(), automerge::ROOT, vec!["$schema".into()])
+            .await
+            .wrap_err("error hydrating added docment")?;
+
+        if let Some(schema) = schema_opt {
+            if schema == "daybook.drawer" {
+                // Register a change listener that logs additions/removals in the drawer
+                let cm = cx.acx.change_manager().clone();
+                cm.add_listener(
+                    ChangeFilter {
+                        doc_id: Some(handle.document_id().clone().clone()),
+                        path: vec!["docs".into()],
+                    },
+                    move |notifs| {
+                        for notif in notifs {
+                            match notif.patch.action {
+                                automerge::PatchAction::PutMap { key, .. } => {
+                                    info!(%key, "drawer: doc added/updated");
+                                }
+                                automerge::PatchAction::DeleteMap { key } => {
+                                    info!(%key, "drawer: doc removed");
+                                }
+                                _ => {}
+                            }
+                        }
+                    },
+                )
+                .await;
+
+                let change_worker = cx
+                    .acx
+                    .change_manager()
+                    .clone()
+                    .spawn_doc_listener(handle.clone());
+                doc_change_worker.push(change_worker);
+            }
+        }
+
+        listen_list.insert(doc_id);
+    }
+    Ok(())
 }
 
 #[tracing::instrument(skip(cx), ret)]
@@ -187,24 +257,4 @@ async fn handle_socket(cx: SharedCtx, socket: axum::extract::ws::WebSocket) {
         let fin = cx.acx.repo().accept_axum(socket).await;
         info!(?fin, "connection finsihed");
     });
-}
-
-#[derive(Deserialize, Debug)]
-struct GetDocIdQuery {
-    peer_id: String,
-}
-
-#[tracing::instrument(skip(cx), ret)]
-async fn get_doc_id(
-    cx: axum::extract::State<SharedCtx>,
-    query: axum::extract::Query<GetDocIdQuery>,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    let peer_id = PeerId::from_string(query.peer_id.clone());
-    let peer_docs = cx.peer_docs.get(&peer_id);
-    if let Some(doc_id) = peer_docs {
-        format!("{}", *doc_id.value()).into_response()
-    } else {
-        axum::http::StatusCode::NOT_FOUND.into_response()
-    }
 }

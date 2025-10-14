@@ -31,6 +31,7 @@ use super::*;
             reg: &reg,
             attrs: RustAttrs {
                 garde: true,
+                patch: false,
                 ..default()
             },
         };
@@ -67,6 +68,7 @@ package townframe:btress-api;"#
                 automerge: false,
                 uniffi: false,
                 garde: true,
+                patch: false,
             },
         ),
         (
@@ -77,6 +79,7 @@ package townframe:btress-api;"#
                 automerge: true,
                 uniffi: true,
                 garde: false,
+                patch: true,
             },
         ),
         (
@@ -87,6 +90,7 @@ package townframe:btress-api;"#
                 automerge: true,
                 uniffi: false,
                 garde: false,
+                patch: false,
             },
         ),
         (
@@ -97,6 +101,7 @@ package townframe:btress-api;"#
                 automerge: false,
                 uniffi: false,
                 garde: false,
+                patch: false,
             },
         ),
     ];
@@ -157,6 +162,8 @@ pub struct RustAttrs {
     pub utoipa: bool,
     /// If true, emit garde validation attributes
     pub garde: bool,
+    /// If true, emit Patch derive and helpers
+    pub patch: bool,
 }
 
 impl Default for RustAttrs {
@@ -167,6 +174,7 @@ impl Default for RustAttrs {
             automerge: false,
             uniffi: false,
             garde: false,
+            patch: false,
         }
     }
 }

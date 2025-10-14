@@ -836,6 +836,8 @@ internal open class UniffiVTableCallbackInterfaceTablesEventListener(
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -853,15 +855,17 @@ internal interface IntegrityCheckingUniffiLib : Library {
     // Integrity check functions only
     fun uniffi_daybook_core_checksum_method_drawereventlistener_on_drawer_event(
 ): Short
-fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_contains(
+fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_add(
 ): Short
-fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_insert(
+fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_del(
+): Short
+fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_get(
 ): Short
 fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_list(
 ): Short
 fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_register_listener(
 ): Short
-fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_remove(
+fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_update_batch(
 ): Short
 fun uniffi_daybook_core_checksum_method_ffierror_message(
 ): Short
@@ -903,7 +907,7 @@ fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_set_table(
 ): Short
 fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_set_window(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_update_items(
+fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_update_batch(
 ): Short
 fun uniffi_daybook_core_checksum_constructor_drawerrepo_for_ffi(
 ): Short
@@ -976,15 +980,17 @@ fun uniffi_daybook_core_fn_free_drawerrepo(`ptr`: Pointer,uniffi_out_err: Uniffi
 ): Unit
 fun uniffi_daybook_core_fn_constructor_drawerrepo_for_ffi(`fcx`: Pointer,
 ): Long
-fun uniffi_daybook_core_fn_method_drawerrepo_ffi_contains(`ptr`: Pointer,`id`: RustBuffer.ByValue,
+fun uniffi_daybook_core_fn_method_drawerrepo_ffi_add(`ptr`: Pointer,`doc`: RustBuffer.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_drawerrepo_ffi_insert(`ptr`: Pointer,`id`: RustBuffer.ByValue,
+fun uniffi_daybook_core_fn_method_drawerrepo_ffi_del(`ptr`: Pointer,`id`: RustBuffer.ByValue,
+): Long
+fun uniffi_daybook_core_fn_method_drawerrepo_ffi_get(`ptr`: Pointer,`id`: RustBuffer.ByValue,
 ): Long
 fun uniffi_daybook_core_fn_method_drawerrepo_ffi_list(`ptr`: Pointer,
 ): Long
 fun uniffi_daybook_core_fn_method_drawerrepo_ffi_register_listener(`ptr`: Pointer,`listener`: Pointer,
 ): Long
-fun uniffi_daybook_core_fn_method_drawerrepo_ffi_remove(`ptr`: Pointer,`id`: RustBuffer.ByValue,
+fun uniffi_daybook_core_fn_method_drawerrepo_ffi_update_batch(`ptr`: Pointer,`docs`: RustBuffer.ByValue,
 ): Long
 fun uniffi_daybook_core_fn_clone_ffictx(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
@@ -1052,7 +1058,7 @@ fun uniffi_daybook_core_fn_method_tablesrepo_ffi_set_table(`ptr`: Pointer,`id`: 
 ): Long
 fun uniffi_daybook_core_fn_method_tablesrepo_ffi_set_window(`ptr`: Pointer,`id`: RustBuffer.ByValue,`window`: RustBuffer.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_update_items(`ptr`: Pointer,`patches`: RustBuffer.ByValue,
+fun uniffi_daybook_core_fn_method_tablesrepo_ffi_update_batch(`ptr`: Pointer,`patches`: RustBuffer.ByValue,
 ): Long
 fun ffi_daybook_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1183,19 +1189,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_core_checksum_method_drawereventlistener_on_drawer_event() != 56912.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_contains() != 22994.toShort()) {
+    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_add() != 48806.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_insert() != 1958.toShort()) {
+    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_del() != 56751.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_list() != 29867.toShort()) {
+    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_get() != 30775.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_list() != 55846.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_register_listener() != 905.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_remove() != 1993.toShort()) {
+    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_update_batch() != 51109.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_core_checksum_method_ffierror_message() != 31694.toShort()) {
@@ -1258,7 +1267,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_set_window() != 8464.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_update_items() != 11272.toShort()) {
+    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_update_batch() != 65234.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_core_checksum_constructor_drawerrepo_for_ffi() != 6929.toShort()) {
@@ -2000,15 +2009,17 @@ public object FfiConverterTypeDrawerEventListener: FfiConverter<DrawerEventListe
 
 public interface DrawerRepoInterface {
     
-    suspend fun `ffiContains`(`id`: Uuid): kotlin.Boolean
+    suspend fun `ffiAdd`(`doc`: Doc): kotlin.String
     
-    suspend fun `ffiInsert`(`id`: Uuid): kotlin.Boolean
+    suspend fun `ffiDel`(`id`: kotlin.String): kotlin.Boolean
     
-    suspend fun `ffiList`(): List<Uuid>
+    suspend fun `ffiGet`(`id`: kotlin.String): Doc?
+    
+    suspend fun `ffiList`(): List<kotlin.String>
     
     suspend fun `ffiRegisterListener`(`listener`: DrawerEventListener): ListenerRegistration
     
-    suspend fun `ffiRemove`(`id`: Uuid): kotlin.Boolean
+    suspend fun `ffiUpdateBatch`(`docs`: List<DocPatch>)
     
     companion object
 }
@@ -2098,12 +2109,33 @@ open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiContains`(`id`: Uuid) : kotlin.Boolean {
+    override suspend fun `ffiAdd`(`doc`: Doc) : kotlin.String {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_contains(
+            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_add(
                 thisPtr,
-                FfiConverterTypeUuid.lower(`id`),
+                FfiConverterTypeDoc.lower(`doc`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `ffiDel`(`id`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_del(
+                thisPtr,
+                FfiConverterString.lower(`id`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_i8(future, callback, continuation) },
@@ -2119,19 +2151,19 @@ open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiInsert`(`id`: Uuid) : kotlin.Boolean {
+    override suspend fun `ffiGet`(`id`: kotlin.String) : Doc? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_insert(
+            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_get(
                 thisPtr,
-                FfiConverterTypeUuid.lower(`id`),
+                FfiConverterString.lower(`id`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_i8(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_i8(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_i8(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterBoolean.lift(it) },
+        { FfiConverterOptionalTypeDoc.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -2140,7 +2172,7 @@ open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiList`() : List<Uuid> {
+    override suspend fun `ffiList`() : List<kotlin.String> {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_list(
@@ -2152,7 +2184,7 @@ open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
         { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterSequenceTypeUuid.lift(it) },
+        { FfiConverterSequenceString.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -2182,19 +2214,20 @@ open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiRemove`(`id`: Uuid) : kotlin.Boolean {
+    override suspend fun `ffiUpdateBatch`(`docs`: List<DocPatch>) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_remove(
+            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_update_batch(
                 thisPtr,
-                FfiConverterTypeUuid.lower(`id`),
+                FfiConverterSequenceTypeDocPatch.lower(`docs`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_i8(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_i8(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_i8(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_void(future) },
         // lift function
-        { FfiConverterBoolean.lift(it) },
+        { Unit },
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -3378,7 +3411,7 @@ public interface TablesRepoInterface {
     
     suspend fun `ffiSetWindow`(`id`: Uuid, `window`: Window): Window?
     
-    suspend fun `ffiUpdateItems`(`patches`: TablesPatches)
+    suspend fun `ffiUpdateBatch`(`patches`: TablesPatches)
     
     companion object
 }
@@ -3826,10 +3859,10 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiUpdateItems`(`patches`: TablesPatches) {
+    override suspend fun `ffiUpdateBatch`(`patches`: TablesPatches) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_update_items(
+            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_update_batch(
                 thisPtr,
                 FfiConverterTypeTablesPatches.lower(`patches`),
             )
@@ -3901,7 +3934,7 @@ public object FfiConverterTypeTablesRepo: FfiConverter<TablesRepo, Pointer> {
 
 
 data class Doc (
-    var `id`: Uuid, 
+    var `id`: kotlin.String, 
     var `createdAt`: OffsetDateTime, 
     var `updatedAt`: OffsetDateTime, 
     var `content`: DocContent, 
@@ -3917,7 +3950,7 @@ data class Doc (
 public object FfiConverterTypeDoc: FfiConverterRustBuffer<Doc> {
     override fun read(buf: ByteBuffer): Doc {
         return Doc(
-            FfiConverterTypeUuid.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterTypeOffsetDateTime.read(buf),
             FfiConverterTypeOffsetDateTime.read(buf),
             FfiConverterTypeDocContent.read(buf),
@@ -3926,7 +3959,7 @@ public object FfiConverterTypeDoc: FfiConverterRustBuffer<Doc> {
     }
 
     override fun allocationSize(value: Doc) = (
-            FfiConverterTypeUuid.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`id`) +
             FfiConverterTypeOffsetDateTime.allocationSize(value.`createdAt`) +
             FfiConverterTypeOffsetDateTime.allocationSize(value.`updatedAt`) +
             FfiConverterTypeDocContent.allocationSize(value.`content`) +
@@ -3934,7 +3967,7 @@ public object FfiConverterTypeDoc: FfiConverterRustBuffer<Doc> {
     )
 
     override fun write(value: Doc, buf: ByteBuffer) {
-            FfiConverterTypeUuid.write(value.`id`, buf)
+            FfiConverterString.write(value.`id`, buf)
             FfiConverterTypeOffsetDateTime.write(value.`createdAt`, buf)
             FfiConverterTypeOffsetDateTime.write(value.`updatedAt`, buf)
             FfiConverterTypeDocContent.write(value.`content`, buf)
@@ -3976,12 +4009,44 @@ public object FfiConverterTypeDocBlob: FfiConverterRustBuffer<DocBlob> {
 
 
 
+data class DocBlobPatch (
+    var `lengthOctets`: kotlin.ULong?, 
+    var `hash`: kotlin.String?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDocBlobPatch: FfiConverterRustBuffer<DocBlobPatch> {
+    override fun read(buf: ByteBuffer): DocBlobPatch {
+        return DocBlobPatch(
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DocBlobPatch) = (
+            FfiConverterOptionalULong.allocationSize(value.`lengthOctets`) +
+            FfiConverterOptionalString.allocationSize(value.`hash`)
+    )
+
+    override fun write(value: DocBlobPatch, buf: ByteBuffer) {
+            FfiConverterOptionalULong.write(value.`lengthOctets`, buf)
+            FfiConverterOptionalString.write(value.`hash`, buf)
+    }
+}
+
+
+
 data class DocImage (
     var `mime`: kotlin.String, 
     var `widthPx`: kotlin.ULong, 
     var `heightPx`: kotlin.ULong, 
-    var `blurhash`: Uuid?, 
-    var `blob`: Uuid
+    var `blurhash`: kotlin.String?, 
+    var `blob`: kotlin.String
 ) {
     
     companion object
@@ -3996,8 +4061,8 @@ public object FfiConverterTypeDocImage: FfiConverterRustBuffer<DocImage> {
             FfiConverterString.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
-            FfiConverterOptionalTypeUuid.read(buf),
-            FfiConverterTypeUuid.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
         )
     }
 
@@ -4005,16 +4070,104 @@ public object FfiConverterTypeDocImage: FfiConverterRustBuffer<DocImage> {
             FfiConverterString.allocationSize(value.`mime`) +
             FfiConverterULong.allocationSize(value.`widthPx`) +
             FfiConverterULong.allocationSize(value.`heightPx`) +
-            FfiConverterOptionalTypeUuid.allocationSize(value.`blurhash`) +
-            FfiConverterTypeUuid.allocationSize(value.`blob`)
+            FfiConverterOptionalString.allocationSize(value.`blurhash`) +
+            FfiConverterString.allocationSize(value.`blob`)
     )
 
     override fun write(value: DocImage, buf: ByteBuffer) {
             FfiConverterString.write(value.`mime`, buf)
             FfiConverterULong.write(value.`widthPx`, buf)
             FfiConverterULong.write(value.`heightPx`, buf)
-            FfiConverterOptionalTypeUuid.write(value.`blurhash`, buf)
-            FfiConverterTypeUuid.write(value.`blob`, buf)
+            FfiConverterOptionalString.write(value.`blurhash`, buf)
+            FfiConverterString.write(value.`blob`, buf)
+    }
+}
+
+
+
+data class DocImagePatch (
+    var `mime`: kotlin.String?, 
+    var `widthPx`: kotlin.ULong?, 
+    var `heightPx`: kotlin.ULong?, 
+    var `blurhash`: kotlin.String??, 
+    var `blob`: kotlin.String?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDocImagePatch: FfiConverterRustBuffer<DocImagePatch> {
+    override fun read(buf: ByteBuffer): DocImagePatch {
+        return DocImagePatch(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DocImagePatch) = (
+            FfiConverterOptionalString.allocationSize(value.`mime`) +
+            FfiConverterOptionalULong.allocationSize(value.`widthPx`) +
+            FfiConverterOptionalULong.allocationSize(value.`heightPx`) +
+            FfiConverterOptionalOptionalString.allocationSize(value.`blurhash`) +
+            FfiConverterOptionalString.allocationSize(value.`blob`)
+    )
+
+    override fun write(value: DocImagePatch, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`mime`, buf)
+            FfiConverterOptionalULong.write(value.`widthPx`, buf)
+            FfiConverterOptionalULong.write(value.`heightPx`, buf)
+            FfiConverterOptionalOptionalString.write(value.`blurhash`, buf)
+            FfiConverterOptionalString.write(value.`blob`, buf)
+    }
+}
+
+
+
+data class DocPatch (
+    var `id`: kotlin.String?, 
+    var `createdAt`: OffsetDateTime?, 
+    var `updatedAt`: OffsetDateTime?, 
+    var `content`: DocContent?, 
+    var `tags`: List<DocTag>?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDocPatch: FfiConverterRustBuffer<DocPatch> {
+    override fun read(buf: ByteBuffer): DocPatch {
+        return DocPatch(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeOffsetDateTime.read(buf),
+            FfiConverterOptionalTypeOffsetDateTime.read(buf),
+            FfiConverterOptionalTypeDocContent.read(buf),
+            FfiConverterOptionalSequenceTypeDocTag.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DocPatch) = (
+            FfiConverterOptionalString.allocationSize(value.`id`) +
+            FfiConverterOptionalTypeOffsetDateTime.allocationSize(value.`createdAt`) +
+            FfiConverterOptionalTypeOffsetDateTime.allocationSize(value.`updatedAt`) +
+            FfiConverterOptionalTypeDocContent.allocationSize(value.`content`) +
+            FfiConverterOptionalSequenceTypeDocTag.allocationSize(value.`tags`)
+    )
+
+    override fun write(value: DocPatch, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`id`, buf)
+            FfiConverterOptionalTypeOffsetDateTime.write(value.`createdAt`, buf)
+            FfiConverterOptionalTypeOffsetDateTime.write(value.`updatedAt`, buf)
+            FfiConverterOptionalTypeDocContent.write(value.`content`, buf)
+            FfiConverterOptionalSequenceTypeDocTag.write(value.`tags`, buf)
     }
 }
 
@@ -4499,7 +4652,7 @@ sealed class DocTag {
      * A link to another document.
      */
     data class RefGeneric(
-        val v1: Uuid) : DocTag() {
+        val v1: kotlin.String) : DocTag() {
         companion object
     }
     
@@ -4520,7 +4673,7 @@ public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
     override fun read(buf: ByteBuffer): DocTag {
         return when(buf.getInt()) {
             1 -> DocTag.RefGeneric(
-                FfiConverterTypeUuid.read(buf),
+                FfiConverterString.read(buf),
                 )
             2 -> DocTag.LabelGeneric(
                 FfiConverterString.read(buf),
@@ -4534,7 +4687,7 @@ public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterTypeUuid.allocationSize(value.v1)
+                + FfiConverterString.allocationSize(value.v1)
             )
         }
         is DocTag.LabelGeneric -> {
@@ -4550,7 +4703,7 @@ public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
         when(value) {
             is DocTag.RefGeneric -> {
                 buf.putInt(1)
-                FfiConverterTypeUuid.write(value.v1, buf)
+                FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is DocTag.LabelGeneric -> {
@@ -4817,6 +4970,38 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
 /**
  * @suppress
  */
+public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
+    override fun read(buf: ByteBuffer): kotlin.ULong? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterULong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ULong?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterULong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ULong?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
@@ -4839,6 +5024,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeDoc: FfiConverterRustBuffer<Doc?> {
+    override fun read(buf: ByteBuffer): Doc? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeDoc.read(buf)
+    }
+
+    override fun allocationSize(value: Doc?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeDoc.allocationSize(value)
+        }
+    }
+
+    override fun write(value: Doc?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeDoc.write(value, buf)
         }
     }
 }
@@ -4977,6 +5194,38 @@ public object FfiConverterOptionalTypeWindow: FfiConverterRustBuffer<Window?> {
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeDocContent: FfiConverterRustBuffer<DocContent?> {
+    override fun read(buf: ByteBuffer): DocContent? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeDocContent.read(buf)
+    }
+
+    override fun allocationSize(value: DocContent?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeDocContent.allocationSize(value)
+        }
+    }
+
+    override fun write(value: DocContent?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeDocContent.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeTableWindow: FfiConverterRustBuffer<TableWindow?> {
     override fun read(buf: ByteBuffer): TableWindow? {
         if (buf.get().toInt() == 0) {
@@ -4999,6 +5248,38 @@ public object FfiConverterOptionalTypeTableWindow: FfiConverterRustBuffer<TableW
         } else {
             buf.put(1)
             FfiConverterTypeTableWindow.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalOptionalString: FfiConverterRustBuffer<kotlin.String??> {
+    override fun read(buf: ByteBuffer): kotlin.String?? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterOptionalString.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.String??): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterOptionalString.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.String??, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterOptionalString.write(value, buf)
         }
     }
 }
@@ -5169,6 +5450,38 @@ public object FfiConverterOptionalSequenceTypeWindowPatch: FfiConverterRustBuffe
 /**
  * @suppress
  */
+public object FfiConverterOptionalSequenceTypeDocTag: FfiConverterRustBuffer<List<DocTag>?> {
+    override fun read(buf: ByteBuffer): List<DocTag>? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterSequenceTypeDocTag.read(buf)
+    }
+
+    override fun allocationSize(value: List<DocTag>?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterSequenceTypeDocTag.allocationSize(value)
+        }
+    }
+
+    override fun write(value: List<DocTag>?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterSequenceTypeDocTag.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalSequenceTypeUuid: FfiConverterRustBuffer<List<Uuid>?> {
     override fun read(buf: ByteBuffer): List<Uuid>? {
         if (buf.get().toInt() == 0) {
@@ -5201,6 +5514,38 @@ public object FfiConverterOptionalSequenceTypeUuid: FfiConverterRustBuffer<List<
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeOffsetDateTime: FfiConverterRustBuffer<OffsetDateTime?> {
+    override fun read(buf: ByteBuffer): OffsetDateTime? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeOffsetDateTime.read(buf)
+    }
+
+    override fun allocationSize(value: OffsetDateTime?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeOffsetDateTime.allocationSize(value)
+        }
+    }
+
+    override fun write(value: OffsetDateTime?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeOffsetDateTime.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeUuid: FfiConverterRustBuffer<Uuid?> {
     override fun read(buf: ByteBuffer): Uuid? {
         if (buf.get().toInt() == 0) {
@@ -5223,6 +5568,62 @@ public object FfiConverterOptionalTypeUuid: FfiConverterRustBuffer<Uuid?> {
         } else {
             buf.put(1)
             FfiConverterTypeUuid.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
+    override fun read(buf: ByteBuffer): List<kotlin.String> {
+        val len = buf.getInt()
+        return List<kotlin.String>(len) {
+            FfiConverterString.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.String>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterString.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.String>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeDocPatch: FfiConverterRustBuffer<List<DocPatch>> {
+    override fun read(buf: ByteBuffer): List<DocPatch> {
+        val len = buf.getInt()
+        return List<DocPatch>(len) {
+            FfiConverterTypeDocPatch.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<DocPatch>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeDocPatch.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<DocPatch>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeDocPatch.write(it, buf)
         }
     }
 }

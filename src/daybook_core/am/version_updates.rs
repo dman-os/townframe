@@ -11,19 +11,24 @@ pub mod app {
     pub fn version_latest() -> Res<Vec<u8>> {
         let mut doc = AutoCommit::new().with_actor(ActorId::random());
         doc.put(ROOT, "version", "0")?;
+        // annotate schema for app document
+        doc.put(ROOT, "$schema", "daybook.app")?;
         reconcile_prop(&mut doc, ROOT, TablesAm::PROP, TablesAm::default())?;
         Ok(doc.save_nocompress())
     }
 }
 
 pub mod drawer {
+    use super::*;
+
     use crate::drawer::DrawerAm;
 
     pub fn version_latest() -> Res<Vec<u8>> {
         let mut doc = AutoCommit::new().with_actor(ActorId::random());
         doc.put(ROOT, "version", "0")?;
+        // indicate schema type for this document
+        doc.put(ROOT, "$schema", "daybook.drawer")?;
         reconcile_prop(&mut doc, ROOT, DrawerAm::PROP, DrawerAm::default())?;
         Ok(doc.save_nocompress())
     }
-    use super::*;
 }

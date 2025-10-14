@@ -239,14 +239,14 @@ impl TablesRepo {
                 let mut events = Vec::new();
 
                 for notification in notifications {
-                    match notification.action {
+                    match notification.patch.action {
                         automerge::PatchAction::PutMap { key, .. } => {
                             // Check if this is a specific item change
                             if let Ok(uuid) = Uuid::parse_str(&key) {
                                 // Determine which type of item changed based on path
-                                if notification.path.len() >= 2 {
-                                    match &notification.path[1] {
-                                        autosurgeon::Prop::Key(path_key) => {
+                                if notification.patch.path.len() >= 2 {
+                                    match &notification.patch.path[1].1 {
+                                        automerge::Prop::Map(path_key) => {
                                             match path_key.as_ref() {
                                                 "windows" => events
                                                     .push(TablesEvent::WindowChanged { id: uuid }),
@@ -269,9 +269,9 @@ impl TablesRepo {
                         automerge::PatchAction::DeleteMap { key } => {
                             // Handle deletions
                             if let Ok(uuid) = Uuid::parse_str(&key) {
-                                if notification.path.len() >= 2 {
-                                    match &notification.path[1] {
-                                        autosurgeon::Prop::Key(path_key) => {
+                                if notification.patch.path.len() >= 2 {
+                                    match &notification.patch.path[1].1 {
+                                        automerge::Prop::Map(path_key) => {
                                             match path_key.as_ref() {
                                                 "windows" => events
                                                     .push(TablesEvent::WindowChanged { id: uuid }),
@@ -336,7 +336,7 @@ impl TablesRepo {
     }
 
     async fn set_window(&self, id: Uuid, val: Window) -> Res<Option<Window>> {
-        let mut am = self.am.clone().write_owned().await;
+        let mut am = self.am.write().await;
 
         // Get old window to check for tab changes
         let old_window = am.windows.get(&id).cloned();
@@ -377,7 +377,7 @@ impl TablesRepo {
     }
 
     async fn set_tab(&self, id: Uuid, val: Tab) -> Res<Option<Tab>> {
-        let mut am = self.am.clone().write_owned().await;
+        let mut am = self.am.write().await;
 
         // Get old tab to check for panel changes
         let old_tab = am.tabs.get(&id).cloned();
@@ -427,7 +427,7 @@ impl TablesRepo {
     }
 
     async fn set_table(&self, id: Uuid, val: Table) -> Res<Option<Table>> {
-        let mut am = self.am.clone().write_owned().await;
+        let mut am = self.am.write().await;
 
         // Get old table to check for tab changes
         let old_table = am.tables.get(&id).cloned();
@@ -483,7 +483,7 @@ impl TablesRepo {
     }
 
     async fn set_panel(&self, id: Uuid, val: Panel) -> Res<Option<Panel>> {
-        let mut am = self.am.clone().write_owned().await;
+        let mut am = self.am.write().await;
         let ret = am.panels.insert(id, val);
         am.flush(&self.fcx.cx).await?;
 
@@ -509,8 +509,8 @@ impl TablesRepo {
         Ok(am.panels.values().cloned().collect())
     }
 
-    async fn update_items(&self, patches: TablesPatches) -> Res<()> {
-        let mut am = self.am.clone().write_owned().await;
+    async fn update_batch(&self, patches: TablesPatches) -> Res<()> {
+        let mut am = self.am.write().await;
 
         // Apply tab updates
         if let Some(tab_updates) = patches.tab_updates {
@@ -566,7 +566,7 @@ impl TablesRepo {
 
     // Auto-create a default table with window, tab, and panel
     async fn auto_create_default_table(&self) -> Res<()> {
-        let mut am = self.am.clone().write_owned().await;
+        let mut am = self.am.write().await;
 
         let window_id = Uuid::new_v4();
         let table_id = Uuid::new_v4();
@@ -620,7 +620,7 @@ impl TablesRepo {
 
     // Auto-create a tab for a table when all tabs are removed
     async fn auto_create_tab_for_table(&self, table_id: Uuid) -> Res<()> {
-        let mut am = self.am.clone().write_owned().await;
+        let mut am = self.am.write().await;
 
         // Get the table to find its window
         let table = am.tables.get(&table_id).ok_or_eyre("Table not found")?;
@@ -712,7 +712,7 @@ impl TablesRepo {
 
     // Create a new table with a default tab and panel
     async fn create_new_table(&self) -> Res<Table> {
-        let mut am = self.am.clone().write_owned().await;
+        let mut am = self.am.write().await;
 
         let table_id = Uuid::new_v4();
         let tab_id = Uuid::new_v4();
@@ -783,7 +783,7 @@ impl TablesRepo {
 
     // Create a new tab for an existing table
     async fn create_new_tab(&self, table_id: Uuid) -> Res<Tab> {
-        let mut am = self.am.clone().write_owned().await;
+        let mut am = self.am.write().await;
 
         // Get the table to find its window
         let table = am.tables.get(&table_id).ok_or_eyre("Table not found")?;
@@ -855,7 +855,7 @@ impl TablesRepo {
 
     // Remove a tab and its panel
     async fn remove_tab(&self, tab_id: Uuid) -> Res<()> {
-        let mut am = self.am.clone().write_owned().await;
+        let mut am = self.am.write().await;
 
         // Get the tab to find its panels
         let tab = am.tabs.get(&tab_id).ok_or_eyre("Tab not found")?;
@@ -1067,10 +1067,10 @@ impl TablesRepo {
     }
 
     #[tracing::instrument(err, skip(self, patches))]
-    async fn ffi_update_items(self: Arc<Self>, patches: TablesPatches) -> Result<(), FfiError> {
+    async fn ffi_update_batch(self: Arc<Self>, patches: TablesPatches) -> Result<(), FfiError> {
         let this = self.clone();
         self.fcx
-            .do_on_rt(async move { this.update_items(patches).await })
+            .do_on_rt(async move { this.update_batch(patches).await })
             .await?;
         Ok(())
     }

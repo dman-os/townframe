@@ -6,7 +6,6 @@ use std::collections::HashSet;
 #[serde(rename_all = "camelCase")]
 pub struct DocsCreatedEvent {
     pub id: String,
-    pub tickets: HashSet<String>,
 }
 
 #[restate_sdk::service]

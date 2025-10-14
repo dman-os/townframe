@@ -52,7 +52,7 @@ impl Config {
                 .unwrap_or_else(|_| PathBuf::from("/data/data/org.example.daybook/files"));
 
             (
-                am::Config {
+                utils_rs::am::Config {
                     storage_dir: app_dir.join("samod"),
 
                     peer_id: "daybook_client".to_string(),
