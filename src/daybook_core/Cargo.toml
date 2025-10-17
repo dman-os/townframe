@@ -15,7 +15,7 @@ path = "lib.rs"
 
 [dependencies]
 # internal
-utils_rs.workspace = true
+utils_rs = { workspace = true, features = ["hash"] }
 
 # serde
 serde.workspace = true

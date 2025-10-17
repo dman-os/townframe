@@ -98,7 +98,7 @@ impl AmCtx {
 
     pub async fn reconcile_prop<'a, T, P>(
         &self,
-        handle: DocHandle,
+        doc_id: &DocumentId,
         obj_id: automerge::ObjId,
         prop_name: P,
         update: &T,
@@ -107,6 +107,7 @@ impl AmCtx {
         T: Hydrate + Reconcile + Send + Sync + 'static,
         P: Into<Prop<'a>> + Send + Sync + 'static,
     {
+        let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         tokio::task::block_in_place(move || {
             handle.with_document(move |doc| {
                 doc.transact(move |tx| {
@@ -123,10 +124,11 @@ impl AmCtx {
     // FIXME: this actually returns an error on failing to find it
     pub async fn hydrate_path<T: Hydrate + Reconcile + Send + Sync + 'static>(
         &self,
-        handle: DocHandle,
+        doc_id: &DocumentId,
         obj_id: automerge::ObjId,
         path: Vec<Prop<'static>>,
     ) -> Res<Option<T>> {
+        let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         tokio::task::block_in_place(move || {
             handle.with_document(move |doc| {
                 let value: Option<T> =
@@ -138,17 +140,28 @@ impl AmCtx {
 
     pub async fn hydrate_path_at_head<T: autosurgeon::Hydrate>(
         &self,
-        handle: DocHandle,
+        doc_id: &DocumentId,
         head: &[automerge::ChangeHash],
         obj_id: automerge::ObjId,
         path: Vec<Prop<'static>>,
-    ) -> Res<Option<T>> {
+    ) -> Result<Option<T>, HydrateAtHeadError> {
+        let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         tokio::task::block_in_place(move || {
             handle.with_document(move |doc| {
-                let version = doc.fork_at(&head)?;
+                let cur = doc.get_heads();
+                let cur_formatted = serialize_commit_heads(&cur);
+                let cur_roundtrip = parse_commit_heads(&cur_formatted).unwrap();
+                let value = doc.hydrate(None);
+                info!(?head, ?cur, ?cur_formatted, ?cur_roundtrip, ?value, "XXX");
+                let version = match doc.fork_at(head) {
+                    Err(automerge::AutomergeError::InvalidHash(hash)) => {
+                        return Err(HydrateAtHeadError::HashNotFound(hash))
+                    }
+                    val => val.wrap_err("error forking doc at change")?,
+                };
                 let value: Option<T> = autosurgeon::hydrate_path(&version, &obj_id, path)
                     .wrap_err("error hydrating")?;
-                eyre::Ok(value)
+                Ok(value)
             })
         })
     }
@@ -160,14 +173,14 @@ impl AmCtx {
         Ok(handle)
     }
 
-    pub async fn find_doc(&self, doc_id: DocumentId) -> Res<Option<DocHandle>> {
-        if let Some(handle) = self.handle_cache.get(&doc_id) {
+    pub async fn find_doc(&self, doc_id: &DocumentId) -> Res<Option<DocHandle>> {
+        if let Some(handle) = self.handle_cache.get(doc_id) {
             return Ok(Some(handle.clone()));
         }
         let Some(handle) = self.repo.find(doc_id.clone()).await? else {
             return Ok(None);
         };
-        self.handle_cache.insert(doc_id, handle.clone());
+        self.handle_cache.insert(doc_id.clone(), handle.clone());
         Ok(Some(handle))
     }
 
@@ -178,6 +191,14 @@ impl AmCtx {
     pub fn change_manager(&self) -> &Arc<ChangeListenerManager> {
         &self.change_manager
     }
+}
+
+#[derive(Debug, displaydoc::Display, thiserror::Error)]
+pub enum HydrateAtHeadError {
+    /// hash not found {0:?}
+    HashNotFound(ChangeHash),
+    /// {0}
+    Other(#[from] eyre::Report),
 }
 
 #[cfg(feature = "hash")]
@@ -195,6 +216,6 @@ pub fn parse_commit_heads<S: AsRef<str>>(heads: &[S]) -> Res<Arc<[ChangeHash]>> 
 pub fn serialize_commit_heads(heads: &[ChangeHash]) -> Vec<String> {
     heads
         .iter()
-        .map(|commit| crate::hash::encode_base32_multibase(&commit.0))
+        .map(|commit| crate::hash::encode_base32_multibase(commit.0))
         .collect()
 }

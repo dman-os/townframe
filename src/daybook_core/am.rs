@@ -11,8 +11,10 @@ pub async fn init_from_globals(cx: &Ctx) -> Res<()> {
         doc_id_drawer,
     } = init_state
     {
-        let (handle_app, handle_drawer) =
-            tokio::try_join!(cx.acx.find_doc(doc_id_app), cx.acx.find_doc(doc_id_drawer))?;
+        let (handle_app, handle_drawer) = tokio::try_join!(
+            cx.acx.find_doc(&doc_id_app),
+            cx.acx.find_doc(&doc_id_drawer)
+        )?;
         if handle_app.is_none() {
             warn!("doc not found locally for stored doc_id_app; creating new local document");
         }

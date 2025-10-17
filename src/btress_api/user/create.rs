@@ -30,8 +30,7 @@ impl GuestService for UserCreate {
             ,email::TEXT as "email?"
             ,username::TEXT as "username!"
         FROM auth.create_user($1, $2)
-            "#
-            .into(),
+            "#,
             &[
                 PgValue::Text(inp.username.clone()),
                 inp.email

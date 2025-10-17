@@ -36,6 +36,7 @@ impl Ctx {
             Option::<samod::AlwaysAnnounce>::None,
         )
         .await?;
+        acx.spawn_connector("ws://0.0.0.0:8090".into());
         let llm_provider = llm::builder::LLMBuilder::new()
             .backend(llm::builder::LLMBackend::Ollama)
             .base_url(config.ollama_url)
@@ -60,7 +61,7 @@ async fn app_main() -> Res<()> {
     utils_rs::setup_tracing()?;
 
     let config = Config {
-        ollama_url: "http://127.0.0.1:1143".into(),
+        ollama_url: "http://127.0.0.1:11434".into(),
         ollama_model: "gemma3".into(),
     };
     let cx = Ctx::init(config).await?;

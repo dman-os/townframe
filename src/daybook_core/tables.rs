@@ -82,7 +82,7 @@ impl TablesAm {
         let mut am = cx
             .acx
             .hydrate_path::<Self>(
-                cx.doc_app().clone(),
+                cx.doc_app().document_id(),
                 automerge::ROOT,
                 vec![Self::PROP.into()],
             )
@@ -96,7 +96,12 @@ impl TablesAm {
 
     async fn flush(&self, cx: &Ctx) -> Res<()> {
         cx.acx
-            .reconcile_prop(cx.doc_app().clone(), automerge::ROOT, Self::PROP, self)
+            .reconcile_prop(
+                cx.doc_app().document_id(),
+                automerge::ROOT,
+                Self::PROP,
+                self,
+            )
             .await
     }
 

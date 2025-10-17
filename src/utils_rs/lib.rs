@@ -262,7 +262,7 @@ pub mod hash {
     pub fn hash_bytes(bytes: &[u8]) -> String {
         use sha2::Digest;
         let mut hash = sha2::Sha256::new();
-        hash.write(bytes).expect("error writing to hasher");
+        hash.write_all(bytes).expect("error writing to hasher");
         let hash = hash.finalize();
 
         let hash =
@@ -288,7 +288,7 @@ pub mod hash {
             if bytes_read == 0 {
                 break;
             }
-            hash.write(&buf[..bytes_read])
+            hash.write_all(&buf[..bytes_read])
                 .expect("error writing to hasher");
         }
         let hash = hash.finalize();
@@ -329,7 +329,7 @@ pub mod hash {
     pub fn decode_hex_multibase(source: &str) -> eyre::Result<Vec<u8>> {
         match (
             &source[0..1],
-            data_encoding::HEXLOWER_PERMISSIVE.decode(source[1..].as_bytes()),
+            data_encoding::HEXLOWER_PERMISSIVE.decode(&source.as_bytes()[1..]),
         ) {
             ("f", Ok(bytes)) => Ok(bytes),
             (prefix, Ok(_)) => Err(eyre::format_err!(

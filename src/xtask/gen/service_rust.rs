@@ -50,7 +50,7 @@ impl RustGenCtx<'_> {
             .into(),
             Type::Tuple(items) => {
                 let joined = items
-                    .into_iter()
+                    .iter()
                     .map(|id| self.rust_name(*id).expect("unregistered inner type"))
                     .fold(")".to_string(), |acc, curr| format!("{acc},{curr}"));
                 format!("({joined}").into()
@@ -377,9 +377,9 @@ fn schema_record(
             patch_parts.join(", ")
         )?;
     }
-    write!(
+    writeln!(
         buf,
-        "pub struct {name} {{\n",
+        "pub struct {name} {{",
         name = heck::AsPascalCase(&this.name[..])
     )?;
     for (field_name, field) in &this.fields {
@@ -387,7 +387,7 @@ fn schema_record(
             field,
             cx,
             &mut indenter::indented(buf).with_str("    "),
-            &field_name,
+            field_name,
             true,
         )?;
         writeln!(buf, ",")?;
@@ -431,9 +431,9 @@ fn schema_enum(
         writeln!(buf, "#[serde(rename_all = \"camelCase\", untagged)]")?;
     }
     // For enums we keep serde derives only; autosurgeon derive is only emitted for records
-    write!(
+    writeln!(
         buf,
-        "pub enum {name} {{\n",
+        "pub enum {name} {{",
         name = heck::AsPascalCase(&this.name[..])
     )?;
     for (name, EnumVariant { desc }) in &this.variants {
@@ -509,12 +509,12 @@ fn schema_variant(
     }
     writeln!(buf, "#[derive({})]", derives.join(", "))?;
     if cx.attrs.serde {
-        writeln!(buf, "#[serde(rename_all = \"camelCase\", tag = \"ty\")]")?;
+        writeln!(buf, "#[serde(rename_all = \"camelCase\", untagged)]")?;
     }
     // autosurgeon derives are only emitted for records — enums are intentionally left with serde only
-    write!(
+    writeln!(
         buf,
-        "pub enum {name} {{\n",
+        "pub enum {name} {{",
         name = heck::AsPascalCase(&this.name[..])
     )?;
     for (name, VariantVariant { ty, desc }) in &this.variants {
@@ -621,11 +621,10 @@ fn input_type(
                     }
                 }
 
-                if !schema_attrs.is_empty() {
-                    if cx.attrs.utoipa {
+                if !schema_attrs.is_empty()
+                    && cx.attrs.utoipa {
                         writeln!(buf, "#[schema({})]", schema_attrs.join(", "))?;
                     }
-                }
             }
             if cx.attrs.garde {
                 // Add garde validation attributes
@@ -671,14 +670,13 @@ fn input_type(
                 }
             }
 
-            if cx.attrs.serde {
-                if field.source != this.main_source {
+            if cx.attrs.serde
+                && field.source != this.main_source {
                     writeln!(buf, "#[serde(skip)]")?;
                 }
-            }
 
             // Write the field definition
-            record_field(&field.inner, cx, buf, &field_name, true)?;
+            record_field(&field.inner, cx, buf, field_name, true)?;
             writeln!(buf, ",")?;
         }
     }
@@ -760,7 +758,7 @@ fn error_type(
                 if *thiserror_from {
                     writeln!(buf, "#[from]")?;
                 }
-                record_field(inner, cx, buf, &field_name, true)?;
+                record_field(inner, cx, buf, field_name, true)?;
                 writeln!(buf, ",")?;
             }
         }
@@ -841,30 +839,26 @@ fn record_field(
         writeln!(buf, "#[autosurgeon(key)]")?;
     }
 
-    match cx
+    if let Type::Primitives(Primitives::DateTime) = cx
         .reg
         .types
         .get(&this.ty)
         .as_deref()
-        .expect("unregistered field type")
-    {
-        Type::Primitives(Primitives::DateTime) => {
-            // Emit autosurgeon date helper at field-level when the parent record requested autosurgeon
-            if cx.attrs.automerge {
-                if cx.attrs.serde {
-                    // Emit serde codec helper for sane ISO8601 on datetime fields
-                    writeln!(
-                        buf,
-                        "#[serde(with = \"api_utils_rs::codecs::sane_iso8601\")]",
-                    )?;
-                }
+        .expect("unregistered field type") {
+        // Emit autosurgeon date helper at field-level when the parent record requested autosurgeon
+        if cx.attrs.automerge {
+            if cx.attrs.serde {
+                // Emit serde codec helper for sane ISO8601 on datetime fields
                 writeln!(
                     buf,
-                    "#[autosurgeon(with = \"utils_rs::am::codecs::autosurgeon_date\")]",
+                    "#[serde(with = \"api_utils_rs::codecs::sane_iso8601\")]",
                 )?;
             }
+            writeln!(
+                buf,
+                "#[autosurgeon(with = \"utils_rs::am::codecs::autosurgeon_date\")]",
+            )?;
         }
-        _ => {}
     }
     write!(
         buf,

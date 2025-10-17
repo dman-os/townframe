@@ -36,7 +36,7 @@ use super::*;
             },
         };
         for feature in &features {
-            service_rust::feature_module(&cx, buf, &feature)?;
+            service_rust::feature_module(&cx, buf, feature)?;
         }
 
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../btress_api/gen/");
@@ -53,7 +53,7 @@ use super::*;
                 r#"// @generated
 package townframe:btress-api;"#
             )?;
-            component_wit::feature_file(&reg, buf, &feature)?;
+            component_wit::feature_file(&reg, buf, feature)?;
             let path = path.join(format!("{}.wit", feature.tag.name.to_kebab_case()));
             std::fs::write(path, &out)?;
         }

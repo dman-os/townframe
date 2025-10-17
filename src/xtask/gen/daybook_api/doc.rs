@@ -94,8 +94,8 @@ pub fn feature(reg: &TypeReg) -> Feature {
         Record::builder("Doc")
             .with_fields([
                 ("id", RecordField::builder(doc_id).build()),
-                ("created_at", RecordField::date_time(&reg).build()),
-                ("updated_at", RecordField::date_time(&reg).build()),
+                ("created_at", RecordField::date_time(reg).build()),
+                ("updated_at", RecordField::date_time(reg).build()),
                 // (
                 //     "kind",
                 //     RecordField::builder(doc_content_kind).build(),

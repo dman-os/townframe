@@ -121,8 +121,6 @@ impl Ctx {
                 let doc_peers = doc_peers.clone();
                 let doc_id_tx = announcer_tx.clone();
                 move |doc_id: DocumentId, peer_id| {
-                    info!(%doc_id, %peer_id, ?peer_docs, ?doc_peers, "announcing");
-
                     doc_id_tx.send(doc_id.clone()).expect("doc channel closed");
 
                     if let Some(peer_of_doc) = doc_peers.get(&doc_id) {
@@ -189,7 +187,7 @@ fn spawn_doc_setup_worker(
             if listen_list.contains(&doc_id) {
                 continue;
             }
-            let handle = match cx.acx.find_doc(doc_id.clone()).await {
+            let handle = match cx.acx.find_doc(&doc_id).await {
                 Err(err) => {
                     warn!("error looking up doc_id: {err}");
                     continue;
@@ -214,32 +212,34 @@ fn spawn_doc_setup_worker(
             // Try to hydrate the $schema property via AmCtx helper
             let schema_opt = cx
                 .acx
-                .hydrate_path::<String>(handle.clone(), automerge::ROOT, vec!["$schema".into()])
+                .hydrate_path::<String>(&doc_id, automerge::ROOT, vec!["$schema".into()])
                 .await
                 .wrap_err("error hydrating added docment")?;
 
             if let Some(schema) = schema_opt {
                 if schema == "daybook.drawer" {
-                    // Register a change listener that logs additions/removals in the drawer
-                    let cm = cx.acx.change_manager().clone();
-                    let doc_id = handle.document_id().clone();
-                    cm.add_listener(
-                        ChangeFilter {
-                            doc_id: Some(doc_id.clone()),
-                            path: vec!["docs".into()],
-                        },
-                        {
-                            let notif_tx = drawer_changes_driver.notif_tx.clone();
-                            move |notifs| {
-                                let notif_tx = notif_tx.clone();
-                                tokio::task::spawn(async move {
-                                    let permit = notif_tx.reserve().await.expect("channel error");
-                                    permit.send(notifs);
-                                });
-                            }
-                        },
-                    )
-                    .await;
+                    cx.acx
+                        .change_manager()
+                        .add_listener(
+                            ChangeFilter {
+                                doc_id: Some(doc_id.clone()),
+                                path: vec!["docs".into()],
+                            },
+                            {
+                                let notif_tx = drawer_changes_driver.notif_tx.clone();
+                                let doc_id = doc_id.clone();
+                                move |notifs| {
+                                    let notif_tx = notif_tx.clone();
+                                    let doc_id = doc_id.clone();
+                                    tokio::task::spawn(async move {
+                                        let permit =
+                                            notif_tx.reserve().await.expect("channel error");
+                                        permit.send((doc_id, notifs));
+                                    });
+                                }
+                            },
+                        )
+                        .await;
 
                     let change_worker = cx
                         .acx
@@ -264,7 +264,8 @@ fn spawn_doc_setup_worker(
 }
 
 struct DrawerChangesDriver {
-    notif_tx: mpsc::Sender<Vec<ChangeNotification>>,
+    // drawer_doc_id, notifs
+    notif_tx: mpsc::Sender<(DocumentId, Vec<ChangeNotification>)>,
     _handle: JoinHandle<()>,
 }
 
@@ -275,27 +276,57 @@ fn spawn_drawer_changes_driver(cx: SharedCtx) -> DrawerChangesDriver {
     let on_new_doc = {
         let notif_tx = notif_tx.clone();
         let cx = cx.clone();
-        move |doc_id: String, notif: ChangeNotification| {
+        move |drawer_doc_id: DocumentId, notif: ChangeNotification| {
+            let automerge::PatchAction::PutMap {
+                key: new_doc_id,
+                value: (val, obj_id),
+                ..
+            } = &notif.patch.action
+            else {
+                panic!("unexpected");
+            };
+            let Some(automerge::ObjType::List) = val.to_objtype() else {
+                panic!("schema violation");
+            };
+
             let notif_tx = notif_tx.clone();
             let cx = cx.clone();
+            let new_doc_id = new_doc_id.clone();
+            let obj_id = obj_id.clone();
+
             tokio::task::spawn(async move {
+                let heads = cx
+                    .acx
+                    .hydrate_path_at_head::<Vec<String>>(
+                        &drawer_doc_id,
+                        &notif.heads,
+                        obj_id,
+                        vec![],
+                    )
+                    .await
+                    .expect("error hydrating at head")
+                    .expect("schema violation");
+
                 if let Err(err) = restate::start_doc_pipeline(
                     &cx,
                     &r#gen::doc::DocAddedEvent {
-                        id: doc_id.clone(),
-                        heads: utils_rs::am::serialize_commit_heads(&notif.heads[..]),
+                        id: new_doc_id.clone(),
+                        heads,
                     },
                 )
                 .await
                 {
-                    error!(?err, ?doc_id, "error starting doc pipeline");
+                    error!(?err, ?new_doc_id, "error starting doc pipeline");
                     if let restate::RestateError::RequestError { status, .. } = &err {
                         if status.is_client_error() {
                             panic!("client error on restate client {err:?}");
                         }
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    notif_tx.send(vec![notif]).await.expect("channel error")
+                    notif_tx
+                        .send((drawer_doc_id, vec![notif]))
+                        .await
+                        .expect("channel error")
                 }
             })
         }
@@ -304,12 +335,12 @@ fn spawn_drawer_changes_driver(cx: SharedCtx) -> DrawerChangesDriver {
 
     let handle = tokio::spawn({
         async move {
-            while let Some(notifs) = notif_rx.recv().await {
+            while let Some((drawer_doc_id, notifs)) = notif_rx.recv().await {
                 for notif in notifs {
                     match &notif.patch.action {
                         automerge::PatchAction::PutMap { key, .. } => {
                             info!(%key, "drawer: doc added/updated");
-                            on_new_doc(key.clone(), notif);
+                            on_new_doc(drawer_doc_id.clone(), notif);
                         }
                         automerge::PatchAction::DeleteMap { key } => {
                             info!(%key, "drawer: doc removed");
@@ -326,7 +357,7 @@ fn spawn_drawer_changes_driver(cx: SharedCtx) -> DrawerChangesDriver {
     }
 }
 
-#[tracing::instrument(skip(cx), ret)]
+#[tracing::instrument(skip(cx))]
 async fn connect(
     axum::extract::State(cx): axum::extract::State<SharedCtx>,
     ws: axum::extract::WebSocketUpgrade,
@@ -334,7 +365,7 @@ async fn connect(
     ws.on_upgrade(move |socket| handle_socket(cx, socket))
 }
 
-#[tracing::instrument(skip(cx), ret)]
+#[tracing::instrument(skip(cx))]
 async fn handle_socket(cx: SharedCtx, socket: axum::extract::ws::WebSocket) {
     let _handle = tokio::spawn(async move {
         let fin = cx.acx.repo().accept_axum(socket).await;

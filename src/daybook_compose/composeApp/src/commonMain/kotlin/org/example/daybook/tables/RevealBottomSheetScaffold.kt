@@ -422,5 +422,3 @@ fun RevealBottomSheetScaffold(
         // No additional overlay; clipping is applied directly on the sheet Surface
     }
 }
-
-

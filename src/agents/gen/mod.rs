@@ -50,7 +50,7 @@ pub mod doc {
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase", tag = "ty")]
+    #[serde(rename_all = "camelCase", untagged)]
     pub enum DocContent {
         Text(String),
         Blob(DocBlob),
@@ -80,7 +80,7 @@ pub mod doc {
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase", tag = "ty")]
+    #[serde(rename_all = "camelCase", untagged)]
     pub enum DocTag {
         /// A link to another document.
         RefGeneric(DocRef),

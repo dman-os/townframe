@@ -38,9 +38,9 @@ impl TestApp {
         use rand::Rng;
         let http_port = rand::rng().random_range(20000..40000);
         let manifest = make_inline_manifest(
-            &app_name,
+            app_name,
             &app_id,
-            &test_name,
+            test_name,
             http_port,
             &format!(
                 "file://{root}/../../{wasm_path}",

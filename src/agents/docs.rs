@@ -12,7 +12,7 @@ pub struct DocPipelineImpl {
 }
 
 impl DocsPipeline for DocPipelineImpl {
-    #[tracing::instrument(skip(self, rcx), err(Debug))]
+    #[tracing::instrument(skip(self, rcx), fields(key = rcx.key()), err(Debug))]
     async fn run(
         &self,
         rcx: WorkflowContext<'_>,
@@ -30,24 +30,27 @@ impl DocsPipeline for DocPipelineImpl {
 
         let Json(doc) = rcx
             .run(|| async {
-                let Some(handle) = self.cx.acx.find_doc(am_doc_id.clone()).await? else {
-                    return Err(HandlerError::from(format!(
-                        "doc_id {am_doc_id} not found in repo"
-                    )));
-                };
-                let doc = self
+                match self
                     .cx
                     .acx
-                    .hydrate_path_at_head::<Doc>(handle, &heads, automerge::ROOT, vec![])
+                    .hydrate_path_at_head::<Doc>(&am_doc_id, &heads, automerge::ROOT, vec![])
                     .await
-                    .map_err(|err| HandlerError::from(err.to_string()))?
-                    .ok_or_else(|| {
-                        TerminalError::new_with_code(
+                {
+                    Ok(Some(doc)) => Ok(Json(dbg!(doc))),
+                    Ok(None) => Err(TerminalError::new_with_code(
+                        400,
+                        format!("doc {am_doc_id} is not a valid daybook doc"),
+                    ))?,
+                    Err(utils_rs::am::HydrateAtHeadError::HashNotFound(hash)) => {
+                        Err(TerminalError::new_with_code(
                             400,
-                            format!("doc {am_doc_id} is not a valid daybook doc"),
-                        )
-                    })?;
-                Ok(Json(doc))
+                            format!("hash {hash} was not found in daybook doc {am_doc_id}"),
+                        ))?
+                    }
+                    Err(utils_rs::am::HydrateAtHeadError::Other(err)) => {
+                        Err(HandlerError::from(format!("{err:}")))
+                    }
+                }
             })
             .await?;
         rcx.run(|| async {

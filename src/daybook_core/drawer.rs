@@ -9,7 +9,7 @@ use std::str::FromStr;
 pub struct DrawerAm {
     // FIXME: replace with hashset
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    map: HashMap<DocId, bool>,
+    map: HashMap<DocId, Vec<String>>,
 }
 
 impl DrawerAm {
@@ -19,7 +19,7 @@ impl DrawerAm {
     async fn load(cx: &Ctx) -> Res<Self> {
         cx.acx
             .hydrate_path::<Self>(
-                cx.doc_drawer().clone(),
+                cx.doc_drawer().document_id(),
                 automerge::ROOT,
                 vec![Self::PROP.into()],
             )
@@ -29,7 +29,12 @@ impl DrawerAm {
 
     async fn flush(&self, cx: &Ctx) -> Res<()> {
         cx.acx
-            .reconcile_prop(cx.doc_drawer().clone(), automerge::ROOT, Self::PROP, self)
+            .reconcile_prop(
+                cx.doc_drawer().document_id(),
+                automerge::ROOT,
+                Self::PROP,
+                self,
+            )
             .await
     }
 
@@ -112,11 +117,11 @@ impl DrawerRepo {
 
         new_doc.id = handle.document_id().to_string();
 
-        let new_doc = tokio::task::spawn_blocking({
+        let (new_doc, heads) = tokio::task::spawn_blocking({
             let handle = handle.clone();
             move || {
                 handle.with_document(move |doc_am| {
-                    doc_am
+                    let doc = doc_am
                         .transact(move |tx| {
                             use automerge::transaction::Transactable;
                             tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
@@ -126,7 +131,8 @@ impl DrawerRepo {
                             eyre::Ok(new_doc)
                         })
                         .map(|val| val.result)
-                        .map_err(|err| err.error)
+                        .map_err(|err| err.error)?;
+                    eyre::Ok((doc, doc_am.get_heads()))
                 })
             }
         })
@@ -136,7 +142,8 @@ impl DrawerRepo {
         // store id in drawer AM
         {
             let mut drawer = self.drawer.write().await;
-            drawer.map.insert(new_doc.id.clone(), true);
+            let heads = utils_rs::am::serialize_commit_heads(&heads);
+            drawer.map.insert(new_doc.id.clone(), heads);
             drawer.flush(&self.fcx.cx).await?;
         }
 
@@ -158,7 +165,7 @@ impl DrawerRepo {
                 }
                 // Not in cache: check if the drawer actually lists this id
                 let doc_id = samod::DocumentId::from_str(&id).wrap_err("invalid id")?;
-                let Some(handle) = self.fcx.cx.acx.find_doc(doc_id).await? else {
+                let Some(handle) = self.fcx.cx.acx.find_doc(&doc_id).await? else {
                     return Ok(None);
                 };
 

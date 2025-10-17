@@ -79,7 +79,7 @@ async fn test_cx(test_name: &'static str) -> Res<TestContext> {
             let wasm_path = "target/wasm32-wasip2/debug/btress_http_plugged_s.wasm";
             let (app, db) = tokio::try_join!(
                 wasmcloud::TestApp::new(app_name, test_name, wasm_path),
-                pg::TestPg::new(app_name, test_name, &Path::new(root_path))
+                pg::TestPg::new(app_name, test_name, Path::new(root_path))
             )?;
             eyre::Ok((app_name, db, app))
         },
@@ -89,7 +89,7 @@ async fn test_cx(test_name: &'static str) -> Res<TestContext> {
             let wasm_path = "target/wasm32-wasip2/debug/daybook_http_plugged_s.wasm";
             let (app, db) = tokio::try_join!(
                 wasmcloud::TestApp::new(app_name, test_name, wasm_path),
-                pg::TestPg::new(app_name, test_name, &Path::new(root_path))
+                pg::TestPg::new(app_name, test_name, Path::new(root_path))
             )?;
             eyre::Ok((app_name, db, app))
         },

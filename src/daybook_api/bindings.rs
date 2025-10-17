@@ -1,5 +1,5 @@
 //! @generated
-use super::*;   
+use super::*;
 
 pub mod wit {
     wit_bindgen::generate!({
