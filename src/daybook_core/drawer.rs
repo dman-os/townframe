@@ -1,3 +1,6 @@
+use samod::DocumentId;
+use utils_rs::am::AmCtx;
+
 use crate::interlude::*;
 
 use crate::ffi::{FfiError, SharedFfiCtx};
@@ -5,9 +8,8 @@ use crate::ffi::{FfiError, SharedFfiCtx};
 use crate::gen::doc::{Doc, DocId, DocPatch};
 use std::str::FromStr;
 
-#[derive(Default, Reconcile, Hydrate)]
+#[derive(Reconcile, Hydrate)]
 pub struct DrawerAm {
-    // FIXME: replace with hashset
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     map: HashMap<DocId, Vec<String>>,
 }
@@ -16,37 +18,29 @@ impl DrawerAm {
     // const PATH: &[&str] = &["docs"];
     pub const PROP: &str = "docs";
 
-    async fn load(cx: &Ctx) -> Res<Self> {
-        cx.acx
-            .hydrate_path::<Self>(
-                cx.doc_drawer().document_id(),
-                automerge::ROOT,
-                vec![Self::PROP.into()],
-            )
+    async fn load(acx: &AmCtx, drawer_doc_id: &DocumentId) -> Res<Self> {
+        acx.hydrate_path::<Self>(drawer_doc_id, automerge::ROOT, vec![Self::PROP.into()])
             .await?
-            .ok_or_eyre("unable to find obj in am")
+            .ok_or_eyre("unable to find obj in am_docc")
     }
 
-    async fn flush(&self, cx: &Ctx) -> Res<()> {
-        cx.acx
-            .reconcile_prop(
-                cx.doc_drawer().document_id(),
-                automerge::ROOT,
-                Self::PROP,
-                self,
-            )
+    async fn flush(&self, acx: &AmCtx, drawer_doc_id: &DocumentId) -> Res<()> {
+        acx.reconcile_prop(drawer_doc_id, automerge::ROOT, Self::PROP, self)
             .await
     }
 
-    async fn register_change_listener<F>(cx: &Ctx, on_change: F) -> Res<()>
+    async fn register_change_listener<F>(
+        acx: &AmCtx,
+        drawer_doc_id: DocumentId,
+        on_change: F,
+    ) -> Res<()>
     where
         F: Fn(Vec<utils_rs::am::changes::ChangeNotification>) + Send + Sync + 'static,
     {
-        cx.acx
-            .change_manager()
+        acx.change_manager()
             .add_listener(
                 utils_rs::am::changes::ChangeFilter {
-                    doc_id: Some(cx.doc_drawer().document_id().clone()),
+                    doc_id: Some(drawer_doc_id),
                     path: vec![Self::PROP.into()],
                 },
                 on_change,
@@ -57,14 +51,14 @@ impl DrawerAm {
     }
 }
 
-#[derive(uniffi::Object)]
 struct DrawerRepo {
-    fcx: SharedFfiCtx,
+    drawer_doc_id: DocumentId,
+    acx: AmCtx,
     drawer: Arc<tokio::sync::RwLock<DrawerAm>>,
-    registry: Arc<crate::repos::ListenersRegistry>,
     // in-memory cache of document handles
     handles: Arc<DHashMap<DocId, samod::DocHandle>>,
     cache: Arc<DHashMap<DocId, Doc>>,
+    registry: Arc<crate::repos::ListenersRegistry>,
 }
 
 // Minimal event enum so Kotlin can refresh via ffiList on changes
@@ -73,23 +67,22 @@ pub enum DrawerEvent {
     ListChanged,
 }
 
-crate::repo_listeners!(DrawerRepo, DrawerEvent);
-
 impl DrawerRepo {
-    async fn load(fcx: SharedFfiCtx) -> Res<Arc<Self>> {
-        let drawer = DrawerAm::load(&fcx.cx).await?;
+    async fn load(acx: AmCtx, drawer_doc_id: DocumentId) -> Res<Self> {
+        let drawer = DrawerAm::load(&acx, &drawer_doc_id).await?;
         let drawer = Arc::new(tokio::sync::RwLock::new(drawer));
         let registry = crate::repos::ListenersRegistry::new();
 
-        let repo = Arc::new(Self {
-            fcx: fcx.clone(),
+        let repo = Self {
+            acx,
+            drawer_doc_id,
             drawer,
             registry: registry.clone(),
             handles: default(),
             cache: default(),
-        });
+        };
 
-        DrawerAm::register_change_listener(&fcx.cx, {
+        DrawerAm::register_change_listener(&repo.acx, repo.drawer_doc_id.clone(), {
             let registry = registry.clone();
 
             move |_notifications| {
@@ -113,7 +106,7 @@ impl DrawerRepo {
     // and add its id to the drawer set.
     async fn add(&self, mut new_doc: Doc) -> Res<DocId> {
         // Use AutoCommit for reconciliation
-        let handle = self.fcx.cx.acx.add_doc(automerge::Automerge::new()).await?;
+        let handle = self.acx.add_doc(automerge::Automerge::new()).await?;
 
         new_doc.id = handle.document_id().to_string();
 
@@ -144,7 +137,7 @@ impl DrawerRepo {
             let mut drawer = self.drawer.write().await;
             let heads = utils_rs::am::serialize_commit_heads(&heads);
             drawer.map.insert(new_doc.id.clone(), heads);
-            drawer.flush(&self.fcx.cx).await?;
+            drawer.flush(&self.acx, &self.drawer_doc_id).await?;
         }
 
         // cache the handle under the doc's Uuid id
@@ -164,8 +157,8 @@ impl DrawerRepo {
                     return Ok(None);
                 }
                 // Not in cache: check if the drawer actually lists this id
-                let doc_id = samod::DocumentId::from_str(&id).wrap_err("invalid id")?;
-                let Some(handle) = self.fcx.cx.acx.find_doc(&doc_id).await? else {
+                let doc_id = DocumentId::from_str(&id).wrap_err("invalid id")?;
+                let Some(handle) = self.acx.find_doc(&doc_id).await? else {
                     return Ok(None);
                 };
 
@@ -267,7 +260,7 @@ impl DrawerRepo {
         let doc_key = id.clone();
         let mut am = self.drawer.write().await;
         let existed = am.map.remove(&doc_key).is_some();
-        am.flush(&self.fcx.cx).await?;
+        am.flush(&self.acx, &self.drawer_doc_id).await?;
         self.cache.remove(&doc_key);
         self.handles.remove(&doc_key);
         if existed {
@@ -277,31 +270,62 @@ impl DrawerRepo {
     }
 }
 
+impl crate::repos::Repo for DrawerRepo {
+    type Event = DrawerEvent;
+    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
+        &self.registry
+    }
+}
+
+#[derive(uniffi::Object)]
+struct DrawerRepoFfi {
+    fcx: SharedFfiCtx,
+    repo: DrawerRepo,
+}
+
+impl crate::repos::Repo for DrawerRepoFfi {
+    type Event = DrawerEvent;
+    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
+        &self.repo.registry
+    }
+}
+
+crate::uniffi_repo_listeners!(DrawerRepoFfi, DrawerEvent);
+
 #[uniffi::export]
-impl DrawerRepo {
+impl DrawerRepoFfi {
     #[uniffi::constructor]
     #[tracing::instrument(err, skip(fcx))]
-    async fn for_ffi(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
-        let cx = fcx.clone();
-        let this = fcx
-            .do_on_rt(Self::load(cx))
+    async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
+        let fcx = fcx.clone();
+        let repo = fcx
+            .do_on_rt(DrawerRepo::load(
+                fcx.cx.acx.clone(),
+                fcx.cx.doc_drawer().document_id().clone(),
+            ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
-        Ok(this)
+        Ok(Arc::new(Self { fcx, repo }))
     }
 
     // old FFI wrappers for contains/insert/remove removed; use `ffi_get`, `ffi_add`, `ffi_update`, `ffi_del` instead
     #[tracing::instrument(err, skip(self))]
     async fn ffi_list(self: Arc<Self>) -> Result<Vec<DocId>, FfiError> {
         let this = self.clone();
-        let out = self.fcx.do_on_rt(async move { this.list().await }).await?;
+        let out = self
+            .fcx
+            .do_on_rt(async move { this.repo.list().await })
+            .await?;
         Ok(out)
     }
 
     #[tracing::instrument(err, skip(self))]
     async fn ffi_get(self: Arc<Self>, id: DocId) -> Result<Option<Doc>, FfiError> {
         let this = self.clone();
-        Ok(self.fcx.do_on_rt(async move { this.get(id).await }).await?)
+        Ok(self
+            .fcx
+            .do_on_rt(async move { this.repo.get(id).await })
+            .await?)
     }
 
     #[tracing::instrument(err, skip(self))]
@@ -309,7 +333,7 @@ impl DrawerRepo {
         let this = self.clone();
         Ok(self
             .fcx
-            .do_on_rt(async move { this.add(doc).await })
+            .do_on_rt(async move { this.repo.add(doc).await })
             .await?)
     }
 
@@ -320,13 +344,16 @@ impl DrawerRepo {
         let this = self.clone();
         Ok(self
             .fcx
-            .do_on_rt(async move { this.update_batch(docs).await })
+            .do_on_rt(async move { this.repo.update_batch(docs).await })
             .await?)
     }
 
     #[tracing::instrument(err, skip(self))]
     async fn ffi_del(self: Arc<Self>, id: DocId) -> Result<bool, FfiError> {
         let this = self.clone();
-        Ok(self.fcx.do_on_rt(async move { this.del(id).await }).await?)
+        Ok(self
+            .fcx
+            .do_on_rt(async move { this.repo.del(id).await })
+            .await?)
     }
 }

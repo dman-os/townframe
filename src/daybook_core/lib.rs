@@ -26,6 +26,7 @@ mod globals;
 mod macros;
 mod repos;
 mod sql;
+mod stores;
 mod tables;
 
 /// Configuration for the daybook core storage systems

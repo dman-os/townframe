@@ -1,6 +1,12 @@
+use samod::DocumentId;
+use utils_rs::am::AmCtx;
+
+mod store;
+
 use crate::{
     ffi::{FfiError, SharedFfiCtx},
     interlude::*,
+    tables::store::TablesStore,
 };
 
 #[derive(Debug, Clone, Reconcile, Hydrate, uniffi::Record, Patch, PartialEq)]
@@ -55,153 +61,19 @@ pub struct Panel {
     pub title: String,
 }
 
-#[derive(Reconcile, Hydrate, Default)]
-pub struct TablesAm {
-    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    windows: HashMap<Uuid, Window>,
-    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    tables: HashMap<Uuid, Table>,
-    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    tabs: HashMap<Uuid, Tab>,
-    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    panels: HashMap<Uuid, Panel>,
-
-    // Indices for tracking relationships (not stored in CRDT)
-    #[autosurgeon(with = "utils_rs::am::codecs::automerge_skip")]
-    panel_to_tab: HashMap<Uuid, Uuid>, // panel_id -> tab_id
-    #[autosurgeon(with = "utils_rs::am::codecs::automerge_skip")]
-    tab_to_table: HashMap<Uuid, Uuid>, // tab_id -> table_id
-    #[autosurgeon(with = "utils_rs::am::codecs::automerge_skip")]
-    tab_to_window: HashMap<Uuid, Uuid>, // tab_id -> window_id
-}
-
-impl TablesAm {
-    pub const PROP: &str = "tables";
-
-    async fn load(cx: &Ctx) -> Res<Self> {
-        let mut am = cx
-            .acx
-            .hydrate_path::<Self>(
-                cx.doc_app().document_id(),
-                automerge::ROOT,
-                vec![Self::PROP.into()],
-            )
-            .await?
-            .ok_or_eyre("unable to find obj in am")?;
-
-        // Rebuild indices after loading
-        am.rebuild_indices();
-        Ok(am)
-    }
-
-    async fn flush(&self, cx: &Ctx) -> Res<()> {
-        cx.acx
-            .reconcile_prop(
-                cx.doc_app().document_id(),
-                automerge::ROOT,
-                Self::PROP,
-                self,
-            )
-            .await
-    }
-
-    /// Register a change listener for tables changes
-    async fn register_change_listener<F>(cx: &Ctx, on_change: F) -> Res<()>
-    where
-        F: Fn(Vec<utils_rs::am::changes::ChangeNotification>) + Send + Sync + 'static,
-    {
-        cx.acx
-            .change_manager()
-            .add_listener(
-                utils_rs::am::changes::ChangeFilter {
-                    path: vec![Self::PROP.into()],
-                    doc_id: Some(cx.doc_app().document_id().clone()),
-                },
-                on_change,
-            )
-            .await;
-        Ok(())
-    }
-
-    // Rebuild all indices from scratch
-    fn rebuild_indices(&mut self) {
-        self.panel_to_tab.clear();
-        self.tab_to_table.clear();
-        self.tab_to_window.clear();
-
-        // Build panel -> tab index
-        for (tab_id, tab) in &self.tabs {
-            for panel_id in &tab.panels {
-                self.panel_to_tab.insert(*panel_id, *tab_id);
-            }
-        }
-
-        // Build tab -> table index
-        for (table_id, table) in &self.tables {
-            for tab_id in &table.tabs {
-                self.tab_to_table.insert(*tab_id, *table_id);
-            }
-        }
-
-        // Build tab -> window index
-        for (window_id, window) in &self.windows {
-            for tab_id in &window.tabs {
-                self.tab_to_window.insert(*tab_id, *window_id);
-            }
-        }
-    }
-
-    // Update indices when a panel is added/removed from a tab
-    fn update_panel_tab_index(
-        &mut self,
-        panel_id: Uuid,
-        old_tab_id: Option<Uuid>,
-        new_tab_id: Option<Uuid>,
-    ) {
-        if let Some(_old_tab) = old_tab_id {
-            self.panel_to_tab.remove(&panel_id);
-        }
-        if let Some(new_tab) = new_tab_id {
-            self.panel_to_tab.insert(panel_id, new_tab);
-        }
-    }
-
-    // Update indices when a tab is added/removed from a table
-    fn update_tab_table_index(
-        &mut self,
-        tab_id: Uuid,
-        old_table_id: Option<Uuid>,
-        new_table_id: Option<Uuid>,
-    ) {
-        if let Some(_old_table) = old_table_id {
-            self.tab_to_table.remove(&tab_id);
-        }
-        if let Some(new_table) = new_table_id {
-            self.tab_to_table.insert(tab_id, new_table);
-        }
-    }
-
-    // Update indices when a tab is added/removed from a window
-    fn update_tab_window_index(
-        &mut self,
-        tab_id: Uuid,
-        old_window_id: Option<Uuid>,
-        new_window_id: Option<Uuid>,
-    ) {
-        if let Some(_old_window) = old_window_id {
-            self.tab_to_window.remove(&tab_id);
-        }
-        if let Some(new_window) = new_window_id {
-            self.tab_to_window.insert(tab_id, new_window);
-        }
-    }
-}
-
-#[derive(uniffi::Object)]
 struct TablesRepo {
-    fcx: SharedFfiCtx,
-    am: Arc<tokio::sync::RwLock<TablesAm>>,
+    acx: AmCtx,
+    app_doc_id: DocumentId,
+    store: crate::stores::StoreHandle<TablesStore>,
+    // am: Arc<tokio::sync::RwLock<store::TablesStore>>,
     registry: Arc<crate::repos::ListenersRegistry>,
+}
+
+impl crate::repos::Repo for TablesRepo {
+    type Event = TablesEvent;
+    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
+        &self.registry
+    }
 }
 
 // Granular event enum for specific changes
@@ -222,22 +94,29 @@ pub struct TablesPatches {
     pub table_updates: Option<Vec<TablePatch>>,
 }
 
-crate::repo_listeners!(TablesRepo, TablesEvent);
-
 impl TablesRepo {
-    async fn load(fcx: SharedFfiCtx) -> Res<Arc<Self>> {
-        let am = TablesAm::load(&fcx.cx).await?;
-        let am = Arc::new(tokio::sync::RwLock::new(am));
+    async fn load(acx: AmCtx, app_doc_id: DocumentId) -> Res<Self> {
+        let store = TablesStore::load(&acx, &app_doc_id).await?;
+        let mut store = crate::stores::StoreHandle::new(store, (acx.clone(), app_doc_id.clone()));
+        store
+            .mutate(|store| {
+                store.rebuild_indices();
+                async {}
+            })
+            .await?;
+        // Rebuild indices after loading
+        // let am = Arc::new(tokio::sync::RwLock::new(am));
         let registry = crate::repos::ListenersRegistry::new();
 
-        let repo = Arc::new(Self {
-            fcx: fcx.clone(),
-            am,
+        let repo = Self {
+            acx,
+            app_doc_id,
+            store,
             registry: registry.clone(),
-        });
+        };
 
         // Register change listener to automatically notify repo listeners
-        TablesAm::register_change_listener(&fcx.cx, {
+        TablesStore::register_change_listener(&repo.acx, repo.app_doc_id.clone(), {
             let registry = registry.clone();
             move |notifications| {
                 // Analyze notifications to determine which specific events to send
@@ -319,20 +198,23 @@ impl TablesRepo {
 
     // Helper method to find which tab contains a panel using index
     async fn find_tab_for_panel(&self, panel_id: Uuid) -> Option<Uuid> {
-        let am = self.am.read().await;
-        am.panel_to_tab.get(&panel_id).copied()
+        self.store
+            .query_sync(|store| store.panel_to_tab.get(&panel_id).copied())
+            .await
     }
 
     // Helper method to find which table contains a tab using index
     async fn find_table_for_tab(&self, tab_id: Uuid) -> Option<Uuid> {
-        let am = self.am.read().await;
-        am.tab_to_table.get(&tab_id).copied()
+        self.store
+            .query_sync(|store| store.tab_to_table.get(&tab_id).copied())
+            .await
     }
 
     // Helper method to find which window contains a tab using index
     async fn find_window_for_tab(&self, tab_id: Uuid) -> Option<Uuid> {
-        let am = self.am.read().await;
-        am.tab_to_window.get(&tab_id).copied()
+        self.store
+            .query_sync(|store| store.tab_to_window.get(&tab_id).copied())
+            .await
     }
 
     async fn get_window(&self, id: Uuid) -> Res<Option<Window>> {
@@ -352,7 +234,7 @@ impl TablesRepo {
         let new_tabs = val.tabs.clone();
 
         let ret = am.windows.insert(id, val);
-        am.flush(&self.fcx.cx).await?;
+        am.flush(&self.acx, &self.app_doc_id).await?;
 
         // Update tab-to-window index for changed tabs
         for tab_id in &old_tabs {
@@ -393,7 +275,7 @@ impl TablesRepo {
         let new_panels = val.panels.clone();
 
         let ret = am.tabs.insert(id, val);
-        am.flush(&self.fcx.cx).await?;
+        am.flush(&self.acx, &self.app_doc_id).await?;
 
         // Update panel-to-tab index for changed panels
         for panel_id in &old_panels {
@@ -443,7 +325,7 @@ impl TablesRepo {
         let new_tabs = val.tabs.clone();
 
         let ret = am.tables.insert(id, val);
-        am.flush(&self.fcx.cx).await?;
+        am.flush(&self.acx, &self.app_doc_id).await?;
 
         // Update tab-to-table index for changed tabs
         for tab_id in &old_tabs {
@@ -490,7 +372,7 @@ impl TablesRepo {
     async fn set_panel(&self, id: Uuid, val: Panel) -> Res<Option<Panel>> {
         let mut am = self.am.write().await;
         let ret = am.panels.insert(id, val);
-        am.flush(&self.fcx.cx).await?;
+        am.flush(&self.acx, &self.app_doc_id).await?;
 
         // Send cascading events using indices
         self.registry.notify(TablesEvent::PanelChanged { id });
@@ -564,7 +446,7 @@ impl TablesRepo {
         // Rebuild indices after all updates
         am.rebuild_indices();
 
-        am.flush(&self.fcx.cx).await?;
+        am.flush(&self.acx, &self.app_doc_id).await?;
         self.registry.notify(TablesEvent::ListChanged);
         Ok(())
     }
@@ -618,7 +500,7 @@ impl TablesRepo {
         am.tab_to_window.insert(tab_id, window_id);
         am.panel_to_tab.insert(panel_id, tab_id);
 
-        am.flush(&self.fcx.cx).await?;
+        am.flush(&self.acx, &self.app_doc_id).await?;
         self.registry.notify(TablesEvent::ListChanged);
         Ok(())
     }
@@ -687,7 +569,7 @@ impl TablesRepo {
         am.tab_to_window.insert(tab_id, window_id);
         am.panel_to_tab.insert(panel_id, tab_id);
 
-        am.flush(&self.fcx.cx).await?;
+        am.flush(&self.acx, &self.app_doc_id).await?;
         self.registry
             .notify(TablesEvent::TableChanged { id: table_id });
         self.registry.notify(TablesEvent::ListChanged);
@@ -778,7 +660,7 @@ impl TablesRepo {
         am.tab_to_window.insert(tab_id, window_id);
         am.panel_to_tab.insert(panel_id, tab_id);
 
-        am.flush(&self.fcx.cx).await?;
+        am.flush(&self.acx, &self.app_doc_id).await?;
         self.registry
             .notify(TablesEvent::TableChanged { id: table_id });
         self.registry.notify(TablesEvent::ListChanged);
@@ -919,8 +801,23 @@ impl TablesRepo {
     }
 }
 
+#[derive(uniffi::Object)]
+struct TablesRepoFfi {
+    fcx: SharedFfiCtx,
+    repo: TablesRepo,
+}
+
+impl crate::repos::Repo for TablesRepoFfi {
+    type Event = TablesEvent;
+    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
+        &self.repo.registry
+    }
+}
+
+crate::uniffi_repo_listeners!(TablesRepoFfi, TablesEvent);
+
 #[uniffi::export]
-impl TablesRepo {
+impl TablesRepoFfi {
     #[uniffi::constructor]
     #[tracing::instrument(err, skip(fcx))]
     async fn for_ffi(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {

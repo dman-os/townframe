@@ -1,5 +1,30 @@
 use crate::interlude::*;
 
+pub trait Repo {
+    type Event: Send + Sync + 'static;
+
+    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry>;
+
+    fn register_listener<F>(self: &Self, listener: F) -> crate::repos::ListenerRegistration
+    where
+        F: Fn(Arc<Self::Event>) + Send + Sync + 'static,
+    {
+        let id = Uuid::new_v4();
+        {
+            let mut lock = self.registry().list.lock();
+            lock.push((
+                id,
+                ErasedListener::new::<Self::Event>(move |ev| listener(ev)),
+            ));
+        }
+        ListenerRegistration {
+            // strong is dropped here; we only keep Weak to avoid leaks.
+            registry: Arc::downgrade(&self.registry()),
+            id,
+        }
+    }
+}
+
 type ErasedEvent = Arc<dyn std::any::Any + Send + Sync + 'static>;
 
 pub struct ErasedListener {

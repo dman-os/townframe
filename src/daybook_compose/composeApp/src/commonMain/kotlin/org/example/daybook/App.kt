@@ -64,7 +64,7 @@ import org.example.daybook.tables.ExpandedLayout
 import org.example.daybook.tables.MediumLayout
 import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
-import org.example.daybook.uniffi.DrawerRepo
+import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiCtx
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.ListenerRegistration
@@ -100,7 +100,7 @@ data class PermissionsContext(
 }
 
 data class AppContainer(
-    val ffiCtx: FfiCtx, val drawerRepo: DrawerRepo, val tablesRepo: TablesRepo
+    val ffiCtx: FfiCtx, val drawerRepo: DrawerRepoFfi, val tablesRepo: TablesRepo
 )
 
 val LocalContainer = staticCompositionLocalOf<AppContainer> {
@@ -420,8 +420,8 @@ fun App(
     LaunchedEffect(initAttempt) {
         initState = AppInitState.Loading
         val fcx = FfiCtx.forFfi()
-        val drawerRepo = DrawerRepo.forFfi(fcx = fcx)
-        val tablesRepo = TablesRepo.forFfi(fcx = fcx)
+        val drawerRepo = DrawerRepoFfi.load(fcx = fcx)
+        val tablesRepo = TablesRepo.load(fcx = fcx)
         
         // Initialize first-time data if needed
         val tablesViewModel = TablesViewModel(tablesRepo)

@@ -18,7 +18,7 @@ import org.example.daybook.uniffi.Doc
 import org.example.daybook.uniffi.DocContent
 import org.example.daybook.uniffi.DrawerEvent
 import org.example.daybook.uniffi.DrawerEventListener
-import org.example.daybook.uniffi.DrawerRepo
+import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.ListenerRegistration
 import kotlin.time.Clock
@@ -37,7 +37,7 @@ sealed interface DocsListState {
 }
 
 class CaptureScreenViewModel(
-    val drawerRepo: DrawerRepo,
+    val drawerRepo: DrawerRepoFfi,
     val initialMode: CaptureMode = CaptureMode.Text,
     val availableModes: Set<CaptureMode> = setOf(CaptureMode.Text),
 ) : ViewModel() {

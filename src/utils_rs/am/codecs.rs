@@ -33,7 +33,7 @@ pub mod autosurgeon_date {
     }
 }
 
-pub mod automerge_skip {
+pub mod skip {
     use super::*;
     use autosurgeon::{HydrateError, ReadDoc, Reconciler};
 

@@ -18,6 +18,7 @@ pub struct Config {
     pub peer_id: String,
 }
 
+#[derive(Clone)]
 pub struct AmCtx {
     repo: samod::Repo,
     // peer_id: samod::PeerId,
