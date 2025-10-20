@@ -60,6 +60,8 @@ impl RustGenCtx<'_> {
     }
 }
 
+// we use a arced dhasmap since we're cloning this multiple times
+// in with_prefix
 type ExportedTypes = Arc<DHashMap<String, String>>;
 
 struct ExportedTypesAppender {
@@ -222,7 +224,7 @@ fn endpoint_module(
         module_name = AsSnekCase(&epoint.id[..])
     )?;
     {
-        let mut exp = exp.with_prefix(AsKebabCase(&epoint.id[..]), AsSnekCase(&epoint.id[..]));
+        let exp = exp.with_prefix(AsKebabCase(&epoint.id[..]), AsSnekCase(&epoint.id[..]));
 
         let mut out = indenter::indented(buf).with_str("    ");
         let buf = &mut out;
@@ -235,11 +237,11 @@ pub struct {id};"#,
             id = AsPascalCase(&epoint.id[..]),
         )?;
         writeln!(buf)?;
-        output_type(cx, buf, &mut exp, &epoint.output)?;
+        output_type(cx, buf, &exp, &epoint.output)?;
         writeln!(buf)?;
-        input_type(cx, buf, &mut exp, &epoint.input)?;
+        input_type(cx, buf, &exp, &epoint.input)?;
         writeln!(buf)?;
-        error_type(cx, buf, &mut exp, &epoint.error)?;
+        error_type(cx, buf, &exp, &epoint.error)?;
         /*
                 // http_impl(&epoint, reg, buf)?;
                 writeln!(
@@ -451,7 +453,7 @@ fn schema_enum(
     pub unsafe fn _lift(val:u8) -> {rust_name} {{
         if !cfg!(debug_assertions){{
             return unsafe {{
-                ::core::mem::transmute(val)
+                ::core::mem::transmute::<u8, {rust_name}>(val)
             }};
         }}
         match val {{
@@ -621,10 +623,9 @@ fn input_type(
                     }
                 }
 
-                if !schema_attrs.is_empty()
-                    && cx.attrs.utoipa {
-                        writeln!(buf, "#[schema({})]", schema_attrs.join(", "))?;
-                    }
+                if !schema_attrs.is_empty() && cx.attrs.utoipa {
+                    writeln!(buf, "#[schema({})]", schema_attrs.join(", "))?;
+                }
             }
             if cx.attrs.garde {
                 // Add garde validation attributes
@@ -670,10 +671,9 @@ fn input_type(
                 }
             }
 
-            if cx.attrs.serde
-                && field.source != this.main_source {
-                    writeln!(buf, "#[serde(skip)]")?;
-                }
+            if cx.attrs.serde && field.source != this.main_source {
+                writeln!(buf, "#[serde(skip)]")?;
+            }
 
             // Write the field definition
             record_field(&field.inner, cx, buf, field_name, true)?;
@@ -844,7 +844,8 @@ fn record_field(
         .types
         .get(&this.ty)
         .as_deref()
-        .expect("unregistered field type") {
+        .expect("unregistered field type")
+    {
         // Emit autosurgeon date helper at field-level when the parent record requested autosurgeon
         if cx.attrs.automerge {
             if cx.attrs.serde {

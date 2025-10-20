@@ -38,6 +38,8 @@ mod interlude {
     pub use tracing::{self, debug, error, info, trace, warn};
     pub use tracing_futures::Instrument;
     pub use tracing_unwrap::*;
+
+    pub use futures::FutureExt;
 }
 
 use crate::interlude::*;

@@ -1,6 +1,5 @@
 use crate::interlude::*;
 
-
 fn fixture_request_json() -> serde_json::Value {
     serde_json::json!({
         "id": "123",

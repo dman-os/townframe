@@ -21,6 +21,7 @@ uniffi::setup_scaffolding!();
 mod am;
 mod drawer;
 mod ffi;
+#[allow(unused)]
 mod gen;
 mod globals;
 mod macros;
@@ -123,11 +124,11 @@ impl Ctx {
     }
 
     fn doc_app(&self) -> &samod::DocHandle {
-        &self.doc_app.get().expect("ctx was not initialized")
+        self.doc_app.get().expect("ctx was not initialized")
     }
 
     fn doc_drawer(&self) -> &samod::DocHandle {
-        &self.doc_drawer.get().expect("ctx was not initialized")
+        self.doc_drawer.get().expect("ctx was not initialized")
     }
 }
 

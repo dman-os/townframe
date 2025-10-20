@@ -5,21 +5,18 @@ pub trait Repo {
 
     fn registry(&self) -> &Arc<crate::repos::ListenersRegistry>;
 
-    fn register_listener<F>(self: &Self, listener: F) -> crate::repos::ListenerRegistration
+    fn register_listener<F>(&self, listener: F) -> crate::repos::ListenerRegistration
     where
         F: Fn(Arc<Self::Event>) + Send + Sync + 'static,
     {
         let id = Uuid::new_v4();
         {
             let mut lock = self.registry().list.lock();
-            lock.push((
-                id,
-                ErasedListener::new::<Self::Event>(move |ev| listener(ev)),
-            ));
+            lock.push((id, ErasedListener::new::<Self::Event>(listener)));
         }
         ListenerRegistration {
             // strong is dropped here; we only keep Weak to avoid leaks.
-            registry: Arc::downgrade(&self.registry()),
+            registry: Arc::downgrade(self.registry()),
             id,
         }
     }
@@ -51,6 +48,7 @@ impl ErasedListener {
 
 pub struct ListenersRegistry {
     // Maintain weak references to listeners to avoid leaks.
+    // WARN: sync mutex, take care
     pub list: parking_lot::Mutex<Vec<(Uuid, ErasedListener)>>,
 }
 

@@ -42,7 +42,7 @@ pub mod doc {
     impl DocKind {
         pub unsafe fn _lift(val: u8) -> DocKind {
             if !cfg!(debug_assertions) {
-                return unsafe { ::core::mem::transmute(val) };
+                return unsafe { ::core::mem::transmute::<u8, DocKind>(val) };
             }
             match val {
                 0 => DocKind::Text,
@@ -73,7 +73,7 @@ pub mod doc {
     impl DocTagKind {
         pub unsafe fn _lift(val: u8) -> DocTagKind {
             if !cfg!(debug_assertions) {
-                return unsafe { ::core::mem::transmute(val) };
+                return unsafe { ::core::mem::transmute::<u8, DocTagKind>(val) };
             }
             match val {
                 0 => DocTagKind::RefGeneric,
