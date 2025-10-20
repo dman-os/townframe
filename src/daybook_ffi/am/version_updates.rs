@@ -6,7 +6,7 @@ use autosurgeon::reconcile_prop;
 pub mod app {
     use super::*;
 
-    use crate::tables::TablesStore;
+    use daybook_core::tables::TablesStore;
 
     pub fn version_latest() -> Res<Vec<u8>> {
         let mut doc = AutoCommit::new().with_actor(ActorId::random());
@@ -21,7 +21,7 @@ pub mod app {
 pub mod drawer {
     use super::*;
 
-    use crate::drawer::DrawerStore;
+    use daybook_core::drawer::DrawerStore;
 
     pub fn version_latest() -> Res<Vec<u8>> {
         let mut doc = AutoCommit::new().with_actor(ActorId::random());

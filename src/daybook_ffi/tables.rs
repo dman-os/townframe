@@ -1,4 +1,8 @@
-use super::*;
+use crate::interlude::*;
+
+use crate::ffi::{FfiError, SharedFfiCtx};
+
+use daybook_core::tables::{Panel, Tab, Table, TablesEvent, TablesPatches, TablesRepo, Window};
 
 #[derive(uniffi::Object)]
 struct TablesRepoFfi {
@@ -6,9 +10,9 @@ struct TablesRepoFfi {
     repo: TablesRepo,
 }
 
-impl crate::repos::Repo for TablesRepoFfi {
+impl daybook_core::repos::Repo for TablesRepoFfi {
     type Event = TablesEvent;
-    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
+    fn registry(&self) -> &Arc<daybook_core::repos::ListenersRegistry> {
         &self.repo.registry
     }
 }
@@ -32,7 +36,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn ffi_get_window(self: Arc<Self>, id: Uuid) -> Option<Window> {
+    async fn get_window(self: Arc<Self>, id: Uuid) -> Option<Window> {
         let this = self.clone();
         self.fcx
             .do_on_rt(async move { this.repo.get_window(id).await })
@@ -40,7 +44,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self, window))]
-    async fn ffi_set_window(
+    async fn set_window(
         self: Arc<Self>,
         id: Uuid,
         window: Window,
@@ -54,7 +58,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_list_windows(self: Arc<Self>) -> Result<Vec<Window>, FfiError> {
+    async fn list_windows(self: Arc<Self>) -> Result<Vec<Window>, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
@@ -64,7 +68,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_get_tab(self: Arc<Self>, id: Uuid) -> Result<Option<Tab>, FfiError> {
+    async fn get_tab(self: Arc<Self>, id: Uuid) -> Result<Option<Tab>, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
@@ -74,7 +78,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self, tab))]
-    async fn ffi_set_tab(self: Arc<Self>, id: Uuid, tab: Tab) -> Result<Option<Tab>, FfiError> {
+    async fn set_tab(self: Arc<Self>, id: Uuid, tab: Tab) -> Result<Option<Tab>, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
@@ -84,7 +88,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_list_tabs(self: Arc<Self>) -> Result<Vec<Tab>, FfiError> {
+    async fn list_tabs(self: Arc<Self>) -> Result<Vec<Tab>, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
@@ -94,7 +98,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn ffi_get_panel(self: Arc<Self>, id: Uuid) -> Option<Panel> {
+    async fn get_panel(self: Arc<Self>, id: Uuid) -> Option<Panel> {
         let this = self.clone();
         self.fcx
             .do_on_rt(async move { this.repo.get_panel(id).await })
@@ -102,11 +106,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self, panel))]
-    async fn ffi_set_panel(
-        self: Arc<Self>,
-        id: Uuid,
-        panel: Panel,
-    ) -> Result<Option<Panel>, FfiError> {
+    async fn set_panel(self: Arc<Self>, id: Uuid, panel: Panel) -> Result<Option<Panel>, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
@@ -116,7 +116,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_list_panels(self: Arc<Self>) -> Result<Vec<Panel>, FfiError> {
+    async fn list_panels(self: Arc<Self>) -> Result<Vec<Panel>, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
@@ -126,7 +126,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_get_table(self: Arc<Self>, id: Uuid) -> Result<Option<Table>, FfiError> {
+    async fn get_table(self: Arc<Self>, id: Uuid) -> Result<Option<Table>, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
@@ -136,11 +136,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self, table))]
-    async fn ffi_set_table(
-        self: Arc<Self>,
-        id: Uuid,
-        table: Table,
-    ) -> Result<Option<Table>, FfiError> {
+    async fn set_table(self: Arc<Self>, id: Uuid, table: Table) -> Result<Option<Table>, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
@@ -150,7 +146,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_list_tables(self: Arc<Self>) -> Result<Vec<Table>, FfiError> {
+    async fn list_tables(self: Arc<Self>) -> Result<Vec<Table>, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
@@ -160,7 +156,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_get_selected_table(self: Arc<Self>) -> Result<Option<Table>, FfiError> {
+    async fn get_selected_table(self: Arc<Self>) -> Result<Option<Table>, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
@@ -170,7 +166,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self, patches))]
-    async fn ffi_update_batch(self: Arc<Self>, patches: TablesPatches) -> Result<(), FfiError> {
+    async fn update_batch(self: Arc<Self>, patches: TablesPatches) -> Result<(), FfiError> {
         let this = self.clone();
         self.fcx
             .do_on_rt(async move { this.repo.update_batch(patches).await })
@@ -179,7 +175,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_create_new_table(self: Arc<Self>) -> Result<Uuid, FfiError> {
+    async fn create_new_table(self: Arc<Self>) -> Result<Uuid, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
@@ -189,7 +185,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_create_new_tab(self: Arc<Self>, table_id: Uuid) -> Result<Uuid, FfiError> {
+    async fn create_new_tab(self: Arc<Self>, table_id: Uuid) -> Result<Uuid, FfiError> {
         let this = self.clone();
         let out = self
             .fcx
@@ -199,7 +195,7 @@ impl TablesRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_remove_tab(self: Arc<Self>, tab_id: Uuid) -> Result<(), FfiError> {
+    async fn remove_tab(self: Arc<Self>, tab_id: Uuid) -> Result<(), FfiError> {
         let this = self.clone();
         self.fcx
             .do_on_rt(async move { this.repo.remove_tab(tab_id).await })

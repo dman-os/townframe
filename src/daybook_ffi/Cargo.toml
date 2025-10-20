@@ -1,19 +1,22 @@
 [package]
-name = "daybook_core"
+name = "daybook_ffi"
 version.workspace = true
 edition.workspace = true
 
-[lib]
-name = "daybook_core"
-path = "lib.rs"
+[[bin]]
+# This can be whatever name makes sense for your project, but the rest of this tutorial assumes uniffi-bindgen.
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
 
-[features]
-default = ["uniffi"]
-uniffi = ["dep:uniffi"]
+[lib]
+crate-type = ["cdylib"]
+name = "daybook_ffi"
+path = "lib.rs"
 
 [dependencies]
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
+daybook_core = { workspace = true, features = ["uniffi"] }
 
 # serde
 serde.workspace = true
@@ -59,8 +62,8 @@ sqlx = { workspace = true, features = ["sqlite"] }
 pastey = "0.1"
 struct-patch = "0.10.4"
 directories = "6.0.0"
-async-trait.workspace = true
 
 [build-dependencies]
-uniffi = { workspace = true, features = [ "build" ], optional = true }
+uniffi = { workspace = true, features = [ "build" ] }
 
+[features]

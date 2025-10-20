@@ -8,13 +8,15 @@ Repo guide:
 
   - Confirmed to run on desktop and android.
 
-- `./src/daybook_core/`: Rust core for daybook app.
+- `./src/daybook_ffi/`: Rust core for daybook app.
 
   - Accessed in Kotlin through [uniffi](https://lib.rs/uniffi).
 
     - Use ghjk task `gen-ffi-dayb` to re-generate the bindings and build the library.
 
   - Uses automerge (throug [`samod`](https://lib.rs/samod)) and SQLite (through [`sqlx`](https://lib.rs/sqlx)) for storage.
+
+- `./src/daybook_core/`: Shared code for daybook app and servers.
 
 - `./src/daybook_sync/`: Automerge sync server for daybook.
 

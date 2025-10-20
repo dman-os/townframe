@@ -35,11 +35,14 @@ pub mod doc {
         Image,
     }
     impl DocKind {
-        pub unsafe fn _lift(val: u8) -> DocKind {
-            if !cfg!(debug_assertions) {
-                return unsafe { ::core::mem::transmute::<u8, DocKind>(val) };
+        pub unsafe fn _lift(val:u8) -> DocKind {
+            if !cfg!(debug_assertions){
+                return unsafe {
+                    ::core::mem::transmute::<u8, DocKind>(val)
+                };
             }
             match val {
+
                 0 => DocKind::Text,
                 1 => DocKind::Blob,
                 2 => DocKind::Image,
@@ -49,12 +52,13 @@ pub mod doc {
         }
     }
 
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", untagged)]
     pub enum DocContent {
-        Text(String),
-        Blob(DocBlob),
-        Image(DocImage),
+        Text(String), 
+        Blob(DocBlob), 
+        Image(DocImage), 
     }
 
     pub type DocRef = DocId;
@@ -66,11 +70,14 @@ pub mod doc {
         LabelGeneric,
     }
     impl DocTagKind {
-        pub unsafe fn _lift(val: u8) -> DocTagKind {
-            if !cfg!(debug_assertions) {
-                return unsafe { ::core::mem::transmute::<u8, DocTagKind>(val) };
+        pub unsafe fn _lift(val:u8) -> DocTagKind {
+            if !cfg!(debug_assertions){
+                return unsafe {
+                    ::core::mem::transmute::<u8, DocTagKind>(val)
+                };
             }
             match val {
+
                 0 => DocTagKind::RefGeneric,
                 1 => DocTagKind::LabelGeneric,
 
@@ -79,12 +86,13 @@ pub mod doc {
         }
     }
 
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", untagged)]
     pub enum DocTag {
         /// A link to another document.
-        RefGeneric(DocRef),
-        LabelGeneric(String),
+        RefGeneric(DocRef), 
+        LabelGeneric(String), 
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,4 +145,5 @@ pub mod doc {
             Internal(#[from] ErrorInternal),
         }
     }
+
 }

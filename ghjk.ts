@@ -412,15 +412,15 @@ ghjk.task(
 
 ghjk.task(
   "gen-ffi-dayb",
-  ($) => $`cargo build -p daybook_core 
+  ($) => $`cargo build -p daybook_ffi 
     && cargo run 
-      -p daybook_core 
-      generate --library ${$.workingDir.join("./target/debug/libdaybook_core.so")}
+      -p daybook_ffi 
+      generate --library ${$.workingDir.join("./target/debug/libdaybook_ffi.so")}
       --language kotlin 
       --out-dir ${$.workingDir.join("./src/daybook_compose/composeApp/src/commonMain/kotlin/")}
       --no-format`,
   {
-    desc: "Generate uniffi kotlin bindings for the daybook_core crate",
+    desc: "Generate uniffi kotlin bindings for the daybook_ffi crate",
   },
 );
 

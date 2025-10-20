@@ -360,24 +360,24 @@ fn schema_record(
         derives.push("Deserialize");
     }
     // only records get autosurgeon/automerge derives
-    if cx.attrs.uniffi {
-        derives.push("uniffi::Record");
-    }
     writeln!(buf, "#[derive({})]", derives.join(", "))?;
+    if cx.attrs.uniffi {
+        writeln!(buf, "#[cfg_attr(feature = \"uniffi\", derive(uniffi::Record))]")?;
+    }
     if cx.attrs.serde {
         writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
     }
     if cx.attrs.patch {
         // emit patch attribute so generated Patch types derive the desired attributes for patches
         let mut patch_parts: Vec<&str> = vec!["Debug", "Default"];
-        if cx.attrs.uniffi {
-            patch_parts.push("uniffi::Record");
-        }
         writeln!(
             buf,
             "#[patch(attribute(derive({})))]",
             patch_parts.join(", ")
         )?;
+        if cx.attrs.uniffi {
+            writeln!(buf, "#[cfg_attr(feature = \"uniffi\", patch(attribute(derive(uniffi::Record))))]")?;
+        }
     }
     writeln!(
         buf,
@@ -422,13 +422,13 @@ fn schema_enum(
         derives.push("Serialize");
         derives.push("Deserialize");
     }
-    if cx.attrs.uniffi {
-        derives.push("uniffi::Enum");
-    }
     if cx.attrs.patch {
         derives.push("PartialEq");
     }
     writeln!(buf, "#[derive({})]", derives.join(", "))?;
+    if cx.attrs.uniffi {
+        writeln!(buf, "#[cfg_attr(feature = \"uniffi\", derive(uniffi::Enum))]")?;
+    }
     if cx.attrs.serde {
         writeln!(buf, "#[serde(rename_all = \"camelCase\", untagged)]")?;
     }
@@ -506,10 +506,10 @@ fn schema_variant(
     if cx.attrs.patch {
         derives.push("PartialEq");
     }
-    if cx.attrs.uniffi {
-        derives.push("uniffi::Enum");
-    }
     writeln!(buf, "#[derive({})]", derives.join(", "))?;
+    if cx.attrs.uniffi {
+        writeln!(buf, "#[cfg_attr(feature = \"uniffi\", derive(uniffi::Enum))]")?;
+    }
     if cx.attrs.serde {
         writeln!(buf, "#[serde(rename_all = \"camelCase\", untagged)]")?;
     }

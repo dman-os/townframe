@@ -85,9 +85,9 @@ import org.example.daybook.LocalContainer
 import org.example.daybook.Routes
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
-import org.example.daybook.uniffi.Tab
-import org.example.daybook.uniffi.Table
-import org.example.daybook.uniffi.Uuid
+import org.example.daybook.uniffi.core.Tab
+import org.example.daybook.uniffi.core.Table
+import org.example.daybook.uniffi.core.Uuid
 
 // ViewModel-based hover-hold controller for abstracting the hover-to-create pattern
 class HoverHoldControllerViewModel : androidx.lifecycle.ViewModel() {
@@ -285,10 +285,10 @@ fun CompactLayout(
                         if (sel != null) {
                             val res = vm.createNewTab(sel.id)
                             if (res.isSuccess) {
-                                val newTab = res.getOrNull()
-                                if (newTab != null) {
+                                val newTabId = res.getOrNull()
+                                if (newTabId != null) {
                                     isSheetManuallyOpened = !isSheetManuallyOpened
-                                    vm.selectTab(newTab.id)
+                                    vm.selectTab(newTabId)
                                 }
                             }
                         }
@@ -449,9 +449,9 @@ fun CompactLayout(
                         if (sel != null) {
                             val res = vm.createNewTab(sel.id)
                             if (res.isSuccess) {
-                                val newTab = res.getOrNull()
-                                if (newTab != null) {
-                                    vm.selectTab(newTab.id)
+                                val newTabId = res.getOrNull()
+                                if (newTabId != null) {
+                                    vm.selectTab(newTabId)
                                     // didActivate = true  (revert: keep original close behavior)
                                 }
                             }

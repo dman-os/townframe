@@ -1,5 +1,5 @@
 [bindings.kotlin]
-package_name = "org.example.daybook.uniffi.core"
+package_name = "org.example.daybook.uniffi"
 
 [bindings.kotlin.custom_types.OffsetDateTime]
 # Name of the type in the Kotlin code

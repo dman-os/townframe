@@ -23,8 +23,8 @@ macro_rules! uniffi_repo_listeners {
                 fn ffi_register_listener(
                     self: Arc<Self>,
                     listener: Arc<dyn [<$t_event Listener>]>,
-                ) -> Arc<$crate::repos::ListenerRegistration> {
-                    use $crate::repos::Repo;
+                ) -> Arc<daybook_core::repos::ListenerRegistration> {
+                    use daybook_core::repos::Repo;
                     let ticket =self.register_listener(
                         move |ev| {
                             listener.[<on_ $t_event:snake>]($t_event::clone(&ev))

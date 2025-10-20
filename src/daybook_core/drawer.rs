@@ -3,12 +3,8 @@ use utils_rs::am::AmCtx;
 
 use crate::interlude::*;
 
-use crate::ffi::{FfiError, SharedFfiCtx};
-
 use crate::gen::doc::{Doc, DocId, DocPatch};
 use std::str::FromStr;
-
-mod ffi;
 
 #[derive(Default, Reconcile, Hydrate)]
 pub struct DrawerStore {
@@ -48,6 +44,7 @@ impl DrawerStore {
     }
 }
 
+#[async_trait::async_trait]
 impl crate::stores::Store for DrawerStore {
     type FlushArgs = (AmCtx, DocumentId);
 
@@ -57,24 +54,25 @@ impl crate::stores::Store for DrawerStore {
     }
 }
 
-struct DrawerRepo {
+pub struct DrawerRepo {
     // drawer_doc_id: DocumentId,
     acx: AmCtx,
     store: crate::stores::StoreHandle<DrawerStore>,
     // in-memory cache of document handles
     handles: Arc<DHashMap<DocId, samod::DocHandle>>,
     cache: Arc<DHashMap<DocId, Doc>>,
-    registry: Arc<crate::repos::ListenersRegistry>,
+    pub registry: Arc<crate::repos::ListenersRegistry>,
 }
 
 // Minimal event enum so Kotlin can refresh via ffiList on changes
-#[derive(Debug, Clone, uniffi::Enum)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum DrawerEvent {
     ListChanged,
 }
 
 impl DrawerRepo {
-    async fn load(acx: AmCtx, drawer_doc_id: DocumentId) -> Res<Self> {
+    pub async fn load(acx: AmCtx, drawer_doc_id: DocumentId) -> Res<Self> {
         let registry = crate::repos::ListenersRegistry::new();
 
         DrawerStore::register_change_listener(&acx, drawer_doc_id.clone(), {
@@ -103,7 +101,7 @@ impl DrawerRepo {
 
     // NOTE: old contains/insert/remove removed. Use add/get/update/del instead.
 
-    async fn list(&self) -> Vec<DocId> {
+    pub async fn list(&self) -> Vec<DocId> {
         self.store
             .query_sync(|store| store.map.keys().cloned().collect())
             .await
@@ -111,7 +109,7 @@ impl DrawerRepo {
 
     // Create a new doc (Automerge), reconcile the provided `Doc` into it, store and cache handle,
     // and add its id to the drawer set.
-    async fn add(&self, mut new_doc: Doc) -> Res<DocId> {
+    pub async fn add(&self, mut new_doc: Doc) -> Res<DocId> {
         // Use AutoCommit for reconciliation
         let handle = self.acx.add_doc(automerge::Automerge::new()).await?;
 
@@ -180,7 +178,7 @@ impl DrawerRepo {
     }
 
     // Get a Doc by id by hydrating its automerge document
-    async fn get(&self, id: DocId) -> Res<Option<Doc>> {
+    pub async fn get(&self, id: DocId) -> Res<Option<Doc>> {
         if let Some(cached) = self.cache.get(&id) {
             return Ok(Some(cached.clone()));
         }
@@ -238,7 +236,7 @@ impl DrawerRepo {
     }
 
     /// Apply a batch of patches to documents. Each patch must include the target `id`.
-    async fn update_batch(&self, docs: Vec<DocPatch>) -> Res<()> {
+    pub async fn update_batch(&self, docs: Vec<DocPatch>) -> Res<()> {
         use futures::StreamExt;
         let mut stream =
             futures::stream::iter(docs.into_iter().enumerate().map(|(ii, patch)| async move {
@@ -266,7 +264,7 @@ impl DrawerRepo {
     }
 
     // Delete: evict from drawer and cache (document remains in repo for now)
-    async fn del(&self, id: DocId) -> Res<bool> {
+    pub async fn del(&self, id: DocId) -> Res<bool> {
         let doc_key = id.clone();
         let existed = self
             .store

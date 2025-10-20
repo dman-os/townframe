@@ -1,15 +1,12 @@
 use samod::DocumentId;
 use utils_rs::am::AmCtx;
 
-mod ffi;
+use crate::interlude::*;
 
-use crate::{
-    ffi::{FfiError, SharedFfiCtx},
-    interlude::*,
-};
-
-#[derive(Debug, Clone, Reconcile, Hydrate, uniffi::Record, Patch, PartialEq)]
-#[patch(attribute(derive(Debug, Default, uniffi::Record)))]
+#[derive(Debug, Clone, Reconcile, Hydrate, Patch, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[patch(attribute(derive(Debug, Default)))]
+#[cfg_attr(feature = "uniffi", patch(attribute(derive(uniffi::Record))))]
 pub struct Window {
     #[key]
     pub id: Uuid,
@@ -18,8 +15,10 @@ pub struct Window {
     pub selected_table: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate, uniffi::Record, PartialEq, Patch)]
-#[patch(attribute(derive(Debug, Default, uniffi::Record)))]
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Patch)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[patch(attribute(derive(Debug, Default)))]
+#[cfg_attr(feature = "uniffi", patch(attribute(derive(uniffi::Record))))]
 pub struct Table {
     #[key]
     pub id: Uuid,
@@ -29,7 +28,8 @@ pub struct Table {
     pub selected_tab: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate, Default, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, Reconcile, Hydrate, Default, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum TableWindow {
     #[default]
     AllWindows,
@@ -38,8 +38,10 @@ pub enum TableWindow {
     },
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate, uniffi::Record, Patch, PartialEq)]
-#[patch(attribute(derive(Debug, Default, uniffi::Record)))]
+#[derive(Debug, Clone, Reconcile, Hydrate, Patch, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[patch(attribute(derive(Debug, Default)))]
+#[cfg_attr(feature = "uniffi", patch(attribute(derive(uniffi::Record))))]
 pub struct Tab {
     #[key]
     pub id: Uuid,
@@ -48,8 +50,10 @@ pub struct Tab {
     pub selected_panel: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate, uniffi::Record, Patch, PartialEq)]
-#[patch(attribute(derive(Debug, Default, uniffi::Record)))]
+#[derive(Debug, Clone, Reconcile, Hydrate, Patch, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[patch(attribute(derive(Debug, Default)))]
+#[cfg_attr(feature = "uniffi", patch(attribute(derive(uniffi::Record))))]
 pub struct Panel {
     #[key]
     pub id: Uuid,
@@ -76,6 +80,7 @@ pub struct TablesStore {
     pub tab_to_window: HashMap<Uuid, Uuid>, // tab_id -> window_id
 }
 
+#[async_trait::async_trait]
 impl crate::stores::Store for TablesStore {
     type FlushArgs = (AmCtx, DocumentId);
 
@@ -239,9 +244,9 @@ impl TablesStore {
     }
 }
 
-struct TablesRepo {
+pub struct TablesRepo {
     store: crate::stores::StoreHandle<TablesStore>,
-    registry: Arc<crate::repos::ListenersRegistry>,
+    pub registry: Arc<crate::repos::ListenersRegistry>,
 }
 
 impl crate::repos::Repo for TablesRepo {
@@ -270,9 +275,7 @@ pub struct TablesPatches {
 }
 
 impl TablesRepo {
-    async fn load(acx: AmCtx, app_doc_id: DocumentId) -> Res<Self> {
-        // Rebuild indices after loading
-        // let am = Arc::new(tokio::sync::RwLock::new(am));
+    pub async fn load(acx: AmCtx, app_doc_id: DocumentId) -> Res<Self> {
         let registry = crate::repos::ListenersRegistry::new();
 
         // Register change listener to automatically notify repo listeners
@@ -390,13 +393,13 @@ impl TablesRepo {
             .await
     }
 
-    async fn get_window(&self, id: Uuid) -> Option<Window> {
+    pub async fn get_window(&self, id: Uuid) -> Option<Window> {
         self.store
             .query_sync(|store| store.windows.get(&id).cloned())
             .await
     }
 
-    async fn set_window(&self, id: Uuid, val: Window) -> Res<Option<Window>> {
+    pub async fn set_window(&self, id: Uuid, val: Window) -> Res<Option<Window>> {
         self.store
             .mutate_sync(|store| {
                 let old_window = store.windows.get(&id).cloned();
@@ -425,7 +428,7 @@ impl TablesRepo {
             .await
     }
 
-    async fn list_windows(&self) -> Res<Vec<Window>> {
+    pub async fn list_windows(&self) -> Res<Vec<Window>> {
         let out = self
             .store
             .query_sync(|store| store.windows.values().cloned().collect())
@@ -433,7 +436,7 @@ impl TablesRepo {
         Ok(out)
     }
 
-    async fn get_tab(&self, id: Uuid) -> Res<Option<Tab>> {
+    pub async fn get_tab(&self, id: Uuid) -> Res<Option<Tab>> {
         let out = self
             .store
             .query_sync(|store| store.tabs.get(&id).cloned())
@@ -441,7 +444,7 @@ impl TablesRepo {
         Ok(out)
     }
 
-    async fn set_tab(&self, id: Uuid, val: Tab) -> Res<Option<Tab>> {
+    pub async fn set_tab(&self, id: Uuid, val: Tab) -> Res<Option<Tab>> {
         let old = self
             .store
             .mutate_sync(|store| {
@@ -481,7 +484,7 @@ impl TablesRepo {
         Ok(old)
     }
 
-    async fn list_tab(&self) -> Res<Vec<Tab>> {
+    pub async fn list_tab(&self) -> Res<Vec<Tab>> {
         let out = self
             .store
             .query_sync(|store| store.tabs.values().cloned().collect())
@@ -489,7 +492,7 @@ impl TablesRepo {
         Ok(out)
     }
 
-    async fn get_table(&self, id: Uuid) -> Res<Option<Table>> {
+    pub async fn get_table(&self, id: Uuid) -> Res<Option<Table>> {
         let out = self
             .store
             .query_sync(|store| store.tables.get(&id).cloned())
@@ -497,7 +500,7 @@ impl TablesRepo {
         Ok(out)
     }
 
-    async fn set_table(&self, id: Uuid, val: Table) -> Res<Option<Table>> {
+    pub async fn set_table(&self, id: Uuid, val: Table) -> Res<Option<Table>> {
         let old = self
             .store
             .mutate_sync(|store| {
@@ -551,7 +554,7 @@ impl TablesRepo {
         Ok(old)
     }
 
-    async fn list_tables(&self) -> Res<Vec<Table>> {
+    pub async fn list_tables(&self) -> Res<Vec<Table>> {
         let tables = self
             .store
             .mutate_sync(|store| {
@@ -568,13 +571,13 @@ impl TablesRepo {
         Ok(tables)
     }
 
-    async fn get_panel(&self, id: Uuid) -> Option<Panel> {
+    pub async fn get_panel(&self, id: Uuid) -> Option<Panel> {
         self.store
             .query_sync(|store| store.panels.get(&id).cloned())
             .await
     }
 
-    async fn set_panel(&self, id: Uuid, val: Panel) -> Res<Option<Panel>> {
+    pub async fn set_panel(&self, id: Uuid, val: Panel) -> Res<Option<Panel>> {
         let old = self
             .store
             .mutate_sync(|store| store.panels.insert(id, val))
@@ -597,7 +600,7 @@ impl TablesRepo {
         Ok(old)
     }
 
-    async fn list_panel(&self) -> Res<Vec<Panel>> {
+    pub async fn list_panel(&self) -> Res<Vec<Panel>> {
         let out = self
             .store
             .query_sync(|store| store.panels.values().cloned().collect())
@@ -605,7 +608,7 @@ impl TablesRepo {
         Ok(out)
     }
 
-    async fn update_batch(&self, patches: TablesPatches) -> Res<()> {
+    pub async fn update_batch(&self, patches: TablesPatches) -> Res<()> {
         // Move patches into the closure to avoid cloning non-cloneable patch types
         self.store
             .mutate_sync(move |store| {
@@ -663,7 +666,7 @@ impl TablesRepo {
     }
 
     // Get the selected table from the first window
-    async fn get_selected_table(&self) -> Res<Option<Table>> {
+    pub async fn get_selected_table(&self) -> Res<Option<Table>> {
         let out = self
             .store
             .query_sync(|store| {
@@ -684,7 +687,7 @@ impl TablesRepo {
     }
 
     // Create a new table with a default tab and panel
-    async fn create_new_table(&self) -> Res<Uuid> {
+    pub async fn create_new_table(&self) -> Res<Uuid> {
         let table_id = self
             .store
             .mutate_sync(|store| {
@@ -759,7 +762,7 @@ impl TablesRepo {
     }
 
     // Create a new tab for an existing table
-    async fn create_new_tab(&self, table_id: Uuid) -> Res<Uuid> {
+    pub async fn create_new_tab(&self, table_id: Uuid) -> Res<Uuid> {
         // Single lock: use try_mutate so we can return errors inside the closure
         let tab_id = self
             .store
@@ -834,7 +837,7 @@ impl TablesRepo {
     }
 
     // Remove a tab and its panel
-    async fn remove_tab(&self, tab_id: Uuid) -> Res<()> {
+    pub async fn remove_tab(&self, tab_id: Uuid) -> Res<()> {
         // Single lock: read and mutate inside try_mutate to avoid double-lock
         let table_id = self
             .store

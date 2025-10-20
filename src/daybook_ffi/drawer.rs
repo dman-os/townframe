@@ -1,4 +1,9 @@
-use super::*;
+use crate::interlude::*;
+
+use crate::ffi::{FfiError, SharedFfiCtx};
+
+use daybook_core::drawer::{DrawerEvent, DrawerRepo};
+use daybook_core::gen::doc::{Doc, DocId, DocPatch};
 
 #[derive(uniffi::Object)]
 struct DrawerRepoFfi {
@@ -6,9 +11,9 @@ struct DrawerRepoFfi {
     repo: DrawerRepo,
 }
 
-impl crate::repos::Repo for DrawerRepoFfi {
+impl daybook_core::repos::Repo for DrawerRepoFfi {
     type Event = DrawerEvent;
-    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
+    fn registry(&self) -> &Arc<daybook_core::repos::ListenersRegistry> {
         &self.repo.registry
     }
 }
@@ -33,7 +38,7 @@ impl DrawerRepoFfi {
 
     // old FFI wrappers for contains/insert/remove removed; use `ffi_get`, `ffi_add`, `ffi_update`, `ffi_del` instead
     #[tracing::instrument(skip(self))]
-    async fn ffi_list(self: Arc<Self>) -> Vec<DocId> {
+    async fn list(self: Arc<Self>) -> Vec<DocId> {
         let this = self.clone();
         self.fcx
             .do_on_rt(async move { this.repo.list().await })
@@ -41,7 +46,7 @@ impl DrawerRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_get(self: Arc<Self>, id: DocId) -> Result<Option<Doc>, FfiError> {
+    async fn get(self: Arc<Self>, id: DocId) -> Result<Option<Doc>, FfiError> {
         let this = self.clone();
         Ok(self
             .fcx
@@ -50,7 +55,7 @@ impl DrawerRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_add(self: Arc<Self>, doc: Doc) -> Result<DocId, FfiError> {
+    async fn add(self: Arc<Self>, doc: Doc) -> Result<DocId, FfiError> {
         let this = self.clone();
         Ok(self
             .fcx
@@ -61,7 +66,7 @@ impl DrawerRepoFfi {
     // singular update removed; expose batch-only API
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_update_batch(self: Arc<Self>, docs: Vec<DocPatch>) -> Result<(), FfiError> {
+    async fn update_batch(self: Arc<Self>, docs: Vec<DocPatch>) -> Result<(), FfiError> {
         let this = self.clone();
         Ok(self
             .fcx
@@ -70,7 +75,7 @@ impl DrawerRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn ffi_del(self: Arc<Self>, id: DocId) -> Result<bool, FfiError> {
+    async fn del(self: Arc<Self>, id: DocId) -> Result<bool, FfiError> {
         let this = self.clone();
         Ok(self
             .fcx

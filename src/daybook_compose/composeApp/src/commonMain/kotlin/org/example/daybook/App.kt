@@ -1,5 +1,7 @@
 @file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)
 
+// FIXME: remove usage of Result
+
 package org.example.daybook
 
 import androidx.compose.animation.AnimatedVisibility
@@ -67,15 +69,15 @@ import org.example.daybook.theme.ThemeConfig
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiCtx
 import org.example.daybook.uniffi.FfiException
-import org.example.daybook.uniffi.ListenerRegistration
-import org.example.daybook.uniffi.Panel
-import org.example.daybook.uniffi.Tab
-import org.example.daybook.uniffi.Table
-import org.example.daybook.uniffi.TablesEvent
 import org.example.daybook.uniffi.TablesEventListener
-import org.example.daybook.uniffi.TablesRepo
-import org.example.daybook.uniffi.Uuid
-import org.example.daybook.uniffi.Window
+import org.example.daybook.uniffi.TablesRepoFfi
+import org.example.daybook.uniffi.core.ListenerRegistration
+import org.example.daybook.uniffi.core.Panel
+import org.example.daybook.uniffi.core.Tab
+import org.example.daybook.uniffi.core.Table
+import org.example.daybook.uniffi.core.TablesEvent
+import org.example.daybook.uniffi.core.Uuid
+import org.example.daybook.uniffi.core.Window
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.ui.tooling.preview.Preview
 
@@ -100,7 +102,7 @@ data class PermissionsContext(
 }
 
 data class AppContainer(
-    val ffiCtx: FfiCtx, val drawerRepo: DrawerRepoFfi, val tablesRepo: TablesRepo
+    val ffiCtx: FfiCtx, val drawerRepo: DrawerRepoFfi, val tablesRepo: TablesRepoFfi
 )
 
 val LocalContainer = staticCompositionLocalOf<AppContainer> {
@@ -140,7 +142,7 @@ sealed interface TablesState {
 }
 
 class TablesViewModel(
-    val tablesRepo: TablesRepo
+    val tablesRepo: TablesRepoFfi
 ) : ViewModel() {
     private val _tablesState = MutableStateFlow(TablesState.Loading as TablesState)
     val tablesState = _tablesState.asStateFlow()
@@ -199,10 +201,10 @@ class TablesViewModel(
     private suspend fun refreshTables() {
         _tablesState.value = TablesState.Loading
         try {
-            val windows = tablesRepo.ffiListWindows()
-            val tabs = tablesRepo.ffiListTabs()
-            val panels = tablesRepo.ffiListPanels()
-            val tables = tablesRepo.ffiListTables()
+            val windows = tablesRepo.listWindows()
+            val tabs = tablesRepo.listTabs()
+            val panels = tablesRepo.listPanels()
+            val tables = tablesRepo.listTables()
             _tablesState.value = TablesState.Data(
                 windows = windows.associateBy { it.id },
                 tabs = tabs.associateBy { it.id },
@@ -223,7 +225,7 @@ class TablesViewModel(
         try {
             val currentState = _tablesState.value
             if (currentState is TablesState.Data) {
-                val updatedWindow = tablesRepo.ffiGetWindow(windowId)
+                val updatedWindow = tablesRepo.getWindow(windowId)
                 val updatedWindows = currentState.windows.toMutableMap()
                 
                 if (updatedWindow != null) {
@@ -244,7 +246,7 @@ class TablesViewModel(
         try {
             val currentState = _tablesState.value
             if (currentState is TablesState.Data) {
-                val updatedTab = tablesRepo.ffiGetTab(tabId)
+                val updatedTab = tablesRepo.getTab(tabId)
                 val updatedTabs = currentState.tabs.toMutableMap()
                 
                 if (updatedTab != null) {
@@ -265,7 +267,7 @@ class TablesViewModel(
         try {
             val currentState = _tablesState.value
             if (currentState is TablesState.Data) {
-                val updatedPanel = tablesRepo.ffiGetPanel(panelId)
+                val updatedPanel = tablesRepo.getPanel(panelId)
                 val updatedPanels = currentState.panels.toMutableMap()
                 
                 if (updatedPanel != null) {
@@ -286,7 +288,7 @@ class TablesViewModel(
         try {
             val currentState = _tablesState.value
             if (currentState is TablesState.Data) {
-                val updatedTable = tablesRepo.ffiGetTable(tableId)
+                val updatedTable = tablesRepo.getTable(tableId)
                 val updatedTables = currentState.tables.toMutableMap()
                 
                 if (updatedTable != null) {
@@ -323,7 +325,7 @@ class TablesViewModel(
                     val updatedTable = table.copy(selectedTab = tabId)
                     try {
                         // Persist selection to repo
-                        tablesRepo.ffiSetTable(selectedTableId, updatedTable)
+                        tablesRepo.setTable(selectedTableId, updatedTable)
                         // Update local state optimistically
                         val updatedTables = currentState.tables.toMutableMap()
                         updatedTables[selectedTableId] = updatedTable
@@ -344,7 +346,7 @@ class TablesViewModel(
         } else {
             // If no explicit selection, try to get the selected table from the repo
             try {
-                tablesRepo.ffiGetSelectedTable()
+                tablesRepo.getSelectedTable()
             } catch (e: FfiException) {
                 null
             }
@@ -370,21 +372,21 @@ class TablesViewModel(
         }
     }
 
-    suspend fun createNewTable(): Result<Table> {
+    suspend fun createNewTable(): Result<Uuid> {
         return try {
-            val newTable = tablesRepo.ffiCreateNewTable()
+            val newTableId = tablesRepo.createNewTable()
             // Select the new table
-            _selectedTableId.value = newTable.id
-            Result.success(newTable)
+            _selectedTableId.value = newTableId
+            Result.success(newTableId)
         } catch (err: FfiException) {
             Result.failure(err)
         }
     }
 
-    suspend fun createNewTab(tableId: Uuid): Result<Tab> {
+    suspend fun createNewTab(tableId: Uuid): Result<Uuid> {
         return try {
-            val newTab = tablesRepo.ffiCreateNewTab(tableId)
-            Result.success(newTab)
+            val newTabId = tablesRepo.createNewTab(tableId)
+            Result.success(newTabId)
         } catch (err: FfiException) {
             Result.failure(err)
         }
@@ -392,7 +394,7 @@ class TablesViewModel(
 
     suspend fun removeTab(tabId: Uuid): Result<Unit> {
         return try {
-            tablesRepo.ffiRemoveTab(tabId)
+            tablesRepo.removeTab(tabId)
             Result.success(Unit)
         } catch (err: FfiException) {
             Result.failure(err)
@@ -421,7 +423,7 @@ fun App(
         initState = AppInitState.Loading
         val fcx = FfiCtx.forFfi()
         val drawerRepo = DrawerRepoFfi.load(fcx = fcx)
-        val tablesRepo = TablesRepo.load(fcx = fcx)
+        val tablesRepo = TablesRepoFfi.load(fcx = fcx)
         
         // Initialize first-time data if needed
         val tablesViewModel = TablesViewModel(tablesRepo)

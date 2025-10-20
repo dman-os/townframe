@@ -32,15 +32,36 @@ fn main() {
 
 fn apply_kotlin_modifications(out_dir: &str) {
     // Look for the generated Kotlin file
-    let kotlin_file_path = Path::new(out_dir)
+    let real_out_dir = Path::new(out_dir)
         .join("org")
         .join("example")
         .join("daybook")
-        .join("uniffi")
-        .join("daybook_core.kt");
+        .join("uniffi");
+    // .join("daybook_ffi.kt");
 
-    if kotlin_file_path.exists() {
-        match fs::read_to_string(&kotlin_file_path) {
+    let mut kotlin_files = vec![];
+    let mut dirs = vec![real_out_dir];
+    loop {
+        let Some(dir_path) = dirs.pop() else {
+            break;
+        };
+        for file in std::fs::read_dir(dir_path).expect("dir not found") {
+            let file = file.expect("error iterating dir");
+            let path = file.path();
+            let file_ty = file.file_type().expect("error reading file type");
+            if file_ty.is_file() {
+                if let Some(ext) = path.extension() {
+                    if ext == "kt" {
+                        kotlin_files.push(path)
+                    }
+                }
+            } else if file_ty.is_dir() {
+                dirs.push(path)
+            }
+        }
+    }
+    for path in kotlin_files {
+        match fs::read_to_string(&path) {
             Ok(content) => {
                 let modified_content = content
                     .split('\n')
@@ -54,12 +75,12 @@ fn apply_kotlin_modifications(out_dir: &str) {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                if let Err(e) = fs::write(&kotlin_file_path, modified_content) {
-                    eprintln!("Warning: Failed to apply Kotlin modifications: {}", e);
+                if let Err(err) = fs::write(&path, modified_content) {
+                    panic!("Warning: Failed to apply Kotlin modifications: {err}");
                 }
             }
-            Err(e) => {
-                eprintln!("Warning: Failed to read generated Kotlin file: {}", e);
+            Err(err) => {
+                panic!("Warning: Failed to read generated Kotlin file: {err}");
             }
         }
     }

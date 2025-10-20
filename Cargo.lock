@@ -1240,9 +1240,44 @@ name = "daybook_core"
 version = "0.1.0"
 dependencies = [
  "api_utils_rs",
+ "async-trait",
  "automerge",
  "autosurgeon",
  "color-eyre",
+ "directories",
+ "displaydoc",
+ "futures",
+ "garde",
+ "once_cell",
+ "parking_lot",
+ "pastey",
+ "reqwest",
+ "rust_decimal",
+ "samod",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "struct-patch",
+ "thiserror 2.0.16",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-unwrap",
+ "uniffi",
+ "url",
+ "utils_rs",
+]
+
+[[package]]
+name = "daybook_ffi"
+version = "0.1.0"
+dependencies = [
+ "api_utils_rs",
+ "automerge",
+ "autosurgeon",
+ "color-eyre",
+ "daybook_core",
  "directories",
  "displaydoc",
  "futures",

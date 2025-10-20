@@ -2,6 +2,7 @@ use futures::future::BoxFuture;
 
 use crate::interlude::*;
 
+#[async_trait::async_trait]
 pub trait Store {
     type FlushArgs;
     async fn flush(&mut self, args: &mut Self::FlushArgs) -> Res<()>;

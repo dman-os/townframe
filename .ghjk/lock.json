@@ -1324,7 +1324,7 @@
             "gen-ffi-dayb": {
               "ty": "denoFile@v1",
               "key": "gen-ffi-dayb",
-              "desc": "Generate uniffi kotlin bindings for the daybook_core crate",
+              "desc": "Generate uniffi kotlin bindings for the daybook_ffi crate",
               "envKey": "bciqndkhmbf4kvubgvvcuswgolpttfqvmshjtdqko2raeu2lda4gdmcq"
             },
             "dev-d-dayb": {

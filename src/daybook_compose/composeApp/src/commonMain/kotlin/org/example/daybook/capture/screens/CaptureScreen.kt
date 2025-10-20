@@ -14,13 +14,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.LocalContainer
 // removed Doc/DocContent imports - using Uuid list for drawer
-import org.example.daybook.uniffi.Doc
-import org.example.daybook.uniffi.DocContent
-import org.example.daybook.uniffi.DrawerEvent
+import org.example.daybook.uniffi.core.Doc
+import org.example.daybook.uniffi.core.DocContent
+import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
-import org.example.daybook.uniffi.ListenerRegistration
+import org.example.daybook.uniffi.core.ListenerRegistration
 import kotlin.time.Clock
 import kotlin.uuid.Uuid
 
@@ -77,10 +77,10 @@ class CaptureScreenViewModel(
     private suspend fun refreshDocs() {
         _docsList.value = DocsListState.Loading
         try {
-            val ids = drawerRepo.ffiList()
+            val ids = drawerRepo.list()
             val docs = ids.mapNotNull { idStr ->
                 try {
-                    drawerRepo.ffiGet(idStr)
+                    drawerRepo.get(idStr)
                 } catch (e: FfiException) {
                     null
                 }
@@ -108,7 +108,7 @@ class CaptureScreenViewModel(
                 content = DocContent.Text("hello"),
                 tags = listOf()
             )
-            drawerRepo.ffiAdd(doc)
+            drawerRepo.add(doc)
         }
     }
 

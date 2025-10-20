@@ -1,5 +1,5 @@
 //! @generated
-use super::*;
+use super::*;   
 
 pub mod user {
     use super::*;
@@ -61,4 +61,5 @@ pub mod user {
             Internal(#[from] ErrorInternal),
         }
     }
+
 }

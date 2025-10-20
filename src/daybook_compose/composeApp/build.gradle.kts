@@ -169,9 +169,9 @@ val targetRustTriple = rustAndroidTargets[targetAbi] ?: "aarch64-linux-android"
 // Debug variant: build Rust in debug mode
 tasks.register<Exec>("buildRustAndroidDebug") {
     group = "build"
-    description = "Build Rust daybook_core (debug) for Android ABIs"
+    description = "Build Rust daybook_ffi (debug) for Android ABIs"
     
-    commandLine("cargo", "build", "-p", "daybook_core", "--target", targetRustTriple)
+    commandLine("cargo", "build", "-p", "daybook_ffi", "--target", targetRustTriple)
     // Only pass essential environment variables for cargo
     // environment("PATH", System.getenv("PATH"))
     // environment("HOME", System.getenv("HOME"))
@@ -183,14 +183,14 @@ tasks.register<Exec>("buildRustAndroidDebug") {
 // Copy task for debug variant
 tasks.register<Copy>("copyRustAndroidDebug") {
     group = "build"
-    description = "Copy Rust daybook_core (debug) to jniLibs"
+    description = "Copy Rust daybook_ffi (debug) to jniLibs"
     
     dependsOn("buildRustAndroidDebug")
     
     val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
-    val sourceSoFile = File(repoRoot, "target/$targetRustTriple/debug/libdaybook_core.so")
+    val sourceSoFile = File(repoRoot, "target/$targetRustTriple/debug/libdaybook_ffi.so")
     val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
-    val destSoFile = File(destDir, "libdaybook_core.so")
+    val destSoFile = File(destDir, "libdaybook_ffi.so")
     
     // Only copy if source is newer than destination
     onlyIf {
@@ -208,22 +208,22 @@ tasks.register<Copy>("copyRustAndroidDebug") {
 // Release variant: build Rust in release mode
 tasks.register<Exec>("buildRustAndroidRelease") {
     group = "build"
-    description = "Build Rust daybook_core (release) for Android ABIs"
+    description = "Build Rust daybook_ffi (release) for Android ABIs"
     
-    commandLine("cargo", "build", "-p", "daybook_core", "--release", "--target", targetRustTriple)
+    commandLine("cargo", "build", "-p", "daybook_ffi", "--release", "--target", targetRustTriple)
 }
 
 // Copy task for release variant
 tasks.register<Copy>("copyRustAndroidRelease") {
     group = "build"
-    description = "Copy Rust daybook_core (release) to jniLibs"
+    description = "Copy Rust daybook_ffi (release) to jniLibs"
     
     dependsOn("buildRustAndroidRelease")
     
     val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
-    val sourceSoFile = File(repoRoot, "target/$targetRustTriple/release/libdaybook_core.so")
+    val sourceSoFile = File(repoRoot, "target/$targetRustTriple/release/libdaybook_ffi.so")
     val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
-    val destSoFile = File(destDir, "libdaybook_core.so")
+    val destSoFile = File(destDir, "libdaybook_ffi.so")
     
     // Only copy if source is newer than destination
     onlyIf {

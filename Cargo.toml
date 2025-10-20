@@ -9,6 +9,7 @@ members = [
   "./src/btress_http",
   "./src/daybook_api",
   "./src/daybook_core",
+  "./src/daybook_ffi",
   "./src/daybook_http",
   "./src/daybook_sync",
   "./src/macros",
@@ -37,6 +38,7 @@ utils_rs = { path = "./src/utils_rs", default-features = false }
 api_utils_rs = { path = "./src/api_utils_rs" }
 btress_api = { path = "./src/btress_api" }
 macros = { path = "./src/macros" }
+daybook_core = { path = "./src/daybook_core", default-features = false }
 
 syn = { version = "2", features = ["extra-traits"] }
 

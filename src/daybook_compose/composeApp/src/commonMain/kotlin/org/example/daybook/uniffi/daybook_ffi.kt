@@ -41,6 +41,36 @@ import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import org.example.daybook.uniffi.core.Doc
+import org.example.daybook.uniffi.core.DocPatch
+import org.example.daybook.uniffi.core.DrawerEvent
+import org.example.daybook.uniffi.core.FfiConverterTypeDoc
+import org.example.daybook.uniffi.core.FfiConverterTypeDocPatch
+import org.example.daybook.uniffi.core.FfiConverterTypeDrawerEvent
+import org.example.daybook.uniffi.core.FfiConverterTypeListenerRegistration
+import org.example.daybook.uniffi.core.FfiConverterTypePanel
+import org.example.daybook.uniffi.core.FfiConverterTypeTab
+import org.example.daybook.uniffi.core.FfiConverterTypeTable
+import org.example.daybook.uniffi.core.FfiConverterTypeTablesEvent
+import org.example.daybook.uniffi.core.FfiConverterTypeTablesPatches
+import org.example.daybook.uniffi.core.FfiConverterTypeWindow
+import org.example.daybook.uniffi.core.ListenerRegistration
+import org.example.daybook.uniffi.core.Panel
+import org.example.daybook.uniffi.core.Tab
+import org.example.daybook.uniffi.core.Table
+import org.example.daybook.uniffi.core.TablesEvent
+import org.example.daybook.uniffi.core.TablesPatches
+import org.example.daybook.uniffi.core.Window
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferDoc
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocPatch
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferDrawerEvent
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferListenerRegistration
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferPanel
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferTab
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferTable
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesEvent
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesPatches
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferWindow
 
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
@@ -69,7 +99,7 @@ open class RustBuffer : Structure() {
     companion object {
         internal fun alloc(size: ULong = 0UL) = uniffiRustCall() { status ->
             // Note: need to convert the size to a `Long` value to make this work with JVM.
-            UniffiLib.INSTANCE.ffi_daybook_core_rustbuffer_alloc(size.toLong(), status)
+            UniffiLib.INSTANCE.ffi_daybook_ffi_rustbuffer_alloc(size.toLong(), status)
         }.also {
             if(it.data == null) {
                throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=${size})")
@@ -85,7 +115,7 @@ open class RustBuffer : Structure() {
         }
 
         internal fun free(buf: RustBuffer.ByValue) = uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.ffi_daybook_core_rustbuffer_free(buf, status)
+            UniffiLib.INSTANCE.ffi_daybook_ffi_rustbuffer_free(buf, status)
         }
     }
 
@@ -385,7 +415,7 @@ private fun findLibraryName(componentName: String): String {
     if (libOverride != null) {
         return libOverride
     }
-    return "daybook_core"
+    return "daybook_ffi"
 }
 
 private inline fun <reified Lib : Library> loadIndirect(
@@ -665,10 +695,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
     fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructVoid.UniffiByValue,)
 }
 internal interface UniffiCallbackInterfaceDrawerEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferDrawerEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceTablesEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferTablesEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 @Structure.FieldOrder("onDrawerEvent", "uniffiFree")
 internal open class UniffiVTableCallbackInterfaceDrawerEventListener(
@@ -834,10 +864,6 @@ internal open class UniffiVTableCallbackInterfaceTablesEventListener(
 
 
 
-
-
-
-
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -853,69 +879,67 @@ internal open class UniffiVTableCallbackInterfaceTablesEventListener(
 // when the library is loaded.
 internal interface IntegrityCheckingUniffiLib : Library {
     // Integrity check functions only
-    fun uniffi_daybook_core_checksum_method_drawereventlistener_on_drawer_event(
+    fun uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event(
 ): Short
-fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_add(
+fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_add(
 ): Short
-fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_del(
+fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_del(
 ): Short
-fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_get(
+fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_ffi_register_listener(
 ): Short
-fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_list(
+fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get(
 ): Short
-fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_register_listener(
+fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_list(
 ): Short
-fun uniffi_daybook_core_checksum_method_drawerrepo_ffi_update_batch(
+fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch(
 ): Short
-fun uniffi_daybook_core_checksum_method_ffierror_message(
+fun uniffi_daybook_ffi_checksum_method_ffierror_message(
 ): Short
-fun uniffi_daybook_core_checksum_method_listenerregistration_unregister(
+fun uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event(
 ): Short
-fun uniffi_daybook_core_checksum_method_tableseventlistener_on_tables_event(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_tab(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_create_new_tab(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_table(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_create_new_table(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_ffi_register_listener(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_get_panel(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_panel(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_get_selected_table(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_selected_table(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_get_tab(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_tab(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_get_table(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_table(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_get_window(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_window(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_list_panels(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_panels(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_list_tables(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tables(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_list_tabs(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tabs(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_list_windows(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_windows(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_register_listener(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_remove_tab(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_remove_tab(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_panel(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_set_panel(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_tab(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_set_tab(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_table(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_set_table(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_window(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_set_window(
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch(
 ): Short
-fun uniffi_daybook_core_checksum_method_tablesrepo_ffi_update_batch(
+fun uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load(
 ): Short
-fun uniffi_daybook_core_checksum_constructor_drawerrepo_for_ffi(
+fun uniffi_daybook_ffi_checksum_constructor_ffictx_for_ffi(
 ): Short
-fun uniffi_daybook_core_checksum_constructor_ffictx_for_ffi(
+fun uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load(
 ): Short
-fun uniffi_daybook_core_checksum_constructor_tablesrepo_for_ffi(
-): Short
-fun ffi_daybook_core_uniffi_contract_version(
+fun ffi_daybook_ffi_uniffi_contract_version(
 ): Int
 
 }
@@ -925,7 +949,7 @@ fun ffi_daybook_core_uniffi_contract_version(
 internal interface UniffiLib : Library {
     companion object {
         internal val INSTANCE: UniffiLib by lazy {
-            val componentName = "daybook_core"
+            val componentName = "daybook_ffi"
             // For large crates we prevent `MethodTooLargeException` (see #2340)
             // N.B. the name of the extension is very misleading, since it is 
             // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -955,6 +979,7 @@ internal interface UniffiLib : Library {
             // we already did that with `IntegrityCheckingUniffiLib` above.
             uniffiCallbackInterfaceDrawerEventListener.register(lib)
             uniffiCallbackInterfaceTablesEventListener.register(lib)
+            org.example.daybook.uniffi.core.uniffiEnsureInitialized()
             // Loading of library with integrity check done.
             lib
         }
@@ -966,211 +991,205 @@ internal interface UniffiLib : Library {
     }
 
     // FFI functions
-    fun uniffi_daybook_core_fn_clone_drawereventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_daybook_ffi_fn_clone_drawereventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
-fun uniffi_daybook_core_fn_free_drawereventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_free_drawereventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-fun uniffi_daybook_core_fn_init_callback_vtable_drawereventlistener(`vtable`: UniffiVTableCallbackInterfaceDrawerEventListener,
+fun uniffi_daybook_ffi_fn_init_callback_vtable_drawereventlistener(`vtable`: UniffiVTableCallbackInterfaceDrawerEventListener,
 ): Unit
-fun uniffi_daybook_core_fn_method_drawereventlistener_on_drawer_event(`ptr`: Pointer,`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_method_drawereventlistener_on_drawer_event(`ptr`: Pointer,`event`: RustBufferDrawerEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-fun uniffi_daybook_core_fn_clone_drawerrepo(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_clone_drawerrepoffi(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
-fun uniffi_daybook_core_fn_free_drawerrepo(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_free_drawerrepoffi(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-fun uniffi_daybook_core_fn_constructor_drawerrepo_for_ffi(`fcx`: Pointer,
+fun uniffi_daybook_ffi_fn_constructor_drawerrepoffi_load(`fcx`: Pointer,
 ): Long
-fun uniffi_daybook_core_fn_method_drawerrepo_ffi_add(`ptr`: Pointer,`doc`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_drawerrepoffi_add(`ptr`: Pointer,`doc`: RustBufferDoc.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_drawerrepo_ffi_del(`ptr`: Pointer,`id`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_drawerrepoffi_del(`ptr`: Pointer,`id`: RustBuffer.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_drawerrepo_ffi_get(`ptr`: Pointer,`id`: RustBuffer.ByValue,
-): Long
-fun uniffi_daybook_core_fn_method_drawerrepo_ffi_list(`ptr`: Pointer,
-): Long
-fun uniffi_daybook_core_fn_method_drawerrepo_ffi_register_listener(`ptr`: Pointer,`listener`: Pointer,
-): Long
-fun uniffi_daybook_core_fn_method_drawerrepo_ffi_update_batch(`ptr`: Pointer,`docs`: RustBuffer.ByValue,
-): Long
-fun uniffi_daybook_core_fn_clone_ffictx(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_method_drawerrepoffi_ffi_register_listener(`ptr`: Pointer,`listener`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
-fun uniffi_daybook_core_fn_free_ffictx(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-fun uniffi_daybook_core_fn_constructor_ffictx_for_ffi(
+fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get(`ptr`: Pointer,`id`: RustBuffer.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_clone_ffierror(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_method_drawerrepoffi_list(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update_batch(`ptr`: Pointer,`docs`: RustBuffer.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_clone_ffictx(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
-fun uniffi_daybook_core_fn_free_ffierror(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_free_ffictx(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-fun uniffi_daybook_core_fn_method_ffierror_message(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_constructor_ffictx_for_ffi(
+): Long
+fun uniffi_daybook_ffi_fn_clone_ffierror(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Pointer
+fun uniffi_daybook_ffi_fn_free_ffierror(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_daybook_ffi_fn_method_ffierror_message(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-fun uniffi_daybook_core_fn_clone_listenerregistration(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_clone_tableseventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
-fun uniffi_daybook_core_fn_free_listenerregistration(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_free_tableseventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-fun uniffi_daybook_core_fn_method_listenerregistration_unregister(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_init_callback_vtable_tableseventlistener(`vtable`: UniffiVTableCallbackInterfaceTablesEventListener,
 ): Unit
-fun uniffi_daybook_core_fn_clone_tableseventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_method_tableseventlistener_on_tables_event(`ptr`: Pointer,`event`: RustBufferTablesEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_daybook_ffi_fn_clone_tablesrepoffi(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
-fun uniffi_daybook_core_fn_free_tableseventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_free_tablesrepoffi(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-fun uniffi_daybook_core_fn_init_callback_vtable_tableseventlistener(`vtable`: UniffiVTableCallbackInterfaceTablesEventListener,
-): Unit
-fun uniffi_daybook_core_fn_method_tableseventlistener_on_tables_event(`ptr`: Pointer,`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-fun uniffi_daybook_core_fn_clone_tablesrepo(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_daybook_ffi_fn_constructor_tablesrepoffi_load(`fcx`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_create_new_tab(`ptr`: Pointer,`tableId`: RustBuffer.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_create_new_table(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_ffi_register_listener(`ptr`: Pointer,`listener`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
-fun uniffi_daybook_core_fn_free_tablesrepo(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-fun uniffi_daybook_core_fn_constructor_tablesrepo_for_ffi(`fcx`: Pointer,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_panel(`ptr`: Pointer,`id`: RustBuffer.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_create_new_tab(`ptr`: Pointer,`tableId`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_selected_table(`ptr`: Pointer,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_create_new_table(`ptr`: Pointer,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_tab(`ptr`: Pointer,`id`: RustBuffer.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_get_panel(`ptr`: Pointer,`id`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_table(`ptr`: Pointer,`id`: RustBuffer.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_get_selected_table(`ptr`: Pointer,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_window(`ptr`: Pointer,`id`: RustBuffer.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_get_tab(`ptr`: Pointer,`id`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_list_panels(`ptr`: Pointer,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_get_table(`ptr`: Pointer,`id`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_list_tables(`ptr`: Pointer,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_get_window(`ptr`: Pointer,`id`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_list_tabs(`ptr`: Pointer,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_list_panels(`ptr`: Pointer,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_list_windows(`ptr`: Pointer,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_list_tables(`ptr`: Pointer,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_remove_tab(`ptr`: Pointer,`tabId`: RustBuffer.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_list_tabs(`ptr`: Pointer,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_panel(`ptr`: Pointer,`id`: RustBuffer.ByValue,`panel`: RustBufferPanel.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_list_windows(`ptr`: Pointer,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_tab(`ptr`: Pointer,`id`: RustBuffer.ByValue,`tab`: RustBufferTab.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_register_listener(`ptr`: Pointer,`listener`: Pointer,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_table(`ptr`: Pointer,`id`: RustBuffer.ByValue,`table`: RustBufferTable.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_remove_tab(`ptr`: Pointer,`tabId`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_window(`ptr`: Pointer,`id`: RustBuffer.ByValue,`window`: RustBufferWindow.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_set_panel(`ptr`: Pointer,`id`: RustBuffer.ByValue,`panel`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_update_batch(`ptr`: Pointer,`patches`: RustBufferTablesPatches.ByValue,
 ): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_set_tab(`ptr`: Pointer,`id`: RustBuffer.ByValue,`tab`: RustBuffer.ByValue,
-): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_set_table(`ptr`: Pointer,`id`: RustBuffer.ByValue,`table`: RustBuffer.ByValue,
-): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_set_window(`ptr`: Pointer,`id`: RustBuffer.ByValue,`window`: RustBuffer.ByValue,
-): Long
-fun uniffi_daybook_core_fn_method_tablesrepo_ffi_update_batch(`ptr`: Pointer,`patches`: RustBuffer.ByValue,
-): Long
-fun ffi_daybook_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-fun ffi_daybook_core_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-fun ffi_daybook_core_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-fun ffi_daybook_core_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-fun ffi_daybook_core_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_u8(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_u8(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_u8(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_u8(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
-fun ffi_daybook_core_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_i8(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_i8(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_i8(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_i8(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
-fun ffi_daybook_core_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_u16(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_u16(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_u16(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_u16(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Short
-fun ffi_daybook_core_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_i16(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_i16(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_i16(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_i16(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Short
-fun ffi_daybook_core_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_u32(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_u32(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_u32(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_u32(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Int
-fun ffi_daybook_core_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_i32(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_i32(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_i32(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_i32(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Int
-fun ffi_daybook_core_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_u64(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_u64(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_u64(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_u64(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
-fun ffi_daybook_core_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_i64(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_i64(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_i64(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_i64(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
-fun ffi_daybook_core_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_f32(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_f32(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_f32(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_f32(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Float
-fun ffi_daybook_core_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_f64(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_f64(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_f64(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_f64(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Double
-fun ffi_daybook_core_rust_future_poll_pointer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_pointer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_pointer(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_pointer(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_pointer(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_pointer(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_pointer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_pointer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
-fun ffi_daybook_core_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_rust_buffer(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_rust_buffer(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_rust_buffer(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_rust_buffer(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-fun ffi_daybook_core_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+fun ffi_daybook_ffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_cancel_void(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_cancel_void(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_free_void(`handle`: Long,
+fun ffi_daybook_ffi_rust_future_free_void(`handle`: Long,
 ): Unit
-fun ffi_daybook_core_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+fun ffi_daybook_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 
 }
@@ -1179,104 +1198,101 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
     // Get the bindings contract version from our ComponentInterface
     val bindings_contract_version = 29
     // Get the scaffolding contract version by calling the into the dylib
-    val scaffolding_contract_version = lib.ffi_daybook_core_uniffi_contract_version()
+    val scaffolding_contract_version = lib.ffi_daybook_ffi_uniffi_contract_version()
     if (bindings_contract_version != scaffolding_contract_version) {
         throw RuntimeException("UniFFI contract version mismatch: try cleaning and rebuilding your project")
     }
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if (lib.uniffi_daybook_core_checksum_method_drawereventlistener_on_drawer_event() != 56912.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event() != 441.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_add() != 48806.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_add() != 11782.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_del() != 56751.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_del() != 21112.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_get() != 30775.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_ffi_register_listener() != 23247.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_list() != 55846.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get() != 38578.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_register_listener() != 905.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_list() != 16795.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_drawerrepo_ffi_update_batch() != 51109.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch() != 59938.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_ffierror_message() != 31694.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_ffierror_message() != 19212.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_listenerregistration_unregister() != 47679.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event() != 42965.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tableseventlistener_on_tables_event() != 41904.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_tab() != 4951.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_create_new_tab() != 54564.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_table() != 14593.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_create_new_table() != 48173.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_ffi_register_listener() != 30608.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_get_panel() != 14377.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_panel() != 3535.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_get_selected_table() != 40200.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_selected_table() != 5619.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_get_tab() != 61577.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_tab() != 23275.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_get_table() != 25277.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_table() != 17251.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_get_window() != 50103.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_window() != 57838.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_list_panels() != 48628.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_panels() != 1261.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_list_tables() != 56088.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tables() != 61352.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_list_tabs() != 12168.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tabs() != 45683.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_list_windows() != 39134.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_windows() != 63528.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_register_listener() != 33690.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_remove_tab() != 4252.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_remove_tab() != 6283.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_panel() != 7695.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_set_panel() != 2997.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_tab() != 61891.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_set_tab() != 28050.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_table() != 15848.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_set_table() != 42254.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_window() != 7688.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_set_window() != 8464.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch() != 50638.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_method_tablesrepo_ffi_update_batch() != 65234.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load() != 61455.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_constructor_drawerrepo_for_ffi() != 6929.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_ffictx_for_ffi() != 65525.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_core_checksum_constructor_ffictx_for_ffi() != 55263.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_core_checksum_constructor_tablesrepo_for_ffi() != 54377.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load() != 29288.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1491,29 +1507,6 @@ private class JavaLangRefCleanable(
     val cleanable: java.lang.ref.Cleaner.Cleanable
 ) : UniffiCleaner.Cleanable {
     override fun clean() = cleanable.clean()
-}
-
-/**
- * @suppress
- */
-public object FfiConverterULong: FfiConverter<ULong, Long> {
-    override fun lift(value: Long): ULong {
-        return value.toULong()
-    }
-
-    override fun read(buf: ByteBuffer): ULong {
-        return lift(buf.getLong())
-    }
-
-    override fun lower(value: ULong): Long {
-        return value.toLong()
-    }
-
-    override fun allocationSize(value: ULong) = 8UL
-
-    override fun write(value: ULong, buf: ByteBuffer) {
-        buf.putLong(value.toLong())
-    }
 }
 
 /**
@@ -1814,7 +1807,7 @@ open class DrawerEventListenerImpl: Disposable, AutoCloseable, DrawerEventListen
         override fun run() {
             pointer?.let { ptr ->
                 uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_daybook_core_fn_free_drawereventlistener(ptr, status)
+                    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_free_drawereventlistener(ptr, status)
                 }
             }
         }
@@ -1822,7 +1815,7 @@ open class DrawerEventListenerImpl: Disposable, AutoCloseable, DrawerEventListen
 
     fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_drawereventlistener(pointer!!, status)
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_clone_drawereventlistener(pointer!!, status)
         }
     }
 
@@ -1830,7 +1823,7 @@ open class DrawerEventListenerImpl: Disposable, AutoCloseable, DrawerEventListen
         = 
     callWithPointer {
     uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawereventlistener_on_drawer_event(
+    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawereventlistener_on_drawer_event(
         it, FfiConverterTypeDrawerEvent.lower(`event`),_status)
 }
     }
@@ -1849,7 +1842,7 @@ open class DrawerEventListenerImpl: Disposable, AutoCloseable, DrawerEventListen
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceDrawerEventListener {
     internal object `onDrawerEvent`: UniffiCallbackInterfaceDrawerEventListenerMethod0 {
-        override fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferDrawerEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeDrawerEventListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
                 uniffiObj.`onDrawerEvent`(
@@ -1875,7 +1868,7 @@ internal object uniffiCallbackInterfaceDrawerEventListener {
     // Registers the foreign callback with the Rust side.
     // This method is generated for each callback interface.
     internal fun register(lib: UniffiLib) {
-        lib.uniffi_daybook_core_fn_init_callback_vtable_drawereventlistener(vtable)
+        lib.uniffi_daybook_ffi_fn_init_callback_vtable_drawereventlistener(vtable)
     }
 }
 
@@ -2007,24 +2000,24 @@ public object FfiConverterTypeDrawerEventListener: FfiConverter<DrawerEventListe
 //
 
 
-public interface DrawerRepoInterface {
+public interface DrawerRepoFfiInterface {
     
-    suspend fun `ffiAdd`(`doc`: Doc): kotlin.String
+    suspend fun `add`(`doc`: Doc): kotlin.String
     
-    suspend fun `ffiDel`(`id`: kotlin.String): kotlin.Boolean
+    suspend fun `del`(`id`: kotlin.String): kotlin.Boolean
     
-    suspend fun `ffiGet`(`id`: kotlin.String): Doc?
+    fun `ffiRegisterListener`(`listener`: DrawerEventListener): ListenerRegistration
     
-    suspend fun `ffiList`(): List<kotlin.String>
+    suspend fun `get`(`id`: kotlin.String): Doc?
     
-    suspend fun `ffiRegisterListener`(`listener`: DrawerEventListener): ListenerRegistration
+    suspend fun `list`(): List<kotlin.String>
     
-    suspend fun `ffiUpdateBatch`(`docs`: List<DocPatch>)
+    suspend fun `updateBatch`(`docs`: List<DocPatch>)
     
     companion object
 }
 
-open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
+open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
 {
 
     constructor(pointer: Pointer) {
@@ -2094,7 +2087,7 @@ open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
         override fun run() {
             pointer?.let { ptr ->
                 uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_daybook_core_fn_free_drawerrepo(ptr, status)
+                    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_free_drawerrepoffi(ptr, status)
                 }
             }
         }
@@ -2102,24 +2095,24 @@ open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
 
     fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_drawerrepo(pointer!!, status)
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_clone_drawerrepoffi(pointer!!, status)
         }
     }
 
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiAdd`(`doc`: Doc) : kotlin.String {
+    override suspend fun `add`(`doc`: Doc) : kotlin.String {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_add(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_add(
                 thisPtr,
                 FfiConverterTypeDoc.lower(`doc`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterString.lift(it) },
         // Error FFI converter
@@ -2130,17 +2123,17 @@ open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiDel`(`id`: kotlin.String) : kotlin.Boolean {
+    override suspend fun `del`(`id`: kotlin.String) : kotlin.Boolean {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_del(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_del(
                 thisPtr,
                 FfiConverterString.lower(`id`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_i8(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_i8(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_i8(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_i8(future) },
         // lift function
         { FfiConverterBoolean.lift(it) },
         // Error FFI converter
@@ -2148,20 +2141,32 @@ open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
     )
     }
 
+    override fun `ffiRegisterListener`(`listener`: DrawerEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_ffi_register_listener(
+        it, FfiConverterTypeDrawerEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
+
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiGet`(`id`: kotlin.String) : Doc? {
+    override suspend fun `get`(`id`: kotlin.String) : Doc? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_get(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_get(
                 thisPtr,
                 FfiConverterString.lower(`id`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeDoc.lift(it) },
         // Error FFI converter
@@ -2170,61 +2175,39 @@ open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
     }
 
     
-    @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiList`() : List<kotlin.String> {
+    override suspend fun `list`() : List<kotlin.String> {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_list(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_list(
                 thisPtr,
                 
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceString.lift(it) },
         // Error FFI converter
-        FfiException.ErrorHandler,
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiRegisterListener`(`listener`: DrawerEventListener) : ListenerRegistration {
+    override suspend fun `updateBatch`(`docs`: List<DocPatch>) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_register_listener(
-                thisPtr,
-                FfiConverterTypeDrawerEventListener.lower(`listener`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_pointer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_pointer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_pointer(future) },
-        // lift function
-        { FfiConverterTypeListenerRegistration.lift(it) },
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiUpdateBatch`(`docs`: List<DocPatch>) {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_drawerrepo_ffi_update_batch(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_update_batch(
                 thisPtr,
                 FfiConverterSequenceTypeDocPatch.lower(`docs`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_void(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
         
@@ -2240,14 +2223,14 @@ open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
         
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-     suspend fun `forFfi`(`fcx`: FfiCtx) : DrawerRepo {
+     suspend fun `load`(`fcx`: FfiCtx) : DrawerRepoFfi {
         return uniffiRustCallAsync(
-        UniffiLib.INSTANCE.uniffi_daybook_core_fn_constructor_drawerrepo_for_ffi(FfiConverterTypeFfiCtx.lower(`fcx`),),
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_pointer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_pointer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_pointer(future) },
+        UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_constructor_drawerrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_pointer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_pointer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_pointer(future) },
         // lift function
-        { FfiConverterTypeDrawerRepo.lift(it) },
+        { FfiConverterTypeDrawerRepoFfi.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -2261,25 +2244,25 @@ open class DrawerRepo: Disposable, AutoCloseable, DrawerRepoInterface
 /**
  * @suppress
  */
-public object FfiConverterTypeDrawerRepo: FfiConverter<DrawerRepo, Pointer> {
+public object FfiConverterTypeDrawerRepoFfi: FfiConverter<DrawerRepoFfi, Pointer> {
 
-    override fun lower(value: DrawerRepo): Pointer {
+    override fun lower(value: DrawerRepoFfi): Pointer {
         return value.uniffiClonePointer()
     }
 
-    override fun lift(value: Pointer): DrawerRepo {
-        return DrawerRepo(value)
+    override fun lift(value: Pointer): DrawerRepoFfi {
+        return DrawerRepoFfi(value)
     }
 
-    override fun read(buf: ByteBuffer): DrawerRepo {
+    override fun read(buf: ByteBuffer): DrawerRepoFfi {
         // The Rust code always writes pointers as 8 bytes, and will
         // fail to compile if they don't fit.
         return lift(Pointer(buf.getLong()))
     }
 
-    override fun allocationSize(value: DrawerRepo) = 8UL
+    override fun allocationSize(value: DrawerRepoFfi) = 8UL
 
-    override fun write(value: DrawerRepo, buf: ByteBuffer) {
+    override fun write(value: DrawerRepoFfi, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(Pointer.nativeValue(lower(value)))
@@ -2460,7 +2443,7 @@ open class FfiCtx: Disposable, AutoCloseable, FfiCtxInterface
         override fun run() {
             pointer?.let { ptr ->
                 uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_daybook_core_fn_free_ffictx(ptr, status)
+                    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_free_ffictx(ptr, status)
                 }
             }
         }
@@ -2468,7 +2451,7 @@ open class FfiCtx: Disposable, AutoCloseable, FfiCtxInterface
 
     fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_ffictx(pointer!!, status)
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_clone_ffictx(pointer!!, status)
         }
     }
 
@@ -2481,10 +2464,10 @@ open class FfiCtx: Disposable, AutoCloseable, FfiCtxInterface
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
      suspend fun `forFfi`() : FfiCtx {
         return uniffiRustCallAsync(
-        UniffiLib.INSTANCE.uniffi_daybook_core_fn_constructor_ffictx_for_ffi(),
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_pointer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_pointer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_pointer(future) },
+        UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_constructor_ffictx_for_ffi(),
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_pointer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_pointer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_pointer(future) },
         // lift function
         { FfiConverterTypeFfiCtx.lift(it) },
         // Error FFI converter
@@ -2702,7 +2685,7 @@ open class FfiException : kotlin.Exception, Disposable, AutoCloseable, FfiExcept
         override fun run() {
             pointer?.let { ptr ->
                 uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_daybook_core_fn_free_ffierror(ptr, status)
+                    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_free_ffierror(ptr, status)
                 }
             }
         }
@@ -2710,7 +2693,7 @@ open class FfiException : kotlin.Exception, Disposable, AutoCloseable, FfiExcept
 
     fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_ffierror(pointer!!, status)
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_clone_ffierror(pointer!!, status)
         }
     }
 
@@ -2718,7 +2701,7 @@ open class FfiException : kotlin.Exception, Disposable, AutoCloseable, FfiExcept
             return FfiConverterString.lift(
     callWithPointer {
     uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_ffierror_message(
+    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_ffierror_message(
         it, _status)
 }
     }
@@ -2765,241 +2748,6 @@ public object FfiConverterTypeFfiError: FfiConverter<FfiException, Pointer> {
     override fun allocationSize(value: FfiException) = 8UL
 
     override fun write(value: FfiException, buf: ByteBuffer) {
-        // The Rust code always expects pointers written as 8 bytes,
-        // and will fail to compile if they don't fit.
-        buf.putLong(Pointer.nativeValue(lower(value)))
-    }
-}
-
-
-// This template implements a class for working with a Rust struct via a Pointer/Arc<T>
-// to the live Rust struct on the other side of the FFI.
-//
-// Each instance implements core operations for working with the Rust `Arc<T>` and the
-// Kotlin Pointer to work with the live Rust struct on the other side of the FFI.
-//
-// There's some subtlety here, because we have to be careful not to operate on a Rust
-// struct after it has been dropped, and because we must expose a public API for freeing
-// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
-//
-//   * Each instance holds an opaque pointer to the underlying Rust struct.
-//     Method calls need to read this pointer from the object's state and pass it in to
-//     the Rust FFI.
-//
-//   * When an instance is no longer needed, its pointer should be passed to a
-//     special destructor function provided by the Rust FFI, which will drop the
-//     underlying Rust struct.
-//
-//   * Given an instance, calling code is expected to call the special
-//     `destroy` method in order to free it after use, either by calling it explicitly
-//     or by using a higher-level helper like the `use` method. Failing to do so risks
-//     leaking the underlying Rust struct.
-//
-//   * We can't assume that calling code will do the right thing, and must be prepared
-//     to handle Kotlin method calls executing concurrently with or even after a call to
-//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
-//
-//   * We must never allow Rust code to operate on the underlying Rust struct after
-//     the destructor has been called, and must never call the destructor more than once.
-//     Doing so may trigger memory unsafety.
-//
-//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
-//     is implemented to call the destructor when the Kotlin object becomes unreachable.
-//     This is done in a background thread. This is not a panacea, and client code should be aware that
-//      1. the thread may starve if some there are objects that have poorly performing
-//     `drop` methods or do significant work in their `drop` methods.
-//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
-//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
-//
-// If we try to implement this with mutual exclusion on access to the pointer, there is the
-// possibility of a race between a method call and a concurrent call to `destroy`:
-//
-//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
-//      before it can pass the pointer over the FFI to Rust.
-//    * Thread B calls `destroy` and frees the underlying Rust struct.
-//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
-//      a use-after-free.
-//
-// One possible solution would be to use a `ReadWriteLock`, with each method call taking
-// a read lock (and thus allowed to run concurrently) and the special `destroy` method
-// taking a write lock (and thus blocking on live method calls). However, we aim not to
-// generate methods with any hidden blocking semantics, and a `destroy` method that might
-// block if called incorrectly seems to meet that bar.
-//
-// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
-// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
-// has been called. These are updated according to the following rules:
-//
-//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
-//      The initial value for the flag is false.
-//
-//    * At the start of each method call, we atomically check the counter.
-//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
-//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
-//
-//    * At the end of each method call, we atomically decrement and check the counter.
-//      If it has reached zero then we destroy the underlying Rust struct.
-//
-//    * When `destroy` is called, we atomically flip the flag from false to true.
-//      If the flag was already true we silently fail.
-//      Otherwise we atomically decrement and check the counter.
-//      If it has reached zero then we destroy the underlying Rust struct.
-//
-// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
-// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
-//
-// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
-// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
-// of the underlying Rust code.
-//
-// This makes a cleaner a better alternative to _not_ calling `destroy()` as
-// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
-// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
-// thread may be starved, and the app will leak memory.
-//
-// In this case, `destroy`ing manually may be a better solution.
-//
-// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
-// with Rust peers are reclaimed:
-//
-// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
-// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
-// 3. The memory is reclaimed when the process terminates.
-//
-// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
-//
-
-
-public interface ListenerRegistrationInterface {
-    
-    fun `unregister`()
-    
-    companion object
-}
-
-open class ListenerRegistration: Disposable, AutoCloseable, ListenerRegistrationInterface
-{
-
-    constructor(pointer: Pointer) {
-        this.pointer = pointer
-        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
-    }
-
-    /**
-     * This constructor can be used to instantiate a fake object. Only used for tests. Any
-     * attempt to actually use an object constructed this way will fail as there is no
-     * connected Rust object.
-     */
-    @Suppress("UNUSED_PARAMETER")
-    constructor(noPointer: NoPointer) {
-        this.pointer = null
-        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
-    }
-
-    protected val pointer: Pointer?
-    protected val cleanable: UniffiCleaner.Cleanable
-
-    private val wasDestroyed = AtomicBoolean(false)
-    private val callCounter = AtomicLong(1)
-
-    override fun destroy() {
-        // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
-        if (this.wasDestroyed.compareAndSet(false, true)) {
-            // This decrement always matches the initial count of 1 given at creation time.
-            if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable.clean()
-            }
-        }
-    }
-
-    @Synchronized
-    override fun close() {
-        this.destroy()
-    }
-
-    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
-        // Check and increment the call counter, to keep the object alive.
-        // This needs a compare-and-set retry loop in case of concurrent updates.
-        do {
-            val c = this.callCounter.get()
-            if (c == 0L) {
-                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
-            }
-            if (c == Long.MAX_VALUE) {
-                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
-            }
-        } while (! this.callCounter.compareAndSet(c, c + 1L))
-        // Now we can safely do the method call without the pointer being freed concurrently.
-        try {
-            return block(this.uniffiClonePointer())
-        } finally {
-            // This decrement always matches the increment we performed above.
-            if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable.clean()
-            }
-        }
-    }
-
-    // Use a static inner class instead of a closure so as not to accidentally
-    // capture `this` as part of the cleanable's action.
-    private class UniffiCleanAction(private val pointer: Pointer?) : Runnable {
-        override fun run() {
-            pointer?.let { ptr ->
-                uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_daybook_core_fn_free_listenerregistration(ptr, status)
-                }
-            }
-        }
-    }
-
-    fun uniffiClonePointer(): Pointer {
-        return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_listenerregistration(pointer!!, status)
-        }
-    }
-
-    override fun `unregister`()
-        = 
-    callWithPointer {
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_listenerregistration_unregister(
-        it, _status)
-}
-    }
-    
-    
-
-    
-
-    
-    
-    companion object
-    
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeListenerRegistration: FfiConverter<ListenerRegistration, Pointer> {
-
-    override fun lower(value: ListenerRegistration): Pointer {
-        return value.uniffiClonePointer()
-    }
-
-    override fun lift(value: Pointer): ListenerRegistration {
-        return ListenerRegistration(value)
-    }
-
-    override fun read(buf: ByteBuffer): ListenerRegistration {
-        // The Rust code always writes pointers as 8 bytes, and will
-        // fail to compile if they don't fit.
-        return lift(Pointer(buf.getLong()))
-    }
-
-    override fun allocationSize(value: ListenerRegistration) = 8UL
-
-    override fun write(value: ListenerRegistration, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(Pointer.nativeValue(lower(value)))
@@ -3182,7 +2930,7 @@ open class TablesEventListenerImpl: Disposable, AutoCloseable, TablesEventListen
         override fun run() {
             pointer?.let { ptr ->
                 uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_daybook_core_fn_free_tableseventlistener(ptr, status)
+                    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_free_tableseventlistener(ptr, status)
                 }
             }
         }
@@ -3190,7 +2938,7 @@ open class TablesEventListenerImpl: Disposable, AutoCloseable, TablesEventListen
 
     fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_tableseventlistener(pointer!!, status)
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_clone_tableseventlistener(pointer!!, status)
         }
     }
 
@@ -3198,7 +2946,7 @@ open class TablesEventListenerImpl: Disposable, AutoCloseable, TablesEventListen
         = 
     callWithPointer {
     uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tableseventlistener_on_tables_event(
+    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tableseventlistener_on_tables_event(
         it, FfiConverterTypeTablesEvent.lower(`event`),_status)
 }
     }
@@ -3217,7 +2965,7 @@ open class TablesEventListenerImpl: Disposable, AutoCloseable, TablesEventListen
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceTablesEventListener {
     internal object `onTablesEvent`: UniffiCallbackInterfaceTablesEventListenerMethod0 {
-        override fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferTablesEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeTablesEventListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
                 uniffiObj.`onTablesEvent`(
@@ -3243,7 +2991,7 @@ internal object uniffiCallbackInterfaceTablesEventListener {
     // Registers the foreign callback with the Rust side.
     // This method is generated for each callback interface.
     internal fun register(lib: UniffiLib) {
-        lib.uniffi_daybook_core_fn_init_callback_vtable_tableseventlistener(vtable)
+        lib.uniffi_daybook_ffi_fn_init_callback_vtable_tableseventlistener(vtable)
     }
 }
 
@@ -3375,48 +3123,48 @@ public object FfiConverterTypeTablesEventListener: FfiConverter<TablesEventListe
 //
 
 
-public interface TablesRepoInterface {
+public interface TablesRepoFfiInterface {
     
-    suspend fun `ffiCreateNewTab`(`tableId`: Uuid): Tab
+    suspend fun `createNewTab`(`tableId`: Uuid): Uuid
     
-    suspend fun `ffiCreateNewTable`(): Table
+    suspend fun `createNewTable`(): Uuid
     
-    suspend fun `ffiGetPanel`(`id`: Uuid): Panel?
+    fun `ffiRegisterListener`(`listener`: TablesEventListener): ListenerRegistration
     
-    suspend fun `ffiGetSelectedTable`(): Table?
+    suspend fun `getPanel`(`id`: Uuid): Panel?
     
-    suspend fun `ffiGetTab`(`id`: Uuid): Tab?
+    suspend fun `getSelectedTable`(): Table?
     
-    suspend fun `ffiGetTable`(`id`: Uuid): Table?
+    suspend fun `getTab`(`id`: Uuid): Tab?
     
-    suspend fun `ffiGetWindow`(`id`: Uuid): Window?
+    suspend fun `getTable`(`id`: Uuid): Table?
     
-    suspend fun `ffiListPanels`(): List<Panel>
+    suspend fun `getWindow`(`id`: Uuid): Window?
     
-    suspend fun `ffiListTables`(): List<Table>
+    suspend fun `listPanels`(): List<Panel>
     
-    suspend fun `ffiListTabs`(): List<Tab>
+    suspend fun `listTables`(): List<Table>
     
-    suspend fun `ffiListWindows`(): List<Window>
+    suspend fun `listTabs`(): List<Tab>
     
-    suspend fun `ffiRegisterListener`(`listener`: TablesEventListener): ListenerRegistration
+    suspend fun `listWindows`(): List<Window>
     
-    suspend fun `ffiRemoveTab`(`tabId`: Uuid)
+    suspend fun `removeTab`(`tabId`: Uuid)
     
-    suspend fun `ffiSetPanel`(`id`: Uuid, `panel`: Panel): Panel?
+    suspend fun `setPanel`(`id`: Uuid, `panel`: Panel): Panel?
     
-    suspend fun `ffiSetTab`(`id`: Uuid, `tab`: Tab): Tab?
+    suspend fun `setTab`(`id`: Uuid, `tab`: Tab): Tab?
     
-    suspend fun `ffiSetTable`(`id`: Uuid, `table`: Table): Table?
+    suspend fun `setTable`(`id`: Uuid, `table`: Table): Table?
     
-    suspend fun `ffiSetWindow`(`id`: Uuid, `window`: Window): Window?
+    suspend fun `setWindow`(`id`: Uuid, `window`: Window): Window?
     
-    suspend fun `ffiUpdateBatch`(`patches`: TablesPatches)
+    suspend fun `updateBatch`(`patches`: TablesPatches)
     
     companion object
 }
 
-open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
+open class TablesRepoFfi: Disposable, AutoCloseable, TablesRepoFfiInterface
 {
 
     constructor(pointer: Pointer) {
@@ -3486,7 +3234,7 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
         override fun run() {
             pointer?.let { ptr ->
                 uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_daybook_core_fn_free_tablesrepo(ptr, status)
+                    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_free_tablesrepoffi(ptr, status)
                 }
             }
         }
@@ -3494,26 +3242,26 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
 
     fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_tablesrepo(pointer!!, status)
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_clone_tablesrepoffi(pointer!!, status)
         }
     }
 
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiCreateNewTab`(`tableId`: Uuid) : Tab {
+    override suspend fun `createNewTab`(`tableId`: Uuid) : Uuid {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_create_new_tab(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_create_new_tab(
                 thisPtr,
                 FfiConverterTypeUuid.lower(`tableId`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterTypeTab.lift(it) },
+        { FfiConverterTypeUuid.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -3522,59 +3270,70 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiCreateNewTable`() : Table {
+    override suspend fun `createNewTable`() : Uuid {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_create_new_table(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_create_new_table(
                 thisPtr,
                 
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterTypeTable.lift(it) },
+        { FfiConverterTypeUuid.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
     }
 
+    override fun `ffiRegisterListener`(`listener`: TablesEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_ffi_register_listener(
+        it, FfiConverterTypeTablesEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
     
-    @Throws(FfiException::class)
+
+    
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiGetPanel`(`id`: Uuid) : Panel? {
+    override suspend fun `getPanel`(`id`: Uuid) : Panel? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_get_panel(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_get_panel(
                 thisPtr,
                 FfiConverterTypeUuid.lower(`id`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypePanel.lift(it) },
         // Error FFI converter
-        FfiException.ErrorHandler,
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiGetSelectedTable`() : Table? {
+    override suspend fun `getSelectedTable`() : Table? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_get_selected_table(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_get_selected_table(
                 thisPtr,
                 
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeTable.lift(it) },
         // Error FFI converter
@@ -3585,17 +3344,17 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiGetTab`(`id`: Uuid) : Tab? {
+    override suspend fun `getTab`(`id`: Uuid) : Tab? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_get_tab(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_get_tab(
                 thisPtr,
                 FfiConverterTypeUuid.lower(`id`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeTab.lift(it) },
         // Error FFI converter
@@ -3606,17 +3365,17 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiGetTable`(`id`: Uuid) : Table? {
+    override suspend fun `getTable`(`id`: Uuid) : Table? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_get_table(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_get_table(
                 thisPtr,
                 FfiConverterTypeUuid.lower(`id`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeTable.lift(it) },
         // Error FFI converter
@@ -3625,40 +3384,39 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     }
 
     
-    @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiGetWindow`(`id`: Uuid) : Window? {
+    override suspend fun `getWindow`(`id`: Uuid) : Window? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_get_window(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_get_window(
                 thisPtr,
                 FfiConverterTypeUuid.lower(`id`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeWindow.lift(it) },
         // Error FFI converter
-        FfiException.ErrorHandler,
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiListPanels`() : List<Panel> {
+    override suspend fun `listPanels`() : List<Panel> {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_list_panels(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_list_panels(
                 thisPtr,
                 
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceTypePanel.lift(it) },
         // Error FFI converter
@@ -3669,17 +3427,17 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiListTables`() : List<Table> {
+    override suspend fun `listTables`() : List<Table> {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_list_tables(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_list_tables(
                 thisPtr,
                 
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceTypeTable.lift(it) },
         // Error FFI converter
@@ -3690,17 +3448,17 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiListTabs`() : List<Tab> {
+    override suspend fun `listTabs`() : List<Tab> {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_list_tabs(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_list_tabs(
                 thisPtr,
                 
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceTypeTab.lift(it) },
         // Error FFI converter
@@ -3711,17 +3469,17 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiListWindows`() : List<Window> {
+    override suspend fun `listWindows`() : List<Window> {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_list_windows(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_list_windows(
                 thisPtr,
                 
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceTypeWindow.lift(it) },
         // Error FFI converter
@@ -3732,38 +3490,17 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiRegisterListener`(`listener`: TablesEventListener) : ListenerRegistration {
+    override suspend fun `removeTab`(`tabId`: Uuid) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_register_listener(
-                thisPtr,
-                FfiConverterTypeTablesEventListener.lower(`listener`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_pointer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_pointer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_pointer(future) },
-        // lift function
-        { FfiConverterTypeListenerRegistration.lift(it) },
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiRemoveTab`(`tabId`: Uuid) {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_remove_tab(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_remove_tab(
                 thisPtr,
                 FfiConverterTypeUuid.lower(`tabId`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_void(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
         
@@ -3775,17 +3512,17 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiSetPanel`(`id`: Uuid, `panel`: Panel) : Panel? {
+    override suspend fun `setPanel`(`id`: Uuid, `panel`: Panel) : Panel? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_set_panel(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_set_panel(
                 thisPtr,
                 FfiConverterTypeUuid.lower(`id`),FfiConverterTypePanel.lower(`panel`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypePanel.lift(it) },
         // Error FFI converter
@@ -3796,17 +3533,17 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiSetTab`(`id`: Uuid, `tab`: Tab) : Tab? {
+    override suspend fun `setTab`(`id`: Uuid, `tab`: Tab) : Tab? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_set_tab(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_set_tab(
                 thisPtr,
                 FfiConverterTypeUuid.lower(`id`),FfiConverterTypeTab.lower(`tab`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeTab.lift(it) },
         // Error FFI converter
@@ -3817,17 +3554,17 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiSetTable`(`id`: Uuid, `table`: Table) : Table? {
+    override suspend fun `setTable`(`id`: Uuid, `table`: Table) : Table? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_set_table(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_set_table(
                 thisPtr,
                 FfiConverterTypeUuid.lower(`id`),FfiConverterTypeTable.lower(`table`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeTable.lift(it) },
         // Error FFI converter
@@ -3838,17 +3575,17 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiSetWindow`(`id`: Uuid, `window`: Window) : Window? {
+    override suspend fun `setWindow`(`id`: Uuid, `window`: Window) : Window? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_set_window(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_set_window(
                 thisPtr,
                 FfiConverterTypeUuid.lower(`id`),FfiConverterTypeWindow.lower(`window`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeWindow.lift(it) },
         // Error FFI converter
@@ -3859,17 +3596,17 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiUpdateBatch`(`patches`: TablesPatches) {
+    override suspend fun `updateBatch`(`patches`: TablesPatches) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_tablesrepo_ffi_update_batch(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_update_batch(
                 thisPtr,
                 FfiConverterTypeTablesPatches.lower(`patches`),
             )
         },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_void(future) },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
         
@@ -3885,14 +3622,14 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
         
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-     suspend fun `forFfi`(`fcx`: FfiCtx) : TablesRepo {
+     suspend fun `load`(`fcx`: FfiCtx) : TablesRepoFfi {
         return uniffiRustCallAsync(
-        UniffiLib.INSTANCE.uniffi_daybook_core_fn_constructor_tablesrepo_for_ffi(FfiConverterTypeFfiCtx.lower(`fcx`),),
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_poll_pointer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_complete_pointer(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_core_rust_future_free_pointer(future) },
+        UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_constructor_tablesrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_pointer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_pointer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_pointer(future) },
         // lift function
-        { FfiConverterTypeTablesRepo.lift(it) },
+        { FfiConverterTypeTablesRepoFfi.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -3906,1189 +3643,28 @@ open class TablesRepo: Disposable, AutoCloseable, TablesRepoInterface
 /**
  * @suppress
  */
-public object FfiConverterTypeTablesRepo: FfiConverter<TablesRepo, Pointer> {
+public object FfiConverterTypeTablesRepoFfi: FfiConverter<TablesRepoFfi, Pointer> {
 
-    override fun lower(value: TablesRepo): Pointer {
+    override fun lower(value: TablesRepoFfi): Pointer {
         return value.uniffiClonePointer()
     }
 
-    override fun lift(value: Pointer): TablesRepo {
-        return TablesRepo(value)
+    override fun lift(value: Pointer): TablesRepoFfi {
+        return TablesRepoFfi(value)
     }
 
-    override fun read(buf: ByteBuffer): TablesRepo {
+    override fun read(buf: ByteBuffer): TablesRepoFfi {
         // The Rust code always writes pointers as 8 bytes, and will
         // fail to compile if they don't fit.
         return lift(Pointer(buf.getLong()))
     }
 
-    override fun allocationSize(value: TablesRepo) = 8UL
+    override fun allocationSize(value: TablesRepoFfi) = 8UL
 
-    override fun write(value: TablesRepo, buf: ByteBuffer) {
+    override fun write(value: TablesRepoFfi, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(Pointer.nativeValue(lower(value)))
-    }
-}
-
-
-
-data class Doc (
-    var `id`: kotlin.String, 
-    var `createdAt`: OffsetDateTime, 
-    var `updatedAt`: OffsetDateTime, 
-    var `content`: DocContent, 
-    var `tags`: List<DocTag>
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDoc: FfiConverterRustBuffer<Doc> {
-    override fun read(buf: ByteBuffer): Doc {
-        return Doc(
-            FfiConverterString.read(buf),
-            FfiConverterTypeOffsetDateTime.read(buf),
-            FfiConverterTypeOffsetDateTime.read(buf),
-            FfiConverterTypeDocContent.read(buf),
-            FfiConverterSequenceTypeDocTag.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: Doc) = (
-            FfiConverterString.allocationSize(value.`id`) +
-            FfiConverterTypeOffsetDateTime.allocationSize(value.`createdAt`) +
-            FfiConverterTypeOffsetDateTime.allocationSize(value.`updatedAt`) +
-            FfiConverterTypeDocContent.allocationSize(value.`content`) +
-            FfiConverterSequenceTypeDocTag.allocationSize(value.`tags`)
-    )
-
-    override fun write(value: Doc, buf: ByteBuffer) {
-            FfiConverterString.write(value.`id`, buf)
-            FfiConverterTypeOffsetDateTime.write(value.`createdAt`, buf)
-            FfiConverterTypeOffsetDateTime.write(value.`updatedAt`, buf)
-            FfiConverterTypeDocContent.write(value.`content`, buf)
-            FfiConverterSequenceTypeDocTag.write(value.`tags`, buf)
-    }
-}
-
-
-
-data class DocAddedEvent (
-    var `id`: kotlin.String, 
-    var `heads`: List<kotlin.String>
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocAddedEvent: FfiConverterRustBuffer<DocAddedEvent> {
-    override fun read(buf: ByteBuffer): DocAddedEvent {
-        return DocAddedEvent(
-            FfiConverterString.read(buf),
-            FfiConverterSequenceString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: DocAddedEvent) = (
-            FfiConverterString.allocationSize(value.`id`) +
-            FfiConverterSequenceString.allocationSize(value.`heads`)
-    )
-
-    override fun write(value: DocAddedEvent, buf: ByteBuffer) {
-            FfiConverterString.write(value.`id`, buf)
-            FfiConverterSequenceString.write(value.`heads`, buf)
-    }
-}
-
-
-
-data class DocAddedEventPatch (
-    var `id`: kotlin.String?, 
-    var `heads`: List<kotlin.String>?
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocAddedEventPatch: FfiConverterRustBuffer<DocAddedEventPatch> {
-    override fun read(buf: ByteBuffer): DocAddedEventPatch {
-        return DocAddedEventPatch(
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalSequenceString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: DocAddedEventPatch) = (
-            FfiConverterOptionalString.allocationSize(value.`id`) +
-            FfiConverterOptionalSequenceString.allocationSize(value.`heads`)
-    )
-
-    override fun write(value: DocAddedEventPatch, buf: ByteBuffer) {
-            FfiConverterOptionalString.write(value.`id`, buf)
-            FfiConverterOptionalSequenceString.write(value.`heads`, buf)
-    }
-}
-
-
-
-data class DocBlob (
-    var `lengthOctets`: kotlin.ULong, 
-    var `hash`: kotlin.String
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocBlob: FfiConverterRustBuffer<DocBlob> {
-    override fun read(buf: ByteBuffer): DocBlob {
-        return DocBlob(
-            FfiConverterULong.read(buf),
-            FfiConverterString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: DocBlob) = (
-            FfiConverterULong.allocationSize(value.`lengthOctets`) +
-            FfiConverterString.allocationSize(value.`hash`)
-    )
-
-    override fun write(value: DocBlob, buf: ByteBuffer) {
-            FfiConverterULong.write(value.`lengthOctets`, buf)
-            FfiConverterString.write(value.`hash`, buf)
-    }
-}
-
-
-
-data class DocBlobPatch (
-    var `lengthOctets`: kotlin.ULong?, 
-    var `hash`: kotlin.String?
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocBlobPatch: FfiConverterRustBuffer<DocBlobPatch> {
-    override fun read(buf: ByteBuffer): DocBlobPatch {
-        return DocBlobPatch(
-            FfiConverterOptionalULong.read(buf),
-            FfiConverterOptionalString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: DocBlobPatch) = (
-            FfiConverterOptionalULong.allocationSize(value.`lengthOctets`) +
-            FfiConverterOptionalString.allocationSize(value.`hash`)
-    )
-
-    override fun write(value: DocBlobPatch, buf: ByteBuffer) {
-            FfiConverterOptionalULong.write(value.`lengthOctets`, buf)
-            FfiConverterOptionalString.write(value.`hash`, buf)
-    }
-}
-
-
-
-data class DocImage (
-    var `mime`: kotlin.String, 
-    var `widthPx`: kotlin.ULong, 
-    var `heightPx`: kotlin.ULong, 
-    var `blurhash`: kotlin.String?, 
-    var `blob`: kotlin.String
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocImage: FfiConverterRustBuffer<DocImage> {
-    override fun read(buf: ByteBuffer): DocImage {
-        return DocImage(
-            FfiConverterString.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: DocImage) = (
-            FfiConverterString.allocationSize(value.`mime`) +
-            FfiConverterULong.allocationSize(value.`widthPx`) +
-            FfiConverterULong.allocationSize(value.`heightPx`) +
-            FfiConverterOptionalString.allocationSize(value.`blurhash`) +
-            FfiConverterString.allocationSize(value.`blob`)
-    )
-
-    override fun write(value: DocImage, buf: ByteBuffer) {
-            FfiConverterString.write(value.`mime`, buf)
-            FfiConverterULong.write(value.`widthPx`, buf)
-            FfiConverterULong.write(value.`heightPx`, buf)
-            FfiConverterOptionalString.write(value.`blurhash`, buf)
-            FfiConverterString.write(value.`blob`, buf)
-    }
-}
-
-
-
-data class DocImagePatch (
-    var `mime`: kotlin.String?, 
-    var `widthPx`: kotlin.ULong?, 
-    var `heightPx`: kotlin.ULong?, 
-    var `blurhash`: kotlin.String??, 
-    var `blob`: kotlin.String?
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocImagePatch: FfiConverterRustBuffer<DocImagePatch> {
-    override fun read(buf: ByteBuffer): DocImagePatch {
-        return DocImagePatch(
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalULong.read(buf),
-            FfiConverterOptionalULong.read(buf),
-            FfiConverterOptionalOptionalString.read(buf),
-            FfiConverterOptionalString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: DocImagePatch) = (
-            FfiConverterOptionalString.allocationSize(value.`mime`) +
-            FfiConverterOptionalULong.allocationSize(value.`widthPx`) +
-            FfiConverterOptionalULong.allocationSize(value.`heightPx`) +
-            FfiConverterOptionalOptionalString.allocationSize(value.`blurhash`) +
-            FfiConverterOptionalString.allocationSize(value.`blob`)
-    )
-
-    override fun write(value: DocImagePatch, buf: ByteBuffer) {
-            FfiConverterOptionalString.write(value.`mime`, buf)
-            FfiConverterOptionalULong.write(value.`widthPx`, buf)
-            FfiConverterOptionalULong.write(value.`heightPx`, buf)
-            FfiConverterOptionalOptionalString.write(value.`blurhash`, buf)
-            FfiConverterOptionalString.write(value.`blob`, buf)
-    }
-}
-
-
-
-data class DocPatch (
-    var `id`: kotlin.String?, 
-    var `createdAt`: OffsetDateTime?, 
-    var `updatedAt`: OffsetDateTime?, 
-    var `content`: DocContent?, 
-    var `tags`: List<DocTag>?
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocPatch: FfiConverterRustBuffer<DocPatch> {
-    override fun read(buf: ByteBuffer): DocPatch {
-        return DocPatch(
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalTypeOffsetDateTime.read(buf),
-            FfiConverterOptionalTypeOffsetDateTime.read(buf),
-            FfiConverterOptionalTypeDocContent.read(buf),
-            FfiConverterOptionalSequenceTypeDocTag.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: DocPatch) = (
-            FfiConverterOptionalString.allocationSize(value.`id`) +
-            FfiConverterOptionalTypeOffsetDateTime.allocationSize(value.`createdAt`) +
-            FfiConverterOptionalTypeOffsetDateTime.allocationSize(value.`updatedAt`) +
-            FfiConverterOptionalTypeDocContent.allocationSize(value.`content`) +
-            FfiConverterOptionalSequenceTypeDocTag.allocationSize(value.`tags`)
-    )
-
-    override fun write(value: DocPatch, buf: ByteBuffer) {
-            FfiConverterOptionalString.write(value.`id`, buf)
-            FfiConverterOptionalTypeOffsetDateTime.write(value.`createdAt`, buf)
-            FfiConverterOptionalTypeOffsetDateTime.write(value.`updatedAt`, buf)
-            FfiConverterOptionalTypeDocContent.write(value.`content`, buf)
-            FfiConverterOptionalSequenceTypeDocTag.write(value.`tags`, buf)
-    }
-}
-
-
-
-data class Panel (
-    var `id`: Uuid, 
-    var `title`: kotlin.String
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypePanel: FfiConverterRustBuffer<Panel> {
-    override fun read(buf: ByteBuffer): Panel {
-        return Panel(
-            FfiConverterTypeUuid.read(buf),
-            FfiConverterString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: Panel) = (
-            FfiConverterTypeUuid.allocationSize(value.`id`) +
-            FfiConverterString.allocationSize(value.`title`)
-    )
-
-    override fun write(value: Panel, buf: ByteBuffer) {
-            FfiConverterTypeUuid.write(value.`id`, buf)
-            FfiConverterString.write(value.`title`, buf)
-    }
-}
-
-
-
-data class PanelPatch (
-    var `id`: Uuid?, 
-    var `title`: kotlin.String?
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypePanelPatch: FfiConverterRustBuffer<PanelPatch> {
-    override fun read(buf: ByteBuffer): PanelPatch {
-        return PanelPatch(
-            FfiConverterOptionalTypeUuid.read(buf),
-            FfiConverterOptionalString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: PanelPatch) = (
-            FfiConverterOptionalTypeUuid.allocationSize(value.`id`) +
-            FfiConverterOptionalString.allocationSize(value.`title`)
-    )
-
-    override fun write(value: PanelPatch, buf: ByteBuffer) {
-            FfiConverterOptionalTypeUuid.write(value.`id`, buf)
-            FfiConverterOptionalString.write(value.`title`, buf)
-    }
-}
-
-
-
-data class Tab (
-    var `id`: Uuid, 
-    var `title`: kotlin.String, 
-    var `panels`: List<Uuid>, 
-    var `selectedPanel`: Uuid?
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTab: FfiConverterRustBuffer<Tab> {
-    override fun read(buf: ByteBuffer): Tab {
-        return Tab(
-            FfiConverterTypeUuid.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterSequenceTypeUuid.read(buf),
-            FfiConverterOptionalTypeUuid.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: Tab) = (
-            FfiConverterTypeUuid.allocationSize(value.`id`) +
-            FfiConverterString.allocationSize(value.`title`) +
-            FfiConverterSequenceTypeUuid.allocationSize(value.`panels`) +
-            FfiConverterOptionalTypeUuid.allocationSize(value.`selectedPanel`)
-    )
-
-    override fun write(value: Tab, buf: ByteBuffer) {
-            FfiConverterTypeUuid.write(value.`id`, buf)
-            FfiConverterString.write(value.`title`, buf)
-            FfiConverterSequenceTypeUuid.write(value.`panels`, buf)
-            FfiConverterOptionalTypeUuid.write(value.`selectedPanel`, buf)
-    }
-}
-
-
-
-data class TabPatch (
-    var `id`: Uuid?, 
-    var `title`: kotlin.String?, 
-    var `panels`: List<Uuid>?, 
-    var `selectedPanel`: Uuid??
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTabPatch: FfiConverterRustBuffer<TabPatch> {
-    override fun read(buf: ByteBuffer): TabPatch {
-        return TabPatch(
-            FfiConverterOptionalTypeUuid.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalSequenceTypeUuid.read(buf),
-            FfiConverterOptionalOptionalTypeUuid.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: TabPatch) = (
-            FfiConverterOptionalTypeUuid.allocationSize(value.`id`) +
-            FfiConverterOptionalString.allocationSize(value.`title`) +
-            FfiConverterOptionalSequenceTypeUuid.allocationSize(value.`panels`) +
-            FfiConverterOptionalOptionalTypeUuid.allocationSize(value.`selectedPanel`)
-    )
-
-    override fun write(value: TabPatch, buf: ByteBuffer) {
-            FfiConverterOptionalTypeUuid.write(value.`id`, buf)
-            FfiConverterOptionalString.write(value.`title`, buf)
-            FfiConverterOptionalSequenceTypeUuid.write(value.`panels`, buf)
-            FfiConverterOptionalOptionalTypeUuid.write(value.`selectedPanel`, buf)
-    }
-}
-
-
-
-data class Table (
-    var `id`: Uuid, 
-    var `title`: kotlin.String, 
-    var `tabs`: List<Uuid>, 
-    var `window`: TableWindow, 
-    var `selectedTab`: Uuid?
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTable: FfiConverterRustBuffer<Table> {
-    override fun read(buf: ByteBuffer): Table {
-        return Table(
-            FfiConverterTypeUuid.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterSequenceTypeUuid.read(buf),
-            FfiConverterTypeTableWindow.read(buf),
-            FfiConverterOptionalTypeUuid.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: Table) = (
-            FfiConverterTypeUuid.allocationSize(value.`id`) +
-            FfiConverterString.allocationSize(value.`title`) +
-            FfiConverterSequenceTypeUuid.allocationSize(value.`tabs`) +
-            FfiConverterTypeTableWindow.allocationSize(value.`window`) +
-            FfiConverterOptionalTypeUuid.allocationSize(value.`selectedTab`)
-    )
-
-    override fun write(value: Table, buf: ByteBuffer) {
-            FfiConverterTypeUuid.write(value.`id`, buf)
-            FfiConverterString.write(value.`title`, buf)
-            FfiConverterSequenceTypeUuid.write(value.`tabs`, buf)
-            FfiConverterTypeTableWindow.write(value.`window`, buf)
-            FfiConverterOptionalTypeUuid.write(value.`selectedTab`, buf)
-    }
-}
-
-
-
-data class TablePatch (
-    var `id`: Uuid?, 
-    var `title`: kotlin.String?, 
-    var `tabs`: List<Uuid>?, 
-    var `window`: TableWindow?, 
-    var `selectedTab`: Uuid??
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTablePatch: FfiConverterRustBuffer<TablePatch> {
-    override fun read(buf: ByteBuffer): TablePatch {
-        return TablePatch(
-            FfiConverterOptionalTypeUuid.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalSequenceTypeUuid.read(buf),
-            FfiConverterOptionalTypeTableWindow.read(buf),
-            FfiConverterOptionalOptionalTypeUuid.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: TablePatch) = (
-            FfiConverterOptionalTypeUuid.allocationSize(value.`id`) +
-            FfiConverterOptionalString.allocationSize(value.`title`) +
-            FfiConverterOptionalSequenceTypeUuid.allocationSize(value.`tabs`) +
-            FfiConverterOptionalTypeTableWindow.allocationSize(value.`window`) +
-            FfiConverterOptionalOptionalTypeUuid.allocationSize(value.`selectedTab`)
-    )
-
-    override fun write(value: TablePatch, buf: ByteBuffer) {
-            FfiConverterOptionalTypeUuid.write(value.`id`, buf)
-            FfiConverterOptionalString.write(value.`title`, buf)
-            FfiConverterOptionalSequenceTypeUuid.write(value.`tabs`, buf)
-            FfiConverterOptionalTypeTableWindow.write(value.`window`, buf)
-            FfiConverterOptionalOptionalTypeUuid.write(value.`selectedTab`, buf)
-    }
-}
-
-
-
-data class TablesPatches (
-    var `tabUpdates`: List<TabPatch>?, 
-    var `windowUpdates`: List<WindowPatch>?, 
-    var `panelUpdates`: List<PanelPatch>?, 
-    var `tableUpdates`: List<TablePatch>?
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTablesPatches: FfiConverterRustBuffer<TablesPatches> {
-    override fun read(buf: ByteBuffer): TablesPatches {
-        return TablesPatches(
-            FfiConverterOptionalSequenceTypeTabPatch.read(buf),
-            FfiConverterOptionalSequenceTypeWindowPatch.read(buf),
-            FfiConverterOptionalSequenceTypePanelPatch.read(buf),
-            FfiConverterOptionalSequenceTypeTablePatch.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: TablesPatches) = (
-            FfiConverterOptionalSequenceTypeTabPatch.allocationSize(value.`tabUpdates`) +
-            FfiConverterOptionalSequenceTypeWindowPatch.allocationSize(value.`windowUpdates`) +
-            FfiConverterOptionalSequenceTypePanelPatch.allocationSize(value.`panelUpdates`) +
-            FfiConverterOptionalSequenceTypeTablePatch.allocationSize(value.`tableUpdates`)
-    )
-
-    override fun write(value: TablesPatches, buf: ByteBuffer) {
-            FfiConverterOptionalSequenceTypeTabPatch.write(value.`tabUpdates`, buf)
-            FfiConverterOptionalSequenceTypeWindowPatch.write(value.`windowUpdates`, buf)
-            FfiConverterOptionalSequenceTypePanelPatch.write(value.`panelUpdates`, buf)
-            FfiConverterOptionalSequenceTypeTablePatch.write(value.`tableUpdates`, buf)
-    }
-}
-
-
-
-data class Window (
-    var `id`: Uuid, 
-    var `title`: kotlin.String, 
-    var `tabs`: List<Uuid>, 
-    var `selectedTable`: Uuid?
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeWindow: FfiConverterRustBuffer<Window> {
-    override fun read(buf: ByteBuffer): Window {
-        return Window(
-            FfiConverterTypeUuid.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterSequenceTypeUuid.read(buf),
-            FfiConverterOptionalTypeUuid.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: Window) = (
-            FfiConverterTypeUuid.allocationSize(value.`id`) +
-            FfiConverterString.allocationSize(value.`title`) +
-            FfiConverterSequenceTypeUuid.allocationSize(value.`tabs`) +
-            FfiConverterOptionalTypeUuid.allocationSize(value.`selectedTable`)
-    )
-
-    override fun write(value: Window, buf: ByteBuffer) {
-            FfiConverterTypeUuid.write(value.`id`, buf)
-            FfiConverterString.write(value.`title`, buf)
-            FfiConverterSequenceTypeUuid.write(value.`tabs`, buf)
-            FfiConverterOptionalTypeUuid.write(value.`selectedTable`, buf)
-    }
-}
-
-
-
-data class WindowPatch (
-    var `id`: Uuid?, 
-    var `title`: kotlin.String?, 
-    var `tabs`: List<Uuid>?, 
-    var `selectedTable`: Uuid??
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeWindowPatch: FfiConverterRustBuffer<WindowPatch> {
-    override fun read(buf: ByteBuffer): WindowPatch {
-        return WindowPatch(
-            FfiConverterOptionalTypeUuid.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalSequenceTypeUuid.read(buf),
-            FfiConverterOptionalOptionalTypeUuid.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: WindowPatch) = (
-            FfiConverterOptionalTypeUuid.allocationSize(value.`id`) +
-            FfiConverterOptionalString.allocationSize(value.`title`) +
-            FfiConverterOptionalSequenceTypeUuid.allocationSize(value.`tabs`) +
-            FfiConverterOptionalOptionalTypeUuid.allocationSize(value.`selectedTable`)
-    )
-
-    override fun write(value: WindowPatch, buf: ByteBuffer) {
-            FfiConverterOptionalTypeUuid.write(value.`id`, buf)
-            FfiConverterOptionalString.write(value.`title`, buf)
-            FfiConverterOptionalSequenceTypeUuid.write(value.`tabs`, buf)
-            FfiConverterOptionalOptionalTypeUuid.write(value.`selectedTable`, buf)
-    }
-}
-
-
-
-sealed class DocContent {
-    
-    data class Text(
-        val v1: kotlin.String) : DocContent() {
-        companion object
-    }
-    
-    data class Blob(
-        val v1: DocBlob) : DocContent() {
-        companion object
-    }
-    
-    data class Image(
-        val v1: DocImage) : DocContent() {
-        companion object
-    }
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocContent : FfiConverterRustBuffer<DocContent>{
-    override fun read(buf: ByteBuffer): DocContent {
-        return when(buf.getInt()) {
-            1 -> DocContent.Text(
-                FfiConverterString.read(buf),
-                )
-            2 -> DocContent.Blob(
-                FfiConverterTypeDocBlob.read(buf),
-                )
-            3 -> DocContent.Image(
-                FfiConverterTypeDocImage.read(buf),
-                )
-            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
-        }
-    }
-
-    override fun allocationSize(value: DocContent) = when(value) {
-        is DocContent.Text -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.v1)
-            )
-        }
-        is DocContent.Blob -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeDocBlob.allocationSize(value.v1)
-            )
-        }
-        is DocContent.Image -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeDocImage.allocationSize(value.v1)
-            )
-        }
-    }
-
-    override fun write(value: DocContent, buf: ByteBuffer) {
-        when(value) {
-            is DocContent.Text -> {
-                buf.putInt(1)
-                FfiConverterString.write(value.v1, buf)
-                Unit
-            }
-            is DocContent.Blob -> {
-                buf.putInt(2)
-                FfiConverterTypeDocBlob.write(value.v1, buf)
-                Unit
-            }
-            is DocContent.Image -> {
-                buf.putInt(3)
-                FfiConverterTypeDocImage.write(value.v1, buf)
-                Unit
-            }
-        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
-    }
-}
-
-
-
-
-
-
-enum class DocKind {
-    
-    TEXT,
-    BLOB,
-    IMAGE;
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocKind: FfiConverterRustBuffer<DocKind> {
-    override fun read(buf: ByteBuffer) = try {
-        DocKind.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: DocKind) = 4UL
-
-    override fun write(value: DocKind, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-sealed class DocTag {
-    
-    /**
-     * A link to another document.
-     */
-    data class RefGeneric(
-        val v1: kotlin.String) : DocTag() {
-        companion object
-    }
-    
-    data class LabelGeneric(
-        val v1: kotlin.String) : DocTag() {
-        companion object
-    }
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
-    override fun read(buf: ByteBuffer): DocTag {
-        return when(buf.getInt()) {
-            1 -> DocTag.RefGeneric(
-                FfiConverterString.read(buf),
-                )
-            2 -> DocTag.LabelGeneric(
-                FfiConverterString.read(buf),
-                )
-            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
-        }
-    }
-
-    override fun allocationSize(value: DocTag) = when(value) {
-        is DocTag.RefGeneric -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.v1)
-            )
-        }
-        is DocTag.LabelGeneric -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.v1)
-            )
-        }
-    }
-
-    override fun write(value: DocTag, buf: ByteBuffer) {
-        when(value) {
-            is DocTag.RefGeneric -> {
-                buf.putInt(1)
-                FfiConverterString.write(value.v1, buf)
-                Unit
-            }
-            is DocTag.LabelGeneric -> {
-                buf.putInt(2)
-                FfiConverterString.write(value.v1, buf)
-                Unit
-            }
-        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
-    }
-}
-
-
-
-
-
-
-enum class DocTagKind {
-    
-    REF_GENERIC,
-    LABEL_GENERIC;
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocTagKind: FfiConverterRustBuffer<DocTagKind> {
-    override fun read(buf: ByteBuffer) = try {
-        DocTagKind.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: DocTagKind) = 4UL
-
-    override fun write(value: DocTagKind, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-
-enum class DrawerEvent {
-    
-    LIST_CHANGED;
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDrawerEvent: FfiConverterRustBuffer<DrawerEvent> {
-    override fun read(buf: ByteBuffer) = try {
-        DrawerEvent.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: DrawerEvent) = 4UL
-
-    override fun write(value: DrawerEvent, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-sealed class TableWindow {
-    
-    object AllWindows : TableWindow()
-    
-    
-    data class Specific(
-        val `id`: Uuid) : TableWindow() {
-        companion object
-    }
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTableWindow : FfiConverterRustBuffer<TableWindow>{
-    override fun read(buf: ByteBuffer): TableWindow {
-        return when(buf.getInt()) {
-            1 -> TableWindow.AllWindows
-            2 -> TableWindow.Specific(
-                FfiConverterTypeUuid.read(buf),
-                )
-            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
-        }
-    }
-
-    override fun allocationSize(value: TableWindow) = when(value) {
-        is TableWindow.AllWindows -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-            )
-        }
-        is TableWindow.Specific -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeUuid.allocationSize(value.`id`)
-            )
-        }
-    }
-
-    override fun write(value: TableWindow, buf: ByteBuffer) {
-        when(value) {
-            is TableWindow.AllWindows -> {
-                buf.putInt(1)
-                Unit
-            }
-            is TableWindow.Specific -> {
-                buf.putInt(2)
-                FfiConverterTypeUuid.write(value.`id`, buf)
-                Unit
-            }
-        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
-    }
-}
-
-
-
-
-
-sealed class TablesEvent {
-    
-    object ListChanged : TablesEvent()
-    
-    
-    data class WindowChanged(
-        val `id`: Uuid) : TablesEvent() {
-        companion object
-    }
-    
-    data class TabChanged(
-        val `id`: Uuid) : TablesEvent() {
-        companion object
-    }
-    
-    data class PanelChanged(
-        val `id`: Uuid) : TablesEvent() {
-        companion object
-    }
-    
-    data class TableChanged(
-        val `id`: Uuid) : TablesEvent() {
-        companion object
-    }
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
-    override fun read(buf: ByteBuffer): TablesEvent {
-        return when(buf.getInt()) {
-            1 -> TablesEvent.ListChanged
-            2 -> TablesEvent.WindowChanged(
-                FfiConverterTypeUuid.read(buf),
-                )
-            3 -> TablesEvent.TabChanged(
-                FfiConverterTypeUuid.read(buf),
-                )
-            4 -> TablesEvent.PanelChanged(
-                FfiConverterTypeUuid.read(buf),
-                )
-            5 -> TablesEvent.TableChanged(
-                FfiConverterTypeUuid.read(buf),
-                )
-            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
-        }
-    }
-
-    override fun allocationSize(value: TablesEvent) = when(value) {
-        is TablesEvent.ListChanged -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-            )
-        }
-        is TablesEvent.WindowChanged -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeUuid.allocationSize(value.`id`)
-            )
-        }
-        is TablesEvent.TabChanged -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeUuid.allocationSize(value.`id`)
-            )
-        }
-        is TablesEvent.PanelChanged -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeUuid.allocationSize(value.`id`)
-            )
-        }
-        is TablesEvent.TableChanged -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeUuid.allocationSize(value.`id`)
-            )
-        }
-    }
-
-    override fun write(value: TablesEvent, buf: ByteBuffer) {
-        when(value) {
-            is TablesEvent.ListChanged -> {
-                buf.putInt(1)
-                Unit
-            }
-            is TablesEvent.WindowChanged -> {
-                buf.putInt(2)
-                FfiConverterTypeUuid.write(value.`id`, buf)
-                Unit
-            }
-            is TablesEvent.TabChanged -> {
-                buf.putInt(3)
-                FfiConverterTypeUuid.write(value.`id`, buf)
-                Unit
-            }
-            is TablesEvent.PanelChanged -> {
-                buf.putInt(4)
-                FfiConverterTypeUuid.write(value.`id`, buf)
-                Unit
-            }
-            is TablesEvent.TableChanged -> {
-                buf.putInt(5)
-                FfiConverterTypeUuid.write(value.`id`, buf)
-                Unit
-            }
-        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
-    }
-}
-
-
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
-    override fun read(buf: ByteBuffer): kotlin.ULong? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterULong.read(buf)
-    }
-
-    override fun allocationSize(value: kotlin.ULong?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterULong.allocationSize(value)
-        }
-    }
-
-    override fun write(value: kotlin.ULong?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterULong.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
-    override fun read(buf: ByteBuffer): kotlin.String? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterString.read(buf)
-    }
-
-    override fun allocationSize(value: kotlin.String?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterString.allocationSize(value)
-        }
-    }
-
-    override fun write(value: kotlin.String?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterString.write(value, buf)
-        }
     }
 }
 
@@ -5258,422 +3834,6 @@ public object FfiConverterOptionalTypeWindow: FfiConverterRustBuffer<Window?> {
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeDocContent: FfiConverterRustBuffer<DocContent?> {
-    override fun read(buf: ByteBuffer): DocContent? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeDocContent.read(buf)
-    }
-
-    override fun allocationSize(value: DocContent?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeDocContent.allocationSize(value)
-        }
-    }
-
-    override fun write(value: DocContent?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeDocContent.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalTypeTableWindow: FfiConverterRustBuffer<TableWindow?> {
-    override fun read(buf: ByteBuffer): TableWindow? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeTableWindow.read(buf)
-    }
-
-    override fun allocationSize(value: TableWindow?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeTableWindow.allocationSize(value)
-        }
-    }
-
-    override fun write(value: TableWindow?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeTableWindow.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalOptionalString: FfiConverterRustBuffer<kotlin.String??> {
-    override fun read(buf: ByteBuffer): kotlin.String?? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterOptionalString.read(buf)
-    }
-
-    override fun allocationSize(value: kotlin.String??): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterOptionalString.allocationSize(value)
-        }
-    }
-
-    override fun write(value: kotlin.String??, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterOptionalString.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalOptionalTypeUuid: FfiConverterRustBuffer<Uuid??> {
-    override fun read(buf: ByteBuffer): Uuid?? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterOptionalTypeUuid.read(buf)
-    }
-
-    override fun allocationSize(value: Uuid??): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterOptionalTypeUuid.allocationSize(value)
-        }
-    }
-
-    override fun write(value: Uuid??, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterOptionalTypeUuid.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalSequenceString: FfiConverterRustBuffer<List<kotlin.String>?> {
-    override fun read(buf: ByteBuffer): List<kotlin.String>? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterSequenceString.read(buf)
-    }
-
-    override fun allocationSize(value: List<kotlin.String>?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterSequenceString.allocationSize(value)
-        }
-    }
-
-    override fun write(value: List<kotlin.String>?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterSequenceString.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalSequenceTypePanelPatch: FfiConverterRustBuffer<List<PanelPatch>?> {
-    override fun read(buf: ByteBuffer): List<PanelPatch>? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterSequenceTypePanelPatch.read(buf)
-    }
-
-    override fun allocationSize(value: List<PanelPatch>?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterSequenceTypePanelPatch.allocationSize(value)
-        }
-    }
-
-    override fun write(value: List<PanelPatch>?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterSequenceTypePanelPatch.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalSequenceTypeTabPatch: FfiConverterRustBuffer<List<TabPatch>?> {
-    override fun read(buf: ByteBuffer): List<TabPatch>? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterSequenceTypeTabPatch.read(buf)
-    }
-
-    override fun allocationSize(value: List<TabPatch>?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterSequenceTypeTabPatch.allocationSize(value)
-        }
-    }
-
-    override fun write(value: List<TabPatch>?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterSequenceTypeTabPatch.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalSequenceTypeTablePatch: FfiConverterRustBuffer<List<TablePatch>?> {
-    override fun read(buf: ByteBuffer): List<TablePatch>? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterSequenceTypeTablePatch.read(buf)
-    }
-
-    override fun allocationSize(value: List<TablePatch>?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterSequenceTypeTablePatch.allocationSize(value)
-        }
-    }
-
-    override fun write(value: List<TablePatch>?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterSequenceTypeTablePatch.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalSequenceTypeWindowPatch: FfiConverterRustBuffer<List<WindowPatch>?> {
-    override fun read(buf: ByteBuffer): List<WindowPatch>? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterSequenceTypeWindowPatch.read(buf)
-    }
-
-    override fun allocationSize(value: List<WindowPatch>?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterSequenceTypeWindowPatch.allocationSize(value)
-        }
-    }
-
-    override fun write(value: List<WindowPatch>?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterSequenceTypeWindowPatch.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalSequenceTypeDocTag: FfiConverterRustBuffer<List<DocTag>?> {
-    override fun read(buf: ByteBuffer): List<DocTag>? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterSequenceTypeDocTag.read(buf)
-    }
-
-    override fun allocationSize(value: List<DocTag>?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterSequenceTypeDocTag.allocationSize(value)
-        }
-    }
-
-    override fun write(value: List<DocTag>?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterSequenceTypeDocTag.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalSequenceTypeUuid: FfiConverterRustBuffer<List<Uuid>?> {
-    override fun read(buf: ByteBuffer): List<Uuid>? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterSequenceTypeUuid.read(buf)
-    }
-
-    override fun allocationSize(value: List<Uuid>?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterSequenceTypeUuid.allocationSize(value)
-        }
-    }
-
-    override fun write(value: List<Uuid>?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterSequenceTypeUuid.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalTypeOffsetDateTime: FfiConverterRustBuffer<OffsetDateTime?> {
-    override fun read(buf: ByteBuffer): OffsetDateTime? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeOffsetDateTime.read(buf)
-    }
-
-    override fun allocationSize(value: OffsetDateTime?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeOffsetDateTime.allocationSize(value)
-        }
-    }
-
-    override fun write(value: OffsetDateTime?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeOffsetDateTime.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalTypeUuid: FfiConverterRustBuffer<Uuid?> {
-    override fun read(buf: ByteBuffer): Uuid? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeUuid.read(buf)
-    }
-
-    override fun allocationSize(value: Uuid?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeUuid.allocationSize(value)
-        }
-    }
-
-    override fun write(value: Uuid?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeUuid.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
 public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
@@ -5758,34 +3918,6 @@ public object FfiConverterSequenceTypePanel: FfiConverterRustBuffer<List<Panel>>
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypePanelPatch: FfiConverterRustBuffer<List<PanelPatch>> {
-    override fun read(buf: ByteBuffer): List<PanelPatch> {
-        val len = buf.getInt()
-        return List<PanelPatch>(len) {
-            FfiConverterTypePanelPatch.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<PanelPatch>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypePanelPatch.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<PanelPatch>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypePanelPatch.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
 public object FfiConverterSequenceTypeTab: FfiConverterRustBuffer<List<Tab>> {
     override fun read(buf: ByteBuffer): List<Tab> {
         val len = buf.getInt()
@@ -5804,34 +3936,6 @@ public object FfiConverterSequenceTypeTab: FfiConverterRustBuffer<List<Tab>> {
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeTab.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypeTabPatch: FfiConverterRustBuffer<List<TabPatch>> {
-    override fun read(buf: ByteBuffer): List<TabPatch> {
-        val len = buf.getInt()
-        return List<TabPatch>(len) {
-            FfiConverterTypeTabPatch.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<TabPatch>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeTabPatch.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<TabPatch>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeTabPatch.write(it, buf)
         }
     }
 }
@@ -5870,34 +3974,6 @@ public object FfiConverterSequenceTypeTable: FfiConverterRustBuffer<List<Table>>
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeTablePatch: FfiConverterRustBuffer<List<TablePatch>> {
-    override fun read(buf: ByteBuffer): List<TablePatch> {
-        val len = buf.getInt()
-        return List<TablePatch>(len) {
-            FfiConverterTypeTablePatch.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<TablePatch>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeTablePatch.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<TablePatch>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeTablePatch.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
 public object FfiConverterSequenceTypeWindow: FfiConverterRustBuffer<List<Window>> {
     override fun read(buf: ByteBuffer): List<Window> {
         val len = buf.getInt()
@@ -5916,90 +3992,6 @@ public object FfiConverterSequenceTypeWindow: FfiConverterRustBuffer<List<Window
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWindow.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypeWindowPatch: FfiConverterRustBuffer<List<WindowPatch>> {
-    override fun read(buf: ByteBuffer): List<WindowPatch> {
-        val len = buf.getInt()
-        return List<WindowPatch>(len) {
-            FfiConverterTypeWindowPatch.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<WindowPatch>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeWindowPatch.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<WindowPatch>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeWindowPatch.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypeDocTag: FfiConverterRustBuffer<List<DocTag>> {
-    override fun read(buf: ByteBuffer): List<DocTag> {
-        val len = buf.getInt()
-        return List<DocTag>(len) {
-            FfiConverterTypeDocTag.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<DocTag>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeDocTag.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<DocTag>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeDocTag.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypeUuid: FfiConverterRustBuffer<List<Uuid>> {
-    override fun read(buf: ByteBuffer): List<Uuid> {
-        val len = buf.getInt()
-        return List<Uuid>(len) {
-            FfiConverterTypeUuid.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<Uuid>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeUuid.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<Uuid>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeUuid.write(it, buf)
         }
     }
 }
@@ -6087,3 +4079,32 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
