@@ -241,11 +241,7 @@ fn spawn_doc_setup_worker(
                         )
                         .await;
 
-                    let change_worker = cx
-                        .acx
-                        .change_manager()
-                        .clone()
-                        .spawn_doc_listener(handle.clone());
+                    let change_worker = cx.acx.change_manager().add_doc(handle.clone());
                     doc_change_worker.push(change_worker);
                 }
             }

@@ -12,7 +12,7 @@ struct DrawerRepoFfi {
 }
 
 impl daybook_core::repos::Repo for DrawerRepoFfi {
-    type Event = DrawerEvent;
+    type ChangeEvent = DrawerEvent;
     fn registry(&self) -> &Arc<daybook_core::repos::ListenersRegistry> {
         &self.repo.registry
     }

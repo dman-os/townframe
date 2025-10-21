@@ -362,7 +362,10 @@ fn schema_record(
     // only records get autosurgeon/automerge derives
     writeln!(buf, "#[derive({})]", derives.join(", "))?;
     if cx.attrs.uniffi {
-        writeln!(buf, "#[cfg_attr(feature = \"uniffi\", derive(uniffi::Record))]")?;
+        writeln!(
+            buf,
+            "#[cfg_attr(feature = \"uniffi\", derive(uniffi::Record))]"
+        )?;
     }
     if cx.attrs.serde {
         writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
@@ -376,7 +379,10 @@ fn schema_record(
             patch_parts.join(", ")
         )?;
         if cx.attrs.uniffi {
-            writeln!(buf, "#[cfg_attr(feature = \"uniffi\", patch(attribute(derive(uniffi::Record))))]")?;
+            writeln!(
+                buf,
+                "#[cfg_attr(feature = \"uniffi\", patch(attribute(derive(uniffi::Record))))]"
+            )?;
         }
     }
     writeln!(
@@ -427,7 +433,10 @@ fn schema_enum(
     }
     writeln!(buf, "#[derive({})]", derives.join(", "))?;
     if cx.attrs.uniffi {
-        writeln!(buf, "#[cfg_attr(feature = \"uniffi\", derive(uniffi::Enum))]")?;
+        writeln!(
+            buf,
+            "#[cfg_attr(feature = \"uniffi\", derive(uniffi::Enum))]"
+        )?;
     }
     if cx.attrs.serde {
         writeln!(buf, "#[serde(rename_all = \"camelCase\", untagged)]")?;
@@ -508,7 +517,10 @@ fn schema_variant(
     }
     writeln!(buf, "#[derive({})]", derives.join(", "))?;
     if cx.attrs.uniffi {
-        writeln!(buf, "#[cfg_attr(feature = \"uniffi\", derive(uniffi::Enum))]")?;
+        writeln!(
+            buf,
+            "#[cfg_attr(feature = \"uniffi\", derive(uniffi::Enum))]"
+        )?;
     }
     if cx.attrs.serde {
         writeln!(buf, "#[serde(rename_all = \"camelCase\", untagged)]")?;
@@ -530,7 +542,7 @@ fn schema_variant(
             VariantVariantType::Unit => writeln!(buf, ",")?,
             VariantVariantType::Wrapped(ty) => writeln!(
                 buf,
-                "({ty_name}), ",
+                "({ty_name}),",
                 ty_name = cx.rust_name(*ty).expect("unregistered variant type")
             )?,
         }
@@ -855,10 +867,7 @@ fn record_field(
                     "#[serde(with = \"api_utils_rs::codecs::sane_iso8601\")]",
                 )?;
             }
-            writeln!(
-                buf,
-                "#[autosurgeon(with = \"utils_rs::am::codecs::autosurgeon_date\")]",
-            )?;
+            writeln!(buf, "#[autosurgeon(with = \"utils_rs::am::codecs::date\")]",)?;
         }
     }
     write!(

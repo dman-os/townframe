@@ -1,5 +1,6 @@
 use crate::interlude::*;
 
+use automerge::{transaction::Transactable, ReadDoc};
 use autosurgeon::Prop;
 use samod::DocumentId;
 use tokio::{
@@ -27,6 +28,19 @@ struct ChangeListener {
 pub struct ChangeListenerManager {
     listeners: RwLock<Vec<ChangeListener>>,
     change_tx: mpsc::UnboundedSender<(DocumentId, Vec<ChangeNotification>)>,
+    brokers: DHashMap<DocumentId, Arc<DocChangeBroker>>,
+}
+
+struct DocChangeBroker {
+    join_handle: JoinHandle<Res<()>>,
+    term_signal_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl DocChangeBroker {
+    pub async fn stop(self) -> Res<()> {
+        self.term_signal_tx.send(true).wrap_err("already stopped")?;
+        self.join_handle.await.wrap_err("tokio task error")?
+    }
 }
 
 impl ChangeListenerManager {
@@ -36,6 +50,7 @@ impl ChangeListenerManager {
         let out = Self {
             listeners,
             change_tx,
+            brokers: default(),
         };
         let out = Arc::new(out);
 
@@ -47,10 +62,16 @@ impl ChangeListenerManager {
 
     /// Start listening for events on the given document
     /// TODO: the returned handle should allow unregistration
-    pub fn spawn_doc_listener(self: Arc<Self>, handle: samod::DocHandle) -> JoinHandle<Res<()>> {
+    pub fn add_doc(self: &Arc<Self>, handle: samod::DocHandle) -> Arc<DocChangeBroker> {
+        if let Some(arc) = self.brokers.get(handle.document_id()) {
+            return arc.clone();
+        }
         let this = self.clone();
-        let span = tracing::info_span!("doc listener task", doc_id = ?handle.document_id());
-        tokio::spawn(
+
+        let doc_id = handle.document_id().clone();
+        let span = tracing::info_span!("doc listener task", ?doc_id);
+        let (term_signal_tx, mut term_signal_rx) = tokio::sync::watch::channel(false);
+        let join_handle = tokio::spawn(
             async move {
                 info!("listening on doc");
 
@@ -60,18 +81,34 @@ impl ChangeListenerManager {
                 use futures::StreamExt;
 
                 let mut doc_change_stream = handle.changes();
-                while let Some(changes) = doc_change_stream.next().await {
+                loop {
+                    let changes = tokio::select! {
+                        biased;
+                        _ = term_signal_rx.wait_for(|signal| *signal) => {
+                            break;
+                        },
+                        val = doc_change_stream.next() => {
+                            val
+                        }
+                    };
+                    let Some(changes) = changes else {
+                        break;
+                    };
                     let (new_heads, all_changes) = handle.with_document(|doc| {
                         let patches = doc.diff(&heads, &changes.new_heads[..]);
-                        let mut collected_changes = Vec::new();
+                        // let meta = doc.get_changes_meta(&changes.new_heads[..]);
                         let new_heads: Arc<[automerge::ChangeHash]> = changes.new_heads.into();
-                        for patch in patches {
-                            let patch = Arc::new(patch);
-                            collected_changes.push(ChangeNotification {
-                                patch,
-                                heads: new_heads.clone(),
-                            });
-                        }
+
+                        let collected_changes = patches
+                            .into_iter()
+                            .map(|patch| {
+                                let patch = Arc::new(patch);
+                                ChangeNotification {
+                                    patch,
+                                    heads: new_heads.clone(),
+                                }
+                            })
+                            .collect::<Vec<_>>();
 
                         (new_heads, collected_changes)
                     });
@@ -93,7 +130,15 @@ impl ChangeListenerManager {
                 Ok(())
             }
             .instrument(span),
-        )
+        );
+
+        let out = DocChangeBroker {
+            join_handle,
+            term_signal_tx,
+        };
+        let out = Arc::new(out);
+        self.brokers.insert(doc_id, out.clone());
+        out
     }
 
     /// Register a change listener
@@ -163,7 +208,7 @@ impl ChangeListenerManager {
 }
 
 /// Check if a change path matches a listener path (including subpaths)
-fn path_matches(
+pub fn path_matches(
     listener_path: &[Prop<'static>],
     change_path: &[(automerge::ObjId, automerge::Prop)],
 ) -> bool {
@@ -180,7 +225,7 @@ fn path_matches(
 }
 
 /// Check if two properties match (handles different property types)
-fn prop_matches(listener_prop: &Prop<'static>, change_prop: &automerge::Prop) -> bool {
+pub fn prop_matches(listener_prop: &Prop<'static>, change_prop: &automerge::Prop) -> bool {
     match (listener_prop, change_prop) {
         (Prop::Key(listener_key), automerge::Prop::Map(change_key)) => listener_key == change_key,
         (Prop::Index(listener_idx), automerge::Prop::Seq(change_idx)) => {

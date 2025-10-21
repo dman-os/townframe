@@ -1,7 +1,7 @@
 use super::*;
 use automerge::ObjId;
 
-pub mod autosurgeon_date {
+pub mod date {
     use super::*;
 
     pub fn reconcile<R: Reconciler>(

@@ -1,18 +1,18 @@
 use crate::interlude::*;
 
 pub trait Repo {
-    type Event: Send + Sync + 'static;
+    type ChangeEvent: Send + Sync + 'static;
 
     fn registry(&self) -> &Arc<crate::repos::ListenersRegistry>;
 
     fn register_listener<F>(&self, listener: F) -> crate::repos::ListenerRegistration
     where
-        F: Fn(Arc<Self::Event>) + Send + Sync + 'static,
+        F: Fn(Arc<Self::ChangeEvent>) + Send + Sync + 'static,
     {
         let id = Uuid::new_v4();
         {
             let mut lock = self.registry().list.lock();
-            lock.push((id, ErasedListener::new::<Self::Event>(listener)));
+            lock.push((id, ErasedListener::new::<Self::ChangeEvent>(listener)));
         }
         ListenerRegistration {
             // strong is dropped here; we only keep Weak to avoid leaks.

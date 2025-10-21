@@ -51,10 +51,7 @@ pub async fn init_from_globals(cx: &Ctx) -> Res<()> {
         unreachable!();
     }
     for handle in &doc_handles {
-        cx.acx
-            .change_manager()
-            .clone()
-            .spawn_doc_listener(handle.clone());
+        cx.acx.change_manager().clone().add_doc(handle.clone());
     }
     if update_state {
         crate::globals::set_init_state(

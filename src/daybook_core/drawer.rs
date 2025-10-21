@@ -1,5 +1,6 @@
+use automerge::ChangeHash;
 use samod::DocumentId;
-use utils_rs::am::AmCtx;
+use utils_rs::am::{serialize_commit_heads, AmCtx};
 
 use crate::interlude::*;
 
@@ -8,6 +9,7 @@ use std::str::FromStr;
 
 #[derive(Default, Reconcile, Hydrate)]
 pub struct DrawerStore {
+    // FIXME: use changehash newtype that uses multihash
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     map: HashMap<DocId, Vec<String>>,
 }
@@ -25,16 +27,18 @@ impl DrawerStore {
     async fn register_change_listener<F>(
         acx: &AmCtx,
         drawer_doc_id: DocumentId,
+        mut path: Vec<autosurgeon::Prop<'static>>,
         on_change: F,
     ) -> Res<()>
     where
         F: Fn(Vec<utils_rs::am::changes::ChangeNotification>) + Send + Sync + 'static,
     {
+        path.insert(0, Self::PROP.into());
         acx.change_manager()
             .add_listener(
                 utils_rs::am::changes::ChangeFilter {
                     doc_id: Some(drawer_doc_id),
-                    path: vec![Self::PROP.into()],
+                    path,
                 },
                 on_change,
             )
@@ -69,23 +73,116 @@ pub struct DrawerRepo {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum DrawerEvent {
     ListChanged,
+    DocAdded {
+        id: DocId,
+        heads: Vec<String>,
+    },
+    DocUpdated {
+        id: DocId,
+        new_heads: Vec<String>,
+        old_heads: Vec<String>,
+    },
+    DocDeleted {
+        id: DocId,
+        old_heads: Vec<String>,
+    },
 }
+
+pub enum DrawerUpdate {}
 
 impl DrawerRepo {
     pub async fn load(acx: AmCtx, drawer_doc_id: DocumentId) -> Res<Self> {
         let registry = crate::repos::ListenersRegistry::new();
 
-        DrawerStore::register_change_listener(&acx, drawer_doc_id.clone(), {
-            let registry = registry.clone();
+        let store = DrawerStore::load(&acx, &drawer_doc_id).await?;
+        let store = crate::stores::StoreHandle::new(store, (acx.clone(), drawer_doc_id.clone()));
 
-            move |_notifications| {
-                // Notify repo listeners that the docs list changed
-                registry.notify(DrawerEvent::ListChanged);
-            }
+        let (notif_tx, mut notif_rx) = tokio::sync::mpsc::unbounded_channel::<
+            Vec<utils_rs::am::changes::ChangeNotification>,
+        >();
+
+        DrawerStore::register_change_listener(&acx, drawer_doc_id.clone(), vec!["map".into()], {
+            move |notifs| notif_tx.send(notifs).expect("channel error")
         })
         .await?;
-        let store = DrawerStore::load(&acx, &drawer_doc_id).await?;
-        let store = crate::stores::StoreHandle::new(store, (acx.clone(), drawer_doc_id));
+
+        let _notif_worker = tokio::spawn({
+            let registry = registry.clone();
+            let acx = acx.clone();
+            let store = store.clone();
+            async move {
+                while let Some(notifs) = notif_rx.recv().await {
+                    for notif in notifs {
+                        // make sure the notif is on store.map
+                        match &notif.patch.path[..] {
+                            [(obj_id, automerge::Prop::Map(key))]
+                                // FIXME: the first path of the obj_id is the patched obj, right??
+                                if *obj_id == automerge::ROOT && key == "map" =>
+                            {
+                                match &notif.patch.action {
+                                    automerge::PatchAction::PutMap {
+                                        key: new_doc_id,
+                                        value: (val, obj_id),
+                                        ..
+                                    } => {
+                                        let Some(automerge::ObjType::List) = val.to_objtype()
+                                        else {
+                                            panic!("schema violation");
+                                        };
+
+                                        let new_heads = acx
+                                            .hydrate_path_at_head::<Vec<String>>(
+                                                &drawer_doc_id,
+                                                &notif.heads,
+                                                obj_id.clone(),
+                                                vec![],
+                                            )
+                                            .await
+                                            .expect("error hydrating at head")
+                                            .expect("schema violation");
+
+                                        let old_heads = store
+                                            .mutate_sync({
+                                                let key = new_doc_id.clone();
+                                                |store| store.map.insert(key, new_heads.clone())
+                                            })
+                                            .await?;
+                                        if let Some(old_heads) = old_heads {
+                                            registry.notify(DrawerEvent::DocUpdated {
+                                                id: new_doc_id.clone(),
+                                                new_heads,
+                                                old_heads,
+                                            })
+                                        } else {
+                                            registry.notify(DrawerEvent::DocAdded {
+                                                id: new_doc_id.clone(),
+                                                heads: new_heads,
+                                            })
+                                        }
+                                    }
+                                    automerge::PatchAction::DeleteMap { key } => {
+                                        let old_heads = store
+                                                    .mutate_sync(|store| store.map.remove(key))
+                                                    .await?;
+                                        if let Some(old_heads) = old_heads {
+                                            registry.notify(DrawerEvent::DocDeleted {
+                                                id: key.clone(),
+                                                old_heads,
+                                            })
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Notify repo listeners that the docs list changed
+                    registry.notify(DrawerEvent::ListChanged);
+                }
+                eyre::Ok(())
+            }
+        });
 
         let repo = Self {
             acx,
@@ -136,12 +233,14 @@ impl DrawerRepo {
         })
         .await
         .wrap_err("tokio error")??;
+        let heads: Arc<[ChangeHash]> = heads.into();
+
+        let str_heads = serialize_commit_heads(&heads);
 
         // store id in drawer AM
         {
-            let heads = utils_rs::am::serialize_commit_heads(&heads);
             self.store
-                .mutate_sync(|store| store.map.insert(new_doc.id.clone(), heads))
+                .mutate_sync(|store| store.map.insert(new_doc.id.clone(), str_heads.clone()))
                 .await?;
         }
 
@@ -150,6 +249,10 @@ impl DrawerRepo {
         self.cache.insert(new_doc.id.clone(), new_doc);
         self.handles.insert(out_id.clone(), handle);
         self.registry.notify(DrawerEvent::ListChanged);
+        self.registry.notify(DrawerEvent::DocAdded {
+            id: out_id.clone(),
+            heads: str_heads,
+        });
         Ok(out_id)
     }
 
@@ -280,8 +383,18 @@ impl DrawerRepo {
 }
 
 impl crate::repos::Repo for DrawerRepo {
-    type Event = DrawerEvent;
+    type ChangeEvent = DrawerEvent;
     fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
         &self.registry
     }
+}
+
+mod tests {
+    use super::*;
+
+    fn test_one() {}
+}
+
+fn stuff() {
+    let stuff: Box<str> = "".into();
 }

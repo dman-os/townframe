@@ -250,7 +250,7 @@ pub struct TablesRepo {
 }
 
 impl crate::repos::Repo for TablesRepo {
-    type Event = TablesEvent;
+    type ChangeEvent = TablesEvent;
     fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
         &self.registry
     }

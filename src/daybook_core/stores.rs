@@ -22,6 +22,13 @@ impl<S: Store> Inner<S> {
 pub struct StoreHandle<S: Store> {
     inner: Arc<tokio::sync::RwLock<Inner<S>>>,
 }
+impl<T: Store> Clone for StoreHandle<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
 
 impl<S> StoreHandle<S>
 where

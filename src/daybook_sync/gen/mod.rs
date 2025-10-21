@@ -35,14 +35,11 @@ pub mod doc {
         Image,
     }
     impl DocKind {
-        pub unsafe fn _lift(val:u8) -> DocKind {
-            if !cfg!(debug_assertions){
-                return unsafe {
-                    ::core::mem::transmute::<u8, DocKind>(val)
-                };
+        pub unsafe fn _lift(val: u8) -> DocKind {
+            if !cfg!(debug_assertions) {
+                return unsafe { ::core::mem::transmute::<u8, DocKind>(val) };
             }
             match val {
-
                 0 => DocKind::Text,
                 1 => DocKind::Blob,
                 2 => DocKind::Image,
@@ -52,13 +49,12 @@ pub mod doc {
         }
     }
 
-
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", untagged)]
     pub enum DocContent {
-        Text(String), 
-        Blob(DocBlob), 
-        Image(DocImage), 
+        Text(String),
+        Blob(DocBlob),
+        Image(DocImage),
     }
 
     pub type DocRef = DocId;
@@ -70,14 +66,11 @@ pub mod doc {
         LabelGeneric,
     }
     impl DocTagKind {
-        pub unsafe fn _lift(val:u8) -> DocTagKind {
-            if !cfg!(debug_assertions){
-                return unsafe {
-                    ::core::mem::transmute::<u8, DocTagKind>(val)
-                };
+        pub unsafe fn _lift(val: u8) -> DocTagKind {
+            if !cfg!(debug_assertions) {
+                return unsafe { ::core::mem::transmute::<u8, DocTagKind>(val) };
             }
             match val {
-
                 0 => DocTagKind::RefGeneric,
                 1 => DocTagKind::LabelGeneric,
 
@@ -86,13 +79,12 @@ pub mod doc {
         }
     }
 
-
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", untagged)]
     pub enum DocTag {
         /// A link to another document.
-        RefGeneric(DocRef), 
-        LabelGeneric(String), 
+        RefGeneric(DocRef),
+        LabelGeneric(String),
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
@@ -100,10 +92,10 @@ pub mod doc {
     pub struct Doc {
         pub id: DocId,
         #[serde(with = "api_utils_rs::codecs::sane_iso8601")]
-        #[autosurgeon(with = "utils_rs::am::codecs::autosurgeon_date")]
+        #[autosurgeon(with = "utils_rs::am::codecs::date")]
         pub created_at: OffsetDateTime,
         #[serde(with = "api_utils_rs::codecs::sane_iso8601")]
-        #[autosurgeon(with = "utils_rs::am::codecs::autosurgeon_date")]
+        #[autosurgeon(with = "utils_rs::am::codecs::date")]
         pub updated_at: OffsetDateTime,
         pub content: DocContent,
         pub tags: Vec<DocTag>,
@@ -130,14 +122,25 @@ pub mod doc {
             pub id: Uuid,
         }
 
-        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
+        #[derive(
+            Debug,
+            Clone,
+            thiserror::Error,
+            displaydoc::Display,
+            Serialize,
+            Deserialize,
+            Hydrate,
+            Reconcile,
+        )]
         #[serde(rename_all = "camelCase", tag = "error")]
         /// Id occupied: {id}
         pub struct ErrorIdOccupied {
             pub id: String,
         }
 
-        #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
+        #[derive(
+            Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile,
+        )]
         #[serde(rename_all = "camelCase", tag = "error")]
         pub enum Error {
             /// Id occupied {0}
@@ -148,5 +151,4 @@ pub mod doc {
             Internal(#[from] ErrorInternal),
         }
     }
-
 }
