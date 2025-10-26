@@ -1,8 +1,8 @@
+use crate::interlude::*;
+
 use automerge::ChangeHash;
 use samod::DocumentId;
 use utils_rs::am::{serialize_commit_heads, AmCtx};
-
-use crate::interlude::*;
 
 use crate::gen::doc::{Doc, DocId, DocPatch};
 use crate::repos::Repo;
@@ -67,7 +67,8 @@ pub struct DrawerRepo {
     handles: Arc<DHashMap<DocId, samod::DocHandle>>,
     cache: Arc<DHashMap<DocId, Doc>>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
-    broker: Arc<utils_rs::am::changes::DocChangeBroker>,
+    _broker: Arc<utils_rs::am::changes::DocChangeBroker>,
+    drawer_doc_id: DocumentId,
 }
 
 // Minimal event enum so Kotlin can refresh via ffiList on changes
@@ -93,15 +94,11 @@ pub enum DrawerEvent {
 pub enum DrawerUpdate {}
 
 impl DrawerRepo {
-    pub async fn load(acx: AmCtx, drawer_doc_id: DocumentId) -> Res<Self> {
+    pub async fn load(acx: AmCtx, drawer_doc_id: DocumentId) -> Res<Arc<Self>> {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store = DrawerStore::load(&acx, &drawer_doc_id).await?;
         let store = crate::stores::StoreHandle::new(store, (acx.clone(), drawer_doc_id.clone()));
-
-        let (notif_tx, mut notif_rx) = tokio::sync::mpsc::unbounded_channel::<
-            Vec<utils_rs::am::changes::ChangeNotification>,
-        >();
 
         let broker = {
             let handle = acx
@@ -111,104 +108,115 @@ impl DrawerRepo {
             acx.change_manager().add_doc(handle)
         };
 
+        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
+            Vec<utils_rs::am::changes::ChangeNotification>,
+        >();
         DrawerStore::register_change_listener(&acx, &broker, vec!["map".into()], {
             move |notifs| notif_tx.send(notifs).expect("channel error")
         })
         .await?;
 
-        let _notif_worker = tokio::spawn({
-            let registry = registry.clone();
-            let acx = acx.clone();
-            let store = store.clone();
-            async move {
-                while let Some(notifs) = notif_rx.recv().await {
-                    for notif in notifs {
-                        // make sure the notif is on store.map
-                        match &notif.patch.path[..] {
-                            [(obj_id, automerge::Prop::Map(key))]
-                                // FIXME: the first path of the obj_id is the patched obj, right??
-                                if *obj_id == automerge::ROOT && key == "map" =>
-                            {
-                                match &notif.patch.action {
-                                    automerge::PatchAction::PutMap {
-                                        key: new_doc_id,
-                                        value: (val, obj_id),
-                                        ..
-                                    } => {
-                                        let Some(automerge::ObjType::List) = val.to_objtype()
-                                        else {
-                                            panic!("schema violation");
-                                        };
-
-                                        let new_heads = acx
-                                            .hydrate_path_at_head::<Vec<String>>(
-                                                &drawer_doc_id,
-                                                &notif.heads,
-                                                obj_id.clone(),
-                                                vec![],
-                                            )
-                                            .await
-                                            .expect("error hydrating at head")
-                                            .expect("schema violation");
-
-                                        let old_heads = store
-                                            .mutate_sync({
-                                                let key = new_doc_id.clone();
-                                                |store| store.map.insert(key, new_heads.clone())
-                                            })
-                                            .await?;
-                                        if let Some(old_heads) = old_heads {
-                                            registry.notify(DrawerEvent::DocUpdated {
-                                                id: new_doc_id.clone(),
-                                                new_heads,
-                                                old_heads,
-                                            })
-                                        } else {
-                                            registry.notify(DrawerEvent::DocAdded {
-                                                id: new_doc_id.clone(),
-                                                heads: new_heads,
-                                            })
-                                        }
-                                    }
-                                    automerge::PatchAction::DeleteMap { key } => {
-                                        let old_heads = store
-                                                    .mutate_sync(|store| store.map.remove(key))
-                                                    .await?;
-                                        if let Some(old_heads) = old_heads {
-                                            registry.notify(DrawerEvent::DocDeleted {
-                                                id: key.clone(),
-                                                old_heads,
-                                            })
-                                        }
-                                    }
-                                    _ => {
-                                        info!(?notif.patch, "XXX weird patch action");
-                                    }
-                                }
-                            }
-                            _ => {
-                                info!(?notif.patch, "XXX weird patch");
-                            }
-                        }
-                    }
-                    // Notify repo listeners that the docs list changed
-                    registry.notify(DrawerEvent::ListChanged);
-                }
-                eyre::Ok(())
-            }
-        });
-
         let repo = Self {
             acx,
-            // drawer_doc_id,
+            drawer_doc_id,
             store,
             registry: registry.clone(),
             handles: default(),
             cache: default(),
-            broker,
+            _broker: broker,
         };
+        let repo = Arc::new(repo);
+
+        let _notif_worker = tokio::spawn({
+            let repo = repo.clone();
+            async move { repo.handle_notifs(notif_rx).await }
+        });
 
         Ok(repo)
+    }
+
+    async fn handle_notifs(
+        self: &Self,
+        mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
+            Vec<utils_rs::am::changes::ChangeNotification>,
+        >,
+    ) -> Res<()> {
+        // let mut added_docs = std::collections::HashSet::new();
+        // let mut updated_docs = std::collections::HashSet::new();
+        // let mut deleted_docs = std::collections::HashSet::new();
+        while let Some(notifs) = notif_rx.recv().await {
+            // added_docs.clear();
+            // updated_docs.clear();
+            // deleted_docs.clear();
+            for notif in notifs {
+                if utils_rs::am::changes::path_matches(
+                    &[DrawerStore::PROP.into(), "map".into()],
+                    &notif.patch.path,
+                ) {
+                    match &notif.patch.action {
+                        automerge::PatchAction::PutMap {
+                            key: new_doc_id,
+                            value: (val, obj_id),
+                            ..
+                        } => {
+                            let Some(automerge::ObjType::List) = val.to_objtype() else {
+                                panic!("schema violation");
+                            };
+
+                            let new_heads = self
+                                .acx
+                                .hydrate_path_at_head::<Vec<String>>(
+                                    &self.drawer_doc_id,
+                                    &notif.heads,
+                                    obj_id.clone(),
+                                    vec![],
+                                )
+                                .await
+                                .expect("error hydrating at head")
+                                .expect("schema violation");
+
+                            let old_heads = self
+                                .store
+                                .mutate_sync({
+                                    let key = new_doc_id.clone();
+                                    |store| store.map.insert(key, new_heads.clone())
+                                })
+                                .await?;
+                            if let Some(old_heads) = old_heads {
+                                self.registry.notify(DrawerEvent::DocUpdated {
+                                    id: new_doc_id.clone(),
+                                    new_heads,
+                                    old_heads,
+                                })
+                            } else {
+                                self.registry.notify(DrawerEvent::DocAdded {
+                                    id: new_doc_id.clone(),
+                                    heads: new_heads,
+                                })
+                            }
+                        }
+                        automerge::PatchAction::DeleteMap { key } => {
+                            let old_heads = self
+                                .store
+                                .mutate_sync(|store| store.map.remove(key))
+                                .await?;
+                            if let Some(old_heads) = old_heads {
+                                self.registry.notify(DrawerEvent::DocDeleted {
+                                    id: key.clone(),
+                                    old_heads,
+                                })
+                            }
+                        }
+                        _ => {
+                            info!(?notif.patch, "XXX weird patch action");
+                        }
+                    }
+                }
+            }
+        }
+        // Notify repo listeners that the docs list changed
+        self.registry.notify(DrawerEvent::ListChanged);
+        Ok(())
     }
 
     // NOTE: old contains/insert/remove removed. Use add/get/update/del instead.
@@ -494,7 +502,7 @@ mod tests {
         }
         {
             let event =
-                tokio::time::timeout(std::time::Duration::from_secs(10), server_notif_rx.recv())
+                tokio::time::timeout(std::time::Duration::from_secs(1), server_notif_rx.recv())
                     .await
                     .wrap_err("timeout")?
                     .ok_or_eyre("channel closed")?;

@@ -279,7 +279,6 @@ impl TablesRepo {
     pub async fn load(acx: AmCtx, app_doc_id: DocumentId) -> Res<Self> {
         let registry = crate::repos::ListenersRegistry::new();
 
-
         let store = TablesStore::load(&acx, &app_doc_id).await?;
         let store = crate::stores::StoreHandle::new(store, (acx.clone(), app_doc_id.clone()));
         store
@@ -377,7 +376,7 @@ impl TablesRepo {
         let repo = Self {
             store,
             registry: registry.clone(),
-            broker
+            broker,
         };
         Ok(repo)
     }

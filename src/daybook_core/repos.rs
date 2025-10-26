@@ -6,7 +6,7 @@ pub trait Repo {
     fn registry(&self) -> &Arc<crate::repos::ListenersRegistry>;
 
     /// Add a listener to the repository.
-    /// 
+    ///
     /// Dropping the registration handle will unregister the listener.
     fn register_listener<F>(&self, listener: F) -> crate::repos::ListenerRegistration
     where

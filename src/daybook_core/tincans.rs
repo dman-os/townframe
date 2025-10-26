@@ -6,7 +6,7 @@ Copyright © 2025 Alex Good
  */
 
 #![allow(dead_code)]
-use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, future::join, select};
+use futures::{future::join, select, FutureExt, Sink, SinkExt, Stream, StreamExt};
 use samod::{ConnDirection, Repo};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;

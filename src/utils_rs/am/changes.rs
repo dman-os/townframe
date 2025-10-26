@@ -53,7 +53,7 @@ impl DocChangeBroker {
 pub struct DocIdFilter {
     pub doc_id: DocumentId,
     // forces one to have broker before adding a listener
-    _seal: ()
+    _seal: (),
 }
 
 impl ChangeListenerManager {
@@ -223,7 +223,7 @@ impl ChangeListenerManager {
 
 /// Check if a change path matches a listener path (including subpaths)
 pub fn path_matches(
-    listener_path: &[Prop<'static>],
+    listener_path: &[Prop<'_>],
     change_path: &[(automerge::ObjId, automerge::Prop)],
 ) -> bool {
     if listener_path.len() > change_path.len() {
@@ -239,7 +239,7 @@ pub fn path_matches(
 }
 
 /// Check if two properties match (handles different property types)
-pub fn prop_matches(listener_prop: &Prop<'static>, change_prop: &automerge::Prop) -> bool {
+pub fn prop_matches(listener_prop: &Prop<'_>, change_prop: &automerge::Prop) -> bool {
     match (listener_prop, change_prop) {
         (Prop::Key(listener_key), automerge::Prop::Map(change_key)) => listener_key == change_key,
         (Prop::Index(listener_idx), automerge::Prop::Seq(change_idx)) => {
