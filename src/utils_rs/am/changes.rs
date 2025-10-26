@@ -1,6 +1,5 @@
 use crate::interlude::*;
 
-use automerge::{transaction::Transactable, ReadDoc};
 use autosurgeon::Prop;
 use samod::DocumentId;
 use tokio::{
@@ -16,7 +15,7 @@ pub struct ChangeNotification {
 }
 
 pub struct ChangeFilter {
-    pub doc_id: Option<DocumentId>,
+    pub doc_id: Option<DocIdFilter>,
     pub path: Vec<Prop<'static>>,
 }
 
@@ -31,7 +30,8 @@ pub struct ChangeListenerManager {
     brokers: DHashMap<DocumentId, Arc<DocChangeBroker>>,
 }
 
-struct DocChangeBroker {
+pub struct DocChangeBroker {
+    doc_id: DocumentId,
     join_handle: JoinHandle<Res<()>>,
     term_signal_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -41,6 +41,19 @@ impl DocChangeBroker {
         self.term_signal_tx.send(true).wrap_err("already stopped")?;
         self.join_handle.await.wrap_err("tokio task error")?
     }
+
+    pub fn filter(&self) -> DocIdFilter {
+        DocIdFilter {
+            doc_id: self.doc_id.clone(),
+            _seal: (),
+        }
+    }
+}
+
+pub struct DocIdFilter {
+    pub doc_id: DocumentId,
+    // forces one to have broker before adding a listener
+    _seal: ()
 }
 
 impl ChangeListenerManager {
@@ -113,7 +126,7 @@ impl ChangeListenerManager {
                         (new_heads, collected_changes)
                     });
 
-                    info!(?all_changes, "changes observed");
+                    debug!(?all_changes, "XXX changes observed");
 
                     // Notify listeners about changes
                     if !all_changes.is_empty() {
@@ -135,6 +148,7 @@ impl ChangeListenerManager {
         let out = DocChangeBroker {
             join_handle,
             term_signal_tx,
+            doc_id: doc_id.clone(),
         };
         let out = Arc::new(out);
         self.brokers.insert(doc_id, out.clone());
@@ -175,7 +189,7 @@ impl ChangeListenerManager {
                             .filter
                             .doc_id
                             .as_ref()
-                            .map(|target| *target != id)
+                            .map(|target| target.doc_id != id)
                             .unwrap_or_default()
                         {
                             continue;

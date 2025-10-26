@@ -1,21 +1,24 @@
 use crate::interlude::*;
 
 pub trait Repo {
-    type ChangeEvent: Send + Sync + 'static;
+    type Event: Send + Sync + 'static;
 
     fn registry(&self) -> &Arc<crate::repos::ListenersRegistry>;
 
+    /// Add a listener to the repository.
+    /// 
+    /// Dropping the registration handle will unregister the listener.
     fn register_listener<F>(&self, listener: F) -> crate::repos::ListenerRegistration
     where
-        F: Fn(Arc<Self::ChangeEvent>) + Send + Sync + 'static,
+        F: Fn(Arc<Self::Event>) + Send + Sync + 'static,
     {
         let id = Uuid::new_v4();
         {
             let mut lock = self.registry().list.lock();
-            lock.push((id, ErasedListener::new::<Self::ChangeEvent>(listener)));
+            lock.push((id, ErasedListener::new::<Self::Event>(listener)));
         }
         ListenerRegistration {
-            // strong is dropped here; we only keep Weak to avoid leaks.
+            // we only keep Weak to avoid leaks.
             registry: Arc::downgrade(self.registry()),
             id,
         }
@@ -65,6 +68,15 @@ impl ListenersRegistry {
             // Call synchronously; foreign side should hop to main thread as needed.
             listener.on_event(ev);
         }
+    }
+
+    pub fn dump(&self) {
+        let list = self.list.lock();
+        info!("ListenersRegistry: ================================================");
+        for (id, _listener) in list.iter() {
+            info!("- {id}");
+        }
+        info!("================================================");
     }
 }
 

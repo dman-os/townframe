@@ -12,10 +12,16 @@ use changes::ChangeListenerManager;
 /// Configuration for Automerge storage
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Storage directory for Automerge documents
-    pub storage_dir: PathBuf,
     /// Peer ID for this client
     pub peer_id: String,
+    /// Storage directory for Automerge documents
+    pub storage: StorageConfig,
+}
+
+#[derive(Debug, Clone)]
+pub enum StorageConfig {
+    Disk { path: PathBuf },
+    Memory,
 }
 
 #[derive(Clone)]
@@ -34,23 +40,30 @@ impl AmCtx {
     ) -> Res<Self> {
         let peer_id = samod::PeerId::from_string(config.peer_id);
 
-        // Ensure the storage directory exists
-        std::fs::create_dir_all(&config.storage_dir).wrap_err_with(|| {
-            format!(
-                "Failed to create storage directory: {}",
-                config.storage_dir.display()
-            )
-        })?;
+        let repo = samod::Repo::build_tokio().with_peer_id(peer_id.clone());
 
-        let repo = samod::Repo::build_tokio()
-            .with_peer_id(peer_id.clone())
-            .with_storage(samod::storage::TokioFilesystemStorage::new(
-                config.storage_dir.to_string_lossy().as_ref(),
-            ));
-        let repo = if let Some(policy) = announce_policy {
-            repo.with_announce_policy(policy).load().await
-        } else {
-            repo.load().await
+        let repo = match config.storage {
+            StorageConfig::Disk { path } => {
+                std::fs::create_dir_all(&path).wrap_err_with(|| {
+                    format!("Failed to create storage directory: {}", path.display())
+                })?;
+                let repo = repo.with_storage(samod::storage::TokioFilesystemStorage::new(
+                    path.to_string_lossy().as_ref(),
+                ));
+                if let Some(policy) = announce_policy {
+                    repo.with_announce_policy(policy).load().await
+                } else {
+                    repo.load().await
+                }
+            }
+            StorageConfig::Memory => {
+                let repo = repo.with_storage(samod::storage::InMemoryStorage::new());
+                if let Some(policy) = announce_policy {
+                    repo.with_announce_policy(policy).load().await
+                } else {
+                    repo.load().await
+                }
+            }
         };
 
         let change_manager = ChangeListenerManager::boot();
@@ -64,8 +77,30 @@ impl AmCtx {
         Ok(out)
     }
 
+    pub fn spawn_mpsc_connector(
+        &self,
+        rx_from_peer: futures::channel::mpsc::UnboundedReceiver<Vec<u8>>,
+        tx_to_peer: futures::channel::mpsc::UnboundedSender<Vec<u8>>,
+        direction: samod::ConnDirection,
+    ) {
+        use futures::StreamExt;
+        let repo = self.repo.clone();
+        tokio::spawn(
+            async move {
+                let fin_reason = repo
+                    .connect(
+                        rx_from_peer.map(Ok::<_, std::convert::Infallible>),
+                        tx_to_peer,
+                        direction,
+                    )
+                    .await;
+                info!(?fin_reason, "sync server connector task finished");
+            }
+            .instrument(tracing::info_span!("mpsc sync server connector task")),
+        );
+    }
     /// Maintains connection to the sync server
-    pub fn spawn_connector(&self, addr: std::borrow::Cow<'static, str>) {
+    pub fn spawn_ws_connector(&self, addr: std::borrow::Cow<'static, str>) {
         let repo = self.repo.clone();
         tokio::spawn(
             async move {
@@ -93,7 +128,7 @@ impl AmCtx {
                     }
                 }
             }
-            .instrument(tracing::info_span!("sync server connector task")),
+            .instrument(tracing::info_span!("websocket sync server connector task")),
         );
     }
 
@@ -149,11 +184,6 @@ impl AmCtx {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         tokio::task::block_in_place(move || {
             handle.with_document(move |doc| {
-                let cur = doc.get_heads();
-                let cur_formatted = serialize_commit_heads(&cur);
-                let cur_roundtrip = parse_commit_heads(&cur_formatted).unwrap();
-                let value = doc.hydrate(None);
-                info!(?head, ?cur, ?cur_formatted, ?cur_roundtrip, ?value, "XXX");
                 let version = match doc.fork_at(head) {
                     Err(automerge::AutomergeError::InvalidHash(hash)) => {
                         return Err(HydrateAtHeadError::HashNotFound(hash))

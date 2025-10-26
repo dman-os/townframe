@@ -22,6 +22,9 @@ pub mod repos;
 pub mod stores;
 pub mod tables;
 
+#[cfg(test)]
+mod tincans;
+
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
 

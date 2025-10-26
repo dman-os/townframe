@@ -122,6 +122,23 @@ New version
 
 ## dev-log
 
+### 2025-10-26 | architecture
+
+As I start to build out more features, I'd love to have in hand something that will take me far.
+
+Concerns:
+- Portable execution (client or server)
+  - Wash is building out soemething nice here
+- Possible plugins through wasm
+  - Again, very positive about wash here
+- Possible multiple UI impls
+  - UI constrains around uniffi
+    - FFI boundary is expensive to cros ruling out Elm
+    - Crux provide a nice abstraction here but maybe too much abstraction?
+      - I think I'll wait on them to make some progress and see how that shakes out
+
+I 
+
 ### 2025-07-26
 
 Spent the day trying to get it to start on desktop.

@@ -36,7 +36,7 @@ impl Ctx {
             Option::<samod::AlwaysAnnounce>::None,
         )
         .await?;
-        acx.spawn_connector("ws://0.0.0.0:8090".into());
+        acx.spawn_ws_connector("ws://0.0.0.0:8090".into());
         let llm_provider = llm::builder::LLMBuilder::new()
             .backend(llm::builder::LLMBackend::Ollama)
             .base_url(config.ollama_url)

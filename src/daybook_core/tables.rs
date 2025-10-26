@@ -102,7 +102,7 @@ impl TablesStore {
     /// Register a change listener for tables changes
     pub async fn register_change_listener<F>(
         acx: &AmCtx,
-        app_doc_id: DocumentId,
+        broker: &utils_rs::am::changes::DocChangeBroker,
         on_change: F,
     ) -> Res<()>
     where
@@ -112,7 +112,7 @@ impl TablesStore {
             .add_listener(
                 utils_rs::am::changes::ChangeFilter {
                     path: vec![Self::PROP.into()],
-                    doc_id: Some(app_doc_id),
+                    doc_id: Some(broker.filter()),
                 },
                 on_change,
             )
@@ -247,10 +247,11 @@ impl TablesStore {
 pub struct TablesRepo {
     store: crate::stores::StoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
+    broker: Arc<utils_rs::am::changes::DocChangeBroker>,
 }
 
 impl crate::repos::Repo for TablesRepo {
-    type ChangeEvent = TablesEvent;
+    type Event = TablesEvent;
     fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
         &self.registry
     }
@@ -278,8 +279,25 @@ impl TablesRepo {
     pub async fn load(acx: AmCtx, app_doc_id: DocumentId) -> Res<Self> {
         let registry = crate::repos::ListenersRegistry::new();
 
+
+        let store = TablesStore::load(&acx, &app_doc_id).await?;
+        let store = crate::stores::StoreHandle::new(store, (acx.clone(), app_doc_id.clone()));
+        store
+            .mutate_sync(|store| {
+                store.rebuild_indices();
+            })
+            .await?;
+
+        let broker = {
+            let handle = acx
+                .find_doc(&app_doc_id)
+                .await?
+                .expect("doc should have been loaded");
+            acx.change_manager().add_doc(handle)
+        };
+
         // Register change listener to automatically notify repo listeners
-        TablesStore::register_change_listener(&acx, app_doc_id.clone(), {
+        TablesStore::register_change_listener(&acx, &broker, {
             let registry = registry.clone();
             move |notifications| {
                 // Analyze notifications to determine which specific events to send
@@ -356,16 +374,10 @@ impl TablesRepo {
         })
         .await?;
 
-        let store = TablesStore::load(&acx, &app_doc_id).await?;
-        let store = crate::stores::StoreHandle::new(store, (acx.clone(), app_doc_id.clone()));
-        store
-            .mutate_sync(|store| {
-                store.rebuild_indices();
-            })
-            .await?;
         let repo = Self {
             store,
             registry: registry.clone(),
+            broker
         };
         Ok(repo)
     }

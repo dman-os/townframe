@@ -104,7 +104,7 @@ impl Ctx {
         let acx =
             utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
                 .await?;
-        acx.spawn_connector("ws://0.0.0.0:8090".into());
+        acx.spawn_ws_connector("ws://0.0.0.0:8090".into());
 
         let cx = Arc::new(Self {
             // config,

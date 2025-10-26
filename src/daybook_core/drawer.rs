@@ -5,6 +5,7 @@ use utils_rs::am::{serialize_commit_heads, AmCtx};
 use crate::interlude::*;
 
 use crate::gen::doc::{Doc, DocId, DocPatch};
+use crate::repos::Repo;
 use std::str::FromStr;
 
 #[derive(Default, Reconcile, Hydrate)]
@@ -26,7 +27,7 @@ impl DrawerStore {
 
     async fn register_change_listener<F>(
         acx: &AmCtx,
-        drawer_doc_id: DocumentId,
+        broker: &utils_rs::am::changes::DocChangeBroker,
         mut path: Vec<autosurgeon::Prop<'static>>,
         on_change: F,
     ) -> Res<()>
@@ -37,7 +38,7 @@ impl DrawerStore {
         acx.change_manager()
             .add_listener(
                 utils_rs::am::changes::ChangeFilter {
-                    doc_id: Some(drawer_doc_id),
+                    doc_id: Some(broker.filter()),
                     path,
                 },
                 on_change,
@@ -66,6 +67,7 @@ pub struct DrawerRepo {
     handles: Arc<DHashMap<DocId, samod::DocHandle>>,
     cache: Arc<DHashMap<DocId, Doc>>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
+    broker: Arc<utils_rs::am::changes::DocChangeBroker>,
 }
 
 // Minimal event enum so Kotlin can refresh via ffiList on changes
@@ -101,7 +103,15 @@ impl DrawerRepo {
             Vec<utils_rs::am::changes::ChangeNotification>,
         >();
 
-        DrawerStore::register_change_listener(&acx, drawer_doc_id.clone(), vec!["map".into()], {
+        let broker = {
+            let handle = acx
+                .find_doc(&drawer_doc_id)
+                .await?
+                .expect("doc should have been loaded");
+            acx.change_manager().add_doc(handle)
+        };
+
+        DrawerStore::register_change_listener(&acx, &broker, vec!["map".into()], {
             move |notifs| notif_tx.send(notifs).expect("channel error")
         })
         .await?;
@@ -171,10 +181,14 @@ impl DrawerRepo {
                                             })
                                         }
                                     }
-                                    _ => {}
+                                    _ => {
+                                        info!(?notif.patch, "XXX weird patch action");
+                                    }
                                 }
                             }
-                            _ => {}
+                            _ => {
+                                info!(?notif.patch, "XXX weird patch");
+                            }
                         }
                     }
                     // Notify repo listeners that the docs list changed
@@ -191,6 +205,7 @@ impl DrawerRepo {
             registry: registry.clone(),
             handles: default(),
             cache: default(),
+            broker,
         };
 
         Ok(repo)
@@ -248,11 +263,11 @@ impl DrawerRepo {
         let out_id = new_doc.id.clone();
         self.cache.insert(new_doc.id.clone(), new_doc);
         self.handles.insert(out_id.clone(), handle);
-        self.registry.notify(DrawerEvent::ListChanged);
         self.registry.notify(DrawerEvent::DocAdded {
             id: out_id.clone(),
             heads: str_heads,
         });
+        self.registry.notify(DrawerEvent::ListChanged);
         Ok(out_id)
     }
 
@@ -382,19 +397,115 @@ impl DrawerRepo {
     }
 }
 
-impl crate::repos::Repo for DrawerRepo {
-    type ChangeEvent = DrawerEvent;
+impl Repo for DrawerRepo {
+    type Event = DrawerEvent;
     fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
         &self.registry
     }
 }
 
-mod tests {
-    use super::*;
+pub mod version_updates {
+    use crate::interlude::*;
 
-    fn test_one() {}
+    use automerge::{transaction::Transactable, ActorId, AutoCommit, ROOT};
+    use autosurgeon::reconcile_prop;
+
+    pub fn version_latest() -> Res<Vec<u8>> {
+        let mut doc = AutoCommit::new().with_actor(ActorId::random());
+        doc.put(ROOT, "version", "0")?;
+        // indicate schema type for this document
+        doc.put(ROOT, "$schema", "daybook.drawer")?;
+        reconcile_prop(
+            &mut doc,
+            ROOT,
+            super::DrawerStore::PROP,
+            super::DrawerStore::default(),
+        )?;
+        Ok(doc.save_nocompress())
+    }
 }
 
-fn stuff() {
-    let stuff: Box<str> = "".into();
+mod tests {
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_one() -> Res<()> {
+        utils_rs::testing::setup_tracing()?;
+        let client_acx = AmCtx::boot(
+            utils_rs::am::Config {
+                peer_id: "client".into(),
+                storage: utils_rs::am::StorageConfig::Memory,
+            },
+            Some(samod::AlwaysAnnounce),
+        )
+        .await?;
+        let server_acx = AmCtx::boot(
+            utils_rs::am::Config {
+                peer_id: "server".into(),
+                storage: utils_rs::am::StorageConfig::Memory,
+            },
+            Some(samod::AlwaysAnnounce),
+        )
+        .await?;
+
+        crate::tincans::connect_repos(&client_acx.repo(), &server_acx.repo());
+        client_acx.repo().when_connected("server".into()).await?;
+        server_acx.repo().when_connected("client".into()).await?;
+
+        let drawer_doc_id = {
+            let doc = automerge::Automerge::load(&version_updates::version_latest()?)?;
+            let handle = client_acx.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+        let client_repo = DrawerRepo::load(client_acx.clone(), drawer_doc_id.clone()).await?;
+        let server_repo = DrawerRepo::load(server_acx.clone(), drawer_doc_id.clone()).await?;
+
+        let (server_notif_tx, mut server_notif_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _listener_handle = server_repo
+            .register_listener(move |msg| server_notif_tx.send(msg).expect("channel error"));
+
+        let (client_notif_tx, mut client_notif_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _client_listener_handle = client_repo
+            .register_listener(move |msg| client_notif_tx.send(msg).expect("channel error"));
+
+        let new_doc_id = client_repo
+            .add(Doc {
+                id: "client".into(),
+                created_at: OffsetDateTime::now_utc(),
+                updated_at: OffsetDateTime::now_utc(),
+                content: crate::r#gen::doc::DocContent::Text("Hello, world!".into()),
+                tags: vec![],
+            })
+            .await?;
+
+        {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(1), client_notif_rx.recv())
+                    .await
+                    .wrap_err("timeout")?
+                    .ok_or_eyre("channel closed")?;
+            match &*event {
+                DrawerEvent::DocAdded { id, heads: _ } => {
+                    assert_eq!(*id, new_doc_id);
+                }
+                _ => eyre::bail!("unexpected event"),
+            }
+        }
+        {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(10), server_notif_rx.recv())
+                    .await
+                    .wrap_err("timeout")?
+                    .ok_or_eyre("channel closed")?;
+            match &*event {
+                DrawerEvent::DocAdded { id, heads: _ } => {
+                    assert_eq!(*id, new_doc_id);
+                }
+                _ => eyre::bail!("unexpected event"),
+            }
+        }
+
+        Ok(())
+    }
 }

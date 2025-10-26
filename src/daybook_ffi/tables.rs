@@ -11,7 +11,7 @@ struct TablesRepoFfi {
 }
 
 impl daybook_core::repos::Repo for TablesRepoFfi {
-    type ChangeEvent = TablesEvent;
+    type Event = TablesEvent;
     fn registry(&self) -> &Arc<daybook_core::repos::ListenersRegistry> {
         &self.repo.registry
     }
