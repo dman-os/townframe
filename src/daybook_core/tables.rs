@@ -245,6 +245,7 @@ impl TablesStore {
 }
 
 pub struct TablesRepo {
+    acx: AmCtx,
     store: crate::stores::StoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     broker: Arc<utils_rs::am::changes::DocChangeBroker>,
@@ -258,7 +259,8 @@ impl crate::repos::Repo for TablesRepo {
 }
 
 // Granular event enum for specific changes
-#[derive(Debug, Clone, uniffi::Enum)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub enum TablesEvent {
     ListChanged,
     WindowChanged { id: Uuid },
@@ -267,7 +269,8 @@ pub enum TablesEvent {
     TableChanged { id: Uuid },
 }
 
-#[derive(Debug, uniffi::Record)]
+#[derive(Debug)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct TablesPatches {
     pub tab_updates: Option<Vec<TabPatch>>,
     pub window_updates: Option<Vec<WindowPatch>>,
@@ -276,7 +279,7 @@ pub struct TablesPatches {
 }
 
 impl TablesRepo {
-    pub async fn load(acx: AmCtx, app_doc_id: DocumentId) -> Res<Self> {
+    pub async fn load(acx: AmCtx, app_doc_id: DocumentId) -> Res<Arc<Self>> {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store = TablesStore::load(&acx, &app_doc_id).await?;
@@ -295,90 +298,103 @@ impl TablesRepo {
             acx.change_manager().add_doc(handle)
         };
 
+        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
+            Vec<utils_rs::am::changes::ChangeNotification>,
+        >();
         // Register change listener to automatically notify repo listeners
         TablesStore::register_change_listener(&acx, &broker, {
-            let registry = registry.clone();
-            move |notifications| {
-                // Analyze notifications to determine which specific events to send
-                let mut events = Vec::new();
-
-                for notification in notifications {
-                    match &notification.patch.action {
-                        automerge::PatchAction::PutMap { key, .. } => {
-                            // Check if this is a specific item change
-                            if let Ok(uuid) = Uuid::parse_str(key) {
-                                // Determine which type of item changed based on path
-                                if notification.patch.path.len() >= 2 {
-                                    match &notification.patch.path[1].1 {
-                                        automerge::Prop::Map(path_key) => {
-                                            match path_key.as_ref() {
-                                                "windows" => events
-                                                    .push(TablesEvent::WindowChanged { id: uuid }),
-                                                "tables" => events
-                                                    .push(TablesEvent::TableChanged { id: uuid }),
-                                                "tabs" => events
-                                                    .push(TablesEvent::TabChanged { id: uuid }),
-                                                "panels" => events
-                                                    .push(TablesEvent::PanelChanged { id: uuid }),
-                                                _ => events.push(TablesEvent::ListChanged),
-                                            }
-                                        }
-                                        _ => events.push(TablesEvent::ListChanged),
-                                    }
-                                } else {
-                                    events.push(TablesEvent::ListChanged);
-                                }
-                            }
-                        }
-                        automerge::PatchAction::DeleteMap { key } => {
-                            // Handle deletions
-                            if let Ok(uuid) = Uuid::parse_str(key) {
-                                if notification.patch.path.len() >= 2 {
-                                    match &notification.patch.path[1].1 {
-                                        automerge::Prop::Map(path_key) => {
-                                            match path_key.as_ref() {
-                                                "windows" => events
-                                                    .push(TablesEvent::WindowChanged { id: uuid }),
-                                                "tables" => events
-                                                    .push(TablesEvent::TableChanged { id: uuid }),
-                                                "tabs" => events
-                                                    .push(TablesEvent::TabChanged { id: uuid }),
-                                                "panels" => events
-                                                    .push(TablesEvent::PanelChanged { id: uuid }),
-                                                _ => events.push(TablesEvent::ListChanged),
-                                            }
-                                        }
-                                        _ => events.push(TablesEvent::ListChanged),
-                                    }
-                                } else {
-                                    events.push(TablesEvent::ListChanged);
-                                }
-                            }
-                        }
-                        _ => {
-                            // For other operations, send ListChanged
-                            events.push(TablesEvent::ListChanged);
-                        }
-                    }
-                }
-
-                // Send events (deduplicate)
-                let mut sent_events = std::collections::HashSet::new();
-                for event in events {
-                    if sent_events.insert(format!("{:?}", event)) {
-                        registry.notify(event);
-                    }
-                }
-            }
+            move |notifs| notif_tx.send(notifs).expect(ERROR_CHANNEL)
         })
         .await?;
 
         let repo = Self {
+            acx,
             store,
             registry: registry.clone(),
             broker,
         };
+        let repo = Arc::new(repo);
+
+        let _notif_worker = tokio::spawn({
+            let repo = repo.clone();
+            async move { repo.handle_notifs(notif_rx).await }
+        });
+
         Ok(repo)
+    }
+
+    async fn handle_notifs(
+        self: &Self,
+        mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
+            Vec<utils_rs::am::changes::ChangeNotification>,
+        >,
+    ) -> Res<()> {
+        let mut events = vec![];
+        while let Some(notifs) = notif_rx.recv().await {
+            events.clear();
+            for notif in notifs {
+                match &notif.patch.action {
+                    automerge::PatchAction::PutMap { key, .. } => {
+                        // Check if this is a specific item change
+                        if let Ok(uuid) = Uuid::parse_str(key) {
+                            // Determine which type of item changed based on path
+                            if notif.patch.path.len() >= 2 {
+                                match &notif.patch.path[1].1 {
+                                    automerge::Prop::Map(path_key) => match path_key.as_ref() {
+                                        "windows" => {
+                                            events.push(TablesEvent::WindowChanged { id: uuid })
+                                        }
+                                        "tables" => {
+                                            events.push(TablesEvent::TableChanged { id: uuid })
+                                        }
+                                        "tabs" => events.push(TablesEvent::TabChanged { id: uuid }),
+                                        "panels" => {
+                                            events.push(TablesEvent::PanelChanged { id: uuid })
+                                        }
+                                        _ => events.push(TablesEvent::ListChanged),
+                                    },
+                                    _ => events.push(TablesEvent::ListChanged),
+                                }
+                            } else {
+                                events.push(TablesEvent::ListChanged);
+                            }
+                        }
+                    }
+                    automerge::PatchAction::DeleteMap { key } => {
+                        // Handle deletions
+                        if let Ok(uuid) = Uuid::parse_str(key) {
+                            if notif.patch.path.len() >= 2 {
+                                match &notif.patch.path[1].1 {
+                                    automerge::Prop::Map(path_key) => match path_key.as_ref() {
+                                        "windows" => {
+                                            events.push(TablesEvent::WindowChanged { id: uuid })
+                                        }
+                                        "tables" => {
+                                            events.push(TablesEvent::TableChanged { id: uuid })
+                                        }
+                                        "tabs" => events.push(TablesEvent::TabChanged { id: uuid }),
+                                        "panels" => {
+                                            events.push(TablesEvent::PanelChanged { id: uuid })
+                                        }
+                                        _ => events.push(TablesEvent::ListChanged),
+                                    },
+                                    _ => events.push(TablesEvent::ListChanged),
+                                }
+                            } else {
+                                events.push(TablesEvent::ListChanged);
+                            }
+                        }
+                    }
+                    _ => {
+                        // For other operations, send ListChanged
+                    }
+                }
+            }
+            for evt in events.drain(..) {
+                self.registry.notify(evt);
+            }
+        }
+        Ok(())
     }
 
     // end impl TablesRepo

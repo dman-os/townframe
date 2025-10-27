@@ -24,26 +24,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "512761e0bb2578dd7380c6baaa0f4ce03e84f95e960231d1dec8bf4d7d6e2627"
 
 [[package]]
-name = "agents"
-version = "0.0.1"
-dependencies = [
- "api_utils_rs",
- "automerge",
- "autosurgeon",
- "color-eyre",
- "displaydoc",
- "genai",
- "llm",
- "multihash",
- "restate-sdk",
- "samod",
- "serde",
- "thiserror 2.0.16",
- "tokio",
- "utils_rs",
-]
-
-[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -182,7 +162,7 @@ dependencies = [
  "http",
  "serde",
  "serde_json",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tokio",
  "utils_rs",
  "utoipa",
@@ -383,7 +363,7 @@ dependencies = [
  "serde",
  "sha2 0.11.0-pre.5",
  "smol_str",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tinyvec",
  "tracing",
  "unicode-segmentation",
@@ -410,7 +390,7 @@ dependencies = [
  "automerge-test",
  "autosurgeon-derive",
  "similar",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "uuid",
 ]
 
@@ -756,7 +736,7 @@ dependencies = [
  "macros",
  "serde",
  "serde_json",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tokio",
  "utils_rs",
  "wit-bindgen 0.45.1",
@@ -772,7 +752,7 @@ dependencies = [
  "futures",
  "http",
  "parking_lot",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tower",
  "utils_rs",
  "wit-bindgen 0.45.1",
@@ -860,7 +840,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1229,7 +1209,7 @@ dependencies = [
  "macros",
  "serde",
  "serde_json",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tokio",
  "utils_rs",
  "wit-bindgen 0.45.1",
@@ -1258,7 +1238,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "struct-patch",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "time",
  "tokio",
  "tokio-stream",
@@ -1294,7 +1274,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "struct-patch",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "time",
  "tokio",
  "tracing",
@@ -1319,10 +1299,30 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tower",
  "utils_rs",
  "wit-bindgen 0.45.1",
+]
+
+[[package]]
+name = "daybook_jobs"
+version = "0.0.1"
+dependencies = [
+ "api_utils_rs",
+ "automerge",
+ "autosurgeon",
+ "color-eyre",
+ "displaydoc",
+ "genai",
+ "llm",
+ "multihash",
+ "restate-sdk",
+ "samod",
+ "serde",
+ "thiserror 2.0.17",
+ "tokio",
+ "utils_rs",
 ]
 
 [[package]]
@@ -1344,7 +1344,7 @@ dependencies = [
  "reqwest",
  "samod",
  "serde",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tokio",
  "tower",
  "tower-http 0.6.6",
@@ -1364,7 +1364,7 @@ dependencies = [
  "rustversion",
  "serde",
  "serde_derive",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -2144,7 +2144,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f117759ffbdfa82096cd01c7adcc8465486df830eeafb5033502074f8df3f0c7"
 dependencies = [
  "leb128",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -3276,6 +3276,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "play"
+version = "0.1.0"
+dependencies = [
+ "api_utils_rs",
+ "axum 0.8.6",
+ "axum-extra",
+ "displaydoc",
+ "futures",
+ "http",
+ "macros",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tower",
+ "utils_rs",
+ "wit-bindgen 0.45.1",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3410,7 +3430,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
  "web-time",
@@ -3431,7 +3451,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tinyvec",
  "tracing",
  "web-time",
@@ -3552,7 +3572,7 @@ checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
 dependencies = [
  "getrandom 0.2.16",
  "libredox",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -3740,7 +3760,7 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.106",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3780,7 +3800,7 @@ dependencies = [
  "sha2 0.11.0-pre.5",
  "strum 0.27.2",
  "test-log",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tracing",
 ]
 
@@ -4057,7 +4077,7 @@ dependencies = [
  "rand 0.9.2",
  "serde",
  "sha2 0.10.9",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tracing",
  "uuid",
 ]
@@ -4444,7 +4464,7 @@ checksum = "297f631f50729c8c99b84667867963997ec0b50f32b2a7dbcab828ef0541e8bb"
 dependencies = [
  "num-bigint",
  "num-traits",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "time",
 ]
 
@@ -4575,7 +4595,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smallvec",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "time",
  "tokio",
  "tokio-stream",
@@ -4659,7 +4679,7 @@ dependencies = [
  "smallvec",
  "sqlx-core",
  "stringprep",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "time",
  "tracing",
  "uuid",
@@ -4699,7 +4719,7 @@ dependencies = [
  "smallvec",
  "sqlx-core",
  "stringprep",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "time",
  "tracing",
  "uuid",
@@ -4725,7 +4745,7 @@ dependencies = [
  "serde",
  "serde_urlencoded",
  "sqlx-core",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "time",
  "tracing",
  "url",
@@ -4949,11 +4969,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.16"
+version = "2.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3467d614147380f2e4e374161426ff399c91084acd2363eaf549172b3d5e60c0"
+checksum = "f63587ca0f12b72a0600bcba1d40081f830876000bb46dd2337a3051618f4fc8"
 dependencies = [
- "thiserror-impl 2.0.16",
+ "thiserror-impl 2.0.17",
 ]
 
 [[package]]
@@ -4969,9 +4989,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.16"
+version = "2.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c5e1be1c48b9172ee610da68fd9cd2770e7a4056cb3fc98710ee6906f0c7960"
+checksum = "3ff15c8ecd7de3849db632e14d18d2571fa09dfc5ed93479bc4485c7a517c913"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5409,7 +5429,7 @@ dependencies = [
  "log",
  "rand 0.9.2",
  "sha1",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "url",
  "utf-8",
 ]
@@ -5427,7 +5447,7 @@ dependencies = [
  "log",
  "rand 0.9.2",
  "sha1",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "utf-8",
 ]
 
@@ -5755,7 +5775,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0-pre.5",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "time",
  "tokio",
  "tokio-tungstenite 0.27.0",
@@ -5846,7 +5866,7 @@ dependencies = [
  "nkeys",
  "serde_json",
  "serde_yaml",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tokio",
  "wadm-types",
 ]

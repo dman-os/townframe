@@ -31,7 +31,9 @@ impl Ctx {
         let acx = utils_rs::am::AmCtx::boot(
             utils_rs::am::Config {
                 peer_id: "daybook_agents".to_string(),
-                storage_dir: "/tmp/samod-sync-agents".into(),
+                storage: utils_rs::am::StorageConfig::Disk {
+                    path: "/tmp/samod-sync-agents".into(),
+                },
             },
             Option::<samod::AlwaysAnnounce>::None,
         )

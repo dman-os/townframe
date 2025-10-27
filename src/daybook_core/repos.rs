@@ -81,13 +81,13 @@ impl ListenersRegistry {
 }
 
 // A registration handle that unregisters on drop.
-#[derive(uniffi::Object)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct ListenerRegistration {
     pub registry: std::sync::Weak<ListenersRegistry>,
     pub id: Uuid,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
 impl ListenerRegistration {
     fn unregister(&self) {
         if let Some(registry) = self.registry.upgrade() {

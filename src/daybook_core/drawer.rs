@@ -112,7 +112,7 @@ impl DrawerRepo {
             Vec<utils_rs::am::changes::ChangeNotification>,
         >();
         DrawerStore::register_change_listener(&acx, &broker, vec!["map".into()], {
-            move |notifs| notif_tx.send(notifs).expect("channel error")
+            move |notifs| notif_tx.send(notifs).expect(ERROR_CHANNEL)
         })
         .await?;
 
@@ -255,7 +255,7 @@ impl DrawerRepo {
             }
         })
         .await
-        .wrap_err("tokio error")??;
+        .wrap_err(ERROR_TOKIO)??;
         let heads: Arc<[ChangeHash]> = heads.into();
 
         let str_heads = serialize_commit_heads(&heads);
@@ -357,7 +357,7 @@ impl DrawerRepo {
                 .map_err(|err| err.error)
         })
         .await
-        .wrap_err("tokio error")??;
+        .wrap_err(ERROR_TOKIO)??;
         eyre::Ok(())
     }
 
@@ -471,11 +471,11 @@ mod tests {
 
         let (server_notif_tx, mut server_notif_rx) = tokio::sync::mpsc::unbounded_channel();
         let _listener_handle = server_repo
-            .register_listener(move |msg| server_notif_tx.send(msg).expect("channel error"));
+            .register_listener(move |msg| server_notif_tx.send(msg).expect(ERROR_CHANNEL));
 
         let (client_notif_tx, mut client_notif_rx) = tokio::sync::mpsc::unbounded_channel();
         let _client_listener_handle = client_repo
-            .register_listener(move |msg| client_notif_tx.send(msg).expect("channel error"));
+            .register_listener(move |msg| client_notif_tx.send(msg).expect(ERROR_CHANNEL));
 
         let new_doc_id = client_repo
             .add(Doc {

@@ -122,17 +122,17 @@
             export XDG_DATA_DIRS=${fontconfig.out}/share:$XDG_DATA_DIRS
             export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${self}/target/debug/:${lib.makeLibraryPath [ 
               # needed by daybook_compose desktop
-              (lib.getLib sqlite) 
-              llvmPackages.libclang.lib 
-              (lib.getLib xorg.libXrender) 
-              (lib.getLib xorg.libXext)
+              (lib.getLib sqlite.dev) 
+              (lib.getLib llvmPackages.libclang.dev) 
+              (lib.getLib xorg.libXrender.dev) 
+              (lib.getLib xorg.libXext.dev)
               (lib.getLib xorg.libXtst)
-              (lib.getLib xorg.libX11)
-              (lib.getLib xorg.libXi)
-              (lib.getLib xorg.libXrandr)
-              (lib.getLib freetype)
-              (lib.getLib fontconfig)
-              (lib.getLib libglvnd)
+              (lib.getLib xorg.libX11.dev)
+              (lib.getLib xorg.libXi.dev)
+              (lib.getLib xorg.libXrandr.dev)
+              (lib.getLib freetype.dev)
+              (lib.getLib fontconfig.dev)
+              (lib.getLib libglvnd.dev)
             ]}"
             if [ "$(uname -s)" = "Darwin" ]; then
               export DYLD_LIBRARY_PATH="$LD_LIBRARY_PATH"

@@ -20,7 +20,7 @@ use generational_box::SyncStorage;
 use samod::{DocumentId, PeerId};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tower_http::ServiceBuilderExt;
-use utils_rs::am::changes::{ChangeFilter, ChangeNotification};
+use utils_rs::am::changes::ChangeFilter;
 
 fn main() -> Res<()> {
     utils_rs::setup_tracing()?;
@@ -105,13 +105,15 @@ impl Ctx {
     async fn init(config: Config) -> Res<SharedCtx> {
         let peer_docs: Arc<DHashMap<PeerId, HashSet<DocumentId>>> = default();
         let doc_peers: Arc<DHashMap<DocumentId, PeerId>> = default();
-        let (doc_id_tx, doc_id_rx) = mpsc::unbounded_channel::<DocumentId>();
-        let announcer_tx = doc_id_tx.clone();
 
+        let (doc_setup_req_tx, mut doc_setup_req_rx) = mpsc::unbounded_channel::<DocSetupRequest>();
+        let announcer_tx = doc_setup_req_tx.clone();
         let acx = utils_rs::am::AmCtx::boot(
             utils_rs::am::Config {
                 peer_id: "daybook_sync".to_string(),
-                storage_dir: "/tmp/samod-sync".into(),
+                storage: utils_rs::am::StorageConfig::Disk {
+                    path: "/tmp/samod-sync".into(),
+                },
             },
             // we only announce docs to peers that forwarded them in the first place
             // FIXME: this gets run at startup for all doc/peers leading to the first
@@ -119,15 +121,16 @@ impl Ctx {
             Some({
                 let peer_docs = peer_docs.clone();
                 let doc_peers = doc_peers.clone();
-                let doc_id_tx = announcer_tx.clone();
+                let doc_setup_req_tx = announcer_tx.clone();
                 move |doc_id: DocumentId, peer_id| {
-                    doc_id_tx.send(doc_id.clone()).expect("doc channel closed");
-
                     if let Some(peer_of_doc) = doc_peers.get(&doc_id) {
                         if *peer_of_doc.value() != peer_id {
                             return false;
                         }
                     }
+                    doc_setup_req_tx
+                        .send(DocSetupRequest::new(peer_id.clone(), doc_id.clone()))
+                        .expect(ERROR_CHANNEL);
                     peer_docs
                         .entry(peer_id.clone())
                         .or_default()
@@ -148,7 +151,12 @@ impl Ctx {
             _doc_peers: doc_peers,
             _gen_store: SyncStorage::owner(),
         });
-        let _doc_setup_worker = spawn_doc_setup_worker(cx.clone(), doc_id_rx, doc_id_tx);
+        let doc_setup_worker = spawn_doc_setup_worker(cx.clone());
+        tokio::spawn(async move {
+            while let Some(req) = doc_setup_req_rx.recv().await {
+                doc_setup_worker.request_tx.send(req).expect(ERROR_CHANNEL)
+            }
+        });
         cx.acx
             .change_manager()
             .add_listener(
@@ -168,189 +176,216 @@ impl Ctx {
     }
 }
 
-fn spawn_doc_setup_worker(
-    cx: SharedCtx,
-    doc_id_rx: mpsc::UnboundedReceiver<DocumentId>,
-    doc_id_tx: mpsc::UnboundedSender<DocumentId>,
-) -> JoinHandle<()> {
-    async fn inner(
-        cx: SharedCtx,
-        mut doc_id_rx: mpsc::UnboundedReceiver<DocumentId>,
-        doc_id_tx: mpsc::UnboundedSender<DocumentId>,
-    ) -> Res<()> {
-        let mut doc_change_worker = vec![];
-        let mut listen_list = std::collections::HashSet::new();
-
-        let drawer_changes_driver = spawn_drawer_changes_driver(cx.clone());
-
-        while let Some(doc_id) = doc_id_rx.recv().await {
-            if listen_list.contains(&doc_id) {
-                continue;
-            }
-            let handle = match cx.acx.find_doc(&doc_id).await {
-                Err(err) => {
-                    warn!("error looking up doc_id: {err}");
-                    continue;
-                }
-                Ok(None) => {
-                    warn!(?doc_id, "doc not found in repo during setup, trying again");
-                    tokio::task::spawn({
-                        let doc_id_tx = doc_id_tx.clone();
-                        let doc_id = doc_id.clone();
-                        async move {
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                            // requeue for later handling
-                            doc_id_tx.send(doc_id).expect("failed to requeue doc_id");
-                        }
-                    });
-                    continue;
-                }
-                Ok(Some(val)) => val,
-            };
-
-            // inspect schema and attach schema-specific listeners
-            // Try to hydrate the $schema property via AmCtx helper
-            let schema_opt = cx
-                .acx
-                .hydrate_path::<String>(&doc_id, automerge::ROOT, vec!["$schema".into()])
-                .await
-                .wrap_err("error hydrating added docment")?;
-
-            if let Some(schema) = schema_opt {
-                if schema == "daybook.drawer" {
-                    cx.acx
-                        .change_manager()
-                        .add_listener(
-                            ChangeFilter {
-                                doc_id: Some(doc_id.clone()),
-                                path: vec!["docs".into()],
-                            },
-                            {
-                                let notif_tx = drawer_changes_driver.notif_tx.clone();
-                                let doc_id = doc_id.clone();
-                                move |notifs| {
-                                    let notif_tx = notif_tx.clone();
-                                    let doc_id = doc_id.clone();
-                                    tokio::task::spawn(async move {
-                                        let permit =
-                                            notif_tx.reserve().await.expect("channel error");
-                                        permit.send((doc_id, notifs));
-                                    });
-                                }
-                            },
-                        )
-                        .await;
-
-                    let change_worker = cx.acx.change_manager().add_doc(handle.clone());
-                    doc_change_worker.push(change_worker);
-                }
-            }
-
-            listen_list.insert(doc_id);
-        }
-        Ok(())
-    }
-
-    tokio::spawn({
-        let cx = cx.clone();
-        async move {
-            inner(cx, doc_id_rx, doc_id_tx).await.unwrap_or_log();
-        }
-    })
+#[derive(Debug)]
+struct DocSetupRequest {
+    _peer_id: PeerId,
+    doc_id: DocumentId,
+    last_attempt_backoff_secs: u64,
 }
 
-struct DrawerChangesDriver {
-    // drawer_doc_id, notifs
-    notif_tx: mpsc::Sender<(DocumentId, Vec<ChangeNotification>)>,
+impl DocSetupRequest {
+    fn new(peer_id: PeerId, doc_id: DocumentId) -> Self {
+        Self {
+            _peer_id: peer_id,
+            doc_id,
+            last_attempt_backoff_secs: 1,
+        }
+    }
+}
+
+struct DocSetupWorker {
+    request_tx: mpsc::UnboundedSender<DocSetupRequest>,
     _handle: JoinHandle<()>,
 }
 
-fn spawn_drawer_changes_driver(cx: SharedCtx) -> DrawerChangesDriver {
-    let (notif_tx, mut notif_rx) = mpsc::channel(16);
+fn spawn_doc_setup_worker(cx: SharedCtx) -> DocSetupWorker {
+    let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DocSetupRequest>();
+    let fut = {
+        let request_tx = request_tx.clone();
+        async move {
+            let mut listen_list = std::collections::HashSet::new();
+            let mut drawer_change_workers = std::collections::HashMap::new();
 
-    // #region event handlers
-    let on_new_doc = {
-        let notif_tx = notif_tx.clone();
-        let cx = cx.clone();
-        move |drawer_doc_id: DocumentId, notif: ChangeNotification| {
-            let automerge::PatchAction::PutMap {
-                key: new_doc_id,
-                value: (val, obj_id),
-                ..
-            } = &notif.patch.action
-            else {
-                panic!("unexpected");
+            // with exponential backoff
+            let retry = |task: DocSetupRequest| {
+                tokio::spawn({
+                    let doc_id_tx = request_tx.clone();
+                    async move {
+                        let new_backoff = backoff(task.last_attempt_backoff_secs, 60).await;
+                        doc_id_tx
+                            .send(DocSetupRequest {
+                                last_attempt_backoff_secs: new_backoff,
+                                ..task
+                            })
+                            .expect(ERROR_CHANNEL);
+                    }
+                });
             };
-            let Some(automerge::ObjType::List) = val.to_objtype() else {
-                panic!("schema violation");
-            };
 
-            let notif_tx = notif_tx.clone();
-            let cx = cx.clone();
-            let new_doc_id = new_doc_id.clone();
-            let obj_id = obj_id.clone();
+            while let Some(request) = request_rx.recv().await {
+                if listen_list.contains(&request.doc_id) {
+                    continue;
+                }
+                match cx.acx.find_doc(&request.doc_id).await {
+                    Err(err) => {
+                        warn!(?request, "error looking up doc_id: {err}");
+                        retry(request);
+                        continue;
+                    }
+                    Ok(None) => {
+                        warn!(?request, "doc not found in repo during setup");
+                        retry(request);
+                        continue;
+                    }
+                    Ok(Some(_val)) => {
+                        // noop
+                    }
+                };
 
-            tokio::task::spawn(async move {
-                let heads = cx
+                // inspect schema and attach schema-specific listeners
+                // Try to hydrate the $schema property via AmCtx helper
+
+                let schema_opt = cx
                     .acx
-                    .hydrate_path_at_head::<Vec<String>>(
-                        &drawer_doc_id,
-                        &notif.heads,
-                        obj_id,
-                        vec![],
+                    .hydrate_path::<String>(
+                        &request.doc_id,
+                        automerge::ROOT,
+                        vec!["$schema".into()],
                     )
                     .await
-                    .expect("error hydrating at head")
-                    .expect("schema violation");
+                    .wrap_err("error hydrating added docment")?;
 
-                if let Err(err) = restate::start_doc_pipeline(
-                    &cx,
-                    &r#gen::doc::DocAddedEvent {
-                        id: new_doc_id.clone(),
-                        heads,
-                    },
-                )
-                .await
-                {
-                    error!(?err, ?new_doc_id, "error starting doc pipeline");
-                    if let restate::RestateError::RequestError { status, .. } = &err {
-                        if status.is_client_error() {
-                            panic!("client error on restate client {err:?}");
+                if let Some(schema) = schema_opt {
+                    if schema == "daybook.drawer" {
+                        match spawn_drawer_changes_worker(cx.clone(), request.doc_id.clone()).await
+                        {
+                            Err(err) => {
+                                error!(?err, ?request, "error spawning doc changes worker");
+                                retry(request);
+                                continue;
+                            }
+                            Ok(worker) => {
+                                drawer_change_workers.insert(request.doc_id.clone(), worker);
+                            }
                         }
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    notif_tx
-                        .send((drawer_doc_id, vec![notif]))
-                        .await
-                        .expect("channel error")
                 }
-            })
+
+                listen_list.insert(request.doc_id);
+            }
+            eyre::Ok(())
         }
     };
-    // #endregion
 
     let handle = tokio::spawn({
         async move {
-            while let Some((drawer_doc_id, notifs)) = notif_rx.recv().await {
-                for notif in notifs {
-                    match &notif.patch.action {
-                        automerge::PatchAction::PutMap { key, .. } => {
-                            info!(%key, "drawer: doc added/updated");
-                            on_new_doc(drawer_doc_id.clone(), notif);
+            fut.await.unwrap_or_log();
+        }
+    });
+    DocSetupWorker {
+        request_tx,
+        _handle: handle,
+    }
+}
+
+struct DrawerChangesWorker {
+    // event_tx: UnboundedSender<DocChangeEvent>,
+    _handle: JoinHandle<()>,
+    _listener: daybook_core::repos::ListenerRegistration,
+    _repo: Arc<daybook_core::drawer::DrawerRepo>,
+}
+
+struct DocChangeEvent {
+    inner: Arc<daybook_core::drawer::DrawerEvent>,
+    last_attempt_backoff_secs: u64,
+}
+
+impl From<Arc<daybook_core::drawer::DrawerEvent>> for DocChangeEvent {
+    fn from(inner: Arc<daybook_core::drawer::DrawerEvent>) -> Self {
+        Self {
+            inner,
+            last_attempt_backoff_secs: 1,
+        }
+    }
+}
+
+async fn spawn_drawer_changes_worker(
+    cx: SharedCtx,
+    doc_id: DocumentId,
+) -> Res<DrawerChangesWorker> {
+    use daybook_core::repos::Repo;
+
+    let repo = daybook_core::drawer::DrawerRepo::load(cx.acx.clone(), doc_id.clone())
+        .await
+        .wrap_err("error booting drawer repo")?;
+
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<DocChangeEvent>();
+
+    let listener = repo.register_listener({
+        let event_tx = event_tx.clone();
+        move |event| event_tx.send(event.into()).expect(ERROR_CHANNEL)
+    });
+
+    let fut = {
+        let event_tx = event_tx.clone();
+        async move {
+            let retry = |event: DocChangeEvent| {
+                tokio::spawn({
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let new_backoff = backoff(event.last_attempt_backoff_secs, 60).await;
+                        event_tx
+                            .send(DocChangeEvent {
+                                last_attempt_backoff_secs: new_backoff,
+                                ..event
+                            })
+                            .expect(ERROR_CHANNEL);
+                    }
+                });
+            };
+
+            while let Some(event) = event_rx.recv().await {
+                match &*event.inner {
+                    daybook_core::drawer::DrawerEvent::ListChanged => {
+                        // noop
+                    }
+                    daybook_core::drawer::DrawerEvent::DocUpdated { .. } => todo!(),
+                    daybook_core::drawer::DrawerEvent::DocDeleted { .. } => todo!(),
+                    daybook_core::drawer::DrawerEvent::DocAdded { id, heads } => {
+                        if let Err(err) = restate::start_doc_pipeline(
+                            &cx,
+                            &r#gen::doc::DocAddedEvent {
+                                id: id.clone(),
+                                heads: heads.clone(),
+                            },
+                        )
+                        .await
+                        {
+                            error!(?err, doc_id = ?id, "error starting doc pipeline");
+                            if let restate::RestateError::RequestError { status, .. } = &err {
+                                if status.is_client_error() {
+                                    panic!("client error on restate client {err:?}");
+                                }
+                            }
+                            retry(event);
+                            continue;
                         }
-                        automerge::PatchAction::DeleteMap { key } => {
-                            info!(%key, "drawer: doc removed");
-                        }
-                        _ => {}
                     }
                 }
             }
+            eyre::Ok(())
         }
+    };
+    let handle = tokio::spawn(async move {
+        fut.await.unwrap_or_log();
     });
-    DrawerChangesDriver {
-        notif_tx,
+
+    Ok(DrawerChangesWorker {
+        _repo: repo,
+        // event_tx,
+        _listener: listener,
         _handle: handle,
-    }
+    })
 }
 
 #[tracing::instrument(skip(cx))]
@@ -367,4 +402,12 @@ async fn handle_socket(cx: SharedCtx, socket: axum::extract::ws::WebSocket) {
         let fin = cx.acx.repo().accept_axum(socket).await;
         info!(?fin, "connection finsihed");
     });
+}
+
+// returns new backoff
+async fn backoff(last_backoff: u64, max: u64) -> u64 {
+    let new_backoff = last_backoff * 2;
+    let new_backoff = new_backoff.min(max);
+    tokio::time::sleep(std::time::Duration::from_secs(new_backoff)).await;
+    new_backoff
 }

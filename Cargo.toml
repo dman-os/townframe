@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-  "./src/agents",
   "./src/api_utils_rs",
   "./src/autosurgeon/autosurgeon",
   "./src/autosurgeon/autosurgeon-derive/",
@@ -11,13 +10,14 @@ members = [
   "./src/daybook_core",
   "./src/daybook_ffi",
   "./src/daybook_http",
+  "./src/daybook_jobs/",
   "./src/daybook_sync",
   "./src/macros",
+  "./src/play",
+  "./src/sdk-shared-core/",
   "./src/tests_http",
   "./src/utils_rs",
   "./src/xtask",
-  "./src/sdk-shared-core/",
-  # "./src/xtask",
   # "./src/granary_web",
   # "./src/leptos_oidc",
   # "./src/leptos_wasi/",
@@ -25,11 +25,14 @@ members = [
 exclude = [
   "./src/samod"
 ]
-# rust-version = "1.65"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.91"
+authors = []
+license = ""
+repository = ""
 
 [workspace.dependencies]
 # internal

@@ -127,7 +127,7 @@ impl FlywayMigrationSource<'_> {
                     }
                 };
                 let cx = cx.clone();
-                drop(tokio::task::spawn(FlywayMigrationSource::look_at_entry(
+                drop(tokio::spawn(FlywayMigrationSource::look_at_entry(
                     entry, cx,
                 )));
             }
