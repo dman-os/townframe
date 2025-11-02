@@ -128,6 +128,7 @@ mod cheapstr {
     #[serde(crate = "serde", from = "String", into = "String")]
     pub struct CHeapStr {
         hash: u64,
+        // make a cow that's backed by Arc<str>
         string: Cow<'static, str>,
     }
 

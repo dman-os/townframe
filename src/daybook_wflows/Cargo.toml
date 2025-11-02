@@ -1,0 +1,28 @@
+[package]
+name = "daybook_wflows"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"
+
+[dependencies]
+utils_rs = { workspace = true  }
+api_utils_rs.workspace = true
+
+# genai = "0.4.1"
+# llm = "1.3.4"
+
+# ds
+multihash.workspace = true
+
+# serde
+serde.workspace = true
+
+# error
+color-eyre.workspace = true
+thiserror.workspace = true
+displaydoc.workspace = true
+
+wit-bindgen.workspace = true

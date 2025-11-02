@@ -1,0 +1,134 @@
+package townframe:wflow;
+
+// types used across interfaces
+interface types {
+    type json = string;
+
+    type job-id = string;
+}
+
+// for a component that implements wflows
+interface bundle {
+    use types.{json, job-id};
+
+    record job-ctx {
+        job-id: job-id,
+    }
+
+    variant job-error {
+        terminal(string),
+        transient(string)
+    }
+
+    type job-result = result<json, job-error>;
+
+    record run-args {
+        ctx: job-ctx,
+        // FIXME: find a better way of having a single component
+        // impl an interface N types
+        wflow-key: string,
+        args: json
+    }
+
+    run: func(cx: run-args) -> job-result;
+}
+
+// for the host functionality for wflows
+interface host {
+    use types.{job-id};
+
+
+    type step-id = u64;
+
+    variant step-state {
+        active(active-step-state),
+        completed(completed-step-state)
+    }
+
+    record completed-step-state {
+        id: step-id,
+        res: list<u8>,
+    }
+
+    record active-step-state {
+        id: step-id,
+    }
+
+    next-step: func(job-id: job-id) -> result<step-state, string>;
+    persist-step: func(id: step-id, res: list<u8>) -> result<_, string>;
+}
+
+// for starting invocations
+interface ingress {
+    use types.{job-id, json};
+
+    record invoke-args {
+        wflow-key: string,
+        args: json,
+        idem-key: option<string>,
+    }
+
+    variant invoke-error {
+        wflow-not-found,
+    }
+
+    invoke: func(args: invoke-args) -> result<job-id, invoke-error>;
+}
+
+interface partition-host {
+    use types.{job-id};
+    use metadata-store.{wflow-meta};
+
+    type partition-id = u64;
+    
+    record add-job-args {
+        id: job-id,
+        wflow: wflow-meta,
+    }
+
+    resource partition {
+        add-job: func(args: add-job-args);
+    }
+
+    get-partition: func(id: partition-id) -> option<partition>;
+}
+
+interface metadata-store {
+    record wflow-meta {
+        key: string,
+        service: wflow-service-meta
+    }
+
+    variant wflow-service-meta {
+        wasmcloud(wasmcloud-wflow-service-meta),
+    }
+
+    record wasmcloud-wflow-service-meta {
+    }
+
+    get-wflow: func(key:string) -> option<wflow-meta>;
+
+    record partitions-meta {
+        version: string,
+        partition-count: u64,
+    }
+
+    get-partitions: func() -> partitions-meta;
+}
+
+world rt-partition-host {
+    import partition-host;
+}
+
+world rt-host {
+    import host;
+}
+
+world rt-metadata-store {
+    import metadata-store;
+}
+
+world service {
+    import host;
+    export bundle;
+}

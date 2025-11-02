@@ -1,0 +1,9 @@
+package townframe:daybook-wflow;
+
+world bundle {
+    include townframe:api-utils/imports;
+
+    import townframe:wflow/host;
+
+    export townframe:wflow/bundle;
+}

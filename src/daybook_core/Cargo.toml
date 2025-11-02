@@ -61,6 +61,9 @@ struct-patch = "0.10.4"
 directories = "6.0.0"
 async-trait.workspace = true
 
+# wasm
+wash-runtime.workspace = true
+
 [build-dependencies]
 uniffi = { workspace = true, features = [ "build" ], optional = true }
 

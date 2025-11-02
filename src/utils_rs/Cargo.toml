@@ -15,7 +15,7 @@ hash = ["dep:multihash", "dep:json-canon", "dep:sha2", "dep:data-encoding", "tok
 # futures
 async-trait.workspace = true
 futures.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros"] }
+tokio = { workspace = true, features = ["sync", "macros"] }
 
 # encoding
 serde.workspace = true

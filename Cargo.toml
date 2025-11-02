@@ -10,13 +10,15 @@ members = [
   "./src/daybook_core",
   "./src/daybook_ffi",
   "./src/daybook_http",
-  "./src/daybook_jobs/",
+  "./src/daybook_restate/",
   "./src/daybook_sync",
+  "./src/daybook_wflows/",
   "./src/macros",
-  "./src/play",
   "./src/sdk-shared-core/",
   "./src/tests_http",
   "./src/utils_rs",
+  "./src/wflow/",
+  "./src/wflow_ingress_http/",
   "./src/xtask",
   # "./src/granary_web",
   # "./src/leptos_oidc",
@@ -38,7 +40,7 @@ repository = ""
 # internal
 leptos_oidc = { path = "./src/leptos_oidc" }
 utils_rs = { path = "./src/utils_rs", default-features = false }
-api_utils_rs = { path = "./src/api_utils_rs" }
+api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
 btress_api = { path = "./src/btress_api" }
 macros = { path = "./src/macros" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
@@ -137,6 +139,9 @@ sqlx = { version = "0.8.6", features = [
 # ffi
 uniffi = { version = "0.29.4" }
 # uniffi = { path = "../uniffi-rs/uniffi/" }
+
+wasmtime = "*"
+wash-runtime = "0.1.0"
 
 [patch.crates-io]
 restate-sdk-shared-core = { path = "./src/sdk-shared-core/" }

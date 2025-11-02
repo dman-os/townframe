@@ -1,0 +1,13 @@
+package townframe:wflow-ingress-http;
+
+world server {
+    import wasi:logging/logging@0.1.0-draft;
+    import wasi:clocks/monotonic-clock@0.2.6;
+
+    import townframe:api-utils/utils;
+    import townframe:wflow/metadata-store;
+    import townframe:wflow/partition-host;
+
+    export townframe:wflow/ingress;
+    export wasi:http/incoming-handler@0.2.6;
+}

@@ -24,3 +24,5 @@ captures
 **/xcshareddata/WorkspaceSettings.xcsettings
 
 src/samod/
+
+**/*/.terragrunt-cache

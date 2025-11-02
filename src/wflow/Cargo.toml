@@ -1,0 +1,38 @@
+[package]
+name = "wflow"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["utoipa", "serde"]
+serde = []
+utoipa = []
+automerge = []
+uniffi = []
+
+[lib]
+path = "lib.rs"
+# crate-type = ["cdylib"]
+
+[dependencies]
+utils_rs.workspace = true
+api_utils_rs.workspace = true
+macros.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+
+futures.workspace = true
+async-trait.workspace = true
+
+anyhow.workspace = true
+thiserror.workspace = true
+displaydoc.workspace = true
+parking_lot.workspace = true
+
+# wasmcloud-component = "0.2.0"
+# wit-bindgen.workspace = true
+wasmtime.workspace = true
+wash-runtime.workspace = true
+
+

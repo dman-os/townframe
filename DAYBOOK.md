@@ -5,12 +5,18 @@
 ### Stack
 
 - [x] Get uniffi working on android
+- [ ] wflow
+  - [ ] in-memory smoke
+  - [ ] ingress workload
+  - [ ] durablity
 - [ ] Save a photo
 - [ ] DRY up all the wit bindgen
 - [ ] Move http tests into api crates
 - [ ] Code generator for http wrapper
 - [ ] PgLite based testing
 - [ ] Policy against tokio mutexes (cancel safety)
+- [ ] Move to wasmcloud v2
+  - [ ] Use async on wit_bindgen
 
 ---
 
@@ -121,6 +127,42 @@ New version
 ```
 
 ## dev-log
+
+### 2025-11-08 | wflow details
+
+This will be a rough reimpl of restate.
+I don't want to loose time inventing from scratch.
+Nor coming up with new names.
+
+- Wflow: the impl.
+- Service: the live implementation.
+- Job: the instance.
+- Partition: the engine.
+- Log: the ground truth.
+- Cache: accelerator over log.
+- Ingress: inngest/API for system.
+- Metadata: the wflow and partition information registry.
+
+```rust
+metadata.registerWflow(key, wflowMeta)
+// job added by client
+ingress.addJob(key, args)
+  // event persited in log
+  log.addEvt(newJobEvt)
+  // client gets 200
+// worker gets new event
+worker.eventAdded(newJobEvt)
+  // starts wflow on service
+  service.startWflow(wflowArgs)
+worker.addEvt(wflowEvt)
+  partition.eventAdded(newJobEvt)
+```
+
+### 2025-11-07 | wflow
+
+I am guilty of yak-shaving here but I think it's critical workflows are able to run on local devices.
+Still, the only way to asuage my guilt is to power through the impl asap.
+I feel that I'm just setting myself up for failure.
 
 ### 2025-10-26 | architecture
 

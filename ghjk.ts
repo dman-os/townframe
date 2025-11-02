@@ -53,7 +53,7 @@ ghjk.env("main")
 
 ghjk.env("dev")
   .install(
-    ports.cargobi({ crateName: "wash", locked: true }),
+    // ports.cargobi({ crateName: "wash", locked: true }),
     ports.cargobi({ crateName: "wac-cli", locked: true }),
     ports.cargobi({ crateName: "wasmtime-cli", locked: true }),
     // ports.cargobi({ crateName: "wasi-virt", locked: true }),

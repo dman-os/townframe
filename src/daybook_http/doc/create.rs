@@ -8,6 +8,7 @@ pub const METHOD: Method = Method::POST;
 
 pub async fn service(Json(inp): Json<Input>) -> Response {
     let service = Service::new();
+    // FIXME: this is blocking
     match service.serve(&inp) {
         Ok(val) => (StatusCode::CREATED, Json(val)).into_response(),
         Err(err) => match &err {

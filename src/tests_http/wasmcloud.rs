@@ -103,9 +103,7 @@ fn make_inline_manifest(
         metadata: Metadata {
             labels: default(),
             name: app_id.to_string(),
-            annotations: [("version".to_string(), "v0.0.1".to_string())]
-                .into_iter()
-                .collect(),
+            annotations: [("version".to_string(), "v0.0.1".to_string())].into(),
         },
         spec: Specification {
             policies: default(),
@@ -149,8 +147,7 @@ fn make_inline_manifest(
                                                 ("POSTGRES_PORT".to_string(), postgres_port),
                                                 ("POSTGRES_PASSWORD".to_string(), postgres_pass),
                                             ]
-                                            .into_iter()
-                                            .collect(),
+                                            .into(),
                                         ),
                                     }],
                                     ..default()
@@ -203,8 +200,7 @@ fn make_inline_manifest(
                                             "address".to_string(),
                                             format!("127.0.0.1:{http_port}").to_string(),
                                         )]
-                                        .into_iter()
-                                        .collect(),
+                                        .into(),
                                     ),
                                 }],
                                 secrets: vec![],

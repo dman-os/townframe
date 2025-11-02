@@ -116,6 +116,14 @@
             # bashInteractive
             # zsh
             # fish
+            opentofu
+            terragrunt
+
+            # checkov
+            # terrascan
+            # trivy
+            
+            infisical
           ];
 
           shellHook = with pkgs; ''

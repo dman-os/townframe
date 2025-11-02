@@ -1253,7 +1253,6 @@
             },
             "ghjkEnvProvInstSet___dev": {
               "installs": [
-                "bciqbmshoeiky7jtulrb3xhlkqm7ghbusog73uwbdejazsqcg442h6ci",
                 "bciqm7d2mxkzalpy4vgytof7wd2rjtla5optxtzt36wxwlgdoshv4nii",
                 "bciqhxmcbc2duypykyvlidxw7ibqsztmp7273ixtlpeqq24fb2tovvoa",
                 "bciqfbovder2v5fv5iwrreq44kxwzxmxlmfcilz2cu7powruloqb4n4i",
@@ -2255,44 +2254,6 @@
         "rustup_rustlang": "bciqjy4hqev32fydh2ksskyqrowc3ouqwgdbaszo6rbpex3yhye42edi",
         "cargo_binstall_ghrel": "bciqmf64dikkabvqcjtq4bfq4rbleebba32ccp6fhdbbpbyf66qpdoti",
         "asdf_plugin_git": "bciqhvxd4wkprwcu6fmu5nqen6iekpjeio442cwbiqfkio5mowjgn7yy"
-      },
-      "bciqbmshoeiky7jtulrb3xhlkqm7ghbusog73uwbdejazsqcg442h6ci": {
-        "port": {
-          "ty": "denoWorker@v1",
-          "name": "cargobi_cratesio",
-          "platforms": [
-            "x86_64-linux",
-            "aarch64-linux",
-            "x86_64-darwin",
-            "aarch64-darwin",
-            "x86_64-windows",
-            "aarch64-windows",
-            "x86_64-freebsd",
-            "aarch64-freebsd",
-            "x86_64-netbsd",
-            "aarch64-netbsd",
-            "x86_64-aix",
-            "aarch64-aix",
-            "x86_64-solaris",
-            "aarch64-solaris",
-            "x86_64-illumos",
-            "aarch64-illumos",
-            "x86_64-android",
-            "aarch64-android"
-          ],
-          "version": "0.1.0",
-          "buildDeps": [
-            {
-              "name": "cargo_binstall_ghrel"
-            },
-            {
-              "name": "rust_rustup"
-            }
-          ],
-          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.2/ports/cargobi.ts"
-        },
-        "crateName": "wash",
-        "locked": true
       },
       "bciqm7d2mxkzalpy4vgytof7wd2rjtla5optxtzt36wxwlgdoshv4nii": {
         "port": {
