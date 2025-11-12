@@ -19,7 +19,7 @@ pub enum StdDb {
     PgWasi {},
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 pub trait Endpoint: Send + Sync + 'static {
     type Request: Send + Sync + 'static;
     type Response;
@@ -33,7 +33,7 @@ pub trait Endpoint: Send + Sync + 'static {
     ) -> Result<Self::Response, Self::Error>;
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 pub trait Authorize {
     type Info: Send + Sync + 'static;
     type Request: Send + Sync + 'static;
@@ -42,7 +42,7 @@ pub trait Authorize {
     async fn authorize(&self, request: Self::Request) -> Result<Self::Info, Self::Error>;
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 pub trait AuthenticatedEndpoint: Send + Sync + 'static {
     type Request: Send + Sync + 'static;
     type Response;
@@ -64,7 +64,7 @@ pub trait AuthenticatedEndpoint: Send + Sync + 'static {
 //     EndpointError(E)
 // }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl<T> Endpoint for T
 where
     T: AuthenticatedEndpoint,

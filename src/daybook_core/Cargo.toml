@@ -69,5 +69,5 @@ uniffi = { workspace = true, features = [ "build" ], optional = true }
 
 [dev-dependencies]
 tokio-stream = "0.1.17"
-tokio-util = "0.7.16"
+tokio-util = { workspace = true, features = [] }
 

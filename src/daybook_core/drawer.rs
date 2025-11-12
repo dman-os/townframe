@@ -49,7 +49,7 @@ impl DrawerStore {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl crate::stores::Store for DrawerStore {
     type FlushArgs = (AmCtx, DocumentId);
 

@@ -1,22 +1,45 @@
 mod interlude {
     pub use api_utils_rs::{api, prelude::*};
 }
-use futures::{stream::BoxStream, StreamExt};
 
-use crate::{interlude::*, plugin::bindings_metadata_store::townframe::wflow::metadata_store};
+use crate::interlude::*;
 
 mod log;
+mod metastore;
 mod partition;
 mod plugin;
 
 struct Ctx {
-    metadata: Box<dyn MetdataStore>,
+    metadata: Arc<dyn metastore::MetdataStore>,
 }
 type SharedCtx = Arc<Ctx>;
 
-// Contains information about what wflows exist
-#[async_trait::async_trait]
-trait MetdataStore: Send + Sync {
-    async fn get_wflow(&self, key: Arc<str>) -> Option<metadata_store::WflowMeta>;
-    async fn get_partitions(&self) -> metadata_store::PartitionsMeta;
+impl Ctx {
+    fn new(metadata: Arc<dyn metastore::MetdataStore>) -> Arc<Self> {
+        Arc::new(Self { metadata })
+    }
+}
+
+#[async_trait]
+trait KvStore {
+    async fn count(&self) -> Res<u64>;
+    async fn get(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>>;
+    async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>) -> Res<Option<Arc<[u8]>>>;
+    async fn del(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>>;
+}
+
+#[async_trait]
+impl KvStore for DHashMap<Arc<[u8]>, Arc<[u8]>> {
+    async fn count(&self) -> Res<u64> {
+        Ok(self.len() as u64)
+    }
+    async fn get(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
+        Ok(self.get(key).map(|v| v.value().clone()))
+    }
+    async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>) -> Res<Option<Arc<[u8]>>> {
+        Ok(self.insert(key, value))
+    }
+    async fn del(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
+        Ok(self.remove(key).map(|(_, val)| val))
+    }
 }

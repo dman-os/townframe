@@ -2,7 +2,9 @@ use crate::interlude::*;
 
 use futures::{stream::BoxStream, StreamExt};
 
-#[async_trait::async_trait]
+use crate::KvStore;
+
+#[async_trait]
 pub trait LogStore: Send + Sync {
     async fn append(&self, entry: &[u8]) -> Res<u64>;
     async fn tail(&self, offset: u64) -> BoxStream<Res<(u64, Arc<[u8]>)>>;
@@ -16,7 +18,7 @@ pub struct KvStoreLog {
 }
 
 impl KvStoreLog {
-    fn new(kv_store: Arc<dyn KvStore + Send + Sync>, latest_id: u64) -> Self {
+    pub fn new(kv_store: Arc<dyn KvStore + Send + Sync>, latest_id: u64) -> Self {
         let (latest_id_tx, latest_id_rx) = tokio::sync::watch::channel(latest_id);
         Self {
             latest_id: Arc::new(std::sync::atomic::AtomicU64::new(latest_id)),
@@ -27,7 +29,7 @@ impl KvStoreLog {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl LogStore for KvStoreLog {
     async fn append(&self, entry: &[u8]) -> Res<u64> {
         let key = self
@@ -75,29 +77,5 @@ impl LogStore for KvStoreLog {
             }
         })
         .boxed()
-    }
-}
-
-#[async_trait::async_trait]
-trait KvStore {
-    async fn count(&self) -> Res<u64>;
-    async fn get(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>>;
-    async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>) -> Res<Option<Arc<[u8]>>>;
-    async fn del(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>>;
-}
-
-#[async_trait::async_trait]
-impl KvStore for DHashMap<Arc<[u8]>, Arc<[u8]>> {
-    async fn count(&self) -> Res<u64> {
-        Ok(self.len() as u64)
-    }
-    async fn get(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
-        Ok(self.get(key).map(|v| v.value().clone()))
-    }
-    async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>) -> Res<Option<Arc<[u8]>>> {
-        Ok(self.insert(key, value))
-    }
-    async fn del(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
-        Ok(self.remove(key).map(|(_, val)| val))
     }
 }

@@ -7,7 +7,19 @@
 #[macro_export]
 macro_rules! anyhow_to_eyre {
     () => {
-        |err| eyre::format_err!(err)
+        |err| {
+            let err: Box<dyn std::error::Error + Send + Sync + 'static> = Box::from(err);
+            eyre::format_err!(err)
+        }
+    };
+}
+#[macro_export]
+macro_rules! eyre_to_anyhow {
+    () => {
+        |err| {
+            let err: Box<dyn std::error::Error + Send + Sync + 'static> = Box::from(err);
+            anyhow::anyhow!(err)
+        }
     };
 }
 

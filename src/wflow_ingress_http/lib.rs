@@ -25,7 +25,7 @@ mod wit {
 
             "townframe:api-utils/utils": api_utils_rs::wit::utils,
             "townframe:wflow/types": generate,
-            "townframe:wflow/metadata-store": generate,
+            "townframe:wflow/metastore": generate,
             "townframe:wflow/partition-host": generate,
         }
     });
@@ -36,7 +36,7 @@ use crate::interlude::*;
 
 use crate::wit::exports::townframe::wflow::ingress;
 use crate::wit::townframe::wflow::types::JobId;
-use crate::wit::townframe::wflow::{metadata_store, partition_host};
+use crate::wit::townframe::wflow::{metastore, partition_host};
 
 /// When working with streams, this crate will try to chunk bytes with
 /// this size.
@@ -160,7 +160,7 @@ async fn invoke_route(
 impl ingress::Guest for Component {
     #[allow(async_fn_in_trait)]
     fn invoke(args: ingress::InvokeArgs) -> Result<JobId, ingress::InvokeError> {
-        let meta = match metadata_store::get_wflow(&args.wflow_key) {
+        let meta = match metastore::get_wflow(&args.wflow_key) {
             None => Err(ingress::InvokeError::WflowNotFound),
             Some(meta) => Ok(meta),
         }?;
@@ -169,14 +169,15 @@ impl ingress::Guest for Component {
         let job_id = Uuid::new_v4();
         let job_id = job_id.to_string();
 
-        let _parts_meta = metadata_store::get_partitions();
-        // TODO: request hash based assignation of job to partition
-        //
-        let partition = partition_host::get_partition(0).expect("FIXME");
-        partition.add_job(&partition_host::AddJobArgs {
-            id: job_id.clone(),
-            wflow: meta,
-        });
+        let _parts_meta = metastore::get_partitions();
+        partition_host::add_job(
+            // TODO: request hash based assignation of job to partition
+            0,
+            &partition_host::AddJobArgs {
+                id: job_id.clone(),
+                wflow: meta,
+            },
+        );
         Ok(job_id)
     }
 }

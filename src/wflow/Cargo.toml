@@ -34,5 +34,6 @@ parking_lot.workspace = true
 # wit-bindgen.workspace = true
 wasmtime.workspace = true
 wash-runtime.workspace = true
+tokio-util.workspace = true
 
 

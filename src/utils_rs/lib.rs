@@ -15,7 +15,9 @@ pub mod prelude {
 }
 
 mod interlude {
-    pub use crate::{default, CHeapStr, DHashMap, JsonExt};
+    pub use crate::{
+        default, CHeapStr, DHashMap, DHashMapMutRef, DHashMapRef, JsonExt, ToAnyhow, ToEyre,
+    };
 
     pub use std::{
         path::{Path, PathBuf},
@@ -57,8 +59,47 @@ pub fn default<T: Default>() -> T {
     T::default()
 }
 
+pub fn eyre_to_anyhow(err: eyre::Report) -> anyhow::Error {
+    let err: Box<dyn std::error::Error + Send + Sync + 'static> = Box::from(err);
+    anyhow::anyhow!(err)
+}
+
+pub fn anyhow_to_eyre(err: anyhow::Error) -> eyre::Report {
+    let err: Box<dyn std::error::Error + Send + Sync + 'static> = Box::from(err);
+    eyre::format_err!(err)
+}
+
+pub trait ToEyre {
+    type Out;
+    fn to_eyre(self) -> Self::Out;
+}
+
+impl<T> ToEyre for Result<T, anyhow::Error> {
+    type Out = Result<T, eyre::Report>;
+
+    fn to_eyre(self) -> Self::Out {
+        self.map_err(anyhow_to_eyre)
+    }
+}
+
+pub trait ToAnyhow {
+    type Out;
+    fn to_anyhow(self) -> Self::Out;
+}
+
+impl<T> ToAnyhow for Result<T, eyre::Report> {
+    type Out = Result<T, anyhow::Error>;
+
+    fn to_anyhow(self) -> Self::Out {
+        self.map_err(eyre_to_anyhow)
+    }
+}
+
 // pub use ahash::{AHashMap, AHashSet};
 pub type DHashMap<K, V> = dashmap::DashMap<K, V, ahash::random_state::RandomState>;
+pub type DHashMapRef<'a, K, V> = dashmap::mapref::one::Ref<'a, K, V>;
+pub type DHashMapMutRef<'a, K, V> = dashmap::mapref::one::RefMut<'a, K, V>;
+
 pub use cheapstr::CHeapStr;
 
 // Ensure that the `tracing` stack is only initialised once using `once_cell`

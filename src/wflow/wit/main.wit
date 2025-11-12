@@ -15,9 +15,18 @@ interface bundle {
         job-id: job-id,
     }
 
+    variant retry-policy {
+        immediate
+    }
+    
+    record transient-job-error {
+        error-json: json,
+        retry-policy: option<retry-policy>
+    }
+
     variant job-error {
-        terminal(string),
-        transient(string)
+        terminal(json),
+        transient(transient-job-error)
     }
 
     type job-result = result<json, job-error>;
@@ -25,9 +34,9 @@ interface bundle {
     record run-args {
         ctx: job-ctx,
         // FIXME: find a better way of having a single component
-        // impl an interface N types
+        // impl an interface N times
         wflow-key: string,
-        args: json
+        args-json: json
     }
 
     run: func(cx: run-args) -> job-result;
@@ -47,7 +56,7 @@ interface host {
 
     record completed-step-state {
         id: step-id,
-        res: list<u8>,
+        value: list<u8>,
     }
 
     record active-step-state {
@@ -55,7 +64,7 @@ interface host {
     }
 
     next-step: func(job-id: job-id) -> result<step-state, string>;
-    persist-step: func(id: step-id, res: list<u8>) -> result<_, string>;
+    persist-step: func(job-id: job-id, step-id: step-id, value: list<u8>) -> result<_, string>;
 }
 
 // for starting invocations
@@ -64,7 +73,7 @@ interface ingress {
 
     record invoke-args {
         wflow-key: string,
-        args: json,
+        args-json: json,
         idem-key: option<string>,
     }
 
@@ -77,7 +86,7 @@ interface ingress {
 
 interface partition-host {
     use types.{job-id};
-    use metadata-store.{wflow-meta};
+    use metastore.{wflow-meta};
 
     type partition-id = u64;
     
@@ -86,14 +95,10 @@ interface partition-host {
         wflow: wflow-meta,
     }
 
-    resource partition {
-        add-job: func(args: add-job-args);
-    }
-
-    get-partition: func(id: partition-id) -> option<partition>;
+    add-job: func(partition-id: partition-id, args: add-job-args);
 }
 
-interface metadata-store {
+interface metastore {
     record wflow-meta {
         key: string,
         service: wflow-service-meta
@@ -104,6 +109,7 @@ interface metadata-store {
     }
 
     record wasmcloud-wflow-service-meta {
+        workload-id: string,
     }
 
     get-wflow: func(key:string) -> option<wflow-meta>;
@@ -124,8 +130,8 @@ world rt-host {
     import host;
 }
 
-world rt-metadata-store {
-    import metadata-store;
+world rt-metastore {
+    import metastore;
 }
 
 world service {

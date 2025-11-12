@@ -31,7 +31,7 @@ impl TestApp {
         };
         let client = wadm_client::Client::new(&lattice, None, opts)
             .await
-            .map_err(utils_rs::anyhow_to_eyre!())?;
+            .to_eyre()?;
 
         // Use ephemeral-ish port range to reduce collisions: 18000-20000
 

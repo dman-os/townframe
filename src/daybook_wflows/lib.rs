@@ -38,15 +38,14 @@ mod wit {
 
 use crate::interlude::*;
 
+use crate::wit::exports::townframe::wflow::bundle::{JobCtx, JobError, JobResult};
+
 wit::export!(Component with_types_in wit);
 
 struct Component;
 
 impl wit::exports::townframe::wflow::bundle::Guest for Component {
-    fn run(
-        args: wit::exports::townframe::wflow::bundle::RunArgs,
-    ) -> wit::townframe::wflow::types::JobResult {
-        use wit::townframe::wflow::types::JobError;
+    fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
         let cx = WflowCtx { job: args.ctx };
         match &args.wflow_key[..] {
             "doc-created" => doc_created(
@@ -85,14 +84,14 @@ enum JobErrorX {
 }
 
 struct WflowCtx {
-    job: wit::townframe::wflow::types::JobCtx,
+    job: JobCtx,
 }
 
 fn doc_created(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(), JobErrorX> {
-    match wit::townframe::wflow::host::next_op(&cx.job.job_id) {
+    match wit::townframe::wflow::host::next_step(&cx.job.job_id) {
         Ok(state) => match state {
-            wit::townframe::wflow::types::OpState::Active(active_op_state) => todo!(),
-            wit::townframe::wflow::types::OpState::Completed(completed_op_state) => todo!(),
+            wit::townframe::wflow::host::StepState::Active(active_op_state) => todo!(),
+            wit::townframe::wflow::host::StepState::Completed(completed_op_state) => todo!(),
         },
         Err(err) => Err(ferr!("error getting next op {err}").into()),
     }

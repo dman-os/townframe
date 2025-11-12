@@ -80,7 +80,7 @@ pub struct TablesStore {
     pub tab_to_window: HashMap<Uuid, Uuid>, // tab_id -> window_id
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl crate::stores::Store for TablesStore {
     type FlushArgs = (AmCtx, DocumentId);
 
