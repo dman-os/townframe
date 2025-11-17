@@ -1,5 +1,6 @@
 use crate::interlude::*;
 
+use crate::metastore;
 use crate::plugin::binds_partition_host::townframe::wflow::partition_host;
 
 pub mod effects;
@@ -21,7 +22,11 @@ pub struct PartitionCtx {
     cx: crate::SharedCtx,
     processed_entries_offset: u64,
     log: Arc<dyn crate::log::LogStore>,
-    local_wasmcloud_host: Arc<dyn service::WflowServiceHost + Sync + Send>,
+    local_wasmcloud_host: Arc<
+        dyn service::WflowServiceHost<ExtraArgs = metastore::WasmcloudWflowServiceMeta>
+            + Sync
+            + Send,
+    >,
 }
 
 impl PartitionCtx {
@@ -30,7 +35,11 @@ impl PartitionCtx {
         id: partition_host::PartitionId,
         log: Arc<dyn crate::log::LogStore>,
         processed_entries_offset: u64,
-        local_wasmcloud_host: Arc<dyn service::WflowServiceHost + Sync + Send>,
+        local_wasmcloud_host: Arc<
+            dyn service::WflowServiceHost<ExtraArgs = metastore::WasmcloudWflowServiceMeta>
+                + Sync
+                + Send,
+        >,
     ) -> Self {
         Self {
             id,

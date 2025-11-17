@@ -2,33 +2,36 @@ use std::sync::atomic::Ordering;
 
 use crate::interlude::*;
 
-use super::{
-    effects::PartitionEffect, job_events::JobEvent, log, state::PartitionWorkingState, PartitionCtx,
-};
+use crate::metastore;
+use crate::partition::{effects, job_events, log, state, PartitionCtx};
 
-mod effects;
+mod effect_worker;
 
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
-use utils_rs::prelude::tokio::{sync::mpsc::Sender, task::JoinHandle};
+use utils_rs::prelude::tokio::task::JoinHandle;
 
-struct TokioPartitionWorkerHandle {
+pub struct TokioPartitionWorkerHandle {
     mux: TokioEntryMuxHandle,
-    effect_worker: crate::partition::tokio::effects::TokioEffectWorkerHandle,
+    workers: Vec<effect_worker::TokioEffectWorkerHandle>,
 }
 
 pub async fn start_tokio_worker(
     pcx: PartitionCtx,
-    working_state: Arc<PartitionWorkingState>,
+    working_state: Arc<state::PartitionWorkingState>,
 ) -> TokioPartitionWorkerHandle {
-    let effect_worker = effects::start_tokio_effect_worker(pcx.clone(), working_state.clone());
-    let mux = start_tokio_entry_mux(
-        pcx.clone(),
-        working_state.clone(),
-        effect_worker.inbox.clone(),
-    );
+    let mut workers = vec![];
+    let (effect_tx, effect_rx) = async_channel::bounded(16);
+    for _ii in 0..16 {
+        workers.push(effect_worker::start_tokio_effect_worker(
+            pcx.clone(),
+            working_state.clone(),
+            effect_rx.clone(),
+        ));
+    }
+    let mux = start_tokio_entry_mux(pcx.clone(), working_state.clone(), effect_tx);
 
-    TokioPartitionWorkerHandle { mux, effect_worker }
+    TokioPartitionWorkerHandle { mux, workers }
 }
 
 struct TokioEntryMuxHandle {
@@ -45,8 +48,8 @@ impl TokioEntryMuxHandle {
 
 fn start_tokio_entry_mux(
     pcx: PartitionCtx,
-    state: Arc<PartitionWorkingState>,
-    effect_tx: Sender<Vec<PartitionEffect>>,
+    state: Arc<state::PartitionWorkingState>,
+    effect_tx: async_channel::Sender<log::PartitionEffectsLogEntry>,
 ) -> TokioEntryMuxHandle {
     let cancel_token = CancellationToken::new();
 
@@ -90,16 +93,18 @@ fn start_tokio_entry_mux(
 struct TokioPartitionWorker {
     pcx: PartitionCtx,
     log: crate::partition::log::PartitionLogRef,
-    state: Arc<PartitionWorkingState>,
-    effects: Vec<PartitionEffect>,
-    effect_tx: Sender<Vec<PartitionEffect>>,
+    state: Arc<state::PartitionWorkingState>,
+    effects: Vec<effects::PartitionEffect>,
+    effect_tx: async_channel::Sender<log::PartitionEffectsLogEntry>,
 }
 
 impl TokioPartitionWorker {
     async fn reduce(&mut self, entry_id: u64, entry: Arc<[u8]>) -> Res<()> {
         {
             let old = self.state.last_applied_entry_id.load(Ordering::Relaxed);
-            debug_assert!(entry_id <= old, "invariant");
+            if old > 0 {
+                debug_assert!(entry_id > old, "invariant {entry_id} <= {old}");
+            }
         }
         let evt: log::PartitionLogEntry = serde_json::from_slice(&entry).expect(ERROR_JSON);
         match evt {
@@ -107,7 +112,10 @@ impl TokioPartitionWorker {
                 self.handle_job_event(entry_id, job_event).await?;
             }
             log::PartitionLogEntry::PartitionEffects(effects) => {
-                self.effect_tx.send(effects).await.wrap_err(ERROR_CHANNEL)?
+                self.effect_tx
+                    .send(effects)
+                    .await
+                    .wrap_err("no effect worker active")?;
             }
         };
 
@@ -118,7 +126,11 @@ impl TokioPartitionWorker {
         Ok(())
     }
 
-    async fn handle_job_event(&mut self, source_entry_id: u64, evt: JobEvent) -> Res<()> {
+    async fn handle_job_event(
+        &mut self,
+        source_entry_id: u64,
+        evt: job_events::JobEvent,
+    ) -> Res<()> {
         crate::partition::reduce::reduce_job_event(&self.state.jobs, evt, &mut self.effects);
 
         // NOTE: this little dance gives as arena like semantics
@@ -139,13 +151,6 @@ impl TokioPartitionWorker {
             &mut entry.effects
         });
         self.effects.clear();
-        Ok(())
-    }
-
-    async fn handle_partition_effects(
-        &mut self,
-        effects: log::PartitionEffectsLogEntry,
-    ) -> Res<()> {
         Ok(())
     }
 }

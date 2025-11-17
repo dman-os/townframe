@@ -9,7 +9,7 @@ use wash_runtime::engine::ctx::Ctx as WashCtx;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
 use crate::partition;
-use crate::partition::{job_events, log, service};
+use crate::partition::{job_events, service, state};
 
 pub mod binds_partition_host {
     wash_runtime::wasmtime::component::bindgen!({
@@ -45,11 +45,24 @@ use binds_service::townframe::wflow::host;
 struct ActiveJobCtx {
     trap_tx: tokio::sync::Mutex<Option<oneshot::Sender<JobTrap>>>,
     cur_step: AtomicU64,
+    active_step: Option<ActiveStepCtx>,
     journal: partition::state::JobState,
 }
 
+struct ActiveStepCtx {
+    attempt_id: u64,
+    step_id: u64,
+    start_at: OffsetDateTime,
+}
+
 enum JobTrap {
-    PersistStep { step_id: u64, value: Vec<u8> },
+    PersistStep {
+        step_id: u64,
+        start_at: OffsetDateTime,
+        end_at: OffsetDateTime,
+        value: Vec<u8>,
+        attempt_id: u64,
+    },
     RunComplete(Result<String, bundle::JobError>),
 }
 
@@ -59,18 +72,22 @@ impl host::Host for WashCtx {
         job_id: partition_host::JobId,
     ) -> wasmtime::Result<Result<host::StepState, String>> {
         let plugin = TownframewflowPlugin::from_ctx(self);
-        let Some(job) = plugin.active_jobs.get(job_id.as_str()) else {
+        let Some(mut job) = plugin.active_jobs.get_mut(job_id.as_str()) else {
             anyhow::bail!("job not active");
         };
+        if job.active_step.is_some() {
+            // TODO: should be possible to implement this
+            anyhow::bail!("concurrent steps not allowed");
+        }
         let step_id = job.cur_step.load(std::sync::atomic::Ordering::Relaxed);
-        if let Some(state) = job.journal.steps.get(step_id as usize) {
-            use crate::partition::job_events::JobEffectResult;
+        let attempt_id = if let Some(state) = job.journal.steps.get(step_id as usize) {
+            use crate::partition::job_events::JobEffectResultDeets;
             use crate::partition::state::JobStepState;
             match state {
                 JobStepState::Effect { attempts } => {
                     if let Some(attempt) = attempts.last() {
-                        match &attempt.result {
-                            JobEffectResult::Success { value } => {
+                        match &attempt.deets {
+                            JobEffectResultDeets::Success { value } => {
                                 return Ok(Ok(host::StepState::Completed(
                                     host::CompletedStepState {
                                         id: step_id,
@@ -78,14 +95,22 @@ impl host::Host for WashCtx {
                                     },
                                 )));
                             }
-                            JobEffectResult::EffectErr(_) => {
-                                // noop
-                            }
+                            JobEffectResultDeets::EffectErr(_) => attempts.len(),
                         }
+                    } else {
+                        0
                     }
                 }
             }
-        }
+        } else {
+            0
+        };
+        let start_at = OffsetDateTime::now_utc();
+        job.active_step = Some(ActiveStepCtx {
+            attempt_id: attempt_id as u64,
+            step_id,
+            start_at,
+        });
         Ok(Ok(host::StepState::Active(host::ActiveStepState {
             id: step_id,
         })))
@@ -98,17 +123,24 @@ impl host::Host for WashCtx {
         value: Vec<u8>,
     ) -> wasmtime::Result<Result<(), String>> {
         let plugin = TownframewflowPlugin::from_ctx(self);
-        let Some(job) = plugin.active_jobs.get(job_id.as_str()) else {
+        let Some(mut job) = plugin.active_jobs.get_mut(job_id.as_str()) else {
             anyhow::bail!("job not active");
         };
-        if job.cur_step.load(std::sync::atomic::Ordering::Relaxed) != step_id {
+        let Some(active_step) = job.active_step.take() else {
             anyhow::bail!("step not active");
-        }
+        };
         let trap_tx = { job.trap_tx.lock().await.take() };
         let Some(trap_tx) = trap_tx else {
             anyhow::bail!("run has already trapped");
         };
-        if let Err(_) = trap_tx.send(JobTrap::PersistStep { step_id, value }) {
+        let end_at = OffsetDateTime::now_utc();
+        if let Err(_) = trap_tx.send(JobTrap::PersistStep {
+            step_id,
+            value,
+            attempt_id: active_step.attempt_id,
+            start_at: active_step.start_at,
+            end_at,
+        }) {
             anyhow::bail!("run has been abandoned");
         }
 
@@ -142,7 +174,7 @@ impl metastore::Host for WashCtx {
     }
 }
 
-struct TownframewflowPlugin {
+pub struct TownframewflowPlugin {
     pending_workloads: DHashMap<Arc<str>, HashSet<Arc<str>>>,
 
     // workload_id -> workload
@@ -156,6 +188,16 @@ struct TownframewflowPlugin {
 }
 
 impl TownframewflowPlugin {
+    pub fn new(metastore: Arc<dyn crate::metastore::MetdataStore>) -> Self {
+        Self {
+            active_workloads: default(),
+            pending_workloads: default(),
+            active_keys: default(),
+            active_jobs: default(),
+            metastore,
+        }
+    }
+
     const ID: &str = "townframe:wflow";
 
     fn from_ctx(wcx: &WashCtx) -> Arc<Self> {
@@ -175,10 +217,13 @@ impl TownframewflowPlugin {
     }
 }
 
+#[derive(educe::Educe)]
+#[educe(Debug)]
 struct WflowWorkload {
     wflow_keys: HashSet<Arc<str>>,
     resolved_handle: wash_runtime::engine::workload::ResolvedWorkload,
     component_id: String,
+    #[educe(Debug(ignore))]
     instance_pre: binds_service::ServicePre<WashCtx>,
 }
 
@@ -197,72 +242,77 @@ impl wash_runtime::plugin::HostPlugin for TownframewflowPlugin {
             imports: std::collections::HashSet::from([
                 //
                 WitInterface::from("townframe:wflow/host"),
-                WitInterface::from("townframe:wflow/partition-host"),
-                WitInterface::from("townframe:wflow/metadata-store"),
+                // WitInterface::from("townframe:wflow/partition-host"),
+                // WitInterface::from("townframe:wflow/metadata-store"),
             ]),
             ..default()
         }
     }
 
     async fn start(&self) -> anyhow::Result<()> {
-        info!("XXX starting");
         Ok(())
     }
 
     async fn on_workload_bind(
         &self,
         workload: &wash_runtime::engine::workload::UnresolvedWorkload,
-        interfaces: std::collections::HashSet<WitInterface>,
+        interface_configs: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
-        let Some(iface) = interfaces
+        let Some(iface) = interface_configs
             .iter()
             .find(|iface| iface.namespace == "townframe" && iface.package == "wflow")
         else {
             unreachable!();
         };
-        if iface.interfaces.contains("bundle") {
-            let Some(wflow_keys_raw) = iface.config.get("wflow_keys") else {
-                anyhow::bail!("no wflow_keys defined for townframe:wflow component");
-            };
-            let wflow_keys: HashSet<Arc<str>> = wflow_keys_raw
-                .split(",")
-                .map(|key| key.trim().into())
-                .collect();
-            // FIXME: regex for valid job keys
-            if wflow_keys.is_empty() {
-                anyhow::bail!("wflow_keys is empty: \"{wflow_keys_raw}\"");
-            }
-            for key in &wflow_keys {
-                if let Some(occpied) = self.metastore.get_wflow(key).await.to_anyhow()? {
-                    anyhow::bail!("occupied wflow key: \"{key}\" by {occpied:?}");
-                }
-            }
-            let workload_id: Arc<str> = workload.id().into();
-            self.pending_workloads.insert(workload_id, wflow_keys);
+        if !iface.interfaces.contains("bundle") {
+            anyhow::bail!("unupported component {interface_configs:?}");
         }
+        let Some(wflow_keys_raw) = iface.config.get("wflow_keys") else {
+            anyhow::bail!("no wflow_keys defined for townframe:wflow component");
+        };
+        let wflow_keys: HashSet<Arc<str>> = wflow_keys_raw
+            .split(",")
+            .map(|key| key.trim().into())
+            .collect();
+        // FIXME: regex for valid job keys
+        if wflow_keys.is_empty() {
+            anyhow::bail!("wflow_keys is empty: \"{wflow_keys_raw}\"");
+        }
+        for key in &wflow_keys {
+            if let Some(occpied) = self.metastore.get_wflow(key).await.to_anyhow()? {
+                anyhow::bail!("occupied wflow key: \"{key}\" by {occpied:?}");
+            }
+        }
+        let workload_id: Arc<str> = workload.id().into();
+        self.pending_workloads.insert(workload_id, wflow_keys);
         Ok(())
     }
 
     async fn on_component_bind(
         &self,
         component: &mut wash_runtime::engine::workload::WorkloadComponent,
-        _interfaces: std::collections::HashSet<WitInterface>,
+        interface_configs: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
-        info!(?component, ?_interfaces, "XXX");
-        let Some(wflow_iface) = _interfaces
+        info!(?component, ?interface_configs, "XXX");
+        let Some(wflow_iface) = interface_configs
             .iter()
             .find(|iface| iface.namespace == "townframe" && iface.package == "wflow")
         else {
             unreachable!();
         };
-        if wflow_iface.interfaces.contains("host") {
-            host::add_to_linker(component.linker(), |ctx| ctx)?;
-        }
-        if wflow_iface.interfaces.contains("partition-host") {
-            partition_host::add_to_linker(component.linker(), |ctx| ctx)?;
-        }
-        if wflow_iface.interfaces.contains("metadata-store") {
-            metastore::add_to_linker(component.linker(), |ctx| ctx)?;
+        let world = component.world();
+        for iface in world.imports {
+            if iface.namespace == "townframe" && iface.package == "wflow" {
+                if iface.interfaces.contains("host") {
+                    host::add_to_linker(component.linker(), |ctx| ctx)?;
+                }
+                if iface.interfaces.contains("partition-host") {
+                    partition_host::add_to_linker(component.linker(), |ctx| ctx)?;
+                }
+                if iface.interfaces.contains("metadata-store") {
+                    metastore::add_to_linker(component.linker(), |ctx| ctx)?;
+                }
+            }
         }
         Ok(())
     }
@@ -272,48 +322,49 @@ impl wash_runtime::plugin::HostPlugin for TownframewflowPlugin {
         resolved: &wash_runtime::engine::workload::ResolvedWorkload,
         component_id: &str,
     ) -> anyhow::Result<()> {
-        if let Some((workload_id, wflow_keys)) = self.pending_workloads.remove(resolved.id()) {
-            let instance_pre = resolved.instantiate_pre(component_id).await?;
-            let instance_pre = binds_service::ServicePre::new(instance_pre)
-                .context("error pre instantiating service component")?;
+        let Some((workload_id, wflow_keys)) = self.pending_workloads.remove(resolved.id()) else {
+            anyhow::bail!("unrecognized workload was resolved");
+        };
+        let instance_pre = resolved.instantiate_pre(component_id).await?;
+        let instance_pre = binds_service::ServicePre::new(instance_pre)
+            .context("error pre instantiating service component")?;
 
-            for key in &wflow_keys {
-                if let Some(occpied) = self.metastore.get_wflow(key).await.to_anyhow()? {
-                    anyhow::bail!("occupied wflow key: \"{key}\" by {occpied:?}");
-                }
-                self.metastore
-                    .set_wflow(
-                        &key,
-                        &metastore::WflowMeta {
-                            key: key.to_string(),
-                            service: metastore::WflowServiceMeta::Wasmcloud(
-                                metastore::WasmcloudWflowServiceMeta {
-                                    workload_id: resolved.id().into(),
-                                },
-                            ),
-                        },
-                    )
-                    .await
-                    .to_anyhow()?;
-
-                self.active_keys.insert(key.clone(), workload_id.clone());
+        for key in &wflow_keys {
+            if let Some(occpied) = self.metastore.get_wflow(key).await.to_anyhow()? {
+                anyhow::bail!("occupied wflow key: \"{key}\" by {occpied:?}");
             }
-            let wflow = WflowWorkload {
-                wflow_keys,
-                instance_pre,
-                resolved_handle: resolved.clone(),
-                component_id: component_id.into(),
-            };
-            let wflow = Arc::new(wflow);
-            self.active_workloads.insert(workload_id, wflow);
+            self.metastore
+                .set_wflow(
+                    &key,
+                    &metastore::WflowMeta {
+                        key: key.to_string(),
+                        service: metastore::WflowServiceMeta::Wasmcloud(
+                            metastore::WasmcloudWflowServiceMeta {
+                                workload_id: resolved.id().into(),
+                            },
+                        ),
+                    },
+                )
+                .await
+                .to_anyhow()?;
+
+            self.active_keys.insert(key.clone(), workload_id.clone());
         }
+        let wflow = WflowWorkload {
+            wflow_keys,
+            instance_pre,
+            resolved_handle: resolved.clone(),
+            component_id: component_id.into(),
+        };
+        let wflow = Arc::new(wflow);
+        self.active_workloads.insert(workload_id, wflow);
         Ok(())
     }
 
     async fn on_workload_unbind(
         &self,
         workload: &wash_runtime::engine::workload::ResolvedWorkload,
-        _interfaces: std::collections::HashSet<WitInterface>,
+        interfaces: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
         if let Some((_, wflow)) = self.active_workloads.remove(workload.id()) {
             for key in &wflow.wflow_keys {
@@ -323,6 +374,7 @@ impl wash_runtime::plugin::HostPlugin for TownframewflowPlugin {
         // FIXME: cleaanup from meta store
         Ok(())
     }
+
     async fn stop(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -330,15 +382,17 @@ impl wash_runtime::plugin::HostPlugin for TownframewflowPlugin {
 
 #[async_trait]
 impl service::WflowServiceHost for TownframewflowPlugin {
-    async fn run(&self, args: service::RunArgs) -> Result<service::RunValue, service::RunError> {
-        let workload = {
-            let Some(workload_id) = self.active_keys.get(&args.wflow_key[..]) else {
-                return Err(service::RunError::WflowNotFound);
-            };
-            self.active_workloads
-                .get(&workload_id[..])
-                .expect("TOCTOU")
-                .clone()
+    type ExtraArgs = metastore::WasmcloudWflowServiceMeta;
+    async fn run(
+        &self,
+        job_id: Arc<str>,
+        journal: state::JobState,
+        args: &Self::ExtraArgs,
+    ) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
+        let Some(workload) = self.active_workloads.get(&args.workload_id[..]) else {
+            return Err(job_events::JobRunResult::WorkerErr(
+                job_events::JobRunWorkerError::WflowNotFound,
+            ));
         };
         let mut store = workload
             .resolved_handle
@@ -355,10 +409,10 @@ impl service::WflowServiceHost for TownframewflowPlugin {
             .wrap_err("error creating component store")?;
         let bundle_args = bundle::RunArgs {
             ctx: bundle::JobCtx {
-                job_id: args.job_id.to_string(),
+                job_id: job_id.to_string(),
             },
-            wflow_key: args.wflow_key.to_string(),
-            args_json: args.args_json.to_string(),
+            wflow_key: journal.wflow.key.clone(),
+            args_json: journal.init_args_json.to_string(),
         };
         let fut = instance
             .townframe_wflow_bundle()
@@ -367,11 +421,12 @@ impl service::WflowServiceHost for TownframewflowPlugin {
         let (trap_tx, trap_rx) = oneshot::channel();
         let trap_tx = tokio::sync::Mutex::new(Some(trap_tx));
         let _old = self.active_jobs.insert(
-            args.job_id.clone(),
+            job_id.clone(),
             ActiveJobCtx {
                 trap_tx,
-                journal: args.journal,
+                journal,
                 cur_step: default(),
+                active_step: None,
             },
         );
         assert!(_old.is_some(), "fishy");
@@ -390,30 +445,43 @@ impl service::WflowServiceHost for TownframewflowPlugin {
             }
         };
         // FIXME: unite type hierarichies
-        match trap {
+        let res = match trap {
             JobTrap::RunComplete(Err(err)) => match err {
-                bundle::JobError::Transient(err) => Err(service::RunError::WflowErr(
-                    job_events::JobError::Transient {
-                        error_json: err.error_json.into(),
-                        retry_policy: err.retry_policy.map(|policy| match policy {
-                            bundle::RetryPolicy::Immediate => partition::RetryPolicy::Immediate,
-                        }),
-                    },
-                )),
-                bundle::JobError::Terminal(err_json) => Err(service::RunError::WflowErr(
-                    job_events::JobError::Terminal {
-                        error_json: err_json.into(),
-                    },
-                )),
+                bundle::JobError::Transient(err) => Err(job_events::JobError::Transient {
+                    error_json: err.error_json.into(),
+                    retry_policy: err.retry_policy.map(|policy| match policy {
+                        bundle::RetryPolicy::Immediate => partition::RetryPolicy::Immediate,
+                    }),
+                }
+                .into()),
+                bundle::JobError::Terminal(err_json) => Err(job_events::JobError::Terminal {
+                    error_json: err_json.into(),
+                }
+                .into()),
             },
-            JobTrap::PersistStep { step_id, value } => Ok(service::RunValue::StepEffect {
+            JobTrap::PersistStep {
                 step_id,
-                value: value.into(),
-            }),
-            JobTrap::RunComplete(Ok(value_json)) => Ok(service::RunValue::Success {
+                value,
+                start_at,
+                end_at,
+                attempt_id,
+            } => Ok(job_events::JobRunResult::StepEffect(
+                job_events::JobEffectResult {
+                    step_id,
+                    attempt_id,
+                    start_at,
+                    end_at,
+                    deets: job_events::JobEffectResultDeets::Success {
+                        value: value.into(),
+                    },
+                },
+            )),
+            JobTrap::RunComplete(Ok(value_json)) => Ok(job_events::JobRunResult::Success {
                 value_json: value_json.into(),
             }),
-        }
+        };
+        let _ = self.active_jobs.remove(&job_id);
+        res
     }
 }
 
@@ -424,6 +492,7 @@ async fn test() -> Res<()> {
     use wash_runtime::host::HostApi;
     use wash_runtime::*;
 
+    use wash_runtime::*;
     let metastore = {
         let kv = DHashMap::default();
         let kv = Arc::new(kv);
@@ -437,18 +506,9 @@ async fn test() -> Res<()> {
         .await?;
         Arc::new(metastore)
     };
-
     let cx = crate::Ctx::new(metastore.clone());
-
-    let wflow_plugin = TownframewflowPlugin {
-        active_workloads: default(),
-        pending_workloads: default(),
-        active_keys: default(),
-        active_jobs: default(),
-        metastore,
-    };
+    let wflow_plugin = crate::plugin::TownframewflowPlugin::new(metastore);
     let wflow_plugin = Arc::new(wflow_plugin);
-
     let pcx = partition::PartitionCtx::new(
         cx.clone(),
         0,
@@ -462,13 +522,9 @@ async fn test() -> Res<()> {
         wflow_plugin.clone(),
     );
     let mut log_ref = pcx.log_ref();
-
-    // TODO: recover from snapshhot
     let active_state = partition::state::PartitionWorkingState::default();
     let active_state = Arc::new(active_state);
-
     let worker = partition::tokio::start_tokio_worker(pcx, active_state.clone()).await;
-
     let host = {
         // Create a Wasmtime engine
         let engine = engine::Engine::builder().build().to_eyre()?;
@@ -488,7 +544,6 @@ async fn test() -> Res<()> {
             .build()
             .to_eyre()?
     };
-
     let host = host.start().await.to_eyre()?;
 
     let dbook_wflow_wasm =
@@ -509,7 +564,7 @@ async fn test() -> Res<()> {
                 //
                 WitInterface {
                     config: [("wflow_keys".to_owned(), "doc-created".to_owned())].into(),
-                    ..WitInterface::from("townframe:wflow/host")
+                    ..WitInterface::from("townframe:wflow/bundle")
                 },
             ],
             volumes: vec![],
@@ -519,29 +574,31 @@ async fn test() -> Res<()> {
     host.workload_start(req).await.to_eyre()?;
 
     let id = log_ref
-        .append(&log::PartitionLogEntry::JobEvent(job_events::JobEvent {
-            timestamp: OffsetDateTime::now_utc(),
-            job_id: "job123".into(),
-            deets: job_events::JobEventDeets::Init(job_events::JobInitEvent {
-                args_json: "{}".into(),
-                override_wflow_retry_policy: None,
-                wflow: metastore::WflowMeta {
-                    key: "doc-created".into(),
-                    service: metastore::WflowServiceMeta::Wasmcloud(
-                        metastore::WasmcloudWflowServiceMeta {
-                            workload_id: wflow_plugin
-                                .active_keys
-                                .get("doc-created")
-                                .unwrap()
-                                .to_string(),
-                        },
-                    ),
-                },
-            }),
-        }))
+        .append(&crate::partition::log::PartitionLogEntry::JobEvent(
+            job_events::JobEvent {
+                timestamp: OffsetDateTime::now_utc(),
+                job_id: "job123".into(),
+                deets: job_events::JobEventDeets::Init(job_events::JobInitEvent {
+                    args_json: "{}".into(),
+                    override_wflow_retry_policy: None,
+                    wflow: metastore::WflowMeta {
+                        key: "doc-created".into(),
+                        service: metastore::WflowServiceMeta::Wasmcloud(
+                            metastore::WasmcloudWflowServiceMeta {
+                                workload_id: wflow_plugin
+                                    .active_keys
+                                    .get("doc-created")
+                                    .unwrap()
+                                    .to_string(),
+                            },
+                        ),
+                    },
+                }),
+            },
+        ))
         .await?;
 
-    // tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
     Ok(())
 }

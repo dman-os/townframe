@@ -1,5 +1,9 @@
 # daybook
 
+## Notes
+
+- Avoid adding dependencies if possible
+
 ## TODO
 
 ### Stack

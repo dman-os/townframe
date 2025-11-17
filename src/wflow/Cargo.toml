@@ -35,5 +35,6 @@ parking_lot.workspace = true
 wasmtime.workspace = true
 wash-runtime.workspace = true
 tokio-util.workspace = true
+async-channel.workspace = true
 
 

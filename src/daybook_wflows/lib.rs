@@ -38,7 +38,9 @@ mod wit {
 
 use crate::interlude::*;
 
-use crate::wit::exports::townframe::wflow::bundle::{JobCtx, JobError, JobResult};
+use crate::wit::exports::townframe::wflow::bundle::{
+    JobCtx, JobError, JobResult, TransientJobError,
+};
 
 wit::export!(Component with_types_in wit);
 
@@ -50,24 +52,40 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
         match &args.wflow_key[..] {
             "doc-created" => doc_created(
                 cx,
-                serde_json::from_str(&args.args).map_err(|err| {
-                    JobError::Terminal(format!(
-                        "error parsing json ({json}) for {key} args: {err}",
-                        json = args.args,
-                        key = args.wflow_key
-                    ))
+                serde_json::from_str(&args.args_json).map_err(|err| {
+                    JobError::Terminal(
+                        serde_json::to_string(&json!({
+                            "msg": format!(
+                                "error parsing json ({json}) for {key} args: {err}",
+                                json = args.args_json,
+                                key = args.wflow_key
+                            )
+                        }))
+                        .expect(ERROR_JSON),
+                    )
                 })?,
             )
             .map_err(|err| match err {
                 JobErrorX::Terminal(err) => JobError::Terminal(format!("{err:?}")),
-                JobErrorX::Transient(err) => JobError::Transient(format!("{err:?}")),
+                JobErrorX::Transient(err) => JobError::Transient(TransientJobError {
+                    retry_policy: None,
+                    error_json: serde_json::to_string(&json!({
+                        "msg": format!("{err:?}")
+                    }))
+                    .expect(ERROR_JSON),
+                }),
             })
             .and_then(|res| {
                 serde_json::to_string(&res).map_err(|err| {
-                    JobError::Terminal(format!(
-                        "error serializing result ({res:?}) to json for {key} args: {err}",
-                        key = args.wflow_key
-                    ))
+                    JobError::Terminal(
+                        serde_json::to_string(&json!({
+                            "msg": format!(
+                                "error serializing result ({res:?}) to json for {key} args: {err}",
+                                key = args.wflow_key
+                            )
+                        }))
+                        .expect(ERROR_JSON),
+                    )
                 })
             }),
             key => Err(JobError::Terminal(format!("unrecognized wflow_key: {key}"))),
@@ -89,10 +107,18 @@ struct WflowCtx {
 
 fn doc_created(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(), JobErrorX> {
     match wit::townframe::wflow::host::next_step(&cx.job.job_id) {
+        Err(err) => return Err(ferr!("error getting next op {err}").into()),
         Ok(state) => match state {
-            wit::townframe::wflow::host::StepState::Active(active_op_state) => todo!(),
-            wit::townframe::wflow::host::StepState::Completed(completed_op_state) => todo!(),
+            wit::townframe::wflow::host::StepState::Active(active_op_state) => {
+                wit::townframe::wflow::host::persist_step(
+                    &cx.job.job_id,
+                    active_op_state.id,
+                    "hi".as_bytes(),
+                )
+                .map_err(|err| ferr!("error persisting step {err:?}"))?;
+            }
+            wit::townframe::wflow::host::StepState::Completed(completed_op_state) => {}
         },
-        Err(err) => Err(ferr!("error getting next op {err}").into()),
     }
+    Ok(())
 }

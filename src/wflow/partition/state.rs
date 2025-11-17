@@ -40,7 +40,7 @@ impl ActiveEffectState {
 #[derive(Debug, Serialize, Deserialize)]
 struct EffectState {}
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct JobState {
     pub init_args_json: Arc<str>,
     pub wflow: metastore::WflowMeta,
@@ -49,9 +49,9 @@ pub struct JobState {
     pub steps: Vec<JobStepState>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum JobStepState {
-    Effect { attempts: Vec<JobEffectEvent> },
+    Effect { attempts: Vec<JobEffectResult> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

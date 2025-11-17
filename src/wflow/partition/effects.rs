@@ -15,7 +15,6 @@ pub enum PartitionEffectDeets {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RunJobAttemptDeets {
     pub run_id: u64,
-    pub args_json: Arc<str>,
 }
 
 impl From<RunJobAttemptDeets> for PartitionEffectDeets {

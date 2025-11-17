@@ -6192,6 +6192,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "api_utils_rs",
+ "async-channel",
  "async-trait",
  "displaydoc",
  "futures",

@@ -32,11 +32,6 @@ pub fn reduce_job_event(
             Ok(Some(val)) => effects.push(val),
             Err(val) => effects.push(val),
         },
-        job_events::JobEventDeets::Effect(deets) => match reduce_job_effect_event(cx, deets) {
-            Ok(None) => {}
-            Ok(Some(val)) => effects.push(val),
-            Err(val) => effects.push(val),
-        },
     }
 }
 
@@ -66,10 +61,7 @@ fn reduce_job_init_event(
 
     Ok(PartitionEffect {
         job_id,
-        deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets {
-            run_id: 0,
-            args_json: deets.args_json,
-        }),
+        deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets { run_id: 0 }),
     })
 }
 
@@ -90,94 +82,97 @@ fn get_job_state<'a>(
 
 fn reduce_job_run_event(
     ReduceCtx { state, job_id, .. }: ReduceCtx,
-    deets: job_events::JobRunEvent,
+    event: job_events::JobRunEvent,
 ) -> Result<Option<PartitionEffect>, PartitionEffect> {
-    let mut job_state = get_job_state(&state, &job_id)?;
+    // deref destructure to avoid borrow checker
+    // confusin on cross field refs
+    let state::JobState {
+        ref mut runs,
+        ref mut steps,
+        ref override_wflow_retry_policy,
+        ..
+    } = &mut *get_job_state(&state, &job_id)?;
 
-    assert!((deets.run_id as usize) == job_state.runs.len());
-    job_state.runs.push(deets);
+    assert!((event.run_id as usize) == runs.len());
+    runs.push(event);
 
-    let deets = &job_state.runs[job_state.runs.len()];
+    let event = runs.last_mut().unwrap();
 
-    match &deets.result {
+    let effect = match &event.result {
+        // that's it for the job, archive it
         job_events::JobRunResult::Success { .. }
         | job_events::JobRunResult::WorkerErr(_)
         | job_events::JobRunResult::WflowErr(JobError::Terminal { .. }) => {
-            drop(job_state);
             let (_, job_state) = state.active.remove(&job_id).unwrap();
             state.archive.insert(job_id, job_state);
-            Ok(None)
+            None
         }
+        // try another run
         job_events::JobRunResult::WflowErr(JobError::Transient { retry_policy, .. }) => {
+            // FIXME: double clone
             match retry_policy
-                .as_ref()
-                .or(job_state.override_wflow_retry_policy.as_ref())
-                .unwrap_or(&crate::partition::RetryPolicy::Immediate)
+                .clone()
+                .or(override_wflow_retry_policy.clone())
+                .unwrap_or(crate::partition::RetryPolicy::Immediate)
             {
-                crate::partition::RetryPolicy::Immediate => Ok(Some(PartitionEffect {
+                crate::partition::RetryPolicy::Immediate => Some(PartitionEffect {
                     job_id,
                     deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets {
-                        run_id: job_state.runs.len() as u64,
-                        args_json: job_state.init_args_json.clone(),
+                        run_id: runs.len() as u64,
                     }),
-                })),
+                }),
             }
         }
-        job_events::JobRunResult::EffectInterrupt { .. } => Ok(Some(PartitionEffect {
-            job_id,
-            deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets {
-                run_id: job_state.runs.len() as u64,
-                args_json: job_state.init_args_json.clone(),
-            }),
-        })),
-    }
-}
-
-fn reduce_job_effect_event(
-    ReduceCtx { state, job_id, .. }: ReduceCtx,
-    deets: job_events::JobEffectEvent,
-) -> Result<Option<PartitionEffect>, PartitionEffect> {
-    let mut job_state = get_job_state(&state, &job_id)?;
-    assert!((deets.step_id as usize) >= (job_state.steps.len() - 1));
-
-    let step_id = deets.step_id;
-    if job_state.steps.len() == step_id as usize {
-        job_state.steps.push(state::JobStepState::Effect {
-            attempts: default(),
-        });
-    }
-    {
-        let step = &mut job_state.steps[deets.step_id as usize];
-        let state::JobStepState::Effect { attempts } = step;
-        assert!((deets.attempt_id as usize) == attempts.len());
-        attempts.push(deets);
-    }
-    let step = &job_state.steps[step_id as usize];
-    let state::JobStepState::Effect { attempts } = step;
-    let deets = &attempts[attempts.len()];
-
-    match &deets.result {
-        job_events::JobEffectResult::Success { .. } => Ok(None),
-        job_events::JobEffectResult::EffectErr(JobError::Terminal { .. }) => {
-            drop(job_state);
-            let (_, job_state) = state.active.remove(&job_id).unwrap();
-            state.archive.insert(job_id, job_state);
-            Ok(None)
-        }
-        job_events::JobEffectResult::EffectErr(JobError::Transient { retry_policy, .. }) => {
-            match retry_policy
-                .as_ref()
-                .or(job_state.override_wflow_retry_policy.as_ref())
-                .unwrap_or(&crate::partition::RetryPolicy::Immediate)
+        // steps require special attention
+        job_events::JobRunResult::StepEffect(res) => {
+            // update our state first for quick ref later
             {
-                crate::partition::RetryPolicy::Immediate => Ok(Some(PartitionEffect {
+                if steps.len() == res.step_id as usize {
+                    steps.push(state::JobStepState::Effect {
+                        attempts: default(),
+                    });
+                }
+                let step = &mut steps[res.step_id as usize];
+                let state::JobStepState::Effect { attempts } = step;
+                assert!((res.attempt_id as usize) == attempts.len());
+                attempts.push(res.clone());
+            }
+            match &res.deets {
+                // no more job runs, archive it
+                job_events::JobEffectResultDeets::EffectErr(JobError::Terminal { .. }) => {
+                    let (_, job_state) = state.active.remove(&job_id).unwrap();
+                    state.archive.insert(job_id, job_state);
+                    None
+                }
+                // step succeeded, let's run again
+                job_events::JobEffectResultDeets::Success { .. } => Some(PartitionEffect {
                     job_id,
                     deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets {
-                        run_id: job_state.runs.len() as u64,
-                        args_json: job_state.init_args_json.clone(),
+                        run_id: runs.len() as u64,
                     }),
-                })),
+                }),
+                job_events::JobEffectResultDeets::EffectErr(JobError::Transient {
+                    retry_policy,
+                    ..
+                }) => {
+                    match retry_policy
+                        .as_ref()
+                        .or(override_wflow_retry_policy.as_ref())
+                        .unwrap_or(&crate::partition::RetryPolicy::Immediate)
+                    {
+                        crate::partition::RetryPolicy::Immediate => Some(PartitionEffect {
+                            job_id,
+                            deets: effects::PartitionEffectDeets::RunJob(
+                                effects::RunJobAttemptDeets {
+                                    run_id: runs.len() as u64,
+                                },
+                            ),
+                        }),
+                    }
+                }
             }
         }
-    }
+    };
+
+    Ok(effect)
 }

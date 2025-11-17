@@ -15,7 +15,6 @@ pub struct JobEvent {
 pub enum JobEventDeets {
     Init(JobInitEvent),
     Run(JobRunEvent),
-    Effect(JobEffectEvent),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,20 +33,25 @@ pub struct JobRunEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobEffectEvent {
-    pub step_id: u64,
-    pub attempt_id: u64,
-    pub start_at: OffsetDateTime,
-    pub end_at: OffsetDateTime,
-    pub result: JobEffectResult,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum JobRunResult {
     Success { value_json: Arc<str> },
-    EffectInterrupt { step_id: u64 },
+    StepEffect(JobEffectResult),
     WorkerErr(JobRunWorkerError),
     WflowErr(JobError),
+}
+
+impl From<eyre::Report> for JobRunResult {
+    fn from(value: eyre::Report) -> Self {
+        Self::WorkerErr(JobRunWorkerError::Other {
+            msg: format!("{value:?}"),
+        })
+    }
+}
+
+impl From<JobError> for JobRunResult {
+    fn from(value: JobError) -> Self {
+        Self::WflowErr(value)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +62,16 @@ pub enum JobRunWorkerError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum JobEffectResult {
+pub struct JobEffectResult {
+    pub step_id: u64,
+    pub attempt_id: u64,
+    pub start_at: OffsetDateTime,
+    pub end_at: OffsetDateTime,
+    pub deets: JobEffectResultDeets,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum JobEffectResultDeets {
     Success { value: Arc<[u8]> },
     EffectErr(JobError),
 }
