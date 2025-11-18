@@ -7,6 +7,7 @@ pub mod am;
 pub mod prelude {
     pub use crate::interlude::*;
 
+    pub use dashmap;
     pub use dotenv_flow;
     pub use educe;
     pub use regex;
@@ -15,9 +16,7 @@ pub mod prelude {
 }
 
 mod interlude {
-    pub use crate::{
-        default, CHeapStr, DHashMap, DHashMapMutRef, DHashMapRef, JsonExt, ToAnyhow, ToEyre,
-    };
+    pub use crate::{default, CHeapStr, DHashMap, JsonExt, ToAnyhow, ToEyre};
 
     pub use std::{
         path::{Path, PathBuf},
@@ -95,7 +94,7 @@ impl<T> ToAnyhow for Result<T, eyre::Report> {
     }
 }
 
-// pub use ahash::{AHashMap, AHashSet};
+// NOTE: only use these in actors or single writer scenarios
 pub type DHashMap<K, V> = dashmap::DashMap<K, V, ahash::random_state::RandomState>;
 pub type DHashMapRef<'a, K, V> = dashmap::mapref::one::Ref<'a, K, V>;
 pub type DHashMapMutRef<'a, K, V> = dashmap::mapref::one::RefMut<'a, K, V>;

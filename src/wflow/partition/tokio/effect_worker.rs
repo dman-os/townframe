@@ -2,6 +2,7 @@ use crate::interlude::*;
 
 use crate::plugin::binds_metastore::townframe::wflow::metastore;
 
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use utils_rs::prelude::tokio::task::JoinHandle;
 
@@ -9,24 +10,37 @@ use crate::partition::{effects, job_events, log, service, state, PartitionCtx};
 
 pub struct TokioEffectWorkerHandle {
     cancel_token: CancellationToken,
-    join_handle: JoinHandle<Res<()>>,
+    join_handle: Option<JoinHandle<Res<()>>>,
 }
 
 impl TokioEffectWorkerHandle {
-    pub async fn close(self) -> Res<()> {
+    pub fn cancel(&self) {
         self.cancel_token.cancel();
-        self.join_handle.await.wrap_err("join error")?
+    }
+
+    pub async fn close(mut self) -> Res<()> {
+        self.cancel_token.cancel();
+        // Move out the join_handle to await it
+        let join_handle = self.join_handle.take().expect("join_handle already taken");
+        // Drop will cancel again, which is safe (idempotent)
+        drop(self);
+        join_handle.await.wrap_err("join error")?
+    }
+}
+
+impl Drop for TokioEffectWorkerHandle {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
     }
 }
 
 pub fn start_tokio_effect_worker(
     pcx: PartitionCtx,
     state: Arc<state::PartitionWorkingState>,
-    effect_rx: async_channel::Receiver<log::PartitionEffectsLogEntry>,
+    effect_rx: async_channel::Receiver<effects::EffectId>,
+    cancel_token: CancellationToken,
 ) -> TokioEffectWorkerHandle {
-    let cancel_token = CancellationToken::new();
-
-    let join_handle = tokio::spawn({
+    let fut = {
         let cancel_token = cancel_token.clone();
         async move {
             let mut worker = TokioEffectWorker {
@@ -36,23 +50,25 @@ pub fn start_tokio_effect_worker(
             };
             loop {
                 tokio::select! {
+                    biased;
                     _ = cancel_token.cancelled() => {
                         break;
                     }
-                    effects = effect_rx.recv() => {
-                        let Ok(effects) = effects else {
+                    effect_id = effect_rx.recv() => {
+                        let Ok(effect_id) = effect_id else {
                             break;
                         };
-                        worker.handle_partition_effects(effects).await?;
+                        worker.handle_partition_effects(effect_id).await?;
                     }
                 };
             }
             eyre::Ok(())
         }
-    });
+    };
+    let join_handle = tokio::spawn(fut);
     TokioEffectWorkerHandle {
         cancel_token,
-        join_handle,
+        join_handle: Some(join_handle),
     }
 }
 
@@ -63,49 +79,56 @@ struct TokioEffectWorker {
 }
 
 impl TokioEffectWorker {
-    async fn handle_partition_effects(
-        &mut self,
-        effects: log::PartitionEffectsLogEntry,
-    ) -> Res<()> {
-        for effect in effects.effects {
-            match effect.deets {
-                effects::PartitionEffectDeets::RunJob(deets) => {
-                    let start_at = OffsetDateTime::now_utc();
-                    let result = self.run_job_effect(effect.job_id.clone(), &deets).await;
-                    let end_at = OffsetDateTime::now_utc();
-                    self.log
-                        .append(&log::PartitionLogEntry::JobEvent(job_events::JobEvent {
-                            job_id: effect.job_id,
-                            timestamp: end_at.clone(),
-                            deets: job_events::JobEventDeets::Run(job_events::JobRunEvent {
-                                run_id: deets.run_id,
-                                start_at,
-                                end_at,
-                                result,
-                            }),
-                        }))
-                        .await?;
-                }
-                effects::PartitionEffectDeets::AbortJob { reason } => todo!(),
+    async fn handle_partition_effects(&mut self, effect_id: effects::EffectId) -> Res<()> {
+        let (job_id, deets) = {
+            let mut effects_map = self.state.effects.lock().await;
+            let effects::PartitionEffect { job_id, deets } = effects_map
+                .get_mut(&effect_id)
+                .expect("scheduled effect not found");
+            (job_id.clone(), deets.clone())
+        };
+
+        match deets {
+            effects::PartitionEffectDeets::RunJob(deets) => {
+                let start_at = OffsetDateTime::now_utc();
+                let run_id = deets.run_id;
+
+                let result = self.run_job_effect(job_id.clone()).await;
+                let end_at = OffsetDateTime::now_utc();
+                self.log
+                    .append(&log::PartitionLogEntry::JobEvent(job_events::JobEvent {
+                        job_id,
+                        timestamp: end_at.clone(),
+                        deets: job_events::JobEventDeets::Run(job_events::JobRunEvent {
+                            run_id,
+                            start_at,
+                            end_at,
+                            result,
+                        }),
+                    }))
+                    .await?;
             }
+            effects::PartitionEffectDeets::AbortJob { reason: _ } => todo!(),
         }
         Ok(())
     }
 
-    async fn run_job_effect(
-        &mut self,
-        job_id: Arc<str>,
-        payload: &effects::RunJobAttemptDeets,
-    ) -> job_events::JobRunResult {
-        let Some(job_state) = self.state.jobs.get(&job_id) else {
-            return job_events::JobRunResult::WorkerErr(job_events::JobRunWorkerError::JobNotFound);
+    async fn run_job_effect(&mut self, job_id: Arc<str>) -> job_events::JobRunResult {
+        let job_state_snapshot = {
+            let jobs = self.state.jobs.lock().await;
+            let Some(state) = jobs.active.get(&job_id) else {
+                return job_events::JobRunResult::WorkerErr(
+                    job_events::JobRunWorkerError::JobNotFound,
+                );
+            };
+            state.clone()
         };
-        tracing::debug!(%job_id, ?payload, ?job_state, "running job XXX");
-        let res = match &job_state.wflow.service {
+
+        let res = match &job_state_snapshot.wflow.service {
             metastore::WflowServiceMeta::Wasmcloud(meta) => {
                 self.pcx
                     .local_wasmcloud_host
-                    .run(job_id, job_state.clone(), meta)
+                    .run(job_id.clone(), job_state_snapshot.clone(), meta)
                     .await
             }
         };

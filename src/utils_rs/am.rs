@@ -199,7 +199,6 @@ impl AmCtx {
         })
     }
 
-
     pub async fn add_doc(&self, doc: Automerge) -> Res<DocHandle> {
         let handle = self.repo.create(doc).await?;
         self.handle_cache

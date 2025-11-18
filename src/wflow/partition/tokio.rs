@@ -1,4 +1,5 @@
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::interlude::*;
 
@@ -6,98 +7,162 @@ use crate::partition::{effects, job_events, log, state, PartitionCtx};
 
 mod effect_worker;
 
-use futures::StreamExt;
+use futures::{stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use utils_rs::prelude::tokio::task::JoinHandle;
 
 pub struct TokioPartitionWorkerHandle {
-    mux: TokioEntryMuxHandle,
-    workers: Vec<effect_worker::TokioEffectWorkerHandle>,
+    part_reducer: Option<TokioPartitionReducerHandle>,
+    effect_workers: Option<Vec<effect_worker::TokioEffectWorkerHandle>>,
+    cancel_token: CancellationToken,
+}
+
+impl TokioPartitionWorkerHandle {
+    pub async fn close(mut self) -> Res<()> {
+        self.cancel_token.cancel();
+        // Close all effect workers first
+        if let Some(effect_workers) = self.effect_workers.take() {
+            for worker in effect_workers {
+                worker.close().await?;
+            }
+        }
+        // Then close the event worker
+        if let Some(reducer) = self.part_reducer.take() {
+            reducer.close().await?;
+        }
+        // Drop will cancel again, which is safe (idempotent)
+        Ok(())
+    }
+}
+
+impl Drop for TokioPartitionWorkerHandle {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        // Cancel all effect workers
+        if let Some(ref effect_workers) = self.effect_workers {
+            for worker in effect_workers {
+                worker.cancel();
+            }
+        }
+        // Cancel the event worker
+        if let Some(ref event_worker) = self.part_reducer {
+            event_worker.cancel();
+        }
+    }
 }
 
 pub async fn start_tokio_worker(
     pcx: PartitionCtx,
     working_state: Arc<state::PartitionWorkingState>,
 ) -> TokioPartitionWorkerHandle {
-    let mut workers = vec![];
-    let (effect_tx, effect_rx) = async_channel::bounded(16);
-    for _ii in 0..16 {
-        workers.push(effect_worker::start_tokio_effect_worker(
+    let cancel_token = CancellationToken::new();
+    let mut effect_workers = vec![];
+    // Shared channel for effect scheduling
+    let (effect_tx, effect_rx) = async_channel::unbounded::<effects::EffectId>();
+    for _ii in 0..8 {
+        effect_workers.push(effect_worker::start_tokio_effect_worker(
             pcx.clone(),
             working_state.clone(),
             effect_rx.clone(),
+            cancel_token.child_token(),
         ));
     }
-    let mux = start_tokio_entry_mux(pcx.clone(), working_state.clone(), effect_tx);
+    let part_reducer = start_tokio_partition_reducer(
+        pcx.clone(),
+        working_state.clone(),
+        effect_tx,
+        cancel_token.child_token(),
+    );
 
-    TokioPartitionWorkerHandle { mux, workers }
-}
-
-struct TokioEntryMuxHandle {
-    cancel_token: CancellationToken,
-    join_handle: JoinHandle<Res<()>>,
-}
-
-impl TokioEntryMuxHandle {
-    pub async fn close(self) -> Res<()> {
-        self.cancel_token.cancel();
-        self.join_handle.await.wrap_err("join error")?
+    TokioPartitionWorkerHandle {
+        part_reducer: Some(part_reducer),
+        effect_workers: Some(effect_workers),
+        cancel_token,
     }
 }
 
-fn start_tokio_entry_mux(
+struct TokioPartitionReducerHandle {
+    cancel_token: CancellationToken,
+    join_handle: Option<JoinHandle<Res<()>>>,
+}
+
+impl TokioPartitionReducerHandle {
+    pub fn cancel(&self) {
+        self.cancel_token.cancel();
+    }
+
+    pub async fn close(mut self) -> Res<()> {
+        self.cancel_token.cancel();
+        // Move out the join_handle to await it
+        let join_handle = self.join_handle.take().expect("join_handle already taken");
+        join_handle.await.wrap_err("join error")?
+    }
+}
+
+impl Drop for TokioPartitionReducerHandle {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+    }
+}
+
+fn start_tokio_partition_reducer(
     pcx: PartitionCtx,
     state: Arc<state::PartitionWorkingState>,
-    effect_tx: async_channel::Sender<log::PartitionEffectsLogEntry>,
-) -> TokioEntryMuxHandle {
-    let cancel_token = CancellationToken::new();
-
+    effect_tx: async_channel::Sender<effects::EffectId>,
+    cancel_token: CancellationToken,
+) -> TokioPartitionReducerHandle {
     let fut = {
         let cancel_token = cancel_token.clone();
         async move {
-            let mut worker = TokioPartitionWorker {
+            let mut worker = TokioPartitionReducer {
                 log: pcx.log_ref(),
                 pcx: pcx.clone(),
                 state,
-                effects: default(),
+                new_effects: default(),
+                event_effects: default(),
                 effect_tx,
             };
             let mut stream = pcx.log.tail(0).await;
             loop {
-                let entry = tokio::select! {
+                // Poll the stream with cancellation check
+                tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => {
                         break;
                     }
-                    entry = stream.next() => {
-                        entry
+                    // we avoid processing entries if there are many effects
+                    // that needs to be scheduled
+                    entry = stream.next(), if worker.new_effects.len() < 128 => {
+                        let Some(entry) = entry else {
+                            // Stream ended
+                            break;
+                        };
+                        let (entry_id, entry) = entry?;
+                        worker.reduce(entry_id, entry).await?;
                     }
-                };
-                let Some(Ok((entry_id, entry))) = entry else {
-                    break;
-                };
-                worker.reduce(entry_id, entry).await?;
+                }
             }
             eyre::Ok(())
         }
     };
     let join_handle = tokio::spawn(fut);
 
-    TokioEntryMuxHandle {
+    TokioPartitionReducerHandle {
         cancel_token,
-        join_handle,
+        join_handle: Some(join_handle),
     }
 }
 
-struct TokioPartitionWorker {
+struct TokioPartitionReducer {
     pcx: PartitionCtx,
     log: crate::partition::log::PartitionLogRef,
     state: Arc<state::PartitionWorkingState>,
-    effects: Vec<effects::PartitionEffect>,
-    effect_tx: async_channel::Sender<log::PartitionEffectsLogEntry>,
+    new_effects: Vec<effects::EffectId>,
+    event_effects: Vec<effects::PartitionEffect>,
+    effect_tx: async_channel::Sender<effects::EffectId>,
 }
 
-impl TokioPartitionWorker {
+impl TokioPartitionReducer {
     async fn reduce(&mut self, entry_id: u64, entry: Arc<[u8]>) -> Res<()> {
         {
             let old = self.state.last_applied_entry_id.load(Ordering::Relaxed);
@@ -110,11 +175,8 @@ impl TokioPartitionWorker {
             log::PartitionLogEntry::JobEvent(job_event) => {
                 self.handle_job_event(entry_id, job_event).await?;
             }
-            log::PartitionLogEntry::PartitionEffects(effects) => {
-                self.effect_tx
-                    .send(effects)
-                    .await
-                    .wrap_err("no effect worker active")?;
+            log::PartitionLogEntry::NewPartitionEffects(effects) => {
+                self.handle_partition_effect(entry_id, effects).await?;
             }
         };
 
@@ -125,32 +187,54 @@ impl TokioPartitionWorker {
         Ok(())
     }
 
-    async fn handle_job_event(
+    async fn handle_partition_effect(
         &mut self,
-        source_entry_id: u64,
-        evt: job_events::JobEvent,
+        entry_id: u64,
+        entry: log::NewPartitionEffectsLogEntry,
     ) -> Res<()> {
-        tracing::debug!(%source_entry_id, ?evt, "reducing job event XXX");
-        crate::partition::reduce::reduce_job_event(&self.state.jobs, evt, &mut self.effects);
+        for (ii, effect) in entry.effects.into_iter().enumerate() {
+            let id = effects::EffectId {
+                entry_id,
+                effect_idx: ii as u64,
+            };
+            {
+                let mut effects_map = self.state.effects.lock().await;
+                effects_map.insert(id.clone(), effect);
+            }
+            self.new_effects.push(id);
+        }
+        // Send all effects to the channel
+        for effect_id in self.new_effects.drain(..) {
+            self.effect_tx.send(effect_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_job_event(&mut self, entry_id: u64, evt: job_events::JobEvent) -> Res<()> {
+        tracing::debug!(%entry_id, ?evt, "reducing job event XXX");
+        {
+            let mut jobs = self.state.jobs.lock().await;
+            crate::partition::reduce::reduce_job_event(&mut jobs, evt, &mut self.event_effects);
+        }
 
         // NOTE: this little dance gives as arena like semantics
         // without Drop issues
-        let mut entry = log::PartitionEffectsLogEntry {
-            source_entry_id,
+        let mut entry = log::NewPartitionEffectsLogEntry {
+            source_entry_id: entry_id,
             effects: vec![],
         };
-        std::mem::swap(&mut self.effects, &mut entry.effects);
+        std::mem::swap(&mut self.event_effects, &mut entry.effects);
 
-        let mut entry = log::PartitionLogEntry::PartitionEffects(entry);
+        let mut entry = log::PartitionLogEntry::NewPartitionEffects(entry);
         self.log.append(&entry).await?;
 
-        std::mem::swap(&mut self.effects, {
-            let log::PartitionLogEntry::PartitionEffects(entry) = &mut entry else {
+        std::mem::swap(&mut self.event_effects, {
+            let log::PartitionLogEntry::NewPartitionEffects(entry) = &mut entry else {
                 unreachable!()
             };
             &mut entry.effects
         });
-        self.effects.clear();
+        self.event_effects.clear();
         Ok(())
     }
 }

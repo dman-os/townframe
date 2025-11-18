@@ -21,6 +21,7 @@ pub mod gen;
 pub mod repos;
 pub mod stores;
 pub mod tables;
+pub mod wflows;
 
 #[cfg(test)]
 mod tincans;

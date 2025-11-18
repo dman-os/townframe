@@ -27,6 +27,9 @@ pub fn setup_tracing() -> eyre::Result<()> {
     #[cfg(target_os = "android")]
     let registry = registry.with(tracing_android::layer("org.example.daybook")?);
 
+    #[cfg(feature = "console-subscriber")]
+    let registry = registry.with(console_subscriber::spawn());
+
     registry.try_init().map_err(|err| eyre::eyre!(err))?;
 
     // color_eyre::install()?;

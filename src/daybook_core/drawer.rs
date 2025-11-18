@@ -438,7 +438,7 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_one() -> Res<()> {
+    async fn smoke() -> Res<()> {
         utils_rs::testing::setup_tracing()?;
         let client_acx = AmCtx::boot(
             utils_rs::am::Config {

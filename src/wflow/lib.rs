@@ -4,18 +4,18 @@ mod interlude {
 
 use crate::interlude::*;
 
-mod log;
-mod metastore;
-mod partition;
-mod plugin;
+pub mod log;
+pub mod metastore;
+pub mod partition;
+pub mod plugin;
 
-struct Ctx {
-    metadata: Arc<dyn metastore::MetdataStore>,
+pub struct Ctx {
+    pub metadata: Arc<dyn metastore::MetdataStore>,
 }
-type SharedCtx = Arc<Ctx>;
+pub type SharedCtx = Arc<Ctx>;
 
 impl Ctx {
-    fn new(metadata: Arc<dyn metastore::MetdataStore>) -> Arc<Self> {
+    pub fn new(metadata: Arc<dyn metastore::MetdataStore>) -> Arc<Self> {
         Arc::new(Self { metadata })
     }
 }
@@ -88,7 +88,7 @@ pub async fn start_host() -> Res<Arc<wash_runtime::host::Host>> {
 }
 
 #[async_trait]
-trait KvStore {
+pub trait KvStore {
     async fn count(&self) -> Res<u64>;
     async fn get(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>>;
     async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>) -> Res<Option<Arc<[u8]>>>;

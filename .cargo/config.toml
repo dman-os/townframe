@@ -1,2 +1,4 @@
 [alias]
 x = "run --package xtask --"
+[build]
+rustflags = ["--cfg", "tokio_unstable"]

@@ -14,7 +14,9 @@ uniffi = ["dep:uniffi"]
 [dependencies]
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
-api_utils_rs.workspace = true
+api_utils_rs = { workspace = true, features = ["automerge"] }
+wflow.workspace = true
+wash-plugin-am-repo.workspace = true
 
 # encoding
 serde.workspace = true
@@ -41,6 +43,7 @@ struct-patch = "0.10.4"
 
 # async
 tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs"] }
+tokio-util.workspace = true
 futures = { workspace = true }
 async-trait.workspace = true
 
@@ -59,6 +62,8 @@ reqwest.workspace = true
 sqlx = { workspace = true, features = ["sqlite"] }
 pastey = "0.1"
 directories = "6.0.0"
+
+wash-runtime.workspace = true
 
 [build-dependencies]
 uniffi = { workspace = true, features = [ "build" ], optional = true }

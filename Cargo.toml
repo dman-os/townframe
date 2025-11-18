@@ -16,6 +16,7 @@ members = [
   "./src/macros",
   # "./src/sdk-shared-core/",
   "./src/tests_http",
+  "./src/tests_wflow",
   "./src/utils_rs",
   "./src/wflow/",
   "./src/wflow_ingress_http/",
@@ -45,6 +46,8 @@ api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
 btress_api = { path = "./src/btress_api" }
 macros = { path = "./src/macros" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
+wflow = { path = "./src/wflow/", default-features = false }
+wash-plugin-am-repo = { path = "./src/wash-plugin-am-repo" }
 
 syn = { version = "2", features = ["extra-traits"] }
 

@@ -17,10 +17,10 @@ use wash_runtime::engine::ctx::Ctx as WashCtx;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
 // The bindgen macro generates types based on the WIT package structure
-// For package "townframe:am-repo" with interface "am-repo",
-// the structure follows: binds_guest::townframe::am_repo::am_repo
+// For package "townframe:am-repo" with interface "repo",
+// the structure follows: binds_guest::townframe::am_repo::repo
 // The Host trait is generated for implementing the host side
-use binds_guest::townframe::am_repo::am_repo;
+use binds_guest::townframe::am_repo::repo;
 
 pub struct AmRepoPlugin {
     am_ctx: Arc<utils_rs::am::AmCtx>,
@@ -51,7 +51,7 @@ impl wash_runtime::plugin::HostPlugin for AmRepoPlugin {
         WitWorld {
             exports: std::collections::HashSet::new(),
             imports: std::collections::HashSet::from([WitInterface::from(
-                "townframe:am-repo/am-repo",
+                "townframe:am-repo/repo",
             )]),
             ..default()
         }
@@ -66,6 +66,7 @@ impl wash_runtime::plugin::HostPlugin for AmRepoPlugin {
         _workload: &wash_runtime::engine::workload::UnresolvedWorkload,
         _interface_configs: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
+        info!(?_interface_configs, "XXX");
         Ok(())
     }
 
@@ -75,10 +76,11 @@ impl wash_runtime::plugin::HostPlugin for AmRepoPlugin {
         _interface_configs: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
         let world = component.world();
+        info!(?world, "XXX");
         for iface in world.imports {
             if iface.namespace == "townframe" && iface.package == "am-repo" {
-                if iface.interfaces.contains("am-repo") {
-                    am_repo::add_to_linker(component.linker(), |ctx| ctx)?;
+                if iface.interfaces.contains("repo") {
+                    repo::add_to_linker(component.linker(), |ctx| ctx)?;
                 }
             }
         }
@@ -106,14 +108,14 @@ impl wash_runtime::plugin::HostPlugin for AmRepoPlugin {
     }
 }
 
-impl am_repo::Host for WashCtx {
+impl repo::Host for WashCtx {
     async fn hydrate_path_at_head(
         &mut self,
-        doc_id: am_repo::DocId,
-        heads: am_repo::Heads,
-        obj_id: am_repo::ObjId,
-        path: Vec<am_repo::PathProp>,
-    ) -> wasmtime::Result<Result<am_repo::Json, am_repo::HydrateAtHeadError>> {
+        doc_id: repo::DocId,
+        heads: repo::Heads,
+        obj_id: repo::ObjId,
+        path: Vec<repo::PathProp>,
+    ) -> wasmtime::Result<Result<repo::Json, repo::HydrateAtHeadError>> {
         let plugin = AmRepoPlugin::from_ctx(self);
 
         // Convert WIT types to Rust types
@@ -139,8 +141,8 @@ impl am_repo::Host for WashCtx {
 
         // Convert obj-id to automerge::ObjId
         let obj_id_rust = match obj_id {
-            am_repo::ObjId::Root => automerge::ObjId::Root,
-            am_repo::ObjId::Id((counter, actor_id, op_id)) => {
+            repo::ObjId::Root => automerge::ObjId::Root,
+            repo::ObjId::Id((counter, actor_id, op_id)) => {
                 automerge::ObjId::Id(counter, actor_id.into(), op_id as usize)
             }
         };
@@ -149,8 +151,8 @@ impl am_repo::Host for WashCtx {
         let path_rust: Vec<autosurgeon::Prop<'static>> = path
             .into_iter()
             .map(|p| match p {
-                am_repo::PathProp::Key(key) => autosurgeon::Prop::Key(key.into()),
-                am_repo::PathProp::Index(idx) => autosurgeon::Prop::Index(idx as u32),
+                repo::PathProp::Key(key) => autosurgeon::Prop::Key(key.into()),
+                repo::PathProp::Index(idx) => autosurgeon::Prop::Index(idx as u32),
             })
             .collect();
 
@@ -171,16 +173,16 @@ impl am_repo::Host for WashCtx {
                     .map_err(|e| wasmtime::Error::msg(format!("error serializing to json: {e}")))?;
                 Ok(Ok(json_str))
             }
-            Ok(None) => Ok(Err(am_repo::HydrateAtHeadError::PathNotFound)),
+            Ok(None) => Ok(Err(repo::HydrateAtHeadError::PathNotFound)),
             Err(utils_rs::am::HydrateAtHeadError::HashNotFound(hash)) => Ok(Err(
-                am_repo::HydrateAtHeadError::HashNotFound(format!("{:?}", hash)),
+                repo::HydrateAtHeadError::HashNotFound(format!("{:?}", hash)),
             )),
             Err(utils_rs::am::HydrateAtHeadError::Other(e)) => {
                 // Check if it's a doc-not-found error
                 if e.to_string().contains("doc not found") {
-                    Ok(Err(am_repo::HydrateAtHeadError::DocNotFound))
+                    Ok(Err(repo::HydrateAtHeadError::DocNotFound))
                 } else if e.to_string().contains("obj not found") {
-                    Ok(Err(am_repo::HydrateAtHeadError::ObjNotFound))
+                    Ok(Err(repo::HydrateAtHeadError::ObjNotFound))
                 } else {
                     Err(wasmtime::Error::msg(format!("error hydrating: {e}")))
                 }
@@ -188,4 +190,3 @@ impl am_repo::Host for WashCtx {
         }
     }
 }
-

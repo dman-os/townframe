@@ -43,6 +43,7 @@ use crate::interlude::*;
 use crate::wit::exports::townframe::wflow::bundle::{
     JobCtx, JobError, JobResult, TransientJobError,
 };
+use crate::wit::townframe::am_repo::repo;
 use crate::wit::townframe::wflow::host;
 
 wit::export!(Component with_types_in wit);
@@ -158,10 +159,29 @@ impl WflowCtx {
 }
 
 fn doc_created(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(), JobErrorX> {
-    let heads = utils_rs::am::parse_commit_heads(&event.heads)
-        .map_err(|err| JobErrorX::Terminal(ferr!("error parsing commit heads: {err}")))?;
-    let am_doc_id = samod::DocumentId::from_str(&event.id)
-        .map_err(|err| JobErrorX::Transient(ferr!("error parsing doc_id: {err}")))?;
-    cx.effect(|| Ok(Json(())))?;
+    // Call the am-repo plugin to hydrate the document at the root object
+    let json_str: String = cx.effect(|| {
+        use crate::wit::townframe::am_repo::repo;
+
+        // Convert types to match WIT bindings
+        let doc_id = args.id.clone();
+        let heads = args.heads.clone();
+        let obj_id = repo::ObjId::Root;
+        let path: Vec<repo::PathProp> = vec![];
+
+        let result = repo::hydrate_path_at_head(&doc_id, &heads, &obj_id, &path);
+
+        match result {
+            Ok(json) => Ok(Json(json)),
+            Err(err) => Err(JobErrorX::Terminal(ferr!(
+                "error hydrating document: {:?}",
+                err
+            ))),
+        }
+    })?;
+
+    // Print the hydrated JSON document
+    println!("Document {} hydrated JSON:\n{}", args.id, json_str);
+
     Ok(())
 }
