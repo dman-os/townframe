@@ -14,11 +14,11 @@ uniffi = ["dep:uniffi"]
 [dependencies]
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
+api_utils_rs.workspace = true
 
-# serde
+# encoding
 serde.workspace = true
 serde_json.workspace = true
-api_utils_rs.workspace = true
 
 # error
 color-eyre.workspace = true
@@ -37,11 +37,12 @@ rust_decimal = "1.37.2"
 parking_lot.workspace = true
 url.workspace = true
 garde.workspace = true
-
+struct-patch = "0.10.4"
 
 # async
 tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs"] }
 futures = { workspace = true }
+async-trait.workspace = true
 
 # ffi
 uniffi = { workspace = true, features = ["cli"] }
@@ -54,15 +55,10 @@ samod = { workspace = true, features = ["tokio", "tungstenite"] }
 # http
 reqwest.workspace = true
 
+# misc
 sqlx = { workspace = true, features = ["sqlite"] }
-
 pastey = "0.1"
-struct-patch = "0.10.4"
 directories = "6.0.0"
-async-trait.workspace = true
-
-# wasm
-wash-runtime.workspace = true
 
 [build-dependencies]
 uniffi = { workspace = true, features = [ "build" ], optional = true }

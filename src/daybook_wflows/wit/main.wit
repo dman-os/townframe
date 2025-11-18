@@ -4,6 +4,7 @@ world bundle {
     include townframe:api-utils/imports;
 
     import townframe:wflow/host;
+    import townframe:am-repo/repo;
 
     export townframe:wflow/bundle;
 }

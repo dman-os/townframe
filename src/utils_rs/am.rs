@@ -4,8 +4,10 @@ pub mod changes;
 pub mod codecs;
 
 use automerge::{Automerge, ChangeHash};
-use autosurgeon::{Hydrate, HydrateError, Prop, ReadDoc, Reconcile, Reconciler};
+use autosurgeon::{Hydrate, Prop, Reconcile};
 use samod::{DocHandle, DocumentId};
+
+pub use codecs::AutosurgeonJson;
 
 use changes::ChangeListenerManager;
 
@@ -196,6 +198,7 @@ impl AmCtx {
             })
         })
     }
+
 
     pub async fn add_doc(&self, doc: Automerge) -> Res<DocHandle> {
         let handle = self.repo.create(doc).await?;

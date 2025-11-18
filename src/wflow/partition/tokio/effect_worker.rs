@@ -100,6 +100,7 @@ impl TokioEffectWorker {
         let Some(job_state) = self.state.jobs.get(&job_id) else {
             return job_events::JobRunResult::WorkerErr(job_events::JobRunWorkerError::JobNotFound);
         };
+        tracing::debug!(%job_id, ?payload, ?job_state, "running job XXX");
         let res = match &job_state.wflow.service {
             metastore::WflowServiceMeta::Wasmcloud(meta) => {
                 self.pcx

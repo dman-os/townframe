@@ -1,13 +1,10 @@
 [package]
-name = "wflow"
+name = "wash-plugin-am-repo"
 version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["utoipa", "serde"]
-serde = []
-utoipa = []
-automerge = []
+default = []
 uniffi = []
 
 [lib]
@@ -16,13 +13,14 @@ path = "lib.rs"
 
 [dependencies]
 # internal
-utils_rs.workspace = true
+utils_rs = { workspace = true, features = ["automerge", "hash"] }
 api_utils_rs.workspace = true
 macros.workspace = true
 
 # encoding
 serde.workspace = true
 serde_json.workspace = true
+data-encoding.workspace = true
 
 # async
 futures.workspace = true
@@ -42,4 +40,8 @@ parking_lot.workspace = true
 wasmtime.workspace = true
 wash-runtime.workspace = true
 
+# sync
+autosurgeon = { workspace = true, features = ["uuid"] }
+automerge = { workspace = true }
+samod = { workspace = true, features = ["tokio", "tungstenite"] }
 

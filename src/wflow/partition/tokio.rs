@@ -2,7 +2,6 @@ use std::sync::atomic::Ordering;
 
 use crate::interlude::*;
 
-use crate::metastore;
 use crate::partition::{effects, job_events, log, state, PartitionCtx};
 
 mod effect_worker;
@@ -131,6 +130,7 @@ impl TokioPartitionWorker {
         source_entry_id: u64,
         evt: job_events::JobEvent,
     ) -> Res<()> {
+        tracing::debug!(%source_entry_id, ?evt, "reducing job event XXX");
         crate::partition::reduce::reduce_job_event(&self.state.jobs, evt, &mut self.effects);
 
         // NOTE: this little dance gives as arena like semantics

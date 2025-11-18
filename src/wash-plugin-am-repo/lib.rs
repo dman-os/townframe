@@ -1,0 +1,191 @@
+mod interlude {
+    pub use api_utils_rs::prelude::*;
+    pub use std::sync::Arc;
+}
+
+use crate::interlude::*;
+
+mod binds_guest {
+    wash_runtime::wasmtime::component::bindgen!({
+        world: "guest",
+        trappable_imports: true,
+        async: true,
+    });
+}
+
+use wash_runtime::engine::ctx::Ctx as WashCtx;
+use wash_runtime::wit::{WitInterface, WitWorld};
+
+// The bindgen macro generates types based on the WIT package structure
+// For package "townframe:am-repo" with interface "am-repo",
+// the structure follows: binds_guest::townframe::am_repo::am_repo
+// The Host trait is generated for implementing the host side
+use binds_guest::townframe::am_repo::am_repo;
+
+pub struct AmRepoPlugin {
+    am_ctx: Arc<utils_rs::am::AmCtx>,
+}
+
+impl AmRepoPlugin {
+    pub fn new(am_ctx: Arc<utils_rs::am::AmCtx>) -> Self {
+        Self { am_ctx }
+    }
+
+    const ID: &str = "townframe:am-repo";
+
+    fn from_ctx(wcx: &WashCtx) -> Arc<Self> {
+        let Some(this) = wcx.get_plugin::<Self>(Self::ID) else {
+            panic!("plugin not on ctx");
+        };
+        this
+    }
+}
+
+#[async_trait]
+impl wash_runtime::plugin::HostPlugin for AmRepoPlugin {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+
+    fn world(&self) -> WitWorld {
+        WitWorld {
+            exports: std::collections::HashSet::new(),
+            imports: std::collections::HashSet::from([WitInterface::from(
+                "townframe:am-repo/am-repo",
+            )]),
+            ..default()
+        }
+    }
+
+    async fn start(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn on_workload_bind(
+        &self,
+        _workload: &wash_runtime::engine::workload::UnresolvedWorkload,
+        _interface_configs: std::collections::HashSet<WitInterface>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn on_component_bind(
+        &self,
+        component: &mut wash_runtime::engine::workload::WorkloadComponent,
+        _interface_configs: std::collections::HashSet<WitInterface>,
+    ) -> anyhow::Result<()> {
+        let world = component.world();
+        for iface in world.imports {
+            if iface.namespace == "townframe" && iface.package == "am-repo" {
+                if iface.interfaces.contains("am-repo") {
+                    am_repo::add_to_linker(component.linker(), |ctx| ctx)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn on_workload_resolved(
+        &self,
+        _resolved: &wash_runtime::engine::workload::ResolvedWorkload,
+        _component_id: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn on_workload_unbind(
+        &self,
+        _workload: &wash_runtime::engine::workload::ResolvedWorkload,
+        _interfaces: std::collections::HashSet<WitInterface>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl am_repo::Host for WashCtx {
+    async fn hydrate_path_at_head(
+        &mut self,
+        doc_id: am_repo::DocId,
+        heads: am_repo::Heads,
+        obj_id: am_repo::ObjId,
+        path: Vec<am_repo::PathProp>,
+    ) -> wasmtime::Result<Result<am_repo::Json, am_repo::HydrateAtHeadError>> {
+        let plugin = AmRepoPlugin::from_ctx(self);
+
+        // Convert WIT types to Rust types
+        let doc_id_rust: samod::DocumentId = doc_id
+            .parse()
+            .map_err(|e| wasmtime::Error::msg(format!("invalid doc-id: {e}")))?;
+
+        // Parse heads from base32 strings to ChangeHash
+        let heads_rust: Result<Vec<automerge::ChangeHash>, _> = heads
+            .iter()
+            .map(|head_str| {
+                utils_rs::hash::decode_base32_multibase(head_str).and_then(|bytes| {
+                    bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| eyre::eyre!("invalid change hash length"))
+                })
+            })
+            .collect();
+
+        let heads_rust =
+            heads_rust.map_err(|e| wasmtime::Error::msg(format!("error parsing heads: {e}")))?;
+
+        // Convert obj-id to automerge::ObjId
+        let obj_id_rust = match obj_id {
+            am_repo::ObjId::Root => automerge::ObjId::Root,
+            am_repo::ObjId::Id((counter, actor_id, op_id)) => {
+                automerge::ObjId::Id(counter, actor_id.into(), op_id as usize)
+            }
+        };
+
+        // Convert path from Vec<PathProp> to Vec<autosurgeon::Prop>
+        let path_rust: Vec<autosurgeon::Prop<'static>> = path
+            .into_iter()
+            .map(|p| match p {
+                am_repo::PathProp::Key(key) => autosurgeon::Prop::Key(key.into()),
+                am_repo::PathProp::Index(idx) => autosurgeon::Prop::Index(idx as u32),
+            })
+            .collect();
+
+        // Use hydrate_path_at_head with AutosurgeonJson
+        let result = plugin
+            .am_ctx
+            .hydrate_path_at_head::<utils_rs::am::AutosurgeonJson>(
+                &doc_id_rust,
+                &heads_rust,
+                obj_id_rust,
+                path_rust,
+            )
+            .await;
+
+        match result {
+            Ok(Some(json_wrapper)) => {
+                let json_str = serde_json::to_string(&json_wrapper.0)
+                    .map_err(|e| wasmtime::Error::msg(format!("error serializing to json: {e}")))?;
+                Ok(Ok(json_str))
+            }
+            Ok(None) => Ok(Err(am_repo::HydrateAtHeadError::PathNotFound)),
+            Err(utils_rs::am::HydrateAtHeadError::HashNotFound(hash)) => Ok(Err(
+                am_repo::HydrateAtHeadError::HashNotFound(format!("{:?}", hash)),
+            )),
+            Err(utils_rs::am::HydrateAtHeadError::Other(e)) => {
+                // Check if it's a doc-not-found error
+                if e.to_string().contains("doc not found") {
+                    Ok(Err(am_repo::HydrateAtHeadError::DocNotFound))
+                } else if e.to_string().contains("obj not found") {
+                    Ok(Err(am_repo::HydrateAtHeadError::ObjNotFound))
+                } else {
+                    Err(wasmtime::Error::msg(format!("error hydrating: {e}")))
+                }
+            }
+        }
+    }
+}
+

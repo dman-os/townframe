@@ -20,6 +20,7 @@ members = [
   "./src/wflow/",
   "./src/wflow_ingress_http/",
   "./src/xtask",
+  "./src/wash-plugin-am-repo/",
   # "./src/granary_web",
   # "./src/leptos_oidc",
   # "./src/leptos_wasi/",
@@ -66,6 +67,7 @@ url = "2.5.7"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 multihash = "0.19.3"
+data-encoding = "2.9"
 
 # web
 leptos = { version = "0.8", default-features = false }

@@ -42,13 +42,17 @@ mod binds_service {
 use binds_service::exports::townframe::wflow::bundle;
 use binds_service::townframe::wflow::host;
 
+#[derive(educe::Educe)]
+#[educe(Debug)]
 struct ActiveJobCtx {
+    #[educe(Debug(ignore))]
     trap_tx: tokio::sync::Mutex<Option<oneshot::Sender<JobTrap>>>,
     cur_step: AtomicU64,
     active_step: Option<ActiveStepCtx>,
     journal: partition::state::JobState,
 }
 
+#[derive(Debug)]
 struct ActiveStepCtx {
     attempt_id: u64,
     step_id: u64,
@@ -429,7 +433,7 @@ impl service::WflowServiceHost for TownframewflowPlugin {
                 active_step: None,
             },
         );
-        assert!(_old.is_some(), "fishy");
+        assert!(_old.is_none(), "fishy");
 
         // TODO: timeout
         let trap = tokio::select! {
@@ -506,25 +510,27 @@ async fn test() -> Res<()> {
         .await?;
         Arc::new(metastore)
     };
+    let log_store = {
+        let kv = DHashMap::default();
+        let kv = Arc::new(kv);
+        let log = crate::log::KvStoreLog::new(kv, 0);
+        Arc::new(log)
+    };
+
     let cx = crate::Ctx::new(metastore.clone());
+
     let wflow_plugin = crate::plugin::TownframewflowPlugin::new(metastore);
     let wflow_plugin = Arc::new(wflow_plugin);
-    let pcx = partition::PartitionCtx::new(
-        cx.clone(),
-        0,
-        {
-            let kv = DHashMap::default();
-            let kv = Arc::new(kv);
-            let log = crate::log::KvStoreLog::new(kv, 0);
-            Arc::new(log)
-        },
-        0,
-        wflow_plugin.clone(),
-    );
+
+    let pcx =
+        partition::PartitionCtx::new(cx.clone(), 0, log_store.clone(), 0, wflow_plugin.clone());
     let mut log_ref = pcx.log_ref();
+
     let active_state = partition::state::PartitionWorkingState::default();
     let active_state = Arc::new(active_state);
+
     let worker = partition::tokio::start_tokio_worker(pcx, active_state.clone()).await;
+
     let host = {
         // Create a Wasmtime engine
         let engine = engine::Engine::builder().build().to_eyre()?;
@@ -579,7 +585,11 @@ async fn test() -> Res<()> {
                 timestamp: OffsetDateTime::now_utc(),
                 job_id: "job123".into(),
                 deets: job_events::JobEventDeets::Init(job_events::JobInitEvent {
-                    args_json: "{}".into(),
+                    args_json: serde_json::to_string(&json!({
+                        "id": "123"
+                    }))
+                    .expect(ERROR_JSON)
+                    .into(),
                     override_wflow_retry_policy: None,
                     wflow: metastore::WflowMeta {
                         key: "doc-created".into(),
@@ -597,6 +607,15 @@ async fn test() -> Res<()> {
             },
         ))
         .await?;
+
+    use crate::log::LogStore;
+    use futures::StreamExt;
+    let mut stream = log_store.tail(0).await;
+    while let Some(entry) = stream.next().await {
+        let (_, entry) = entry?;
+        let entry: serde_json::Value = serde_json::from_slice(&entry[..]).expect(ERROR_JSON);
+        info!(%entry, "XXX");
+    }
 
     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 

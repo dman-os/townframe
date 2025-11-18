@@ -10,6 +10,7 @@ mod gen;
 mod wit {
     wit_bindgen::generate!({
         world: "bundle",
+
         // generate_all,
         // async: true,
         with: {
@@ -27,6 +28,7 @@ mod wit {
 
             "townframe:wflow/types": generate,
             "townframe:wflow/host": generate,
+            "townframe:am-repo/repo": generate,
 
             // "wasi:io/poll@0.2.6": generate,
             // "wasi:io/error@0.2.6": generate,
@@ -41,6 +43,7 @@ use crate::interlude::*;
 use crate::wit::exports::townframe::wflow::bundle::{
     JobCtx, JobError, JobResult, TransientJobError,
 };
+use crate::wit::townframe::wflow::host;
 
 wit::export!(Component with_types_in wit);
 
@@ -105,20 +108,60 @@ struct WflowCtx {
     job: JobCtx,
 }
 
-fn doc_created(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(), JobErrorX> {
-    match wit::townframe::wflow::host::next_step(&cx.job.job_id) {
-        Err(err) => return Err(ferr!("error getting next op {err}").into()),
-        Ok(state) => match state {
-            wit::townframe::wflow::host::StepState::Active(active_op_state) => {
-                wit::townframe::wflow::host::persist_step(
-                    &cx.job.job_id,
-                    active_op_state.id,
-                    "hi".as_bytes(),
-                )
-                .map_err(|err| ferr!("error persisting step {err:?}"))?;
-            }
-            wit::townframe::wflow::host::StepState::Completed(completed_op_state) => {}
-        },
+trait EffectFunctionResult<R> {
+    fn into_job_result(self) -> JobResult;
+}
+
+struct Json<T>(T);
+
+impl<T> EffectFunctionResult<T> for Json<T>
+where
+    T: Serialize,
+{
+    fn into_job_result(self) -> JobResult {
+        JobResult::Ok(serde_json::to_string(&self.0).expect(ERROR_JSON))
     }
+}
+
+impl WflowCtx {
+    pub fn effect<F, O>(&self, func: F) -> Result<O, JobErrorX>
+    where
+        F: FnOnce() -> Result<Json<O>, JobErrorX>,
+        O: serde::de::DeserializeOwned + Serialize,
+    {
+        let state = host::next_step(&self.job.job_id)
+            .map_err(|err| ferr!("error getting next op: {err}"))?;
+        match state {
+            host::StepState::Completed(completed) => {
+                let value: O = serde_json::from_slice(&completed.value).map_err(|err| {
+                    ferr!(
+                        "error parsing replay step value as json for '{type_name}': {err:?}",
+                        type_name = std::any::type_name::<O>()
+                    )
+                })?;
+                Ok(value)
+            }
+            host::StepState::Active(active_op_state) => {
+                let Json(result) = func()?;
+                let json = serde_json::to_vec(&result).map_err(|err| {
+                    ferr!(
+                        "error serializing result as json for '{type_name}': {err:?}",
+                        type_name = std::any::type_name::<O>()
+                    )
+                })?;
+                host::persist_step(&self.job.job_id, active_op_state.id, &json)
+                    .map_err(|err| ferr!("error persisting step {err:?}"))?;
+                Ok(result)
+            }
+        }
+    }
+}
+
+fn doc_created(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(), JobErrorX> {
+    let heads = utils_rs::am::parse_commit_heads(&event.heads)
+        .map_err(|err| JobErrorX::Terminal(ferr!("error parsing commit heads: {err}")))?;
+    let am_doc_id = samod::DocumentId::from_str(&event.id)
+        .map_err(|err| JobErrorX::Transient(ferr!("error parsing doc_id: {err}")))?;
+    cx.effect(|| Ok(Json(())))?;
     Ok(())
 }

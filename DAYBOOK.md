@@ -10,7 +10,7 @@
 
 - [x] Get uniffi working on android
 - [ ] wflow
-  - [ ] in-memory smoke
+  - [x] in-memory smoke
   - [ ] ingress workload
   - [ ] durablity
 - [ ] Save a photo
@@ -21,6 +21,7 @@
 - [ ] Policy against tokio mutexes (cancel safety)
 - [ ] Move to wasmcloud v2
   - [ ] Use async on wit_bindgen
+- [ ] Replace time with jiff??
 
 ---
 
