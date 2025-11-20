@@ -1,0 +1,40 @@
+[package]
+name = "wash_plugin_wflow"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["serde"]
+serde = []
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+# internal
+wflow_core.workspace = true
+utils_rs.workspace = true
+macros.workspace = true
+
+# encoding
+serde.workspace = true
+serde_json.workspace = true
+
+# async
+futures.workspace = true
+async-trait.workspace = true
+tokio-util.workspace = true
+async-channel.workspace = true
+
+# error
+anyhow.workspace = true
+thiserror.workspace = true
+displaydoc.workspace = true
+parking_lot.workspace = true
+
+# wasm
+wasmtime.workspace = true
+wash-runtime.workspace = true
+
+tracing.workspace = true
+

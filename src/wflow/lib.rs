@@ -1,112 +1,104 @@
 mod interlude {
-    pub use api_utils_rs::{api, prelude::*};
+    pub use utils_rs::prelude::*;
 }
+
+#[cfg(test)]
+mod test;
+
+pub mod ingress;
+
+pub use ingress::{PartitionLogIngress, WflowIngress};
 
 use crate::interlude::*;
 
-pub mod log;
-pub mod metastore;
-pub mod partition;
-pub mod plugin;
+use utils_rs::am::AmCtx;
+use wash_runtime::*;
+use wflow_core::gen::types::PartitionId;
+use wflow_core::metastore;
+use wflow_tokio::SnapStore;
 
+// pub struct Config {}
+
+#[derive(Clone)]
 pub struct Ctx {
-    pub metadata: Arc<dyn metastore::MetdataStore>,
+    pub acx: Arc<AmCtx>,
+    pub metastore: Arc<dyn metastore::MetdataStore>,
+    pub log_store: Arc<dyn wflow_core::log::LogStore>,
+    pub partition_id: PartitionId,
+    pub snap_store: Option<Arc<dyn SnapStore>>,
 }
-pub type SharedCtx = Arc<Ctx>;
 
-impl Ctx {
-    pub fn new(metadata: Arc<dyn metastore::MetdataStore>) -> Arc<Self> {
-        Arc::new(Self { metadata })
+/// Build and start a wash runtime host with wflow and am-repo plugins
+pub async fn build_wash_host(
+    plugins: Vec<Arc<dyn plugin::HostPlugin>>,
+) -> Res<Arc<wash_runtime::host::Host>> {
+    let engine = engine::Engine::builder().build().to_eyre()?;
+
+    let mut host = host::HostBuilder::new().with_engine(engine);
+    for plugin in plugins {
+        host = host.with_plugin(plugin).to_eyre()?
     }
-}
-
-pub async fn start_host() -> Res<Arc<wash_runtime::host::Host>> {
-    use wash_runtime::*;
-
-    let metastore = {
-        let kv = DHashMap::default();
-        let kv = Arc::new(kv);
-        let metastore = crate::metastore::KvStoreMetadtaStore::new(
-            kv,
-            metastore::PartitionsMeta {
-                version: "0".into(),
-                partition_count: 1,
-            },
-        )
-        .await?;
-        Arc::new(metastore)
-    };
-
-    let cx = crate::Ctx::new(metastore.clone());
-
-    let wflow_plugin = crate::plugin::TownframewflowPlugin::new(metastore);
-    let wflow_plugin = Arc::new(wflow_plugin);
-
-    let pcx = partition::PartitionCtx::new(
-        cx.clone(),
-        0,
-        {
-            let kv = DHashMap::default();
-            let kv = Arc::new(kv);
-            let log = crate::log::KvStoreLog::new(kv, 0);
-            Arc::new(log)
-        },
-        0,
-        wflow_plugin.clone(),
-    );
-    let mut log_ref = pcx.log_ref();
-
-    // TODO: recover from snapshhot
-    let active_state = partition::state::PartitionWorkingState::default();
-    let active_state = Arc::new(active_state);
-
-    let worker = partition::tokio::start_tokio_worker(pcx, active_state.clone()).await;
-
-    let host = {
-        // Create a Wasmtime engine
-        let engine = engine::Engine::builder().build().to_eyre()?;
-
-        // Configure plugins
-        let http_plugin = plugin::wasi_http::HttpServer::new("127.0.0.1:8080".parse()?);
-        let runtime_config_plugin = plugin::wasi_config::RuntimeConfig::default();
-        // Build and start the host
-        host::HostBuilder::new()
-            .with_engine(engine)
-            .with_plugin(Arc::new(http_plugin))
-            .to_eyre()?
-            .with_plugin(Arc::new(runtime_config_plugin))
-            .to_eyre()?
-            .with_plugin(wflow_plugin.clone())
-            .to_eyre()?
-            .build()
-            .to_eyre()?
-    };
+    let host = host.build().to_eyre()?;
 
     let host = host.start().await.to_eyre()?;
 
     Ok(host)
 }
 
-#[async_trait]
-pub trait KvStore {
-    async fn count(&self) -> Res<u64>;
-    async fn get(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>>;
-    async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>) -> Res<Option<Arc<[u8]>>>;
-    async fn del(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>>;
-}
+/// Start the partition worker for processing workflow jobs
+pub async fn start_partition_worker(
+    wcx: &Ctx,
+    wflow_plugin: Arc<wash_plugin_wflow::TownframewflowPlugin>,
+) -> Res<wflow_tokio::partition::TokioPartitionWorkerHandle> {
+    // Load state from snapshot if available
+    let (initial_entry_id, initial_jobs_state, initial_effects) =
+        if let Some(ref snap_store) = wcx.snap_store {
+            match snap_store.load_latest_snapshot(wcx.partition_id).await? {
+                Some((entry_id, snapshot)) => {
+                    tracing::info!(
+                        partition_id = wcx.partition_id,
+                        entry_id,
+                        "loaded state from snapshot"
+                    );
+                    (entry_id + 1, snapshot.jobs, snapshot.effects) // Resume from next entry after snapshot
+                }
+                None => {
+                    tracing::info!(
+                        partition_id = wcx.partition_id,
+                        "no snapshot found, starting from beginning"
+                    );
+                    (
+                        0,
+                        wflow_core::partition::state::PartitionJobsState::default(),
+                        default(),
+                    )
+                }
+            }
+        } else {
+            (
+                0,
+                wflow_core::partition::state::PartitionJobsState::default(),
+                default(),
+            )
+        };
 
-#[async_trait]
-impl KvStore for DHashMap<Arc<[u8]>, Arc<[u8]>> {
-    async fn count(&self) -> Res<u64> {
-        Ok(self.len() as u64)
-    }
-    async fn get(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
-        Ok(self.get(key).map(|v| v.value().clone()))
-    }
-    async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>) -> Res<Option<Arc<[u8]>>> {
-        Ok(self.insert(key, value))
-    }
-    async fn del(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
-        Ok(self.remove(key).map(|(_, val)| val))
-    }
+    let pcx = wflow_tokio::partition::PartitionCtx::new(
+        wcx.partition_id,
+        wcx.metastore.clone(),
+        wcx.log_store.clone(),
+        initial_entry_id,
+        wflow_plugin,
+    );
+
+    let active_state = wflow_tokio::partition::state::PartitionWorkingState {
+        last_applied_entry_id: std::sync::atomic::AtomicU64::new(initial_entry_id),
+        jobs: tokio::sync::Mutex::new(initial_jobs_state),
+        effects: tokio::sync::Mutex::new(initial_effects),
+    };
+    let active_state = Arc::new(active_state);
+
+    let worker =
+        wflow_tokio::partition::start_tokio_worker(pcx, active_state, wcx.snap_store.clone()).await;
+
+    Ok(worker)
 }

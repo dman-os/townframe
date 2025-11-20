@@ -9,6 +9,7 @@ mod btress_api;
 mod component_wit;
 mod daybook_api;
 mod service_rust;
+mod wflow_api;
 
 use std::fmt::Write;
 
@@ -115,6 +116,28 @@ package townframe:btress-api;"#
         }
         std::fs::write(path, &out)?;
     }
+
+    // Generate wflow_core types
+    {
+        let features = wflow_api::wflow_api_features(&reg);
+        let mut out = String::new();
+        let buf = &mut out;
+        write!(buf, "//! @generated\nuse super::*;\n\n")?;
+        let cx = service_rust::RustGenCtx {
+            reg: &reg,
+            attrs: RustAttrs {
+                serde: true,
+                ..default()
+            },
+        };
+        for feature in &features {
+            service_rust::feature_module(&cx, buf, feature)?;
+        }
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../wflow_core/gen/");
+        std::fs::create_dir_all(&path)?;
+        std::fs::write(path.join("mod.rs"), &out)?;
+    }
+
     Ok(())
 }
 

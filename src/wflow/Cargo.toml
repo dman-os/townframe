@@ -3,43 +3,40 @@ name = "wflow"
 version.workspace = true
 edition.workspace = true
 
-[features]
-default = ["utoipa", "serde"]
-serde = []
-utoipa = []
-automerge = []
-uniffi = []
-
 [lib]
 path = "lib.rs"
-# crate-type = ["cdylib"]
 
 [dependencies]
-# internal
+wflow_core = { path = "../wflow_core" }
+wflow_tokio = { path = "../wflow_tokio" }
 utils_rs.workspace = true
-api_utils_rs.workspace = true
-macros.workspace = true
-
-# encoding
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-
-# async
-futures.workspace = true
-async-trait.workspace = true
-tokio-util.workspace = true
-async-channel.workspace = true
-
-# error
+time.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
 displaydoc.workspace = true
+thiserror.workspace = true
 parking_lot.workspace = true
-
-# wasm
-# wasmcloud-component = "0.2.0"
-# wit-bindgen.workspace = true
-wasmtime.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "fs"] }
+tokio-util.workspace = true
+futures.workspace = true
+async-channel.workspace = true
 wash-runtime.workspace = true
+wash_plugin_wflow = { path = "../wash_plugin_wflow" }
+wash_plugin_am_repo.workspace = true
+tracing.workspace = true
+samod.workspace = true
 
+[dev-dependencies]
+utils_rs = { workspace = true, features = ["hash", "automerge", "console-subscriber"] }
+automerge.workspace = true
+samod.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "macros", "sync", "tracing"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+color-eyre.workspace = true
+tracing-subscriber.workspace = true
+wasmtime.workspace = true
 

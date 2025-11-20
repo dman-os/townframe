@@ -15,8 +15,7 @@ uniffi = ["dep:uniffi"]
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
 api_utils_rs = { workspace = true, features = ["automerge"] }
-wflow.workspace = true
-wash-plugin-am-repo.workspace = true
+wflow = { path = "../wflow" }
 
 # encoding
 serde.workspace = true

@@ -1,14 +1,11 @@
-mod ingress;
-mod runtime;
-
-pub use ingress::{PartitionLogIngress, WflowIngress};
-pub use runtime::{build_runtime_host, start_partition_worker, RuntimeConfig};
+use crate::interlude::*;
 
 use crate::drawer::{DrawerEvent, DrawerRepo};
 use crate::gen::doc::DocAddedEvent;
-use crate::interlude::*;
 use samod::DocumentId;
 use std::str::FromStr;
+
+pub use wflow::{PartitionLogIngress, WflowIngress};
 
 /// Worker that listens to drawer events and schedules workflows
 pub struct DocChangesWorker {

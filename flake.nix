@@ -124,6 +124,7 @@
             # trivy
             
             infisical
+            protobuf
           ];
 
           shellHook = with pkgs; ''

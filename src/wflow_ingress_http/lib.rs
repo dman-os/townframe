@@ -137,7 +137,7 @@ async fn invoke_route(
     };
     match <Component as ingress::Guest>::invoke(ingress::InvokeArgs {
         wflow_key,
-        args: serde_json::to_string(&args).expect(ERROR_JSON),
+        args_json: serde_json::to_string(&args).expect(ERROR_JSON),
         idem_key,
     }) {
         Ok(job_id) => (

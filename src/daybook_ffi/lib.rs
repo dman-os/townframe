@@ -14,7 +14,7 @@ mod interlude {
     pub use utils_rs::{CHeapStr, DHashMap};
 }
 
-use interlude::*;
+use crate::interlude::*;
 
 uniffi::setup_scaffolding!();
 

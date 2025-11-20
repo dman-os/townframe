@@ -1,4 +1,4 @@
-package townframe:daybook-wflow;
+package townframe:daybook-wflows;
 
 world bundle {
     include townframe:api-utils/imports;

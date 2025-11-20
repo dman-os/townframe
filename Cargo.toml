@@ -16,12 +16,15 @@ members = [
   "./src/macros",
   # "./src/sdk-shared-core/",
   "./src/tests_http",
-  "./src/tests_wflow",
+  "./src/test_wflows",
   "./src/utils_rs",
+  "./src/wflow_core/",
+  "./src/wflow_tokio/",
   "./src/wflow/",
+  "./src/wash_plugin_wflow/",
   "./src/wflow_ingress_http/",
   "./src/xtask",
-  "./src/wash-plugin-am-repo/",
+  "./src/wash_plugin_am_repo/",
   # "./src/granary_web",
   # "./src/leptos_oidc",
   # "./src/leptos_wasi/",
@@ -46,8 +49,10 @@ api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
 btress_api = { path = "./src/btress_api" }
 macros = { path = "./src/macros" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
-wflow = { path = "./src/wflow/", default-features = false }
-wash-plugin-am-repo = { path = "./src/wash-plugin-am-repo" }
+wflow_core = { path = "./src/wflow_core", default-features = false }
+wflow_tokio = { path = "./src/wflow_tokio", default-features = false }
+wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
+wash_plugin_am_repo = { path = "./src/wash_plugin_am_repo" }
 
 syn = { version = "2", features = ["extra-traits"] }
 
@@ -149,7 +154,9 @@ uniffi = { version = "0.29.4" }
 # uniffi = { path = "../uniffi-rs/uniffi/" }
 
 wasmtime = "*"
-wash-runtime = "0.1.0"
+# wash-runtime = "0.1.0"
+wash-runtime = { path = "../wash/crates/wash-runtime/"}
 
 # [patch.crates-io]
+# wash-runtime = { path = "../wash/crates/wash-runtime/"}
 # restate-sdk-shared-core = { path = "./src/sdk-shared-core/" }
