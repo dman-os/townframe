@@ -1,13 +1,4 @@
-mod interlude {
-    pub use utils_rs::prelude::*;
-}
-
 use crate::interlude::*;
-
-pub mod partition;
-
-// Re-export types from wflow for convenience (when wflow_tokio is used with wflow)
-pub use wflow_core::snapstore::{PartitionSnapshot, SnapStore};
 
 /// A keyvalue interface that provides atomic operations.
 ///
@@ -131,8 +122,9 @@ impl KvStore for Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>> {
     }
     async fn increment(&self, key: &[u8], delta: i64) -> Res<i64> {
         // Use CAS to atomically increment
+        const MAX_CAS_RETRIES: usize = 100;
         let mut cas = self.new_cas(key).await?;
-        loop {
+        for _attempt in 0..MAX_CAS_RETRIES {
             let current = cas.current();
             let current_value = if let Some(bytes) = current {
                 // Try to parse as i64 (little-endian, 8 bytes)
@@ -165,6 +157,9 @@ impl KvStore for Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>> {
                 Err(CasError::StoreError(err)) => return Err(err),
             }
         }
+        Err(eyre::eyre!(
+            "failed to increment after {MAX_CAS_RETRIES} CAS retries: concurrent modifications",
+        ))
     }
 
     async fn new_cas(&self, key: &[u8]) -> Res<CasGuard> {

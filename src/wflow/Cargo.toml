@@ -39,4 +39,5 @@ serde_json.workspace = true
 color-eyre.workspace = true
 tracing-subscriber.workspace = true
 wasmtime.workspace = true
+insta.workspace = true
 

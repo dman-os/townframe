@@ -99,10 +99,10 @@ pub mod doc {
     #[serde(rename_all = "camelCase")]
     pub struct Doc {
         pub id: DocId,
-        #[serde(with = "api_utils_rs::codecs::sane_iso8601")]
+        #[serde(with = "utils_rs::codecs::sane_iso8601")]
         #[autosurgeon(with = "utils_rs::am::codecs::date")]
         pub created_at: OffsetDateTime,
-        #[serde(with = "api_utils_rs::codecs::sane_iso8601")]
+        #[serde(with = "utils_rs::codecs::sane_iso8601")]
         #[autosurgeon(with = "utils_rs::am::codecs::date")]
         pub updated_at: OffsetDateTime,
         pub content: DocContent,

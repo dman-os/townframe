@@ -5,9 +5,10 @@ mod keyvalue_plugin;
 
 use utils_rs::am::AmCtx;
 
+use crate::{AtomicKvSnapStore, KvStoreLog, KvStoreMetadtaStore};
 use wash_runtime::{host::HostApi, plugin, types, wit::WitInterface};
 use wflow_core::metastore;
-use wflow_tokio::{metastore::KvStoreMetadtaStore, AtomicKvSnapStore, SnapStore};
+use wflow_core::snapstore::SnapStore;
 
 /// Test context for wflow tests
 #[allow(unused)]
@@ -21,6 +22,7 @@ pub struct WflowTestContext {
     pub host: Arc<wash_runtime::host::Host>,
     pub wflow_plugin: Arc<wash_plugin_wflow::TownframewflowPlugin>,
     pub worker_handle: wflow_tokio::partition::TokioPartitionWorkerHandle,
+    pub working_state: Arc<wflow_tokio::partition::state::PartitionWorkingState>,
 }
 
 impl WflowTestContext {
@@ -55,7 +57,7 @@ impl WflowTestContext {
         let metastore = Arc::new(metastore);
 
         // Create log store
-        let log_store = wflow_tokio::KvStoreLog::new(
+        let log_store = KvStoreLog::new(
             {
                 let kv: DHashMap<Arc<[u8]>, Arc<[u8]>> = default();
                 let kv = Arc::new(kv);
@@ -107,7 +109,8 @@ impl WflowTestContext {
         .await?;
 
         // Start partition worker
-        let worker_handle = crate::start_partition_worker(&wcx, wflow_plugin.clone()).await?;
+        let (worker_handle, working_state) =
+            crate::start_partition_worker(&wcx, wflow_plugin.clone()).await?;
 
         Ok(Self {
             am_ctx: acx,
@@ -119,6 +122,7 @@ impl WflowTestContext {
             host,
             wflow_plugin,
             worker_handle,
+            working_state,
         })
     }
 
@@ -170,63 +174,128 @@ impl WflowTestContext {
             .await
     }
 
-    /// Wait for a job to complete successfully
-    pub async fn wait_for_job_success(&self, timeout_secs: u64) -> Res<()> {
-        use futures::StreamExt;
-        use tokio::time::{sleep, Duration};
-        use wflow_core::partition::job_events::{JobEventDeets, JobRunResult};
-        use wflow_core::partition::log::PartitionLogEntry;
+    /// Wait until there are no active jobs, with a timeout
+    pub async fn wait_until_no_active_jobs(&self, timeout_secs: u64) -> Res<()> {
+        use tokio::time::{sleep, Duration, Instant};
 
-        let mut stream = self.log_store.tail(0).await;
-        let timeout = sleep(Duration::from_secs(timeout_secs));
-        tokio::pin!(timeout);
+        let start = Instant::now();
+        let timeout_duration = Duration::from_secs(timeout_secs);
+        let mut change_rx = self.working_state.change_receiver();
+
+        // Mark that we've seen the current value so changed() will wait for new changes
+        let _ = change_rx.borrow_and_update();
 
         loop {
-            let entry = tokio::select! {
-                _ = &mut timeout => {
-                    return Err(eyre::eyre!("timeout waiting for workflow to complete"));
-                }
-                entry = stream.next() => {
-                    entry
-                }
-            };
-            let Some(Ok((_, entry_bytes))) = entry else {
-                continue;
-            };
+            // Check current state first
+            let jobs = self.working_state.read_jobs().await;
+            let active_count = jobs.active.len();
+            if active_count == 0 {
+                // No active jobs, we're done
+                tracing::info!("No active jobs found, test complete");
+                return Ok(());
+            }
 
-            let log_entry: PartitionLogEntry =
-                serde_json::from_slice(&entry_bytes[..]).wrap_err("failed to parse log entry")?;
+            // Check if we've timed out before waiting
+            let elapsed = start.elapsed();
+            if elapsed >= timeout_duration {
+                return Err(eyre::eyre!(
+                    "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
+                    timeout_secs,
+                    elapsed,
+                    active_count
+                ));
+            }
 
-            match log_entry {
-                PartitionLogEntry::JobEvent(job_event) => {
-                    match job_event.deets {
-                        JobEventDeets::Run(run_event) => {
-                            match run_event.result {
-                                JobRunResult::Success { .. } => {
-                                    tracing::info!("Workflow completed successfully!");
-                                    return Ok(());
-                                }
-                                JobRunResult::WflowErr(err) => {
-                                    return Err(eyre::eyre!("workflow error: {:?}", err));
-                                }
-                                JobRunResult::WorkerErr(err) => {
-                                    return Err(eyre::eyre!("worker error: {:?}", err));
-                                }
-                                JobRunResult::StepEffect(_) => {
-                                    // Still processing, continue waiting
-                                }
-                            }
+            // Calculate remaining time
+            let remaining = timeout_duration.saturating_sub(elapsed);
+            if remaining.is_zero() {
+                return Err(eyre::eyre!(
+                    "timeout waiting for no active jobs after {} seconds (active jobs: {})",
+                    timeout_secs,
+                    active_count
+                ));
+            }
+
+            tracing::debug!(
+                "Waiting for state change or timeout (active jobs: {}, remaining: {:?})",
+                active_count,
+                remaining
+            );
+
+            // Wait for the next state change or timeout
+            tokio::select! {
+                _ = sleep(remaining) => {
+                    // Timeout reached
+                    let final_elapsed = start.elapsed();
+                    let final_jobs = self.working_state.read_jobs().await;
+                    return Err(eyre::eyre!(
+                        "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
+                        timeout_secs,
+                        final_elapsed,
+                        final_jobs.active.len()
+                    ));
+                }
+                result = change_rx.changed() => {
+                    match result {
+                        Ok(()) => {
+                            // State changed, check again in next iteration
+                            tracing::debug!("State changed, rechecking active jobs");
+                            continue;
                         }
-                        JobEventDeets::Init(_) => {
-                            // Job initialized, continue waiting
+                        Err(_) => {
+                            // Channel closed, worker might be shutting down
+                            return Err(eyre::eyre!("worker state channel closed"));
                         }
                     }
                 }
-                PartitionLogEntry::NewPartitionEffects(_) => {
-                    // Effects entry, continue waiting
+            }
+        }
+    }
+
+    /// Get the full partition log for snapshot testing
+    pub async fn get_partition_log_snapshot(
+        &self,
+    ) -> Res<Vec<(u64, wflow_core::partition::log::PartitionLogEntry)>> {
+        use futures::StreamExt;
+        use tokio::time::{sleep, Duration};
+
+        let mut entries = Vec::new();
+        let mut stream = self.log_store.tail(0).await;
+
+        // Get the latest ID to know when to stop
+        // We'll read entries with a timeout to avoid waiting forever
+        let timeout = sleep(Duration::from_secs(1));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                _ = &mut timeout => {
+                    // Timeout reached, we've read all available entries
+                    break;
+                }
+                entry = stream.next() => {
+                    match entry {
+                        Some(Ok((entry_id, entry_bytes))) => {
+                            let log_entry: wflow_core::partition::log::PartitionLogEntry =
+                                serde_json::from_slice(&entry_bytes[..])
+                                    .wrap_err("failed to parse log entry")?;
+                            entries.push((entry_id, log_entry));
+                            // Reset timeout for next entry
+                            timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(100));
+                        }
+                        Some(Err(err)) => {
+                            return Err(err);
+                        }
+                        None => {
+                            // Stream ended
+                            break;
+                        }
+                    }
                 }
             }
         }
+
+        Ok(entries)
     }
 
     /// Cleanup: shutdown all workers

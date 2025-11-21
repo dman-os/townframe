@@ -8,3 +8,4 @@ pub mod gen;
 pub mod log;
 pub mod metastore;
 pub mod partition;
+pub mod snapstore;

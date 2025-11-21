@@ -1,3 +1,4 @@
+pub mod codecs;
 mod macros;
 pub mod testing;
 

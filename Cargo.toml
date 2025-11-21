@@ -137,6 +137,9 @@ samod = { version = "0.5.0" }
 # samod = { path = "src/samod/samod" }
 async-channel = "2.5.0"
 
+# testing
+insta = { version =  "1.44", features = ["yaml", "filters"] }
+
 # db
 sqlx = { version = "0.8.6", features = [
   "runtime-tokio",

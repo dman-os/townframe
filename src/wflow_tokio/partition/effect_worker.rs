@@ -80,9 +80,9 @@ struct TokioEffectWorker {
 impl TokioEffectWorker {
     async fn handle_partition_effects(&mut self, effect_id: effects::EffectId) -> Res<()> {
         let (job_id, deets) = {
-            let mut effects_map = self.state.effects.lock().await;
+            let effects_map = self.state.read_effects().await;
             let effects::PartitionEffect { job_id, deets } = effects_map
-                .get_mut(&effect_id)
+                .get(&effect_id)
                 .expect("scheduled effect not found");
             (job_id.clone(), deets.clone())
         };
@@ -109,12 +109,12 @@ impl TokioEffectWorker {
             }
             effects::PartitionEffectDeets::AbortJob { reason } => {
                 // Remove the job from active state and archive it
-                let mut jobs = self.state.jobs.lock().await;
+                let mut jobs = self.state.write_jobs().await;
                 if let Some(job_state) = jobs.active.remove(&job_id) {
                     jobs.archive.insert(job_id.clone(), job_state);
                 }
                 // Remove the effect from the effects map
-                let mut effects_map = self.state.effects.lock().await;
+                let mut effects_map = self.state.write_effects().await;
                 effects_map.remove(&effect_id);
                 // Log the abort event
                 self.log
@@ -140,7 +140,7 @@ impl TokioEffectWorker {
 
     async fn run_job_effect(&mut self, job_id: Arc<str>) -> job_events::JobRunResult {
         let job_state_snapshot = {
-            let jobs = self.state.jobs.lock().await;
+            let jobs = self.state.read_jobs().await;
             let Some(state) = jobs.active.get(&job_id) else {
                 return job_events::JobRunResult::WorkerErr(
                     job_events::JobRunWorkerError::JobNotFound,

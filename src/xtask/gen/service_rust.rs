@@ -862,10 +862,7 @@ fn record_field(
         if cx.attrs.automerge {
             if cx.attrs.serde {
                 // Emit serde codec helper for sane ISO8601 on datetime fields
-                writeln!(
-                    buf,
-                    "#[serde(with = \"api_utils_rs::codecs::sane_iso8601\")]",
-                )?;
+                writeln!(buf, "#[serde(with = \"utils_rs::codecs::sane_iso8601\")]",)?;
             }
             writeln!(buf, "#[autosurgeon(with = \"utils_rs::am::codecs::date\")]",)?;
         }

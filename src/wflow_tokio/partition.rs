@@ -8,7 +8,7 @@ use wflow_core::{
     r#gen::types::PartitionId,
 };
 
-use crate::snapstore::SnapStore;
+use wflow_core::snapstore::SnapStore;
 
 mod effect_worker;
 pub mod reducer;

@@ -1,5 +1,4 @@
 pub mod api;
-pub mod codecs;
 pub mod errs;
 pub mod macros;
 

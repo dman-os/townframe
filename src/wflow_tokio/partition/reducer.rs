@@ -9,10 +9,8 @@ use utils_rs::prelude::tokio::task::JoinHandle;
 
 use wflow_core::partition::{effects, job_events, log};
 
-use crate::{
-    partition::{state::PartitionWorkingState, PartitionCtx, PartitionLogRef},
-    SnapStore,
-};
+use crate::partition::{state::PartitionWorkingState, PartitionCtx, PartitionLogRef};
+use wflow_core::snapstore::SnapStore;
 
 pub struct TokioPartitionReducerHandle {
     cancel_token: CancellationToken,
@@ -64,11 +62,13 @@ pub fn start_tokio_partition_reducer(
 
             // Schedule any active effects found in the effect state
             {
-                let effects = worker.state.effects.lock().await;
+                let effects = worker.state.read_effects().await;
                 for effect_id in effects.keys() {
-                    if let Err(err) = worker.effect_tx.send(effect_id.clone()).await {
-                        tracing::warn!(?err, ?effect_id, "failed to schedule effect on startup");
-                    }
+                    worker
+                        .effect_tx
+                        .send(effect_id.clone())
+                        .await
+                        .wrap_err("failed to schedule effect at startup")?;
                 }
             }
 
@@ -100,9 +100,10 @@ pub fn start_tokio_partition_reducer(
             }
 
             // Save final snapshot on shutdown
-            if let Err(err) = worker.check_and_snapshot().await {
-                tracing::warn!(?err, "failed to save final snapshot on shutdown");
-            }
+            worker
+                .check_and_snapshot()
+                .await
+                .wrap_err("failed to save final snapshot on shutdown")?;
 
             eyre::Ok(())
         }
@@ -166,21 +167,18 @@ impl TokioPartitionReducer {
         if entry_id > self.last_snapshotted_entry_id {
             if let Some(ref snap_store) = self.snap_store {
                 let (jobs, effects) = {
-                    let jobs_guard = self.state.jobs.lock().await;
-                    let effects_guard = self.state.effects.lock().await;
+                    let jobs_guard = self.state.read_jobs().await;
+                    let effects_guard = self.state.read_effects().await;
                     (jobs_guard.clone(), effects_guard.clone())
                 };
-                let snapshot = crate::snapstore::PartitionSnapshot { jobs, effects };
-                if let Err(err) = snap_store
+                let snapshot = wflow_core::snapstore::PartitionSnapshot { jobs, effects };
+                snap_store
                     .save_snapshot(self.pcx.id, entry_id, &snapshot)
                     .await
-                {
-                    tracing::warn!(?err, "failed to save snapshot");
-                } else {
-                    self.entries_since_snapshot = 0;
-                    self.last_snapshot_time = OffsetDateTime::now_utc();
-                    self.last_snapshotted_entry_id = entry_id;
-                }
+                    .wrap_err("failed to save snapshot")?;
+                self.entries_since_snapshot = 0;
+                self.last_snapshot_time = OffsetDateTime::now_utc();
+                self.last_snapshotted_entry_id = entry_id;
             }
         }
         Ok(())
@@ -197,7 +195,7 @@ impl TokioPartitionReducer {
                 effect_idx: ii as u64,
             };
             {
-                let mut effects_map = self.state.effects.lock().await;
+                let mut effects_map = self.state.write_effects().await;
                 effects_map.insert(id.clone(), effect);
             }
             self.new_effects.push(id);
@@ -212,7 +210,7 @@ impl TokioPartitionReducer {
     async fn handle_job_event(&mut self, entry_id: u64, evt: job_events::JobEvent) -> Res<()> {
         tracing::debug!(%entry_id, ?evt, "reducing job event XXX");
         {
-            let mut jobs = self.state.jobs.lock().await;
+            let mut jobs = self.state.write_jobs().await;
             wflow_core::partition::reduce::reduce_job_event(
                 &mut jobs,
                 evt,
@@ -220,24 +218,27 @@ impl TokioPartitionReducer {
             );
         }
 
-        // NOTE: this little dance gives as arena like semantics
-        // without Drop issues
-        let mut entry = log::NewPartitionEffectsLogEntry {
-            source_entry_id: entry_id,
-            effects: vec![],
-        };
-        std::mem::swap(&mut self.event_effects, &mut entry.effects);
-
-        let mut entry = log::PartitionLogEntry::NewPartitionEffects(entry);
-        self.log.append(&entry).await?;
-
-        std::mem::swap(&mut self.event_effects, {
-            let log::PartitionLogEntry::NewPartitionEffects(entry) = &mut entry else {
-                unreachable!()
+        if !self.event_effects.is_empty() {
+            // NOTE: this little dance gives as arena like semantics
+            // without Drop issues
+            let mut entry = log::NewPartitionEffectsLogEntry {
+                source_entry_id: entry_id,
+                effects: vec![],
             };
-            &mut entry.effects
-        });
-        self.event_effects.clear();
+            std::mem::swap(&mut self.event_effects, &mut entry.effects);
+
+            let mut entry = log::PartitionLogEntry::NewPartitionEffects(entry);
+            self.log.append(&entry).await?;
+
+            std::mem::swap(&mut self.event_effects, {
+                let log::PartitionLogEntry::NewPartitionEffects(entry) = &mut entry else {
+                    unreachable!()
+                };
+                &mut entry.effects
+            });
+            self.event_effects.clear();
+        }
+
         Ok(())
     }
 }

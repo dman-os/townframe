@@ -1,0 +1,88 @@
+---
+source: src/wflow/test/fails_once.rs
+expression: log_snapshot
+---
+- - 0
+  - JobEvent:
+      timestamp: "[timesamp]"
+      job_id: test-fails-once-1
+      deets:
+        Init:
+          args_json: "{\"key\":\"test-counter\"}"
+          override_wflow_retry_policy: ~
+          wflow:
+            key: fails_once
+            service:
+              workloadId: workload_123
+- - 1
+  - NewPartitionEffects:
+      source_entry_id: 0
+      effects:
+        - job_id: test-fails-once-1
+          deets:
+            RunJob:
+              run_id: 0
+- - 2
+  - JobEvent:
+      timestamp: "[timesamp]"
+      job_id: test-fails-once-1
+      deets:
+        Run:
+          run_id: 0
+          start_at: "[timesamp]"
+          end_at: "[timesamp]"
+          result:
+            WflowErr:
+              Transient:
+                error_json: "{\"msg\":\"first run, woohoo!\\n\\nLocation:\\n    src/test_wflows/lib.rs:158:31\"}"
+                retry_policy: ~
+- - 3
+  - NewPartitionEffects:
+      source_entry_id: 2
+      effects:
+        - job_id: test-fails-once-1
+          deets:
+            RunJob:
+              run_id: 1
+- - 4
+  - JobEvent:
+      timestamp: "[timesamp]"
+      job_id: test-fails-once-1
+      deets:
+        Run:
+          run_id: 1
+          start_at: "[timesamp]"
+          end_at: "[timesamp]"
+          result:
+            StepEffect:
+              step_id: 0
+              attempt_id: 0
+              start_at: "[timesamp]"
+              end_at: "[timesamp]"
+              deets:
+                Success:
+                  value:
+                    - 110
+                    - 117
+                    - 108
+                    - 108
+- - 5
+  - NewPartitionEffects:
+      source_entry_id: 4
+      effects:
+        - job_id: test-fails-once-1
+          deets:
+            RunJob:
+              run_id: 2
+- - 6
+  - JobEvent:
+      timestamp: "[timesamp]"
+      job_id: test-fails-once-1
+      deets:
+        Run:
+          run_id: 2
+          start_at: "[timesamp]"
+          end_at: "[timesamp]"
+          result:
+            Success:
+              value_json: "null"

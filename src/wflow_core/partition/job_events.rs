@@ -5,6 +5,7 @@ use crate::gen::metastore::WflowMeta;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobEvent {
+    #[serde(with = "utils_rs::codecs::sane_iso8601")]
     pub timestamp: OffsetDateTime,
     pub job_id: Arc<str>,
     pub deets: JobEventDeets,
@@ -26,7 +27,9 @@ pub struct JobInitEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRunEvent {
     pub run_id: u64,
+    #[serde(with = "utils_rs::codecs::sane_iso8601")]
     pub start_at: OffsetDateTime,
+    #[serde(with = "utils_rs::codecs::sane_iso8601")]
     pub end_at: OffsetDateTime,
     pub result: JobRunResult,
 }
@@ -64,7 +67,9 @@ pub enum JobRunWorkerError {
 pub struct JobEffectResult {
     pub step_id: u64,
     pub attempt_id: u64,
+    #[serde(with = "utils_rs::codecs::sane_iso8601")]
     pub start_at: OffsetDateTime,
+    #[serde(with = "utils_rs::codecs::sane_iso8601")]
     pub end_at: OffsetDateTime,
     pub deets: JobEffectResultDeets,
 }

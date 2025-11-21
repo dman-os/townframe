@@ -8,13 +8,6 @@
 
 ### Stack
 
-- Move KvStore impl for DHashMap and the KvStoreXXX types to wflow from wflow_tokio
-- Introduce insta for snapshot testing. The snapshot will be full partition log for that test.
-- Let's introduce methods on PartitionWorkingState that wrap the mutex access. 
-  - In addition, let's add support for change listeners that get notified when someone modifies the state.
-  - We'll use this to implement state observation for our tests.
-- Snapstore impl sucks. Two separate kv values aren't needed, let's merge the types. The cas is also misused.
-
 - [x] Get uniffi working on android
 - [ ] wflow
   - [x] in-memory smoke
