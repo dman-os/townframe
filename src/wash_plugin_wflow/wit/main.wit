@@ -45,7 +45,7 @@ interface bundle {
 
 // for the host functionality for wflows
 interface host {
-    use types.{job-id};
+    use types.{job-id, json};
 
 
     type step-id = u64;
@@ -57,7 +57,7 @@ interface host {
 
     record completed-step-state {
         id: step-id,
-        value: list<u8>,
+        value-json: json,
     }
 
     record active-step-state {
@@ -65,7 +65,7 @@ interface host {
     }
 
     next-step: func(job-id: job-id) -> result<step-state, string>;
-    persist-step: func(job-id: job-id, step-id: step-id, value: list<u8>) -> result<_, string>;
+    persist-step: func(job-id: job-id, step-id: step-id, value-json: json) -> result<_, string>;
 }
 
 // for starting invocations

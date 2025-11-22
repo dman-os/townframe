@@ -18,17 +18,17 @@ impl RustGenCtx<'_> {
             Type::Primitives(Primitives::F64) => "f64".into(),
             Type::Primitives(Primitives::Bool) => "bool".into(),
             Type::Primitives(Primitives::Uuid) => {
-                if self.attrs.automerge {
-                    "Uuid".into()
-                } else {
+                if self.attrs.wit {
                     "String".into()
+                } else {
+                    "Uuid".into()
                 }
             }
             Type::Primitives(Primitives::DateTime) => {
-                if self.attrs.automerge {
-                    "OffsetDateTime".into()
-                } else {
+                if self.attrs.wit {
                     "Datetime".into()
+                } else {
+                    "OffsetDateTime".into()
                 }
             }
             Type::Primitives(Primitives::Json) => "serde_json::Value".into(),
@@ -368,7 +368,7 @@ fn schema_record(
         )?;
     }
     if cx.attrs.serde {
-        writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
+        // writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
     }
     if cx.attrs.patch {
         // emit patch attribute so generated Patch types derive the desired attributes for patches
@@ -439,7 +439,7 @@ fn schema_enum(
         )?;
     }
     if cx.attrs.serde {
-        writeln!(buf, "#[serde(rename_all = \"camelCase\", untagged)]")?;
+        // writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
     }
     // For enums we keep serde derives only; autosurgeon derive is only emitted for records
     writeln!(
@@ -523,7 +523,7 @@ fn schema_variant(
         )?;
     }
     if cx.attrs.serde {
-        writeln!(buf, "#[serde(rename_all = \"camelCase\", untagged)]")?;
+        // writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
     }
     // autosurgeon derives are only emitted for records — enums are intentionally left with serde only
     writeln!(
@@ -604,7 +604,7 @@ fn input_type(
     }
     writeln!(buf, "#[derive({})]", derives.join(", "))?;
     if cx.attrs.serde {
-        writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
+        // writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
     }
     writeln!(buf, "pub struct Input {{")?;
 
@@ -742,7 +742,7 @@ fn error_type(
         writeln!(buf, "#[derive({})]", err_derives.join(", "))?;
         // Optional serde derives and serde attributes when enabled for this ErrorType
         if cx.attrs.serde {
-            writeln!(buf, "#[serde(rename_all = \"camelCase\", tag = \"error\")]")?;
+            // writeln!(buf, "#[serde(rename_all = \"camelCase\", tag = \"error\")]")?;
         }
         writeln!(buf, "/// {message}{message_with_fields}",)?;
         writeln!(
@@ -796,7 +796,7 @@ fn error_type(
     }
     writeln!(buf, "#[derive({})]", enum_derives.join(", "))?;
     if cx.attrs.serde {
-        writeln!(buf, "#[serde(rename_all = \"camelCase\", tag = \"error\")]")?;
+        // writeln!(buf, "#[serde(rename_all = \"camelCase\", tag = \"error\")]")?;
     }
 
     writeln!(buf, "pub enum Error {{")?;
@@ -858,12 +858,18 @@ fn record_field(
         .as_deref()
         .expect("unregistered field type")
     {
-        // Emit autosurgeon date helper at field-level when the parent record requested autosurgeon
-        if cx.attrs.automerge {
-            if cx.attrs.serde {
-                // Emit serde codec helper for sane ISO8601 on datetime fields
+        // Emit serde codec helper for datetime fields
+        if cx.attrs.serde {
+            if cx.attrs.wit {
+                // When using WIT types, use Datetime codec that delegates through OffsetDateTime
+                writeln!(buf, "#[serde(with = \"api_utils_rs::codecs::datetime\")]",)?;
+            } else {
+                // When using native Rust types, use OffsetDateTime codec directly
                 writeln!(buf, "#[serde(with = \"utils_rs::codecs::sane_iso8601\")]",)?;
             }
+        }
+        // Emit autosurgeon date helper at field-level when the parent record requested autosurgeon
+        if cx.attrs.automerge {
             writeln!(buf, "#[autosurgeon(with = \"utils_rs::am::codecs::date\")]",)?;
         }
     }

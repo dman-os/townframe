@@ -1,0 +1,54 @@
+package townframe:utils;
+
+// Copy of the utils interface from api-utils, renamed to types
+interface types {
+    use wasi:clocks/wall-clock@0.2.6.{datetime as dt};
+
+    record errors-validation {
+        issues: list<tuple<string, string>>,
+    }
+    record error-internal {
+        message: string
+    }
+    type datetime = dt;
+    type uuid = string;
+
+    // note: we don't include the errors since we don't want those generated
+    noop: func(inc: tuple<errors-validation, error-internal, datetime, uuid>) -> result;
+}
+
+interface llm-chat {
+    variant role {
+        user,
+        assitant
+    }
+
+    variant request-input {
+        text(string)
+    }
+
+    record request {
+        input: request-input
+    }
+
+    record response-message {
+        role: role,
+        text: string,
+    }
+    variant response-item {
+        message(response-message)
+    }
+
+    record response {
+        items:  list<response-item>,
+        text: string
+    }
+
+    respond: func(request: request) -> result<response, string>;
+}
+
+world guest {
+    import types;
+    import llm-chat;
+}
+

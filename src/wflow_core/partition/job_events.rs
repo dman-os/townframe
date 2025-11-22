@@ -76,7 +76,7 @@ pub struct JobEffectResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum JobEffectResultDeets {
-    Success { value: Arc<[u8]> },
+    Success { value_json: Arc<str> },
     EffectErr(JobError),
 }
 

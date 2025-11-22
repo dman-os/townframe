@@ -25,11 +25,11 @@ mod wit {
             "wasi:config/runtime@0.2.0-draft": api_utils_rs::wit::wasi::config::runtime,
 
             "townframe:api-utils/utils": api_utils_rs::wit::utils,
-
             "townframe:wflow/types": wflow_sdk::wit::townframe::wflow::types,
             "townframe:wflow/host": wflow_sdk::wit::townframe::wflow::host,
             "townframe:wflow/bundle": generate,
             "townframe:am-repo/repo": generate,
+            "townframe:utils/llm-chat": generate,
 
             // "wasi:io/poll@0.2.6": generate,
             // "wasi:io/error@0.2.6": generate,
@@ -42,9 +42,7 @@ mod wit {
 use crate::interlude::*;
 
 use crate::wit::exports::townframe::wflow::bundle::JobResult;
-use wflow_sdk::types::{JobCtx, JobError, TransientJobError};
-use crate::wit::townframe::am_repo::repo;
-use wflow_sdk::{host, JobErrorX, Json, WflowCtx};
+use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
 wit::export!(Component with_types_in wit);
 
@@ -58,10 +56,9 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
     }
 }
 
-
 fn doc_created(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(), JobErrorX> {
     // Call the am-repo plugin to hydrate the document at the root object
-    let json_str: String = cx.effect(|| {
+    let doc = cx.effect(|| {
         use crate::wit::townframe::am_repo::repo;
 
         // Convert types to match WIT bindings
@@ -70,19 +67,33 @@ fn doc_created(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(),
         let obj_id = repo::ObjId::Root;
         let path: Vec<repo::PathProp> = vec![];
 
-        let result = repo::hydrate_path_at_head(&doc_id, &heads, &obj_id, &path);
+        let json = repo::hydrate_path_at_head(&doc_id, &heads, &obj_id, &path)
+            .wrap_err("error hydrating document")
+            .map_err(JobErrorX::Terminal)?;
+        println!("XXX {json}");
+        let doc: crate::gen::doc::Doc = serde_json::from_str(&json)
+            .wrap_err("error parsing json doc")
+            .map_err(JobErrorX::Terminal)?;
 
-        match result {
-            Ok(json) => Ok(Json(json)),
-            Err(err) => Err(JobErrorX::Terminal(ferr!(
-                "error hydrating document: {:?}",
-                err
-            ))),
-        }
+        Ok(Json(doc))
     })?;
 
-    // Print the hydrated JSON document
-    println!("Document {} hydrated JSON:\n{}", args.id, json_str);
+    // Call the LLM with the document content
+    let _llm_response: String = cx.effect(|| {
+        use crate::wit::townframe::utils::llm_chat;
+
+        let message_text = format!("What do you think of {doc:?}");
+        let request = llm_chat::Request {
+            input: llm_chat::RequestInput::Text(message_text),
+        };
+
+        let result = llm_chat::respond(&request);
+
+        match result {
+            Ok(response) => Ok(Json(response.text)),
+            Err(err) => Err(JobErrorX::Terminal(ferr!("error calling LLM: {err}"))),
+        }
+    })?;
 
     Ok(())
 }

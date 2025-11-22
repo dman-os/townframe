@@ -10,7 +10,6 @@ pub mod doc {
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Patch, PartialEq, Serialize, Deserialize)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-    #[serde(rename_all = "camelCase")]
     #[patch(attribute(derive(Debug, Default)))]
     #[cfg_attr(feature = "uniffi", patch(attribute(derive(uniffi::Record))))]
     pub struct DocImage {
@@ -23,7 +22,6 @@ pub mod doc {
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Patch, PartialEq, Serialize, Deserialize)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-    #[serde(rename_all = "camelCase")]
     #[patch(attribute(derive(Debug, Default)))]
     #[cfg_attr(feature = "uniffi", patch(attribute(derive(uniffi::Record))))]
     pub struct DocBlob {
@@ -35,18 +33,20 @@ pub mod doc {
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-    #[serde(rename_all = "camelCase", untagged)]
     pub enum DocKind {
         Text,
         Blob,
         Image,
     }
     impl DocKind {
-        pub unsafe fn _lift(val: u8) -> DocKind {
-            if !cfg!(debug_assertions) {
-                return unsafe { ::core::mem::transmute::<u8, DocKind>(val) };
+        pub unsafe fn _lift(val:u8) -> DocKind {
+            if !cfg!(debug_assertions){
+                return unsafe {
+                    ::core::mem::transmute::<u8, DocKind>(val)
+                };
             }
             match val {
+
                 0 => DocKind::Text,
                 1 => DocKind::Blob,
                 2 => DocKind::Image,
@@ -56,9 +56,9 @@ pub mod doc {
         }
     }
 
+
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-    #[serde(rename_all = "camelCase", untagged)]
     pub enum DocContent {
         Text(String),
         Blob(DocBlob),
@@ -69,17 +69,19 @@ pub mod doc {
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-    #[serde(rename_all = "camelCase", untagged)]
     pub enum DocTagKind {
         RefGeneric,
         LabelGeneric,
     }
     impl DocTagKind {
-        pub unsafe fn _lift(val: u8) -> DocTagKind {
-            if !cfg!(debug_assertions) {
-                return unsafe { ::core::mem::transmute::<u8, DocTagKind>(val) };
+        pub unsafe fn _lift(val:u8) -> DocTagKind {
+            if !cfg!(debug_assertions){
+                return unsafe {
+                    ::core::mem::transmute::<u8, DocTagKind>(val)
+                };
             }
             match val {
+
                 0 => DocTagKind::RefGeneric,
                 1 => DocTagKind::LabelGeneric,
 
@@ -88,9 +90,9 @@ pub mod doc {
         }
     }
 
+
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-    #[serde(rename_all = "camelCase", untagged)]
     pub enum DocTag {
         /// A link to another document.
         RefGeneric(DocRef),
@@ -99,7 +101,6 @@ pub mod doc {
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Patch, PartialEq, Serialize, Deserialize)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-    #[serde(rename_all = "camelCase")]
     #[patch(attribute(derive(Debug, Default)))]
     #[cfg_attr(feature = "uniffi", patch(attribute(derive(uniffi::Record))))]
     pub struct Doc {
@@ -116,7 +117,6 @@ pub mod doc {
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Patch, PartialEq, Serialize, Deserialize)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-    #[serde(rename_all = "camelCase")]
     #[patch(attribute(derive(Debug, Default)))]
     #[cfg_attr(feature = "uniffi", patch(attribute(derive(uniffi::Record))))]
     pub struct DocAddedEvent {
@@ -133,31 +133,17 @@ pub mod doc {
         pub type Output = Doc;
 
         #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
-        #[serde(rename_all = "camelCase")]
         pub struct Input {
             pub id: Uuid,
         }
 
-        #[derive(
-            Debug,
-            Clone,
-            thiserror::Error,
-            displaydoc::Display,
-            Serialize,
-            Deserialize,
-            Hydrate,
-            Reconcile,
-        )]
-        #[serde(rename_all = "camelCase", tag = "error")]
+        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
         /// Id occupied: {id}
         pub struct ErrorIdOccupied {
             pub id: String,
         }
 
-        #[derive(
-            Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile,
-        )]
-        #[serde(rename_all = "camelCase", tag = "error")]
+        #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
         pub enum Error {
             /// Id occupied {0}
             IdOccupied(#[from] ErrorIdOccupied),
@@ -167,4 +153,5 @@ pub mod doc {
             Internal(#[from] ErrorInternal),
         }
     }
+
 }

@@ -90,7 +90,7 @@ enum JobTrap {
         step_id: u64,
         start_at: OffsetDateTime,
         end_at: OffsetDateTime,
-        value: Vec<u8>,
+        value_json: Arc<str>,
         attempt_id: u64,
     },
     RunComplete(Result<String, types::JobError>),
@@ -117,7 +117,7 @@ impl host::Host for WashCtx {
                 JobStepState::Effect { attempts } => {
                     if let Some(attempt) = attempts.last() {
                         match &attempt.deets {
-                            JobEffectResultDeets::Success { value } => {
+                            JobEffectResultDeets::Success { value_json } => {
                                 job.cur_step
                                     .compare_exchange(
                                         step_id,
@@ -129,7 +129,7 @@ impl host::Host for WashCtx {
                                 return Ok(Ok(host::StepState::Completed(
                                     host::CompletedStepState {
                                         id: step_id,
-                                        value: value.to_vec(),
+                                        value_json: value_json.to_string(),
                                     },
                                 )));
                             }
@@ -158,7 +158,7 @@ impl host::Host for WashCtx {
         &mut self,
         job_id: partition_host::JobId,
         step_id: host::StepId,
-        value: Vec<u8>,
+        value_json: String,
     ) -> wasmtime::Result<Result<(), String>> {
         let plugin = TownframewflowPlugin::from_ctx(self);
         let Some(mut job) = plugin.active_jobs.get_mut(job_id.as_str()) else {
@@ -173,7 +173,7 @@ impl host::Host for WashCtx {
         let end_at = OffsetDateTime::now_utc();
         let trap = JobTrap::PersistStep {
             step_id,
-            value,
+            value_json: value_json.into(),
             attempt_id: active_step.attempt_id,
             start_at: active_step.start_at,
             end_at,
@@ -291,9 +291,7 @@ impl wash_runtime::plugin::HostPlugin for TownframewflowPlugin {
             ]),
             imports: std::collections::HashSet::from([
                 //
-                WitInterface::from("townframe:wflow/host"),
-                // WitInterface::from("townframe:wflow/partition-host"),
-                // WitInterface::from("townframe:wflow/metadata-store"),
+                WitInterface::from("townframe:wflow/host,partition-host,metadata-store"),
             ]),
             ..default()
         }
@@ -514,7 +512,7 @@ impl service::WflowServiceHost for TownframewflowPlugin {
             },
             JobTrap::PersistStep {
                 step_id,
-                value,
+                value_json,
                 start_at,
                 end_at,
                 attempt_id,
@@ -524,9 +522,7 @@ impl service::WflowServiceHost for TownframewflowPlugin {
                     attempt_id,
                     start_at,
                     end_at,
-                    deets: job_events::JobEffectResultDeets::Success {
-                        value: value.into(),
-                    },
+                    deets: job_events::JobEffectResultDeets::Success { value_json },
                 },
             )),
             JobTrap::RunComplete(Ok(value_json)) => Ok(job_events::JobRunResult::Success {

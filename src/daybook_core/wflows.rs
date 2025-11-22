@@ -98,7 +98,6 @@ impl DocChangesWorker {
                                     // TODO: handle doc deletions
                                 }
                                 DrawerEvent::DocAdded { id, heads } => {
-                                    info!(?id, "XXX");
                                     let job_id: Arc<str> = format!("doc-added-{}", id).into();
                                     let args_json = serde_json::to_string(&DocAddedEvent {
                                         id: id.clone(),

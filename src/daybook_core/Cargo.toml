@@ -15,7 +15,7 @@ uniffi = ["dep:uniffi"]
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
 api_utils_rs = { workspace = true, features = ["automerge"] }
-wflow = { path = "../wflow" }
+wflow = { workspace = true }
 
 # encoding
 serde.workspace = true
@@ -68,4 +68,7 @@ uniffi = { workspace = true, features = [ "build" ], optional = true }
 [dev-dependencies]
 tokio-stream = "0.1.17"
 tokio-util = { workspace = true, features = [] }
+insta = { workspace = true, features = ["json"] }
+wflow = { workspace = true, features = ["test-harness"] }
+utils_rs = { workspace = true, features = ["console-subscriber"]}
 

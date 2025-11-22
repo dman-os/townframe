@@ -1,20 +1,28 @@
 use crate::interlude::*;
 
 use std::collections::HashMap;
-use tokio::sync::{watch, RwLock};
+use std::sync::atomic::AtomicU64;
+use tokio::sync::RwLock;
 
 use wflow_core::partition::effects;
 use wflow_core::partition::state::PartitionJobsState;
 
+/// Counts of active and archived jobs, used for change notifications
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobCounts {
+    pub active: usize,
+    pub archive: usize,
+}
+
 #[derive(Debug)]
 pub struct PartitionWorkingState {
     // FIXME: this probably should go into the metastore
-    pub last_applied_entry_id: std::sync::atomic::AtomicU64,
+    pub last_applied_entry_id: AtomicU64,
     jobs: RwLock<PartitionJobsState>,
     effects: RwLock<HashMap<effects::EffectId, effects::PartitionEffect>>,
-    // Change notification channel - sends () whenever state is modified
-    change_tx: watch::Sender<()>,
-    change_rx: watch::Receiver<()>,
+    // Change notification channel - sends JobCounts whenever counts change
+    change_tx: tokio::sync::watch::Sender<JobCounts>,
+    change_rx: tokio::sync::watch::Receiver<JobCounts>,
 }
 
 impl PartitionWorkingState {
@@ -24,9 +32,13 @@ impl PartitionWorkingState {
         initial_jobs: PartitionJobsState,
         initial_effects: HashMap<effects::EffectId, effects::PartitionEffect>,
     ) -> Self {
-        let (change_tx, change_rx) = watch::channel(());
+        let initial_counts = JobCounts {
+            active: initial_jobs.active.len(),
+            archive: initial_jobs.archive.len(),
+        };
+        let (change_tx, change_rx) = tokio::sync::watch::channel(initial_counts);
         Self {
-            last_applied_entry_id: std::sync::atomic::AtomicU64::new(initial_entry_id),
+            last_applied_entry_id: AtomicU64::new(initial_entry_id),
             jobs: RwLock::new(initial_jobs),
             effects: RwLock::new(initial_effects),
             change_tx,
@@ -39,13 +51,9 @@ impl PartitionWorkingState {
         self.jobs.read().await
     }
 
-    /// Get a write lock on jobs state and notify listeners
-    pub async fn write_jobs(&self) -> PartitionWorkingStateWriteGuard<'_, PartitionJobsState> {
-        let guard = self.jobs.write().await;
-        PartitionWorkingStateWriteGuard {
-            guard,
-            change_tx: self.change_tx.clone(),
-        }
+    /// Get a write lock on jobs state (no automatic notification - caller must notify)
+    pub async fn write_jobs(&self) -> tokio::sync::RwLockWriteGuard<'_, PartitionJobsState> {
+        self.jobs.write().await
     }
 
     /// Get a read lock on effects state
@@ -56,49 +64,32 @@ impl PartitionWorkingState {
         self.effects.read().await
     }
 
-    /// Get a write lock on effects state and notify listeners
+    /// Get a write lock on effects state (no automatic notification - caller must notify)
     pub async fn write_effects(
         &self,
-    ) -> PartitionWorkingStateWriteGuard<'_, HashMap<effects::EffectId, effects::PartitionEffect>>
+    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<effects::EffectId, effects::PartitionEffect>>
     {
-        let guard = self.effects.write().await;
-        PartitionWorkingStateWriteGuard {
-            guard,
-            change_tx: self.change_tx.clone(),
+        self.effects.write().await
+    }
+
+    /// Get current job counts without holding a lock
+    pub async fn get_job_counts(&self) -> JobCounts {
+        let jobs = self.jobs.read().await;
+        JobCounts {
+            active: jobs.active.len(),
+            archive: jobs.archive.len(),
         }
     }
 
-    /// Get a receiver for change notifications
-    pub fn change_receiver(&self) -> watch::Receiver<()> {
-        self.change_rx.clone()
-    }
-}
-
-/// A write guard that notifies change listeners when dropped
-pub struct PartitionWorkingStateWriteGuard<'a, T> {
-    guard: tokio::sync::RwLockWriteGuard<'a, T>,
-    change_tx: watch::Sender<()>,
-}
-
-impl<T> std::ops::Deref for PartitionWorkingStateWriteGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.guard
-    }
-}
-
-impl<T> std::ops::DerefMut for PartitionWorkingStateWriteGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.guard
-    }
-}
-
-impl<T> Drop for PartitionWorkingStateWriteGuard<'_, T> {
-    fn drop(&mut self) {
-        // Notify listeners that state has changed
+    /// Notify listeners of count changes (call this after updating state)
+    pub fn notify_counts_changed(&self, counts: JobCounts) {
         // Ignore errors - receivers may have been dropped
-        let _ = self.change_tx.send(());
+        let _ = self.change_tx.send(counts);
+    }
+
+    /// Get a receiver for count change notifications
+    pub fn change_receiver(&self) -> tokio::sync::watch::Receiver<JobCounts> {
+        self.change_rx.clone()
     }
 }
 

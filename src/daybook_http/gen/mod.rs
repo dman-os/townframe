@@ -14,7 +14,6 @@ pub mod doc {
     pub type Multihash = String;
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
     pub struct DocImage {
         pub mime: MimeType,
         pub width_px: u64,
@@ -24,7 +23,6 @@ pub mod doc {
     }
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
     pub struct DocBlob {
         pub length_octets: u64,
         pub hash: Multihash,
@@ -33,18 +31,20 @@ pub mod doc {
     pub type DocId = String;
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase", untagged)]
     pub enum DocKind {
         Text,
         Blob,
         Image,
     }
     impl DocKind {
-        pub unsafe fn _lift(val: u8) -> DocKind {
-            if !cfg!(debug_assertions) {
-                return unsafe { ::core::mem::transmute::<u8, DocKind>(val) };
+        pub unsafe fn _lift(val:u8) -> DocKind {
+            if !cfg!(debug_assertions){
+                return unsafe {
+                    ::core::mem::transmute::<u8, DocKind>(val)
+                };
             }
             match val {
+
                 0 => DocKind::Text,
                 1 => DocKind::Blob,
                 2 => DocKind::Image,
@@ -54,8 +54,8 @@ pub mod doc {
         }
     }
 
+
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase", untagged)]
     pub enum DocContent {
         Text(String),
         Blob(DocBlob),
@@ -65,17 +65,19 @@ pub mod doc {
     pub type DocRef = DocId;
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase", untagged)]
     pub enum DocTagKind {
         RefGeneric,
         LabelGeneric,
     }
     impl DocTagKind {
-        pub unsafe fn _lift(val: u8) -> DocTagKind {
-            if !cfg!(debug_assertions) {
-                return unsafe { ::core::mem::transmute::<u8, DocTagKind>(val) };
+        pub unsafe fn _lift(val:u8) -> DocTagKind {
+            if !cfg!(debug_assertions){
+                return unsafe {
+                    ::core::mem::transmute::<u8, DocTagKind>(val)
+                };
             }
             match val {
+
                 0 => DocTagKind::RefGeneric,
                 1 => DocTagKind::LabelGeneric,
 
@@ -84,8 +86,8 @@ pub mod doc {
         }
     }
 
+
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase", untagged)]
     pub enum DocTag {
         /// A link to another document.
         RefGeneric(DocRef),
@@ -93,17 +95,17 @@ pub mod doc {
     }
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
     pub struct Doc {
         pub id: DocId,
-        pub created_at: Datetime,
-        pub updated_at: Datetime,
+        #[serde(with = "utils_rs::codecs::sane_iso8601")]
+        pub created_at: OffsetDateTime,
+        #[serde(with = "utils_rs::codecs::sane_iso8601")]
+        pub updated_at: OffsetDateTime,
         pub content: DocContent,
         pub tags: Vec<DocTag>,
     }
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
     pub struct DocAddedEvent {
         pub id: DocId,
         pub heads: Vec<String>,
@@ -118,37 +120,18 @@ pub mod doc {
         pub type Output = SchemaRef<Doc>;
 
         #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-        #[serde(rename_all = "camelCase")]
         pub struct Input {
             #[schema(min_length = 1, max_length = 1024)]
-            pub id: String,
+            pub id: Uuid,
         }
 
-        #[derive(
-            Debug,
-            Clone,
-            thiserror::Error,
-            displaydoc::Display,
-            utoipa::ToSchema,
-            Serialize,
-            Deserialize,
-        )]
-        #[serde(rename_all = "camelCase", tag = "error")]
+        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, utoipa::ToSchema, Serialize, Deserialize)]
         /// Id occupied: {id}
         pub struct ErrorIdOccupied {
             pub id: String,
         }
 
-        #[derive(
-            Debug,
-            thiserror::Error,
-            displaydoc::Display,
-            utoipa::ToSchema,
-            macros::HttpError,
-            Serialize,
-            Deserialize,
-        )]
-        #[serde(rename_all = "camelCase", tag = "error")]
+        #[derive(Debug, thiserror::Error, displaydoc::Display, utoipa::ToSchema, macros::HttpError, Serialize, Deserialize)]
         pub enum Error {
             /// Id occupied {0}
             #[http(code(StatusCode::BAD_REQUEST), desc("Id occupied"))]
@@ -161,4 +144,5 @@ pub mod doc {
             Internal(#[from] ErrorInternal),
         }
     }
+
 }

@@ -125,6 +125,7 @@
             
             infisical
             protobuf
+            tokio-console
           ];
 
           shellHook = with pkgs; ''

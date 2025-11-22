@@ -66,7 +66,6 @@ impl wash_runtime::plugin::HostPlugin for AmRepoPlugin {
         _workload: &wash_runtime::engine::workload::UnresolvedWorkload,
         _interface_configs: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
-        info!(?_interface_configs, "XXX");
         Ok(())
     }
 
@@ -76,7 +75,6 @@ impl wash_runtime::plugin::HostPlugin for AmRepoPlugin {
         _interface_configs: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
         let world = component.world();
-        info!(?world, "XXX");
         for iface in world.imports {
             if iface.namespace == "townframe" && iface.package == "am-repo" {
                 if iface.interfaces.contains("repo") {
@@ -159,6 +157,7 @@ impl repo::Host for WashCtx {
             })
             .collect();
 
+        warn!("XXXX entered");
         // Use hydrate_path_at_head with AutosurgeonJson
         let result = plugin
             .am_ctx
@@ -169,6 +168,7 @@ impl repo::Host for WashCtx {
                 path_rust,
             )
             .await;
+        warn!(?result, "XXXX entered");
 
         match result {
             Ok(Some(json_wrapper)) => {

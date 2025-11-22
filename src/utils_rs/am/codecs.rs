@@ -151,6 +151,7 @@ fn hydrate_value<D: autosurgeon::ReadDoc>(
 /// Helper function to convert a scalar value to JSON
 fn scalar_to_json(s: &automerge::ScalarValue) -> serde_json::Value {
     use automerge::ScalarValue;
+    use crate::codecs::sane_iso8601::FORMAT;
     match s {
         ScalarValue::Null => serde_json::Value::Null,
         ScalarValue::Boolean(b) => serde_json::Value::Bool(*b),
@@ -168,7 +169,18 @@ fn scalar_to_json(s: &automerge::ScalarValue) -> serde_json::Value {
         ScalarValue::Int(i) => serde_json::Value::Number((*i).into()),
         ScalarValue::Uint(u) => serde_json::Value::Number((*u).into()),
         ScalarValue::Str(s) => serde_json::Value::String(s.to_string()),
-        ScalarValue::Timestamp(t) => serde_json::Value::Number((*t).into()),
+        ScalarValue::Timestamp(t) => {
+            // Convert timestamp to ISO 8601 string to match serde codec
+            // Note: This assumes timestamps stored as strings in automerge (via date codec)
+            // If we encounter a numeric timestamp, convert it
+            match OffsetDateTime::from_unix_timestamp(*t) {
+                Ok(dt) => dt
+                    .format(&FORMAT)
+                    .map(serde_json::Value::String)
+                    .unwrap_or_else(|_| serde_json::Value::Number((*t).into())),
+                Err(_) => serde_json::Value::Number((*t).into()),
+            }
+        }
         ScalarValue::Unknown { .. } => serde_json::Value::Null,
     }
 }
@@ -242,19 +254,16 @@ fn reconcile_json_value<R: autosurgeon::Reconciler>(
 
 pub mod date {
     use super::*;
+    use crate::codecs::sane_iso8601::FORMAT;
 
     pub fn reconcile<R: autosurgeon::Reconciler>(
         ts: &OffsetDateTime,
         mut reconciler: R,
     ) -> Result<(), R::Error> {
-        reconciler.timestamp(ts.unix_timestamp())
-    }
-
-    struct Wrapper(i64);
-    impl autosurgeon::Hydrate for Wrapper {
-        fn hydrate_timestamp(ts: i64) -> Result<Self, autosurgeon::HydrateError> {
-            Ok(Self(ts))
-        }
+        // Store as ISO 8601 string to match serde codec
+        // Format errors should be extremely rare (only if FORMAT is misconfigured)
+        let iso_string = ts.format(&FORMAT).expect("timestamp format should always succeed");
+        reconciler.str(iso_string.as_str())
     }
 
     pub fn hydrate<'a, D: autosurgeon::ReadDoc>(
@@ -262,11 +271,51 @@ pub mod date {
         obj: &ObjId,
         prop: autosurgeon::Prop<'a>,
     ) -> Result<OffsetDateTime, autosurgeon::HydrateError> {
-        let Wrapper(inner) = Wrapper::hydrate(doc, obj, prop)?;
-        OffsetDateTime::from_unix_timestamp(inner).map_err(|err| {
+        use automerge::{ScalarValue, Value};
+        
+        // Read the value directly from the document
+        let iso_string = match doc.get(obj, &prop)? {
+            Some((Value::Scalar(s), _)) => {
+                match s.as_ref() {
+                    // If stored as a string (new format), use it directly
+                    ScalarValue::Str(s) => s.to_string(),
+                    // If stored as a timestamp (old format), convert to ISO 8601
+                    ScalarValue::Timestamp(t) => {
+                        match OffsetDateTime::from_unix_timestamp(*t) {
+                            Ok(dt) => dt.format(&FORMAT).map_err(|e| {
+                                autosurgeon::HydrateError::unexpected(
+                                    "a valid timestamp",
+                                    format!("error formatting timestamp: {e}"),
+                                )
+                            })?,
+                            Err(e) => {
+                                return Err(autosurgeon::HydrateError::unexpected(
+                                    "a valid timestamp",
+                                    format!("error converting timestamp: {e}"),
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(autosurgeon::HydrateError::unexpected(
+                            "a string or timestamp",
+                            format!("unexpected scalar type: {:?}", s),
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(autosurgeon::HydrateError::unexpected(
+                    "a scalar value",
+                    "value is not a scalar".to_string(),
+                ));
+            }
+        };
+        
+        OffsetDateTime::parse(&iso_string, &FORMAT).map_err(|err| {
             autosurgeon::HydrateError::unexpected(
-                "an valid unix timestamp",
-                format!("error parsing timestamp int {err}"),
+                "a valid ISO 8601 timestamp string",
+                format!("error parsing ISO 8601 timestamp '{iso_string}': {err}"),
             )
         })
     }

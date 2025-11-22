@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
 mod fails_once;
+#[cfg(any(test, feature = "test-harness"))]
 #[allow(unused)]
 mod keyvalue_plugin;
 
@@ -29,16 +30,25 @@ pub struct WflowTestContext {
 impl WflowTestContext {
     /// Create a new test context with in-memory stores
     pub async fn new() -> Res<Self> {
-        // Initialize AmCtx with memory storage
-        let acx = AmCtx::boot(
-            utils_rs::am::Config {
-                peer_id: "test".to_string(),
-                storage: utils_rs::am::StorageConfig::Memory,
-            },
-            Option::<samod::AlwaysAnnounce>::None,
-        )
-        .await?;
-        let acx = Arc::new(acx);
+        Self::with_am_ctx(None).await
+    }
+
+    /// Create a new test context with an existing AmCtx (or create a new one if None)
+    pub async fn with_am_ctx(acx: Option<Arc<AmCtx>>) -> Res<Self> {
+        // Use provided AmCtx or create a new one
+        let acx = match acx {
+            Some(acx) => acx,
+            None => Arc::new(
+                AmCtx::boot(
+                    utils_rs::am::Config {
+                        peer_id: "test".to_string(),
+                        storage: utils_rs::am::StorageConfig::Memory,
+                    },
+                    Option::<samod::AlwaysAnnounce>::None,
+                )
+                .await?,
+            ),
+        };
 
         // Create metastore
         let metastore = {
@@ -100,10 +110,13 @@ impl WflowTestContext {
 
         let runtime_config_plugin = plugin::wasi_config::WasiConfig::default();
         let keyvalue_plugin = keyvalue_plugin::WasiKeyvalue::new();
+        let utils_plugin =
+            wash_plugin_utils::UtilsPlugin::new().wrap_err("error creating utils plugin")?;
 
         let host = crate::build_wash_host(vec![
             wflow_plugin.clone(),
             am_repo_plugin,
+            utils_plugin,
             Arc::new(runtime_config_plugin),
             Arc::new(keyvalue_plugin),
         ])
@@ -112,6 +125,27 @@ impl WflowTestContext {
         // Start partition worker
         let (worker_handle, working_state) =
             crate::start_partition_worker(&wcx, wflow_plugin.clone()).await?;
+
+        {
+            let log_store = log_store.clone();
+            tokio::spawn(async move {
+                use futures::StreamExt;
+                use wflow_core::log::LogStore;
+                let mut stream = log_store.tail(0).await;
+                while let Some(entry) = stream.next().await {
+                    match entry {
+                        Ok((entry_id, entry)) => {
+                            let entry: serde_json::Value =
+                                serde_json::from_slice(&entry[..]).expect(ERROR_JSON);
+                            info!(?entry, entry_id, "log entry");
+                        }
+                        Err(err) => {
+                            error!(?err, "log tail error");
+                        }
+                    }
+                }
+            });
+        }
 
         Ok(Self {
             am_ctx: acx,
@@ -151,6 +185,9 @@ impl WflowTestContext {
                         ..WitInterface::from("townframe:am-repo/repo")
                     },
                     WitInterface {
+                        ..WitInterface::from("townframe:utils/llm-chat")
+                    },
+                    WitInterface {
                         ..WitInterface::from("wasi:keyvalue/store")
                     },
                 ],
@@ -177,77 +214,67 @@ impl WflowTestContext {
 
     /// Wait until there are no active jobs, with a timeout
     pub async fn wait_until_no_active_jobs(&self, timeout_secs: u64) -> Res<()> {
-        use tokio::time::{sleep, Duration, Instant};
+        use tokio::time::{Duration, Instant};
 
         let start = Instant::now();
         let timeout_duration = Duration::from_secs(timeout_secs);
         let mut change_rx = self.working_state.change_receiver();
 
-        // Mark that we've seen the current value so changed() will wait for new changes
-        let _ = change_rx.borrow_and_update();
+        // Get initial counts without holding a lock
+        let mut counts = *change_rx.borrow();
+        if counts.active == 0 && counts.archive > 0 {
+            // No active jobs, we're done
+            tracing::info!("done, {} active jobs, {} archived jobs", counts.active, counts.archive);
+            return Ok(());
+        }
 
         loop {
-            // Check current state first
-            let jobs = self.working_state.read_jobs().await;
-            let active_count = jobs.active.len();
-            if active_count == 0 {
-                // No active jobs, we're done
-                tracing::info!("No active jobs found, test complete");
-                return Ok(());
-            }
-
-            // Check if we've timed out before waiting
+            // Calculate remaining time
             let elapsed = start.elapsed();
-            if elapsed >= timeout_duration {
+            let remaining = timeout_duration.saturating_sub(elapsed);
+            if remaining.is_zero() {
                 return Err(eyre::eyre!(
                     "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
                     timeout_secs,
                     elapsed,
-                    active_count
-                ));
-            }
-
-            // Calculate remaining time
-            let remaining = timeout_duration.saturating_sub(elapsed);
-            if remaining.is_zero() {
-                return Err(eyre::eyre!(
-                    "timeout waiting for no active jobs after {} seconds (active jobs: {})",
-                    timeout_secs,
-                    active_count
+                    counts.active
                 ));
             }
 
             tracing::debug!(
-                "Waiting for state change or timeout (active jobs: {}, remaining: {:?})",
-                active_count,
+                "Waiting for count change or timeout (active jobs: {}, remaining: {:?})",
+                counts.active,
                 remaining
             );
 
-            // Wait for the next state change or timeout
-            tokio::select! {
-                _ = sleep(remaining) => {
+            // Wait for the next count change or timeout
+            match tokio::time::timeout(remaining, change_rx.changed()).await {
+                Ok(Ok(())) => {
+                    // Counts changed, update our local copy
+                    counts = *change_rx.borrow();
+                    if counts.active == 0 && counts.archive > 0 {
+                        // No active jobs, we're done
+                        tracing::info!("done, {} active jobs, {} archived jobs", counts.active, counts.archive);
+                        return Ok(());
+                    }
+                    // Continue waiting
+                    tracing::debug!("Counts changed, rechecking active jobs");
+                    continue;
+                }
+                Ok(Err(_)) => {
+                    // Channel closed, worker might be shutting down
+                    return Err(eyre::eyre!("worker state channel closed"));
+                }
+                Err(_) => {
                     // Timeout reached
                     let final_elapsed = start.elapsed();
-                    let final_jobs = self.working_state.read_jobs().await;
+                    let final_counts = self.working_state.get_job_counts().await;
                     return Err(eyre::eyre!(
                         "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
                         timeout_secs,
                         final_elapsed,
-                        final_jobs.active.len()
+                        final_counts.active
                     ));
-                }
-                result = change_rx.changed() => {
-                    match result {
-                        Ok(()) => {
-                            // State changed, check again in next iteration
-                            tracing::debug!("State changed, rechecking active jobs");
-                            continue;
-                        }
-                        Err(_) => {
-                            // Channel closed, worker might be shutting down
-                            return Err(eyre::eyre!("worker state channel closed"));
-                        }
-                    }
                 }
             }
         }
@@ -258,45 +285,52 @@ impl WflowTestContext {
         &self,
     ) -> Res<Vec<(u64, wflow_core::partition::log::PartitionLogEntry)>> {
         use futures::StreamExt;
-        use tokio::time::{sleep, Duration};
+        use tokio::time::Duration;
 
         let mut entries = Vec::new();
         let mut stream = self.log_store.tail(0).await;
 
-        // Get the latest ID to know when to stop
-        // We'll read entries with a timeout to avoid waiting forever
-        let timeout = sleep(Duration::from_secs(1));
-        tokio::pin!(timeout);
-
+        // Read entries with a timeout to avoid waiting forever
+        // If no entry comes for 100ms, we've read all available entries
         loop {
-            tokio::select! {
-                _ = &mut timeout => {
-                    // Timeout reached, we've read all available entries
+            match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
+                Ok(Some(Ok((entry_id, entry_bytes)))) => {
+                    let log_entry: wflow_core::partition::log::PartitionLogEntry =
+                        serde_json::from_slice(&entry_bytes[..])
+                            .wrap_err("failed to parse log entry")?;
+                    entries.push((entry_id, log_entry));
+                }
+                Ok(Some(Err(err))) => {
+                    return Err(err);
+                }
+                Ok(None) => {
+                    // Stream ended
                     break;
                 }
-                entry = stream.next() => {
-                    match entry {
-                        Some(Ok((entry_id, entry_bytes))) => {
-                            let log_entry: wflow_core::partition::log::PartitionLogEntry =
-                                serde_json::from_slice(&entry_bytes[..])
-                                    .wrap_err("failed to parse log entry")?;
-                            entries.push((entry_id, log_entry));
-                            // Reset timeout for next entry
-                            timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(100));
-                        }
-                        Some(Err(err)) => {
-                            return Err(err);
-                        }
-                        None => {
-                            // Stream ended
-                            break;
-                        }
-                    }
+                Err(_) => {
+                    // Timeout reached, we've read all available entries
+                    break;
                 }
             }
         }
 
         Ok(entries)
+    }
+
+    /// Assert a snapshot of the partition log with standard filters
+    pub async fn assert_partition_log_snapshot(&self, snapshot_name: &str) -> Res<()> {
+        let log_snapshot = self.get_partition_log_snapshot().await?;
+
+        insta::with_settings!({
+            filters => vec![
+                (r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", "[timestamp]"),
+                (r"\w*Location.*:\d+:\d+", "[location]"),
+            ]
+        }, {
+            insta::assert_yaml_snapshot!(snapshot_name, log_snapshot);
+        });
+
+        Ok(())
     }
 
     /// Cleanup: shutdown all workers

@@ -9,7 +9,6 @@ mod wit {
     wit_bindgen::generate!({
         world: "bundle",
         path: "wit",
-
         with: {
             "wasi:keyvalue/store@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::store,
             "wasi:keyvalue/atomics@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::atomics,

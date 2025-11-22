@@ -29,6 +29,7 @@
 - [ ] Replace time with jiff??
 - [ ] Wasi 0.3
   - [ ] wRPC everything
+- [ ] autosurgeon doens't respect serde attribs like untagged and camelCase
 
 ---
 

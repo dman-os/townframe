@@ -8,3 +8,5 @@
 - To type check and lint the ./src/daybook_compose multiplatform app, use `ghjk x check-dayb`.
 - Prefer `cargo clippy --all-targets --all-features -p myCrate`.
 - When working rust code, in addition to `cargo clippy`, small tests can be used to validate ideas.
+- Do not use the cargo integration tests features.
+  - I.e. avoid making tests in root::tests.

@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use utils_rs::prelude::tokio::task::JoinHandle;
 use wflow_core::partition::{effects, job_events, log};
 
-use crate::partition::{state::PartitionWorkingState, PartitionCtx};
+use crate::partition::{state::PartitionWorkingState, state::JobCounts, PartitionCtx};
 
 pub struct TokioEffectWorkerHandle {
     cancel_token: CancellationToken,
@@ -109,10 +109,20 @@ impl TokioEffectWorker {
             }
             effects::PartitionEffectDeets::AbortJob { reason } => {
                 // Remove the job from active state and archive it
-                let mut jobs = self.state.write_jobs().await;
-                if let Some(job_state) = jobs.active.remove(&job_id) {
-                    jobs.archive.insert(job_id.clone(), job_state);
-                }
+                let new_counts = {
+                    let mut jobs = self.state.write_jobs().await;
+                    if let Some(job_state) = jobs.active.remove(&job_id) {
+                        jobs.archive.insert(job_id.clone(), job_state);
+                    }
+                    // Calculate new counts after state update
+                    JobCounts {
+                        active: jobs.active.len(),
+                        archive: jobs.archive.len(),
+                    }
+                };
+                // Notify listeners of count changes (after lock is released)
+                self.state.notify_counts_changed(new_counts);
+                
                 // Remove the effect from the effects map
                 let mut effects_map = self.state.write_effects().await;
                 effects_map.remove(&effect_id);

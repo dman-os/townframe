@@ -11,7 +11,27 @@ plugins {
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.composeHotReload)
+    alias(libs.plugins.gobleyCargo)
+    alias(libs.plugins.gobleyUniffi)
+    kotlin("plugin.atomicfu") version libs.versions.kotlin
 //    alias(libs.plugins.kotlinAndroid)
+}
+cargo {
+
+}
+uniffi {
+    // Generate the bindings using library mode.
+    generateFromLibrary {
+        // The UDL namespace as in the UDL file. Defaults to the library crate name.
+        namespace = "daybook_ffi"
+        // The Rust target of the build to use to generate the bindings. If unspecified, one of the available builds
+        // will be automatically selected.
+        // build = RustAndroidTarget.Arm64
+        // The variant of the build that makes the library to use. If unspecified, the UniFFI plugin automatically picks
+        // one.
+        // variant = Variant.Debug
+    }
+    formatCode = true
 }
 
 kotlin {
@@ -137,111 +157,111 @@ compose.desktop {
     }
 }
 
-// Build the Rust core for Android ABIs and copy .so into jniLibs
-val rustAndroidTargets = mapOf(
-    "arm64-v8a" to "aarch64-linux-android",
-    "armeabi-v7a" to "armv7-linux-androideabi",
-    "x86_64" to "x86_64-linux-android",
-    "x86" to "i686-linux-android",
-)
-
-// Detect which ABI we're actually building for
-val targetAbi = when {
-    // Check if we're building for a specific ABI (from Android Studio or command line)
-    project.hasProperty("android.injected.build.abi") -> {
-        val abi = project.findProperty("android.injected.build.abi") as String
-        // Handle comma-separated ABIs by taking the first one
-        abi.split(",").first().trim()
-    }
-    // Check if we're building for a specific device/emulator
-    project.hasProperty("android.injected.device.abi") -> {
-        val abi = project.findProperty("android.injected.device.abi") as String
-        abi.split(",").first().trim()
-    }
-    // Check if we're building for a specific target (from gradle properties)
-    project.hasProperty("target.abi") -> project.findProperty("target.abi") as String
-    // Default to arm64-v8a for modern devices
-    else -> "arm64-v8a"
-}
-
-val targetRustTriple = rustAndroidTargets[targetAbi] ?: "aarch64-linux-android"
-
-// Debug variant: build Rust in debug mode
-tasks.register<Exec>("buildRustAndroidDebug") {
-    group = "build"
-    description = "Build Rust daybook_ffi (debug) for Android ABIs"
-    
-    commandLine("cargo", "build", "-p", "daybook_ffi", "--target", targetRustTriple)
-    // Only pass essential environment variables for cargo
-    // environment("PATH", System.getenv("PATH"))
-    // environment("HOME", System.getenv("HOME"))
-    // environment("CARGO_HOME", System.getenv("CARGO_HOME"))
-    // environment("RUSTUP_HOME", System.getenv("RUSTUP_HOME"))
-    // environment("RUSTUP_TOOLCHAIN", System.getenv("RUSTUP_TOOLCHAIN"))
-}
-
-// Copy task for debug variant
-tasks.register<Copy>("copyRustAndroidDebug") {
-    group = "build"
-    description = "Copy Rust daybook_ffi (debug) to jniLibs"
-    
-    dependsOn("buildRustAndroidDebug")
-    
-    val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
-    val sourceSoFile = File(repoRoot, "target/$targetRustTriple/debug/libdaybook_ffi.so")
-    val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
-    val destSoFile = File(destDir, "libdaybook_ffi.so")
-    
-    // Only copy if source is newer than destination
-    onlyIf {
-        !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
-    }
-    
-    from(sourceSoFile)
-    into(destDir)
-    
-    // Declare inputs and outputs for proper up-to-date checking
-    inputs.file(sourceSoFile)
-    outputs.file(destSoFile)
-}
-
-// Release variant: build Rust in release mode
-tasks.register<Exec>("buildRustAndroidRelease") {
-    group = "build"
-    description = "Build Rust daybook_ffi (release) for Android ABIs"
-    
-    commandLine("cargo", "build", "-p", "daybook_ffi", "--release", "--target", targetRustTriple)
-}
-
-// Copy task for release variant
-tasks.register<Copy>("copyRustAndroidRelease") {
-    group = "build"
-    description = "Copy Rust daybook_ffi (release) to jniLibs"
-    
-    dependsOn("buildRustAndroidRelease")
-    
-    val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
-    val sourceSoFile = File(repoRoot, "target/$targetRustTriple/release/libdaybook_ffi.so")
-    val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
-    val destSoFile = File(destDir, "libdaybook_ffi.so")
-    
-    // Only copy if source is newer than destination
-    onlyIf {
-        !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
-    }
-    
-    from(sourceSoFile)
-    into(destDir)
-    
-    // Declare inputs and outputs for proper up-to-date checking
-    inputs.file(sourceSoFile)
-    outputs.file(destSoFile)
-}
-
-// Wire tasks to Android variants
-tasks.matching { it.name == "preDebugBuild" }.configureEach {
-    dependsOn("copyRustAndroidDebug")
-}
+// // Build the Rust core for Android ABIs and copy .so into jniLibs
+// val rustAndroidTargets = mapOf(
+//     "arm64-v8a" to "aarch64-linux-android",
+//     "armeabi-v7a" to "armv7-linux-androideabi",
+//     "x86_64" to "x86_64-linux-android",
+//     "x86" to "i686-linux-android",
+// )
+//
+// // Detect which ABI we're actually building for
+// val targetAbi = when {
+//     // Check if we're building for a specific ABI (from Android Studio or command line)
+//     project.hasProperty("android.injected.build.abi") -> {
+//         val abi = project.findProperty("android.injected.build.abi") as String
+//         // Handle comma-separated ABIs by taking the first one
+//         abi.split(",").first().trim()
+//     }
+//     // Check if we're building for a specific device/emulator
+//     project.hasProperty("android.injected.device.abi") -> {
+//         val abi = project.findProperty("android.injected.device.abi") as String
+//         abi.split(",").first().trim()
+//     }
+//     // Check if we're building for a specific target (from gradle properties)
+//     project.hasProperty("target.abi") -> project.findProperty("target.abi") as String
+//     // Default to arm64-v8a for modern devices
+//     else -> "arm64-v8a"
+// }
+//
+// val targetRustTriple = rustAndroidTargets[targetAbi] ?: "aarch64-linux-android"
+//
+// // Debug variant: build Rust in debug mode
+// tasks.register<Exec>("buildRustAndroidDebug") {
+//     group = "build"
+//     description = "Build Rust daybook_ffi (debug) for Android ABIs"
+//
+//     commandLine("cargo", "build", "-p", "daybook_ffi", "--target", targetRustTriple)
+//     // Only pass essential environment variables for cargo
+//     // environment("PATH", System.getenv("PATH"))
+//     // environment("HOME", System.getenv("HOME"))
+//     // environment("CARGO_HOME", System.getenv("CARGO_HOME"))
+//     // environment("RUSTUP_HOME", System.getenv("RUSTUP_HOME"))
+//     // environment("RUSTUP_TOOLCHAIN", System.getenv("RUSTUP_TOOLCHAIN"))
+// }
+//
+// // Copy task for debug variant
+// tasks.register<Copy>("copyRustAndroidDebug") {
+//     group = "build"
+//     description = "Copy Rust daybook_ffi (debug) to jniLibs"
+//
+//     dependsOn("buildRustAndroidDebug")
+//
+//     val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
+//     val sourceSoFile = File(repoRoot, "target/$targetRustTriple/debug/libdaybook_ffi.so")
+//     val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
+//     val destSoFile = File(destDir, "libdaybook_ffi.so")
+//
+//     // Only copy if source is newer than destination
+//     onlyIf {
+//         !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
+//     }
+//
+//     from(sourceSoFile)
+//     into(destDir)
+//
+//     // Declare inputs and outputs for proper up-to-date checking
+//     inputs.file(sourceSoFile)
+//     outputs.file(destSoFile)
+// }
+//
+// // Release variant: build Rust in release mode
+// tasks.register<Exec>("buildRustAndroidRelease") {
+//     group = "build"
+//     description = "Build Rust daybook_ffi (release) for Android ABIs"
+//
+//     commandLine("cargo", "build", "-p", "daybook_ffi", "--release", "--target", targetRustTriple)
+// }
+//
+// // Copy task for release variant
+// tasks.register<Copy>("copyRustAndroidRelease") {
+//     group = "build"
+//     description = "Copy Rust daybook_ffi (release) to jniLibs"
+//
+//     dependsOn("buildRustAndroidRelease")
+//
+//     val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
+//     val sourceSoFile = File(repoRoot, "target/$targetRustTriple/release/libdaybook_ffi.so")
+//     val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
+//     val destSoFile = File(destDir, "libdaybook_ffi.so")
+//
+//     // Only copy if source is newer than destination
+//     onlyIf {
+//         !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
+//     }
+//
+//     from(sourceSoFile)
+//     into(destDir)
+//
+//     // Declare inputs and outputs for proper up-to-date checking
+//     inputs.file(sourceSoFile)
+//     outputs.file(destSoFile)
+// }
+//
+// // Wire tasks to Android variants
+// tasks.matching { it.name == "preDebugBuild" }.configureEach {
+//     dependsOn("copyRustAndroidDebug")
+// }
 // tasks.matching { it.name == "preReleaseBuild" }.configureEach {
 //     dependsOn("buildRustAndroidRelease")
 // }

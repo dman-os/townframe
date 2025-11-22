@@ -57,7 +57,7 @@ impl WflowCtx {
             .map_err(|err| ferr!("error getting next op: {err}"))?;
         match state {
             host::StepState::Completed(completed) => {
-                let value: O = serde_json::from_slice(&completed.value).map_err(|err| {
+                let value: O = serde_json::from_str(&completed.value_json).map_err(|err| {
                     ferr!(
                         "error parsing replay step value as json for '{type_name}': {err:?}",
                         type_name = std::any::type_name::<O>()
@@ -67,7 +67,7 @@ impl WflowCtx {
             }
             host::StepState::Active(active_op_state) => {
                 let Json(result) = func()?;
-                let json = serde_json::to_vec(&result).map_err(|err| {
+                let json = serde_json::to_string(&result).map_err(|err| {
                     ferr!(
                         "error serializing result as json for '{type_name}': {err:?}",
                         type_name = std::any::type_name::<O>()
@@ -97,15 +97,15 @@ pub fn job_error_from_x(err: JobErrorX) -> types::JobError {
 }
 
 /// Helper function to handle workflow routing with JSON parsing/serialization
-/// 
+///
 /// This function takes a `RunArgs` and a handler function that routes `wflow_key` to
 /// handler functions. It handles:
 /// - JSON parsing of args
 /// - JSON serialization of results
 /// - Error conversion from `JobErrorX` to `JobError`
-/// 
+///
 /// # Example
-/// 
+///
 /// ```ignore
 /// impl wit::exports::townframe::wflow::bundle::Guest for Component {
 ///     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
@@ -121,47 +121,40 @@ pub fn job_error_from_x(err: JobErrorX) -> types::JobError {
 ///     }
 /// }
 /// ```
-pub fn run_wflow<F, R>(
-    args: types::RunArgs,
-    handler: F,
-) -> types::JobResult
+pub fn run_wflow<F, R>(args: types::RunArgs, handler: F) -> types::JobResult
 where
     F: FnOnce(WflowCtx, &str, &str) -> Result<R, JobErrorX>,
     R: Serialize,
 {
     let cx = WflowCtx { job: args.ctx };
-    
+
     // Parse args JSON
     let args_json = &args.args_json;
-    
+
     // Call handler and convert errors
-    let result = handler(cx, &args.wflow_key, args_json)
-        .map_err(job_error_from_x);
-    
+    let result = handler(cx, &args.wflow_key, args_json).map_err(job_error_from_x);
+
     // Serialize result
     match result {
-        Ok(value) => {
-            serde_json::to_string(&value)
-                .map_err(|err| {
-                    types::JobError::Terminal(
-                        serde_json::to_string(&json!({
-                            "msg": format!(
-                                "error serializing result to json for {key}: {err}",
-                                key = args.wflow_key
-                            )
-                        }))
-                        .expect(ERROR_JSON),
+        Ok(value) => serde_json::to_string(&value).map_err(|err| {
+            types::JobError::Terminal(
+                serde_json::to_string(&json!({
+                    "msg": format!(
+                        "error serializing result to json for {key}: {err}",
+                        key = args.wflow_key
                     )
-                })
-        }
+                }))
+                .expect(ERROR_JSON),
+            )
+        }),
         Err(err) => types::JobResult::Err(err),
     }
 }
 
 /// Macro to simplify workflow routing with automatic JSON parsing
-/// 
+///
 /// # Example
-/// 
+///
 /// ```ignore
 /// impl wit::exports::townframe::wflow::bundle::Guest for Component {
 ///     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
@@ -179,7 +172,7 @@ macro_rules! route_wflows {
             use $crate::{run_wflow, WflowCtx, JobErrorX};
             use serde_json::json;
             use color_eyre::eyre::format_err as ferr;
-            
+
             run_wflow($args, |cx, key, args_json| {
                 match key {
                     $(

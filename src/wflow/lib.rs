@@ -2,8 +2,11 @@ mod interlude {
     pub use utils_rs::prelude::*;
 }
 
-#[cfg(test)]
-mod test;
+#[cfg(any(test, feature = "test-harness"))]
+pub mod test;
+
+#[cfg(any(test, feature = "test-harness"))]
+pub use test::WflowTestContext;
 
 pub mod ingress;
 pub mod kvstore;

@@ -32,15 +32,7 @@ async fn test_fails_once() -> Res<()> {
     tracing::info!("wait_until_no_active_jobs completed, getting snapshot");
 
     // Snapshot the full partition log
-    let log_snapshot = test_cx.get_partition_log_snapshot().await?;
-    insta::with_settings!({
-        filters => vec![
-            (r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", "[timesamp]"),
-            (r"\w*Location.*:\d+:\d+", "[location]"),
-        ]
-    }, {
-        insta::assert_yaml_snapshot!("fails_once_partition_log", log_snapshot);
-    });
+    test_cx.assert_partition_log_snapshot("fails_once_partition_log").await?;
 
     // Cleanup
     test_cx.close().await?;

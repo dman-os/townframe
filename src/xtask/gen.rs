@@ -68,11 +68,18 @@ package townframe:btress-api;"#
                 ..default()
             },
         ),
-        ("../daybook_wflows/gen/mod.rs", RustAttrs { ..default() }),
+        (
+            "../daybook_wflows/gen/mod.rs",
+            RustAttrs {
+                wit: true,
+                ..default()
+            },
+        ),
         (
             "../daybook_api/gen/mod.rs",
             RustAttrs {
                 garde: true,
+                wit: true,
                 ..default()
             },
         ),
@@ -96,6 +103,7 @@ package townframe:btress-api;"#
             "../daybook_http/gen/mod.rs",
             RustAttrs {
                 utoipa: true,
+                wit: true,
                 ..default()
             },
         ),
@@ -181,6 +189,8 @@ pub struct RustAttrs {
     pub garde: bool,
     /// If true, emit Patch derive and helpers
     pub patch: bool,
+    /// If true, use WIT types (Uuid, OffsetDateTime) instead of API types (String, Datetime)
+    pub wit: bool,
 }
 
 impl Default for RustAttrs {
@@ -192,6 +202,7 @@ impl Default for RustAttrs {
             uniffi: false,
             garde: false,
             patch: false,
+            wit: false,
         }
     }
 }

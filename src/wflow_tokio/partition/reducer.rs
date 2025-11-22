@@ -9,7 +9,7 @@ use utils_rs::prelude::tokio::task::JoinHandle;
 
 use wflow_core::partition::{effects, job_events, log};
 
-use crate::partition::{state::PartitionWorkingState, PartitionCtx, PartitionLogRef};
+use crate::partition::{state::PartitionWorkingState, state::JobCounts, PartitionCtx, PartitionLogRef};
 use wflow_core::snapstore::SnapStore;
 
 pub struct TokioPartitionReducerHandle {
@@ -107,7 +107,9 @@ pub fn start_tokio_partition_reducer(
 
             eyre::Ok(())
         }
-    };
+    }
+    .boxed()
+    .instrument(tracing::info_span!("TokioPartitionReducer"));
     let join_handle = tokio::spawn(fut);
 
     TokioPartitionReducerHandle {
@@ -161,6 +163,7 @@ impl TokioPartitionReducer {
     }
 
     async fn check_and_snapshot(&mut self) -> Res<()> {
+        tracing::info!("snapshotting state");
         let entry_id = self.state.last_applied_entry_id.load(Ordering::SeqCst);
 
         // Only snapshot if we haven't already snapshotted this entry
@@ -189,6 +192,7 @@ impl TokioPartitionReducer {
         entry_id: u64,
         entry: log::NewPartitionEffectsLogEntry,
     ) -> Res<()> {
+        tracing::info!(%entry_id, ?entry, "reducing partition event");
         for (ii, effect) in entry.effects.into_iter().enumerate() {
             let id = effects::EffectId {
                 entry_id,
@@ -208,16 +212,24 @@ impl TokioPartitionReducer {
     }
 
     async fn handle_job_event(&mut self, entry_id: u64, evt: job_events::JobEvent) -> Res<()> {
-        tracing::debug!(%entry_id, ?evt, "reducing job event XXX");
-        {
+        tracing::warn!(%entry_id, ?evt, "reducing job event XXX");
+        let new_counts = {
             let mut jobs = self.state.write_jobs().await;
             wflow_core::partition::reduce::reduce_job_event(
                 &mut jobs,
                 evt,
                 &mut self.event_effects,
             );
-        }
+            // Calculate new counts after state update
+            JobCounts {
+                active: jobs.active.len(),
+                archive: jobs.archive.len(),
+            }
+        };
+        // Notify listeners of count changes (after lock is released)
+        self.state.notify_counts_changed(new_counts);
 
+        tracing::warn!(%entry_id, ?self.event_effects, "job event effects XXX");
         if !self.event_effects.is_empty() {
             // NOTE: this little dance gives as arena like semantics
             // without Drop issues

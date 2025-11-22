@@ -1,15 +1,16 @@
 //! @generated
-use super::*;
+use super::*;   
 
 pub mod user {
     use super::*;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
     pub struct User {
-        pub id: String,
-        pub created_at: Datetime,
-        pub updated_at: Datetime,
+        pub id: Uuid,
+        #[serde(with = "utils_rs::codecs::sane_iso8601")]
+        pub created_at: OffsetDateTime,
+        #[serde(with = "utils_rs::codecs::sane_iso8601")]
+        pub updated_at: OffsetDateTime,
         pub email: Option<String>,
         pub username: String,
     }
@@ -23,7 +24,6 @@ pub mod user {
         pub type Output = User;
 
         #[derive(Debug, Clone, garde::Validate, Serialize, Deserialize)]
-        #[serde(rename_all = "camelCase")]
         pub struct Input {
             #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 25))]
             pub username: String,
@@ -34,14 +34,12 @@ pub mod user {
         }
 
         #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]
-        #[serde(rename_all = "camelCase", tag = "error")]
         /// Username occupied: {username}
         pub struct ErrorUsernameOccupied {
             pub username: String,
         }
 
         #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]
-        #[serde(rename_all = "camelCase", tag = "error")]
         /// Email occupied: {email:?}
         pub struct ErrorEmailOccupied {
             /// example: alice@example.com
@@ -49,7 +47,6 @@ pub mod user {
         }
 
         #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]
-        #[serde(rename_all = "camelCase", tag = "error")]
         pub enum Error {
             /// Username occupied {0}
             UsernameOccupied(#[from] ErrorUsernameOccupied),
@@ -61,4 +58,5 @@ pub mod user {
             Internal(#[from] ErrorInternal),
         }
     }
+
 }

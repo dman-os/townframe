@@ -14,6 +14,11 @@ pub fn setup_tracing() -> eyre::Result<()> {
 
     let filter = filter.unwrap_or_else(|| "info".into());
 
+    // #[cfg(feature = "console-subscriber")]
+    // console_subscriber::init();
+    // #[cfg(feature = "console-subscriber")]
+    // return Ok(());
+
     use tracing_subscriber::prelude::*;
     let registry = tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(filter))
@@ -27,8 +32,8 @@ pub fn setup_tracing() -> eyre::Result<()> {
     #[cfg(target_os = "android")]
     let registry = registry.with(tracing_android::layer("org.example.daybook")?);
 
-    #[cfg(feature = "console-subscriber")]
-    let registry = registry.with(console_subscriber::spawn());
+    // #[cfg(feature = "console-subscriber")]
+    // let registry = registry.with(console_subscriber::spawn());
 
     registry.try_init().map_err(|err| eyre::eyre!(err))?;
 

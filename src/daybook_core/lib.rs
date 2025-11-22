@@ -24,6 +24,9 @@ pub mod tables;
 pub mod wflows;
 
 #[cfg(test)]
+mod e2e;
+
+#[cfg(test)]
 mod tincans;
 
 #[cfg(feature = "uniffi")]
