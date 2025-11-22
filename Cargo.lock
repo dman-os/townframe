@@ -1655,7 +1655,6 @@ dependencies = [
  "uniffi",
  "url",
  "utils_rs",
- "wash-runtime",
  "wflow",
 ]
 
@@ -1752,6 +1751,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.17",
  "utils_rs",
+ "wflow_sdk",
  "wit-bindgen 0.45.1",
 ]
 
@@ -5370,7 +5370,7 @@ dependencies = [
  "displaydoc",
  "serde",
  "thiserror 2.0.17",
- "utils_rs",
+ "wflow_sdk",
  "wit-bindgen 0.45.1",
 ]
 
@@ -7233,6 +7233,19 @@ dependencies = [
  "thiserror 2.0.17",
  "tower",
  "utils_rs",
+ "wit-bindgen 0.45.1",
+]
+
+[[package]]
+name = "wflow_sdk"
+version = "0.1.0"
+dependencies = [
+ "api_utils_rs",
+ "color-eyre",
+ "displaydoc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
  "wit-bindgen 0.45.1",
 ]
 

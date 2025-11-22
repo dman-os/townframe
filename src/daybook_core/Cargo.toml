@@ -62,8 +62,6 @@ sqlx = { workspace = true, features = ["sqlite"] }
 pastey = "0.1"
 directories = "6.0.0"
 
-wash-runtime.workspace = true
-
 [build-dependencies]
 uniffi = { workspace = true, features = [ "build" ], optional = true }
 

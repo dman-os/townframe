@@ -34,7 +34,7 @@ expression: log_snapshot
           result:
             WflowErr:
               Transient:
-                error_json: "{\"msg\":\"first run, woohoo!\\n\\nLocation:\\n    src/test_wflows/lib.rs:158:31\"}"
+                error_json: "{\"msg\":\"first run, woohoo!\\n\\[location]\"}"
                 retry_policy: ~
 - - 3
   - NewPartitionEffects:

@@ -46,26 +46,3 @@ uniffi::custom_type!(Uuid, Vec<u8>, {
             .map_err(|err| uniffi::deps::anyhow::anyhow!(err))
     }
 });
-
-mod wasm {
-    use crate::interlude::*;
-
-    use wash_runtime::*;
-
-    async fn main() -> Res<()> {
-        let host = host::HostBuilder::new()
-            .with_engine({ engine::Engine::builder().build().to_eyre()? })
-            .with_plugin({ Arc::new(plugin::wasi_config::RuntimeConfig::default()) })
-            .to_eyre()?
-            .build()
-            .to_eyre()?;
-
-        let host = host.start().await.to_eyre()?;
-
-        Ok(())
-    }
-
-    mod wflows {
-        use crate::interlude::*;
-    }
-}

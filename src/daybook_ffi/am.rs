@@ -32,7 +32,10 @@ pub async fn init_from_globals(cx: &Ctx) -> Res<()> {
             handle_app,
             version_updates::app::version_latest as fn() -> Res<Vec<u8>>,
         ),
-        (handle_drarwer, version_updates::drawer::version_latest),
+        (
+            handle_drarwer,
+            daybook_core::drawer::version_updates::version_latest,
+        ),
     ] {
         let handle = match handle {
             Some(handle) => handle,

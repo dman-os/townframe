@@ -8,8 +8,8 @@ crate-type = ["cdylib"]
 path = "lib.rs"
 
 [dependencies]
-utils_rs = { workspace = true }
 api_utils_rs.workspace = true
+wflow_sdk.workspace = true
 
 # serde
 serde.workspace = true

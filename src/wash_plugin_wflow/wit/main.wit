@@ -5,11 +5,7 @@ interface types {
     type json = string;
 
     type job-id = string;
-}
 
-// for a component that implements wflows
-interface bundle {
-    use types.{json, job-id};
 
     record job-ctx {
         job-id: job-id,
@@ -38,6 +34,11 @@ interface bundle {
         wflow-key: string,
         args-json: json
     }
+}
+
+// for a component that implements wflows
+interface bundle {
+    use types.{run-args, job-result};
 
     run: func(cx: run-args) -> job-result;
 }

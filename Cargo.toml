@@ -13,6 +13,7 @@ members = [
   # "./src/daybook_restate/",
   "./src/daybook_sync",
   "./src/daybook_wflows/",
+  "./src/wflow_sdk",
   "./src/macros",
   # "./src/sdk-shared-core/",
   "./src/tests_http",
@@ -51,6 +52,7 @@ macros = { path = "./src/macros" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 wflow_core = { path = "./src/wflow_core", default-features = false }
 wflow_tokio = { path = "./src/wflow_tokio", default-features = false }
+wflow_sdk = { path = "./src/wflow_sdk", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 wash_plugin_am_repo = { path = "./src/wash_plugin_am_repo" }
 

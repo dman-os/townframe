@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
 mod fails_once;
+#[allow(unused)]
 mod keyvalue_plugin;
 
 use utils_rs::am::AmCtx;

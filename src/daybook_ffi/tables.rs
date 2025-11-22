@@ -7,7 +7,7 @@ use daybook_core::tables::{Panel, Tab, Table, TablesEvent, TablesPatches, Tables
 #[derive(uniffi::Object)]
 struct TablesRepoFfi {
     fcx: SharedFfiCtx,
-    repo: TablesRepo,
+    repo: Arc<TablesRepo>,
 }
 
 impl daybook_core::repos::Repo for TablesRepoFfi {

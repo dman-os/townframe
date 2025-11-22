@@ -71,7 +71,9 @@ impl Config {
                 .ok_or_eyre("failed to get xdg directories")?;
             (
                 utils_rs::am::Config {
-                    storage_dir: dirs.data_dir().join("samod"),
+                    storage: utils_rs::am::StorageConfig::Disk {
+                        path: dirs.data_dir().join("samod"),
+                    },
                     peer_id: "daybook_client".to_string(),
                 },
                 sql::Config {

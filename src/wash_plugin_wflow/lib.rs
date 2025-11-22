@@ -46,6 +46,7 @@ mod binds_service {
 }
 use binds_service::exports::townframe::wflow::bundle;
 use binds_service::townframe::wflow::host;
+use binds_service::townframe::wflow::types;
 
 #[derive(educe::Educe)]
 #[educe(Debug)]
@@ -92,7 +93,7 @@ enum JobTrap {
         value: Vec<u8>,
         attempt_id: u64,
     },
-    RunComplete(Result<String, bundle::JobError>),
+    RunComplete(Result<String, types::JobError>),
 }
 
 impl host::Host for WashCtx {
@@ -458,7 +459,7 @@ impl service::WflowServiceHost for TownframewflowPlugin {
             .to_eyre()
             .wrap_err("error creating component store")?;
         let bundle_args = bundle::RunArgs {
-            ctx: bundle::JobCtx {
+            ctx: types::JobCtx {
                 job_id: job_id.to_string(),
             },
             wflow_key: journal.wflow.key.clone(),
@@ -497,16 +498,16 @@ impl service::WflowServiceHost for TownframewflowPlugin {
         // FIXME: unite type hierarichies
         let res = match trap {
             JobTrap::RunComplete(Err(err)) => match err {
-                bundle::JobError::Transient(err) => Err(job_events::JobError::Transient {
+                types::JobError::Transient(err) => Err(job_events::JobError::Transient {
                     error_json: err.error_json.into(),
                     retry_policy: err.retry_policy.map(|policy| match policy {
-                        bundle::RetryPolicy::Immediate => {
+                        types::RetryPolicy::Immediate => {
                             wflow_core::partition::RetryPolicy::Immediate
                         }
                     }),
                 }
                 .into()),
-                bundle::JobError::Terminal(err_json) => Err(job_events::JobError::Terminal {
+                types::JobError::Terminal(err_json) => Err(job_events::JobError::Terminal {
                     error_json: err_json.into(),
                 }
                 .into()),

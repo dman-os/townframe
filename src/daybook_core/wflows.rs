@@ -2,8 +2,6 @@ use crate::interlude::*;
 
 use crate::drawer::{DrawerEvent, DrawerRepo};
 use crate::gen::doc::DocAddedEvent;
-use samod::DocumentId;
-use std::str::FromStr;
 
 pub use wflow::{PartitionLogIngress, WflowIngress};
 

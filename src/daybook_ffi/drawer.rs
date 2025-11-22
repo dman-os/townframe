@@ -8,7 +8,7 @@ use daybook_core::gen::doc::{Doc, DocId, DocPatch};
 #[derive(uniffi::Object)]
 struct DrawerRepoFfi {
     fcx: SharedFfiCtx,
-    repo: DrawerRepo,
+    repo: Arc<DrawerRepo>,
 }
 
 impl daybook_core::repos::Repo for DrawerRepoFfi {
