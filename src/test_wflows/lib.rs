@@ -43,6 +43,7 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
         wflow_sdk::route_wflows!(args, {
             "fails_once" => |cx, args: FailsOnceArgs| fails_once(cx, args),
+            "fails_until_told" => |cx, args: FailsUntilToldArgs| fails_until_told(cx, args),
         })
     }
 }
@@ -85,6 +86,44 @@ fn fails_once(cx: WflowCtx, args: FailsOnceArgs) -> Result<(), JobErrorX> {
                     Err(JobErrorX::Terminal(ferr!("unexpected value: {number}")))
                 } else {
                     Ok(Json(()))
+                }
+            }
+        }
+    })?;
+
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FailsUntilToldArgs {
+    key: String,
+}
+
+fn fails_until_told(cx: WflowCtx, args: FailsUntilToldArgs) -> Result<(), JobErrorX> {
+    use api_utils_rs::wit::wasi::keyvalue::store;
+
+    // Check if we should succeed by reading from keyvalue store
+    cx.effect(|| {
+        let bucket = store::open("default")
+            .map_err(|err| JobErrorX::Terminal(ferr!("error opening bucket: {:?}", err)))?;
+        let key = &args.key;
+        match bucket.get(key) {
+            Err(err) => Err(JobErrorX::Terminal(ferr!(
+                "error getting keyvalue: {:?}",
+                err
+            ))),
+            Ok(None) => {
+                // Key doesn't exist, fail transiently
+                Err(ferr!("waiting for flag to be set").into())
+            }
+            Ok(Some(bytes)) => {
+                // Check if the value is true (1 byte with value 1)
+                if bytes.len() == 1 && bytes[0] == 1 {
+                    // Flag is set, succeed
+                    Ok(Json(()))
+                } else {
+                    // Flag is not set or wrong value, fail transiently
+                    Err(ferr!("flag not set yet").into())
                 }
             }
         }

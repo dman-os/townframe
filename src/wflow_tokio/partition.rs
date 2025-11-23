@@ -73,12 +73,14 @@ impl PartitionLogRef {
             log,
         }
     }
+    #[tracing::instrument(skip(self))]
     pub async fn append(
         &mut self,
-        evt: &wflow_core::partition::log::PartitionLogEntry,
+        entry: &wflow_core::partition::log::PartitionLogEntry,
     ) -> Res<u64> {
         self.buffer.clear();
-        serde_json::to_writer(&mut self.buffer, evt).expect(ERROR_JSON);
+        debug!("appending");
+        serde_json::to_writer(&mut self.buffer, entry).expect(ERROR_JSON);
         self.log.append(&self.buffer).await
     }
 }
@@ -126,14 +128,15 @@ impl Drop for TokioPartitionWorkerHandle {
 pub async fn start_tokio_worker(
     pcx: PartitionCtx,
     working_state: Arc<state::PartitionWorkingState>,
-    snap_store: Option<Arc<dyn SnapStore>>,
+    snap_store: Arc<dyn SnapStore>,
 ) -> TokioPartitionWorkerHandle {
     let cancel_token = CancellationToken::new();
     let mut effect_workers = vec![];
     // Shared channel for effect scheduling
     let (effect_tx, effect_rx) = async_channel::unbounded::<effects::EffectId>();
-    for _ii in 0..8 {
+    for ii in 0..8 {
         effect_workers.push(effect_worker::start_tokio_effect_worker(
+            ii,
             pcx.clone(),
             working_state.clone(),
             effect_rx.clone(),

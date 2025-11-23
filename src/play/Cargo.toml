@@ -1,0 +1,27 @@
+[package]
+name = "play"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# wasm - using wasmtime 19 for Preview1 support (like pglite-oxide)
+wasmtime = "38.0.4"
+wasmtime-wasi = { version = "38.0.4" }
+cap-std = "3"
+
+# async
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+futures.workspace = true
+
+
+# error
+anyhow.workspace = true
+thiserror.workspace = true
+
+# logging
+tracing.workspace = true
+tracing-subscriber.workspace = true

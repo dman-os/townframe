@@ -3,8 +3,6 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
-import gobley.gradle.cargo.dsl.*
-import gobley.gradle.GobleyHost
 import java.io.File
 
 plugins {
@@ -15,7 +13,7 @@ plugins {
     alias(libs.plugins.composeHotReload)
     // alias(libs.plugins.gobleyCargo)
     // alias(libs.plugins.gobleyUniffi)
-    kotlin("plugin.atomicfu") version libs.versions.kotlin
+    // kotlin("plugin.atomicfu") version libs.versions.kotlin
     // alias(libs.plugins.kotlinAndroid)
 }
 
@@ -84,6 +82,8 @@ kotlin {
             implementation(libs.androidx.lifecycle.viewmodel)
             implementation(libs.androidx.lifecycle.runtimeCompose)
             implementation("${libs.jna.get()}@aar")
+            implementation(libs.camerak)
+            implementation(libs.camerak.image.saver)
         }
         commonMain.dependencies {
             implementation(compose.runtime)
@@ -262,6 +262,13 @@ tasks.register<Copy>("copyRustAndroidRelease") {
 tasks.matching { it.name == "preDebugBuild" }.configureEach {
     dependsOn("copyRustAndroidDebug")
 }
+// Only build release Rust when actually assembling/building release (not during check)
+// The check task builds all variants but we only need debug Rust for testing
 tasks.matching { it.name == "preReleaseBuild" }.configureEach {
-    dependsOn("buildRustAndroidRelease")
+    val taskNames = gradle.startParameter.taskNames
+    val isCheckTask = taskNames.contains("check")
+    // Skip release Rust build during check - we only need debug for testing
+    if (!isCheckTask) {
+        dependsOn("buildRustAndroidRelease")
+    }
 }

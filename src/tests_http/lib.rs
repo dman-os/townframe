@@ -71,7 +71,9 @@ impl Drop for TestContext {
 
 #[allow(unused)]
 async fn test_cx(test_name: &'static str) -> Res<TestContext> {
-    utils_rs::testing::load_envs_once();
+    tokio::task::block_in_place(|| {
+        utils_rs::testing::load_envs_once();
+    });
     let ((btress_name, btress_db, btress_http), (daybook_name, daybook_db, daybook_http)) = tokio::try_join!(
         async {
             let app_name = "btress";

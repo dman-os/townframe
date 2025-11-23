@@ -6,6 +6,10 @@ pub struct EffectId {
     pub effect_idx: u64,
 }
 
+pub enum EffectCommand {
+    Schedule(PartitionEffect),
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PartitionEffect {
     pub job_id: Arc<str>,

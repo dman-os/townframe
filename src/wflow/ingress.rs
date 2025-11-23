@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use wflow_core::metastore;
-use wflow_core::partition::job_events::{JobEvent, JobEventDeets, JobInitEvent};
+use wflow_core::partition::job_events::JobInitEvent;
 use wflow_core::partition::log::PartitionLogEntry;
 use wflow_tokio::partition::PartitionLogRef;
 
@@ -57,19 +57,14 @@ impl WflowIngress for PartitionLogIngress {
             .wrap_err("error getting workflow metadata")?
             .ok_or_eyre(format!("workflow not found: {wflow_key}"))?;
 
-        // Create job init event
-        let init_event = JobInitEvent {
+        // Append to partition log
+        let mut log = self.log.clone();
+        log.append(&PartitionLogEntry::JobInit(JobInitEvent {
             args_json: args_json.into(),
             override_wflow_retry_policy: retry_policy,
             wflow: wflow_meta,
-        };
-
-        // Append to partition log
-        let mut log = self.log.clone();
-        log.append(&PartitionLogEntry::JobEvent(JobEvent {
             timestamp: OffsetDateTime::now_utc(),
             job_id,
-            deets: JobEventDeets::Init(init_event),
         }))
         .await?;
 

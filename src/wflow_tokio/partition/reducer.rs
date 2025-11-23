@@ -7,9 +7,11 @@ use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 use utils_rs::prelude::tokio::task::JoinHandle;
 
-use wflow_core::partition::{effects, job_events, log};
+use wflow_core::partition::{effects, log};
 
-use crate::partition::{state::PartitionWorkingState, state::JobCounts, PartitionCtx, PartitionLogRef};
+use crate::partition::{
+    state::JobCounts, state::PartitionWorkingState, PartitionCtx, PartitionLogRef,
+};
 use wflow_core::snapstore::SnapStore;
 
 pub struct TokioPartitionReducerHandle {
@@ -41,9 +43,21 @@ pub fn start_tokio_partition_reducer(
     state: Arc<PartitionWorkingState>,
     effect_tx: async_channel::Sender<effects::EffectId>,
     cancel_token: CancellationToken,
-    snap_store: Option<Arc<dyn SnapStore>>,
+    snap_store: Arc<dyn SnapStore>,
 ) -> TokioPartitionReducerHandle {
-    let start_offset = state.last_applied_entry_id.load(Ordering::Relaxed);
+    let start_offset = {
+        let last_applied = state.last_applied_entry_id.load(Ordering::Relaxed);
+        if last_applied == 0 {
+            0
+        } else {
+            last_applied.saturating_add(1)
+        }
+    };
+    let span = tracing::info_span!(
+        "TokioPartitionReducer",
+        partition_id = ?pcx.id,
+    );
+
     let fut = {
         let cancel_token = cancel_token.clone();
         async move {
@@ -54,28 +68,46 @@ pub fn start_tokio_partition_reducer(
                 new_effects: default(),
                 event_effects: default(),
                 effect_tx,
-                snap_store,
+                snapstore: snap_store,
                 entries_since_snapshot: 0,
                 last_snapshot_time: OffsetDateTime::now_utc(),
                 last_snapshotted_entry_id: start_offset.saturating_sub(1),
             };
 
-            // Schedule any active effects found in the effect state
-            {
+            let mut pending_effects_at_start = {
                 let effects = worker.state.read_effects().await;
-                for effect_id in effects.keys() {
-                    worker
-                        .effect_tx
-                        .send(effect_id.clone())
-                        .await
-                        .wrap_err("failed to schedule effect at startup")?;
-                }
-            }
+                effects.keys().cloned().collect::<Vec<_>>()
+            };
+            let latest_entry_id_at_start = pcx
+                .log
+                .latest_id()
+                .await
+                .wrap_err("error getting latest id from log")?;
 
             let mut stream = pcx.log.tail(start_offset).await;
             let mut snapshot_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-            snapshot_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            snapshot_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            let mut cur_entry_id = start_offset;
+
+            debug!("starting");
             loop {
+                // schedule any active effects found in the effect state
+                // but only after we process and pending effects at start
+                // in case there were effect resutls we haven't observed
+                // FIXME: not elegant!
+                // there has to be a better way to configure this log approach
+                // to avoid such errors
+                if cur_entry_id == latest_entry_id_at_start {
+                    for effect_id in pending_effects_at_start.drain(..) {
+                        info!(?effect_id, "rescheduling effect back after re-boot");
+                        worker
+                            .effect_tx
+                            .send(effect_id.clone())
+                            .await
+                            .wrap_err("failed to schedule effect at startup")?;
+                    }
+                }
                 // Poll the stream with cancellation check
                 tokio::select! {
                     biased;
@@ -83,6 +115,7 @@ pub fn start_tokio_partition_reducer(
                         break;
                     }
                     _ = snapshot_interval.tick() => {
+                        debug!("taking interval snapshot");
                         // Time-based snapshot check
                         worker.check_and_snapshot().await?;
                     }
@@ -90,16 +123,18 @@ pub fn start_tokio_partition_reducer(
                     // that needs to be scheduled
                     entry = stream.next(), if worker.new_effects.len() < 128 => {
                         let Some(entry) = entry else {
+                            warn!("log stream closed");
                             // Stream ended
                             break;
                         };
                         let (entry_id, entry) = entry?;
                         worker.reduce(entry_id, entry).await?;
+                        cur_entry_id = entry_id;
                     }
                 }
             }
 
-            // Save final snapshot on shutdown
+            debug!("shutting down, taking final snapshot");
             worker
                 .check_and_snapshot()
                 .await
@@ -109,7 +144,7 @@ pub fn start_tokio_partition_reducer(
         }
     }
     .boxed()
-    .instrument(tracing::info_span!("TokioPartitionReducer"));
+    .instrument(span);
     let join_handle = tokio::spawn(fut);
 
     TokioPartitionReducerHandle {
@@ -125,26 +160,27 @@ struct TokioPartitionReducer {
     new_effects: Vec<effects::EffectId>,
     event_effects: Vec<effects::PartitionEffect>,
     effect_tx: async_channel::Sender<effects::EffectId>,
-    snap_store: Option<Arc<dyn SnapStore>>,
+    snapstore: Arc<dyn SnapStore>,
     entries_since_snapshot: u64,
     last_snapshot_time: OffsetDateTime,
     last_snapshotted_entry_id: u64,
 }
 
 impl TokioPartitionReducer {
+    #[tracing::instrument(skip(self, entry))]
     async fn reduce(&mut self, entry_id: u64, entry: Arc<[u8]>) -> Res<()> {
         {
             let old = self.state.last_applied_entry_id.load(Ordering::Relaxed);
             if old > 0 {
-                debug_assert!(entry_id > old, "invariant {entry_id} <= {old}");
+                assert!(entry_id > old, "invariant {entry_id} <= {old}");
             }
         }
         let evt: log::PartitionLogEntry = serde_json::from_slice(&entry).expect(ERROR_JSON);
         match evt {
-            log::PartitionLogEntry::JobEvent(job_event) => {
-                self.handle_job_event(entry_id, job_event).await?;
+            log::PartitionLogEntry::JobEffectResult(..) | log::PartitionLogEntry::JobInit(..) => {
+                self.handle_job_event(entry_id, evt).await?;
             }
-            log::PartitionLogEntry::NewPartitionEffects(effects) => {
+            log::PartitionLogEntry::JobPartitionEffects(effects) => {
                 self.handle_partition_effect(entry_id, effects).await?;
             }
         };
@@ -163,26 +199,23 @@ impl TokioPartitionReducer {
     }
 
     async fn check_and_snapshot(&mut self) -> Res<()> {
-        tracing::info!("snapshotting state");
-        let entry_id = self.state.last_applied_entry_id.load(Ordering::SeqCst);
-
+        let entry_id = self.state.last_applied_entry_id.load(Ordering::Relaxed);
         // Only snapshot if we haven't already snapshotted this entry
         if entry_id > self.last_snapshotted_entry_id {
-            if let Some(ref snap_store) = self.snap_store {
-                let (jobs, effects) = {
-                    let jobs_guard = self.state.read_jobs().await;
-                    let effects_guard = self.state.read_effects().await;
-                    (jobs_guard.clone(), effects_guard.clone())
-                };
-                let snapshot = wflow_core::snapstore::PartitionSnapshot { jobs, effects };
-                snap_store
-                    .save_snapshot(self.pcx.id, entry_id, &snapshot)
-                    .await
-                    .wrap_err("failed to save snapshot")?;
-                self.entries_since_snapshot = 0;
-                self.last_snapshot_time = OffsetDateTime::now_utc();
-                self.last_snapshotted_entry_id = entry_id;
-            }
+            debug!(latest_entry_id = ?entry_id, "snapshotting state");
+            let (jobs, effects) = {
+                let jobs_guard = self.state.read_jobs().await;
+                let effects_guard = self.state.read_effects().await;
+                (jobs_guard.clone(), effects_guard.clone())
+            };
+            let snapshot = wflow_core::snapstore::PartitionSnapshot { jobs, effects };
+            self.snapstore
+                .save_snapshot(self.pcx.id, entry_id, &snapshot)
+                .await
+                .wrap_err("failed to save snapshot")?;
+            self.entries_since_snapshot = 0;
+            self.last_snapshot_time = OffsetDateTime::now_utc();
+            self.last_snapshotted_entry_id = entry_id;
         }
         Ok(())
     }
@@ -190,9 +223,9 @@ impl TokioPartitionReducer {
     async fn handle_partition_effect(
         &mut self,
         entry_id: u64,
-        entry: log::NewPartitionEffectsLogEntry,
+        entry: log::JobPartitionEffectsLogEntry,
     ) -> Res<()> {
-        tracing::info!(%entry_id, ?entry, "reducing partition event");
+        debug!(?entry, "reducing partition event");
         for (ii, effect) in entry.effects.into_iter().enumerate() {
             let id = effects::EffectId {
                 entry_id,
@@ -206,20 +239,41 @@ impl TokioPartitionReducer {
         }
         // Send all effects to the channel
         for effect_id in self.new_effects.drain(..) {
+            debug!(?effect_id, "scheduling new effect");
             self.effect_tx.send(effect_id).await?;
         }
         Ok(())
     }
 
-    async fn handle_job_event(&mut self, entry_id: u64, evt: job_events::JobEvent) -> Res<()> {
-        tracing::warn!(%entry_id, ?evt, "reducing job event XXX");
+    #[tracing::instrument(skip(self, entry_id))]
+    async fn handle_job_event(&mut self, entry_id: u64, evt: log::PartitionLogEntry) -> Res<()> {
+        debug!("reducing job event");
+
         let new_counts = {
             let mut jobs = self.state.write_jobs().await;
-            wflow_core::partition::reduce::reduce_job_event(
-                &mut jobs,
-                evt,
-                &mut self.event_effects,
-            );
+            match evt {
+                log::PartitionLogEntry::JobInit(evt) => {
+                    wflow_core::partition::reduce::reduce_job_init_event(
+                        &mut jobs,
+                        &mut self.event_effects,
+                        evt,
+                    )
+                }
+                log::PartitionLogEntry::JobEffectResult(evt) => {
+                    {
+                        let mut effects = self.state.write_effects().await;
+                        effects.remove(&evt.effect_id);
+                    }
+                    wflow_core::partition::reduce::reduce_job_run_event(
+                        &mut jobs,
+                        &mut self.event_effects,
+                        evt,
+                    )
+                }
+                log::PartitionLogEntry::JobPartitionEffects(_) => {
+                    unreachable!()
+                }
+            };
             // Calculate new counts after state update
             JobCounts {
                 active: jobs.active.len(),
@@ -229,21 +283,20 @@ impl TokioPartitionReducer {
         // Notify listeners of count changes (after lock is released)
         self.state.notify_counts_changed(new_counts);
 
-        tracing::warn!(%entry_id, ?self.event_effects, "job event effects XXX");
         if !self.event_effects.is_empty() {
             // NOTE: this little dance gives as arena like semantics
             // without Drop issues
-            let mut entry = log::NewPartitionEffectsLogEntry {
+            let mut entry = log::JobPartitionEffectsLogEntry {
                 source_entry_id: entry_id,
                 effects: vec![],
             };
             std::mem::swap(&mut self.event_effects, &mut entry.effects);
 
-            let mut entry = log::PartitionLogEntry::NewPartitionEffects(entry);
+            let mut entry = log::PartitionLogEntry::JobPartitionEffects(entry);
             self.log.append(&entry).await?;
 
             std::mem::swap(&mut self.event_effects, {
-                let log::PartitionLogEntry::NewPartitionEffects(entry) = &mut entry else {
+                let log::PartitionLogEntry::JobPartitionEffects(entry) = &mut entry else {
                     unreachable!()
                 };
                 &mut entry.effects

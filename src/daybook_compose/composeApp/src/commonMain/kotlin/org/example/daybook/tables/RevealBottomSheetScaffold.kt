@@ -1,24 +1,26 @@
 package org.example.daybook.tables
 
+// offset and drawContent are provided by different packages on some platforms; use graphicsLayer
+// for translation and drawWithContent's this.drawContent() is available in the lambda.
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.requiredHeightIn
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.width
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -28,46 +30,29 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.clipRect
-import androidx.compose.ui.layout.Layout
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.animation.core.spring
-import androidx.compose.foundation.clickable
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Velocity
-import androidx.compose.ui.semantics.SemanticsPropertyReceiver
-import androidx.compose.ui.semantics.expand
-import androidx.compose.ui.semantics.collapse
-import androidx.compose.ui.semantics.dismiss
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.geometry.Offset
-// offset and drawContent are provided by different packages on some platforms; use graphicsLayer
-// for translation and drawWithContent's this.drawContent() is available in the lambda.
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.ui.Alignment
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.graphics.Shape
-import kotlin.math.abs
-import kotlin.math.roundToInt
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastForEach
 import kotlinx.coroutines.CoroutineScope
@@ -85,12 +70,12 @@ class RevealBottomSheetState(
         private set
 
     // backing progress used for immediate, non-suspending updates during pointer drag
-    private val _progressBacking = mutableStateOf(initialProgress)
+    private val _progressBacking = mutableFloatStateOf(initialProgress)
     val progress: Float
-        get() = _progressBacking.value
+        get() = _progressBacking.floatValue
 
     fun setProgressImmediate(p: Float) {
-        _progressBacking.value = p.coerceIn(0f, 1f)
+        _progressBacking.floatValue = p.coerceIn(0f, 1f)
     }
 
     // Anchors can be updated at runtime (e.g. different sheet content requires different anchors)
@@ -168,7 +153,8 @@ class RevealBottomSheetState(
 
             val target = biasedTarget ?: run {
                 // choose nearest anchor
-                anchors.minByOrNull { kotlin.math.abs(it - current) } ?: if (current < 0.5f) 0f else 1f
+                anchors.minByOrNull { kotlin.math.abs(it - current) }
+                    ?: if (current < 0.5f) 0f else 1f
             }
 
             anim.animateTo(target.coerceIn(0f, 1f), animationSpec = animationSpec)
@@ -226,7 +212,7 @@ fun RevealBottomSheetScaffold(
     hideAnimationSpec: AnimationSpec<Float> = tween(),
     settleAnimationSpec: AnimationSpec<Float> = spring(),
     topBar: @Composable (() -> Unit)? = null,
-    snackbarHost: @Composable (SnackbarHostState) -> Unit = { SnackbarHost(it) },
+    snackBarHost: @Composable (SnackbarHostState) -> Unit = { SnackbarHost(it) },
     containerColor: Color = MaterialTheme.colorScheme.surface,
     contentColor: Color = contentColorFor(containerColor),
     sheetAnchors: List<Float>? = null,
@@ -238,7 +224,7 @@ fun RevealBottomSheetScaffold(
     val handleColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
     val handleWidthPx = with(density) { 36.dp.toPx() }
     val handleHeightPx = with(density) { 4.dp.toPx() }
-    var sheetHeightPx by remember { mutableStateOf(0) }
+    var sheetHeightPx by remember { mutableIntStateOf(0) }
     val peekPx = with(density) { sheetPeekHeight.toPx() }
 
     // If caller provided explicit anchors, apply them to the sheet state so settle logic uses them
@@ -260,19 +246,26 @@ fun RevealBottomSheetScaffold(
                     // nested-scroll connection: convert nested pre-scroll into sheet progress
                     val sheetNestedScroll = remember(sheetState, sheetHeightPx, peekPx) {
                         object : NestedScrollConnection {
-                            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                            override fun onPreScroll(
+                                available: Offset,
+                                source: NestedScrollSource
+                            ): Offset {
                                 val dy = available.y
                                 val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
                                 if (total <= 0f) return Offset.Zero
                                 val currentVisible = peekPx + total * sheetState.progress
-                                val nextVisible = (currentVisible - dy).coerceIn(0f, sheetHeightPx.toFloat())
+                                val nextVisible =
+                                    (currentVisible - dy).coerceIn(0f, sheetHeightPx.toFloat())
                                 val nextProgress = ((nextVisible - peekPx) / total).coerceIn(0f, 1f)
                                 // synchronous update via suspend scope in pointer handler; here we launch
                                 scope.launch { sheetState.snapToProgress(nextProgress) }
                                 return Offset(0f, dy)
                             }
 
-                            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                            override suspend fun onPostFling(
+                                consumed: Velocity,
+                                available: Velocity
+                            ): Velocity {
                                 val vy = available.y.toFloat()
                                 sheetState.settle(vy)
                                 return available
@@ -281,7 +274,7 @@ fun RevealBottomSheetScaffold(
                     }
 
                     // drawWithContent on Surface to clip background and content to the reveal edge
-                    Surface(
+                    if (sheetState.isVisible) Surface(
                         modifier = Modifier
                             .widthIn(max = sheetMaxWidth)
                             .fillMaxWidth()
@@ -289,7 +282,8 @@ fun RevealBottomSheetScaffold(
                             .onSizeChanged { sheetHeightPx = it.height }
                             .drawWithContent {
                                 val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
-                                val visible = if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
+                                val visible =
+                                    if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
                                 val revealTop = size.height - visible
                                 clipRect(top = revealTop.coerceAtLeast(0f)) {
                                     this@drawWithContent.drawContent()
@@ -307,8 +301,12 @@ fun RevealBottomSheetScaffold(
                                     val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
                                     if (total <= 0f) return@detectVerticalDragGestures
                                     val currentVisible = peekPx + total * sheetState.progress
-                                    val nextVisible = (currentVisible - dragAmount).coerceIn(0f, sheetHeightPx.toFloat())
-                                    val nextProgress = ((nextVisible - peekPx) / total).coerceIn(0f, 1f)
+                                    val nextVisible = (currentVisible - dragAmount).coerceIn(
+                                        0f,
+                                        sheetHeightPx.toFloat()
+                                    )
+                                    val nextProgress =
+                                        ((nextVisible - peekPx) / total).coerceIn(0f, 1f)
                                     change.consume()
                                     // update backing progress immediately for tight finger follow
                                     sheetState.setProgressImmediate(nextProgress)
@@ -319,7 +317,8 @@ fun RevealBottomSheetScaffold(
                     ) {
                         // compute reveal geometry (pixels)
                         val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
-                        val visiblePx = if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
+                        val visiblePx =
+                            if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
                         val revealTopPx = (sheetHeightPx - visiblePx).coerceAtLeast(0f)
 
                         // Layout: header/handle sit above the clipped content but inside the Surface.
@@ -329,19 +328,22 @@ fun RevealBottomSheetScaffold(
                             // will be positioned by the parent Layout so it participates in hit testing.
 
                             // clipped content region (revealed from bottom)
-                            Box(Modifier
-                                .matchParentSize()
-                                .drawWithContent {
-                                    val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
-                                    val visible = if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
-                                    val revealTop = size.height - visible
-                                    clipRect(top = revealTop.coerceAtLeast(0f)) {
-                                        this@drawWithContent.drawContent()
-                                    }
-                                }) {
-                                Column(Modifier
-                                    .fillMaxWidth()
-                                    .fillMaxHeight(),
+                            Box(
+                                Modifier
+                                    .matchParentSize()
+                                    .drawWithContent {
+                                        val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
+                                        val visible =
+                                            if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
+                                        val revealTop = size.height - visible
+                                        clipRect(top = revealTop.coerceAtLeast(0f)) {
+                                            this@drawWithContent.drawContent()
+                                        }
+                                    }) {
+                                Column(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .fillMaxHeight(),
                                     verticalArrangement = Arrangement.Bottom
                                 ) {
                                     sheetContent()
@@ -351,26 +353,33 @@ fun RevealBottomSheetScaffold(
                     }
                 },
                 // header slot measured separately so we can position it relative to the reveal edge
-                { if (sheetHeader != null) sheetHeader(headerSlotModifier.then(
-                    Modifier
-                        .pointerInput(Unit) {
-                            // forward vertical drags from header into the same draggable state
-                            detectVerticalDragGestures(
-                                onDragStart = { /* no-op */ },
-                                onDragEnd = { scope.launch { sheetState.settle(0f) } },
-                                onDragCancel = { scope.launch { sheetState.settle(0f) } }
-                            ) { change, dragAmount ->
-                                // convert drag into sheet progress updates - reuse the same logic
-                                val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
-                                val currentVisible = peekPx + total * sheetState.progress
-                                val nextVisible = (currentVisible - dragAmount).coerceIn(0f, sheetHeightPx.toFloat())
-                                val nextProgress = ((nextVisible - peekPx) / total).coerceIn(0f, 1f)
-                                change.consume()
-                                scope.launch { sheetState.snapToProgress(nextProgress) }
+                {
+                    if (sheetHeader != null) sheetHeader(
+                        headerSlotModifier.then(
+                        Modifier
+                            .pointerInput(Unit) {
+                                // forward vertical drags from header into the same draggable state
+                                detectVerticalDragGestures(
+                                    onDragStart = { /* no-op */ },
+                                    onDragEnd = { scope.launch { sheetState.settle(0f) } },
+                                    onDragCancel = { scope.launch { sheetState.settle(0f) } }
+                                ) { change, dragAmount ->
+                                    // convert drag into sheet progress updates - reuse the same logic
+                                    val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
+                                    val currentVisible = peekPx + total * sheetState.progress
+                                    val nextVisible = (currentVisible - dragAmount).coerceIn(
+                                        0f,
+                                        sheetHeightPx.toFloat()
+                                    )
+                                    val nextProgress =
+                                        ((nextVisible - peekPx) / total).coerceIn(0f, 1f)
+                                    change.consume()
+                                    scope.launch { sheetState.snapToProgress(nextProgress) }
+                                }
                             }
-                        }
-                )) else {} },
-                { snackbarHost(remember { SnackbarHostState() }) }
+                    ))
+                },
+                { snackBarHost(remember { SnackbarHostState() }) }
             )
         ) { (topBarMeasurables, bodyMeasurables, sheetMeasurables, headerMeasurables, snackbarMeasurables), constraints ->
             val layoutWidth = constraints.maxWidth
@@ -399,7 +408,8 @@ fun RevealBottomSheetScaffold(
                 if (headerPlaceables.isNotEmpty()) {
                     // compute visible px from sheetHeightPx and progress
                     val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
-                    val visiblePx = if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
+                    val visiblePx =
+                        if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
                     val headerTopGlobal = (layoutHeight - visiblePx).toInt()
                     headerPlaceables.fastForEach { hp ->
                         val hx = (layoutWidth - hp.width) / 2
@@ -418,7 +428,5 @@ fun RevealBottomSheetScaffold(
                 }
             }
         }
-
-        // No additional overlay; clipping is applied directly on the sheet Surface
     }
 }

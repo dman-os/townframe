@@ -21,29 +21,32 @@ use binds_guest::townframe::utils::{llm_chat, types};
 
 pub struct UtilsPlugin {
     ollama: ollama_rs::Ollama,
-    model: String,
+    config: Config,
+}
+
+pub struct Config {
+    pub ollama_url: String,
+    pub ollama_model: String,
 }
 
 impl UtilsPlugin {
-    pub fn new() -> Res<Arc<Self>> {
-        utils_rs::testing::load_envs_once();
-
-        let ollama_url = utils_rs::get_env_var("OLLAMA_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-        let model = utils_rs::get_env_var("OLLAMA_MODEL").unwrap_or_else(|_| "llama2".to_string());
-
+    pub fn new(config: Config) -> Res<Arc<Self>> {
         // Parse URL to extract host and port
-        let url = url::Url::parse(&ollama_url)
-            .wrap_err_with(|| format!("invalid OLLAMA_URL: {ollama_url}"))?;
+        let url = url::Url::parse(&config.ollama_url).wrap_err_with(|| {
+            format!(
+                "invalid OLLAMA_URL: {ollama_url}",
+                ollama_url = config.ollama_url
+            )
+        })?;
         let host = url
             .host_str()
-            .ok_or_else(|| eyre::eyre!("OLLAMA_URL missing host"))?;
+            .ok_or_else(|| ferr!("OLLAMA_URL missing host"))?;
         let scheme = url.scheme();
         let port = url.port().unwrap_or(11434);
 
         let ollama = ollama_rs::Ollama::new(format!("{scheme}://{host}"), port);
 
-        Ok(Arc::new(Self { ollama, model }))
+        Ok(Arc::new(Self { ollama, config }))
     }
 
     const ID: &str = "townframe:utils";
@@ -168,7 +171,8 @@ impl llm_chat::Host for WashCtx {
 
         // Call Ollama
         use ollama_rs::generation::completion::request::GenerationRequest;
-        let generation_request = GenerationRequest::new(plugin.model.clone(), message_text);
+        let generation_request =
+            GenerationRequest::new(plugin.config.ollama_model.clone(), message_text);
 
         let ollama_response = plugin
             .ollama

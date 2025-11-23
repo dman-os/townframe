@@ -8,10 +8,16 @@ pub mod am;
 pub mod prelude {
     pub use crate::interlude::*;
 
+    #[cfg(feature = "automerge")]
+    pub use automerge;
+    #[cfg(feature = "automerge")]
+    pub use autosurgeon;
     pub use dashmap;
     pub use dotenv_flow;
     pub use educe;
     pub use regex;
+    #[cfg(feature = "automerge")]
+    pub use samod;
     pub use serde_json;
     pub use tokio;
 }
@@ -96,7 +102,7 @@ impl<T> ToAnyhow for Result<T, eyre::Report> {
 }
 
 // NOTE: only use these in actors or single writer scenarios
-pub type DHashMap<K, V> = dashmap::DashMap<K, V, ahash::random_state::RandomState>;
+pub type DHashMap<K, V> = dashmap::DashMap<K, V>;
 pub type DHashMapRef<'a, K, V> = dashmap::mapref::one::Ref<'a, K, V>;
 pub type DHashMapMutRef<'a, K, V> = dashmap::mapref::one::RefMut<'a, K, V>;
 
@@ -111,7 +117,7 @@ pub fn setup_tracing_once() {
     });
 }
 
-pub fn setup_tracing() -> eyre::Result<()> {
+pub fn setup_tracing() -> Res<()> {
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
         if std::env::var("RUST_BACKTRACE").is_err() {
@@ -131,14 +137,14 @@ pub fn setup_tracing() -> eyre::Result<()> {
         .with(
             tracing_subscriber::fmt::layer()
                 .compact()
-                .with_timer(tracing_subscriber::fmt::time::uptime()),
+                .with_timer(tracing_subscriber::fmt::time::time()),
         )
         .with(tracing_error::ErrorLayer::default());
 
     #[cfg(target_os = "android")]
     let registry = registry.with(tracing_android::layer("org.example.daybook")?);
 
-    registry.try_init().map_err(|err| eyre::eyre!(err))?;
+    registry.try_init().map_err(|err| ferr!(err))?;
 
     // color_eyre::install()?;
     let (eyre_panic_hook, eyre_hook) =
@@ -189,7 +195,8 @@ mod cheapstr {
         }
 
         fn update_hash(&mut self) {
-            let mut hasher = ahash::AHasher::default();
+            let mut hasher = std::hash::DefaultHasher::new();
+            // let mut hasher = ahash::AHasher::default();
             self.string.hash(&mut hasher);
             self.hash = hasher.finish();
         }
@@ -487,16 +494,13 @@ fn test_type_name_macro() {
     assert_eq!("Foo", type_name_raw::<Foo>());
 }
 
-pub fn get_env_var<K>(key: K) -> eyre::Result<String>
+pub fn get_env_var<K>(key: K) -> Res<String>
 where
     K: AsRef<std::ffi::OsStr>,
 {
     match std::env::var(key.as_ref()) {
         Ok(val) => Ok(val),
-        Err(err) => Err(eyre::eyre!(
-            "error geting env var {:?}: {err}",
-            key.as_ref()
-        )),
+        Err(err) => Err(ferr!("error geting env var {:?}: {err}", key.as_ref())),
     }
 }
 

@@ -26,6 +26,10 @@ impl KvStoreLog {
 
 #[async_trait]
 impl LogStore for KvStoreLog {
+    async fn latest_id(&self) -> Res<u64> {
+        Ok(self.latest_id.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     async fn append(&self, entry: &[u8]) -> Res<u64> {
         // Use atomic increment to get the next log entry ID
         let key_bytes = {
@@ -38,7 +42,7 @@ impl LogStore for KvStoreLog {
         // Use CAS to ensure the key doesn't exist (should never happen, but be safe)
         let cas = self.kv_store.new_cas(&key_bytes).await?;
         if cas.current().is_some() {
-            return Err(eyre::eyre!(
+            return Err(ferr!(
                 "log entry key already exists: this should never happen"
             ));
         }
@@ -53,7 +57,7 @@ impl LogStore for KvStoreLog {
             }
             Err(CasError::CasFailed(_)) => {
                 // This should never happen since we just checked it's None
-                Err(eyre::eyre!("log entry key was set between check and swap"))
+                Err(ferr!("log entry key was set between check and swap"))
             }
             Err(CasError::StoreError(err)) => Err(err),
         }

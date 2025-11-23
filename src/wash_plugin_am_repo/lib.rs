@@ -132,7 +132,7 @@ impl repo::Host for WashCtx {
                     bytes
                         .as_slice()
                         .try_into()
-                        .map_err(|_| eyre::eyre!("invalid change hash length"))
+                        .map_err(|_| ferr!("invalid change hash length"))
                 })
             })
             .collect();
@@ -157,7 +157,6 @@ impl repo::Host for WashCtx {
             })
             .collect();
 
-        warn!("XXXX entered");
         // Use hydrate_path_at_head with AutosurgeonJson
         let result = plugin
             .am_ctx
@@ -168,7 +167,6 @@ impl repo::Host for WashCtx {
                 path_rust,
             )
             .await;
-        warn!(?result, "XXXX entered");
 
         match result {
             Ok(Some(json_wrapper)) => {

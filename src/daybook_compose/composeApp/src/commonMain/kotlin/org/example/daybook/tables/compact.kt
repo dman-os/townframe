@@ -2,7 +2,6 @@
 
 package org.example.daybook.tables
 
-// Use our custom reveal scaffold
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -172,8 +171,6 @@ fun CompactLayout(
     val density = LocalDensity.current
     val revealSheetState = rememberRevealBottomSheetState(initiallyVisible = false)
     var sheetContent by remember { mutableStateOf(SheetContent.TABS) }
-    // sheet content collapsed to tabs only (we use nav rail for table switching)
-    var isSheetManuallyOpened by rememberSaveable { mutableStateOf(false) }
 
     var tabItemLayouts by remember { mutableStateOf(mapOf<Uuid, Rect>()) }
     var tableItemLayouts by remember { mutableStateOf(mapOf<Uuid, Rect>()) }
@@ -200,20 +197,36 @@ fun CompactLayout(
         // FeatureItem("feat_add_tab", "＋", "Add Tab") { scope.launch { snackbarHostState.showSnackbar("Activated: Add Tab") } },
         // FeatureItem("feat_add_table", "📁", "Add Table") { scope.launch { snackbarHostState.showSnackbar("Activated: Add Table") } },
         // FeatureItem("feat_settings", "⚙️", "Settings") { scope.launch { snackbarHostState.showSnackbar("Activated: Settings") } },
-        FeatureItem("nav_home", "H", "Home") { scope.launch { navController.navigate(
-            AppScreens.Home.name
-        ) } },
-        FeatureItem("nav_tables", "T", "Tables") { scope.launch { navController.navigate(
-            AppScreens.Tables.name
-        ) } },
-        FeatureItem("nav_capture", "＋", "Capture") { scope.launch { navController.navigate(
-            AppScreens.Capture.name
-        ) } },
+        FeatureItem("nav_home", "H", "Home") {
+            scope.launch {
+                navController.navigate(
+                    AppScreens.Home.name
+                )
+            }
+        },
+        FeatureItem("nav_tables", "T", "Tables") {
+            scope.launch {
+                navController.navigate(
+                    AppScreens.Tables.name
+                )
+            }
+        },
+        FeatureItem("nav_capture", "＋", "Capture") {
+            scope.launch {
+                navController.navigate(
+                    AppScreens.Capture.name
+                )
+            }
+        },
     )
 
     // Create controllers and ready-state trackers for each feature
     val featureKeys = features.map { it.key }
-    val featureControllers = featureKeys.map { k -> viewModel<HoverHoldControllerViewModel>(key = k).also { it.label = k } }
+    val featureControllers = featureKeys.map { k ->
+        viewModel<HoverHoldControllerViewModel>(key = k).also {
+            it.label = k
+        }
+    }
     val featureReadyStates = featureControllers.map { it.ready.collectAsState() }
     var featuresButtonWindowRect by remember { mutableStateOf<Rect?>(null) }
 
@@ -266,17 +279,9 @@ fun CompactLayout(
         highlightedTable = null
     }
 
-    LaunchedEffect(isSheetManuallyOpened) {
-        if (isSheetManuallyOpened) revealSheetState.show(tween(0)) else revealSheetState.hide(
-            tween(
-                0
-            )
-        )
-    }
-
     val centerNavBarContent: @Composable RowScope.() -> Unit = {
         // When sheet is open, show controls (add button). When closed, show current tab title.
-        if (isSheetManuallyOpened) {
+        if (revealSheetState.isVisible) {
             // Add-tab button expands to fill the center area
             Button(
                 onClick = {
@@ -287,7 +292,7 @@ fun CompactLayout(
                             if (res.isSuccess) {
                                 val newTabId = res.getOrNull()
                                 if (newTabId != null) {
-                                    isSheetManuallyOpened = !isSheetManuallyOpened
+                                    if (revealSheetState.isVisible) revealSheetState.hide() else revealSheetState.show()
                                     vm.selectTab(newTabId)
                                 }
                             }
@@ -335,7 +340,9 @@ fun CompactLayout(
                         val labelText = feature.label
 
                         // Highlight when pointer (during drag) is over the button rect, or controller reports ready
-                        val hoverOver = lastDragWindowPos?.let { pw -> featureButtonLayouts[key]?.contains(pw) } ?: false
+                        val hoverOver =
+                            lastDragWindowPos?.let { pw -> featureButtonLayouts[key]?.contains(pw) }
+                                ?: false
                         val ready = featureReadyStates.getOrNull(idx)?.value ?: false
 
                         NavigationBarItem(
@@ -346,7 +353,8 @@ fun CompactLayout(
                                 }
                             },
                             modifier = btnModifier.onGloballyPositioned {
-                                featureButtonLayouts = featureButtonLayouts + (key to it.boundsInWindow())
+                                featureButtonLayouts =
+                                    featureButtonLayouts + (key to it.boundsInWindow())
                             },
                             icon = {
                                 Text(iconText, style = MaterialTheme.typography.bodyLarge)
@@ -393,7 +401,7 @@ fun CompactLayout(
     val tabsButtonModifier = Modifier.pointerInput(Unit) {
         detectDragGestures(
             onDragStart = { _ ->
-                isSheetManuallyOpened = true
+                revealSheetState.show()
                 isDragging = true
                 revealSheetState.show(tween(0))
             },
@@ -473,7 +481,7 @@ fun CompactLayout(
                     highlightedTable = null
 
                     // Revert to original behavior: always close sheet on drag end
-                    isSheetManuallyOpened = false
+                    revealSheetState.hide()
 
                     isDragging = false
                     // reset
@@ -484,7 +492,7 @@ fun CompactLayout(
             },
             onDragCancel = {
                 scope.launch {
-                    isSheetManuallyOpened = false
+                    revealSheetState.hide()
                     isDragging = false
                     highlightedTab = null
                     highlightedTable = null
@@ -507,7 +515,7 @@ fun CompactLayout(
 
             DaybookBottomNavigationBar(
                 onTabPressed = {
-                    isSheetManuallyOpened = !isSheetManuallyOpened
+                    if (revealSheetState.isVisible) revealSheetState.hide() else revealSheetState.show()
                 },
                 onFeaturesPressed = { showFeaturesMenu = !showFeaturesMenu },
                 centerContent = {
@@ -582,14 +590,14 @@ fun CompactLayout(
                     onTabSelected = {
                         // When the user selects a tab from the sheet, route it via the vm
                         vm.selectTab(it.id)
-                        isSheetManuallyOpened = false
+                        revealSheetState.hide()
                     },
                     onTableSelected = { table ->
                         vm.selectTable(table.id)
                         sheetContent = SheetContent.TABS // Switch back to tabs
                     },
                     onDismiss = {
-                        isSheetManuallyOpened = false
+                        revealSheetState.hide()
                     },
                     onTabLayout = { tabId, rect ->
                         tabItemLayouts = tabItemLayouts + (tabId to rect)

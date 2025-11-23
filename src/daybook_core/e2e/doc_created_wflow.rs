@@ -20,10 +20,8 @@ async fn test_doc_created_workflow() -> Res<()> {
     // Add the document - DocChangesWorker will automatically queue the workflow job
     let _doc_id = test_cx.drawer_repo.add(new_doc).await?;
 
-    info!("XXX here");
     // Wait for the workflow to complete
     test_cx.wflow_test_cx.wait_until_no_active_jobs(90).await?;
-    info!("XXX here 2");
 
     // Assert snapshot
     test_cx

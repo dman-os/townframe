@@ -24,6 +24,11 @@ impl AtomicKvSnapStore {
         }
     }
 
+    /// Create a new snapstore from a trait object directly
+    pub fn from_trait_object(kv_store: Arc<dyn KvStore + Send + Sync>) -> Self {
+        Self { kv_store }
+    }
+
     fn snapshot_key(partition_id: u64) -> Vec<u8> {
         format!("__snapshot_partition_{}", partition_id).into_bytes()
     }
@@ -84,7 +89,7 @@ impl wflow_core::snapstore::SnapStore for AtomicKvSnapStore {
                 }
             }
         }
-        Err(eyre::eyre!(
+        Err(ferr!(
             "failed to save snapshot after {MAX_CAS_RETRIES} CAS retries: concurrent modifications"
         ))
     }

@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-pub fn setup_tracing() -> eyre::Result<()> {
+pub fn setup_tracing() -> Res<()> {
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
         // if std::env::var("RUST_BACKTRACE_TEST").is_err() {
@@ -24,7 +24,7 @@ pub fn setup_tracing() -> eyre::Result<()> {
         .with(tracing_subscriber::EnvFilter::new(filter))
         .with(
             tracing_subscriber::fmt::layer()
-                .compact()
+                //.pretty()
                 .with_timer(tracing_subscriber::fmt::time::uptime()),
         )
         .with(tracing_error::ErrorLayer::default());
@@ -35,7 +35,7 @@ pub fn setup_tracing() -> eyre::Result<()> {
     // #[cfg(feature = "console-subscriber")]
     // let registry = registry.with(console_subscriber::spawn());
 
-    registry.try_init().map_err(|err| eyre::eyre!(err))?;
+    registry.try_init().map_err(|err| ferr!(err))?;
 
     // color_eyre::install()?;
     let (eyre_panic_hook, eyre_hook) =

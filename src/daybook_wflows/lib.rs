@@ -70,7 +70,6 @@ fn doc_created(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(),
         let json = repo::hydrate_path_at_head(&doc_id, &heads, &obj_id, &path)
             .wrap_err("error hydrating document")
             .map_err(JobErrorX::Terminal)?;
-        println!("XXX {json}");
         let doc: crate::gen::doc::Doc = serde_json::from_str(&json)
             .wrap_err("error parsing json doc")
             .map_err(JobErrorX::Terminal)?;

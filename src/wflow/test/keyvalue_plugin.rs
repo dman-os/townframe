@@ -57,11 +57,48 @@ impl WasiKeyvalue {
         }
     }
 
+    /// Create a new instance that shares the same storage
+    pub fn with_shared_storage(&self) -> Self {
+        Self {
+            storage: self.storage.clone(),
+        }
+    }
+
     fn get_timestamp() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs()
+    }
+
+    /// Set a value in the keyvalue store directly (for testing)
+    pub async fn set_value(
+        &self,
+        workload_id: &str,
+        bucket: &str,
+        key: &str,
+        value: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let mut storage = self.storage.write().await;
+        let workload_storage = storage.entry(workload_id.into()).or_default();
+
+        // Create bucket if it doesn't exist
+        if !workload_storage.contains_key(bucket) {
+            let bucket_data = BucketData {
+                name: bucket.to_string(),
+                data: HashMap::new(),
+                created_at: Self::get_timestamp(),
+            };
+            workload_storage.insert(bucket.to_string(), bucket_data);
+        }
+
+        match workload_storage.get_mut(bucket) {
+            Some(bucket_data) => {
+                bucket_data.data.insert(key.to_string(), value);
+                Ok(())
+            }
+            None => Err(anyhow::anyhow!("bucket '{}' does not exist", bucket)),
+        }
     }
 }
 
@@ -464,7 +501,7 @@ impl HostPlugin for WasiKeyvalue {
 
         // Initialize storage for this workload
         let mut storage = self.storage.write().await;
-        storage.insert(id.clone(), HashMap::new());
+        storage.entry(id.clone()).or_insert_with(HashMap::new);
 
         tracing::debug!(%id,"WasiKeyvalue plugin bound to workload");
 

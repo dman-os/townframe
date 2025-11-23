@@ -8,6 +8,13 @@
 
 ### Stack
 
+- Get pglite building to oci
+  - For pglite-build
+  - Maybe a wash provider?
+  - Maybe wasi component
+  - KvStore impl
+- Finish autosurgeon::Patch
+  - Fork with context generic programming
 - Test to assert snapshot recovery works
 - Sqlite backed KvStore impl
 - Convert DHashMap to be wrapper around RwLock<HashMap>
@@ -17,7 +24,7 @@
   - [x] in-memory smoke
   - [ ] Ingress workload
   - [ ] Durablity
-  - [ ] Snapshots
+  - [x] Snapshots
   - [ ] Use flatbuffers instead of JSON
   - [ ] web UI
   - [ ] Non-wasm impl
@@ -34,6 +41,8 @@
 - [ ] Wasi 0.3
   - [ ] wRPC everything
 - [ ] autosurgeon doens't respect serde attribs like untagged and camelCase
+- [ ] Pipeline editor web app
+- [ ] wrpc + iroh
 
 ---
 
@@ -49,6 +58,8 @@
   - [ ] Photographs
   - [ ] Text input
   - [ ] Audio recordings
+  - [ ] Browser snips
+  - [ ] Social bots
 - Magic wand
   - [ ] Follow bubble behavior from android
   - [ ] Status bar/Gesture bar insets for puck and widgets

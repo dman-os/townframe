@@ -244,7 +244,7 @@ impl DrawerRepo {
                             use automerge::transaction::Transactable;
                             tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
                             autosurgeon::reconcile(tx, &new_doc)
-                                .map_err(|err| eyre::eyre!(err.to_string()))
+                                .map_err(|err| ferr!(err.to_string()))
                                 .wrap_err("error reconciling new doc")?;
                             eyre::Ok(new_doc)
                         })

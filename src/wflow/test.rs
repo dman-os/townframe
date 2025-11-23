@@ -1,202 +1,230 @@
 use crate::interlude::*;
 
+#[cfg(test)]
 mod fails_once;
+#[cfg(test)]
+mod fails_until_told;
 #[cfg(any(test, feature = "test-harness"))]
 #[allow(unused)]
 mod keyvalue_plugin;
-
-use utils_rs::am::AmCtx;
 
 use crate::{AtomicKvSnapStore, KvStoreLog, KvStoreMetadtaStore};
 use wash_runtime::{host::HostApi, plugin, types, wit::WitInterface};
 use wflow_core::metastore;
 use wflow_core::snapstore::SnapStore;
 
+/// Builder used to configure [`WflowTestContext`]
+#[derive(Default)]
+pub struct WflowTestContextBuilder {
+    metastore: Option<Arc<dyn metastore::MetdataStore>>,
+    log_store: Option<Arc<dyn wflow_core::log::LogStore>>,
+    snap_store: Option<Arc<dyn SnapStore>>,
+    keyvalue_plugin: Option<Arc<keyvalue_plugin::WasiKeyvalue>>,
+    initial_workloads: Vec<InitialWorkload>,
+    plugins: Vec<Arc<dyn plugin::HostPlugin>>,
+}
+
+impl WflowTestContextBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_metastore(mut self, metastore: Arc<dyn metastore::MetdataStore>) -> Self {
+        self.metastore = Some(metastore);
+        self
+    }
+
+    pub fn with_log_store(mut self, log_store: Arc<dyn wflow_core::log::LogStore>) -> Self {
+        self.log_store = Some(log_store);
+        self
+    }
+
+    pub fn with_snapstore(mut self, snap_store: Arc<dyn SnapStore>) -> Self {
+        self.snap_store = Some(snap_store);
+        self
+    }
+
+    pub fn with_keyvalue_plugin(
+        mut self,
+        keyvalue_plugin: Arc<keyvalue_plugin::WasiKeyvalue>,
+    ) -> Self {
+        self.keyvalue_plugin = Some(keyvalue_plugin);
+        self
+    }
+
+    pub fn add_initial_workload(mut self, workload: InitialWorkload) -> Self {
+        self.initial_workloads.push(workload);
+        self
+    }
+
+    pub fn initial_workloads<I>(mut self, workloads: I) -> Self
+    where
+        I: IntoIterator<Item = InitialWorkload>,
+    {
+        self.initial_workloads.extend(workloads);
+        self
+    }
+
+    pub fn with_plugin(mut self, plugin: Arc<dyn plugin::HostPlugin>) -> Self {
+        self.plugins.push(plugin);
+        self
+    }
+
+    pub async fn build(mut self) -> Res<WflowTestContext> {
+        let metastore = match self.metastore {
+            Some(store) => store,
+            None => {
+                let meta = KvStoreMetadtaStore::new(
+                    new_in_memory_kv_store(),
+                    wflow_core::gen::metastore::PartitionsMeta {
+                        version: "0".into(),
+                        partition_count: 1,
+                    },
+                )
+                .await?;
+                Arc::new(meta)
+            }
+        };
+
+        let log_store = match self.log_store {
+            Some(store) => store,
+            None => Arc::new(KvStoreLog::new(new_in_memory_kv_store(), 0)),
+        };
+
+        let partition_log = wflow_tokio::partition::PartitionLogRef::new(log_store.clone());
+        let ingress = Arc::new(crate::ingress::PartitionLogIngress::new(
+            partition_log.clone(),
+            metastore.clone(),
+        ));
+
+        let snapstore = match self.snap_store {
+            Some(store) => store,
+            None => Arc::new(AtomicKvSnapStore::new(new_in_memory_kv_store())),
+        };
+
+        let keyvalue_plugin = self
+            .keyvalue_plugin
+            .unwrap_or_else(|| Arc::new(keyvalue_plugin::WasiKeyvalue::new()));
+
+        let wflow_plugin = Arc::new(wash_plugin_wflow::TownframewflowPlugin::new(
+            metastore.clone(),
+        ));
+        let runtime_config_plugin = plugin::wasi_config::WasiConfig::default();
+        self.plugins.extend_from_slice(&[
+            wflow_plugin.clone(),
+            Arc::new(runtime_config_plugin),
+            keyvalue_plugin.clone(),
+        ]);
+        let host = crate::build_wash_host(self.plugins).await?;
+        Ok(WflowTestContext {
+            metastore,
+            log_store,
+            snapstore,
+            partition_log,
+            ingress,
+            keyvalue_plugin,
+            initial_workloads: self.initial_workloads,
+            pending_host: Some(host),
+            host: None,
+            wflow_plugin,
+            worker_handle: None,
+            working_state: None,
+        })
+    }
+}
 /// Test context for wflow tests
 #[allow(unused)]
 pub struct WflowTestContext {
-    pub am_ctx: Arc<AmCtx>,
     pub metastore: Arc<dyn metastore::MetdataStore>,
     pub log_store: Arc<dyn wflow_core::log::LogStore>,
-    pub snap_store: Option<Arc<dyn SnapStore>>,
+    pub snapstore: Arc<dyn SnapStore>,
     pub partition_log: wflow_tokio::partition::PartitionLogRef,
     pub ingress: Arc<crate::ingress::PartitionLogIngress>,
-    pub host: Arc<wash_runtime::host::Host>,
-    pub wflow_plugin: Arc<wash_plugin_wflow::TownframewflowPlugin>,
-    pub worker_handle: wflow_tokio::partition::TokioPartitionWorkerHandle,
-    pub working_state: Arc<wflow_tokio::partition::state::PartitionWorkingState>,
+    pub keyvalue_plugin: Arc<keyvalue_plugin::WasiKeyvalue>,
+    initial_workloads: Vec<InitialWorkload>,
+    pending_host: Option<wash_runtime::host::Host>,
+    host: Option<Arc<wash_runtime::host::Host>>,
+    wflow_plugin: Arc<wash_plugin_wflow::TownframewflowPlugin>,
+    worker_handle: Option<wflow_tokio::partition::TokioPartitionWorkerHandle>,
+    working_state: Option<Arc<wflow_tokio::partition::state::PartitionWorkingState>>,
+}
+
+/// Workload to register before starting the worker
+pub struct InitialWorkload {
+    pub wasm_path: String,
+    pub wflow_keys: Vec<String>,
 }
 
 impl WflowTestContext {
-    /// Create a new test context with in-memory stores
+    /// Create a new test context with in-memory stores and immediately start it.
+    /// Convenience helper for tests that don't need custom configuration.
     pub async fn new() -> Res<Self> {
-        Self::with_am_ctx(None).await
+        Self::builder().build().await?.start().await
     }
 
-    /// Create a new test context with an existing AmCtx (or create a new one if None)
-    pub async fn with_am_ctx(acx: Option<Arc<AmCtx>>) -> Res<Self> {
-        // Use provided AmCtx or create a new one
-        let acx = match acx {
-            Some(acx) => acx,
-            None => Arc::new(
-                AmCtx::boot(
-                    utils_rs::am::Config {
-                        peer_id: "test".to_string(),
-                        storage: utils_rs::am::StorageConfig::Memory,
-                    },
-                    Option::<samod::AlwaysAnnounce>::None,
-                )
-                .await?,
-            ),
-        };
+    /// Returns true if the wash host and partition worker have been started.
+    pub fn is_started(&self) -> bool {
+        self.host.is_some()
+    }
 
-        // Create metastore
-        let metastore = {
-            KvStoreMetadtaStore::new(
-                {
-                    let kv: DHashMap<Arc<[u8]>, Arc<[u8]>> = default();
-                    let kv = Arc::new(kv);
-                    Arc::new(kv)
-                },
-                wflow_core::gen::metastore::PartitionsMeta {
-                    version: "0".into(),
-                    partition_count: 1,
-                },
-            )
-            .await?
-        };
-        let metastore = Arc::new(metastore);
-
-        // Create log store
-        let log_store = KvStoreLog::new(
-            {
-                let kv: DHashMap<Arc<[u8]>, Arc<[u8]>> = default();
-                let kv = Arc::new(kv);
-                Arc::new(kv)
-            },
-            0,
-        );
-        let log_store = Arc::new(log_store);
-
-        // Create partition log reference
-        let partition_log = wflow_tokio::partition::PartitionLogRef::new(log_store.clone());
-
-        // Create ingress
-        let ingress =
-            crate::ingress::PartitionLogIngress::new(partition_log.clone(), metastore.clone());
-        let ingress = Arc::new(ingress);
-
-        // Create snap store
-        let snap_store = Arc::new(AtomicKvSnapStore::new({
-            let kv: DHashMap<Arc<[u8]>, Arc<[u8]>> = default();
-            let kv = Arc::new(kv);
-            Arc::new(kv)
-        })) as Arc<dyn SnapStore>;
-
-        // Build runtime host
-        let wcx = crate::Ctx {
-            acx: acx.clone(),
-            metastore: metastore.clone(),
-            log_store: log_store.clone(),
-            partition_id: 0,
-            snap_store: Some(snap_store.clone()),
-        };
-
-        let wflow_plugin = wash_plugin_wflow::TownframewflowPlugin::new(wcx.metastore.clone());
-        let wflow_plugin = Arc::new(wflow_plugin);
-
-        let am_repo_plugin = wash_plugin_am_repo::AmRepoPlugin::new(wcx.acx.clone());
-        let am_repo_plugin = Arc::new(am_repo_plugin);
-
-        let runtime_config_plugin = plugin::wasi_config::WasiConfig::default();
-        let keyvalue_plugin = keyvalue_plugin::WasiKeyvalue::new();
-        let utils_plugin =
-            wash_plugin_utils::UtilsPlugin::new().wrap_err("error creating utils plugin")?;
-
-        let host = crate::build_wash_host(vec![
-            wflow_plugin.clone(),
-            am_repo_plugin,
-            utils_plugin,
-            Arc::new(runtime_config_plugin),
-            Arc::new(keyvalue_plugin),
-        ])
-        .await?;
-
-        // Start partition worker
-        let (worker_handle, working_state) =
-            crate::start_partition_worker(&wcx, wflow_plugin.clone()).await?;
-
-        {
-            let log_store = log_store.clone();
-            tokio::spawn(async move {
-                use futures::StreamExt;
-                use wflow_core::log::LogStore;
-                let mut stream = log_store.tail(0).await;
-                while let Some(entry) = stream.next().await {
-                    match entry {
-                        Ok((entry_id, entry)) => {
-                            let entry: serde_json::Value =
-                                serde_json::from_slice(&entry[..]).expect(ERROR_JSON);
-                            info!(?entry, entry_id, "log entry");
-                        }
-                        Err(err) => {
-                            error!(?err, "log tail error");
-                        }
-                    }
-                }
-            });
+    /// Start the wash host and partition worker using the configured stores.
+    /// Safe to call multiple times; subsequent calls are no-ops.
+    pub async fn start(mut self) -> Res<Self> {
+        if self.is_started() {
+            return Ok(self);
         }
 
-        Ok(Self {
-            am_ctx: acx,
-            metastore,
-            log_store,
-            snap_store: Some(snap_store),
-            partition_log,
-            ingress,
-            host,
-            wflow_plugin,
-            worker_handle,
-            working_state,
-        })
+        let wcx = crate::Ctx {
+            metastore: self.metastore.clone(),
+            log_store: self.log_store.clone(),
+            snapstore: self.snapstore.clone(),
+        };
+
+        let host = self.pending_host.take().expect("bad builder");
+        let host = host.start().await.to_eyre()?;
+
+        // Register any initial workloads before starting the worker
+        for workload in &self.initial_workloads {
+            register_workload_on_host(
+                &host,
+                workload.wasm_path.as_str(),
+                workload.wflow_keys.clone(),
+            )
+            .await?;
+        }
+
+        self.host = Some(host);
+
+        let (worker_handle, working_state) =
+            crate::start_partition_worker(&wcx, self.wflow_plugin.clone(), 0).await?;
+
+        self.worker_handle = Some(worker_handle);
+        self.working_state = Some(working_state);
+
+        Ok(self)
+    }
+
+    fn host(&self) -> Res<&Arc<wash_runtime::host::Host>> {
+        self.host
+            .as_ref()
+            .ok_or_else(|| ferr!("wflow test context not started. call start().await?"))
+    }
+
+    fn working_state(&self) -> Res<&Arc<wflow_tokio::partition::state::PartitionWorkingState>> {
+        self.working_state
+            .as_ref()
+            .ok_or_else(|| ferr!("wflow test context not started. call start().await?"))
+    }
+
+    /// Create a new builder for [`WflowTestContext`]
+    pub fn builder() -> WflowTestContextBuilder {
+        WflowTestContextBuilder::new()
     }
 
     /// Register a workload from a WASM file
     pub async fn register_workload(&self, wasm_path: &str, wflow_keys: Vec<String>) -> Res<()> {
-        let wasm_bytes = tokio::fs::read(wasm_path).await?;
-
-        let req = types::WorkloadStartRequest {
-            workload_id: "workload_123".into(),
-            workload: types::Workload {
-                namespace: "test".to_string(),
-                name: format!("test-wflows-{}", wflow_keys.join("-")),
-                annotations: std::collections::HashMap::new(),
-                service: None,
-                components: vec![types::Component {
-                    bytes: wasm_bytes.into(),
-                    ..default()
-                }],
-                host_interfaces: vec![
-                    WitInterface {
-                        config: [("wflow_keys".to_owned(), wflow_keys.join(","))].into(),
-                        ..WitInterface::from("townframe:wflow/bundle")
-                    },
-                    WitInterface {
-                        ..WitInterface::from("townframe:am-repo/repo")
-                    },
-                    WitInterface {
-                        ..WitInterface::from("townframe:utils/llm-chat")
-                    },
-                    WitInterface {
-                        ..WitInterface::from("wasi:keyvalue/store")
-                    },
-                ],
-                volumes: vec![],
-            },
-        };
-
-        self.host.workload_start(req).await.to_eyre()?;
-        Ok(())
+        let host = self.host()?;
+        register_workload_on_host(host.as_ref(), wasm_path, wflow_keys).await
     }
 
     /// Schedule a workflow job
@@ -218,13 +246,18 @@ impl WflowTestContext {
 
         let start = Instant::now();
         let timeout_duration = Duration::from_secs(timeout_secs);
-        let mut change_rx = self.working_state.change_receiver();
+        let working_state = self.working_state()?;
+        let mut change_rx = working_state.change_receiver();
 
         // Get initial counts without holding a lock
         let mut counts = *change_rx.borrow();
         if counts.active == 0 && counts.archive > 0 {
             // No active jobs, we're done
-            tracing::info!("done, {} active jobs, {} archived jobs", counts.active, counts.archive);
+            tracing::info!(
+                "done, {} active jobs, {} archived jobs",
+                counts.active,
+                counts.archive
+            );
             return Ok(());
         }
 
@@ -233,7 +266,7 @@ impl WflowTestContext {
             let elapsed = start.elapsed();
             let remaining = timeout_duration.saturating_sub(elapsed);
             if remaining.is_zero() {
-                return Err(eyre::eyre!(
+                return Err(ferr!(
                     "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
                     timeout_secs,
                     elapsed,
@@ -254,7 +287,11 @@ impl WflowTestContext {
                     counts = *change_rx.borrow();
                     if counts.active == 0 && counts.archive > 0 {
                         // No active jobs, we're done
-                        tracing::info!("done, {} active jobs, {} archived jobs", counts.active, counts.archive);
+                        tracing::info!(
+                            "done, {} active jobs, {} archived jobs",
+                            counts.active,
+                            counts.archive
+                        );
                         return Ok(());
                     }
                     // Continue waiting
@@ -263,17 +300,77 @@ impl WflowTestContext {
                 }
                 Ok(Err(_)) => {
                     // Channel closed, worker might be shutting down
-                    return Err(eyre::eyre!("worker state channel closed"));
+                    return Err(ferr!("worker state channel closed"));
                 }
                 Err(_) => {
                     // Timeout reached
                     let final_elapsed = start.elapsed();
-                    let final_counts = self.working_state.get_job_counts().await;
-                    return Err(eyre::eyre!(
+                    let final_counts = working_state.get_job_counts().await;
+                    return Err(ferr!(
                         "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
                         timeout_secs,
                         final_elapsed,
                         final_counts.active
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Wait until a log entry matches the provided condition
+    /// The callback receives (entry_id, log_entry) and should return true when the condition is met
+    pub async fn wait_until_entry<F>(
+        &self,
+        start_entry_id: u64,
+        timeout_secs: u64,
+        mut condition: F,
+    ) -> Res<(u64, wflow_core::partition::log::PartitionLogEntry)>
+    where
+        F: FnMut(u64, &wflow_core::partition::log::PartitionLogEntry) -> bool,
+    {
+        use futures::StreamExt;
+        use tokio::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let timeout_duration = Duration::from_secs(timeout_secs);
+        let mut stream = self.log_store.tail(start_entry_id).await;
+
+        loop {
+            // Calculate remaining time
+            let elapsed = start.elapsed();
+            let remaining = timeout_duration.saturating_sub(elapsed);
+            if remaining.is_zero() {
+                return Err(ferr!(
+                    "timeout waiting for log entry condition after {} seconds",
+                    timeout_secs
+                ));
+            }
+
+            // Wait for next entry with timeout
+            match tokio::time::timeout(remaining, stream.next()).await {
+                Ok(Some(Ok((entry_id, entry_bytes)))) => {
+                    let log_entry: wflow_core::partition::log::PartitionLogEntry =
+                        serde_json::from_slice(&entry_bytes[..])
+                            .wrap_err("failed to parse log entry")?;
+
+                    if condition(entry_id, &log_entry) {
+                        return Ok((entry_id, log_entry));
+                    }
+                    // Continue waiting
+                }
+                Ok(Some(Err(err))) => {
+                    return Err(err);
+                }
+                Ok(None) => {
+                    // Stream ended, wait a bit and retry
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                Err(_) => {
+                    // Timeout reached
+                    return Err(ferr!(
+                        "timeout waiting for log entry condition after {} seconds",
+                        timeout_secs
                     ));
                 }
             }
@@ -333,9 +430,68 @@ impl WflowTestContext {
         Ok(())
     }
 
-    /// Cleanup: shutdown all workers
-    pub async fn close(self) -> Res<()> {
-        self.worker_handle.close().await?;
+    /// Set a value in the keyvalue store (for testing)
+    pub async fn set_keyvalue(&self, bucket: &str, key: &str, value: Vec<u8>) -> Res<()> {
+        // Use the hardcoded workload_id from register_workload
+        self.keyvalue_plugin
+            .set_value("workload_123", bucket, key, value)
+            .await
+            .to_eyre()?;
         Ok(())
     }
+
+    /// Cleanup: shutdown all workers
+    pub async fn close(self) -> Res<()> {
+        if let Some(worker_handle) = self.worker_handle {
+            worker_handle.close().await?;
+        }
+        Ok(())
+    }
+}
+
+fn new_in_memory_kv_store() -> Arc<Arc<DHashMap<Arc<[u8]>, Arc<[u8]>>>> {
+    let kv: DHashMap<Arc<[u8]>, Arc<[u8]>> = default();
+    let kv = Arc::new(kv);
+    Arc::new(kv)
+}
+
+async fn register_workload_on_host(
+    host: &wash_runtime::host::Host,
+    wasm_path: &str,
+    wflow_keys: Vec<String>,
+) -> Res<()> {
+    let wasm_bytes = tokio::fs::read(wasm_path).await?;
+
+    let req = types::WorkloadStartRequest {
+        workload_id: "workload_123".into(),
+        workload: types::Workload {
+            namespace: "test".to_string(),
+            name: format!("test-wflows-{}", wflow_keys.join("-")),
+            annotations: std::collections::HashMap::new(),
+            service: None,
+            components: vec![types::Component {
+                bytes: wasm_bytes.into(),
+                ..default()
+            }],
+            host_interfaces: vec![
+                WitInterface {
+                    config: [("wflow_keys".to_owned(), wflow_keys.join(","))].into(),
+                    ..WitInterface::from("townframe:wflow/bundle")
+                },
+                WitInterface {
+                    ..WitInterface::from("townframe:am-repo/repo")
+                },
+                WitInterface {
+                    ..WitInterface::from("townframe:utils/llm-chat")
+                },
+                WitInterface {
+                    ..WitInterface::from("wasi:keyvalue/store")
+                },
+            ],
+            volumes: vec![],
+        },
+    };
+
+    host.workload_start(req).await.to_eyre()?;
+    Ok(())
 }

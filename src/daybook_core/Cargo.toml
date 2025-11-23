@@ -70,5 +70,5 @@ tokio-stream = "0.1.17"
 tokio-util = { workspace = true, features = [] }
 insta = { workspace = true, features = ["json"] }
 wflow = { workspace = true, features = ["test-harness"] }
-utils_rs = { workspace = true, features = ["console-subscriber"]}
+utils_rs = { workspace = true, features = []}
 

@@ -21,6 +21,7 @@ import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.core.ListenerRegistration
+import org.example.daybook.capture.DaybookCameraPreview
 import kotlin.time.Clock
 import kotlin.uuid.Uuid
 
@@ -38,8 +39,8 @@ sealed interface DocsListState {
 
 class CaptureScreenViewModel(
     val drawerRepo: DrawerRepoFfi,
-    val initialMode: CaptureMode = CaptureMode.Text,
-    val availableModes: Set<CaptureMode> = setOf(CaptureMode.Text),
+    val initialMode: CaptureMode = CaptureMode.Camera,
+    val availableModes: Set<CaptureMode> = setOf(CaptureMode.Text, CaptureMode.Camera),
 ) : ViewModel() {
     private val _captureMode = MutableStateFlow(initialMode)
     val captureMode = _captureMode.asStateFlow()
@@ -129,26 +130,40 @@ fun CaptureScreen() {
         CaptureScreenViewModel(drawerRepo = drawerRepo)
     }
 
+    val captureMode = vm.captureMode.collectAsState().value
     val docsList = vm.docsList.collectAsState().value
 
-    when (docsList) {
-        is DocsListState.Error -> {
-            Text("error loading docs: ${docsList.error.message()}")
-        }
-
-        is DocsListState.Loading -> {
-            Text("Loading...")
-        }
-
-        is DocsListState.Data -> {
-            Button(
-                onClick = {
-                    vm.addOne()
+    when (captureMode) {
+        CaptureMode.Camera -> {
+            DaybookCameraPreview(
+                onImageSaved = { byteArray ->
+                    // Optionally save the image as a Doc
+                    // For now, just log that it was saved
+                    println("Image saved: ${byteArray.size} bytes")
                 }
-            ) {
-                Text("Add")
+            )
+        }
+        else -> {
+            when (docsList) {
+                is DocsListState.Error -> {
+                    Text("error loading docs: ${docsList.error.message()}")
+                }
+
+                is DocsListState.Loading -> {
+                    Text("Loading...")
+                }
+
+                is DocsListState.Data -> {
+                    Button(
+                        onClick = {
+                            vm.addOne()
+                        }
+                    ) {
+                        Text("Add")
+                    }
+                    Text("${docsList.docs}")
+                }
             }
-            Text("${docsList.docs}")
         }
     }
 }

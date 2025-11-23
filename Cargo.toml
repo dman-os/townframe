@@ -10,25 +10,26 @@ members = [
   "./src/daybook_core",
   "./src/daybook_ffi",
   "./src/daybook_http",
-  # "./src/daybook_restate/",
   "./src/daybook_sync",
   "./src/daybook_wflows/",
-  "./src/wflow_sdk",
   "./src/macros",
-  # "./src/sdk-shared-core/",
-  "./src/tests_http",
+  "./src/play/",
   "./src/test_wflows",
+  # "./src/tests_http",
   "./src/utils_rs",
-  "./src/wflow_core/",
-  "./src/wflow_tokio/",
-  "./src/wflow/",
-  "./src/wash_plugin_wflow/",
-  "./src/wflow_ingress_http/",
-  "./src/xtask",
   "./src/wash_plugin_am_repo/",
   "./src/wash_plugin_utils/",
+  "./src/wash_plugin_wflow/",
+  "./src/wflow/",
+  "./src/wflow_core/",
+  "./src/wflow_ingress_http/",
+  "./src/wflow_sdk",
+  "./src/wflow_tokio/",
+  "./src/wflow_webui/",
+  "./src/xtask",
+  # "./src/daybook_restate/",
+  # "./src/sdk-shared-core/",
   # "./src/granary_web",
-  # "./src/leptos_oidc",
   # "./src/leptos_wasi/",
 ]
 exclude = [
@@ -45,7 +46,6 @@ repository = ""
 
 [workspace.dependencies]
 # internal
-leptos_oidc = { path = "./src/leptos_oidc" }
 utils_rs = { path = "./src/utils_rs", default-features = false }
 api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
 btress_api = { path = "./src/btress_api" }
@@ -84,6 +84,7 @@ data-encoding = "2.9"
 # web
 leptos = { version = "0.8", default-features = false }
 leptos-use = { version = "0.16", default-features = false }
+leptos_meta = { version = "0.8" }
 leptos_router = { version = "0.8", default-features = false }
 
 # macros
@@ -135,7 +136,7 @@ gloo = { version = "0.11.0", default-features = false }
 
 
 # wasm
-wit-bindgen = "0.45.1"
+wit-bindgen = "0.48.1"
 
 # sync
 automerge = "0.7"
@@ -169,6 +170,99 @@ wasmtime = "*"
 # wash-runtime = "0.1.0"
 wash-runtime = { path = "../wash/crates/wash-runtime/"}
 
+scopeguard = "1.2.0"
+
 # [patch.crates-io]
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 # restate-sdk-shared-core = { path = "./src/sdk-shared-core/" }
+
+# The default profile is optimized for Wasm builds because
+# that's what [Trunk reads](https://github.com/trunk-rs/trunk/issues/605).
+# Optimize for size in the wasm-release profile to reduce load times and bandwidth usage on web.
+# NOTE: the comment above is now stale
+[profile.wasm-release]
+inherits = "release"
+# Compile the entire crate as one unit.
+# Slows compile times, marginal improvements.
+codegen-units = 1
+# Do a second optimization pass over the entire program, including dependencies.
+# Slows compile times, marginal improvements.
+lto = "thin"
+# lto = true
+# Optimize with size in mind (also try "z", sometimes it is better).
+# Slightly slows compile times, great improvements to file size and runtime performance.
+opt-level = "s"
+# opt-level = 'z'
+# Strip all debugging information from the binary to slightly reduce file size.
+strip = "debuginfo"
+panic = "abort"
+
+
+[[workspace.metadata.leptos]]
+name = "wflow_webui"
+# the package in the workspace that contains the server binary (binary crate)
+bin-package = "wflow_webui"
+# the package in the workspace that contains the frontend wasm binary (library crate)
+lib-package = "wflow_webui"
+
+# The name used by wasm-bindgen/cargo-leptos for the JS/WASM bundle. Defaults to the crate name
+# output-name = "isis"
+
+# The site root folder is where cargo-leptos generate all output. WARNING: all content of this folder will be erased on a rebuild. Use it in your server setup.
+site-root = "./target/site"
+
+# The site-root relative folder where all compiled output (JS, WASM and CSS) is written
+# Defaults to pkg
+site-pkg-dir = "pkg"
+
+# [Optional] The source CSS file. If it ends with .sass or .scss then it will be compiled by dart-sass into CSS. The CSS is optimized by Lightning CSS before being written to <site-root>/<site-pkg>/app.css
+style-file = "src/wflow_webui/styles/main.scss"
+tailwind-input-file = "src/wflow_webui/styles/tailwind.css"
+# Assets source dir. All files found here will be copied and synchronized to site-root.
+# The assets-dir cannot have a sub directory with the same name/path as site-pkg-dir.
+#
+# Optional. Env: LEPTOS_ASSETS_DIR.
+# assets-dir = "assets"
+
+# The IP and port (ex: 127.0.0.1:3000) where the server serves the content. Use it in your server setup.
+site-addr = "127.0.0.1:3000"
+
+# The port to use for automatic reload monitoring
+reload-port = 3001
+
+# [Optional] Command to use when running end2end tests. It will run in the end2end dir.
+#   [Windows] for non-WSL use "npx.cmd playwright test"
+#   This binary name can be checked in Powershell with Get-Command npx
+end2end-cmd = "npx playwright test"
+end2end-dir = "src/end2end"
+
+#  The browserlist query used for optimizing the CSS.
+browserquery = "defaults"
+
+# The environment Leptos will run in, usually either "DEV" or "PROD"
+env = "DEV"
+
+# The features to use when compiling the bin target
+#
+# Optional. Can be over-ridden with the command line parameter --bin-features
+bin-features = ["ssr"]
+
+# If the --no-default-features flag should be used when compiling the bin target
+#
+# Optional. Defaults to false.
+bin-default-features = false
+
+# The features to use when compiling the lib target
+#
+# Optional. Can be over-ridden with the command line parameter --lib-features
+lib-features = ["hydrate"]
+
+# If the --no-default-features flag should be used when compiling the lib target
+#
+# Optional. Defaults to false.
+lib-default-features = false
+
+# The profile to use for the lib target when compiling for release
+#
+# Optional. Defaults to "release".
+lib-profile-release = "wasm-release"

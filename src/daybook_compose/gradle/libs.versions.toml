@@ -21,6 +21,8 @@ lifecycleService = "2.9.1"
 skiko = "0.9.4.2"
 jna = "5.17.0"
 gobley = "0.3.7"
+camerak = "0.0.12"
+camerakImageSaver = "0.0.7"
 
 [libraries]
 calf-permissions = { module = "com.mohamedrejeb.calf:calf-permissions", version.ref = "calfPermissions" }
@@ -42,6 +44,8 @@ kotlinx-coroutinesSwing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-s
 kotlinx-coroutinesCore = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 skikoLinuxX64 = { module = "org.jetbrains.skiko:skiko-awt-runtime-linux-x64", version.ref = "skiko" }
 jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
+camerak = { module = "io.github.kashif-mehmood-km:camerak", version.ref = "camerak" }
+camerak-image-saver = { module = "io.github.kashif-mehmood-km:image_saver_plugin", version.ref = "camerakImageSaver" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }

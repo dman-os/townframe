@@ -1,3 +1,5 @@
+./README.md
+
 - Don't be lazy with solutions.
 - Don't catch or log errors every edgecase.
   - Most errors are programming errors and should crash the program.
@@ -6,10 +8,13 @@
     - User input validation
   - Don't swallow errors with empty catch statements or catch-and-log unless explcitly told to do so.
 - To type check and lint the ./src/daybook_compose multiplatform app, use `ghjk x check-dayb`.
-- Prefer `cargo clippy --all-targets --all-features -p myCrate`.
-- When working rust code, in addition to `cargo clippy`, small tests can be used to validate ideas.
+- Prefer `cargo clippy --all-targets --all-features -p myCrate` over `cargo check`.
+- When working with rust, in addition to `cargo clippy`, small tests can be used to validate ideas.
 - Do not use the cargo integration tests features.
   - I.e. avoid making tests in root::tests.
 - DHashMaps shouldn't not be used for sync across tasks/threads. 
   - They easily deadlock if modified across multiple tasks.
   - They're only a good fit for single modifier situation where a normal HashMap won't due to do async problems.
+- Do not adress TODOs or FIXMEs unless told to do so.
+- Prefer to preserve comments unless they are progress comments written by an agent. 
+- Don't be lazy with solutions.

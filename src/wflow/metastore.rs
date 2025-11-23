@@ -60,7 +60,7 @@ impl MetdataStore for KvStoreMetadtaStore {
             }
             Err(CasError::CasFailed(_)) => {
                 // Value was modified by another process, abort
-                Err(eyre::eyre!("concurrent modification detected: another process modified the workflow metadata for key '{}'", key))
+                Err(ferr!("concurrent modification detected: another process modified the workflow metadata for key '{}'", key))
             }
             Err(CasError::StoreError(err)) => Err(err),
         }

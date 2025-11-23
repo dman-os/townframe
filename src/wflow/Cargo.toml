@@ -11,38 +11,43 @@ default = ["test-harness"]
 test-harness = ["wasmtime", "insta"]
 
 [dependencies]
+# internal
 wflow_core.workspace = true
 wflow_tokio.workspace = true
+wash_plugin_wflow.workspace = true
 utils_rs.workspace = true
-async-trait.workspace = true
+
+# encodign
 serde.workspace = true
 serde_json.workspace = true
+
+# ds
 time.workspace = true
-anyhow.workspace = true
-displaydoc.workspace = true
-thiserror.workspace = true
 parking_lot.workspace = true
+async-channel.workspace = true
+
+# errors
+anyhow.workspace = true
+thiserror.workspace = true
+displaydoc.workspace = true
+
+# async
+async-trait.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "fs"] }
 tokio-util.workspace = true
 futures.workspace = true
-async-channel.workspace = true
+
+# db
+sqlx = { workspace = true, features = ["sqlite"] }
+
+# wasm
 wash-runtime.workspace = true
-wash_plugin_wflow = { path = "../wash_plugin_wflow" }
-wash_plugin_am_repo.workspace = true
-wash_plugin_utils = { path = "../wash_plugin_utils" }
-tracing.workspace = true
-samod.workspace = true
 wasmtime = { workspace = true, optional = true }
+
+# testing
 insta = { workspace = true, optional = true, features = ["json"] }
 
+tracing.workspace = true
+
 [dev-dependencies]
-utils_rs = { workspace = true, features = ["hash", "automerge", "console-subscriber"] }
-automerge.workspace = true
-samod.workspace = true
-futures.workspace = true
-tokio = { workspace = true, features = ["rt", "time", "macros", "sync", "tracing"] }
-serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
-color-eyre.workspace = true
-tracing-subscriber.workspace = true
 wasmtime.workspace = true

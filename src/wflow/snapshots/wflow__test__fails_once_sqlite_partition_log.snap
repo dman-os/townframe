@@ -1,0 +1,86 @@
+---
+source: src/wflow/test.rs
+expression: log_snapshot
+---
+- - 0
+  - JobInit:
+      job_id: test-fails-once-sqlite-1
+      timestamp: "[timestamp]"
+      args_json: "{\"key\":\"test-counter\"}"
+      override_wflow_retry_policy: ~
+      wflow:
+        key: fails_once
+        service:
+          Wasmcloud:
+            workload_id: workload_123
+- - 1
+  - JobPartitionEffects:
+      source_entry_id: 0
+      effects:
+        - job_id: test-fails-once-sqlite-1
+          deets:
+            RunJob:
+              run_id: 0
+- - 2
+  - JobEffectResult:
+      job_id: test-fails-once-sqlite-1
+      timestamp: "[timestamp]"
+      effect_id:
+        entry_id: 1
+        effect_idx: 0
+      run_id: 0
+      start_at: "[timestamp]"
+      end_at: "[timestamp]"
+      result:
+        WflowErr:
+          Transient:
+            error_json: "{\"msg\":\"first run, woohoo!\\n\\[location]\"}"
+            retry_policy: ~
+- - 3
+  - JobPartitionEffects:
+      source_entry_id: 2
+      effects:
+        - job_id: test-fails-once-sqlite-1
+          deets:
+            RunJob:
+              run_id: 1
+- - 4
+  - JobEffectResult:
+      job_id: test-fails-once-sqlite-1
+      timestamp: "[timestamp]"
+      effect_id:
+        entry_id: 3
+        effect_idx: 0
+      run_id: 1
+      start_at: "[timestamp]"
+      end_at: "[timestamp]"
+      result:
+        StepEffect:
+          step_id: 0
+          attempt_id: 0
+          start_at: "[timestamp]"
+          end_at: "[timestamp]"
+          deets:
+            Success:
+              value_json: "null"
+- - 5
+  - JobPartitionEffects:
+      source_entry_id: 4
+      effects:
+        - job_id: test-fails-once-sqlite-1
+          deets:
+            RunJob:
+              run_id: 2
+- - 6
+  - JobEffectResult:
+      job_id: test-fails-once-sqlite-1
+      timestamp: "[timestamp]"
+      effect_id:
+        entry_id: 5
+        effect_idx: 0
+      run_id: 2
+      start_at: "[timestamp]"
+      end_at: "[timestamp]"
+      result:
+        Success:
+          value_json: "null"

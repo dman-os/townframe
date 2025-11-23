@@ -22,7 +22,9 @@ impl DaybookTestContext {
 }
 
 async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
-    utils_rs::testing::load_envs_once();
+    tokio::task::block_in_place(|| {
+        utils_rs::testing::load_envs_once();
+    });
 
     // Initialize AmCtx with memory storage
     let acx = AmCtx::boot(
@@ -45,8 +47,20 @@ async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
     // Load the drawer repo (DrawerRepo::load takes ownership of AmCtx, so we clone)
     let drawer_repo = DrawerRepo::load((*acx).clone(), drawer_doc_id).await?;
 
+    let am_repo_plugin = Arc::new(wash_plugin_am_repo::AmRepoPlugin::new(wcx.acx.clone()));
+    let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {
+        ollama_url: utils_rs::get_env_var("OLLAMA_URL")?,
+        ollama_model: utils_rs::get_env_var("OLLAMA_MODEL")?,
+    })
+    .wrap_err("error creating utils plugin")?;
     // Create wflow test context with the same AmCtx so documents are shared
-    let wflow_test_cx = WflowTestContext::with_am_ctx(Some(acx.clone())).await?;
+    let wflow_test_cx = WflowTestContext::builder()
+        .wth_plugin(am_repo_plugin)
+        .wth_plugin(utils_plugin)
+        .build()
+        .await?
+        .start()
+        .await?;
 
     // Register the daybook_wflows workload
     wflow_test_cx

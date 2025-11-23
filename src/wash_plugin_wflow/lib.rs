@@ -341,7 +341,6 @@ impl wash_runtime::plugin::HostPlugin for TownframewflowPlugin {
         component: &mut wash_runtime::engine::workload::WorkloadComponent,
         interface_configs: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
-        info!(?component, ?interface_configs, "XXX");
         let world = component.world();
         for iface in world.imports {
             if iface.namespace == "townframe" && iface.package == "wflow" {
@@ -479,6 +478,9 @@ impl service::WflowServiceHost for TownframewflowPlugin {
             },
         );
         assert!(_old.is_none(), "fishy");
+        scopeguard::defer! {
+            let _ = self.active_jobs.remove(&job_id);
+        }
 
         // TODO: timeout
         let trap = tokio::select! {
@@ -529,7 +531,6 @@ impl service::WflowServiceHost for TownframewflowPlugin {
                 value_json: value_json.into(),
             }),
         };
-        let _ = self.active_jobs.remove(&job_id);
         res
     }
 }

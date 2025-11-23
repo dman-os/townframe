@@ -4,21 +4,10 @@ use super::RetryPolicy;
 use crate::gen::metastore::WflowMeta;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobEvent {
+pub struct JobInitEvent {
+    pub job_id: Arc<str>,
     #[serde(with = "utils_rs::codecs::sane_iso8601")]
     pub timestamp: OffsetDateTime,
-    pub job_id: Arc<str>,
-    pub deets: JobEventDeets,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum JobEventDeets {
-    Init(JobInitEvent),
-    Run(JobRunEvent),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobInitEvent {
     pub args_json: Arc<str>,
     pub override_wflow_retry_policy: Option<RetryPolicy>,
     pub wflow: WflowMeta,
@@ -26,6 +15,10 @@ pub struct JobInitEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRunEvent {
+    pub job_id: Arc<str>,
+    #[serde(with = "utils_rs::codecs::sane_iso8601")]
+    pub timestamp: OffsetDateTime,
+    pub effect_id: crate::partition::effects::EffectId,
     pub run_id: u64,
     #[serde(with = "utils_rs::codecs::sane_iso8601")]
     pub start_at: OffsetDateTime,
