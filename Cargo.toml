@@ -27,7 +27,6 @@ members = [
   "./src/xtask",
   "./src/wash_plugin_am_repo/",
   "./src/wash_plugin_utils/",
-  "./src/daybook_dx/*"
   # "./src/granary_web",
   # "./src/leptos_oidc",
   # "./src/leptos_wasi/",
@@ -58,7 +57,6 @@ wflow_tokio = { path = "./src/wflow_tokio", default-features = false }
 wflow_sdk = { path = "./src/wflow_sdk", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 wash_plugin_am_repo = { path = "./src/wash_plugin_am_repo" }
-ui = { path = "./src/daybook_dx/ui" }
 
 syn = { version = "2", features = ["extra-traits"] }
 
@@ -166,8 +164,6 @@ sqlx = { version = "0.8.6", features = [
 # ffi
 uniffi = { version = "0.29.4" }
 # uniffi = { path = "../uniffi-rs/uniffi/" }
-
-dioxus = { version = "0.7.1" }
 
 wasmtime = "*"
 # wash-runtime = "0.1.0"
