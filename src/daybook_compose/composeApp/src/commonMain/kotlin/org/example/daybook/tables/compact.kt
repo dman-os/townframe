@@ -259,7 +259,7 @@ fun CompactLayout(
 
     // Clear cached tab layout rects whenever the selected table or sheet content changes
     // FIXME:
-    LaunchedEffect(vm.tablesState.value) {
+    LaunchedEffect(vm.tablesState.collectAsState()) {
         tabItemLayouts = mapOf()
         tableItemLayouts = mapOf()
         highlightedTab = null

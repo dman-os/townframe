@@ -27,6 +27,7 @@ members = [
   "./src/xtask",
   "./src/wash_plugin_am_repo/",
   "./src/wash_plugin_utils/",
+  "./src/daybook_dx/*"
   # "./src/granary_web",
   # "./src/leptos_oidc",
   # "./src/leptos_wasi/",
@@ -57,6 +58,7 @@ wflow_tokio = { path = "./src/wflow_tokio", default-features = false }
 wflow_sdk = { path = "./src/wflow_sdk", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 wash_plugin_am_repo = { path = "./src/wash_plugin_am_repo" }
+ui = { path = "./src/daybook_dx/ui" }
 
 syn = { version = "2", features = ["extra-traits"] }
 
@@ -112,6 +114,11 @@ tracing-futures = "0.2.5"
 # auth
 kanidm_client = "1.7.2"
 kanidm_proto = "1.7.2"
+# # openssl = { version = "0.10", features = ["vendored"] }
+#
+# [features]
+# default = ["openssl/vendored"]
+
 
 # os
 dotenv-flow = "0.16.2"
@@ -125,7 +132,7 @@ utoipa = { version = "5.4.0", features = ["debug", "uuid", "time", "smallvec",  
 # http
 tower = "0.5"
 tower-http = "0.6"
-reqwest = { version = "0.12", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream", "rustls-tls"] }
 gloo = { version = "0.11.0", default-features = false }
 
 
@@ -159,6 +166,8 @@ sqlx = { version = "0.8.6", features = [
 # ffi
 uniffi = { version = "0.29.4" }
 # uniffi = { path = "../uniffi-rs/uniffi/" }
+
+dioxus = { version = "0.7.1" }
 
 wasmtime = "*"
 # wash-runtime = "0.1.0"

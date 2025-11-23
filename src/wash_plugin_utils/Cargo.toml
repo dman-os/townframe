@@ -35,7 +35,7 @@ wasmtime.workspace = true
 wash-runtime.workspace = true
 
 tracing.workspace = true
-ollama-rs = "0.3.3"
+ollama-rs = { version = "0.3.3", default-features = false, features = ["rustls"] }
 url.workspace = true
 
 

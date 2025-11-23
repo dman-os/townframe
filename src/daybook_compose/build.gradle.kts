@@ -8,7 +8,11 @@ plugins {
     alias(libs.plugins.composeCompiler) apply false
     alias(libs.plugins.kotlinMultiplatform) apply false
     alias(libs.plugins.kotlinAndroid) apply false
+    alias(libs.plugins.gobleyCargo) apply false
+    alias(libs.plugins.gobleyUniffi) apply false
+    kotlin("plugin.atomicfu") version libs.versions.kotlin apply false
 }
+
 tasks.register("printJavaHome") {
     doLast {
         println("java.home = " + System.getProperty("java.home"))

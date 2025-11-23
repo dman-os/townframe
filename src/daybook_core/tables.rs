@@ -260,7 +260,7 @@ impl crate::repos::Repo for TablesRepo {
 
 // Granular event enum for specific changes
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum TablesEvent {
     ListChanged,
     WindowChanged { id: Uuid },

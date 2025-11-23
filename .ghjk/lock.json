@@ -1222,6 +1222,49 @@
           "crateName": "cargo-progenitor",
           "locked": true,
           "specifiedVersion": false
+        },
+        "bciqcqaceqz6otihyncg7t7pykiaqms23hzh4nmp34h7afl53jmx755q": {
+          "version": "0.7.1",
+          "buildDepConfigs": {
+            "cargo_binstall_ghrel": {
+              "version": "v1.13.0",
+              "buildDepConfigs": {},
+              "portRef": "cargo_binstall_ghrel@0.1.0",
+              "specifiedVersion": false
+            },
+            "rust_rustup": {
+              "version": "nightly-2025-09-01",
+              "buildDepConfigs": {
+                "rustup_rustlang": {
+                  "version": "1.28.2",
+                  "buildDepConfigs": {
+                    "git_aa": {
+                      "version": "2.49.0",
+                      "buildDepConfigs": {},
+                      "portRef": "git_aa@0.1.0",
+                      "specifiedVersion": false
+                    }
+                  },
+                  "portRef": "rustup_rustlang@0.1.0",
+                  "specifiedVersion": false
+                }
+              },
+              "portRef": "rust_rustup@0.1.0",
+              "profile": "default",
+              "components": [
+                "rust-src"
+              ],
+              "targets": [
+                "wasm32-unknown-unknown",
+                "wasm32-wasip2"
+              ],
+              "specifiedVersion": true
+            }
+          },
+          "portRef": "cargobi_cratesio@0.1.0",
+          "crateName": "dioxus-cli",
+          "locked": true,
+          "specifiedVersion": false
         }
       }
     },
@@ -1247,6 +1290,7 @@
                 "bciqhe3jkibjelqjdi7oz6gfur624cglirdhh7kbhrilzcpd3u4ntvni",
                 "bciqdiwip67f2i6dv6bfcsfyakyhx4twexaz7gsryqygqbjim45qgfjq",
                 "bciqleipnwo6t72xhzgdutkru2p2d7utkyn2mv657tnxiiuqlngieoby",
+                "bciqhhtdxwjduo4x5nup54vrfzkmpfyqtdkkg2wl5r4gkzzhwlqtjf4y",
                 "bciqkdvo6udbkvdykibavetgc5ujbeuh4scyyxaxhftrr4wc2hfk4lyq"
               ],
               "allowedBuildDeps": "bciqmfv73ho6jjbntw5n4s53q2iw5gv5s24twhce2ekqcwhblm5wi76y"
@@ -1271,6 +1315,7 @@
                 "bciqhe3jkibjelqjdi7oz6gfur624cglirdhh7kbhrilzcpd3u4ntvni",
                 "bciqdiwip67f2i6dv6bfcsfyakyhx4twexaz7gsryqygqbjim45qgfjq",
                 "bciqleipnwo6t72xhzgdutkru2p2d7utkyn2mv657tnxiiuqlngieoby",
+                "bciqhhtdxwjduo4x5nup54vrfzkmpfyqtdkkg2wl5r4gkzzhwlqtjf4y",
                 "bciqkdvo6udbkvdykibavetgc5ujbeuh4scyyxaxhftrr4wc2hfk4lyq"
               ],
               "allowedBuildDeps": "bciqmfv73ho6jjbntw5n4s53q2iw5gv5s24twhce2ekqcwhblm5wi76y"
@@ -1916,6 +1961,44 @@
           "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.2/ports/cargobi.ts"
         },
         "crateName": "cargo-progenitor",
+        "locked": true
+      },
+      "bciqhhtdxwjduo4x5nup54vrfzkmpfyqtdkkg2wl5r4gkzzhwlqtjf4y": {
+        "port": {
+          "ty": "denoWorker@v1",
+          "name": "cargobi_cratesio",
+          "platforms": [
+            "x86_64-linux",
+            "aarch64-linux",
+            "x86_64-darwin",
+            "aarch64-darwin",
+            "x86_64-windows",
+            "aarch64-windows",
+            "x86_64-freebsd",
+            "aarch64-freebsd",
+            "x86_64-netbsd",
+            "aarch64-netbsd",
+            "x86_64-aix",
+            "aarch64-aix",
+            "x86_64-solaris",
+            "aarch64-solaris",
+            "x86_64-illumos",
+            "aarch64-illumos",
+            "x86_64-android",
+            "aarch64-android"
+          ],
+          "version": "0.1.0",
+          "buildDeps": [
+            {
+              "name": "cargo_binstall_ghrel"
+            },
+            {
+              "name": "rust_rustup"
+            }
+          ],
+          "moduleSpecifier": "https://raw.githubusercontent.com/metatypedev/ghjk/v0.3.2/ports/cargobi.ts"
+        },
+        "crateName": "dioxus-cli",
         "locked": true
       },
       "bciqkdvo6udbkvdykibavetgc5ujbeuh4scyyxaxhftrr4wc2hfk4lyq": {

@@ -2302,28 +2302,119 @@ public object FfiConverterTypeDocTagKind: FfiConverterRustBuffer<DocTagKind> {
 
 
 
-
-enum class DrawerEvent {
+sealed class DrawerEvent {
     
-    LIST_CHANGED;
+    object ListChanged : DrawerEvent()
+    
+    
+    data class DocAdded(
+        val `id`: kotlin.String, 
+        val `heads`: List<kotlin.String>) : DrawerEvent() {
+        companion object
+    }
+    
+    data class DocUpdated(
+        val `id`: kotlin.String, 
+        val `newHeads`: List<kotlin.String>, 
+        val `oldHeads`: List<kotlin.String>) : DrawerEvent() {
+        companion object
+    }
+    
+    data class DocDeleted(
+        val `id`: kotlin.String, 
+        val `oldHeads`: List<kotlin.String>) : DrawerEvent() {
+        companion object
+    }
+    
+
+    
     companion object
 }
-
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDrawerEvent: FfiConverterRustBuffer<DrawerEvent> {
-    override fun read(buf: ByteBuffer) = try {
-        DrawerEvent.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
+    override fun read(buf: ByteBuffer): DrawerEvent {
+        return when(buf.getInt()) {
+            1 -> DrawerEvent.ListChanged
+            2 -> DrawerEvent.DocAdded(
+                FfiConverterString.read(buf),
+                FfiConverterSequenceString.read(buf),
+                )
+            3 -> DrawerEvent.DocUpdated(
+                FfiConverterString.read(buf),
+                FfiConverterSequenceString.read(buf),
+                FfiConverterSequenceString.read(buf),
+                )
+            4 -> DrawerEvent.DocDeleted(
+                FfiConverterString.read(buf),
+                FfiConverterSequenceString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
     }
 
-    override fun allocationSize(value: DrawerEvent) = 4UL
+    override fun allocationSize(value: DrawerEvent) = when(value) {
+        is DrawerEvent.ListChanged -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is DrawerEvent.DocAdded -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterSequenceString.allocationSize(value.`heads`)
+            )
+        }
+        is DrawerEvent.DocUpdated -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterSequenceString.allocationSize(value.`newHeads`)
+                + FfiConverterSequenceString.allocationSize(value.`oldHeads`)
+            )
+        }
+        is DrawerEvent.DocDeleted -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterSequenceString.allocationSize(value.`oldHeads`)
+            )
+        }
+    }
 
     override fun write(value: DrawerEvent, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
+        when(value) {
+            is DrawerEvent.ListChanged -> {
+                buf.putInt(1)
+                Unit
+            }
+            is DrawerEvent.DocAdded -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterSequenceString.write(value.`heads`, buf)
+                Unit
+            }
+            is DrawerEvent.DocUpdated -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterSequenceString.write(value.`newHeads`, buf)
+                FfiConverterSequenceString.write(value.`oldHeads`, buf)
+                Unit
+            }
+            is DrawerEvent.DocDeleted -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterSequenceString.write(value.`oldHeads`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 

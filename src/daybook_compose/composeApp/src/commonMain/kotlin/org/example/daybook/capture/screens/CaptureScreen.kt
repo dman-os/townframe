@@ -56,9 +56,12 @@ class CaptureScreenViewModel(
             // Ensure UI updates happen on main thread
             viewModelScope.launch {
                 when (event) {
-                    DrawerEvent.LIST_CHANGED -> {
+                    DrawerEvent.ListChanged -> {
                         // Refresh from source of truth in Rust
                         refreshDocs()
+                    }
+                    else -> {
+
                     }
                 }
             }

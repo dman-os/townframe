@@ -54,9 +54,6 @@ autosurgeon = { workspace = true, features = ["uuid"] }
 automerge = { workspace = true }
 samod = { workspace = true, features = ["tokio", "tungstenite"] }
 
-# http
-reqwest.workspace = true
-
 sqlx = { workspace = true, features = ["sqlite"] }
 
 pastey = "0.1"

@@ -8,6 +8,10 @@
 
 ### Stack
 
+- Test to assert snapshot recovery works
+- Sqlite backed KvStore impl
+- Convert DHashMap to be wrapper around RwLock<HashMap>
+
 - [x] Get uniffi working on android
 - [ ] wflow
   - [x] in-memory smoke
@@ -140,6 +144,10 @@ New version
 ```
 
 ## dev-log
+
+### 2025-11-22 | wflow in memory
+
+Well, we have the in memory version with zero features working.
 
 ### 2025-11-08 | wflow details
 

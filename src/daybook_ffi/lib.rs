@@ -51,8 +51,9 @@ impl Config {
 
             (
                 utils_rs::am::Config {
-                    storage_dir: app_dir.join("samod"),
-
+                    storage: utils_rs::am::StorageConfig::Disk {
+                        path: app_dir.join("samod"),
+                    },
                     peer_id: "daybook_client".to_string(),
                 },
                 sql::Config {

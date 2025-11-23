@@ -34,7 +34,7 @@ thiserror.workspace = true
 displaydoc.workspace = true
 
 futures.workspace = true
-reqwest = { workspace = true, features = ["json", "stream"] }
+reqwest.workspace = true
 
 url.workspace = true
 generational-box = "0.6.2"
