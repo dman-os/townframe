@@ -1,0 +1,38 @@
+package townframe:daybook;
+
+interface drawer {
+    type doc-id = string;
+    
+    type heads = list<string>;
+    
+    type json = string;
+    
+    variant get-doc-error {
+        doc-not-found,
+        invalid-heads(string),
+        other(string),
+    }
+    
+    get-doc-at-heads: func(
+        doc-id: doc-id,
+        heads: heads,
+    ) -> result<option<json>, get-doc-error>;
+    
+    variant update-doc-error {
+        doc-not-found,
+        invalid-heads(string),
+        invalid-patch(string),
+        other(string),
+    }
+    
+    update-doc-at-heads: func(
+        doc-id: doc-id,
+        heads: heads,
+        patch: json,
+    ) -> result<_, update-doc-error>;
+}
+
+world guest {
+    import drawer;
+}
+

@@ -43,7 +43,7 @@ pub fn feature(reg: &TypeReg) -> Feature {
         ("image", doc_image),
     ];
     let doc_content_kind = reg.add_type(Type::Enum(
-        Enum::builder("DocKind")
+        Enum::builder("DocContentKind")
             .with_variants(
                 doc_content_variants
                     .iter()
@@ -73,6 +73,11 @@ pub fn feature(reg: &TypeReg) -> Feature {
             "label_generic",
             VariantVariant::builder(VariantVariantType::Wrapped(reg.string())).build(),
         ),
+        (
+            "pseudo_label",
+            VariantVariant::builder(VariantVariantType::Wrapped(reg.list(reg.string()))).build(),
+        ),
+        // (),
         // path_generic
         // version_branch
     ];

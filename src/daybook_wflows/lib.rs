@@ -10,7 +10,6 @@ mod gen;
 mod wit {
     wit_bindgen::generate!({
         world: "bundle",
-
         // generate_all,
         // async: true,
         with: {
@@ -28,7 +27,7 @@ mod wit {
             "townframe:wflow/types": wflow_sdk::wit::townframe::wflow::types,
             "townframe:wflow/host": wflow_sdk::wit::townframe::wflow::host,
             "townframe:wflow/bundle": generate,
-            "townframe:am-repo/repo": generate,
+            "townframe:daybook/drawer": generate,
             "townframe:utils/llm-chat": generate,
 
             // "wasi:io/poll@0.2.6": generate,
@@ -51,25 +50,28 @@ struct Component;
 impl wit::exports::townframe::wflow::bundle::Guest for Component {
     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
         wflow_sdk::route_wflows!(args, {
-            "doc-created" => |cx, args: crate::gen::doc::DocAddedEvent| doc_created(cx, args),
+            "pseudo-labeler" => |cx, args: crate::gen::doc::DocAddedEvent| pseudo_labeler(cx, args),
         })
     }
 }
 
-fn doc_created(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(), JobErrorX> {
-    // Call the am-repo plugin to hydrate the document at the root object
-    let doc = cx.effect(|| {
-        use crate::wit::townframe::am_repo::repo;
+fn pseudo_labeler(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(), JobErrorX> {
+    use crate::wit::townframe::daybook::drawer;
 
-        // Convert types to match WIT bindings
+    // Call the daybook plugin to get the document at the specified heads
+    let doc = cx.effect(|| {
         let doc_id = args.id.clone();
         let heads = args.heads.clone();
-        let obj_id = repo::ObjId::Root;
-        let path: Vec<repo::PathProp> = vec![];
 
-        let json = repo::hydrate_path_at_head(&doc_id, &heads, &obj_id, &path)
-            .wrap_err("error hydrating document")
-            .map_err(JobErrorX::Terminal)?;
+        let json = match drawer::get_doc_at_heads(&doc_id, &heads) {
+            Ok(Some(json)) => json,
+            Ok(None) => {
+                return Err(JobErrorX::Terminal(ferr!("document not found: {doc_id}")));
+            }
+            Err(err) => {
+                return Err(JobErrorX::Terminal(ferr!("error getting document: {err:?}")));
+            }
+        };
         let doc: crate::gen::doc::Doc = serde_json::from_str(&json)
             .wrap_err("error parsing json doc")
             .map_err(JobErrorX::Terminal)?;
@@ -77,11 +79,22 @@ fn doc_created(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(),
         Ok(Json(doc))
     })?;
 
-    // Call the LLM with the document content
-    let _llm_response: String = cx.effect(|| {
+    // Extract text content for LLM
+    let content_text = match &doc.content {
+        crate::gen::doc::DocContent::Text(text) => text.clone(),
+        crate::gen::doc::DocContent::Blob(_) => "Binary content".to_string(),
+        crate::gen::doc::DocContent::Image(_) => "Image content".to_string(),
+    };
+
+    // Call the LLM to generate a label
+    let llm_response: String = cx.effect(|| {
         use crate::wit::townframe::utils::llm_chat;
 
-        let message_text = format!("What do you think of {doc:?}");
+        let message_text = format!(
+            "Based on the following document content, provide a single short label or category (1-3 words). \
+            Just return the label, nothing else.\n\nDocument content:\n{}",
+            content_text
+        );
         let request = llm_chat::Request {
             input: llm_chat::RequestInput::Text(message_text),
         };
@@ -89,9 +102,51 @@ fn doc_created(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(),
         let result = llm_chat::respond(&request);
 
         match result {
-            Ok(response) => Ok(Json(response.text)),
+            Ok(response) => {
+                // Clean up the response - remove quotes, trim whitespace
+                let label = response.text.trim().trim_matches('"').trim_matches('\'').trim().to_string();
+                Ok(Json(label))
+            }
             Err(err) => Err(JobErrorX::Terminal(ferr!("error calling LLM: {err}"))),
         }
+    })?;
+
+    // Find or create the pseudo label tag
+    let mut updated_tags = doc.tags.clone();
+    let pseudo_label_index = updated_tags.iter().position(|tag| {
+        matches!(tag, crate::gen::doc::DocTag::PseudoLabel(_))
+    });
+    
+    let new_labels = vec![llm_response.clone()];
+    
+    match pseudo_label_index {
+        Some(index) => {
+            // Replace existing pseudo label tag at the found index
+            updated_tags[index] = crate::gen::doc::DocTag::PseudoLabel(new_labels);
+        }
+        None => {
+            // Add new pseudo label tag
+            updated_tags.push(crate::gen::doc::DocTag::PseudoLabel(new_labels));
+        }
+    }
+
+    // Update the doc with the new tags at the original heads
+    cx.effect(|| {
+        let doc_id = args.id.clone();
+        let heads = args.heads.clone();
+
+        // Create a patch with just the tags field
+        let patch = serde_json::json!({
+            "tags": updated_tags
+        });
+        let patch_str = serde_json::to_string(&patch)
+            .wrap_err("error serializing patch")
+            .map_err(JobErrorX::Terminal)?;
+
+        drawer::update_doc_at_heads(&doc_id, &heads, &patch_str)
+            .map_err(|err| JobErrorX::Terminal(ferr!("error updating document: {err:?}")))?;
+
+        Ok(Json(()))
     })?;
 
     Ok(())

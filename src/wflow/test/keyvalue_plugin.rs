@@ -4,10 +4,8 @@
 //! This module implements an in-memory keyvalue plugin for the wasmCloud runtime,
 //! providing the `wasi:keyvalue@0.2.0-draft` interfaces for development and testing scenarios.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use crate::interlude::*;
+use std::collections::{HashMap, HashSet};
 
 const WASI_KEYVALUE_ID: &str = "wasi-keyvalue";
 use tokio::sync::RwLock;

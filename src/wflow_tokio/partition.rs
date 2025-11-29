@@ -112,16 +112,6 @@ impl TokioPartitionWorkerHandle {
 impl Drop for TokioPartitionWorkerHandle {
     fn drop(&mut self) {
         self.cancel_token.cancel();
-        // Cancel all effect workers
-        if let Some(ref effect_workers) = self.effect_workers {
-            for worker in effect_workers {
-                worker.cancel();
-            }
-        }
-        // Cancel the event worker
-        if let Some(ref event_worker) = self.part_reducer {
-            event_worker.cancel();
-        }
     }
 }
 

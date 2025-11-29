@@ -14,11 +14,9 @@ console-subscriber = ["dep:console-subscriber"]
 native = [
     "uuid/rng-rand",
     # "dep:ahash",
-    "dep:tracing-subscriber",
 ]
 browser = [
     "uuid/js",
-    "dep:tracing-subscriber",
 ]
 
 [dependencies]
@@ -57,7 +55,7 @@ dotenv-flow.workspace = true
 
 # logging
 tracing.workspace = true
-tracing-subscriber = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true }
 tracing-unwrap.workspace = true
 tracing-appender.workspace = true
 tracing-error.workspace = true

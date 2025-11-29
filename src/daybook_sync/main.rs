@@ -180,7 +180,7 @@ impl Ctx {
 struct DocSetupRequest {
     _peer_id: PeerId,
     doc_id: DocumentId,
-    last_attempt_backoff_secs: u64,
+    last_attempt_backoff_ms: u64,
 }
 
 impl DocSetupRequest {
@@ -188,7 +188,7 @@ impl DocSetupRequest {
         Self {
             _peer_id: peer_id,
             doc_id,
-            last_attempt_backoff_secs: 1,
+            last_attempt_backoff_ms: 1000,
         }
     }
 }
@@ -211,10 +211,11 @@ fn spawn_doc_setup_worker(cx: SharedCtx) -> DocSetupWorker {
                 tokio::spawn({
                     let doc_id_tx = request_tx.clone();
                     async move {
-                        let new_backoff = backoff(task.last_attempt_backoff_secs, 60).await;
+                        let new_backoff =
+                            utils_rs::backoff(task.last_attempt_backoff_ms, 60 * 1000).await;
                         doc_id_tx
                             .send(DocSetupRequest {
-                                last_attempt_backoff_secs: new_backoff,
+                                last_attempt_backoff_ms: new_backoff,
                                 ..task
                             })
                             .expect(ERROR_CHANNEL);
@@ -297,14 +298,14 @@ struct DrawerChangesWorker {
 
 struct DocChangeEvent {
     inner: Arc<daybook_core::drawer::DrawerEvent>,
-    last_attempt_backoff_secs: u64,
+    last_attempt_backoff_ms: u64,
 }
 
 impl From<Arc<daybook_core::drawer::DrawerEvent>> for DocChangeEvent {
     fn from(inner: Arc<daybook_core::drawer::DrawerEvent>) -> Self {
         Self {
             inner,
-            last_attempt_backoff_secs: 1,
+            last_attempt_backoff_ms: 1000,
         }
     }
 }
@@ -333,10 +334,11 @@ async fn spawn_drawer_changes_worker(
                 tokio::spawn({
                     let event_tx = event_tx.clone();
                     async move {
-                        let new_backoff = backoff(event.last_attempt_backoff_secs, 60).await;
+                        let new_backoff =
+                            utils_rs::backoff(event.last_attempt_backoff_ms, 60 * 1000).await;
                         event_tx
                             .send(DocChangeEvent {
-                                last_attempt_backoff_secs: new_backoff,
+                                last_attempt_backoff_ms: new_backoff,
                                 ..event
                             })
                             .expect(ERROR_CHANNEL);
@@ -402,12 +404,4 @@ async fn handle_socket(cx: SharedCtx, socket: axum::extract::ws::WebSocket) {
         let fin = cx.acx.repo().accept_axum(socket).await;
         info!(?fin, "connection finsihed");
     });
-}
-
-// returns new backoff
-async fn backoff(last_backoff: u64, max: u64) -> u64 {
-    let new_backoff = last_backoff * 2;
-    let new_backoff = new_backoff.min(max);
-    tokio::time::sleep(std::time::Duration::from_secs(new_backoff)).await;
-    new_backoff
 }

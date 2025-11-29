@@ -24,11 +24,7 @@ async fn test_fails_until_told() -> Res<()> {
     }))?;
 
     test_cx
-        .schedule_job(
-            job_id.clone(),
-            "fails_until_told".to_string(),
-            args_json.clone(),
-        )
+        .schedule_job(job_id.clone(), "fails_until_told", args_json.clone())
         .await?;
 
     // Wait until we see a job run that fails with "waiting for flag to be set"

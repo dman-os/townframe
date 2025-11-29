@@ -1,6 +1,6 @@
-use futures::future::BoxFuture;
-
 use crate::interlude::*;
+
+use futures::future::BoxFuture;
 
 #[async_trait]
 pub trait Store {

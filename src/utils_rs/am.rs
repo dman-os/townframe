@@ -169,31 +169,231 @@ impl AmCtx {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         tokio::task::block_in_place(move || {
             handle.with_document(move |doc| {
-                let value: Option<T> =
-                    autosurgeon::hydrate_path(doc, &obj_id, path).wrap_err("error hydrating")?;
-                eyre::Ok(value)
+                // If path is empty and obj_id is root, use hydrate instead of hydrate_path
+                if path.is_empty() && obj_id == automerge::ROOT {
+                    let value: T = autosurgeon::hydrate(doc).wrap_err("error hydrating")?;
+                    eyre::Ok(Some(value))
+                } else {
+                    match autosurgeon::hydrate_path(doc, &obj_id, path) {
+                        Ok(Some(value)) => eyre::Ok(Some(value)),
+                        Ok(None) => Err(ferr!("path not found in document")),
+                        Err(e) => Err(ferr!("error hydrating: {e:?}")),
+                    }
+                }
             })
         })
     }
 
-    pub async fn hydrate_path_at_head<T: autosurgeon::Hydrate>(
+    pub async fn reconcile_path<T: Reconcile + Send + Sync + 'static>(
         &self,
         doc_id: &DocumentId,
-        head: &[automerge::ChangeHash],
+        obj_id: automerge::ObjId,
+        path: Vec<Prop<'static>>,
+        value: &T,
+    ) -> Res<()> {
+        let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
+        tokio::task::block_in_place(move || {
+            handle.with_document(move |doc| {
+                doc.transact(move |tx| {
+                    use automerge::transaction::Transactable;
+                    use automerge::ReadDoc;
+
+                    // Navigate to the parent of the final path element
+                    let mut current_obj = obj_id;
+                    let (final_prop, path_prefix) = if path.is_empty() {
+                        return Err(ferr!("path cannot be empty"));
+                    } else if path.len() == 1 {
+                        (path[0].clone(), vec![])
+                    } else {
+                        let last_idx = path.len() - 1;
+                        let final_prop = path[last_idx].clone();
+                        let prefix = path[..last_idx].to_vec();
+                        (final_prop, prefix)
+                    };
+
+                    // Navigate through the prefix path
+                    for prop in &path_prefix {
+                        match prop {
+                            Prop::Key(key) => match tx.get(&current_obj, key.clone()) {
+                                Ok(Some((automerge::Value::Object(_), id))) => {
+                                    current_obj = id;
+                                }
+                                _ => {
+                                    let new_obj = tx
+                                        .put_object(
+                                            &current_obj,
+                                            key.clone(),
+                                            automerge::ObjType::Map,
+                                        )
+                                        .wrap_err("error creating map object")?;
+                                    current_obj = new_obj;
+                                }
+                            },
+                            Prop::Index(idx) => {
+                                let idx_usize = *idx as usize;
+                                let len = tx.length(&current_obj) as usize;
+                                if idx_usize >= len {
+                                    for i in len..=idx_usize {
+                                        tx.insert(&current_obj, i, automerge::ScalarValue::Null)
+                                            .wrap_err("error extending sequence")?;
+                                    }
+                                }
+                                match tx.get(&current_obj, idx_usize) {
+                                    Ok(Some((automerge::Value::Object(_), id))) => {
+                                        current_obj = id;
+                                    }
+                                    _ => {
+                                        if idx_usize < len {
+                                            tx.delete(&current_obj, idx_usize)
+                                                .wrap_err("error deleting existing item")?;
+                                        }
+                                        let new_obj = tx
+                                            .insert_object(
+                                                &current_obj,
+                                                idx_usize,
+                                                automerge::ObjType::Map,
+                                            )
+                                            .wrap_err("error creating map object")?;
+                                        current_obj = new_obj;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Reconcile at the final prop using reconcile_prop
+                    autosurgeon::reconcile_prop(tx, current_obj, final_prop, &value)
+                        .wrap_err("error reconciling")?;
+                    eyre::Ok(())
+                })
+            })
+        })
+        .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
+        Ok(())
+    }
+
+    pub async fn reconcile_path_at_heads<T: Reconcile + Send + Sync + 'static>(
+        &self,
+        doc_id: &DocumentId,
+        heads: &[automerge::ChangeHash],
+        obj_id: automerge::ObjId,
+        path: Vec<Prop<'static>>,
+        value: &T,
+    ) -> Res<()> {
+        let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
+        let heads = heads.to_vec();
+        tokio::task::block_in_place(move || {
+            handle.with_document(move |doc| {
+                // Start transaction at the specified heads
+                let mut tx = doc.transaction_at(automerge::PatchLog::null(), &heads);
+                
+                use automerge::transaction::Transactable;
+                use automerge::ReadDoc;
+
+                // Navigate to the parent of the final path element
+                let mut current_obj = obj_id;
+                let (final_prop, path_prefix) = if path.is_empty() {
+                    return Err(ferr!("path cannot be empty"));
+                } else if path.len() == 1 {
+                    (path[0].clone(), vec![])
+                } else {
+                    let last_idx = path.len() - 1;
+                    let final_prop = path[last_idx].clone();
+                    let prefix = path[..last_idx].to_vec();
+                    (final_prop, prefix)
+                };
+
+                // Navigate through the prefix path
+                for prop in &path_prefix {
+                    match prop {
+                        Prop::Key(key) => match tx.get(&current_obj, key.clone()) {
+                            Ok(Some((automerge::Value::Object(_), id))) => {
+                                current_obj = id;
+                            }
+                            _ => {
+                                let new_obj = tx
+                                    .put_object(
+                                        &current_obj,
+                                        key.clone(),
+                                        automerge::ObjType::Map,
+                                    )
+                                    .wrap_err("error creating map object")?;
+                                current_obj = new_obj;
+                            }
+                        },
+                        Prop::Index(idx) => {
+                            let idx_usize = *idx as usize;
+                            let len = tx.length(&current_obj) as usize;
+                            if idx_usize >= len {
+                                for i in len..=idx_usize {
+                                    tx.insert(&current_obj, i, automerge::ScalarValue::Null)
+                                        .wrap_err("error extending sequence")?;
+                                }
+                            }
+                            match tx.get(&current_obj, idx_usize) {
+                                Ok(Some((automerge::Value::Object(_), id))) => {
+                                    current_obj = id;
+                                }
+                                _ => {
+                                    if idx_usize < len {
+                                        tx.delete(&current_obj, idx_usize)
+                                            .wrap_err("error deleting existing item")?;
+                                    }
+                                    let new_obj = tx
+                                        .insert_object(
+                                            &current_obj,
+                                            idx_usize,
+                                            automerge::ObjType::Map,
+                                        )
+                                        .wrap_err("error creating map object")?;
+                                    current_obj = new_obj;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Reconcile at the final prop using reconcile_prop
+                autosurgeon::reconcile_prop(&mut tx, current_obj, final_prop, &value)
+                    .wrap_err("error reconciling")?;
+                
+                // Commit the transaction
+                tx.commit();
+                eyre::Ok(())
+            })
+        })
+        .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
+        Ok(())
+    }
+
+    pub async fn hydrate_path_at_heads<T: autosurgeon::Hydrate>(
+        &self,
+        doc_id: &DocumentId,
+        heads: &[automerge::ChangeHash],
         obj_id: automerge::ObjId,
         path: Vec<Prop<'static>>,
     ) -> Result<Option<T>, HydrateAtHeadError> {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         tokio::task::block_in_place(move || {
             handle.with_document(move |doc| {
-                let version = match doc.fork_at(head) {
+                let version = match doc.fork_at(heads) {
                     Err(automerge::AutomergeError::InvalidHash(hash)) => {
                         return Err(HydrateAtHeadError::HashNotFound(hash))
                     }
                     val => val.wrap_err("error forking doc at change")?,
                 };
-                let value: Option<T> = autosurgeon::hydrate_path(&version, &obj_id, path)
-                    .wrap_err("error hydrating")?;
+                // If path is empty and obj_id is root, use hydrate instead of hydrate_path
+                let value: Option<T> = if path.is_empty() && obj_id == automerge::ROOT {
+                    Some(autosurgeon::hydrate(&version).wrap_err("error hydrating")?)
+                } else {
+                    match autosurgeon::hydrate_path(&version, &obj_id, path) {
+                        Ok(Some(v)) => Some(v),
+                        Ok(None) => None,
+                        Err(e) => {
+                            return Err(HydrateAtHeadError::Other(ferr!("error hydrating: {e:?}")))
+                        }
+                    }
+                };
                 Ok(value)
             })
         })

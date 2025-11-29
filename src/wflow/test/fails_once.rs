@@ -24,7 +24,7 @@ async fn test_fails_once() -> Res<()> {
     }))?;
 
     test_cx
-        .schedule_job(job_id.clone(), "fails_once".to_string(), args_json.clone())
+        .schedule_job(job_id.clone(), "fails_once", args_json.clone())
         .await?;
 
     // Wait until there are no active jobs (job completed or archived)
@@ -60,9 +60,15 @@ async fn test_fails_once_sqlite() -> Res<()> {
     // Wrap in Arc<Arc<>> to match the pattern used by in-memory stores
     // This is needed because AtomicKvSnapStore::new requires a concrete type S where S: KvStore
     // and Arc<SqliteKvStore> implements KvStore, so Arc<Arc<SqliteKvStore>> works
-    let metastore_kv = Arc::new(Arc::new(SqliteKvStore::new(db_pool.clone(), "test_metastore").await?));
-    let log_store_kv = Arc::new(Arc::new(SqliteKvStore::new(db_pool.clone(), "test_log_store").await?));
-    let snapstore_kv = Arc::new(Arc::new(SqliteKvStore::new(db_pool.clone(), "test_snapstore").await?));
+    let metastore_kv = Arc::new(Arc::new(
+        SqliteKvStore::new(db_pool.clone(), "test_metastore").await?,
+    ));
+    let log_store_kv = Arc::new(Arc::new(
+        SqliteKvStore::new(db_pool.clone(), "test_log_store").await?,
+    ));
+    let snapstore_kv = Arc::new(Arc::new(
+        SqliteKvStore::new(db_pool.clone(), "test_snapstore").await?,
+    ));
 
     // Create the stores
     let metastore = Arc::new(
@@ -76,7 +82,10 @@ async fn test_fails_once_sqlite() -> Res<()> {
         .await?,
     );
 
-    let log_store = Arc::new(KvStoreLog::new(log_store_kv.clone() as Arc<dyn KvStore + Send + Sync>, 0));
+    let log_store = Arc::new(KvStoreLog::new(
+        log_store_kv.clone() as Arc<dyn KvStore + Send + Sync>,
+        0,
+    ));
     let snapstore = Arc::new(AtomicKvSnapStore::new(snapstore_kv));
 
     // Build test context with SQLite stores
@@ -104,7 +113,7 @@ async fn test_fails_once_sqlite() -> Res<()> {
     }))?;
 
     test_cx
-        .schedule_job(job_id.clone(), "fails_once".to_string(), args_json.clone())
+        .schedule_job(job_id.clone(), "fails_once", args_json.clone())
         .await?;
 
     // Wait until there are no active jobs (job completed or archived)

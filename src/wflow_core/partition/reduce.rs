@@ -7,16 +7,11 @@ use crate::partition::{effects, job_events, state};
 pub fn reduce_job_init_event(
     state: &mut state::PartitionJobsState,
     effects: &mut Vec<PartitionEffect>,
-
     event: job_events::JobInitEvent,
 ) {
-    if state.active.contains_key(&event.job_id) {
-        return effects.push(PartitionEffect {
-            job_id: event.job_id.clone(),
-            deets: effects::PartitionEffectDeets::AbortJob {
-                reason: "duplicate job id".into(),
-            },
-        });
+    if state.active.contains_key(&event.job_id) || state.archive.contains_key(&event.job_id) {
+        info!("duplicate job id, skipping");
+        return;
     }
 
     state.active.insert(

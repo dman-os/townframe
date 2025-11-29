@@ -1756,11 +1756,13 @@ dependencies = [
 name = "daybook_core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "api_utils_rs",
  "async-trait",
  "automerge",
  "autosurgeon",
  "color-eyre",
+ "data-encoding",
  "directories",
  "displaydoc",
  "futures",
@@ -1787,6 +1789,10 @@ dependencies = [
  "uniffi",
  "url",
  "utils_rs",
+ "wash-runtime",
+ "wash_plugin_am_repo",
+ "wash_plugin_utils",
+ "wasmtime",
  "wflow",
 ]
 

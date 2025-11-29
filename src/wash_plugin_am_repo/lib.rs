@@ -110,6 +110,129 @@ impl wash_runtime::plugin::HostPlugin for AmRepoPlugin {
 }
 
 impl repo::Host for WashCtx {
+    async fn reconcile_path(
+        &mut self,
+        doc_id: repo::DocId,
+        obj_id: repo::ObjId,
+        path: Vec<repo::PathProp>,
+        json: repo::Json,
+    ) -> wasmtime::Result<Result<(), repo::ReconcileError>> {
+        let plugin = AmRepoPlugin::from_ctx(self);
+
+        // Convert WIT types to Rust types
+        let doc_id_rust: samod::DocumentId = doc_id
+            .parse()
+            .map_err(|e| wasmtime::Error::msg(format!("invalid doc-id: {e}")))?;
+
+        let obj_id_rust = match obj_id {
+            repo::ObjId::Root => automerge::ObjId::Root,
+            repo::ObjId::Id((counter, actor_id, op_id)) => {
+                automerge::ObjId::Id(counter, actor_id.into(), op_id as usize)
+            }
+        };
+
+        let path_rust: Vec<autosurgeon::Prop<'static>> = path
+            .into_iter()
+            .map(|p| match p {
+                repo::PathProp::Key(key) => autosurgeon::Prop::Key(key.into()),
+                repo::PathProp::Index(idx) => autosurgeon::Prop::Index(idx as u32),
+            })
+            .collect();
+
+        let json_value: serde_json::Value = serde_json::from_str(&json)
+            .map_err(|e| wasmtime::Error::msg(format!("invalid json: {e}")))?;
+
+        // Convert JSON to AutosurgeonJson for reconciliation
+        let autosurgeon_json = utils_rs::am::AutosurgeonJson(json_value);
+
+        match plugin
+            .am_ctx
+            .reconcile_path(&doc_id_rust, obj_id_rust, path_rust, &autosurgeon_json)
+            .await
+        {
+            Ok(()) => Ok(Ok(())),
+            Err(e) => {
+                if e.to_string().contains("doc not found") {
+                    Ok(Err(repo::ReconcileError::DocNotFound))
+                } else if e.to_string().contains("invalid json") {
+                    Ok(Err(repo::ReconcileError::InvalidJson(e.to_string())))
+                } else {
+                    Ok(Err(repo::ReconcileError::Other(e.to_string())))
+                }
+            }
+        }
+    }
+
+    async fn reconcile_path_at_head(
+        &mut self,
+        doc_id: repo::DocId,
+        heads: repo::Heads,
+        obj_id: repo::ObjId,
+        path: Vec<repo::PathProp>,
+        json: repo::Json,
+    ) -> wasmtime::Result<Result<(), repo::ReconcileError>> {
+        let plugin = AmRepoPlugin::from_ctx(self);
+
+        // Convert WIT types to Rust types
+        let doc_id_rust: samod::DocumentId = doc_id
+            .parse()
+            .map_err(|e| wasmtime::Error::msg(format!("invalid doc-id: {e}")))?;
+
+        // Parse heads from base32 strings to ChangeHash
+        let heads_rust: Result<Vec<automerge::ChangeHash>, _> = heads
+            .iter()
+            .map(|head_str| {
+                utils_rs::hash::decode_base32_multibase(head_str).and_then(|bytes| {
+                    bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| ferr!("invalid change hash length"))
+                })
+            })
+            .collect();
+
+        let heads_rust =
+            heads_rust.map_err(|e| wasmtime::Error::msg(format!("error parsing heads: {e}")))?;
+
+        let obj_id_rust = match obj_id {
+            repo::ObjId::Root => automerge::ObjId::Root,
+            repo::ObjId::Id((counter, actor_id, op_id)) => {
+                automerge::ObjId::Id(counter, actor_id.into(), op_id as usize)
+            }
+        };
+
+        let path_rust: Vec<autosurgeon::Prop<'static>> = path
+            .into_iter()
+            .map(|p| match p {
+                repo::PathProp::Key(key) => autosurgeon::Prop::Key(key.into()),
+                repo::PathProp::Index(idx) => autosurgeon::Prop::Index(idx as u32),
+            })
+            .collect();
+
+        let json_value: serde_json::Value = serde_json::from_str(&json)
+            .map_err(|e| wasmtime::Error::msg(format!("invalid json: {e}")))?;
+
+        // Convert JSON to AutosurgeonJson for reconciliation
+        let autosurgeon_json = utils_rs::am::AutosurgeonJson(json_value);
+
+        match plugin
+            .am_ctx
+            .reconcile_path_at_heads(&doc_id_rust, &heads_rust, obj_id_rust, path_rust, &autosurgeon_json)
+            .await
+        {
+            Ok(()) => Ok(Ok(())),
+            Err(e) => {
+                if e.to_string().contains("doc not found") {
+                    Ok(Err(repo::ReconcileError::DocNotFound))
+                } else if e.to_string().contains("invalid json") {
+                    Ok(Err(repo::ReconcileError::InvalidJson(e.to_string())))
+                } else {
+                    Ok(Err(repo::ReconcileError::Other(e.to_string())))
+                }
+            }
+        }
+    }
+
     async fn hydrate_path_at_head(
         &mut self,
         doc_id: repo::DocId,
@@ -160,7 +283,7 @@ impl repo::Host for WashCtx {
         // Use hydrate_path_at_head with AutosurgeonJson
         let result = plugin
             .am_ctx
-            .hydrate_path_at_head::<utils_rs::am::AutosurgeonJson>(
+            .hydrate_path_at_heads::<utils_rs::am::AutosurgeonJson>(
                 &doc_id_rust,
                 &heads_rust,
                 obj_id_rust,

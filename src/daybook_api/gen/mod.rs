@@ -26,23 +26,18 @@ pub mod doc {
     pub type DocId = String;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub enum DocKind {
+    pub enum DocContentKind {
         Text,
         Blob,
         Image,
     }
-    impl DocKind {
-        pub unsafe fn _lift(val:u8) -> DocKind {
-            if !cfg!(debug_assertions){
-                return unsafe {
-                    ::core::mem::transmute::<u8, DocKind>(val)
-                };
-            }
+    impl DocContentKind {
+        pub fn _lift(val:u8) -> DocContentKind {
             match val {
 
-                0 => DocKind::Text,
-                1 => DocKind::Blob,
-                2 => DocKind::Image,
+                0 => DocContentKind::Text,
+                1 => DocContentKind::Blob,
+                2 => DocContentKind::Image,
 
                 _ => panic!("invalid enum discriminant"),
             }
@@ -63,18 +58,15 @@ pub mod doc {
     pub enum DocTagKind {
         RefGeneric,
         LabelGeneric,
+        PseudoLabel,
     }
     impl DocTagKind {
-        pub unsafe fn _lift(val:u8) -> DocTagKind {
-            if !cfg!(debug_assertions){
-                return unsafe {
-                    ::core::mem::transmute::<u8, DocTagKind>(val)
-                };
-            }
+        pub fn _lift(val:u8) -> DocTagKind {
             match val {
 
                 0 => DocTagKind::RefGeneric,
                 1 => DocTagKind::LabelGeneric,
+                2 => DocTagKind::PseudoLabel,
 
                 _ => panic!("invalid enum discriminant"),
             }
@@ -87,15 +79,16 @@ pub mod doc {
         /// A link to another document.
         RefGeneric(DocRef),
         LabelGeneric(String),
+        PseudoLabel(Vec<String>),
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Doc {
         pub id: DocId,
-        #[serde(with = "utils_rs::codecs::sane_iso8601")]
-        pub created_at: OffsetDateTime,
-        #[serde(with = "utils_rs::codecs::sane_iso8601")]
-        pub updated_at: OffsetDateTime,
+        #[serde(with = "api_utils_rs::codecs::datetime")]
+        pub created_at: Datetime,
+        #[serde(with = "api_utils_rs::codecs::datetime")]
+        pub updated_at: Datetime,
         pub content: DocContent,
         pub tags: Vec<DocTag>,
     }
@@ -117,7 +110,7 @@ pub mod doc {
         #[derive(Debug, Clone, garde::Validate, Serialize, Deserialize)]
         pub struct Input {
             #[garde(length(min = 1, max = 1024))]
-            pub id: Uuid,
+            pub id: String,
         }
 
         #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]

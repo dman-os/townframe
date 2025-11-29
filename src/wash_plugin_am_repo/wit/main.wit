@@ -31,6 +31,27 @@ interface repo {
         obj-id: obj-id, 
         path: list<path-prop>,
     ) -> result<json, hydrate-at-head-error>;
+
+    variant reconcile-error {
+        doc-not-found,
+        invalid-json(string),
+        other(string),
+    }
+
+    reconcile-path: func(
+        doc-id: doc-id,
+        obj-id: obj-id,
+        path: list<path-prop>,
+        json: json,
+    ) -> result<_, reconcile-error>;
+
+    reconcile-path-at-head: func(
+        doc-id: doc-id,
+        heads: heads,
+        obj-id: obj-id,
+        path: list<path-prop>,
+        json: json,
+    ) -> result<_, reconcile-error>;
 }
 
 world guest {

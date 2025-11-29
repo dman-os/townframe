@@ -17,7 +17,7 @@ clap = { version = "4.5.47", features = ["derive", "env"] }
 
 dotenv-flow.workspace = true
 
-utils_rs.workspace = true
+utils_rs = { workspace = true, features = ["native"] }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
 http.workspace = true

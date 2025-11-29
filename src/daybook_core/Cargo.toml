@@ -13,7 +13,7 @@ uniffi = ["dep:uniffi"]
 
 [dependencies]
 # internal
-utils_rs = { workspace = true, features = ["hash"] }
+utils_rs = { workspace = true, features = ["hash", "native"] }
 api_utils_rs = { workspace = true, features = ["automerge"] }
 wflow = { workspace = true }
 
@@ -61,6 +61,11 @@ reqwest.workspace = true
 sqlx = { workspace = true, features = ["sqlite"] }
 pastey = "0.1"
 directories = "6.0.0"
+data-encoding.workspace = true
+
+wash-runtime = { workspace = true }
+wasmtime = { workspace = true }
+anyhow = { workspace = true }
 
 [build-dependencies]
 uniffi = { workspace = true, features = [ "build" ], optional = true }
@@ -70,5 +75,5 @@ tokio-stream = "0.1.17"
 tokio-util = { workspace = true, features = [] }
 insta = { workspace = true, features = ["json"] }
 wflow = { workspace = true, features = ["test-harness"] }
-utils_rs = { workspace = true, features = []}
-
+wash_plugin_am_repo.workspace = true
+wash_plugin_utils.workspace = true

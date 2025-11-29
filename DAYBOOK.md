@@ -71,48 +71,98 @@
 
 ### Architecture
 
-- React native
-    - OTA updates
-- Livestore
-- Local-first frontend
-- Postgres (DB)
-- Kanidm (auth)
-
--- 
-
-New version
-
-- Compose multiplatform
-  - We need this for the native integration on Android
-  - I like the desktop support
-  - We do miss out OTA updates but those were limited anwyays
-    - We ought to rely on a system similar to Telegram
-- Automerge
-  - Use our own stupid sync server
-    - Connect through websocket
-  - Backed by object store storage
-- Kanidm is a pita for some usecases
-  - Consider Authelia
-- Compute
-  - Wasmcloud
-    - Should be used for 99% of mutations
-  - Durable store
-    - Not
-- Database
-  - Postgres for relational
-  - Redis for kv
-- Processing queue
--
+- Compose Multiplatform
+- Custom wash runtime
+  - Locally
+  - And also through wasmcloud
+- SQlite or PGLite
 
 ### Features
 
 #### Stretch goals
 
-- [ ] Android auto-updates
+- [ ] Self hosted auto-updates for android app (think Telegram)
 
-### Endpoints
+## dev-log
 
-### Schema
+### 2025-11-29 | "routing"
+
+So there are a bunch of overlapping concerns here. 
+My brain is fried for some reason but I'll try my best to lay them and a general plan of action out.
+
+- Distributing work across remote and local machines
+  - Specficially in the local-first sense
+- Discovering available workers
+- Choosing workers according to who can do what and other preferences.
+  - Some work can only be done on the server and vice versa
+  - Server might not be available
+- Configuring workers with workloads.
+- Where does work come from and when/where is the routing done
+- Building doc processing pipelines
+- Allowing user programmability for pipelines
+- Events that originate from server
+- Retries/re-routing
+- Metering!
+- Cancellation
+
+Early decisions:
+- Put config in automerge document
+  - Routing decisions can be tagged with head of config commit
+- Generic event handler system
+  - Stamps with head of config for each event
+
+Let's just trace it out.
+
+- Document gets created by user
+- documentCreated event handler runs
+- A bunch of listeners run
+- Some listeners schedule wflow jobs
+- Some jobs need to be scheduled on the server
+  - We need to make sure this happens by re-trying
+- Jobs emit a bunch more events
+- How do server jobs emit events to local?
+  - They will have to modify document
+- How do we re-run events for documents?
+  - Tags on documents to identify processing status
+  - User created pipelines can use tags to make sure all docs are gotten
+
+Wait, generic doc tag based event system??
+- Schedule documentCreated job when there's no docProcessed tag on doc
+- On the other hand, pipelines can run when a tag is detected.
+- After a pipeline is complete, it'll replace the initiating that with a result tag.
+  - Result tag can link to separate document.
+- Use idempotency keys to make sure only one such job is running for certain doc
+- If we want to force re-run a pipeline, just remove the tag.
+- Jobs can themselves decide to move to a server:
+  - They either
+- More brainstorming with a chatbot at [chat.com](https://chatgpt.com/share/692afef9-275c-8007-82de-8143ff7cc19c)
+
+---
+
+Okay so I have something okay
+
+- Predicates
+  - Some basic targetting for processors
+- Reconciler
+  - Goes over (doc + predicate) pairs and makes sure jobs are scheduled
+  - Uses idempotency keys to avoid duplicates
+  - Predicates can contain versioning to allow re-runs
+  - It will run on doc or predicate changes
+  - It will cancel jobs if predicate is no longer fulfilled
+- Processor
+  - Will run on wflow engine
+  - Have cancellation policies?
+- Tags
+  - Attachment to docs
+  - Samples
+    - Embedding
+    - PathGeneric
+
+- Hmm, here's a question? Is this indirect system too difficult to program?
+
+---
+
+The following is just an copy of some thoughts I'd scribbled elsewhere in the past
 
 - A document is created
   - Photo taken
@@ -154,7 +204,47 @@ New version
   - DocChatAgent
 ```
 
-## dev-log
+---
+
+More old sketches.
+
+- React native
+    - OTA updates
+- Livestore
+- Local-first frontend
+- Postgres (DB)
+- Kanidm (auth)
+
+-- 
+
+New version
+
+- Compose multiplatform
+  - We need this for the native integration on Android
+  - I like the desktop support
+  - We do miss out OTA updates but those were limited anwyays
+    - We ought to rely on a system similar to Telegram
+- Automerge
+  - Use our own stupid sync server
+    - Connect through websocket
+  - Backed by object store storage
+- Kanidm is a pita for some usecases
+  - Consider Authelia
+- Compute
+  - Wasmcloud
+    - Should be used for 99% of mutations
+  - Durable store
+    - Not
+- Database
+  - Postgres for relational
+  - Redis for kv
+- Processing queue
+
+### 2025-11-29 | serverless wflow
+
+Right now, with the path I'm treading, wflow will be of the "scale up partition" when needed and scale down to zero when not.
+That's good enough for now but I'll have to keep it mind on how we can make it more efficent.
+What's more, it'd be great if it can all be wasm native, all parts of the engine.
 
 ### 2025-11-22 | wflow in memory
 

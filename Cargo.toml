@@ -57,6 +57,7 @@ wflow_tokio = { path = "./src/wflow_tokio", default-features = false }
 wflow_sdk = { path = "./src/wflow_sdk", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 wash_plugin_am_repo = { path = "./src/wash_plugin_am_repo" }
+wash_plugin_utils = { path = "./src/wash_plugin_utils/" }
 
 syn = { version = "2", features = ["extra-traits"] }
 

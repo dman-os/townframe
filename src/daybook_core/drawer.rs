@@ -1,8 +1,4 @@
-use crate::interlude::*;
-
-use automerge::ChangeHash;
-use samod::DocumentId;
-use utils_rs::am::{serialize_commit_heads, AmCtx};
+use crate::{interlude::*, ChangeHashSet};
 
 use crate::gen::doc::{Doc, DocId, DocPatch};
 use crate::repos::Repo;
@@ -10,9 +6,8 @@ use std::str::FromStr;
 
 #[derive(Default, Reconcile, Hydrate)]
 pub struct DrawerStore {
-    // FIXME: use changehash newtype that uses multihash
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    map: HashMap<DocId, Vec<String>>,
+    map: HashMap<DocId, ChangeHashSet>,
 }
 
 impl DrawerStore {
@@ -65,7 +60,7 @@ pub struct DrawerRepo {
     store: crate::stores::StoreHandle<DrawerStore>,
     // in-memory cache of document handles
     handles: Arc<DHashMap<DocId, samod::DocHandle>>,
-    cache: Arc<DHashMap<DocId, Doc>>,
+    cache: Arc<DHashMap<DocId, (Arc<Doc>, ChangeHashSet)>>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     _broker: Arc<utils_rs::am::changes::DocChangeBroker>,
     drawer_doc_id: DocumentId,
@@ -78,16 +73,16 @@ pub enum DrawerEvent {
     ListChanged,
     DocAdded {
         id: DocId,
-        heads: Vec<String>,
+        heads: ChangeHashSet
     },
     DocUpdated {
         id: DocId,
-        new_heads: Vec<String>,
-        old_heads: Vec<String>,
+        new_heads: ChangeHashSet,
+        old_heads: ChangeHashSet,
     },
     DocDeleted {
         id: DocId,
-        old_heads: Vec<String>,
+        old_heads: ChangeHashSet,
     },
 }
 
@@ -120,7 +115,7 @@ impl DrawerRepo {
             acx,
             drawer_doc_id,
             store,
-            registry: registry.clone(),
+            registry: Arc::clone(&registry),
             handles: default(),
             cache: default(),
             _broker: broker,
@@ -128,7 +123,7 @@ impl DrawerRepo {
         let repo = Arc::new(repo);
 
         let _notif_worker = tokio::spawn({
-            let repo = repo.clone();
+            let repo = Arc::clone(&repo);
             async move { repo.handle_notifs(notif_rx).await }
         });
 
@@ -165,7 +160,7 @@ impl DrawerRepo {
 
                             let new_heads = self
                                 .acx
-                                .hydrate_path_at_head::<Vec<String>>(
+                                .hydrate_path_at_heads::<ChangeHashSet>(
                                     &self.drawer_doc_id,
                                     &notif.heads,
                                     obj_id.clone(),
@@ -256,24 +251,21 @@ impl DrawerRepo {
         })
         .await
         .wrap_err(ERROR_TOKIO)??;
-        let heads: Arc<[ChangeHash]> = heads.into();
-
-        let str_heads = serialize_commit_heads(&heads);
+        let new_doc = Arc::new(new_doc);
+        let heads = ChangeHashSet(heads.into());
 
         // store id in drawer AM
-        {
-            self.store
-                .mutate_sync(|store| store.map.insert(new_doc.id.clone(), str_heads.clone()))
-                .await?;
-        }
+        self.store
+            .mutate_sync(|store| store.map.insert(new_doc.id.clone(), heads.clone()))
+            .await?;
 
         // cache the handle under the doc's Uuid id
         let out_id = new_doc.id.clone();
-        self.cache.insert(new_doc.id.clone(), new_doc);
+        self.cache.insert(new_doc.id.clone(), (new_doc, heads.clone()));
         self.handles.insert(out_id.clone(), handle);
         self.registry.notify(DrawerEvent::DocAdded {
             id: out_id.clone(),
-            heads: str_heads,
+            heads ,
         });
         self.registry.notify(DrawerEvent::ListChanged);
         Ok(out_id)
@@ -283,14 +275,14 @@ impl DrawerRepo {
         match self.handles.get(id) {
             Some(handle) => Ok(Some(handle.clone())),
             None => {
-                if self
+                // Not in cache: check if the drawer actually lists this id
+                if !(self
                     .store
                     .query_sync(|store| store.map.contains_key(id))
-                    .await
+                    .await)
                 {
                     return Ok(None);
                 }
-                // Not in cache: check if the drawer actually lists this id
                 let doc_id = DocumentId::from_str(id).wrap_err("invalid id")?;
                 let Some(handle) = self.acx.find_doc(&doc_id).await? else {
                     return Ok(None);
@@ -304,20 +296,32 @@ impl DrawerRepo {
     }
 
     // Get a Doc by id by hydrating its automerge document
-    pub async fn get(&self, id: DocId) -> Res<Option<Doc>> {
-        if let Some(cached) = self.cache.get(&id) {
-            return Ok(Some(cached.clone()));
-        }
-        let Some(handle) = self.get_handle(&id).await? else {
+    pub async fn get(&self, id: &DocId) -> Res<Option<Arc<Doc>>> {
+        // latest head is stored in the drawer
+        let Some(latest_heads) = self.store.query_sync(|store| store.map.get(id).cloned()).await else {
             return Ok(None);
         };
-        let doc = tokio::task::block_in_place(move || {
+        self.get_at_heads(id, &latest_heads).await
+    }
+
+    pub async fn get_at_heads(&self, id: &DocId, heads: &ChangeHashSet) -> Res<Option<Arc<Doc>>> {
+        if let Some(cached) = self.cache.get(id) {
+            if cached.1 == *heads {
+                return Ok(Some(Arc::clone(&cached.0)));
+            }
+        }
+        let Some(handle) = self.get_handle(id).await? else {
+            return Ok(None);
+        };
+        let (doc, heads) = tokio::task::block_in_place(move || {
             handle.with_document(move |doc| {
-                let value: Doc = autosurgeon::hydrate(doc).wrap_err("error hydrating")?;
-                eyre::Ok(value)
+                let version = doc.fork_at(&heads).wrap_err("error forking doc at heads")?;
+                let value: Doc = autosurgeon::hydrate(&version).wrap_err("error hydrating")?;
+                eyre::Ok((value, heads))
             })
         })?;
-        self.cache.insert(id, doc.clone());
+        let doc = Arc::new(doc);
+        self.cache.insert(id.clone(), (doc.clone(), heads.clone()));
 
         Ok(Some(doc))
     }
@@ -336,19 +340,23 @@ impl DrawerRepo {
         let cache = self.cache.clone();
         tokio::task::spawn_blocking(move || {
             handle
-                .with_document(move |doc| {
-                    doc.transact(move |tx| {
+                .with_document(move |am_doc| {
+                    am_doc.transact(move |tx| {
                         match cache.get_mut(&id) {
-                            Some(mut val) => {
-                                val.apply(patch);
-                                autosurgeon::reconcile(tx, &*val).wrap_err("error reconciling")?;
+                            Some(mut entry) => {
+                                let mut doc = (*entry.0).clone();
+                                doc.apply(patch);
+                                autosurgeon::reconcile(tx, &doc).wrap_err("error reconciling")?;
+                                entry.0 = Arc::new(doc);
                             }
                             None => {
-                                let mut val: Doc =
+                                let mut doc: Doc =
                                     autosurgeon::hydrate(tx).wrap_err("error hydrating")?;
-                                val.apply(patch);
-                                autosurgeon::reconcile(tx, &val).wrap_err("error reconciling")?;
-                                cache.insert(id.clone(), val);
+                                doc.apply(patch);
+                                autosurgeon::reconcile(tx, &doc).wrap_err("error reconciling")?;
+                                let doc = Arc::new(doc);
+                                let heads = crate::ChangeHashSet(tx.get_heads().into());
+                                cache.insert(id.clone(), (doc, heads));
                             }
                         }
                         eyre::Ok(())
@@ -390,14 +398,13 @@ impl DrawerRepo {
     }
 
     // Delete: evict from drawer and cache (document remains in repo for now)
-    pub async fn del(&self, id: DocId) -> Res<bool> {
-        let doc_key = id.clone();
+    pub async fn del(&self, id: &DocId) -> Res<bool> {
         let existed = self
             .store
-            .mutate_sync(|store| store.map.remove(&doc_key).is_some())
+            .mutate_sync(|store| store.map.remove(id).is_some())
             .await?;
-        self.cache.remove(&doc_key);
-        self.handles.remove(&doc_key);
+        self.cache.remove(id);
+        self.handles.remove(id);
         if existed {
             self.registry.notify(DrawerEvent::ListChanged);
         }

@@ -1,9 +1,9 @@
 use crate::interlude::*;
 
-use crate::gen::doc::{Doc, DocContent};
+use crate::gen::doc::{Doc, DocContent, DocTag};
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_doc_created_workflow() -> Res<()> {
+async fn test_pseudo_labeler_workflow() -> Res<()> {
     utils_rs::testing::setup_tracing()?;
 
     let test_cx = crate::e2e::test_cx(utils_rs::function_full!()).await?;
@@ -17,17 +17,30 @@ async fn test_doc_created_workflow() -> Res<()> {
         tags: vec![],
     };
 
-    // Add the document - DocChangesWorker will automatically queue the workflow job
-    let _doc_id = test_cx.drawer_repo.add(new_doc).await?;
+    // Add the document - DocTriageWorker will automatically queue the workflow job
+    let doc_id = test_cx.drawer_repo.add(new_doc).await?;
 
     // Wait for the workflow to complete
     test_cx.wflow_test_cx.wait_until_no_active_jobs(90).await?;
 
-    // Assert snapshot
-    test_cx
-        .wflow_test_cx
-        .assert_partition_log_snapshot("doc_created_workflow_partition_log")
-        .await?;
+    // Give a small delay to ensure document updates are propagated
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Verify the doc has a PseudoLabel tag
+    let updated_doc = test_cx.drawer_repo.get(&doc_id).await?
+        .ok_or_eyre("doc not found")?;
+    
+    let has_pseudo_label = updated_doc.tags.iter().any(|tag| {
+        matches!(tag, DocTag::PseudoLabel(v) if !v.is_empty())
+    });
+
+    info!(?updated_doc, "result");
+    
+    assert!(
+        has_pseudo_label,
+        "doc should have a PseudoLabel tag after pseudo-labeler workflow completes. Tags: {:?}",
+        updated_doc.tags
+    );
 
     // Cleanup
     test_cx.close().await?;

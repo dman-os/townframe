@@ -13,23 +13,19 @@ pub struct TokioEffectWorkerHandle {
 }
 
 impl TokioEffectWorkerHandle {
-    pub fn cancel(&self) {
-        self.cancel_token.cancel();
-    }
-
     pub async fn close(mut self) -> Res<()> {
         self.cancel_token.cancel();
-        // Move out the join_handle to await it
         let join_handle = self.join_handle.take().expect("join_handle already taken");
-        // Drop will cancel again, which is safe (idempotent)
-        drop(self);
-        join_handle.await.wrap_err("join error")?
+        utils_rs::wait_on_handle_with_timeout(join_handle, 5 * 1000).await?
     }
 }
 
 impl Drop for TokioEffectWorkerHandle {
     fn drop(&mut self) {
         self.cancel_token.cancel();
+        if let Some(join_handle) = self.join_handle.take() {
+            join_handle.abort()
+        }
     }
 }
 

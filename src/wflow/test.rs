@@ -231,12 +231,12 @@ impl WflowTestContext {
     pub async fn schedule_job(
         &self,
         job_id: Arc<str>,
-        wflow_key: String,
+        wflow_key: &str,
         args_json: String,
     ) -> Res<()> {
         use crate::WflowIngress;
         self.ingress
-            .add_job(job_id, wflow_key, args_json, None)
+            .add_job(job_id, wflow_key.into(), args_json, None)
             .await
     }
 
@@ -480,6 +480,9 @@ async fn register_workload_on_host(
                 },
                 WitInterface {
                     ..WitInterface::from("townframe:am-repo/repo")
+                },
+                WitInterface {
+                    ..WitInterface::from("townframe:daybook/drawer")
                 },
                 WitInterface {
                     ..WitInterface::from("townframe:utils/llm-chat")

@@ -26,23 +26,18 @@ pub mod doc {
     pub type DocId = String;
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
-    pub enum DocKind {
+    pub enum DocContentKind {
         Text,
         Blob,
         Image,
     }
-    impl DocKind {
-        pub unsafe fn _lift(val:u8) -> DocKind {
-            if !cfg!(debug_assertions){
-                return unsafe {
-                    ::core::mem::transmute::<u8, DocKind>(val)
-                };
-            }
+    impl DocContentKind {
+        pub fn _lift(val:u8) -> DocContentKind {
             match val {
 
-                0 => DocKind::Text,
-                1 => DocKind::Blob,
-                2 => DocKind::Image,
+                0 => DocContentKind::Text,
+                1 => DocContentKind::Blob,
+                2 => DocContentKind::Image,
 
                 _ => panic!("invalid enum discriminant"),
             }
@@ -63,18 +58,15 @@ pub mod doc {
     pub enum DocTagKind {
         RefGeneric,
         LabelGeneric,
+        PseudoLabel,
     }
     impl DocTagKind {
-        pub unsafe fn _lift(val:u8) -> DocTagKind {
-            if !cfg!(debug_assertions){
-                return unsafe {
-                    ::core::mem::transmute::<u8, DocTagKind>(val)
-                };
-            }
+        pub fn _lift(val:u8) -> DocTagKind {
             match val {
 
                 0 => DocTagKind::RefGeneric,
                 1 => DocTagKind::LabelGeneric,
+                2 => DocTagKind::PseudoLabel,
 
                 _ => panic!("invalid enum discriminant"),
             }
@@ -87,6 +79,7 @@ pub mod doc {
         /// A link to another document.
         RefGeneric(DocRef),
         LabelGeneric(String),
+        PseudoLabel(Vec<String>),
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]

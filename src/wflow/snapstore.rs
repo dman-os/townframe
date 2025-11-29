@@ -18,14 +18,8 @@ pub struct AtomicKvSnapStore {
 }
 
 impl AtomicKvSnapStore {
-    pub fn new<S: KvStore + Send + Sync + 'static>(kv_store: Arc<S>) -> Self {
-        Self {
-            kv_store: kv_store as Arc<dyn KvStore + Send + Sync>,
-        }
-    }
-
     /// Create a new snapstore from a trait object directly
-    pub fn from_trait_object(kv_store: Arc<dyn KvStore + Send + Sync>) -> Self {
+    pub fn new(kv_store: Arc<dyn KvStore + Send + Sync>) -> Self {
         Self { kv_store }
     }
 

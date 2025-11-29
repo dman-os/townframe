@@ -259,20 +259,6 @@ mod cheapstr {
 
     impl From<CHeapStr> for String {
         fn from(value: CHeapStr) -> String {
-            // FIXME: optmize this
-            /* let string = if let Some(s) = Arc::get_mut(&mut self.0) {
-                unsafe {
-                    String::from_raw_parts(
-                        s as *mut str as *mut u8,
-                        s.len(),
-                        s.len()
-                    )
-                }
-            } else {
-                (&self.0[..]).to_string()
-            };
-            std::mem::forget(self.0);
-            string */
             value.string.into_owned()
         }
     }
@@ -548,4 +534,26 @@ pub fn dotenv_hierarchical() -> Res<Vec<PathBuf>> {
     }
 
     Ok(path_bufs)
+}
+
+pub async fn backoff(last_backoff_ms: u64, max_ms: u64) -> u64 {
+    let new_backoff = last_backoff_ms * 2;
+    let new_backoff = new_backoff.min(max_ms);
+    tokio::time::sleep(std::time::Duration::from_millis(new_backoff)).await;
+    new_backoff
+}
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum WaitOnHandleError {
+    /// task error: {0:?}
+    JoinError(#[from] tokio::task::JoinError),
+    /// task was aborted after {0:?} due to timeout
+    Timeout(#[from] tokio::time::error::Elapsed),
+}
+
+pub async fn wait_on_handle_with_timeout<T>(
+    join_handle: tokio::task::JoinHandle<T>,
+    timeout_ms: u64,
+) -> Result<T, WaitOnHandleError> {
+    Ok(tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), join_handle).await??)
 }

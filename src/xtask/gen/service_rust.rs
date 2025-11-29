@@ -459,12 +459,7 @@ fn schema_enum(
     writeln!(
         buf,
         r#"impl {rust_name} {{
-    pub unsafe fn _lift(val:u8) -> {rust_name} {{
-        if !cfg!(debug_assertions){{
-            return unsafe {{
-                ::core::mem::transmute::<u8, {rust_name}>(val)
-            }};
-        }}
+    pub fn _lift(val:u8) -> {rust_name} {{
         match val {{
 "#,
         rust_name = heck::AsPascalCase(&this.name[..])

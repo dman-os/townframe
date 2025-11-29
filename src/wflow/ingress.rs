@@ -22,7 +22,7 @@ pub trait WflowIngress: Send + Sync {
     async fn add_job(
         &self,
         job_id: Arc<str>,
-        wflow_key: String,
+        wflow_key: &str,
         args_json: String,
         retry_policy: Option<wflow_core::partition::RetryPolicy>,
     ) -> Res<()>;
@@ -45,7 +45,7 @@ impl WflowIngress for PartitionLogIngress {
     async fn add_job(
         &self,
         job_id: Arc<str>,
-        wflow_key: String,
+        wflow_key: &str,
         args_json: String,
         retry_policy: Option<wflow_core::partition::RetryPolicy>,
     ) -> Res<()> {

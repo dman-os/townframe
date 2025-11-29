@@ -433,3 +433,134 @@ pub mod json {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autosurgeon::{hydrate, reconcile};
+    use automerge::transaction::Transactable;
+
+    #[test]
+    fn test_autosurgeon_json_hydrate_map() {
+        let mut doc = automerge::AutoCommit::new();
+        doc.put(automerge::ROOT, "name", "Alice").unwrap();
+        doc.put(automerge::ROOT, "age", 30u64).unwrap();
+        doc.put(automerge::ROOT, "active", true).unwrap();
+
+        let hydrated: AutosurgeonJson = hydrate(&doc).unwrap();
+        let json = hydrated.0;
+
+        assert_eq!(json["name"], "Alice");
+        assert_eq!(json["age"], 30);
+        assert_eq!(json["active"], true);
+    }
+
+    #[test]
+    fn test_autosurgeon_json_hydrate_seq() {
+        let mut doc = automerge::AutoCommit::new();
+        let list_id = doc.put_object(automerge::ROOT, "items", automerge::ObjType::List).unwrap();
+        doc.insert(&list_id, 0, "first").unwrap();
+        doc.insert(&list_id, 1, "second").unwrap();
+        doc.insert(&list_id, 2, 42u64).unwrap();
+
+        let hydrated: AutosurgeonJson = hydrate(&doc).unwrap();
+        let json = hydrated.0;
+
+        assert_eq!(json["items"][0], "first");
+        assert_eq!(json["items"][1], "second");
+        assert_eq!(json["items"][2], 42);
+    }
+
+    #[test]
+    fn test_autosurgeon_json_hydrate_text() {
+        let mut doc = automerge::AutoCommit::new();
+        let text_id = doc.put_object(automerge::ROOT, "content", automerge::ObjType::Text).unwrap();
+        doc.splice_text(&text_id, 0, 0, "Hello, world!").unwrap();
+
+        let hydrated: AutosurgeonJson = hydrate(&doc).unwrap();
+        let json = hydrated.0;
+
+        assert_eq!(json["content"], "Hello, world!");
+    }
+
+    #[test]
+    fn test_autosurgeon_json_reconcile_map() {
+        let mut doc = automerge::AutoCommit::new();
+        let json = serde_json::json!({
+            "name": "Bob",
+            "age": 25,
+            "tags": ["developer", "rust"]
+        });
+        let autosurgeon_json = AutosurgeonJson(json.clone());
+
+        reconcile(&mut doc, &autosurgeon_json).unwrap();
+
+        let hydrated: AutosurgeonJson = hydrate(&doc).unwrap();
+        assert_eq!(hydrated.0, json);
+    }
+
+    #[test]
+    fn test_autosurgeon_json_reconcile_nested() {
+        let mut doc = automerge::AutoCommit::new();
+        let json = serde_json::json!({
+            "user": {
+                "name": "Charlie",
+                "settings": {
+                    "theme": "dark",
+                    "notifications": true
+                }
+            },
+            "items": [1, 2, 3]
+        });
+        let autosurgeon_json = AutosurgeonJson(json.clone());
+
+        reconcile(&mut doc, &autosurgeon_json).unwrap();
+
+        let hydrated: AutosurgeonJson = hydrate(&doc).unwrap();
+        assert_eq!(hydrated.0, json);
+    }
+
+    #[test]
+    fn test_autosurgeon_json_round_trip() {
+        let original_json = serde_json::json!({
+            "id": "test-123",
+            "title": "Test Document",
+            "content": "This is a test",
+            "metadata": {
+                "created": "2024-01-01T00:00:00Z",
+                "tags": ["test", "example"]
+            },
+            "numbers": [1, 2, 3, 4, 5]
+        });
+
+        // Reconcile into document
+        let mut doc = automerge::AutoCommit::new();
+        let autosurgeon_json = AutosurgeonJson(original_json.clone());
+        reconcile(&mut doc, &autosurgeon_json).unwrap();
+
+        // Hydrate back
+        let hydrated: AutosurgeonJson = hydrate(&doc).unwrap();
+        assert_eq!(hydrated.0, original_json);
+    }
+
+    #[test]
+    fn test_autosurgeon_json_hydrate_scalar() {
+        let mut doc = automerge::AutoCommit::new();
+        doc.put(automerge::ROOT, "null_val", automerge::ScalarValue::Null).unwrap();
+        doc.put(automerge::ROOT, "bool_val", true).unwrap();
+        doc.put(automerge::ROOT, "int_val", 42i64).unwrap();
+        doc.put(automerge::ROOT, "uint_val", 100u64).unwrap();
+        doc.put(automerge::ROOT, "float_val", 3.14).unwrap();
+        doc.put(automerge::ROOT, "str_val", "hello").unwrap();
+
+        let hydrated: AutosurgeonJson = hydrate(&doc).unwrap();
+        let json = hydrated.0;
+
+        assert_eq!(json["null_val"], serde_json::Value::Null);
+        assert_eq!(json["bool_val"], true);
+        assert_eq!(json["int_val"], 42);
+        assert_eq!(json["uint_val"], 100);
+        assert_eq!(json["float_val"], 3.14);
+        assert_eq!(json["str_val"], "hello");
+    }
+}
