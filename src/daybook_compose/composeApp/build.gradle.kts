@@ -82,8 +82,12 @@ kotlin {
             implementation(libs.androidx.lifecycle.viewmodel)
             implementation(libs.androidx.lifecycle.runtimeCompose)
             implementation("${libs.jna.get()}@aar")
-            implementation(libs.camerak)
-            implementation(libs.camerak.image.saver)
+            implementation(libs.camerax.core)
+            implementation(libs.camerax.camera2)
+            implementation(libs.camerax.lifecycle)
+            implementation(libs.camerax.view)
+            implementation(libs.camerax.extensions)
+            implementation(libs.kotlinx.coroutinesGuava)
         }
         commonMain.dependencies {
             implementation(compose.runtime)
@@ -136,6 +140,9 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+    }
+    lint {
+        disable += "UnsafeOptInUsageError"
     }
 }
 

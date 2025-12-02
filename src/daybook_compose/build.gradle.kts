@@ -11,6 +11,7 @@ plugins {
     alias(libs.plugins.gobleyCargo) apply false
     alias(libs.plugins.gobleyUniffi) apply false
     kotlin("plugin.atomicfu") version libs.versions.kotlin apply false
+    id("com.github.ben-manes.versions") version "0.51.0"
 }
 
 tasks.register("printJavaHome") {

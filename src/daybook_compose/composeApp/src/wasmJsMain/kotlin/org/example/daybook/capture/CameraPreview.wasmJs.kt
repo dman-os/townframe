@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 actual fun DaybookCameraPreview(
     modifier: Modifier,
     onImageSaved: ((ByteArray) -> Unit)?,
+    onCaptureRequested: (() -> Unit)?,
 ) {
     // Camera not available on WebAssembly
     Box(

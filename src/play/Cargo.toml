@@ -8,15 +8,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-# wasm - using wasmtime 19 for Preview1 support (like pglite-oxide)
+# wasm - wasmtime 38 with WASI Preview1 support
 wasmtime = "38.0.4"
 wasmtime-wasi = { version = "38.0.4" }
 cap-std = "3"
 
 # async
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 futures.workspace = true
-
 
 # error
 anyhow.workspace = true
@@ -25,3 +24,13 @@ thiserror.workspace = true
 # logging
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# runtime installation
+directories = "5"
+tar = "0.4"
+xz2 = "0.1"
+flate2 = "1"
+getrandom = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

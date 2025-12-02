@@ -50,7 +50,12 @@ impl DrawerRepoFfi {
         let this = self.clone();
         Ok(self
             .fcx
-            .do_on_rt(async move { this.repo.get(id).await })
+            .do_on_rt(async move {
+                this.repo
+                    .get(&id)
+                    .await
+                    .map(|opt| opt.map(|arc| (*arc).clone()))
+            })
             .await?)
     }
 
@@ -79,7 +84,7 @@ impl DrawerRepoFfi {
         let this = self.clone();
         Ok(self
             .fcx
-            .do_on_rt(async move { this.repo.del(id).await })
+            .do_on_rt(async move { this.repo.del(&id).await })
             .await?)
     }
 }

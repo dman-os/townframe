@@ -2078,6 +2078,35 @@ public object FfiConverterTypeWindowPatch: FfiConverterRustBuffer<WindowPatch> {
 
 
 
+
+enum class ConfigEvent {
+    
+    CHANGED;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeConfigEvent: FfiConverterRustBuffer<ConfigEvent> {
+    override fun read(buf: ByteBuffer) = try {
+        ConfigEvent.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ConfigEvent) = 4UL
+
+    override fun write(value: ConfigEvent, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 sealed class DocContent {
     
     data class Text(
@@ -2169,7 +2198,7 @@ public object FfiConverterTypeDocContent : FfiConverterRustBuffer<DocContent>{
 
 
 
-enum class DocKind {
+enum class DocContentKind {
     
     TEXT,
     BLOB,
@@ -2181,16 +2210,16 @@ enum class DocKind {
 /**
  * @suppress
  */
-public object FfiConverterTypeDocKind: FfiConverterRustBuffer<DocKind> {
+public object FfiConverterTypeDocContentKind: FfiConverterRustBuffer<DocContentKind> {
     override fun read(buf: ByteBuffer) = try {
-        DocKind.values()[buf.getInt() - 1]
+        DocContentKind.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
         throw RuntimeException("invalid enum value, something is very wrong!!", e)
     }
 
-    override fun allocationSize(value: DocKind) = 4UL
+    override fun allocationSize(value: DocContentKind) = 4UL
 
-    override fun write(value: DocKind, buf: ByteBuffer) {
+    override fun write(value: DocContentKind, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -2214,6 +2243,11 @@ sealed class DocTag {
         companion object
     }
     
+    data class PseudoLabel(
+        val v1: List<kotlin.String>) : DocTag() {
+        companion object
+    }
+    
 
     
     companion object
@@ -2230,6 +2264,9 @@ public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
                 )
             2 -> DocTag.LabelGeneric(
                 FfiConverterString.read(buf),
+                )
+            3 -> DocTag.PseudoLabel(
+                FfiConverterSequenceString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -2250,6 +2287,13 @@ public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
                 + FfiConverterString.allocationSize(value.v1)
             )
         }
+        is DocTag.PseudoLabel -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterSequenceString.allocationSize(value.v1)
+            )
+        }
     }
 
     override fun write(value: DocTag, buf: ByteBuffer) {
@@ -2264,6 +2308,11 @@ public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
+            is DocTag.PseudoLabel -> {
+                buf.putInt(3)
+                FfiConverterSequenceString.write(value.v1, buf)
+                Unit
+            }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
@@ -2276,7 +2325,8 @@ public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
 enum class DocTagKind {
     
     REF_GENERIC,
-    LABEL_GENERIC;
+    LABEL_GENERIC,
+    PSEUDO_LABEL;
     companion object
 }
 
@@ -2309,20 +2359,20 @@ sealed class DrawerEvent {
     
     data class DocAdded(
         val `id`: kotlin.String, 
-        val `heads`: List<kotlin.String>) : DrawerEvent() {
+        val `heads`: ChangeHashSet) : DrawerEvent() {
         companion object
     }
     
     data class DocUpdated(
         val `id`: kotlin.String, 
-        val `newHeads`: List<kotlin.String>, 
-        val `oldHeads`: List<kotlin.String>) : DrawerEvent() {
+        val `newHeads`: ChangeHashSet, 
+        val `oldHeads`: ChangeHashSet) : DrawerEvent() {
         companion object
     }
     
     data class DocDeleted(
         val `id`: kotlin.String, 
-        val `oldHeads`: List<kotlin.String>) : DrawerEvent() {
+        val `oldHeads`: ChangeHashSet) : DrawerEvent() {
         companion object
     }
     
@@ -2340,16 +2390,16 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
             1 -> DrawerEvent.ListChanged
             2 -> DrawerEvent.DocAdded(
                 FfiConverterString.read(buf),
-                FfiConverterSequenceString.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
                 )
             3 -> DrawerEvent.DocUpdated(
                 FfiConverterString.read(buf),
-                FfiConverterSequenceString.read(buf),
-                FfiConverterSequenceString.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
                 )
             4 -> DrawerEvent.DocDeleted(
                 FfiConverterString.read(buf),
-                FfiConverterSequenceString.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -2367,7 +2417,7 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
-                + FfiConverterSequenceString.allocationSize(value.`heads`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
         is DrawerEvent.DocUpdated -> {
@@ -2375,8 +2425,8 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
-                + FfiConverterSequenceString.allocationSize(value.`newHeads`)
-                + FfiConverterSequenceString.allocationSize(value.`oldHeads`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`newHeads`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`oldHeads`)
             )
         }
         is DrawerEvent.DocDeleted -> {
@@ -2384,7 +2434,7 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
-                + FfiConverterSequenceString.allocationSize(value.`oldHeads`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`oldHeads`)
             )
         }
     }
@@ -2398,20 +2448,20 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
             is DrawerEvent.DocAdded -> {
                 buf.putInt(2)
                 FfiConverterString.write(value.`id`, buf)
-                FfiConverterSequenceString.write(value.`heads`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
             is DrawerEvent.DocUpdated -> {
                 buf.putInt(3)
                 FfiConverterString.write(value.`id`, buf)
-                FfiConverterSequenceString.write(value.`newHeads`, buf)
-                FfiConverterSequenceString.write(value.`oldHeads`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`newHeads`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`oldHeads`, buf)
                 Unit
             }
             is DrawerEvent.DocDeleted -> {
                 buf.putInt(4)
                 FfiConverterString.write(value.`id`, buf)
-                FfiConverterSequenceString.write(value.`oldHeads`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`oldHeads`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -3283,6 +3333,16 @@ public object FfiConverterSequenceTypeUuid: FfiConverterRustBuffer<List<Uuid>> {
         }
     }
 }
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias ChangeHashSet = List<kotlin.String>
+public typealias FfiConverterTypeChangeHashSet = FfiConverterSequenceString
 
 
 

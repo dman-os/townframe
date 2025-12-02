@@ -70,11 +70,8 @@ impl autosurgeon::Hydrate for ChangeHashSet {
 
 impl autosurgeon::Reconcile for ChangeHashSet {
     type Key<'a> = ();
-    
-    fn reconcile<R: autosurgeon::Reconciler>(
-        &self,
-        reconciler: R,
-    ) -> Result<(), R::Error> {
+
+    fn reconcile<R: autosurgeon::Reconciler>(&self, reconciler: R) -> Result<(), R::Error> {
         autosurgeon::Reconcile::reconcile(&self.0, reconciler)
     }
 }
@@ -99,20 +96,22 @@ uniffi::custom_type!(ChangeHashSet, Vec<String>, {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autosurgeon::{hydrate, reconcile, Hydrate, Reconcile};
     use automerge::transaction::Transactable;
+    use autosurgeon::{hydrate, reconcile, Hydrate, Reconcile};
 
     #[test]
     fn test_change_hash_set_hydrate_seq() {
         use autosurgeon::hydrate_prop;
         let mut doc = automerge::AutoCommit::new();
-        let list_id = doc.put_object(automerge::ROOT, "heads", automerge::ObjType::List).unwrap();
-        
+        let list_id = doc
+            .put_object(automerge::ROOT, "heads", automerge::ObjType::List)
+            .unwrap();
+
         // Create some change hashes
         let hash1 = automerge::ChangeHash([1u8; 32]);
         let hash2 = automerge::ChangeHash([2u8; 32]);
         let hash3 = automerge::ChangeHash([3u8; 32]);
-        
+
         // Insert hashes as bytes (convert [u8; 32] to Vec<u8>)
         doc.insert(&list_id, 0, hash1.0.to_vec()).unwrap();
         doc.insert(&list_id, 1, hash2.0.to_vec()).unwrap();
@@ -120,7 +119,7 @@ mod tests {
 
         let hydrated: ChangeHashSet = hydrate_prop(&doc, automerge::ROOT, "heads").unwrap();
         let heads = hydrated.0.as_ref();
-        
+
         assert_eq!(heads.len(), 3);
         assert_eq!(heads[0], hash1);
         assert_eq!(heads[1], hash2);
@@ -171,4 +170,11 @@ mod tests {
         let hydrated: ChangeHashSet = hydrate_prop(&doc, automerge::ROOT, "heads").unwrap();
         assert_eq!(hydrated, original);
     }
+}
+
+pub fn init_sqlite_vec() {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| unsafe {
+        sqlite_vec::sqlite3_vec_init();
+    });
 }

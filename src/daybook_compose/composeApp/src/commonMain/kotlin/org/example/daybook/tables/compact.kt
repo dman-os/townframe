@@ -32,6 +32,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -39,10 +45,27 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.foundation.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.isTraversalGroup
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
@@ -280,117 +303,42 @@ fun CompactLayout(
     }
 
     val centerNavBarContent: @Composable RowScope.() -> Unit = {
-        // When sheet is open, show controls (add button). When closed, show current tab title.
-        if (revealSheetState.isVisible) {
-            // Add-tab button expands to fill the center area
-            Button(
-                onClick = {
-                    scope.launch {
-                        val sel = vm.getSelectedTable()
-                        if (sel != null) {
-                            val res = vm.createNewTab(sel.id)
-                            if (res.isSuccess) {
-                                val newTabId = res.getOrNull()
-                                if (newTabId != null) {
-                                    if (revealSheetState.isVisible) revealSheetState.hide() else revealSheetState.show()
-                                    vm.selectTab(newTabId)
-                                }
-                            }
+        CenterNavBarContent(
+            navController = navController,
+            revealSheetState = revealSheetState,
+            showFeaturesMenu = showFeaturesMenu,
+            addTabReadyState = addTabReadyState,
+            addTableReadyState = addTableReadyState,
+            featureReadyStates = featureReadyStates,
+            features = features,
+            featureButtonLayouts = featureButtonLayouts,
+            lastDragWindowPos = lastDragWindowPos,
+            onAddButtonLayout = { r ->
+                if (r.width > 0f && r.height > 0f) {
+                    addButtonWindowRect = r
+                }
+            },
+            onFeatureButtonLayout = { key, rect ->
+                featureButtonLayouts = featureButtonLayouts + (key to rect)
+            },
+            onAddTab = {
+                val sel = vm.getSelectedTable()
+                if (sel != null) {
+                    val res = vm.createNewTab(sel.id)
+                    if (res.isSuccess) {
+                        val newTabId = res.getOrNull()
+                        if (newTabId != null) {
+                            if (revealSheetState.isVisible) revealSheetState.hide() else revealSheetState.show()
+                            vm.selectTab(newTabId)
                         }
-                    }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .onGloballyPositioned {
-                        val r = it.boundsInWindow()
-                        if (r.width > 0f && r.height > 0f) {
-                            addButtonWindowRect = r
-                            // debug: addButtonWindowRect set to $r
-                        } else {
-                            // debug: addButtonWindowRect ignored empty rect $r
-                        }
-                    },
-                colors = if (addTabReadyState.value) ButtonDefaults.filledTonalButtonColors() else ButtonDefaults.buttonColors()
-            ) {
-                if (addTabReadyState.value) Text("Release to Add") else Text("Add Tab")
-            }
-        } else if (showFeaturesMenu) {
-            // rollout toolbar: fill the center area with nav-style buttons
-            AnimatedVisibility(
-                visible = showFeaturesMenu,
-                enter = fadeIn(animationSpec = tween(220)) + slideInHorizontally(
-                    initialOffsetX = { it / 4 },
-                    animationSpec = tween(220)
-                ),
-                exit = fadeOut(animationSpec = tween(160)) + slideOutHorizontally(
-                    targetOffsetX = { it / 4 },
-                    animationSpec = tween(160)
-                )
-            ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val btnModifier = Modifier.weight(1f).height(48.dp)
-
-                    // Render features from the top-level `features` list and minimize the rollout on press
-                    features.forEachIndexed { idx, feature ->
-                        val key = feature.key
-                        val iconText = feature.icon
-                        val labelText = feature.label
-
-                        // Highlight when pointer (during drag) is over the button rect, or controller reports ready
-                        val hoverOver =
-                            lastDragWindowPos?.let { pw -> featureButtonLayouts[key]?.contains(pw) }
-                                ?: false
-                        val ready = featureReadyStates.getOrNull(idx)?.value ?: false
-
-                        NavigationBarItem(
-                            onClick = {
-                                showFeaturesMenu = false
-                                scope.launch {
-                                    feature.onActivate()
-                                }
-                            },
-                            modifier = btnModifier.onGloballyPositioned {
-                                featureButtonLayouts =
-                                    featureButtonLayouts + (key to it.boundsInWindow())
-                            },
-                            icon = {
-                                Text(iconText, style = MaterialTheme.typography.bodyLarge)
-                            },
-                            label = {
-                                Text(labelText, style = MaterialTheme.typography.labelSmall)
-                            },
-                            selected = hoverOver || ready,
-                        )
                     }
                 }
+            },
+            onFeatureActivate = { feature ->
+                showFeaturesMenu = false
+                feature.onActivate()
             }
-
-        } else {
-            val tablesRepo = LocalContainer.current.tablesRepo
-            val vmLocal = viewModel { TablesViewModel(tablesRepo) }
-            val selectedTableId = vmLocal.selectedTableId.collectAsState().value
-            val tablesState = vmLocal.tablesState.collectAsState().value
-
-            val currentTabTitle = if (selectedTableId != null && tablesState is TablesState.Data) {
-                val selectedTable = tablesState.tables[selectedTableId]
-                if (selectedTable != null && selectedTable.selectedTab != null) {
-                    tablesState.tabs[selectedTable.selectedTab]?.title ?: "No Tab"
-                } else "No Tab"
-            } else "No Tab"
-
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                Text(
-                    text = currentTabTitle,
-                    style = MaterialTheme.typography.titleMedium,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
+        )
     }
 
     // removed duplicate snackbarHostState (declared above)
@@ -651,6 +599,7 @@ fun CompactLayout(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun DaybookBottomNavigationBar(
     onTabPressed: () -> Unit,
@@ -666,14 +615,92 @@ fun DaybookBottomNavigationBar(
      * New simplified, extensible bottom bar implementation:
      * - left area: toggle / drag-enabled tab switcher
      * - center area: dynamic content provided by caller (or default)
-     * - right area: toggle features / FABs
+     * - right area: toggle features / FABs with floating action menu
      */
+    
+    var fabMenuExpanded by rememberSaveable { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
 
     BottomAppBar(
         floatingActionButton = {
-            // Right (features) button area
-            IconButton(onClick = onFeaturesPressed, modifier = featuresButtonModifier) {
-                Text("⚙️", fontSize = 16.sp)
+            // Right (features) button area with floating action menu
+            FloatingActionButtonMenu(
+                expanded = fabMenuExpanded,
+                modifier = featuresButtonModifier,
+                button = {
+                    FloatingActionButton(
+                        onClick = {
+                            fabMenuExpanded = !fabMenuExpanded
+                            if (fabMenuExpanded) {
+                                onFeaturesPressed()
+                            }
+                        },
+                        modifier = Modifier
+                            .semantics {
+                                traversalIndex = -1f
+                                stateDescription = if (fabMenuExpanded) "Expanded" else "Collapsed"
+                                contentDescription = "Toggle menu"
+                            }
+                            .focusRequester(focusRequester),
+                    ) {
+                        Icon(
+                            imageVector = if (fabMenuExpanded) Icons.Filled.Close else Icons.Filled.MoreVert,
+                            contentDescription = null,
+                        )
+                    }
+                },
+            ) {
+                val menuItems = listOf(
+                    Icons.Filled.Add to "Add Tab",
+                    Icons.Filled.Archive to "Archive",
+                    Icons.Filled.Settings to "Settings",
+                )
+                
+                menuItems.forEachIndexed { i, (icon, label) ->
+                    FloatingActionButtonMenuItem(
+                        modifier = Modifier
+                            .semantics {
+                                isTraversalGroup = true
+                                if (i == menuItems.size - 1) {
+                                    customActions = listOf(
+                                        CustomAccessibilityAction(
+                                            label = "Close menu",
+                                            action = {
+                                                fabMenuExpanded = false
+                                                true
+                                            },
+                                        )
+                                    )
+                                }
+                            }
+                            .then(
+                                if (i == 0) {
+                                    Modifier.onKeyEvent {
+                                        if (
+                                            it.type == KeyEventType.KeyDown &&
+                                            (it.key == Key.DirectionUp ||
+                                                (it.isShiftPressed && it.key == Key.Tab))
+                                        ) {
+                                            focusRequester.requestFocus()
+                                            return@onKeyEvent true
+                                        }
+                                        return@onKeyEvent false
+                                    }
+                                } else {
+                                    Modifier
+                                }
+                            ),
+                        onClick = { 
+                            fabMenuExpanded = false
+                            when (label) {
+                                "Add Tab" -> onFeaturesPressed()
+                                // Add other actions here as needed
+                            }
+                        },
+                        icon = { Icon(icon, contentDescription = null) },
+                        text = { Text(text = label) },
+                    )
+                }
             }
         },
         actions = {

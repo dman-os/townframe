@@ -22,6 +22,7 @@ import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.capture.DaybookCameraPreview
+import org.example.daybook.capture.LocalCameraCaptureContext
 import kotlin.time.Clock
 import kotlin.uuid.Uuid
 
@@ -135,11 +136,15 @@ fun CaptureScreen() {
 
     when (captureMode) {
         CaptureMode.Camera -> {
+            val captureContext = LocalCameraCaptureContext.current
             DaybookCameraPreview(
                 onImageSaved = { byteArray ->
                     // Optionally save the image as a Doc
                     // For now, just log that it was saved
                     println("Image saved: ${byteArray.size} bytes")
+                },
+                onCaptureRequested = {
+                    // This will be handled by the camera preview via the context
                 }
             )
         }

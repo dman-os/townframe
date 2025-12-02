@@ -66,6 +66,7 @@ data-encoding.workspace = true
 wash-runtime = { workspace = true }
 wasmtime = { workspace = true }
 anyhow = { workspace = true }
+sqlite-vec = "0.1.6"
 
 [build-dependencies]
 uniffi = { workspace = true, features = [ "build" ], optional = true }

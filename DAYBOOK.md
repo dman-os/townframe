@@ -8,18 +8,16 @@
 
 ### Stack
 
-- Get pglite building to oci
-  - For pglite-build
-  - Maybe a wash provider?
-  - Maybe wasi component
-  - KvStore impl
-- Finish autosurgeon::Patch
-  - Fork with context generic programming
-- Test to assert snapshot recovery works
-- Sqlite backed KvStore impl
-- Convert DHashMap to be wrapper around RwLock<HashMap>
-
+- [ ] Get pglite building to oci
+  - [ ] For pglite-build
+  - [ ] Maybe a wash provider?
+  - [ ] Maybe wasi component
+- [ ] Finish autosurgeon::Patch
+  - [ ] Fork with context generic programming
+- [x] Test to assert snapshot recovery works
+- [x] Sqlite backed KvStore impl
 - [x] Get uniffi working on android
+- [x] Save a photo
 - [ ] wflow
   - [x] in-memory smoke
   - [ ] Ingress workload
@@ -29,7 +27,7 @@
   - [ ] web UI
   - [ ] Non-wasm impl
     - [ ] Catch panics
-- [ ] Save a photo
+- [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
 - [ ] DRY up all the wit bindgen
 - [ ] Move http tests into api crates
 - [ ] Code generator for http wrapper
@@ -79,9 +77,60 @@
 
 ### Features
 
+- Daybook
+  - Core
+    - E2ee
+    - Multiplayer editing
+    - Muti-device
+    - Auth
+  - Application
+    - Inbox screen
+    - Capture screen
+      - Photo
+      - Video
+        - Live transcript
+      - Audio
+        - Live transcript
+      - Text
+    - Config screen
+    - Collection screen
+      - Group by time
+      - Path based tree
+      - Table
+      - Kanban
+    - Markdown editor
+      - Subtext better?
+    - Screenshots
+    - Magic wand
+    - Share reciever
+    - Print doc
+    - Import/export
+      - Markdown
+  - Server
+    - Object store
+  - Processors
+    - Pseudo labeler
+    - OCR
+    - ContentToTag
+    - Transcript
+    - Thumbnails
+  - Ingest
+    - Telegram bot
+    - Browser extension
+    - Discord bot
+    - Mastodon bot
+  - CLI
+    - FUSE tree on Linux
+  - Quality
+    - CI/CD
+    - GUI tests
+- Granary
+  - Metering for LLM requests
+  - Metering for object store
+
 #### Stretch goals
 
-- [ ] Self hosted auto-updates for android app (think Telegram)
+- Self hosted auto-updates for android app (think Telegram)
 
 ## dev-log
 

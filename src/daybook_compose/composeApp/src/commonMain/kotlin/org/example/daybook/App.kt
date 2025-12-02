@@ -60,6 +60,8 @@ import daybook.composeapp.generated.resources.compose_multiplatform
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.example.daybook.capture.CameraCaptureContext
+import org.example.daybook.capture.ProvideCameraCaptureContext
 import org.example.daybook.capture.screens.CaptureScreen
 import org.example.daybook.tables.CompactLayout
 import org.example.daybook.tables.ExpandedLayout
@@ -464,11 +466,15 @@ fun App(
                 CompositionLocalProvider(
                     LocalContainer provides appContainer,
                 ) {
-                    AdaptiveAppLayout(
-                        modifier = surfaceModifier,
-                        navController = navController,
-                        extraAction = extraAction
-                    )
+                    // Provide camera capture context for coordination between camera and bottom bar
+                    val cameraCaptureContext = remember { CameraCaptureContext() }
+                    ProvideCameraCaptureContext(cameraCaptureContext) {
+                        AdaptiveAppLayout(
+                            modifier = surfaceModifier,
+                            navController = navController,
+                            extraAction = extraAction
+                        )
+                    }
                 }
             }
         }

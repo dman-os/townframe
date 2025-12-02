@@ -173,17 +173,17 @@
               # needed by daybook_compose desktop
               sqlite.dev
               llvmPackages.libclang.dev
-              xorg.libXrender.dev
-              xorg.libXext.dev
+              xorg.libXrender
+              xorg.libXext
               xorg.libXtst
-              xorg.libX11.dev
-              xorg.libXi.dev
-              xorg.libXrandr.dev
-              xorg.libxcb.dev
+              xorg.libX11
+              xorg.libXi
+              xorg.libXrandr
+              xorg.libxcb
               libxkbcommon
-              freetype.dev
-              fontconfig.dev
-              libglvnd.dev
+              freetype
+              fontconfig
+              libglvnd
 
               vulkan-loader
             ]))}"
