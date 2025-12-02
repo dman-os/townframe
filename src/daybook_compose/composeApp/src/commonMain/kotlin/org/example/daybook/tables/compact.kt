@@ -32,12 +32,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Archive
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Close
+// Material Icons may not be available on all platforms in Compose Multiplatform
+// Using text/emoji as fallback for now
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -45,27 +41,14 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBarItem
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.foundation.focusRequester
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.isShiftPressed
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onKeyEvent
-import androidx.compose.ui.input.key.type
-import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.customActions
-import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
@@ -599,7 +582,7 @@ fun CompactLayout(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DaybookBottomNavigationBar(
     onTabPressed: () -> Unit,
@@ -619,86 +602,48 @@ fun DaybookBottomNavigationBar(
      */
     
     var fabMenuExpanded by rememberSaveable { mutableStateOf(false) }
-    val focusRequester = remember { FocusRequester() }
 
     BottomAppBar(
         floatingActionButton = {
             // Right (features) button area with floating action menu
-            FloatingActionButtonMenu(
-                expanded = fabMenuExpanded,
-                modifier = featuresButtonModifier,
-                button = {
-                    FloatingActionButton(
-                        onClick = {
-                            fabMenuExpanded = !fabMenuExpanded
-                            if (fabMenuExpanded) {
-                                onFeaturesPressed()
-                            }
-                        },
-                        modifier = Modifier
-                            .semantics {
-                                traversalIndex = -1f
-                                stateDescription = if (fabMenuExpanded) "Expanded" else "Collapsed"
-                                contentDescription = "Toggle menu"
-                            }
-                            .focusRequester(focusRequester),
-                    ) {
-                        Icon(
-                            imageVector = if (fabMenuExpanded) Icons.Filled.Close else Icons.Filled.MoreVert,
-                            contentDescription = null,
-                        )
-                    }
-                },
-            ) {
-                val menuItems = listOf(
-                    Icons.Filled.Add to "Add Tab",
-                    Icons.Filled.Archive to "Archive",
-                    Icons.Filled.Settings to "Settings",
-                )
+            Box(modifier = featuresButtonModifier) {
+                FloatingActionButton(
+                    onClick = {
+                        fabMenuExpanded = !fabMenuExpanded
+                        if (fabMenuExpanded) {
+                            onFeaturesPressed()
+                        }
+                    },
+                    modifier = Modifier
+                        .semantics {
+                            stateDescription = if (fabMenuExpanded) "Expanded" else "Collapsed"
+                            contentDescription = "Toggle menu"
+                        }
+                ) {
+                    Text(
+                        text = if (fabMenuExpanded) "✕" else "⋮",
+                        fontSize = 20.sp
+                    )
+                }
                 
-                menuItems.forEachIndexed { i, (icon, label) ->
-                    FloatingActionButtonMenuItem(
-                        modifier = Modifier
-                            .semantics {
-                                isTraversalGroup = true
-                                if (i == menuItems.size - 1) {
-                                    customActions = listOf(
-                                        CustomAccessibilityAction(
-                                            label = "Close menu",
-                                            action = {
-                                                fabMenuExpanded = false
-                                                true
-                                            },
-                                        )
-                                    )
-                                }
-                            }
-                            .then(
-                                if (i == 0) {
-                                    Modifier.onKeyEvent {
-                                        if (
-                                            it.type == KeyEventType.KeyDown &&
-                                            (it.key == Key.DirectionUp ||
-                                                (it.isShiftPressed && it.key == Key.Tab))
-                                        ) {
-                                            focusRequester.requestFocus()
-                                            return@onKeyEvent true
-                                        }
-                                        return@onKeyEvent false
-                                    }
-                                } else {
-                                    Modifier
-                                }
-                            ),
-                        onClick = { 
+                DropdownMenu(
+                    expanded = fabMenuExpanded,
+                    onDismissRequest = { fabMenuExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("➕ Add Tab") },
+                        onClick = {
                             fabMenuExpanded = false
-                            when (label) {
-                                "Add Tab" -> onFeaturesPressed()
-                                // Add other actions here as needed
-                            }
-                        },
-                        icon = { Icon(icon, contentDescription = null) },
-                        text = { Text(text = label) },
+                            onFeaturesPressed()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("📦 Archive") },
+                        onClick = { fabMenuExpanded = false }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("⚙️ Settings") },
+                        onClick = { fabMenuExpanded = false }
                     )
                 }
             }

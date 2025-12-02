@@ -4,11 +4,14 @@ use crate::interlude::*;
 mod fails_once;
 #[cfg(test)]
 mod fails_until_told;
+#[cfg(test)]
+mod pglite;
 #[cfg(any(test, feature = "test-harness"))]
 #[allow(unused)]
 mod keyvalue_plugin;
 
 use crate::{AtomicKvSnapStore, KvStoreLog, KvStoreMetadtaStore};
+use wash_plugin_pglite::{Config, PglitePlugin};
 use wash_runtime::{host::HostApi, plugin, types, wit::WitInterface};
 use wflow_core::metastore;
 use wflow_core::snapstore::SnapStore;
@@ -71,6 +74,8 @@ impl WflowTestContextBuilder {
     }
 
     pub async fn build(mut self) -> Res<WflowTestContext> {
+        let temp_dir = tokio::task::block_in_place(|| {tempfile::tempdir() })?;
+
         let metastore = match self.metastore {
             Some(store) => store,
             None => {
@@ -110,19 +115,35 @@ impl WflowTestContextBuilder {
             metastore.clone(),
         ));
         let runtime_config_plugin = plugin::wasi_config::WasiConfig::default();
+        let pglite_plugin = {
+            let test_dir = temp_dir.path().join("townframe-test-pglite");
+            tokio::fs::create_dir_all(&test_dir).await?;
+            
+            let config = Config::with_paths(
+                test_dir.join("runtime"),
+                test_dir.join("data"),
+            );
+            let plugin = PglitePlugin::new(config).await?;
+            Arc::new(plugin)
+        };
         self.plugins.extend_from_slice(&[
             wflow_plugin.clone(),
             Arc::new(runtime_config_plugin),
             keyvalue_plugin.clone(),
+            pglite_plugin.clone(),
         ]);
+
+
         let host = crate::build_wash_host(self.plugins).await?;
         Ok(WflowTestContext {
+            temp_dir,
             metastore,
             log_store,
             snapstore,
             partition_log,
             ingress,
             keyvalue_plugin,
+            pglite_plugin,
             initial_workloads: self.initial_workloads,
             pending_host: Some(host),
             host: None,
@@ -135,12 +156,14 @@ impl WflowTestContextBuilder {
 /// Test context for wflow tests
 #[allow(unused)]
 pub struct WflowTestContext {
+    pub temp_dir: tempfile::TempDir,
     pub metastore: Arc<dyn metastore::MetdataStore>,
     pub log_store: Arc<dyn wflow_core::log::LogStore>,
     pub snapstore: Arc<dyn SnapStore>,
     pub partition_log: wflow_tokio::partition::PartitionLogRef,
     pub ingress: Arc<crate::ingress::PartitionLogIngress>,
     pub keyvalue_plugin: Arc<keyvalue_plugin::WasiKeyvalue>,
+    pub pglite_plugin: Arc<PglitePlugin>,
     initial_workloads: Vec<InitialWorkload>,
     pending_host: Option<wash_runtime::host::Host>,
     host: Option<Arc<wash_runtime::host::Host>>,
@@ -483,6 +506,9 @@ async fn register_workload_on_host(
                 },
                 WitInterface {
                     ..WitInterface::from("townframe:daybook/drawer")
+                },
+                WitInterface {
+                    ..WitInterface::from("townframe:pglite/query")
                 },
                 WitInterface {
                     ..WitInterface::from("townframe:utils/llm-chat")

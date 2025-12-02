@@ -13,7 +13,7 @@ members = [
   "./src/daybook_sync",
   "./src/daybook_wflows/",
   "./src/macros",
-  "./src/play/",
+  "./src/wash_plugin_pglite/",
   "./src/test_wflows",
   # "./src/tests_http",
   "./src/utils_rs",
@@ -56,6 +56,7 @@ wflow_core = { path = "./src/wflow_core", default-features = false }
 wflow_tokio = { path = "./src/wflow_tokio", default-features = false }
 wflow_sdk = { path = "./src/wflow_sdk", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
+wash_plugin_pglite = { path = "./src/wash_plugin_pglite", default-features = false }
 wash_plugin_am_repo = { path = "./src/wash_plugin_am_repo" }
 wash_plugin_utils = { path = "./src/wash_plugin_utils/" }
 
@@ -150,6 +151,7 @@ async-channel = "2.5.0"
 
 # testing
 insta = { version =  "1.44", features = ["yaml", "filters"] }
+tempfile = "3"
 
 # db
 sqlx = { version = "0.8.6", features = [

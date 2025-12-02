@@ -6,6 +6,7 @@ world bundle {
     import wasi:keyvalue/store@0.2.0-draft;
     import townframe:wflow/host;
     import townframe:am-repo/repo;
+    import townframe:pglite/query;
 
     export townframe:wflow/bundle;
 }

@@ -1,12 +1,12 @@
 //! Wire session - handles communication with the pglite WASM instance
 
+use crate::interlude::*;
+
 use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{ensure, Context, Result};
-use tracing::debug;
 use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
 use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
@@ -64,62 +64,69 @@ pub struct WireSession {
 }
 
 impl WireSession {
-    /// Create a new wire session
-    pub fn new(config: &Config, engine: &Engine, module: &Module) -> Result<Self> {
+    /// Create a new wire session (async)
+    pub async fn new(config: &Config, engine: &Engine, module: &Module) -> Res<Self> {
         let wasi = build_wasi_ctx(config)?;
         let mut store = Store::new(engine, WasiState { wasi });
+        store.set_epoch_deadline(u64::MAX);
 
         let mut linker = wasmtime::Linker::<WasiState>::new(engine);
-        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |state| &mut state.wasi)?;
+        wasmtime_wasi::p1::add_to_linker_async(&mut linker, |state| &mut state.wasi).to_eyre()?;
 
-        let instance = linker.instantiate(&mut store, module)?;
+        let instance = linker.instantiate_async(&mut store, module).await.to_eyre()?;
 
         // Run _start for initial setup
         if let Ok(start) = instance.get_typed_func::<(), ()>(&mut store, "_start") {
-            let _ = start.call(&mut store, ());
+            let _ = start.call_async(&mut store, ()).await;
         }
 
         // Run initdb if needed
         if let Ok(initdb) = instance.get_typed_func::<(), i32>(&mut store, "pgl_initdb") {
-            let _ = initdb.call(&mut store, ());
+            let _ = initdb.call_async(&mut store, ()).await;
         }
 
         // Start backend
         if let Ok(backend) = instance.get_typed_func::<(), ()>(&mut store, "pgl_backend") {
-            let _ = backend.call(&mut store, ());
+            let _ = backend.call_async(&mut store, ()).await;
         }
 
         // Get memory export
         let memory = instance
             .get_memory(&mut store, "memory")
-            .context("missing 'memory' export")?;
+            .ok_or_else(|| ferr!("missing 'memory' export"))?;
 
         // Get required exports
         let interactive_write = instance
             .get_typed_func::<i32, ()>(&mut store, "interactive_write")
-            .context("missing 'interactive_write' export")?;
+            .to_eyre()
+            .wrap_err("missing 'interactive_write' export")?;
         let interactive_one = instance
             .get_typed_func::<(), ()>(&mut store, "interactive_one")
-            .context("missing 'interactive_one' export")?;
+            .to_eyre()
+            .wrap_err("missing 'interactive_one' export")?;
         let interactive_read = instance
             .get_typed_func::<(), i32>(&mut store, "interactive_read")
-            .context("missing 'interactive_read' export")?;
+            .to_eyre()
+            .wrap_err("missing 'interactive_read' export")?;
 
         // Get channel info to determine transport mode
         let get_channel = instance
             .get_typed_func::<(), i32>(&mut store, "get_channel")
-            .context("missing 'get_channel' export")?;
-        let channel = get_channel.call(&mut store, ())?;
+            .to_eyre()
+            .wrap_err("missing 'get_channel' export")?;
+        let channel = get_channel.call_async(&mut store, ()).await.to_eyre()?;
 
         let get_buffer_addr = instance
             .get_typed_func::<i32, i32>(&mut store, "get_buffer_addr")
-            .context("missing 'get_buffer_addr' export")?;
-        let buffer_addr = get_buffer_addr.call(&mut store, channel)? as usize;
+            .to_eyre()
+            .wrap_err("missing 'get_buffer_addr' export")?;
+        let buffer_addr = get_buffer_addr.call_async(&mut store, channel).await.to_eyre()? as usize;
 
         let get_buffer_size = instance
             .get_typed_func::<i32, i32>(&mut store, "get_buffer_size")
-            .context("missing 'get_buffer_size' export")?;
-        let buffer_size = get_buffer_size.call(&mut store, channel)? as usize;
+            .to_eyre()
+            .wrap_err("missing 'get_buffer_size' export")?;
+        let buffer_size = get_buffer_size.call_async(&mut store, channel).await.to_eyre()? as usize;
 
         debug!(
             "transport channel={} addr={} size={}",
@@ -167,16 +174,16 @@ impl WireSession {
     }
 
     /// Perform PostgreSQL wire protocol handshake
-    pub fn handshake(&mut self) -> Result<()> {
+    pub async fn handshake(&mut self) -> Res<()> {
         if self.handshake_done {
             return Ok(());
         }
 
-        self.clear_pending()?;
+        self.clear_pending().await?;
 
         // Build and send startup message
         let startup = protocol::build_startup_message("postgres", "template1");
-        let mut response = self.run_wire(&startup)?;
+        let mut response = self.run_wire(&startup).await?;
 
         // Process handshake messages until ReadyForQuery
         loop {
@@ -186,15 +193,15 @@ impl WireSession {
                 return Ok(());
             }
             if let Some(payload) = next_payload {
-                response = self.run_wire(&payload)?;
+                response = self.run_wire(&payload).await?;
             } else {
-                anyhow::bail!("handshake did not complete");
+                eyre::bail!("handshake did not complete");
             }
         }
     }
 
     /// Process handshake response, returning next payload to send (if any) and whether done
-    fn process_handshake_response(&self, data: &[u8]) -> Result<(Option<Vec<u8>>, bool)> {
+    fn process_handshake_response(&self, data: &[u8]) -> Res<(Option<Vec<u8>>, bool)> {
         let mut next_payload: Option<Vec<u8>> = None;
         let mut done = false;
 
@@ -202,7 +209,7 @@ impl WireSession {
             match msg.tag {
                 b'R' => {
                     // Authentication
-                    ensure!(msg.body.len() >= 4, "auth response too short");
+                    eyre::ensure!(msg.body.len() >= 4, "auth response too short");
                     let code = u32::from_be_bytes(msg.body[0..4].try_into().unwrap());
                     match code {
                         0 => {} // AuthenticationOk
@@ -213,13 +220,13 @@ impl WireSession {
                         }
                         5 => {
                             // MD5 password
-                            ensure!(msg.body.len() >= 8, "MD5 auth missing salt");
+                            eyre::ensure!(msg.body.len() >= 8, "MD5 auth missing salt");
                             let salt: [u8; 4] = msg.body[4..8].try_into().unwrap();
                             let pw = self.read_password()?;
                             let hashed = protocol::build_md5_password(&pw, "postgres", &salt);
                             next_payload = Some(protocol::build_password_message(hashed.as_bytes()));
                         }
-                        other => anyhow::bail!("unsupported auth method: {}", other),
+                        other => eyre::bail!("unsupported auth method: {}", other),
                     }
                 }
                 b'S' => {
@@ -237,7 +244,7 @@ impl WireSession {
                 }
                 b'E' => {
                     let error_msg = protocol::extract_error_message(data);
-                    anyhow::bail!("handshake error: {}", error_msg);
+                    eyre::bail!("handshake error: {}", error_msg);
                 }
                 b'N' => {
                     // Notice - just log
@@ -252,20 +259,20 @@ impl WireSession {
     }
 
     /// Read password from password file
-    fn read_password(&self) -> Result<String> {
+    fn read_password(&self) -> Res<String> {
         let path = self.config.pgroot.join("pglite").join("password");
         let contents = fs::read_to_string(&path)
-            .with_context(|| format!("read password file {:?}", path))?;
+            .wrap_err_with(|| format!("read password file {:?}", path))?;
         Ok(contents.trim_end_matches(['\n', '\r']).to_string())
     }
 
-    /// Send wire protocol data
-    pub fn send(&mut self, payload: &[u8]) -> Result<()> {
-        self.set_wire_mode(true)?;
+    /// Send wire protocol data (async)
+    pub async fn send(&mut self, payload: &[u8]) -> Res<()> {
+        self.set_wire_mode(true).await?;
 
         match &mut self.transport {
             Transport::Cma { pending_len } => {
-                ensure!(
+                eyre::ensure!(
                     payload.len() <= self.buffer_size,
                     "payload {} exceeds buffer {}",
                     payload.len(),
@@ -273,10 +280,12 @@ impl WireSession {
                 );
                 self.memory
                     .write(&mut self.store, self.buffer_addr, payload)
-                    .context("write to WASM memory")?;
+                    .wrap_err("write to WASM memory")?;
                 self.interactive_write
-                    .call(&mut self.store, payload.len() as i32)
-                    .context("call interactive_write")?;
+                    .call_async(&mut self.store, payload.len() as i32)
+                    .await
+                    .to_eyre()
+                    .wrap_err("call interactive_write")?;
                 *pending_len = payload.len();
             }
             Transport::File { paths } => {
@@ -292,21 +301,25 @@ impl WireSession {
         Ok(())
     }
 
-    /// Tick the backend - process one iteration
-    pub fn tick(&mut self) -> Result<()> {
+    /// Tick the backend - process one iteration (async)
+    pub async fn tick(&mut self) -> Res<()> {
         self.interactive_one
-            .call(&mut self.store, ())
-            .context("call interactive_one")
+            .call_async(&mut self.store, ())
+            .await
+            .to_eyre()
+            .wrap_err("call interactive_one")
     }
 
-    /// Try to receive response data (non-blocking)
-    pub fn try_recv(&mut self) -> Result<Option<Vec<u8>>> {
+    /// Try to receive response data (non-blocking, async)
+    pub async fn try_recv(&mut self) -> Res<Option<Vec<u8>>> {
         match &mut self.transport {
             Transport::Cma { pending_len } => {
                 let reply_len = self
                     .interactive_read
-                    .call(&mut self.store, ())
-                    .context("call interactive_read")? as usize;
+                    .call_async(&mut self.store, ())
+                    .await
+                    .to_eyre()
+                    .wrap_err("call interactive_read")? as usize;
 
                 if reply_len == 0 {
                     return Ok(None);
@@ -314,7 +327,7 @@ impl WireSession {
 
                 // Response is at buffer_addr + pending_len + 1
                 let base = self.buffer_addr + *pending_len + 1;
-                ensure!(
+                eyre::ensure!(
                     base + reply_len <= self.memory.data_size(&self.store),
                     "reply overflows memory"
                 );
@@ -322,12 +335,14 @@ impl WireSession {
                 let mut buf = vec![0u8; reply_len];
                 self.memory
                     .read(&mut self.store, base, &mut buf)
-                    .context("read from WASM memory")?;
+                    .wrap_err("read from WASM memory")?;
 
                 // Clear pending
                 self.interactive_write
-                    .call(&mut self.store, 0)
-                    .context("clear interactive_write")?;
+                    .call_async(&mut self.store, 0)
+                    .await
+                    .to_eyre()
+                    .wrap_err("clear interactive_write")?;
                 *pending_len = 0;
 
                 Ok(Some(buf))
@@ -344,33 +359,39 @@ impl WireSession {
         }
     }
 
-    /// Clear any pending data
-    fn clear_pending(&mut self) -> Result<()> {
+    /// Clear any pending data (async)
+    async fn clear_pending(&mut self) -> Res<()> {
         if let Transport::Cma { pending_len } = &mut self.transport {
-            self.interactive_write.call(&mut self.store, 0)?;
+            self.interactive_write
+                .call_async(&mut self.store, 0)
+                .await
+                .to_eyre()?;
             *pending_len = 0;
         }
         Ok(())
     }
 
-    /// Set wire protocol mode
-    fn set_wire_mode(&mut self, enable: bool) -> Result<()> {
+    /// Set wire protocol mode (async)
+    async fn set_wire_mode(&mut self, enable: bool) -> Res<()> {
         if let Some(use_wire) = &self.use_wire {
-            use_wire.call(&mut self.store, if enable { 1 } else { 0 })?;
+            use_wire
+                .call_async(&mut self.store, if enable { 1 } else { 0 })
+                .await
+                .to_eyre()?;
         }
         Ok(())
     }
 
-    /// Send data and collect all responses until done
-    fn run_wire(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
-        self.send(payload)?;
+    /// Send data and collect all responses until done (async)
+    async fn run_wire(&mut self, payload: &[u8]) -> Res<Vec<u8>> {
+        self.send(payload).await?;
 
         let mut combined = Vec::new();
         const MAX_TICKS: usize = 256;
 
         for _ in 0..MAX_TICKS {
-            self.tick()?;
-            if let Some(data) = self.try_recv()? {
+            self.tick().await?;
+            if let Some(data) = self.try_recv().await? {
                 combined.extend(data);
                 // Check if we have a complete response
                 if protocol::contains_ready_for_query(&combined)
@@ -382,22 +403,24 @@ impl WireSession {
         }
 
         if combined.is_empty() {
-            anyhow::bail!("no response received");
+            eyre::bail!("no response received");
         }
 
         Ok(combined)
     }
 }
 
-/// Create a wasmtime Engine
-pub fn create_engine() -> Result<Engine> {
+/// Create a wasmtime Engine with async support
+pub fn create_engine() -> Res<Engine> {
     let mut cfg = wasmtime::Config::new();
     cfg.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
-    Engine::new(&cfg).context("create wasmtime engine")
+    cfg.async_support(true);
+    cfg.epoch_interruption(true);
+    Engine::new(&cfg).to_eyre().wrap_err("create wasmtime engine")
 }
 
 /// Load module with pre-compilation caching
-pub fn load_module(engine: &Engine, config: &Config) -> Result<Module> {
+pub fn load_module(engine: &Engine, config: &Config) -> Res<Module> {
     let cwasm_path = config.cwasm_path();
     let wasm_path = config.wasm_path();
 
@@ -405,11 +428,15 @@ pub fn load_module(engine: &Engine, config: &Config) -> Result<Module> {
         debug!("loading pre-compiled module from {:?}", cwasm_path);
         // SAFETY: We control the cwasm file and trust it
         unsafe {
-            Module::deserialize_file(engine, &cwasm_path).context("deserialize cached module")
+            Module::deserialize_file(engine, &cwasm_path)
+                .to_eyre()
+                .wrap_err("deserialize cached module")
         }
     } else {
         debug!("compiling module from {:?}", wasm_path);
-        let module = Module::from_file(engine, &wasm_path).context("compile module")?;
+        let module = Module::from_file(engine, &wasm_path)
+            .to_eyre()
+            .wrap_err("compile module")?;
 
         // Cache for next time
         match module.serialize() {
@@ -428,30 +455,36 @@ pub fn load_module(engine: &Engine, config: &Config) -> Result<Module> {
 }
 
 /// Build WASI context for pglite
-pub fn build_wasi_ctx(config: &Config) -> Result<WasiP1Ctx> {
+pub fn build_wasi_ctx(config: &Config) -> Res<WasiP1Ctx> {
     // Ensure directories exist
     fs::create_dir_all(&config.pgroot)?;
     fs::create_dir_all(&config.pgdata)?;
     fs::create_dir_all(config.dev_path())?;
 
     let mut builder = WasiCtxBuilder::new();
+    builder.inherit_stdin().inherit_stdout().inherit_stderr();
+
     builder
-        .inherit_stdin()
-        .inherit_stdout()
-        .inherit_stderr()
-        .preopened_dir(&config.pgroot, "/tmp", DirPerms::all(), FilePerms::all())?
+        .preopened_dir(&config.pgroot, "/tmp", DirPerms::all(), FilePerms::all())
+        .to_eyre()
+        .wrap_err("preopened_dir /tmp")?;
+
+    builder
         .preopened_dir(
             &config.pgdata,
             "/tmp/pglite/base",
             DirPerms::all(),
             FilePerms::all(),
-        )?
-        .preopened_dir(
-            config.dev_path(),
-            "/dev",
-            DirPerms::all(),
-            FilePerms::all(),
-        )?
+        )
+        .to_eyre()
+        .wrap_err("preopened_dir /tmp/pglite/base")?;
+
+    builder
+        .preopened_dir(config.dev_path(), "/dev", DirPerms::all(), FilePerms::all())
+        .to_eyre()
+        .wrap_err("preopened_dir /dev")?;
+
+    builder
         .env("ENVIRONMENT", "wasm32_wasi_preview1")
         .env("PREFIX", "/tmp/pglite")
         .env("PGDATA", "/tmp/pglite/base")

@@ -20,14 +20,14 @@
           };
         };
 
-        androidBuildToolsVersion = "35.0.0";
+        androidBuildToolsVersion = "36.0.0";
         androidApiLevel = "31";
         androidComposition = (pkgs.android-studio.withSdk (
           pkgs.androidenv.composeAndroidPackages { 
             includeNDK = true; 
-            platformToolsVersion = "35.0.1";
+            platformToolsVersion = "36.0.0";
             buildToolsVersions = [ androidBuildToolsVersion  ];
-            platformVersions = [ "35" ];
+            platformVersions = [ "36" ];
           }
         ).androidsdk);
 

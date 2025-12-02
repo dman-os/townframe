@@ -1,20 +1,21 @@
 //! Runtime installation and cluster initialization
 
+use crate::interlude::*;
+
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
+use std::io::Read;
 use tar::Archive;
-use tracing::{debug, info};
-use wasmtime::{Engine, Module, Store, TypedFunc};
-use xz2::read::XzDecoder;
+use wasmtime::{Engine, Module, Store};
 
 use crate::wire::WasiState;
 use crate::Config;
 
-/// URL to download pglite runtime
-const PGLITE_DOWNLOAD_URL: &str = "https://electric-sql.github.io/pglite-build/pglite-wasi.tar.xz";
+/// Embedded pglite runtime archive (compressed with zstd)
+/// Generated at build time by build.rs
+const EMBEDDED_PGLITE_ZST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pglite_embedded.tar.zst"));
 
 /// Install the pglite runtime to the configured paths
 ///
@@ -23,13 +24,13 @@ const PGLITE_DOWNLOAD_URL: &str = "https://electric-sql.github.io/pglite-build/p
 /// - Unpack to pgroot
 /// - Seed /dev/urandom
 /// - Install any configured extensions
-pub async fn install_runtime(config: &Config) -> Result<()> {
-    fs::create_dir_all(&config.pgroot).context("create pgroot")?;
-    fs::create_dir_all(&config.pgdata).context("create pgdata")?;
+pub async fn install_runtime(config: &Config) -> Res<()> {
+    fs::create_dir_all(&config.pgroot).wrap_err("create pgroot")?;
+    fs::create_dir_all(&config.pgdata).wrap_err("create pgdata")?;
 
     // Download and unpack runtime if needed
     if !config.wasm_path().exists() {
-        download_and_unpack_runtime(config).await?;
+        unpack_runtime(config).await?;
     }
 
     // Seed /dev/urandom for PostgreSQL's randomness needs
@@ -44,39 +45,41 @@ pub async fn install_runtime(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Download pglite runtime and unpack to pgroot
-async fn download_and_unpack_runtime(config: &Config) -> Result<()> {
-    info!("downloading pglite runtime from {}", PGLITE_DOWNLOAD_URL);
+/// Extract embedded pglite runtime and unpack to pgroot
+async fn unpack_runtime(config: &Config) -> Res<()> {
+    info!("extracting embedded pglite runtime to {:?}", config.pgroot);
 
-    // Download using reqwest or curl - for simplicity, use blocking curl
-    let tar_xz_path = config.pgroot.join("pglite-wasi.tar.xz");
+    // Decompress and unpack embedded archive (spawn blocking)
+    let pgroot = config.pgroot.clone();
+    let embedded_zst = EMBEDDED_PGLITE_ZST.to_vec();
 
-    let output = std::process::Command::new("curl")
-        .arg("-L")
-        .arg("-o")
-        .arg(&tar_xz_path)
-        .arg(PGLITE_DOWNLOAD_URL)
-        .output()
-        .context("failed to run curl")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("curl failed: {}", stderr);
-    }
-
-    info!("unpacking runtime to {:?}", config.pgroot);
-
-    // Unpack the tar.xz
-    let file = fs::File::open(&tar_xz_path).context("open tar.xz")?;
-    let decoder = XzDecoder::new(file);
-    let mut archive = Archive::new(decoder);
-    archive.unpack(&config.pgroot).context("unpack tar.xz")?;
+    tokio::task::spawn_blocking(move || {
+        // Decompress zstd archive
+        let mut tar_bytes = Vec::new();
+        zstd::stream::copy_decode(embedded_zst.as_slice(), &mut tar_bytes)
+            .wrap_err("decompress embedded zstd archive")?;
+        
+        // Unpack tar archive
+        let mut archive = Archive::new(tar_bytes.as_slice());
+        archive.unpack(&pgroot).wrap_err("unpack embedded archive")?;
+        
+        Ok::<(), eyre::Report>(())
+    })
+    .await
+    .wrap_err("unpack task panicked")??;
 
     // Normalize layout - move nested pglite dir if present
     normalize_runtime_layout(config)?;
 
-    // Cleanup downloaded archive
-    let _ = fs::remove_file(&tar_xz_path);
+    // Move cwasm to expected location if it's at the root
+    let root_cwasm = config.pgroot.join("pglite.cwasm");
+    let expected_cwasm = config.cwasm_path();
+    if root_cwasm.exists() && !expected_cwasm.exists() {
+        if let Some(parent) = expected_cwasm.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&root_cwasm, &expected_cwasm)?;
+    }
 
     Ok(())
 }
@@ -85,7 +88,7 @@ async fn download_and_unpack_runtime(config: &Config) -> Result<()> {
 ///
 /// Some archives have nested directories like tmp/pglite/...
 /// We need to flatten to pgroot/pglite/...
-fn normalize_runtime_layout(config: &Config) -> Result<()> {
+fn normalize_runtime_layout(config: &Config) -> Res<()> {
     // Check for nested structure
     let nested = config.pgroot.join("tmp").join("pglite");
     if nested.join("bin").join("pglite.wasi").exists() {
@@ -108,7 +111,7 @@ fn normalize_runtime_layout(config: &Config) -> Result<()> {
 }
 
 /// Recursively copy a directory
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Res<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -124,7 +127,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Seed /dev/urandom with random bytes
-fn seed_urandom(dev_path: &Path) -> Result<()> {
+fn seed_urandom(dev_path: &Path) -> Res<()> {
     fs::create_dir_all(dev_path)?;
     let urandom_path = dev_path.join("urandom");
     if !urandom_path.exists() {
@@ -137,11 +140,11 @@ fn seed_urandom(dev_path: &Path) -> Result<()> {
 }
 
 /// Install an extension from a tar.gz archive
-fn install_extension(config: &Config, archive_path: &Path) -> Result<()> {
+fn install_extension(config: &Config, archive_path: &Path) -> Res<()> {
     info!("installing extension from {:?}", archive_path);
 
     let file = fs::File::open(archive_path)
-        .with_context(|| format!("open extension archive {:?}", archive_path))?;
+        .wrap_err_with(|| format!("open extension archive {:?}", archive_path))?;
     let decoder = GzDecoder::new(file);
     let mut archive = Archive::new(decoder);
 
@@ -149,13 +152,13 @@ fn install_extension(config: &Config, archive_path: &Path) -> Result<()> {
     fs::create_dir_all(&target)?;
     archive
         .unpack(&target)
-        .with_context(|| format!("unpack extension {:?}", archive_path))?;
+        .wrap_err_with(|| format!("unpack extension {:?}", archive_path))?;
 
     Ok(())
 }
 
-/// Initialize the database cluster by running initdb via WASM
-pub fn init_cluster(config: &Config, engine: &Engine, module: &Module) -> Result<()> {
+/// Initialize the database cluster by running initdb via WASM (async)
+pub async fn init_cluster(config: &Config, engine: &Engine, module: &Module) -> Res<()> {
     info!("running initdb to create cluster");
 
     fs::create_dir_all(&config.pgdata)?;
@@ -172,35 +175,37 @@ pub fn init_cluster(config: &Config, engine: &Engine, module: &Module) -> Result
     // Build WASI context
     let wasi = crate::wire::build_wasi_ctx(config)?;
     let mut store = Store::new(engine, WasiState { wasi });
+    store.set_epoch_deadline(u64::MAX);
 
     // Link and instantiate
     let mut linker = wasmtime::Linker::<WasiState>::new(engine);
-    wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |state| &mut state.wasi)?;
+    wasmtime_wasi::p1::add_to_linker_async(&mut linker, |state| &mut state.wasi).to_eyre()?;
 
-    let instance = linker.instantiate(&mut store, module)?;
+    let instance = linker.instantiate_async(&mut store, module).await.to_eyre()?;
 
     // Call _start for embed setup
     if let Ok(start) = instance.get_typed_func::<(), ()>(&mut store, "_start") {
-        let _ = start.call(&mut store, ());
+        let _ = start.call_async(&mut store, ()).await;
         debug!("_start completed");
     }
 
     // Call pgl_initdb
-    let initdb: TypedFunc<(), i32> = instance
-        .get_typed_func(&mut store, "pgl_initdb")
-        .context("get pgl_initdb export")?;
+    let initdb = instance
+        .get_typed_func::<(), i32>(&mut store, "pgl_initdb")
+        .to_eyre()
+        .wrap_err("get pgl_initdb export")?;
 
-    let rc = initdb.call(&mut store, ())?;
+    let rc = initdb.call_async(&mut store, ()).await.to_eyre()?;
     info!("initdb returned: {}", rc);
 
     // Verify cluster was created
     if !config.cluster_exists() {
-        anyhow::bail!("initdb did not create cluster (rc={})", rc);
+        eyre::bail!("initdb did not create cluster (rc={})", rc);
     }
 
     // Best-effort shutdown
     if let Ok(shutdown) = instance.get_typed_func::<(), ()>(&mut store, "pgl_shutdown") {
-        let _ = shutdown.call(&mut store, ());
+        let _ = shutdown.call_async(&mut store, ()).await;
     }
 
     info!("cluster initialization complete");

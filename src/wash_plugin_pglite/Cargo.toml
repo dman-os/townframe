@@ -1,5 +1,5 @@
 [package]
-name = "play"
+name = "wash_plugin_pglite"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,23 +7,32 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
+# internal
+utils_rs.workspace = true
+
 # wasm - wasmtime 38 with WASI Preview1 support
-wasmtime = "38.0.4"
+wasmtime = "*"
 wasmtime-wasi = { version = "38.0.4" }
 cap-std = "3"
+
+# wash runtime for plugin
+wash-runtime.workspace = true
 
 # async
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 futures.workspace = true
+async-trait.workspace = true
 
 # error
-anyhow.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
 
 # logging
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 # runtime installation
 directories = "5"
@@ -31,6 +40,24 @@ tar = "0.4"
 xz2 = "0.1"
 flate2 = "1"
 getrandom = "0.2"
+zstd = "0.13"
+
+# crypto
+md-5 = "0.10"
+
+# encoding
+serde.workspace = true
+bytes = "1"
+postgres-protocol = "0.6.9"
+fallible-iterator = "0.2"
+
+[build-dependencies]
+ureq = { version = "2", features = ["native-tls"] }
+xz2 = "0.1"
+tar = "0.4"
+zstd = "0.13"
+wasmtime = "*"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
+tracing-subscriber.workspace = true

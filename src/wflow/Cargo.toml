@@ -8,7 +8,7 @@ path = "lib.rs"
 
 [features]
 default = ["test-harness"]
-test-harness = ["wasmtime", "insta"]
+test-harness = ["wasmtime", "insta", "wash_plugin_pglite", "tempfile"]
 
 [dependencies]
 # internal
@@ -43,9 +43,11 @@ sqlx = { workspace = true, features = ["sqlite"] }
 # wasm
 wash-runtime.workspace = true
 wasmtime = { workspace = true, optional = true }
+wash_plugin_pglite = { workspace = true, optional = true }
 
 # testing
 insta = { workspace = true, optional = true, features = ["json"] }
+tempfile = { workspace = true, optional = true }
 
 tracing.workspace = true
 

@@ -106,6 +106,14 @@
     - Print doc
     - Import/export
       - Markdown
+    - Multiple window support
+    - Document types
+      - Images
+        - Thumbnails
+      - Videos
+        - Thumbnails
+      - Audio
+      - Markdown/subtext
   - Server
     - Object store
   - Processors
@@ -121,6 +129,7 @@
     - Mastodon bot
   - CLI
     - FUSE tree on Linux
+    - Directly processor on given file
   - Quality
     - CI/CD
     - GUI tests
