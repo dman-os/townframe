@@ -3,15 +3,14 @@
 use crate::interlude::*;
 
 use std::ffi::OsString;
-use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use tokio::fs;
 
 use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
 use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
-use crate::protocol;
 use crate::Config;
 
 /// WASI state held in the Store
@@ -66,7 +65,7 @@ pub struct WireSession {
 impl WireSession {
     /// Create a new wire session (async)
     pub async fn new(config: &Config, engine: &Engine, module: &Module) -> Res<Self> {
-        let wasi = build_wasi_ctx(config)?;
+        let wasi = build_wasi_ctx(config).await?;
         let mut store = Store::new(engine, WasiState { wasi });
         store.set_epoch_deadline(u64::MAX);
 
@@ -182,12 +181,22 @@ impl WireSession {
         self.clear_pending().await?;
 
         // Build and send startup message
-        let startup = protocol::build_startup_message("postgres", "template1");
+        use bytes::BytesMut;
+        use postgres_protocol::message::frontend;
+        let mut startup_buf = BytesMut::new();
+        let params = [
+            ("user", "postgres"),
+            ("database", "template1"),
+            ("client_encoding", "UTF8"),
+            ("application_name", "wash-pglite"),
+        ];
+        frontend::startup_message(params.iter().map(|(k, v)| (*k, *v)), &mut startup_buf).unwrap();
+        let startup = startup_buf.to_vec();
         let mut response = self.run_wire(&startup).await?;
 
         // Process handshake messages until ReadyForQuery
         loop {
-            let (next_payload, done) = self.process_handshake_response(&response)?;
+            let (next_payload, done) = Self::process_handshake_response(&response, &self.config)?;
             if done {
                 self.handshake_done = true;
                 return Ok(());
@@ -201,57 +210,94 @@ impl WireSession {
     }
 
     /// Process handshake response, returning next payload to send (if any) and whether done
-    fn process_handshake_response(&self, data: &[u8]) -> Res<(Option<Vec<u8>>, bool)> {
+    fn process_handshake_response(data: &[u8], config: &Config) -> Res<(Option<Vec<u8>>, bool)> {
+        use bytes::BytesMut;
+        use postgres_protocol::message::backend::Message;
+
         let mut next_payload: Option<Vec<u8>> = None;
         let mut done = false;
+        let mut buf = BytesMut::from(data);
 
-        for msg in protocol::parse_messages(data)? {
-            match msg.tag {
-                b'R' => {
-                    // Authentication
-                    eyre::ensure!(msg.body.len() >= 4, "auth response too short");
-                    let code = u32::from_be_bytes(msg.body[0..4].try_into().unwrap());
-                    match code {
-                        0 => {} // AuthenticationOk
-                        3 => {
-                            // Cleartext password
-                            let pw = self.read_password()?;
-                            next_payload = Some(protocol::build_password_message(pw.as_bytes()));
-                        }
-                        5 => {
-                            // MD5 password
-                            eyre::ensure!(msg.body.len() >= 8, "MD5 auth missing salt");
-                            let salt: [u8; 4] = msg.body[4..8].try_into().unwrap();
-                            let pw = self.read_password()?;
-                            let hashed = protocol::build_md5_password(&pw, "postgres", &salt);
-                            next_payload = Some(protocol::build_password_message(hashed.as_bytes()));
-                        }
-                        other => eyre::bail!("unsupported auth method: {}", other),
-                    }
+        loop {
+            match Message::parse(&mut buf) {
+                Ok(Some(Message::AuthenticationOk)) => {
+                    // Authentication successful
                 }
-                b'S' => {
+                Ok(Some(Message::AuthenticationCleartextPassword)) => {
+                    // Cleartext password
+                    use postgres_protocol::message::frontend;
+                    let pw = Self::read_password_sync(config)?;
+                    let mut pw_buf = BytesMut::new();
+                    frontend::password_message(pw.as_bytes(), &mut pw_buf).unwrap();
+                    next_payload = Some(pw_buf.to_vec());
+                }
+                Ok(Some(Message::AuthenticationMd5Password(body))) => {
+                    // MD5 password
+                    use postgres_protocol::authentication::md5_hash;
+                    use postgres_protocol::message::frontend;
+                    let salt = body.salt();
+                    let pw = Self::read_password_sync(config)?;
+                    let hashed = md5_hash(b"postgres", pw.as_bytes(), salt);
+                    let mut pw_buf = BytesMut::new();
+                    frontend::password_message(hashed.as_bytes(), &mut pw_buf).unwrap();
+                    next_payload = Some(pw_buf.to_vec());
+                }
+                Ok(Some(Message::ParameterStatus(ps))) => {
                     // ParameterStatus - just log
-                    if let Some((key, value)) = protocol::parse_parameter_status(msg.body) {
-                        debug!("parameter: {}={}", key, value);
+                    if let (Ok(name), Ok(value)) = (ps.name(), ps.value()) {
+                        debug!("parameter: {}={}", name, value);
                     }
                 }
-                b'K' => {
+                Ok(Some(Message::AuthenticationSasl(_))) | Ok(Some(Message::AuthenticationSaslContinue(_))) | Ok(Some(Message::AuthenticationSaslFinal(_))) => {
+                    eyre::bail!("SASL authentication not supported");
+                }
+                Ok(Some(Message::BackendKeyData(_))) => {
                     debug!("backend key data received");
                 }
-                b'Z' => {
+                Ok(Some(Message::ReadyForQuery(_))) => {
                     // ReadyForQuery
                     done = true;
+                    break;
                 }
-                b'E' => {
-                    let error_msg = protocol::extract_error_message(data);
+                Ok(Some(Message::ErrorResponse(err))) => {
+                    // Extract error message
+                    use fallible_iterator::FallibleIterator;
+                    let mut fields = err.fields();
+                    let mut error_msg = String::new();
+                    while let Ok(Some(field)) = fields.next() {
+                        if field.type_() == b'M' {
+                            error_msg = String::from_utf8_lossy(field.value_bytes()).to_string();
+                            break;
+                        }
+                    }
+                    if error_msg.is_empty() {
+                        error_msg = "handshake error".to_string();
+                    }
                     eyre::bail!("handshake error: {}", error_msg);
                 }
-                b'N' => {
+                Ok(Some(Message::NoticeResponse(notice))) => {
                     // Notice - just log
-                    let notice = protocol::extract_error_message(msg.body);
-                    debug!("notice: {}", notice);
+                    use fallible_iterator::FallibleIterator;
+                    let mut fields = notice.fields();
+                    while let Ok(Some(field)) = fields.next() {
+                        if field.type_() == b'M' {
+                            debug!("notice: {}", String::from_utf8_lossy(field.value_bytes()));
+                            break;
+                        }
+                    }
                 }
-                _ => {}
+                Ok(Some(_)) => {
+                    // Skip other messages
+                    continue;
+                }
+                Ok(None) => {
+                    // No more messages
+                    break;
+                }
+                Err(_) => {
+                    // Parse error - return what we have
+                    break;
+                }
             }
         }
 
@@ -259,8 +305,9 @@ impl WireSession {
     }
 
     /// Read password from password file
-    fn read_password(&self) -> Res<String> {
-        let path = self.config.pgroot.join("pglite").join("password");
+    fn read_password_sync(config: &Config) -> Res<String> {
+        use std::fs;
+        let path = config.pgroot.join("pglite").join("password");
         let contents = fs::read_to_string(&path)
             .wrap_err_with(|| format!("read password file {:?}", path))?;
         Ok(contents.trim_end_matches(['\n', '\r']).to_string())
@@ -290,11 +337,11 @@ impl WireSession {
             }
             Transport::File { paths } => {
                 if let Some(parent) = paths.sinput.parent() {
-                    fs::create_dir_all(parent)?;
+                    fs::create_dir_all(parent).await?;
                 }
-                let _ = fs::remove_file(&paths.slock);
-                fs::write(&paths.slock, payload)?;
-                fs::rename(&paths.slock, &paths.sinput)?;
+                let _ = fs::remove_file(&paths.slock).await;
+                fs::write(&paths.slock, payload).await?;
+                fs::rename(&paths.slock, &paths.sinput).await?;
             }
         }
 
@@ -347,10 +394,10 @@ impl WireSession {
 
                 Ok(Some(buf))
             }
-            Transport::File { paths } => match fs::read(&paths.cinput) {
+            Transport::File { paths } => match fs::read(&paths.cinput).await {
                 Ok(data) => {
-                    let _ = fs::remove_file(&paths.cinput);
-                    let _ = fs::remove_file(&paths.clock);
+                    let _ = fs::remove_file(&paths.cinput).await;
+                    let _ = fs::remove_file(&paths.clock).await;
                     Ok(Some(data))
                 }
                 Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
@@ -394,9 +441,26 @@ impl WireSession {
             if let Some(data) = self.try_recv().await? {
                 combined.extend(data);
                 // Check if we have a complete response
-                if protocol::contains_ready_for_query(&combined)
-                    || protocol::contains_error(&combined)
-                {
+                use bytes::BytesMut;
+                use postgres_protocol::message::backend::Message;
+                let mut check_buf = BytesMut::from(&combined[..]);
+                let mut has_ready = false;
+                let mut has_error = false;
+                loop {
+                    match Message::parse(&mut check_buf) {
+                        Ok(Some(Message::ReadyForQuery(_))) => {
+                            has_ready = true;
+                            break;
+                        }
+                        Ok(Some(Message::ErrorResponse(_))) => {
+                            has_error = true;
+                            break;
+                        }
+                        Ok(Some(_)) => continue,
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+                if has_ready || has_error {
                     break;
                 }
             }
@@ -420,28 +484,44 @@ pub fn create_engine() -> Res<Engine> {
 }
 
 /// Load module with pre-compilation caching
-pub fn load_module(engine: &Engine, config: &Config) -> Res<Module> {
+pub async fn load_module(engine: &Engine, config: &Config) -> Res<Module> {
     let cwasm_path = config.cwasm_path();
     let wasm_path = config.wasm_path();
 
     if cwasm_path.exists() {
         debug!("loading pre-compiled module from {:?}", cwasm_path);
         // SAFETY: We control the cwasm file and trust it
-        unsafe {
-            Module::deserialize_file(engine, &cwasm_path)
-                .to_eyre()
-                .wrap_err("deserialize cached module")
-        }
+        tokio::task::spawn_blocking({
+            let engine = engine.clone();
+            let cwasm_path = cwasm_path.clone();
+            move || {
+                unsafe {
+                    Module::deserialize_file(&engine, &cwasm_path)
+                        .to_eyre()
+                        .wrap_err("deserialize cached module")
+                }
+            }
+        })
+        .await
+        .wrap_err("load module task panicked")?
     } else {
         debug!("compiling module from {:?}", wasm_path);
-        let module = Module::from_file(engine, &wasm_path)
-            .to_eyre()
-            .wrap_err("compile module")?;
+        let module = tokio::task::spawn_blocking({
+            let engine = engine.clone();
+            let wasm_path = wasm_path.clone();
+            move || {
+                Module::from_file(&engine, &wasm_path)
+                    .to_eyre()
+                    .wrap_err("compile module")
+            }
+        })
+        .await
+        .wrap_err("compile module task panicked")??;
 
         // Cache for next time
         match module.serialize() {
             Ok(bytes) => {
-                if let Err(e) = fs::write(&cwasm_path, bytes) {
+                if let Err(e) = fs::write(&cwasm_path, bytes).await {
                     tracing::warn!("failed to cache compiled module: {}", e);
                 }
             }
@@ -455,11 +535,11 @@ pub fn load_module(engine: &Engine, config: &Config) -> Res<Module> {
 }
 
 /// Build WASI context for pglite
-pub fn build_wasi_ctx(config: &Config) -> Res<WasiP1Ctx> {
+pub async fn build_wasi_ctx(config: &Config) -> Res<WasiP1Ctx> {
     // Ensure directories exist
-    fs::create_dir_all(&config.pgroot)?;
-    fs::create_dir_all(&config.pgdata)?;
-    fs::create_dir_all(config.dev_path())?;
+    fs::create_dir_all(&config.pgroot).await?;
+    fs::create_dir_all(&config.pgdata).await?;
+    fs::create_dir_all(config.dev_path()).await?;
 
     let mut builder = WasiCtxBuilder::new();
     builder.inherit_stdin().inherit_stdout().inherit_stderr();

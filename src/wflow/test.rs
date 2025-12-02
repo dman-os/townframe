@@ -11,14 +11,13 @@ mod pglite;
 mod keyvalue_plugin;
 
 use crate::{AtomicKvSnapStore, KvStoreLog, KvStoreMetadtaStore};
-use wash_plugin_pglite::{Config, PglitePlugin};
 use wash_runtime::{host::HostApi, plugin, types, wit::WitInterface};
 use wflow_core::metastore;
 use wflow_core::snapstore::SnapStore;
 
 /// Builder used to configure [`WflowTestContext`]
-#[derive(Default)]
 pub struct WflowTestContextBuilder {
+    temp_dir: tempfile::TempDir,
     metastore: Option<Arc<dyn metastore::MetdataStore>>,
     log_store: Option<Arc<dyn wflow_core::log::LogStore>>,
     snap_store: Option<Arc<dyn SnapStore>>,
@@ -29,7 +28,15 @@ pub struct WflowTestContextBuilder {
 
 impl WflowTestContextBuilder {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            temp_dir: tokio::task::block_in_place(|| tempfile::tempdir()).expect("failed to create temp dir"),
+            metastore: None,
+            log_store: None,
+            snap_store: None,
+            keyvalue_plugin: None,
+            initial_workloads: Vec::new(),
+            plugins: Vec::new(),
+        }
     }
 
     pub fn with_metastore(mut self, metastore: Arc<dyn metastore::MetdataStore>) -> Self {
@@ -74,7 +81,7 @@ impl WflowTestContextBuilder {
     }
 
     pub async fn build(mut self) -> Res<WflowTestContext> {
-        let temp_dir = tokio::task::block_in_place(|| {tempfile::tempdir() })?;
+        let temp_dir = self.temp_dir;
 
         let metastore = match self.metastore {
             Some(store) => store,
@@ -115,22 +122,11 @@ impl WflowTestContextBuilder {
             metastore.clone(),
         ));
         let runtime_config_plugin = plugin::wasi_config::WasiConfig::default();
-        let pglite_plugin = {
-            let test_dir = temp_dir.path().join("townframe-test-pglite");
-            tokio::fs::create_dir_all(&test_dir).await?;
-            
-            let config = Config::with_paths(
-                test_dir.join("runtime"),
-                test_dir.join("data"),
-            );
-            let plugin = PglitePlugin::new(config).await?;
-            Arc::new(plugin)
-        };
+        
         self.plugins.extend_from_slice(&[
             wflow_plugin.clone(),
             Arc::new(runtime_config_plugin),
             keyvalue_plugin.clone(),
-            pglite_plugin.clone(),
         ]);
 
 
@@ -143,7 +139,6 @@ impl WflowTestContextBuilder {
             partition_log,
             ingress,
             keyvalue_plugin,
-            pglite_plugin,
             initial_workloads: self.initial_workloads,
             pending_host: Some(host),
             host: None,
@@ -163,7 +158,6 @@ pub struct WflowTestContext {
     pub partition_log: wflow_tokio::partition::PartitionLogRef,
     pub ingress: Arc<crate::ingress::PartitionLogIngress>,
     pub keyvalue_plugin: Arc<keyvalue_plugin::WasiKeyvalue>,
-    pub pglite_plugin: Arc<PglitePlugin>,
     initial_workloads: Vec<InitialWorkload>,
     pending_host: Option<wash_runtime::host::Host>,
     host: Option<Arc<wash_runtime::host::Host>>,
@@ -179,12 +173,6 @@ pub struct InitialWorkload {
 }
 
 impl WflowTestContext {
-    /// Create a new test context with in-memory stores and immediately start it.
-    /// Convenience helper for tests that don't need custom configuration.
-    pub async fn new() -> Res<Self> {
-        Self::builder().build().await?.start().await
-    }
-
     /// Returns true if the wash host and partition worker have been started.
     pub fn is_started(&self) -> bool {
         self.host.is_some()
@@ -508,10 +496,10 @@ async fn register_workload_on_host(
                     ..WitInterface::from("townframe:daybook/drawer")
                 },
                 WitInterface {
-                    ..WitInterface::from("townframe:pglite/query")
+                    ..WitInterface::from("townframe:utils/llm-chat")
                 },
                 WitInterface {
-                    ..WitInterface::from("townframe:utils/llm-chat")
+                    ..WitInterface::from("townframe:pglite/query")
                 },
                 WitInterface {
                     ..WitInterface::from("wasi:keyvalue/store")

@@ -6604,6 +6604,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tests_pglite"
+version = "0.1.0"
+dependencies = [
+ "api_utils_rs",
+ "color-eyre",
+ "displaydoc",
+ "serde",
+ "thiserror 2.0.17",
+ "wflow_sdk",
+ "wit-bindgen 0.48.1",
+]
+
+[[package]]
 name = "textwrap"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7818,17 +7831,19 @@ dependencies = [
  "flate2",
  "futures",
  "getrandom 0.2.16",
- "md-5",
  "postgres-protocol",
  "serde",
+ "serde_json",
  "tar",
  "tempfile",
  "thiserror 2.0.17",
+ "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "ureq",
  "utils_rs",
+ "uuid",
  "wash-runtime",
  "wasmtime",
  "wasmtime-wasi",

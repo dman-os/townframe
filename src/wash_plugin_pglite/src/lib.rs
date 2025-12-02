@@ -1,4 +1,7 @@
-// based on https://github.com/electric-sql/pglite-bindings and https://github.com/f0rr0/pglite-oxide
+//! PGLite embedded PostgreSQL via WebAssembly
+//!
+//! A host plugin providing the `townframe:pglite/query` interface for running PostgreSQL
+//! in-process via pglite WASM.
 
 mod interlude {
     pub use utils_rs::prelude::*;
@@ -10,7 +13,6 @@ use std::path::PathBuf;
 
 mod install;
 mod plugin;
-mod protocol;
 mod wire;
 
 // Re-export plugin
@@ -147,7 +149,7 @@ pub async fn start_pglite(config: Config) -> Res<PgliteHandle> {
 
     // Load the WASM module (with pre-compilation caching)
     let engine = wire::create_engine()?;
-    let module = wire::load_module(&engine, &config)?;
+    let module = wire::load_module(&engine, &config).await?;
 
     // Initialize cluster if needed (runs initdb)
     if !config.cluster_exists() {
@@ -183,7 +185,11 @@ async fn worker_loop(
     while let Some((request, response_tx)) = rx.recv().await {
         match request {
             PgRequest::Query(sql) => {
-                let payload = protocol::build_simple_query(&sql);
+                use bytes::BytesMut;
+                use postgres_protocol::message::frontend;
+                let mut buf = BytesMut::new();
+                frontend::query(&sql, &mut buf).unwrap();
+                let payload = buf.to_vec();
                 if let Err(e) = process_wire_request(&mut wire, &payload, &response_tx).await {
                     let _ = response_tx.send(PgResponse::Error(e.to_string())).await;
                 }
@@ -211,12 +217,42 @@ async fn process_wire_request(
         wire.tick().await?;
 
         if let Some(data) = wire.try_recv().await? {
-            let has_ready = protocol::contains_ready_for_query(&data);
-            let has_error = protocol::contains_error(&data);
+                use bytes::BytesMut;
+                use fallible_iterator::FallibleIterator;
+                use postgres_protocol::message::backend::Message;
+                
+                let mut buf = BytesMut::from(&data[..]);
+                let mut has_ready = false;
+                let mut has_error = false;
+                let mut error_msg = None;
+                
+                loop {
+                    match Message::parse(&mut buf) {
+                        Ok(Some(Message::ReadyForQuery(_))) => {
+                            has_ready = true;
+                            break;
+                        }
+                        Ok(Some(Message::ErrorResponse(err))) => {
+                            has_error = true;
+                            let mut fields = err.fields();
+                            while let Ok(Some(field)) = fields.next() {
+                                if field.type_() == b'M' {
+                                    error_msg = Some(String::from_utf8_lossy(field.value_bytes()).to_string());
+                                    break;
+                                }
+                            }
+                            if error_msg.is_none() {
+                                error_msg = Some("database error".to_string());
+                            }
+                            break;
+                        }
+                        Ok(Some(_)) => continue,
+                        Ok(None) | Err(_) => break,
+                    }
+                }
 
             if has_error {
-                let msg = protocol::extract_error_message(&data);
-                response_tx.send(PgResponse::Error(msg)).await?;
+                response_tx.send(PgResponse::Error(error_msg.unwrap_or_else(|| "unknown error".to_string()))).await?;
                 return Ok(());
             }
 

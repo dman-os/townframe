@@ -12,6 +12,8 @@ use fallible_iterator::FallibleIterator;
 use postgres_protocol::message::backend::{Message, DataRowBody};
 use postgres_protocol::types as pg_types;
 use postgres_protocol::Oid;
+use uuid::Uuid;
+use time::{Date, Time, PrimitiveDateTime, OffsetDateTime};
 
 use crate::{start_pglite, Config, PgResponse, PgliteHandle};
 
@@ -310,6 +312,81 @@ fn parse_data_row(body: &DataRowBody, columns: &[ColumnInfo]) -> Option<types::R
     Some(row)
 }
 
+/// Convert PostgreSQL date (days since 2000-01-01) to WIT Date
+fn pg_date_to_wit_date(days: i32) -> types::Date {
+    // PostgreSQL date represents days since 2000-01-01
+    // Handle special values
+    if days == i32::MAX {
+        return types::Date::PositiveInfinity;
+    }
+    if days == i32::MIN {
+        return types::Date::NegativeInfinity;
+    }
+    
+    // Calculate date from days since 2000-01-01
+    let base_date = Date::from_calendar_date(2000, time::Month::January, 1)
+        .expect("invalid base date");
+    let date = base_date + time::Duration::days(days as i64);
+    
+    types::Date::Ymd((
+        date.year(),
+        date.month() as u32,
+        date.day() as u32,
+    ))
+}
+
+/// Convert PostgreSQL time (microseconds since midnight) to WIT Time
+fn pg_time_to_wit_time(microseconds: i64) -> types::Time {
+    let seconds = microseconds / 1_000_000;
+    let micros = (microseconds % 1_000_000) as u32;
+    
+    let hour = (seconds / 3600) as u32;
+    let min = ((seconds % 3600) / 60) as u32;
+    let sec = (seconds % 60) as u32;
+    
+    types::Time {
+        hour,
+        min,
+        sec,
+        micro: micros,
+    }
+}
+
+/// Parse timezone offset string (e.g., "+05:30", "-04:00") to WIT Offset
+fn parse_timezone_offset(offset_str: &str) -> types::Offset {
+    // Parse offset like "+05:30" or "-04:00"
+    if offset_str.is_empty() {
+        return types::Offset::WesternHemisphereSecs(0);
+    }
+    
+    let sign = if offset_str.starts_with('+') { 1 } else if offset_str.starts_with('-') { -1 } else { return types::Offset::WesternHemisphereSecs(0) };
+    let parts: Vec<&str> = offset_str[1..].split(':').collect();
+    
+    if parts.len() == 2 {
+        if let (Ok(hours), Ok(mins)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
+            let total_seconds = sign * (hours * 3600 + mins * 60);
+            if total_seconds >= 0 {
+                return types::Offset::EasternHemisphereSecs(total_seconds);
+            } else {
+                return types::Offset::WesternHemisphereSecs(-total_seconds);
+            }
+        }
+    } else if parts.len() == 1 {
+        // Try parsing as just hours (e.g., "+05")
+        if let Ok(hours) = parts[0].parse::<i32>() {
+            let total_seconds = sign * hours * 3600;
+            if total_seconds >= 0 {
+                return types::Offset::EasternHemisphereSecs(total_seconds);
+            } else {
+                return types::Offset::WesternHemisphereSecs(-total_seconds);
+            }
+        }
+    }
+    
+    // Default to UTC if parsing fails
+    types::Offset::WesternHemisphereSecs(0)
+}
+
 /// Parse a value based on PostgreSQL type OID
 fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
     // Common PostgreSQL type OIDs
@@ -320,8 +397,17 @@ fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
             if let Ok(b) = pg_types::bool_from_sql(bytes) {
                 types::PgValue::Bool(b)
             } else {
-                // Fallback to text
-                types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                // If parsing fails, try manual parsing as fallback
+                // (postgres-protocol may fail on some text format values)
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    match s {
+                        "t" | "true" | "TRUE" | "1" => types::PgValue::Bool(true),
+                        "f" | "false" | "FALSE" | "0" => types::PgValue::Bool(false),
+                        _ => types::PgValue::Text(s.to_string()),
+                    }
+                } else {
+                    types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                }
             }
         }
         // INT2 = 21
@@ -329,7 +415,17 @@ fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
             if let Ok(i) = pg_types::int2_from_sql(bytes) {
                 types::PgValue::Int2(i)
             } else {
-                types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                // If parsing fails, try manual parsing as fallback
+                // (postgres-protocol may fail on some text format values)
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    if let Ok(i) = s.parse::<i16>() {
+                        types::PgValue::Int2(i)
+                    } else {
+                        types::PgValue::Text(s.to_string())
+                    }
+                } else {
+                    types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                }
             }
         }
         // INT4 = 23
@@ -356,7 +452,17 @@ fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
             if let Ok(i) = pg_types::int8_from_sql(bytes) {
                 types::PgValue::Int8(i)
             } else {
-                types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                // If parsing fails, try manual parsing as fallback
+                // (postgres-protocol may fail on some text format values)
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    if let Ok(i) = s.parse::<i64>() {
+                        types::PgValue::Int8(i)
+                    } else {
+                        types::PgValue::Text(s.to_string())
+                    }
+                } else {
+                    types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                }
             }
         }
         // TEXT = 25, VARCHAR = 1043, CHAR = 1042, NAME = 19
@@ -380,7 +486,18 @@ fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
                 let bits = f.to_bits();
                 types::PgValue::Float4((bits as u64, 0i16, 0i8))
             } else {
-                types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                // If parsing fails, try manual parsing as fallback
+                // (postgres-protocol may fail on some text format values)
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    if let Ok(f) = s.parse::<f32>() {
+                        let bits = f.to_bits();
+                        types::PgValue::Float4((bits as u64, 0i16, 0i8))
+                    } else {
+                        types::PgValue::Text(s.to_string())
+                    }
+                } else {
+                    types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                }
             }
         }
         // FLOAT8 = 701
@@ -389,6 +506,307 @@ fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
                 // Convert f64 to hashable-f64 format
                 let bits = f.to_bits();
                 types::PgValue::Float8((bits, 0i16, 0i8))
+            } else {
+                // If parsing fails, try manual parsing as fallback
+                // (postgres-protocol may fail on some text format values)
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    if let Ok(f) = s.parse::<f64>() {
+                        let bits = f.to_bits();
+                        types::PgValue::Float8((bits, 0i16, 0i8))
+                    } else {
+                        types::PgValue::Text(s.to_string())
+                    }
+                } else {
+                    types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                }
+            }
+        }
+        // DATE = 1082
+        1082 => {
+            match pg_types::date_from_sql(bytes) {
+                Ok(days) => {
+                    types::PgValue::Date(pg_date_to_wit_date(days))
+                }
+                Err(_) => {
+                    // Fallback: try parsing text format (e.g., "2024-01-15")
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        if let Ok(date) = Date::parse(s, &time::format_description::well_known::Iso8601::DATE) {
+                            types::PgValue::Date(types::Date::Ymd((
+                                date.year(),
+                                date.month() as u32,
+                                date.day() as u32,
+                            )))
+                        } else {
+                            types::PgValue::Text(s.to_string())
+                        }
+                    } else {
+                        types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                    }
+                }
+            }
+        }
+        // TIME = 1083
+        1083 => {
+            match pg_types::time_from_sql(bytes) {
+                Ok(microseconds) => {
+                    types::PgValue::Time(pg_time_to_wit_time(microseconds))
+                }
+                Err(_) => {
+                    // Fallback: try parsing text format (e.g., "12:34:56.789")
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        // Try parsing with microseconds
+                        if let Ok(time) = Time::parse(s, &time::format_description::well_known::Iso8601::TIME) {
+                            types::PgValue::Time(types::Time {
+                                hour: time.hour() as u32,
+                                min: time.minute() as u32,
+                                sec: time.second() as u32,
+                                micro: time.nanosecond() / 1000,
+                            })
+                        } else {
+                            types::PgValue::Text(s.to_string())
+                        }
+                    } else {
+                        types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                    }
+                }
+            }
+        }
+        // TIMESTAMP = 1114
+        1114 => {
+            match pg_types::timestamp_from_sql(bytes) {
+                Ok(microseconds) => {
+                    // PostgreSQL timestamp represents microseconds since 2000-01-01 00:00:00
+                    let base_datetime = PrimitiveDateTime::new(
+                        Date::from_calendar_date(2000, time::Month::January, 1).expect("invalid base date"),
+                        Time::MIDNIGHT,
+                    );
+                    let datetime = base_datetime + time::Duration::microseconds(microseconds);
+                    
+                    types::PgValue::Timestamp(types::Timestamp {
+                        date: types::Date::Ymd((
+                            datetime.date().year(),
+                            datetime.date().month() as u32,
+                            datetime.date().day() as u32,
+                        )),
+                        time: types::Time {
+                            hour: datetime.time().hour() as u32,
+                            min: datetime.time().minute() as u32,
+                            sec: datetime.time().second() as u32,
+                            micro: datetime.time().nanosecond() / 1000,
+                        },
+                    })
+                }
+                Err(_) => {
+                    // Fallback: try parsing text format (e.g., "2024-01-15 12:34:56")
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        if let Ok(datetime) = PrimitiveDateTime::parse(s, &time::format_description::well_known::Iso8601::DATE_TIME) {
+                            types::PgValue::Timestamp(types::Timestamp {
+                                date: types::Date::Ymd((
+                                    datetime.date().year(),
+                                    datetime.date().month() as u32,
+                                    datetime.date().day() as u32,
+                                )),
+                                time: types::Time {
+                                    hour: datetime.time().hour() as u32,
+                                    min: datetime.time().minute() as u32,
+                                    sec: datetime.time().second() as u32,
+                                    micro: datetime.time().nanosecond() / 1000,
+                                },
+                            })
+                        } else {
+                            types::PgValue::Text(s.to_string())
+                        }
+                    } else {
+                        types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                    }
+                }
+            }
+        }
+        // TIMESTAMPTZ = 1184
+        1184 => {
+            match pg_types::timestamp_from_sql(bytes) {
+                Ok(microseconds) => {
+                    // PostgreSQL timestamptz represents microseconds since 2000-01-01 00:00:00 UTC
+                    let base_datetime = OffsetDateTime::new_utc(
+                        Date::from_calendar_date(2000, time::Month::January, 1).expect("invalid base date"),
+                        Time::MIDNIGHT,
+                    );
+                    let datetime = base_datetime + time::Duration::microseconds(microseconds);
+                    
+                    // Extract offset (default to UTC)
+                    let offset = datetime.offset();
+                    let offset_secs = offset.whole_seconds();
+                    let offset_variant = if offset_secs >= 0 {
+                        types::Offset::EasternHemisphereSecs(offset_secs)
+                    } else {
+                        types::Offset::WesternHemisphereSecs(-offset_secs)
+                    };
+                    
+                    types::PgValue::TimestampTz(types::TimestampTz {
+                        timestamp: types::Timestamp {
+                            date: types::Date::Ymd((
+                                datetime.date().year(),
+                                datetime.date().month() as u32,
+                                datetime.date().day() as u32,
+                            )),
+                            time: types::Time {
+                                hour: datetime.time().hour() as u32,
+                                min: datetime.time().minute() as u32,
+                                sec: datetime.time().second() as u32,
+                                micro: datetime.time().nanosecond() / 1000,
+                            },
+                        },
+                        offset: offset_variant,
+                    })
+                }
+                Err(_) => {
+                    // Fallback: try parsing text format (e.g., "2024-01-15 12:34:56+00")
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        if let Ok(datetime) = OffsetDateTime::parse(s, &time::format_description::well_known::Iso8601::DATE_TIME) {
+                            let offset_secs = datetime.offset().whole_seconds();
+                            let offset_variant = if offset_secs >= 0 {
+                                types::Offset::EasternHemisphereSecs(offset_secs)
+                            } else {
+                                types::Offset::WesternHemisphereSecs(-offset_secs)
+                            };
+                            
+                            types::PgValue::TimestampTz(types::TimestampTz {
+                                timestamp: types::Timestamp {
+                                    date: types::Date::Ymd((
+                                        datetime.date().year(),
+                                        datetime.date().month() as u32,
+                                        datetime.date().day() as u32,
+                                    )),
+                                    time: types::Time {
+                                        hour: datetime.time().hour() as u32,
+                                        min: datetime.time().minute() as u32,
+                                        sec: datetime.time().second() as u32,
+                                        micro: datetime.time().nanosecond() / 1000,
+                                    },
+                                },
+                                offset: offset_variant,
+                            })
+                        } else {
+                            types::PgValue::Text(s.to_string())
+                        }
+                    } else {
+                        types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                    }
+                }
+            }
+        }
+        // INTERVAL = 1186
+        1186 => {
+            // PostgreSQL interval is complex - for now, parse as text and try to extract components
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                // PostgreSQL interval format: "1 day 2 hours 3 minutes" or "P1DT2H3M" (ISO 8601)
+                // For now, return as text since parsing intervals is complex
+                // TODO: Implement proper interval parsing
+                types::PgValue::Text(s.to_string())
+            } else {
+                types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+            }
+        }
+        // TIMETZ = 1266
+        1266 => {
+            // TIME WITH TIME ZONE - parse time and timezone
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                // Format: "12:34:56+05:30" or "12:34:56.789+05:30" or "12:34:56-04:00"
+                // Find the last occurrence of + or - (which should be the timezone separator)
+                let mut split_pos = None;
+                for (i, c) in s.char_indices().rev() {
+                    if c == '+' || c == '-' {
+                        // Make sure it's not part of the time itself (should be after a space or at start)
+                        if i > 0 && (s.as_bytes()[i-1] == b' ' || s.as_bytes()[i-1] == b'T' || i == s.len() - 6 || i == s.len() - 3) {
+                            split_pos = Some(i);
+                            break;
+                        }
+                    }
+                }
+                
+                if let Some(pos) = split_pos {
+                    let time_str = &s[..pos];
+                    let tz_str = &s[pos..];
+                    
+                    if let Ok(time) = Time::parse(time_str, &time::format_description::well_known::Iso8601::TIME) {
+                        types::PgValue::TimeTz(types::TimeTz {
+                            timesonze: tz_str.to_string(),
+                            time: types::Time {
+                                hour: time.hour() as u32,
+                                min: time.minute() as u32,
+                                sec: time.second() as u32,
+                                micro: time.nanosecond() / 1000,
+                            },
+                        })
+                    } else {
+                        types::PgValue::Text(s.to_string())
+                    }
+                } else {
+                    // No timezone separator found, try parsing as plain time (treat as UTC)
+                    if let Ok(time) = Time::parse(s, &time::format_description::well_known::Iso8601::TIME) {
+                        types::PgValue::TimeTz(types::TimeTz {
+                            timesonze: "+00:00".to_string(),
+                            time: types::Time {
+                                hour: time.hour() as u32,
+                                min: time.minute() as u32,
+                                sec: time.second() as u32,
+                                micro: time.nanosecond() / 1000,
+                            },
+                        })
+                    } else {
+                        types::PgValue::Text(s.to_string())
+                    }
+                }
+            } else {
+                types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+            }
+        }
+        // UUID = 2950
+        2950 => {
+            match pg_types::uuid_from_sql(bytes) {
+                Ok(uuid_bytes) => {
+                    // uuid_from_sql returns [u8; 16]
+                    let uuid = Uuid::from_bytes(uuid_bytes);
+                    types::PgValue::Uuid(uuid.to_string())
+                }
+                Err(_) => {
+                    // Fallback: try parsing text format (e.g., "550e8400-e29b-41d4-a716-446655440000")
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        if Uuid::parse_str(s).is_ok() {
+                            types::PgValue::Uuid(s.to_string())
+                        } else {
+                            types::PgValue::Text(s.to_string())
+                        }
+                    } else {
+                        types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+                    }
+                }
+            }
+        }
+        // JSON = 114
+        114 => {
+            // JSON is stored as text in PostgreSQL
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                // Validate it's valid JSON
+                if serde_json::from_str::<serde_json::Value>(s).is_ok() {
+                    types::PgValue::Json(s.to_string())
+                } else {
+                    types::PgValue::Text(s.to_string())
+                }
+            } else {
+                types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
+            }
+        }
+        // JSONB = 3802
+        3802 => {
+            // JSONB is stored as text in PostgreSQL (binary format is internal)
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                // Validate it's valid JSON
+                if serde_json::from_str::<serde_json::Value>(s).is_ok() {
+                    types::PgValue::Jsonb(s.to_string())
+                } else {
+                    types::PgValue::Text(s.to_string())
+                }
             } else {
                 types::PgValue::Text(String::from_utf8_lossy(bytes).to_string())
             }

@@ -7,7 +7,11 @@ use crate::{AtomicKvSnapStore, KvStore, KvStoreLog, KvStoreMetadtaStore, SqliteK
 async fn test_fails_once() -> Res<()> {
     utils_rs::testing::setup_tracing().unwrap();
 
-    let test_cx = WflowTestContext::new().await?;
+    let test_cx = WflowTestContext::builder()
+        .build()
+        .await?
+        .start()
+        .await?;
 
     // Register the test_wflows workload
     test_cx

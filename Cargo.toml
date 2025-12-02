@@ -15,6 +15,7 @@ members = [
   "./src/macros",
   "./src/wash_plugin_pglite/",
   "./src/test_wflows",
+  "./src/tests_pglite",
   # "./src/tests_http",
   "./src/utils_rs",
   "./src/wash_plugin_am_repo/",
@@ -71,6 +72,7 @@ tokio-util = { version = "0.7.17", features = [] }
 # ds
 ahash = "0.8"
 time = { version = "0.3", default-features = false, features = ["serde"] }
+uuid = { version = "1", features = ["serde"] }
 once_cell = "1"
 parking_lot = "0.12"
 bytes = "1"

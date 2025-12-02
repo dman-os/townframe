@@ -1,11 +1,11 @@
-package townframe:test-wflows;
+package townframe:tests-pglite;
 
 world bundle {
     include townframe:api-utils/imports;
 
-    import wasi:keyvalue/store@0.2.0-draft;
+    import townframe:pglite/query;
     import townframe:wflow/host;
-    import townframe:am-repo/repo;
 
     export townframe:wflow/bundle;
 }
+

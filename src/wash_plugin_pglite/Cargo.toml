@@ -42,14 +42,15 @@ flate2 = "1"
 getrandom = "0.2"
 zstd = "0.13"
 
-# crypto
-md-5 = "0.10"
 
 # encoding
 serde.workspace = true
+serde_json.workspace = true
 bytes = "1"
 postgres-protocol = "0.6.9"
 fallible-iterator = "0.2"
+uuid.workspace = true
+time = { workspace = true, default-features = false, features = ["serde", "parsing", "formatting"] }
 
 [build-dependencies]
 ureq = { version = "2", features = ["native-tls"] }

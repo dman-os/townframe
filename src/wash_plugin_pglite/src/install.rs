@@ -2,12 +2,11 @@
 
 use crate::interlude::*;
 
-use std::fs;
 use std::path::Path;
 
 use flate2::read::GzDecoder;
-use std::io::Read;
 use tar::Archive;
+use tokio::fs;
 use wasmtime::{Engine, Module, Store};
 
 use crate::wire::WasiState;
@@ -25,8 +24,8 @@ const EMBEDDED_PGLITE_ZST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pgl
 /// - Seed /dev/urandom
 /// - Install any configured extensions
 pub async fn install_runtime(config: &Config) -> Res<()> {
-    fs::create_dir_all(&config.pgroot).wrap_err("create pgroot")?;
-    fs::create_dir_all(&config.pgdata).wrap_err("create pgdata")?;
+    fs::create_dir_all(&config.pgroot).await.wrap_err("create pgroot")?;
+    fs::create_dir_all(&config.pgdata).await.wrap_err("create pgdata")?;
 
     // Download and unpack runtime if needed
     if !config.wasm_path().exists() {
@@ -34,11 +33,11 @@ pub async fn install_runtime(config: &Config) -> Res<()> {
     }
 
     // Seed /dev/urandom for PostgreSQL's randomness needs
-    seed_urandom(&config.dev_path())?;
+    seed_urandom(&config.dev_path()).await?;
 
     // Install extensions
     for ext_path in &config.extensions {
-        install_extension(config, ext_path)?;
+        install_extension(config, ext_path).await?;
     }
 
     info!("runtime installation complete");
@@ -69,16 +68,16 @@ async fn unpack_runtime(config: &Config) -> Res<()> {
     .wrap_err("unpack task panicked")??;
 
     // Normalize layout - move nested pglite dir if present
-    normalize_runtime_layout(config)?;
+    normalize_runtime_layout(config).await?;
 
     // Move cwasm to expected location if it's at the root
     let root_cwasm = config.pgroot.join("pglite.cwasm");
     let expected_cwasm = config.cwasm_path();
     if root_cwasm.exists() && !expected_cwasm.exists() {
         if let Some(parent) = expected_cwasm.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).await?;
         }
-        fs::rename(&root_cwasm, &expected_cwasm)?;
+        fs::rename(&root_cwasm, &expected_cwasm).await?;
     }
 
     Ok(())
@@ -88,7 +87,7 @@ async fn unpack_runtime(config: &Config) -> Res<()> {
 ///
 /// Some archives have nested directories like tmp/pglite/...
 /// We need to flatten to pgroot/pglite/...
-fn normalize_runtime_layout(config: &Config) -> Res<()> {
+async fn normalize_runtime_layout(config: &Config) -> Res<()> {
     // Check for nested structure
     let nested = config.pgroot.join("tmp").join("pglite");
     if nested.join("bin").join("pglite.wasi").exists() {
@@ -96,14 +95,20 @@ fn normalize_runtime_layout(config: &Config) -> Res<()> {
 
         let target = config.pgroot.join("pglite");
         if target.exists() {
-            fs::remove_dir_all(&target)?;
+            fs::remove_dir_all(&target).await?;
         }
 
         // Move nested pglite to pgroot
-        if fs::rename(&nested, &target).is_err() {
+        if fs::rename(&nested, &target).await.is_err() {
             // If rename fails (cross-device), copy recursively
-            copy_dir_recursive(&nested, &target)?;
-            fs::remove_dir_all(config.pgroot.join("tmp"))?;
+            tokio::task::spawn_blocking({
+                let nested = nested.clone();
+                let target = target.clone();
+                move || copy_dir_recursive(&nested, &target)
+            })
+            .await
+            .wrap_err("copy_dir_recursive task panicked")??;
+            fs::remove_dir_all(config.pgroot.join("tmp")).await?;
         }
     }
 
@@ -112,47 +117,53 @@ fn normalize_runtime_layout(config: &Config) -> Res<()> {
 
 /// Recursively copy a directory
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Res<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
+        if entry.file_type()?.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
-            fs::copy(&src_path, &dst_path)?;
+            std::fs::copy(&src_path, &dst_path)?;
         }
     }
     Ok(())
 }
 
 /// Seed /dev/urandom with random bytes
-fn seed_urandom(dev_path: &Path) -> Res<()> {
-    fs::create_dir_all(dev_path)?;
+async fn seed_urandom(dev_path: &Path) -> Res<()> {
+    fs::create_dir_all(dev_path).await?;
     let urandom_path = dev_path.join("urandom");
     if !urandom_path.exists() {
         let mut buf = [0u8; 128];
         getrandom::getrandom(&mut buf)?;
-        fs::write(&urandom_path, buf)?;
+        fs::write(&urandom_path, buf).await?;
         debug!("seeded urandom");
     }
     Ok(())
 }
 
 /// Install an extension from a tar.gz archive
-fn install_extension(config: &Config, archive_path: &Path) -> Res<()> {
+async fn install_extension(config: &Config, archive_path: &Path) -> Res<()> {
     info!("installing extension from {:?}", archive_path);
 
-    let file = fs::File::open(archive_path)
-        .wrap_err_with(|| format!("open extension archive {:?}", archive_path))?;
-    let decoder = GzDecoder::new(file);
-    let mut archive = Archive::new(decoder);
-
+    let archive_path = archive_path.to_path_buf();
     let target = config.pgroot.join("pglite");
-    fs::create_dir_all(&target)?;
-    archive
-        .unpack(&target)
-        .wrap_err_with(|| format!("unpack extension {:?}", archive_path))?;
+    fs::create_dir_all(&target).await?;
+    
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&archive_path)
+            .wrap_err_with(|| format!("open extension archive {:?}", archive_path))?;
+        let decoder = GzDecoder::new(file);
+        let mut archive = Archive::new(decoder);
+        archive
+            .unpack(&target)
+            .wrap_err_with(|| format!("unpack extension {:?}", archive_path))?;
+        Ok::<(), eyre::Report>(())
+    })
+    .await
+    .wrap_err("install extension task panicked")??;
 
     Ok(())
 }
@@ -161,19 +172,19 @@ fn install_extension(config: &Config, archive_path: &Path) -> Res<()> {
 pub async fn init_cluster(config: &Config, engine: &Engine, module: &Module) -> Res<()> {
     info!("running initdb to create cluster");
 
-    fs::create_dir_all(&config.pgdata)?;
+    fs::create_dir_all(&config.pgdata).await?;
 
     // Create password file
     let pw_path = config.pgroot.join("pglite").join("password");
     if !pw_path.exists() {
         if let Some(parent) = pw_path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).await?;
         }
-        fs::write(&pw_path, "localdevpassword\n")?;
+        fs::write(&pw_path, "localdevpassword\n").await?;
     }
 
     // Build WASI context
-    let wasi = crate::wire::build_wasi_ctx(config)?;
+    let wasi = crate::wire::build_wasi_ctx(config).await?;
     let mut store = Store::new(engine, WasiState { wasi });
     store.set_epoch_deadline(u64::MAX);
 

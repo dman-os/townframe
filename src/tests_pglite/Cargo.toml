@@ -1,0 +1,23 @@
+[package]
+name = "tests_pglite"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"
+
+[dependencies]
+api_utils_rs.workspace = true
+wflow_sdk.workspace = true
+
+# serde
+serde.workspace = true
+
+# error
+color-eyre.workspace = true
+thiserror.workspace = true
+displaydoc.workspace = true
+
+wit-bindgen.workspace = true
+

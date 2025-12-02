@@ -10,7 +10,7 @@
 
 - [ ] Get pglite building to oci
   - [ ] For pglite-build
-  - [ ] Maybe a wash provider?
+  - [x] Maybe a wash provider?
   - [ ] Maybe wasi component
 - [ ] Finish autosurgeon::Patch
   - [ ] Fork with context generic programming
