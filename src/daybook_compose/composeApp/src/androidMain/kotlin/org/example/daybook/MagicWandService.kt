@@ -60,12 +60,9 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Edit
+// Material Icons not available on Android - using text/emoji instead
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -1332,19 +1329,17 @@ fun ContentOverlay(
                             shape = CircleShape
                         )
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.Edit,
-                            contentDescription = if (editModeState.isEditMode) "Exit Edit Mode" else "Enter Edit Mode",
-                            tint = if (editModeState.isEditMode) Color.Cyan else Color.White,
+                        androidx.compose.material3.Text(
+                            text = if (editModeState.isEditMode) "✏️" else "✏️",
+                            color = if (editModeState.isEditMode) Color.Cyan else Color.White,
                         )
                     }
 
                     // Close button
                     IconButton(onClick = onDismiss) {
-                        Icon(
-                            imageVector = Icons.Filled.Close,
-                            contentDescription = "Dismiss Overlay",
-                            tint = Color.White,
+                        androidx.compose.material3.Text(
+                            text = "✕",
+                            color = Color.White,
                         )
                     }
                 }

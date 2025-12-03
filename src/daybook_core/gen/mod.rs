@@ -17,7 +17,7 @@ pub mod doc {
         pub width_px: u64,
         pub height_px: u64,
         pub blurhash: Option<DocId>,
-        pub blob: DocId,
+        pub blob_id: DocId,
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Patch, PartialEq, Serialize, Deserialize)]
@@ -39,8 +39,9 @@ pub mod doc {
         Image,
     }
     impl DocContentKind {
-        pub fn _lift(val: u8) -> DocContentKind {
+        pub fn _lift(val:u8) -> DocContentKind {
             match val {
+
                 0 => DocContentKind::Text,
                 1 => DocContentKind::Blob,
                 2 => DocContentKind::Image,
@@ -49,6 +50,7 @@ pub mod doc {
             }
         }
     }
+
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
@@ -68,8 +70,9 @@ pub mod doc {
         PseudoLabel,
     }
     impl DocTagKind {
-        pub fn _lift(val: u8) -> DocTagKind {
+        pub fn _lift(val:u8) -> DocTagKind {
             match val {
+
                 0 => DocTagKind::RefGeneric,
                 1 => DocTagKind::LabelGeneric,
                 2 => DocTagKind::PseudoLabel,
@@ -78,6 +81,7 @@ pub mod doc {
             }
         }
     }
+
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
@@ -126,24 +130,13 @@ pub mod doc {
             pub id: Uuid,
         }
 
-        #[derive(
-            Debug,
-            Clone,
-            thiserror::Error,
-            displaydoc::Display,
-            Serialize,
-            Deserialize,
-            Hydrate,
-            Reconcile,
-        )]
+        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
         /// Id occupied: {id}
         pub struct ErrorIdOccupied {
             pub id: String,
         }
 
-        #[derive(
-            Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile,
-        )]
+        #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
         pub enum Error {
             /// Id occupied {0}
             IdOccupied(#[from] ErrorIdOccupied),
@@ -153,4 +146,5 @@ pub mod doc {
             Internal(#[from] ErrorInternal),
         }
     }
+
 }

@@ -9,11 +9,20 @@ pub fn feature(reg: &TypeReg) -> Feature {
 
     let wflow_service_meta = reg.add_type(Type::Variant(
         Variant::builder("WflowServiceMeta")
-            .with_variants(vec![(
-                "wasmcloud",
-                VariantVariant::builder(VariantVariantType::Wrapped(wasmcloud_wflow_service_meta))
+            .with_variants(vec![
+                //
+                (
+                    "wasmcloud",
+                    VariantVariant::builder(VariantVariantType::Wrapped(
+                        wasmcloud_wflow_service_meta,
+                    ))
                     .build(),
-            )])
+                ),
+                (
+                    "local_native",
+                    VariantVariant::builder(VariantVariantType::Unit).build(),
+                ),
+            ])
             .build(),
     ));
 

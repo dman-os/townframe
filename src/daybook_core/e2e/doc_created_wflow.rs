@@ -27,15 +27,19 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Verify the doc has a PseudoLabel tag
-    let updated_doc = test_cx.drawer_repo.get(&doc_id).await?
+    let updated_doc = test_cx
+        .drawer_repo
+        .get(&doc_id)
+        .await?
         .ok_or_eyre("doc not found")?;
-    
-    let has_pseudo_label = updated_doc.tags.iter().any(|tag| {
-        matches!(tag, DocTag::PseudoLabel(v) if !v.is_empty())
-    });
+
+    let has_pseudo_label = updated_doc
+        .tags
+        .iter()
+        .any(|tag| matches!(tag, DocTag::PseudoLabel(v) if !v.is_empty()));
 
     info!(?updated_doc, "result");
-    
+
     assert!(
         has_pseudo_label,
         "doc should have a PseudoLabel tag after pseudo-labeler workflow completes. Tags: {:?}",

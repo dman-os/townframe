@@ -57,23 +57,20 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
 
     // Load the config repo
     let config_repo = crate::config::ConfigRepo::load((*acx).clone(), app_doc_id).await?;
-    
+
     // Initialize default pseudo-labeler processor if needed
     let triage_config = config_repo.get_triage_config_sync().await;
-    
+
     if triage_config.processors.is_empty() {
-        use crate::triage::{Processor, CancellationPolicy};
+        use crate::gen::doc::{DocContentKind, DocTagKind};
         use crate::triage::predicates::PredicateClause;
-        use crate::gen::doc::{DocTagKind, DocContentKind};
-        
+        use crate::triage::{CancellationPolicy, Processor};
+
         let predicate = PredicateClause::And(vec![
             PredicateClause::IsContentKind(DocContentKind::Text),
-            PredicateClause::Not(Box::new(
-                PredicateClause::HasTag(DocTagKind::PseudoLabel),
-            )),
+            PredicateClause::Not(Box::new(PredicateClause::HasTag(DocTagKind::PseudoLabel))),
         ]);
-        let predicate_json = serde_json::to_value(&predicate)
-            .expect("error serializing predicate");
+        let predicate_json = serde_json::to_value(&predicate).expect("error serializing predicate");
         let processor = Processor {
             cancellation_policy: CancellationPolicy::NoSupport,
             predicate: utils_rs::am::AutosurgeonJson(predicate_json),

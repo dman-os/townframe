@@ -39,10 +39,12 @@ pub mod datetime {
             match option {
                 Some(dt) => {
                     let offset_dt = OffsetDateTime::from_unix_timestamp(dt.seconds as i64)
-                        .map_err(|e| serde::ser::Error::custom(format!("invalid timestamp: {e}")))?;
-                    let offset_dt = offset_dt
-                        .replace_nanosecond(dt.nanoseconds)
-                        .map_err(|e| serde::ser::Error::custom(format!("invalid nanoseconds: {e}")))?;
+                        .map_err(|e| {
+                            serde::ser::Error::custom(format!("invalid timestamp: {e}"))
+                        })?;
+                    let offset_dt = offset_dt.replace_nanosecond(dt.nanoseconds).map_err(|e| {
+                        serde::ser::Error::custom(format!("invalid nanoseconds: {e}"))
+                    })?;
                     Some(offset_dt.format(&sane_iso8601::FORMAT))
                         .transpose()
                         .map_err(time::error::Format::into_invalid_serde_value::<S>)?
@@ -61,4 +63,3 @@ pub mod datetime {
         }
     }
 }
-

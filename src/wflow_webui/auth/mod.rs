@@ -199,4 +199,3 @@ async fn sign_up(email: String) -> Result<(), ServerFnError> {
     info!(?email, "signing up");
     Ok(())
 }
-

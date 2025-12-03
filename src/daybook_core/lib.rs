@@ -97,11 +97,10 @@ uniffi::custom_type!(ChangeHashSet, Vec<String>, {
 mod tests {
     use super::*;
     use automerge::transaction::Transactable;
-    use autosurgeon::{hydrate, reconcile, Hydrate, Reconcile};
+    use autosurgeon::{hydrate_prop, reconcile_prop};
 
     #[test]
     fn test_change_hash_set_hydrate_seq() {
-        use autosurgeon::hydrate_prop;
         let mut doc = automerge::AutoCommit::new();
         let list_id = doc
             .put_object(automerge::ROOT, "heads", automerge::ObjType::List)
@@ -128,7 +127,6 @@ mod tests {
 
     #[test]
     fn test_change_hash_set_reconcile() {
-        use autosurgeon::{hydrate_prop, reconcile_prop};
         let mut doc = automerge::AutoCommit::new();
         let hash1 = automerge::ChangeHash([1u8; 32]);
         let hash2 = automerge::ChangeHash([2u8; 32]);
@@ -142,7 +140,6 @@ mod tests {
 
     #[test]
     fn test_change_hash_set_round_trip() {
-        use autosurgeon::{hydrate_prop, reconcile_prop};
         let mut doc = automerge::AutoCommit::new();
         let hashes = vec![
             automerge::ChangeHash([1u8; 32]),
@@ -161,7 +158,6 @@ mod tests {
 
     #[test]
     fn test_change_hash_set_empty() {
-        use autosurgeon::{hydrate_prop, reconcile_prop};
         let mut doc = automerge::AutoCommit::new();
         let original = ChangeHashSet(Arc::from([]));
 

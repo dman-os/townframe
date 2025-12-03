@@ -12,6 +12,7 @@ pub mod metastore {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum WflowServiceMeta {
         Wasmcloud(WasmcloudWflowServiceMeta),
+        LocalNative,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

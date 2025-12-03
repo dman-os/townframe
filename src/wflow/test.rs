@@ -4,8 +4,6 @@ use crate::interlude::*;
 mod fails_once;
 #[cfg(test)]
 mod fails_until_told;
-#[cfg(test)]
-mod pglite;
 #[cfg(any(test, feature = "test-harness"))]
 #[allow(unused)]
 mod keyvalue_plugin;
@@ -29,7 +27,8 @@ pub struct WflowTestContextBuilder {
 impl WflowTestContextBuilder {
     pub fn new() -> Self {
         Self {
-            temp_dir: tokio::task::block_in_place(|| tempfile::tempdir()).expect("failed to create temp dir"),
+            temp_dir: tokio::task::block_in_place(|| tempfile::tempdir())
+                .expect("failed to create temp dir"),
             metastore: None,
             log_store: None,
             snap_store: None,
@@ -122,13 +121,12 @@ impl WflowTestContextBuilder {
             metastore.clone(),
         ));
         let runtime_config_plugin = plugin::wasi_config::WasiConfig::default();
-        
+
         self.plugins.extend_from_slice(&[
             wflow_plugin.clone(),
             Arc::new(runtime_config_plugin),
             keyvalue_plugin.clone(),
         ]);
-
 
         let host = crate::build_wash_host(self.plugins).await?;
         Ok(WflowTestContext {
@@ -497,9 +495,6 @@ async fn register_workload_on_host(
                 },
                 WitInterface {
                     ..WitInterface::from("townframe:utils/llm-chat")
-                },
-                WitInterface {
-                    ..WitInterface::from("townframe:pglite/query")
                 },
                 WitInterface {
                     ..WitInterface::from("wasi:keyvalue/store")

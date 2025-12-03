@@ -1,0 +1,14 @@
+{
+	"//": "FIXME: broken",
+	"wit": {
+		"registries": [
+			{
+				"url": "townframe"
+			}
+		],
+		"sources": {
+			"townframe": "src/api_utils_rs/wit/",
+			"townframe:api-utils": "src/api_utils_rs/wit/"
+		}
+	}
+}

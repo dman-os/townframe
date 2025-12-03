@@ -1,22 +1,24 @@
-use std::path::PathBuf;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::path::PathBuf;
+
+use reqwest::blocking::Client;
+use sha2::{Digest, Sha256};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Download URL for pglite runtime
-    const PGLITE_DOWNLOAD_URL: &str = "https://electric-sql.github.io/pglite-build/pglite-wasi.tar.xz";
+    const PGLITE_DOWNLOAD_URL: &str =
+        "https://electric-sql.github.io/pglite-build/pglite-wasi.tar.xz";
+    const EXPECTED_SHA256: &str =
+        "c725235f22a4fd50fed363f4065edb151a716fa769cba66f2383b8b854e6bdb5";
 
     let cwd = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
     let target = std::env::var("TARGET")?;
     let profile = std::env::var("PROFILE")?;
 
-    // Get target directory (where cargo stores build artifacts)
     let target_dir = if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
         PathBuf::from(dir)
     } else {
-        // If CARGO_TARGET_DIR not set, assume ./target relative to workspace root
-        // CARGO_MANIFEST_DIR is the crate root, so go up to workspace root
         cwd.parent()
             .and_then(|p| p.parent())
             .map(|p| p.join("target"))
@@ -25,72 +27,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=PGLITE_DOWNLOAD_URL");
+    println!("cargo:rerun-if-env-changed=EXPECTED_SHA256");
 
-    // Create temp directory for unpacking
     let temp_dir = out_dir.join("pglite_build");
     if temp_dir.exists() {
         fs::remove_dir_all(&temp_dir)?;
     }
     fs::create_dir_all(&temp_dir)?;
 
-    // Download pglite-wasi.tar.xz to target directory if not cached
     let tar_xz_path = target_dir.join("pglite-wasi.tar.xz");
     if !tar_xz_path.exists() {
-        println!("cargo:warning=Downloading pglite runtime from {}", PGLITE_DOWNLOAD_URL);
-        
-        // Ensure target directory exists
+        println!(
+            "cargo:info=Downloading pglite runtime from {}",
+            PGLITE_DOWNLOAD_URL
+        );
+
         if let Some(parent) = tar_xz_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        
-        let mut response = ureq::get(PGLITE_DOWNLOAD_URL)
-            .call()
-            .map_err(|e| format!("failed to download pglite: {}", e))?;
-        
+
+        let client = Client::builder().build()?;
+        let mut response = client.get(PGLITE_DOWNLOAD_URL).send()?.error_for_status()?;
+
         let mut file = fs::File::create(&tar_xz_path)?;
-        std::io::copy(&mut response.into_reader(), &mut file)?;
-        println!("cargo:warning=Downloaded pglite runtime to {:?}", tar_xz_path);
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+
+        loop {
+            let read = response.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            file.write_all(&buffer[..read])?;
+        }
+
+        let hash = format!("{:x}", hasher.finalize());
+        if hash != EXPECTED_SHA256 {
+            return Err(format!(
+                "downloaded pglite runtime checksum mismatch (expected {EXPECTED_SHA256}, got {hash})"
+            )
+            .into());
+        }
+
+        println!("cargo:info=Downloaded pglite runtime to {:?}", tar_xz_path);
     } else {
-        println!("cargo:warning=Using cached pglite runtime from {:?}", tar_xz_path);
+        println!(
+            "cargo:info=Using cached pglite runtime from {:?}",
+            tar_xz_path
+        );
     }
 
-    // Unpack the tar.xz
-    println!("cargo:warning=Unpacking pglite runtime");
+    println!("cargo:info=Unpacking pglite runtime");
     let file = fs::File::open(&tar_xz_path)?;
     let decoder = xz2::read::XzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
     archive.unpack(&temp_dir)?;
 
-    // Normalize structure: ensure we have pglite/ directory at temp_dir root
     let normalized_pglite = temp_dir.join("pglite");
     if !normalized_pglite.exists() {
-        // Check for nested structure (tmp/pglite)
         let nested = temp_dir.join("tmp").join("pglite");
         if nested.exists() {
-            println!("cargo:warning=Normalizing nested pglite structure");
+            println!("cargo:info=Normalizing nested pglite structure");
             if normalized_pglite.exists() {
                 fs::remove_dir_all(&normalized_pglite)?;
             }
-            // Move nested to root
-            if fs::rename(&nested, &normalized_pglite).is_err() {
-                // Cross-device rename failed, copy instead
-                copy_dir_recursive(&nested, &normalized_pglite)?;
-                fs::remove_dir_all(temp_dir.join("tmp"))?;
-            }
+            fs::rename(&nested, &normalized_pglite)?;
         }
     }
 
-    // Find pglite.wasi after normalization
     let wasm_path = normalized_pglite.join("bin").join("pglite.wasi");
     if !wasm_path.exists() {
-        // Fallback: search for it
-        let found = find_pglite_wasm(&temp_dir)?;
-        println!("cargo:warning=Found pglite.wasi at {:?} (not in expected location)", found);
-        return Err(format!("pglite.wasi not found at expected location {:?}", wasm_path).into());
+        return Err(format!("pglite.wasi not found at {:?}", wasm_path).into());
     }
-    println!("cargo:warning=Found pglite.wasi at {:?}", wasm_path);
+    println!("cargo:info=Found pglite.wasi at {:?}", wasm_path);
 
-    // Create wasmtime engine for compilation
     let mut config = wasmtime::Config::new();
     config
         .wasm_backtrace(true)
@@ -98,110 +109,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable)
         .target(&target)
         .map_err(|err| format!("error configuring wasmtime for target {target}: {err}"))?;
-    
+
     let engine = wasmtime::Engine::new(&config)
         .map_err(|err| format!("error making wasmtime engine: {err}"))?;
 
-    // Compile wasm to cwasm
-    println!("cargo:warning=Compiling pglite.wasi to cwasm (this may take a while)...");
+    println!("cargo:info=Compiling pglite.wasi to cwasm (this may take a while)...");
     let module = wasmtime::Module::from_file(&engine, &wasm_path)
         .map_err(|err| format!("error loading module from file: {err}"))?;
-    
+
     let cwasm = module
         .serialize()
         .map_err(|err| format!("error serializing component: {err}"))?;
 
-    // Write cwasm to temp directory
     let cwasm_path = temp_dir.join("pglite.cwasm");
     fs::write(&cwasm_path, &cwasm)?;
-    println!("cargo:warning=Compiled cwasm ({} bytes)", cwasm.len());
+    println!("cargo:info=Compiled cwasm ({} bytes)", cwasm.len());
 
-    // Create a tar archive containing everything (original contents + cwasm)
     let archive_path = out_dir.join("pglite_embedded.tar");
     {
         let file = fs::File::create(&archive_path)?;
         let mut tar = tar::Builder::new(file);
-        
-        // Add normalized pglite directory structure
-        // The structure should be: pglite/bin/pglite.wasi, pglite/share/, etc.
         if normalized_pglite.exists() {
             add_dir_to_tar(&mut tar, &normalized_pglite, "pglite")?;
         } else {
-            // Fallback: add everything from temp_dir
             add_dir_to_tar(&mut tar, &temp_dir, "")?;
         }
-        
-        // Add cwasm at the root (alongside pglite directory)
         tar.append_file("pglite.cwasm", &mut fs::File::open(&cwasm_path)?)?;
-        
         tar.finish()?;
     }
 
-    // Compress the tar archive with zstd
-    println!("cargo:warning=Compressing embedded archive...");
+    println!("cargo:info=Compressing embedded archive...");
     let compression_level = if profile == "release" { 19 } else { 1 };
-    
+
     let tar_data = fs::read(&archive_path)?;
     let compressed_path = out_dir.join("pglite_embedded.tar.zst");
     {
-        let mut encoder = zstd::Encoder::new(
-            fs::File::create(&compressed_path)?,
-            compression_level,
-        )?;
+        let mut encoder =
+            zstd::Encoder::new(fs::File::create(&compressed_path)?, compression_level)?;
         encoder.write_all(&tar_data)?;
         encoder.finish()?;
     }
 
     let compressed_size = fs::metadata(&compressed_path)?.len();
-    println!("cargo:warning=Compressed archive size: {} bytes", compressed_size);
+    println!(
+        "cargo:info=Compressed archive size: {} bytes",
+        compressed_size
+    );
 
-    // Cleanup temp files (but keep tar_xz_path in target/ for reuse)
     fs::remove_dir_all(&temp_dir)?;
     let _ = fs::remove_file(&archive_path);
 
-    // Tell cargo about the output file so it can be included
-    println!("cargo:rustc-env=PGLITE_EMBEDDED_ZST={}", compressed_path.display());
-
+    println!(
+        "cargo:rustc-env=PGLITE_EMBEDDED_ZST={}",
+        compressed_path.display()
+    );
     Ok(())
 }
 
-/// Find pglite.wasi in the unpacked directory
-fn find_pglite_wasm(dir: &PathBuf) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    // Check common locations
-    let candidates = [
-        dir.join("pglite").join("bin").join("pglite.wasi"),
-        dir.join("tmp").join("pglite").join("bin").join("pglite.wasi"),
-        dir.join("bin").join("pglite.wasi"),
-    ];
-
-    for candidate in &candidates {
-        if candidate.exists() {
-            return Ok(candidate.clone());
-        }
-    }
-
-    // Recursive search
-    fn search_recursive(dir: &PathBuf, target: &str) -> Option<PathBuf> {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    if let Some(found) = search_recursive(&path, target) {
-                        return Some(found);
-                    }
-                } else if path.file_name().and_then(|n| n.to_str()) == Some(target) {
-                    return Some(path);
-                }
-            }
-        }
-        None
-    }
-
-    search_recursive(dir, "pglite.wasi")
-        .ok_or_else(|| format!("pglite.wasi not found in {:?}", dir).into())
-}
-
-/// Recursively add directory contents to tar archive
 fn add_dir_to_tar(
     tar: &mut tar::Builder<fs::File>,
     dir: &PathBuf,
@@ -228,20 +192,3 @@ fn add_dir_to_tar(
     }
     Ok(())
 }
-
-/// Recursively copy directory
-fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
-}
-

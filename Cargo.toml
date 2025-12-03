@@ -15,7 +15,6 @@ members = [
   "./src/macros",
   "./src/wash_plugin_pglite/",
   "./src/test_wflows",
-  "./src/tests_pglite",
   # "./src/tests_http",
   "./src/utils_rs",
   "./src/wash_plugin_am_repo/",
@@ -172,6 +171,7 @@ uniffi = { version = "0.29.4" }
 # uniffi = { path = "../uniffi-rs/uniffi/" }
 
 wasmtime = "*"
+wasmtime-wasi = { version = "*" }
 # wash-runtime = "0.1.0"
 wash-runtime = { path = "../wash/crates/wash-runtime/"}
 

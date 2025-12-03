@@ -25,6 +25,7 @@ pub struct PartitionCtx {
             + Sync
             + Send,
     >,
+    pub local_native_host: Arc<dyn service::WflowServiceHost<ExtraArgs = ()> + Sync + Send>,
 }
 
 impl PartitionCtx {
@@ -38,6 +39,7 @@ impl PartitionCtx {
                 + Sync
                 + Send,
         >,
+        local_native_host: Arc<dyn service::WflowServiceHost<ExtraArgs = ()> + Sync + Send>,
     ) -> Self {
         Self {
             id,
@@ -45,6 +47,7 @@ impl PartitionCtx {
             processed_entries_offset,
             log,
             local_wasmcloud_host,
+            local_native_host,
         }
     }
 

@@ -109,7 +109,7 @@ impl AmCtx {
                 let mut attempt = 0u32;
                 loop {
                     if attempt > 0 {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     }
                     attempt += 1;
                     match tokio_tungstenite::connect_async(&addr[..]).await {
@@ -286,7 +286,7 @@ impl AmCtx {
             handle.with_document(move |doc| {
                 // Start transaction at the specified heads
                 let mut tx = doc.transaction_at(automerge::PatchLog::null(), &heads);
-                
+
                 use automerge::transaction::Transactable;
                 use automerge::ReadDoc;
 
@@ -312,11 +312,7 @@ impl AmCtx {
                             }
                             _ => {
                                 let new_obj = tx
-                                    .put_object(
-                                        &current_obj,
-                                        key.clone(),
-                                        automerge::ObjType::Map,
-                                    )
+                                    .put_object(&current_obj, key.clone(), automerge::ObjType::Map)
                                     .wrap_err("error creating map object")?;
                                 current_obj = new_obj;
                             }
@@ -356,7 +352,7 @@ impl AmCtx {
                 // Reconcile at the final prop using reconcile_prop
                 autosurgeon::reconcile_prop(&mut tx, current_obj, final_prop, &value)
                     .wrap_err("error reconciling")?;
-                
+
                 // Commit the transaction
                 tx.commit();
                 eyre::Ok(())

@@ -2,18 +2,12 @@
 
 package org.example.daybook.tables
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,51 +15,38 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeContentPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-// Material Icons may not be available on all platforms in Compose Multiplatform
-// Using text/emoji as fallback for now
 import androidx.compose.material3.BottomAppBar
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.material3.NavigationDrawerItem
-import androidx.compose.material3.NavigationRail
-import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -76,6 +57,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -85,13 +68,17 @@ import androidx.navigation.NavHostController
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import org.example.daybook.AppScreens
+import org.example.daybook.ChromeState
+import org.example.daybook.ChromeStateTopAppBar
+import org.example.daybook.ConfigViewModel
+import org.example.daybook.LocalChromeStateStack
 import org.example.daybook.LocalContainer
 import org.example.daybook.Routes
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
 import org.example.daybook.uniffi.core.Tab
 import org.example.daybook.uniffi.core.Table
+import org.example.daybook.uniffi.core.TableViewMode
 import org.example.daybook.uniffi.core.Uuid
 
 // ViewModel-based hover-hold controller for abstracting the hover-to-create pattern
@@ -177,11 +164,30 @@ fun CompactLayout(
     val density = LocalDensity.current
     val revealSheetState = rememberRevealBottomSheetState(initiallyVisible = false)
     var sheetContent by remember { mutableStateOf(SheetContent.TABS) }
+    
+    // Config ViewModel
+    val configRepo = LocalContainer.current.configRepo
+    val configVm = viewModel { ConfigViewModel(configRepo) }
+
+    val tableViewModeState = configVm.tableViewModeCompact.collectAsState()
+    val tableViewMode = tableViewModeState.value ?: org.example.daybook.uniffi.core.TableViewMode.HIDDEN
+    
+    // Error handling
+    val snackbarHostState = remember { SnackbarHostState() }
+    val configError = configVm.error.collectAsState()
+    LaunchedEffect(configError.value) {
+        configError.value?.let { error ->
+            snackbarHostState.showSnackbar(error.message)
+            configVm.clearError()
+        }
+    }
 
     var tabItemLayouts by remember { mutableStateOf(mapOf<Uuid, Rect>()) }
     var tableItemLayouts by remember { mutableStateOf(mapOf<Uuid, Rect>()) }
+    var menuItemLayouts by remember { mutableStateOf(mapOf<String, Rect>()) }
     var highlightedTable by remember { mutableStateOf<Uuid?>(null) }
     var highlightedTab by remember { mutableStateOf<Uuid?>(null) }
+    var highlightedMenuItem by remember { mutableStateOf<String?>(null) }
     var isDragging by remember { mutableStateOf(false) }
     var addButtonWindowRect by remember { mutableStateOf<Rect?>(null) }
     var lastDragWindowPos by remember { mutableStateOf<Offset?>(null) }
@@ -197,34 +203,8 @@ fun CompactLayout(
     // feature button layout rects (populated when toolbar renders)
     var featureButtonLayouts by remember { mutableStateOf(mapOf<String, Rect>()) }
 
-    val snackbarHostState = remember { SnackbarHostState() }
-    // Define the available feature buttons (content + activation action)
-    val features = listOf(
-        // FeatureItem("feat_add_tab", "＋", "Add Tab") { scope.launch { snackbarHostState.showSnackbar("Activated: Add Tab") } },
-        // FeatureItem("feat_add_table", "📁", "Add Table") { scope.launch { snackbarHostState.showSnackbar("Activated: Add Table") } },
-        // FeatureItem("feat_settings", "⚙️", "Settings") { scope.launch { snackbarHostState.showSnackbar("Activated: Settings") } },
-        FeatureItem("nav_home", "H", "Home") {
-            scope.launch {
-                navController.navigate(
-                    AppScreens.Home.name
-                )
-            }
-        },
-        FeatureItem("nav_tables", "T", "Tables") {
-            scope.launch {
-                navController.navigate(
-                    AppScreens.Tables.name
-                )
-            }
-        },
-        FeatureItem("nav_capture", "＋", "Capture") {
-            scope.launch {
-                navController.navigate(
-                    AppScreens.Capture.name
-                )
-            }
-        },
-    )
+    // Use common features source
+    val features = rememberFeatures(navController)
 
     // Create controllers and ready-state trackers for each feature
     val featureKeys = features.map { it.key }
@@ -241,13 +221,21 @@ fun CompactLayout(
         .pointerInput(Unit) {
             detectDragGestures(
                 onDragStart = { _ ->
-                    showFeaturesMenu = true
+                    sheetContent = SheetContent.MENU
+                    isDragging = true
+                    revealSheetState.openToContent(SheetContent.MENU, scope)
                 },
                 onDrag = { change, _ ->
                     val btnRect = featuresButtonWindowRect ?: return@detectDragGestures
                     val localPos = change.position
                     val windowPos = Offset(btnRect.left + localPos.x, btnRect.top + localPos.y)
-                    // update controllers with their target rects
+                    lastDragWindowPos = windowPos
+                    
+                    // Check if pointer is over a menu item
+                    val menuHit = menuItemLayouts.entries.find { (_, rect) -> rect.contains(windowPos) }
+                    highlightedMenuItem = menuHit?.key
+                    
+                    // Also update controllers with their target rects for toolbar rollout
                     featureButtonLayouts.forEach { (k, r) ->
                         val idx = featureKeys.indexOf(k)
                         if (idx >= 0) featureControllers[idx].targetRect = r
@@ -255,19 +243,57 @@ fun CompactLayout(
                     featureControllers.forEach { it.update(windowPos) }
                 },
                 onDragEnd = {
-                    // activate any ready feature by invoking its action
-                    featureControllers.forEachIndexed { idx, ctrl ->
-                        if (ctrl.ready.value) {
-                            val feature = features.getOrNull(idx)
-                            if (feature != null) scope.launch { feature.onActivate() }
+                    scope.launch {
+                        var shouldClose = false
+                        
+                        // If released over a menu item, activate it and close
+                        if (highlightedMenuItem != null && lastDragWindowPos != null) {
+                            val menuItemKey = highlightedMenuItem
+                            val feature = features.find { it.key == menuItemKey }
+                            if (feature != null) {
+                                feature.onActivate()
+                                shouldClose = true
+                            }
+                        } else {
+                            // Otherwise, activate any ready feature from toolbar rollout
+                            featureControllers.forEachIndexed { idx, ctrl ->
+                                if (ctrl.ready.value) {
+                                    val feature = features.getOrNull(idx)
+                                    if (feature != null) {
+                                        scope.launch { feature.onActivate() }
+                                        shouldClose = true
+                                    }
+                                }
+                                ctrl.cancel()
+                            }
                         }
-                        ctrl.cancel()
+                        
+                        // Clear highlights
+                        highlightedMenuItem = null
+                        lastDragWindowPos = null
+                        isDragging = false
+                        
+                        // Cancel all controllers
+                        featureControllers.forEach { it.cancel() }
+                        showFeaturesMenu = false
+                        
+                        // Close sheet if item was activated, otherwise settle to nearest anchor
+                        if (shouldClose) {
+                            revealSheetState.hide()
+                        } else {
+                            revealSheetState.settle(0f)
+                        }
                     }
-                    showFeaturesMenu = false
                 },
                 onDragCancel = {
-                    featureControllers.forEach { it.cancel() }
-                    showFeaturesMenu = false
+                    scope.launch {
+                        featureControllers.forEach { it.cancel() }
+                        highlightedMenuItem = null
+                        lastDragWindowPos = null
+                        isDragging = false
+                        revealSheetState.hide()
+                        showFeaturesMenu = false
+                    }
                 }
             )
         }
@@ -278,17 +304,27 @@ fun CompactLayout(
 
     // Clear cached tab layout rects whenever the selected table or sheet content changes
     // FIXME:
-    LaunchedEffect(vm.tablesState.collectAsState()) {
+    LaunchedEffect(vm.tablesState.collectAsState(), sheetContent) {
         tabItemLayouts = mapOf()
         tableItemLayouts = mapOf()
+        menuItemLayouts = mapOf()
         highlightedTab = null
         highlightedTable = null
+        highlightedMenuItem = null
+    }
+    
+    // Ensure sheet snaps to correct anchor when content changes while sheet is open
+    LaunchedEffect(sheetContent) {
+        if (revealSheetState.isVisible) {
+            revealSheetState.ensureValidAnchor(sheetContent, scope)
+        }
     }
 
     val centerNavBarContent: @Composable RowScope.() -> Unit = {
         CenterNavBarContent(
             navController = navController,
             revealSheetState = revealSheetState,
+            sheetContent = sheetContent,
             showFeaturesMenu = showFeaturesMenu,
             addTabReadyState = addTabReadyState,
             addTableReadyState = addTableReadyState,
@@ -330,17 +366,16 @@ fun CompactLayout(
     var tabsButtonWindowRect by remember { mutableStateOf<Rect?>(null) }
 
     val tabsButtonModifier = Modifier.pointerInput(Unit) {
-        detectDragGestures(
-            onDragStart = { _ ->
-                revealSheetState.show()
-                isDragging = true
-                revealSheetState.show(tween(0))
-            },
+            detectDragGestures(
+                onDragStart = { _ ->
+                    sheetContent = SheetContent.TABS
+                    isDragging = true
+                    revealSheetState.openToContent(SheetContent.TABS, scope)
+                },
             onDrag = drag@{ change, _ ->
                 // Convert local pointer position to window coords using captured button rect
                 val localPos = change.position
-                val buttonRect = tabsButtonWindowRect
-                if (buttonRect == null) return@drag
+                val buttonRect = tabsButtonWindowRect ?: return@drag
 
                 val windowPos =
                     Offset(buttonRect.left + localPos.x, buttonRect.top + localPos.y)
@@ -350,9 +385,10 @@ fun CompactLayout(
                 highlightedTab = tabHit?.key
 
                 // Hover-switch tables: if pointer over a table item, switch immediately
-                // Prefer the most recently captured rects: order entries by rect area
+                // Prefer NavigationRail items (smaller, vertical) over TabRow items (larger, horizontal)
+                // Check rail items first (they're typically smaller), then tab row items
                 val tableHit = tableItemLayouts.entries
-                    .sortedByDescending { (_, rect) -> rect.width * rect.height }
+                    .sortedBy { (_, rect) -> rect.width * rect.height } // Smaller first = rail items
                     .find { (_, rect) -> rect.contains(windowPos) }
 
                 if (tableHit != null) {
@@ -446,9 +482,21 @@ fun CompactLayout(
 
             DaybookBottomNavigationBar(
                 onTabPressed = {
-                    if (revealSheetState.isVisible) revealSheetState.hide() else revealSheetState.show()
+                    handleSheetToggle(
+                        targetContent = SheetContent.TABS,
+                        currentContent = sheetContent,
+                        sheetState = revealSheetState,
+                        scope = scope
+                    ) { sheetContent = it }
                 },
-                onFeaturesPressed = { showFeaturesMenu = !showFeaturesMenu },
+                onFeaturesPressed = {
+                    handleSheetToggle(
+                        targetContent = SheetContent.MENU,
+                        currentContent = sheetContent,
+                        sheetState = revealSheetState,
+                        scope = scope
+                    ) { sheetContent = it }
+                },
                 centerContent = {
                     // original center content
                     centerNavBarContent()
@@ -464,19 +512,85 @@ fun CompactLayout(
     ) { scaffoldPadding ->
         RevealBottomSheetScaffold(
             sheetState = revealSheetState,
-            // For the TABS sheet we only want hidden and expanded anchors (no 0.5 partial)
-            sheetAnchors = if (sheetContent == SheetContent.TABS) listOf(0f, 1f) else null,
+            // For TABS sheet: hidden and expanded anchors. For MENU sheet: hidden, 2/3, and expanded anchors
+            sheetAnchors = SheetConfig.getAnchors(sheetContent),
             sheetDragHandle = null,
             sheetHeader = { headerModifier: Modifier ->
-                // Place table title / header when in TABS sheet
-                if (sheetContent == SheetContent.TABS) {
-                    val tablesState = vm.tablesState.collectAsState().value
-                    val selectedTableId = vm.selectedTableId.collectAsState().value
-                    val table = if (tablesState is TablesState.Data && selectedTableId != null) {
-                        tablesState.tables[selectedTableId]
-                    } else null
+                when (sheetContent) {
+                    SheetContent.TABS -> {
+                        // Place table title / header when in TABS sheet
+                        val tablesState = vm.tablesState.collectAsState().value
+                        val selectedTableId = vm.selectedTableId.collectAsState().value
+                        val table = if (tablesState is TablesState.Data && selectedTableId != null) {
+                            tablesState.tables[selectedTableId]
+                        } else null
 
-                    if (table != null) {
+                        if (table != null) {
+                            Surface(
+                                modifier = headerModifier.fillMaxWidth(),
+                                color = Color.Transparent
+                            ) {
+                                Column {
+                                    // handle drawn in header
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 8.dp, bottom = 4.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .height(4.dp)
+                                                .width(36.dp)
+                                                .background(
+                                                    MaterialTheme.colorScheme.onSurface.copy(
+                                                        alpha = 0.12f
+                                                    ), shape = RoundedCornerShape(2.dp)
+                                                )
+                                        )
+                                    }
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(16.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        // Toggle button for view mode
+                                        IconButton(
+                                            onClick = {
+                                                configVm.setTableViewModeCompact(
+                                                    when (tableViewMode) {
+                                                        TableViewMode.HIDDEN -> TableViewMode.RAIL
+                                                        TableViewMode.RAIL -> TableViewMode.TAB_ROW
+                                                        TableViewMode.TAB_ROW -> TableViewMode.HIDDEN
+                                                    }
+                                                )
+                                            }
+                                        ) {
+                                            Text(
+                                                text = when (tableViewMode) {
+                                                    TableViewMode.HIDDEN -> "☰"
+                                                    TableViewMode.RAIL -> "⊞"
+                                                    TableViewMode.TAB_ROW -> "☷"
+                                                },
+                                                style = MaterialTheme.typography.titleLarge
+                                            )
+                                        }
+                                        
+                                        Text(
+                                            text = table.title,
+                                            style = MaterialTheme.typography.titleMedium
+                                        )
+                                        
+                                        Spacer(Modifier.width(48.dp)) // Balance the toggle button on the left
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    SheetContent.MENU -> {
+                        // Header for menu sheet
                         Surface(
                             modifier = headerModifier.fillMaxWidth(),
                             color = Color.Transparent
@@ -505,7 +619,7 @@ fun CompactLayout(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = table.title,
+                                        text = "Menu",
                                         style = MaterialTheme.typography.titleMedium
                                     )
                                 }
@@ -514,7 +628,30 @@ fun CompactLayout(
                     }
                 }
             },
-            topBar = { TopAppBar(title = { Text("Daybook") }) },
+            topBar = {
+                // Get chrome state stack and observe the top state (from the current screen)
+                val chromeStateStack = LocalChromeStateStack.current
+                val screenChromeState by chromeStateStack.topState.collectAsState()
+                
+                // Merge layout-specific chrome with screen chrome
+                // Check if screen chrome is empty (no title, no navigation icon, no actions, and showTopBar is false)
+                val isScreenChromeEmpty = screenChromeState.title == null && 
+                                         screenChromeState.navigationIcon == null && 
+                                         screenChromeState.actions == null &&
+                                         !screenChromeState.showTopBar
+                // Compact view doesn't show features menu in TopAppBar (it's in the bottom app bar)
+                val mergedChromeState = ChromeState(
+                    title = screenChromeState.title ?: "Daybook",
+                    navigationIcon = screenChromeState.navigationIcon,
+                    actions = {
+                        // Only screen actions in compact view (no layout actions since menu is in bottom bar)
+                        screenChromeState.actions?.invoke()
+                    },
+                    showTopBar = if (isScreenChromeEmpty) true else screenChromeState.showTopBar
+                )
+                
+                ChromeStateTopAppBar(mergedChromeState)
+            },
             sheetContent = {
                 SheetContentHost(
                     sheetContent = sheetContent,
@@ -546,27 +683,32 @@ fun CompactLayout(
                     },
                     addTableController = addTableController,
                     highlightedTab = highlightedTab,
-                    highlightedTable = highlightedTable
+                    highlightedTable = highlightedTable,
+                    features = features,
+                    onMenuItemLayout = { key, rect ->
+                        menuItemLayouts = menuItemLayouts + (key to rect)
+                    },
+                    highlightedMenuItem = highlightedMenuItem,
+                    tableViewMode = tableViewMode
                 )
             },
             sheetPeekHeight = 0.dp,
             modifier = Modifier.padding(scaffoldPadding)
         ) { contentPadding ->
-            Box(
+            Row(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(contentPadding)
             ) {
-                Routes(
-                    modifier = Modifier.fillMaxSize(),
-                    extraAction = extraAction,
-                    navController = navController
-                )
-
-                // Instant visual sheet overlay during drag (no scaffold animation)
-                // overlay removed; rely on scaffold expand/hide behavior
-
-                // features menu is rendered inline in the bottom bar (toolbar rollout)
+                Box(modifier = Modifier.weight(1f, fill = true)) {
+                    Routes(
+                        modifier = Modifier.fillMaxSize().safeContentPadding(),
+                        extraAction = extraAction,
+                        navController = navController
+                    )
+                }
+                
+                // Sidebar not shown in compact view
             }
         }
 
@@ -601,51 +743,20 @@ fun DaybookBottomNavigationBar(
      * - right area: toggle features / FABs with floating action menu
      */
     
-    var fabMenuExpanded by rememberSaveable { mutableStateOf(false) }
-
     BottomAppBar(
         floatingActionButton = {
-            // Right (features) button area with floating action menu
-            Box(modifier = featuresButtonModifier) {
-                FloatingActionButton(
-                    onClick = {
-                        fabMenuExpanded = !fabMenuExpanded
-                        if (fabMenuExpanded) {
-                            onFeaturesPressed()
-                        }
-                    },
-                    modifier = Modifier
-                        .semantics {
-                            stateDescription = if (fabMenuExpanded) "Expanded" else "Collapsed"
-                            contentDescription = "Toggle menu"
-                        }
-                ) {
-                    Text(
-                        text = if (fabMenuExpanded) "✕" else "⋮",
-                        fontSize = 20.sp
-                    )
-                }
-                
-                DropdownMenu(
-                    expanded = fabMenuExpanded,
-                    onDismissRequest = { fabMenuExpanded = false }
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("➕ Add Tab") },
-                        onClick = {
-                            fabMenuExpanded = false
-                            onFeaturesPressed()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("📦 Archive") },
-                        onClick = { fabMenuExpanded = false }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("⚙️ Settings") },
-                        onClick = { fabMenuExpanded = false }
-                    )
-                }
+            // Right (features) button area - shows RevealBottomSheet with menu
+            IconButton(
+                onClick = onFeaturesPressed,
+                modifier = featuresButtonModifier
+                    .semantics {
+                        contentDescription = "Toggle menu"
+                    }
+            ) {
+                Text(
+                    text = "⋮",
+                    fontSize = 20.sp
+                )
             }
         },
         actions = {
@@ -683,7 +794,84 @@ fun DaybookBottomNavigationBar(
 }
 
 
-enum class SheetContent { TABS }
+enum class SheetContent { TABS, MENU }
+
+// Sheet configuration constants
+private object SheetConfig {
+    const val TABS_MAX_ANCHOR = 0.95f
+    const val MENU_MAX_ANCHOR = 0.75f
+    
+    fun getAnchors(content: SheetContent): List<Float> = when (content) {
+        SheetContent.TABS -> listOf(0f, TABS_MAX_ANCHOR)
+        SheetContent.MENU -> listOf(0f, MENU_MAX_ANCHOR)
+    }
+    
+    fun getMaxAnchor(content: SheetContent): Float = when (content) {
+        SheetContent.TABS -> TABS_MAX_ANCHOR
+        SheetContent.MENU -> MENU_MAX_ANCHOR
+    }
+}
+
+// Helper functions for sheet state management
+private fun RevealBottomSheetState.openToContent(
+    content: SheetContent,
+    scope: kotlinx.coroutines.CoroutineScope
+) {
+    scope.launch {
+        showToProgress(SheetConfig.getMaxAnchor(content))
+    }
+}
+
+private fun RevealBottomSheetState.switchContent(
+    from: SheetContent,
+    to: SheetContent,
+    scope: kotlinx.coroutines.CoroutineScope
+) {
+    scope.launch {
+        snapToProgress(SheetConfig.getMaxAnchor(to))
+    }
+}
+
+private fun RevealBottomSheetState.ensureValidAnchor(
+    content: SheetContent,
+    scope: kotlinx.coroutines.CoroutineScope
+) {
+    scope.launch {
+        val current = progress
+        val maxAnchor = SheetConfig.getMaxAnchor(content)
+        if (current != 0f && current != maxAnchor) {
+            snapToProgress(maxAnchor)
+        }
+    }
+}
+
+private fun handleSheetToggle(
+    targetContent: SheetContent,
+    currentContent: SheetContent,
+    sheetState: RevealBottomSheetState,
+    scope: kotlinx.coroutines.CoroutineScope,
+    onContentChange: (SheetContent) -> Unit
+) {
+    if (sheetState.isVisible && currentContent == targetContent) {
+        // Same content and already open - toggle close
+        scope.launch {
+            sheetState.hide()
+        }
+    } else {
+        val wasDifferentContent = currentContent != targetContent
+        onContentChange(targetContent)
+        
+        if (sheetState.isVisible) {
+            // Sheet is already open, switch content
+            if (wasDifferentContent) {
+                sheetState.switchContent(currentContent, targetContent, scope)
+            }
+        } else {
+            // Sheet is closed, open to target content
+            sheetState.openToContent(targetContent, scope)
+        }
+    }
+}
 
 @Composable
 fun SheetContentHost(
@@ -697,11 +885,16 @@ fun SheetContentHost(
     onAddTableLayout: (rect: Rect) -> Unit,
     addTableController: HoverHoldControllerViewModel,
     highlightedTab: Uuid?,
-    highlightedTable: Uuid?
+    highlightedTable: Uuid?,
+    features: List<FeatureItem>,
+    onMenuItemLayout: (key: String, rect: Rect) -> Unit,
+    highlightedMenuItem: String?,
+    tableViewMode: TableViewMode
 ) {
     // Action buttons: allow quick creation of tabs/tables from the sheet
     val tablesRepo = LocalContainer.current.tablesRepo
     val vm = viewModel { TablesViewModel(tablesRepo) }
+    val scope = rememberCoroutineScope()
     val addTableReadyState = addTableController.ready.collectAsState()
     val tablesState = vm.tablesState.collectAsState().value
     val selectedTableId = vm.selectedTableId.collectAsState().value
@@ -711,167 +904,157 @@ fun SheetContentHost(
             .padding(top = 16.dp)
     ) {
         // debug: SheetContentHost mounted selectedTableId=$selectedTableId tableCount=${tablesState.let { if (it is TablesState.Data) it.tables.size else 0 }} tabCount=${tablesState.let { if (it is TablesState.Data) it.tabs.size else 0 }}
-        // Header
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Show current table title as sheet title
-            Text(
-                text = if (selectedTableId != null && tablesState is TablesState.Data) {
-                    tablesState.tables[selectedTableId]?.title ?: "Select Tab"
-                } else "Select Tab",
-                style = MaterialTheme.typography.headlineSmall
-            )
-
-            // header: no action buttons here; add-tab moved to navbar center
-
-            Button(onClick = onDismiss) {
-                Text("Close")
-            }
-        }
+        // Fixed spacer to prevent content from being hidden by sheetHeader
+        Spacer(Modifier.height(110.dp))
 
         Spacer(Modifier.weight(1f))
 
         // Content
         when (sheetContent) {
             SheetContent.TABS -> {
-                // Show tabs list plus a NavigationRail for table switching
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    // NavigationRail-based table switcher on the LEFT of the sheet
-                    NavigationRail(modifier = Modifier.width(80.dp)) {
-                        FloatingActionButton(
-                            onClick = {
-                                vm.viewModelScope.launch {
-                                    vm.createNewTable()
-                                }
-                            },
-                            modifier = Modifier
-                                .size(48.dp)
-                                .onGloballyPositioned { onAddTableLayout(it.boundsInWindow()) },
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // Main content area: tabs list, optionally with NavigationRail for table switching
+                    Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        // NavigationRail-based table switcher on the LEFT of the sheet (only when view mode is RAIL)
+                        if (tableViewMode == TableViewMode.RAIL) {
+                            TablesRail(
+                                showTitles = false,
+                                growUpward = true,
+                                onTableSelected = onTableSelected,
+                                onTableLayout = onTableLayout,
+                                highlightedTable = highlightedTable,
+                                onAddTableLayout = onAddTableLayout,
+                                addTableReadyState = addTableReadyState
+                            )
+                        }
 
-                            containerColor = if (addTableReadyState.value) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
-                        ) {
-                            if (addTableReadyState.value) Text("✓") else Text("+")
-                        }
-                        // push items to the bottom
-                        Spacer(Modifier.weight(1f))
-                        if (tablesState is TablesState.Data) {
-                            // Render reversed so items start from bottom
-                            tablesState.tablesList.reversed().forEach { table ->
-                                val tabCount = table.tabs.size ?: 0
-                                NavigationRailItem(
-                                    modifier = Modifier.onGloballyPositioned {
-                                        onTableLayout(table.id, it.boundsInWindow())
-                                    },
-                                    selected = (selectedTableId == table.id) || (highlightedTable == table.id),
-                                    onClick = { onTableSelected(table) },
-                                    icon = {
-                                        // Icon + small subscript count
-                                        Row {
-                                            Box(
-                                                modifier = Modifier.size(36.dp),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Text("📁")
-                                            }
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Text(
-                                                text = tabCount.toString(),
-                                                style = MaterialTheme.typography.bodySmall
-                                            )
-                                        }
-                                    }
-                                )
-                            }
-                        } else {
-                            CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                        }
+                        TabSelectionList(
+                            onTabSelected = onTabSelected,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(
+                                    start = if (tableViewMode == TableViewMode.RAIL) 16.dp else 16.dp,
+                                    end = 8.dp
+                                ),
+                            growUpward = true,
+                            onItemLayout = onTabLayout,
+                            highlightedTab = highlightedTab
+                        )
                     }
 
-                    TabSelectionList(
-                        onTabSelected = onTabSelected,
-                        modifier = Modifier.weight(1f).padding(start = 16.dp, end = 8.dp),
-                        onItemLayout = onTabLayout,
-                        highlightedTab = highlightedTab
-                    )
+                    // TabRow at the bottom for table selection with fixed Add button (only when view mode is TAB_ROW)
+                    if (tableViewMode == TableViewMode.TAB_ROW && tablesState is TablesState.Data) {
+                        val tablesListSnapshot = tablesState.tablesList.toList()
+                        val listSize = tablesListSnapshot.size
+                        
+                        // Use remembered state for selected tab index to avoid race conditions
+                        var selectedTabIndexState by remember {
+                            mutableIntStateOf(0)
+                        }
+                        
+                        // Update selected tab index when selected table or list size changes
+                        // Use tablesState.tables.size as a stable key instead of the snapshot
+                        LaunchedEffect(tablesState.tables.size, selectedTableId) {
+                            val currentList = tablesState.tablesList
+                            val currentSize = currentList.size
+                            if (currentSize > 0) {
+                                val foundIndex = currentList.indexOfFirst { it.id == selectedTableId }
+                                selectedTabIndexState = foundIndex
+                                    .takeIf { it in 0..<currentSize }
+                                    ?.coerceIn(0, (currentSize - 1).coerceAtLeast(0))
+                                    ?: 0
+                            } else {
+                                selectedTabIndexState = 0
+                            }
+                        }
+                        
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Add table button on the left (fixed, doesn't scroll)
+                            IconButton(
+                                onClick = {
+                                    vm.viewModelScope.launch {
+                                        vm.createNewTable()
+                                    }
+                                },
+                                modifier = Modifier.padding(horizontal = 8.dp)
+                            ) {
+                                Text("+", style = MaterialTheme.typography.titleLarge)
+                            }
+
+                            // ScrollableTabRow for table tabs
+                            if (tablesListSnapshot.isNotEmpty()) {
+                                // Ensure index is within bounds of the current snapshot
+                                val maxIndex = (tablesListSnapshot.size - 1).coerceAtLeast(0)
+                                ScrollableTabRow(
+                                    selectedTabIndex = selectedTabIndexState.coerceIn(0, maxIndex),
+                                    modifier = Modifier.weight(1f),
+                                    edgePadding = 0.dp
+                                ) {
+                                    // Tabs for each table - use snapshot to ensure consistency
+                                    tablesListSnapshot.forEachIndexed { index, table ->
+                                        val tabCount = table.tabs.size
+                                        Tab(
+                                            selected = (selectedTableId == table.id) || (highlightedTable == table.id),
+                                            onClick = { onTableSelected(table) },
+                                            modifier = Modifier.onGloballyPositioned {
+                                                onTableLayout(table.id, it.boundsInWindow())
+                                            },
+                                            text = {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    Text(table.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                    if (tabCount > 0) {
+                                                        Text(
+                                                            "($tabCount)",
+                                                            style = MaterialTheme.typography.labelSmall
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        )
+                                    }
+                                }
+                            } else {
+                                // Empty state - just show spacer to take up space
+                                Spacer(Modifier.weight(1f))
+                            }
+                        }
+                    }
                 }
             }
-        }
-    }
-}
-
-@Composable
-fun TabSelectionList(
-    onTabSelected: (Tab) -> Unit,
-    modifier: Modifier = Modifier,
-    onItemLayout: (tabId: Uuid, rect: Rect) -> Unit,
-    highlightedTab: Uuid?
-) {
-    val tablesRepo = LocalContainer.current.tablesRepo
-    val vm = viewModel { TablesViewModel(tablesRepo) }
-    val tablesState = vm.tablesState.collectAsState().value
-    val selectedTableId = vm.selectedTableId.collectAsState().value
-
-    // Ensure a table is selected when data becomes available
-    LaunchedEffect(tablesState) {
-        if (tablesState is TablesState.Data) {
-            val sel = vm.getSelectedTable()
-            if (sel != null) vm.selectTable(sel.id)
-        }
-    }
-
-    val tabsForSelectedTable = if (selectedTableId != null && tablesState is TablesState.Data) {
-        val selectedTable = tablesState.tables[selectedTableId]
-        selectedTable?.tabs?.mapNotNull { tabId -> tablesState.tabs[tabId] } ?: emptyList()
-    } else emptyList()
-
-    // Fill available height and render tabs starting from the bottom
-    Column(
-        modifier = modifier.fillMaxHeight().verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.Bottom)
-    ) {
-        if (tabsForSelectedTable.isEmpty()) {
-            Text("No tabs in this table.", modifier = Modifier.padding(16.dp))
-        } else {
-            // Render tabs reversed so the last tab appears at the bottom
-            tabsForSelectedTable.reversed().forEach { tab ->
-                val isHighlighted = tab.id == highlightedTab
-                // per-row menu state
-                val menuExpandedState = remember { mutableStateOf(false) }
-
-                // Use NavigationDrawerItem so we can use selected highlighting and badge slot
-                NavigationDrawerItem(
-                    selected = isHighlighted,
-                    onClick = { onTabSelected(tab) },
-                    icon = { Text("📄") },
-                    label = { Text(tab.title) },
+            SheetContent.MENU -> {
+                // Show list of navigation buttons from features
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .onGloballyPositioned { onItemLayout(tab.id, it.boundsInWindow()) }
-                        .combinedClickable(
-                            onClick = { onTabSelected(tab) },
-                            onLongClick = { menuExpandedState.value = true }),
-                    badge = {
-                        // place close action in the badge area
-                        IconButton(onClick = { vm.viewModelScope.launch { vm.removeTab(tab.id) } }) {
-                            Text("✕")
-                        }
-                    }
-                )
-
-                DropdownMenu(
-                    expanded = menuExpandedState.value,
-                    onDismissRequest = { menuExpandedState.value = false }
+                        .padding(horizontal = 16.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    DropdownMenuItem(text = { Text("Close") }, onClick = {
-                        menuExpandedState.value = false
-                        vm.viewModelScope.launch { vm.removeTab(tab.id) }
-                    })
+                    features.forEach { feature ->
+                        val isHighlighted = feature.key == highlightedMenuItem
+                        NavigationDrawerItem(
+                            selected = isHighlighted,
+                            onClick = {
+                                scope.launch {
+                                    feature.onActivate()
+                                    onDismiss()
+                                }
+                            },
+                            icon = { Text(feature.icon) },
+                            label = { Text(feature.label) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onGloballyPositioned { 
+                                    onMenuItemLayout(feature.key, it.boundsInWindow()) 
+                                }
+                        )
+                    }
                 }
             }
         }

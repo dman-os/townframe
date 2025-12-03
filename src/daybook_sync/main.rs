@@ -258,17 +258,7 @@ fn spawn_doc_setup_worker(cx: SharedCtx) -> DocSetupWorker {
 
                 if let Some(schema) = schema_opt {
                     if schema == "daybook.drawer" {
-                        match spawn_drawer_changes_worker(cx.clone(), request.doc_id.clone()).await
-                        {
-                            Err(err) => {
-                                error!(?err, ?request, "error spawning doc changes worker");
-                                retry(request);
-                                continue;
-                            }
-                            Ok(worker) => {
-                                drawer_change_workers.insert(request.doc_id.clone(), worker);
-                            }
-                        }
+                        // TODO: spawn doc changes worker
                     }
                 }
 
@@ -287,107 +277,6 @@ fn spawn_doc_setup_worker(cx: SharedCtx) -> DocSetupWorker {
         request_tx,
         _handle: handle,
     }
-}
-
-struct DrawerChangesWorker {
-    // event_tx: UnboundedSender<DocChangeEvent>,
-    _handle: JoinHandle<()>,
-    _listener: daybook_core::repos::ListenerRegistration,
-    _repo: Arc<daybook_core::drawer::DrawerRepo>,
-}
-
-struct DocChangeEvent {
-    inner: Arc<daybook_core::drawer::DrawerEvent>,
-    last_attempt_backoff_ms: u64,
-}
-
-impl From<Arc<daybook_core::drawer::DrawerEvent>> for DocChangeEvent {
-    fn from(inner: Arc<daybook_core::drawer::DrawerEvent>) -> Self {
-        Self {
-            inner,
-            last_attempt_backoff_ms: 1000,
-        }
-    }
-}
-
-async fn spawn_drawer_changes_worker(
-    cx: SharedCtx,
-    doc_id: DocumentId,
-) -> Res<DrawerChangesWorker> {
-    use daybook_core::repos::Repo;
-
-    let repo = daybook_core::drawer::DrawerRepo::load(cx.acx.clone(), doc_id.clone())
-        .await
-        .wrap_err("error booting drawer repo")?;
-
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<DocChangeEvent>();
-
-    let listener = repo.register_listener({
-        let event_tx = event_tx.clone();
-        move |event| event_tx.send(event.into()).expect(ERROR_CHANNEL)
-    });
-
-    let fut = {
-        let event_tx = event_tx.clone();
-        async move {
-            let retry = |event: DocChangeEvent| {
-                tokio::spawn({
-                    let event_tx = event_tx.clone();
-                    async move {
-                        let new_backoff =
-                            utils_rs::backoff(event.last_attempt_backoff_ms, 60 * 1000).await;
-                        event_tx
-                            .send(DocChangeEvent {
-                                last_attempt_backoff_ms: new_backoff,
-                                ..event
-                            })
-                            .expect(ERROR_CHANNEL);
-                    }
-                });
-            };
-
-            while let Some(event) = event_rx.recv().await {
-                match &*event.inner {
-                    daybook_core::drawer::DrawerEvent::ListChanged => {
-                        // noop
-                    }
-                    daybook_core::drawer::DrawerEvent::DocUpdated { .. } => todo!(),
-                    daybook_core::drawer::DrawerEvent::DocDeleted { .. } => todo!(),
-                    daybook_core::drawer::DrawerEvent::DocAdded { id, heads } => {
-                        if let Err(err) = restate::start_doc_pipeline(
-                            &cx,
-                            &r#gen::doc::DocAddedEvent {
-                                id: id.clone(),
-                                heads: heads.clone(),
-                            },
-                        )
-                        .await
-                        {
-                            error!(?err, doc_id = ?id, "error starting doc pipeline");
-                            if let restate::RestateError::RequestError { status, .. } = &err {
-                                if status.is_client_error() {
-                                    panic!("client error on restate client {err:?}");
-                                }
-                            }
-                            retry(event);
-                            continue;
-                        }
-                    }
-                }
-            }
-            eyre::Ok(())
-        }
-    };
-    let handle = tokio::spawn(async move {
-        fut.await.unwrap_or_log();
-    });
-
-    Ok(DrawerChangesWorker {
-        _repo: repo,
-        // event_tx,
-        _listener: listener,
-        _handle: handle,
-    })
 }
 
 #[tracing::instrument(skip(cx))]

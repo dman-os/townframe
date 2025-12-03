@@ -47,6 +47,7 @@ import org.example.daybook.capture.LocalCameraCaptureContext
 fun RowScope.CenterNavBarContent(
     navController: NavHostController,
     revealSheetState: RevealBottomSheetState,
+    sheetContent: SheetContent,
     showFeaturesMenu: Boolean,
     addTabReadyState: androidx.compose.runtime.State<Boolean>,
     addTableReadyState: androidx.compose.runtime.State<Boolean>,
@@ -65,8 +66,8 @@ fun RowScope.CenterNavBarContent(
     val captureContext = LocalCameraCaptureContext.current
     val scope = rememberCoroutineScope()
     
-    // When sheet is open, show controls (add button). When closed, show current tab title or camera controls.
-    if (revealSheetState.isVisible) {
+    // When TABS sheet is open, show controls (add button). When closed, show current tab title or camera controls.
+    if (revealSheetState.isVisible && sheetContent == SheetContent.TABS) {
         // Add-tab button expands to fill the center area
         Button(
             onClick = {
@@ -87,10 +88,10 @@ fun RowScope.CenterNavBarContent(
         ) {
             if (addTabReadyState.value) Text("Release to Add") else Text("Add Tab")
         }
-    } else if (showFeaturesMenu) {
+    } else if (showFeaturesMenu || (revealSheetState.isVisible && sheetContent == SheetContent.MENU)) {
         // rollout toolbar: fill the center area with nav-style buttons
         AnimatedVisibility(
-            visible = showFeaturesMenu,
+            visible = showFeaturesMenu || (revealSheetState.isVisible && sheetContent == SheetContent.MENU),
             enter = fadeIn(animationSpec = tween(220)) + slideInHorizontally(
                 initialOffsetX = { it / 4 },
                 animationSpec = tween(220)

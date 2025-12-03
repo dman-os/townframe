@@ -73,7 +73,7 @@ pub enum DrawerEvent {
     ListChanged,
     DocAdded {
         id: DocId,
-        heads: ChangeHashSet
+        heads: ChangeHashSet,
     },
     DocUpdated {
         id: DocId,
@@ -261,11 +261,12 @@ impl DrawerRepo {
 
         // cache the handle under the doc's Uuid id
         let out_id = new_doc.id.clone();
-        self.cache.insert(new_doc.id.clone(), (new_doc, heads.clone()));
+        self.cache
+            .insert(new_doc.id.clone(), (new_doc, heads.clone()));
         self.handles.insert(out_id.clone(), handle);
         self.registry.notify(DrawerEvent::DocAdded {
             id: out_id.clone(),
-            heads ,
+            heads,
         });
         self.registry.notify(DrawerEvent::ListChanged);
         Ok(out_id)
@@ -298,7 +299,11 @@ impl DrawerRepo {
     // Get a Doc by id by hydrating its automerge document
     pub async fn get(&self, id: &DocId) -> Res<Option<Arc<Doc>>> {
         // latest head is stored in the drawer
-        let Some(latest_heads) = self.store.query_sync(|store| store.map.get(id).cloned()).await else {
+        let Some(latest_heads) = self
+            .store
+            .query_sync(|store| store.map.get(id).cloned())
+            .await
+        else {
             return Ok(None);
         };
         self.get_at_heads(id, &latest_heads).await

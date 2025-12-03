@@ -41,33 +41,51 @@ import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import org.example.daybook.uniffi.core.ConfigEvent
 import org.example.daybook.uniffi.core.Doc
 import org.example.daybook.uniffi.core.DocPatch
 import org.example.daybook.uniffi.core.DrawerEvent
+import org.example.daybook.uniffi.core.FfiConverterTypeConfigEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeDoc
 import org.example.daybook.uniffi.core.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.core.FfiConverterTypeDrawerEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeListenerRegistration
 import org.example.daybook.uniffi.core.FfiConverterTypePanel
+import org.example.daybook.uniffi.core.FfiConverterTypeSidebarMode
+import org.example.daybook.uniffi.core.FfiConverterTypeSidebarPosition
+import org.example.daybook.uniffi.core.FfiConverterTypeSidebarVisibility
 import org.example.daybook.uniffi.core.FfiConverterTypeTab
+import org.example.daybook.uniffi.core.FfiConverterTypeTabListVisibility
 import org.example.daybook.uniffi.core.FfiConverterTypeTable
+import org.example.daybook.uniffi.core.FfiConverterTypeTableViewMode
 import org.example.daybook.uniffi.core.FfiConverterTypeTablesEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeTablesPatches
 import org.example.daybook.uniffi.core.FfiConverterTypeWindow
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.uniffi.core.Panel
+import org.example.daybook.uniffi.core.SidebarMode
+import org.example.daybook.uniffi.core.SidebarPosition
+import org.example.daybook.uniffi.core.SidebarVisibility
 import org.example.daybook.uniffi.core.Tab
+import org.example.daybook.uniffi.core.TabListVisibility
 import org.example.daybook.uniffi.core.Table
+import org.example.daybook.uniffi.core.TableViewMode
 import org.example.daybook.uniffi.core.TablesEvent
 import org.example.daybook.uniffi.core.TablesPatches
 import org.example.daybook.uniffi.core.Window
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferConfigEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDoc
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocPatch
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDrawerEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferListenerRegistration
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferPanel
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferSidebarMode
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferSidebarPosition
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferSidebarVisibility
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTab
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferTabListVisibility
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTable
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferTableViewMode
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesPatches
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferWindow
@@ -694,11 +712,30 @@ internal open class UniffiForeignFutureStructVoid(
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
     fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructVoid.UniffiByValue,)
 }
+internal interface UniffiCallbackInterfaceConfigEventListenerMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferConfigEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceDrawerEventListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`event`: RustBufferDrawerEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceTablesEventListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`event`: RustBufferTablesEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+@Structure.FieldOrder("onConfigEvent", "uniffiFree")
+internal open class UniffiVTableCallbackInterfaceConfigEventListener(
+    @JvmField internal var `onConfigEvent`: UniffiCallbackInterfaceConfigEventListenerMethod0? = null,
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+) : Structure() {
+    class UniffiByValue(
+        `onConfigEvent`: UniffiCallbackInterfaceConfigEventListenerMethod0? = null,
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    ): UniffiVTableCallbackInterfaceConfigEventListener(`onConfigEvent`,`uniffiFree`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceConfigEventListener) {
+        `onConfigEvent` = other.`onConfigEvent`
+        `uniffiFree` = other.`uniffiFree`
+    }
+
 }
 @Structure.FieldOrder("onDrawerEvent", "uniffiFree")
 internal open class UniffiVTableCallbackInterfaceDrawerEventListener(
@@ -864,6 +901,49 @@ internal open class UniffiVTableCallbackInterfaceTablesEventListener(
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -879,7 +959,43 @@ internal open class UniffiVTableCallbackInterfaceTablesEventListener(
 // when the library is loaded.
 internal interface IntegrityCheckingUniffiLib : Library {
     // Integrity check functions only
-    fun uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event(
+    fun uniffi_daybook_ffi_checksum_method_configeventlistener_on_config_event(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_auto_hide_expanded(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_mode_expanded(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_pos_expanded(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_vis_expanded(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_tab_list_vis_expanded(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_table_rail_vis_compact(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_table_rail_vis_expanded(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_table_view_mode_compact(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_auto_hide_expanded(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_mode_expanded(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_pos_expanded(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_vis_expanded(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_tab_list_vis_expanded(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_table_rail_vis_compact(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_table_rail_vis_expanded(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_table_view_mode_compact(
+): Short
+fun uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_add(
 ): Short
@@ -933,6 +1049,8 @@ fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_window(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch(
 ): Short
+fun uniffi_daybook_ffi_checksum_constructor_configrepoffi_load(
+): Short
 fun uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load(
 ): Short
 fun uniffi_daybook_ffi_checksum_constructor_ffictx_for_ffi(
@@ -977,6 +1095,7 @@ internal interface UniffiLib : Library {
             val lib = loadIndirect<UniffiLib>(componentName)
             // No need to check the contract version and checksums, since 
             // we already did that with `IntegrityCheckingUniffiLib` above.
+            uniffiCallbackInterfaceConfigEventListener.register(lib)
             uniffiCallbackInterfaceDrawerEventListener.register(lib)
             uniffiCallbackInterfaceTablesEventListener.register(lib)
             org.example.daybook.uniffi.core.uniffiEnsureInitialized()
@@ -991,7 +1110,55 @@ internal interface UniffiLib : Library {
     }
 
     // FFI functions
-    fun uniffi_daybook_ffi_fn_clone_drawereventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_daybook_ffi_fn_clone_configeventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Pointer
+fun uniffi_daybook_ffi_fn_free_configeventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_daybook_ffi_fn_init_callback_vtable_configeventlistener(`vtable`: UniffiVTableCallbackInterfaceConfigEventListener,
+): Unit
+fun uniffi_daybook_ffi_fn_method_configeventlistener_on_config_event(`ptr`: Pointer,`event`: RustBufferConfigEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_daybook_ffi_fn_clone_configrepoffi(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Pointer
+fun uniffi_daybook_ffi_fn_free_configrepoffi(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_daybook_ffi_fn_constructor_configrepoffi_load(`fcx`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_ffi_register_listener(`ptr`: Pointer,`listener`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Pointer
+fun uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_auto_hide_expanded(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_mode_expanded(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_pos_expanded(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_vis_expanded(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_get_tab_list_vis_expanded(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_get_table_rail_vis_compact(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_get_table_rail_vis_expanded(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_get_table_view_mode_compact(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_auto_hide_expanded(`ptr`: Pointer,`value`: Byte,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_mode_expanded(`ptr`: Pointer,`value`: RustBufferSidebarMode.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_pos_expanded(`ptr`: Pointer,`value`: RustBufferSidebarPosition.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_vis_expanded(`ptr`: Pointer,`value`: RustBufferSidebarVisibility.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_set_tab_list_vis_expanded(`ptr`: Pointer,`value`: RustBufferTabListVisibility.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_set_table_rail_vis_compact(`ptr`: Pointer,`value`: RustBufferTabListVisibility.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_set_table_rail_vis_expanded(`ptr`: Pointer,`value`: RustBufferTabListVisibility.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_set_table_view_mode_compact(`ptr`: Pointer,`value`: RustBufferTableViewMode.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_clone_drawereventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
 fun uniffi_daybook_ffi_fn_free_drawereventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1205,6 +1372,60 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configeventlistener_on_config_event() != 55144.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener() != 18344.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_auto_hide_expanded() != 63700.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_mode_expanded() != 38299.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_pos_expanded() != 2774.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_vis_expanded() != 45232.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_tab_list_vis_expanded() != 47117.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_table_rail_vis_compact() != 3060.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_table_rail_vis_expanded() != 40395.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_table_view_mode_compact() != 2165.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_auto_hide_expanded() != 26329.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_mode_expanded() != 44997.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_pos_expanded() != 60411.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_vis_expanded() != 22891.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_tab_list_vis_expanded() != 5215.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_table_rail_vis_compact() != 10078.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_table_rail_vis_expanded() != 23532.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_table_view_mode_compact() != 61691.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event() != 441.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1284,6 +1505,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch() != 50638.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_constructor_configrepoffi_load() != 55968.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load() != 61455.toShort()) {
@@ -1628,6 +1852,897 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
     override fun write(value: ByteArray, buf: ByteBuffer) {
         buf.putInt(value.size)
         buf.put(value)
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a Pointer/Arc<T>
+// to the live Rust struct on the other side of the FFI.
+//
+// Each instance implements core operations for working with the Rust `Arc<T>` and the
+// Kotlin Pointer to work with the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque pointer to the underlying Rust struct.
+//     Method calls need to read this pointer from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its pointer should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the pointer, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
+//      before it can pass the pointer over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+public interface ConfigEventListener {
+    
+    fun `onConfigEvent`(`event`: ConfigEvent)
+    
+    companion object
+}
+
+open class ConfigEventListenerImpl: Disposable, AutoCloseable, ConfigEventListener
+{
+
+    constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val pointer: Pointer?) : Runnable {
+        override fun run() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_free_configeventlistener(ptr, status)
+                }
+            }
+        }
+    }
+
+    fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall() { status ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_clone_configeventlistener(pointer!!, status)
+        }
+    }
+
+    override fun `onConfigEvent`(`event`: ConfigEvent)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configeventlistener_on_config_event(
+        it, FfiConverterTypeConfigEvent.lower(`event`),_status)
+}
+    }
+    
+    
+
+    
+
+    
+    
+    companion object
+    
+}
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceConfigEventListener {
+    internal object `onConfigEvent`: UniffiCallbackInterfaceConfigEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferConfigEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeConfigEventListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onConfigEvent`(
+                    FfiConverterTypeConfigEvent.lift(`event`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeConfigEventListener.handleMap.remove(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceConfigEventListener.UniffiByValue(
+        `onConfigEvent`,
+        uniffiFree,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_daybook_ffi_fn_init_callback_vtable_configeventlistener(vtable)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeConfigEventListener: FfiConverter<ConfigEventListener, Pointer> {
+    internal val handleMap = UniffiHandleMap<ConfigEventListener>()
+
+    override fun lower(value: ConfigEventListener): Pointer {
+        return Pointer(handleMap.insert(value))
+    }
+
+    override fun lift(value: Pointer): ConfigEventListener {
+        return ConfigEventListenerImpl(value)
+    }
+
+    override fun read(buf: ByteBuffer): ConfigEventListener {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(Pointer(buf.getLong()))
+    }
+
+    override fun allocationSize(value: ConfigEventListener) = 8UL
+
+    override fun write(value: ConfigEventListener, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(Pointer.nativeValue(lower(value)))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a Pointer/Arc<T>
+// to the live Rust struct on the other side of the FFI.
+//
+// Each instance implements core operations for working with the Rust `Arc<T>` and the
+// Kotlin Pointer to work with the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque pointer to the underlying Rust struct.
+//     Method calls need to read this pointer from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its pointer should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the pointer, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
+//      before it can pass the pointer over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+public interface ConfigRepoFfiInterface {
+    
+    fun `ffiRegisterListener`(`listener`: ConfigEventListener): ListenerRegistration
+    
+    suspend fun `getSidebarAutoHideExpanded`(): kotlin.Boolean
+    
+    suspend fun `getSidebarModeExpanded`(): SidebarMode
+    
+    suspend fun `getSidebarPosExpanded`(): SidebarPosition
+    
+    suspend fun `getSidebarVisExpanded`(): SidebarVisibility
+    
+    suspend fun `getTabListVisExpanded`(): TabListVisibility
+    
+    suspend fun `getTableRailVisCompact`(): TabListVisibility
+    
+    suspend fun `getTableRailVisExpanded`(): TabListVisibility
+    
+    suspend fun `getTableViewModeCompact`(): TableViewMode
+    
+    suspend fun `setSidebarAutoHideExpanded`(`value`: kotlin.Boolean)
+    
+    suspend fun `setSidebarModeExpanded`(`value`: SidebarMode)
+    
+    suspend fun `setSidebarPosExpanded`(`value`: SidebarPosition)
+    
+    suspend fun `setSidebarVisExpanded`(`value`: SidebarVisibility)
+    
+    suspend fun `setTabListVisExpanded`(`value`: TabListVisibility)
+    
+    suspend fun `setTableRailVisCompact`(`value`: TabListVisibility)
+    
+    suspend fun `setTableRailVisExpanded`(`value`: TabListVisibility)
+    
+    suspend fun `setTableViewModeCompact`(`value`: TableViewMode)
+    
+    companion object
+}
+
+open class ConfigRepoFfi: Disposable, AutoCloseable, ConfigRepoFfiInterface
+{
+
+    constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val pointer: Pointer?) : Runnable {
+        override fun run() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_free_configrepoffi(ptr, status)
+                }
+            }
+        }
+    }
+
+    fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall() { status ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_clone_configrepoffi(pointer!!, status)
+        }
+    }
+
+    override fun `ffiRegisterListener`(`listener`: ConfigEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_ffi_register_listener(
+        it, FfiConverterTypeConfigEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getSidebarAutoHideExpanded`() : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_auto_hide_expanded(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getSidebarModeExpanded`() : SidebarMode {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_mode_expanded(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferSidebarMode.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeSidebarMode.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getSidebarPosExpanded`() : SidebarPosition {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_pos_expanded(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferSidebarPosition.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeSidebarPosition.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getSidebarVisExpanded`() : SidebarVisibility {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_vis_expanded(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferSidebarVisibility.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeSidebarVisibility.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getTabListVisExpanded`() : TabListVisibility {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_tab_list_vis_expanded(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferTabListVisibility.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeTabListVisibility.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getTableRailVisCompact`() : TabListVisibility {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_table_rail_vis_compact(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferTabListVisibility.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeTabListVisibility.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getTableRailVisExpanded`() : TabListVisibility {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_table_rail_vis_expanded(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferTabListVisibility.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeTabListVisibility.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getTableViewModeCompact`() : TableViewMode {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_table_view_mode_compact(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferTableViewMode.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeTableViewMode.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setSidebarAutoHideExpanded`(`value`: kotlin.Boolean) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_auto_hide_expanded(
+                thisPtr,
+                FfiConverterBoolean.lower(`value`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setSidebarModeExpanded`(`value`: SidebarMode) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_mode_expanded(
+                thisPtr,
+                FfiConverterTypeSidebarMode.lower(`value`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setSidebarPosExpanded`(`value`: SidebarPosition) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_pos_expanded(
+                thisPtr,
+                FfiConverterTypeSidebarPosition.lower(`value`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setSidebarVisExpanded`(`value`: SidebarVisibility) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_vis_expanded(
+                thisPtr,
+                FfiConverterTypeSidebarVisibility.lower(`value`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setTabListVisExpanded`(`value`: TabListVisibility) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_tab_list_vis_expanded(
+                thisPtr,
+                FfiConverterTypeTabListVisibility.lower(`value`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setTableRailVisCompact`(`value`: TabListVisibility) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_table_rail_vis_compact(
+                thisPtr,
+                FfiConverterTypeTabListVisibility.lower(`value`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setTableRailVisExpanded`(`value`: TabListVisibility) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_table_rail_vis_expanded(
+                thisPtr,
+                FfiConverterTypeTabListVisibility.lower(`value`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setTableViewModeCompact`(`value`: TableViewMode) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_table_view_mode_compact(
+                thisPtr,
+                FfiConverterTypeTableViewMode.lower(`value`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx) : ConfigRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_constructor_configrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_pointer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_pointer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_pointer(future) },
+        // lift function
+        { FfiConverterTypeConfigRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeConfigRepoFfi: FfiConverter<ConfigRepoFfi, Pointer> {
+
+    override fun lower(value: ConfigRepoFfi): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): ConfigRepoFfi {
+        return ConfigRepoFfi(value)
+    }
+
+    override fun read(buf: ByteBuffer): ConfigRepoFfi {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(Pointer(buf.getLong()))
+    }
+
+    override fun allocationSize(value: ConfigRepoFfi) = 8UL
+
+    override fun write(value: ConfigRepoFfi, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(Pointer.nativeValue(lower(value)))
     }
 }
 
@@ -4079,6 +5194,18 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

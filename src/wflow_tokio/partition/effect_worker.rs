@@ -139,6 +139,12 @@ impl TokioEffectWorker {
                     .run(job_id.clone(), job_state_snapshot.clone(), meta)
                     .await
             }
+            wflow_core::metastore::WflowServiceMeta::LocalNative => {
+                self.pcx
+                    .local_native_host
+                    .run(job_id.clone(), job_state_snapshot.clone(), &())
+                    .await
+            }
         };
         match res {
             Ok(val) | Err(val) => val,

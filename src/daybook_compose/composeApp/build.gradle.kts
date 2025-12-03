@@ -109,6 +109,8 @@ kotlin {
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutinesSwing)
             implementation(libs.jna)
+            // implementation(compose.foundation)
+            // implementation(compose.ui)
         }
     }
 }

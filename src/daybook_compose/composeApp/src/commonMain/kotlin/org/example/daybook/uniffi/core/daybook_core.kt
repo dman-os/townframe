@@ -1599,7 +1599,7 @@ data class DocImage (
     var `widthPx`: kotlin.ULong, 
     var `heightPx`: kotlin.ULong, 
     var `blurhash`: kotlin.String?, 
-    var `blob`: kotlin.String
+    var `blobId`: kotlin.String
 ) {
     
     companion object
@@ -1624,7 +1624,7 @@ public object FfiConverterTypeDocImage: FfiConverterRustBuffer<DocImage> {
             FfiConverterULong.allocationSize(value.`widthPx`) +
             FfiConverterULong.allocationSize(value.`heightPx`) +
             FfiConverterOptionalString.allocationSize(value.`blurhash`) +
-            FfiConverterString.allocationSize(value.`blob`)
+            FfiConverterString.allocationSize(value.`blobId`)
     )
 
     override fun write(value: DocImage, buf: ByteBuffer) {
@@ -1632,7 +1632,7 @@ public object FfiConverterTypeDocImage: FfiConverterRustBuffer<DocImage> {
             FfiConverterULong.write(value.`widthPx`, buf)
             FfiConverterULong.write(value.`heightPx`, buf)
             FfiConverterOptionalString.write(value.`blurhash`, buf)
-            FfiConverterString.write(value.`blob`, buf)
+            FfiConverterString.write(value.`blobId`, buf)
     }
 }
 
@@ -1643,7 +1643,7 @@ data class DocImagePatch (
     var `widthPx`: kotlin.ULong?, 
     var `heightPx`: kotlin.ULong?, 
     var `blurhash`: kotlin.String??, 
-    var `blob`: kotlin.String?
+    var `blobId`: kotlin.String?
 ) {
     
     companion object
@@ -1668,7 +1668,7 @@ public object FfiConverterTypeDocImagePatch: FfiConverterRustBuffer<DocImagePatc
             FfiConverterOptionalULong.allocationSize(value.`widthPx`) +
             FfiConverterOptionalULong.allocationSize(value.`heightPx`) +
             FfiConverterOptionalOptionalString.allocationSize(value.`blurhash`) +
-            FfiConverterOptionalString.allocationSize(value.`blob`)
+            FfiConverterOptionalString.allocationSize(value.`blobId`)
     )
 
     override fun write(value: DocImagePatch, buf: ByteBuffer) {
@@ -1676,7 +1676,7 @@ public object FfiConverterTypeDocImagePatch: FfiConverterRustBuffer<DocImagePatc
             FfiConverterOptionalULong.write(value.`widthPx`, buf)
             FfiConverterOptionalULong.write(value.`heightPx`, buf)
             FfiConverterOptionalOptionalString.write(value.`blurhash`, buf)
-            FfiConverterOptionalString.write(value.`blob`, buf)
+            FfiConverterOptionalString.write(value.`blobId`, buf)
     }
 }
 
@@ -2465,6 +2465,158 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class SidebarMode {
+    
+    HIDDEN,
+    COMPACT,
+    EXPANDED;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSidebarMode: FfiConverterRustBuffer<SidebarMode> {
+    override fun read(buf: ByteBuffer) = try {
+        SidebarMode.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: SidebarMode) = 4UL
+
+    override fun write(value: SidebarMode, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class SidebarPosition {
+    
+    LEFT,
+    RIGHT;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSidebarPosition: FfiConverterRustBuffer<SidebarPosition> {
+    override fun read(buf: ByteBuffer) = try {
+        SidebarPosition.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: SidebarPosition) = 4UL
+
+    override fun write(value: SidebarPosition, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class SidebarVisibility {
+    
+    VISIBLE,
+    HIDDEN;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSidebarVisibility: FfiConverterRustBuffer<SidebarVisibility> {
+    override fun read(buf: ByteBuffer) = try {
+        SidebarVisibility.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: SidebarVisibility) = 4UL
+
+    override fun write(value: SidebarVisibility, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class TabListVisibility {
+    
+    VISIBLE,
+    HIDDEN;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTabListVisibility: FfiConverterRustBuffer<TabListVisibility> {
+    override fun read(buf: ByteBuffer) = try {
+        TabListVisibility.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: TabListVisibility) = 4UL
+
+    override fun write(value: TabListVisibility, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class TableViewMode {
+    
+    HIDDEN,
+    RAIL,
+    TAB_ROW;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTableViewMode: FfiConverterRustBuffer<TableViewMode> {
+    override fun read(buf: ByteBuffer) = try {
+        TableViewMode.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: TableViewMode) = 4UL
+
+    override fun write(value: TableViewMode, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 

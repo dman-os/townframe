@@ -19,7 +19,7 @@ pub mod doc {
         pub width_px: u64,
         pub height_px: u64,
         pub blurhash: Option<DocId>,
-        pub blob: DocId,
+        pub blob_id: DocId,
     }
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]

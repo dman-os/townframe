@@ -211,14 +211,15 @@ impl metastore::Host for WashCtx {
     async fn get_wflow(&mut self, key: String) -> wasmtime::Result<Option<metastore::WflowMeta>> {
         let plugin = TownframewflowPlugin::from_ctx(self);
         let meta = plugin.metastore.get_wflow(&key).await.to_anyhow()?;
-        Ok(meta.map(|m| metastore::WflowMeta {
-            key: m.key,
-            service: match m.service {
-                WflowServiceMeta::Wasmcloud(w) => {
+        Ok(meta.map(|meta| metastore::WflowMeta {
+            key: meta.key,
+            service: match meta.service {
+                WflowServiceMeta::Wasmcloud(wflow) => {
                     metastore::WflowServiceMeta::Wasmcloud(metastore::WasmcloudWflowServiceMeta {
-                        workload_id: w.workload_id,
+                        workload_id: wflow.workload_id,
                     })
                 }
+                WflowServiceMeta::LocalNative => metastore::WflowServiceMeta::LocalNative,
             },
         }))
     }

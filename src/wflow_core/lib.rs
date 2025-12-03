@@ -5,6 +5,7 @@ mod interlude {
 use crate::interlude::*;
 
 pub mod gen;
+pub mod kvstore;
 pub mod log;
 pub mod metastore;
 pub mod partition;

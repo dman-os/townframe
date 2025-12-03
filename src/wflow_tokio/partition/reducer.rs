@@ -1,3 +1,6 @@
+//! FIXME: have the reducer explicitly know the N of effect workers
+//! and assign jobs directly with acks
+
 use crate::interlude::*;
 
 use std::sync::atomic::Ordering;

@@ -8,16 +8,19 @@
 
 ### Stack
 
-- [ ] Get pglite building to oci
-  - [ ] For pglite-build
-  - [x] Maybe a wash provider?
-  - [ ] Maybe wasi component
+- [ ] PgLite
+  - [ ] Get parametrized queries to work
+  - [ ] It should accept engine from outside
 - [ ] Finish autosurgeon::Patch
   - [ ] Fork with context generic programming
+  - [ ] autosurgeon doens't respect serde attribs like untagged and camelCase
 - [x] Test to assert snapshot recovery works
 - [x] Sqlite backed KvStore impl
 - [x] Get uniffi working on android
 - [x] Save a photo
+- [ ] Blobstore
+  - [ ] Blake3 sums
+- [ ] Receipt parsing
 - [ ] wflow
   - [x] in-memory smoke
   - [ ] Ingress workload
@@ -27,45 +30,53 @@
   - [ ] web UI
   - [ ] Non-wasm impl
     - [ ] Catch panics
+  - [ ] Service for wflow_tokio
+- [ ] CI/CD
+  - [ ] Publish
+    - [ ] Docker image
+    - [ ] WASM OCI
+    - [ ] Android APK 
+      - [ ] to F-Droid
+    - [ ] Linux Appimage
+      - [ ] to Flathub
+    - [ ] Windows.exe
+      - [ ] to Scoop.sh
+  - [ ] Deploy
+    - [ ] Buy domain
+      - [ ] https://daybook.tf
+- [ ] PgLite based testing
 - [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
 - [ ] DRY up all the wit bindgen
 - [ ] Move http tests into api crates
+  - [ ] Replace http with wrpc?
 - [ ] Code generator for http wrapper
-- [ ] PgLite based testing
 - [ ] Policy against tokio mutexes (cancel safety)
 - [ ] Move to wasmcloud v2
   - [ ] Use async on wit_bindgen
+    - [ ] Replace tokio with wstd or wit_bindgen::block_on
+  - [ ] Wasi 0.3
+    - [ ] wRPC everything??
 - [ ] Replace time with jiff??
-- [ ] Wasi 0.3
-  - [ ] wRPC everything
-- [ ] autosurgeon doens't respect serde attribs like untagged and camelCase
 - [ ] Pipeline editor web app
 - [ ] wrpc + iroh
-
----
-
-### Features
-
-- Data model
-  - [x] Document repository with tests
-    - [ ] Tests
-  - [x] Automerge
-    - [ ] Tests
-- Ingest
-  - [ ] Screenshots
-  - [ ] Photographs
-  - [ ] Text input
-  - [ ] Audio recordings
-  - [ ] Browser snips
-  - [ ] Social bots
-- Magic wand
+- [ ] Magic wand
   - [ ] Follow bubble behavior from android
   - [ ] Status bar/Gesture bar insets for puck and widgets
   - [ ] Puck drop required to be on center bug
+- [ ] Tutorial
 
 ### Upstream Issues
 
 ## design-doc
+
+### Usecases
+
+- Expense tracking [MVP]
+- Sleep tracking 
+- Work tracking
+- Goals and planning
+	- Budgeting
+	- Tasks
 
 ### Architecture
 
@@ -74,39 +85,63 @@
   - Locally
   - And also through wasmcloud
 - SQlite or PGLite
+- Durable execution
+  - Homebrew
 
 ### Features
+
+- Immediate proveout
+  - [ ] Plugins/extensability
+    - [ ] Registry
+      - [ ] OCI based
+    - [ ] Un-previlaged processors should go in their own branch
+  - [ ] Chatbot
+  - [ ] Dynamic UI
+  - [ ] FUSE
+  - [ ] Programmability
+  - [ ] Granary
 
 - Daybook
   - Core
     - E2ee
-    - Multiplayer editing
     - Muti-device
     - Auth
+    - Multi-user 
+      - Multiplayer editing
+      - Collaborative vaults
+    - Branch based workflow (think Patchwork)
   - Application
+    - For you screen
+      - Short form like swiping based call-to-action/summary
     - Inbox screen
-    - Capture screen
-      - Photo
-      - Video
+      - Gen UI based assistant
+    - Capture screen [MVP]
+      - Photo [MVP]
+      - Video [MVP]
         - Live transcript
-      - Audio
+      - Audio [MVP]
         - Live transcript
-      - Text
-    - Config screen
+      - Text [MVP]
+    - Config screen [MVP]
     - Collection screen
-      - Group by time
-      - Path based tree
+      - Timespan #MPV
+        - Dayspan
+        - Weekspan
+        - Monthspan
+        - Longspan
+      - Path based tree [MVP]
       - Table
-      - Kanban
+      - Kanban [Stretch]
     - Markdown editor
       - Subtext better?
-    - Screenshots
-    - Magic wand
-    - Share reciever
-    - Print doc
+    - Screenshots [MVP]
+    - Magic wand [MVP]
+    - Share reciever [MVP]
+    - Print doc [Stretch]
     - Import/export
       - Markdown
-    - Multiple window support
+    - Multiple window support [Stretch]
+    - Self hosted auto-updates for android app (think Telegram)
     - Document types
       - Images
         - Thumbnails
@@ -114,34 +149,93 @@
         - Thumbnails
       - Audio
       - Markdown/subtext
-  - Server
-    - Object store
+    - Embed web browser [Stretch]
+  - Server [MVP]
+    - Object store [MVP]
   - Processors
-    - Pseudo labeler
-    - OCR
+    - Pseudo labeler [MVP]
+    - OCR [MVP]
     - ContentToTag
     - Transcript
     - Thumbnails
   - Ingest
-    - Telegram bot
+    - Telegram bot [MVP]
     - Browser extension
     - Discord bot
     - Mastodon bot
   - CLI
-    - FUSE tree on Linux
-    - Directly processor on given file
+    - FUSE tree on Linux (think Ethersync) [MVP]
+    - Directly run processor on given file
   - Quality
-    - CI/CD
+    - CI/CD [MVP]
     - GUI tests
 - Granary
   - Metering for LLM requests
   - Metering for object store
 
-#### Stretch goals
+### Guiding stars
 
-- Self hosted auto-updates for android app (think Telegram)
+- I don't want to be a librarian
+  - I don't want the burden of maintaining the documents of my life
+- I should be able to just use one feature without being overloaded by the others.
+- I should be able to get some value even during periods of low usage.
+- I don't want to talk to a robot unless I want to
+  - Language is a vector of manipulation
+- Third-party server host should have zero leverage over me
+  - Might be impossible but let's try
+- Don't assume the resources of silicon valley
+  - Captial
+  - Brain cells
+  - Free time
+  - I.e. codebase should require low-effort maintaince
+- No walled garden
+  - Easily find new uses for their vault
 
 ## dev-log
+
+### 2025-12-09 | branch first
+
+Patchwork is a big inspiration for this system and I've been thinking a lot about their branch based workflow.
+- Fantastic place to stuff in unverified modifications.
+  - From LLMs 
+  - Other users
+  - Processors
+
+### 2025-12-03 | pglite
+
+My Cursor subscription finally reset and I just blew 20$ of the allowance porting [pglite-oxide](https://github.com/f0rr0/pglite-oxide) to a wash plugin.
+Not even sure if I'll stick with it honestly, but it does trump out SQLite on "shiny" which is a metric for some reason :p.
+Comparision with SQLite:
+
+- Sqlite pros
+  - Starts faster ++
+  - Is generally faster +++
+  - Single file database ++
+  - Not experimental ++++
+  - Litestream exists: a generally avail solution for PoP edge +++
+    - Probably can write something simlar for postgres -
+  - Can use sqlx ++
+- Pglite pros
+  - More extensions ++
+  - Can use postgres on server side for large deployments +++++
+    - Litestream and Turso have an answer here but they'ren not ready -
+  - More features/prorammable ++
+  - I love postgres? ++
+
+SQLite should win by all means here but I really do love postgres.
+I'm going to PGLite a bit more chance.
+The biggest win of SQLite is that it's "not-experimental".
+I.e. PGLite will probably have bugs and unsupported edge cases.
+I'll continue with PGLite but with the expectation of quick retreat to SQLite when I encounter these.
+I do want to see how far I can take it.
+
+PGLite does have a lot of promise, right?
+Can't wait until *someone* (NOT ME!) gets it to build to wasm32-wasip3 using wasi-sdk over wasi:sql interface using wit-bindgen for C.
+I can't afford any such detours.
+
+---
+
+Make that $40 ;;
 
 ### 2025-11-29 | "routing"
 
@@ -358,8 +452,6 @@ Concerns:
     - FFI boundary is expensive to cros ruling out Elm
     - Crux provide a nice abstraction here but maybe too much abstraction?
       - I think I'll wait on them to make some progress and see how that shakes out
-
-I 
 
 ### 2025-07-26
 

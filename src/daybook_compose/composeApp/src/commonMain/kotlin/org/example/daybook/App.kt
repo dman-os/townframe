@@ -43,6 +43,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import org.example.daybook.ChromeState
+import org.example.daybook.ProvideChromeState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
@@ -63,11 +65,12 @@ import kotlinx.coroutines.launch
 import org.example.daybook.capture.CameraCaptureContext
 import org.example.daybook.capture.ProvideCameraCaptureContext
 import org.example.daybook.capture.screens.CaptureScreen
+import org.example.daybook.settings.SettingsScreen
 import org.example.daybook.tables.CompactLayout
 import org.example.daybook.tables.ExpandedLayout
-import org.example.daybook.tables.MediumLayout
 import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
+import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiCtx
 import org.example.daybook.uniffi.FfiException
@@ -104,7 +107,10 @@ data class PermissionsContext(
 }
 
 data class AppContainer(
-    val ffiCtx: FfiCtx, val drawerRepo: DrawerRepoFfi, val tablesRepo: TablesRepoFfi
+    val ffiCtx: FfiCtx, 
+    val drawerRepo: DrawerRepoFfi, 
+    val tablesRepo: TablesRepoFfi,
+    val configRepo: ConfigRepoFfi
 )
 
 val LocalContainer = staticCompositionLocalOf<AppContainer> {
@@ -116,7 +122,7 @@ data class AppConfig(
 )
 
 enum class AppScreens {
-    Home, Capture, Tables
+    Home, Capture, Tables, Settings
 }
 
 private sealed interface AppInitState {
@@ -426,6 +432,7 @@ fun App(
         val fcx = FfiCtx.forFfi()
         val drawerRepo = DrawerRepoFfi.load(fcx = fcx)
         val tablesRepo = TablesRepoFfi.load(fcx = fcx)
+        val configRepo = ConfigRepoFfi.load(fcx = fcx)
         
         // Initialize first-time data if needed
         val tablesViewModel = TablesViewModel(tablesRepo)
@@ -433,7 +440,10 @@ fun App(
         
         initState = AppInitState.Ready(
             AppContainer(
-                ffiCtx = fcx, drawerRepo = drawerRepo, tablesRepo = tablesRepo
+                ffiCtx = fcx, 
+                drawerRepo = drawerRepo, 
+                tablesRepo = tablesRepo,
+                configRepo = configRepo
             )
         )
     }
@@ -459,21 +469,25 @@ fun App(
                     onDispose {
                         appContainer.drawerRepo.close()
                         appContainer.tablesRepo.close()
+                        appContainer.configRepo.close()
                         appContainer.ffiCtx.close()
                     }
                 }
-
+    
                 CompositionLocalProvider(
                     LocalContainer provides appContainer,
                 ) {
                     // Provide camera capture context for coordination between camera and bottom bar
                     val cameraCaptureContext = remember { CameraCaptureContext() }
+                    val chromeStateStack = remember { ChromeStateStack() }
                     ProvideCameraCaptureContext(cameraCaptureContext) {
-                        AdaptiveAppLayout(
-                            modifier = surfaceModifier,
-                            navController = navController,
-                            extraAction = extraAction
-                        )
+                        CompositionLocalProvider(LocalChromeStateStack provides chromeStateStack) {
+                            AdaptiveAppLayout(
+                                modifier = surfaceModifier,
+                                navController = navController,
+                                extraAction = extraAction
+                            )
+                        }
                     }
                 }
             }
@@ -539,7 +553,7 @@ fun DaybookHomeScreen(
         }
 
         DaybookNavigationType.NAVIGATION_RAIL -> {
-            MediumLayout(
+            ExpandedLayout(
                 modifier = modifier, navController = navController, extraAction = extraAction
             )
         }
@@ -554,7 +568,9 @@ fun DaybookHomeScreen(
 
 
 @Composable
-fun TablesScreen() {
+fun TablesScreen(
+    modifier: Modifier = Modifier
+) {
     val tablesRepo = LocalContainer.current.tablesRepo
     val vm = viewModel {
         TablesViewModel(tablesRepo = tablesRepo)
@@ -575,7 +591,7 @@ fun TablesScreen() {
     when (tablesState) {
         is TablesState.Error -> {
             Column(
-                modifier = Modifier.safeContentPadding().fillMaxSize(),
+                modifier = modifier,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text("Error loading tables: ${tablesState.error.message()}")
@@ -584,7 +600,7 @@ fun TablesScreen() {
 
         is TablesState.Loading -> {
             Column(
-                modifier = Modifier.safeContentPadding().fillMaxSize(),
+                modifier = modifier,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 CircularProgressIndicator()
@@ -594,7 +610,7 @@ fun TablesScreen() {
 
         is TablesState.Data -> {
             Column(
-                modifier = Modifier.safeContentPadding().fillMaxSize().padding(16.dp),
+                modifier = modifier.padding(16.dp),
             ) {
                 // Selected Table Info
                 if (selectedTable != null) {
@@ -652,22 +668,25 @@ fun Routes(
     extraAction: (() -> Unit)? = null,
     navController: NavHostController,
 ) {
-
     NavHost(
         startDestination = AppScreens.Home.name,
         navController = navController,
-        modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState())
     ) {
         composable(route = AppScreens.Capture.name) {
-            CaptureScreen()
+            CaptureScreen(modifier = modifier)
         }
         composable(route = AppScreens.Tables.name) {
-            TablesScreen()
+            TablesScreen(modifier = modifier)
+        }
+        composable(route = AppScreens.Settings.name) {
+            ProvideChromeState(ChromeState(title = "Settings")) {
+                SettingsScreen(modifier = modifier)
+            }
         }
         composable(route = AppScreens.Home.name) {
             var showContent by remember { mutableStateOf(false) }
             Column(
-                modifier = Modifier.safeContentPadding().fillMaxSize(),
+                modifier = modifier,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Button(onClick = {

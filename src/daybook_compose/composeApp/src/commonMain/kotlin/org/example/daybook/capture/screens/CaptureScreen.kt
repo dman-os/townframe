@@ -25,6 +25,7 @@ import org.example.daybook.capture.DaybookCameraPreview
 import org.example.daybook.capture.LocalCameraCaptureContext
 import kotlin.time.Clock
 import kotlin.uuid.Uuid
+import androidx.compose.ui.Modifier
 
 enum class CaptureMode {
     Text,
@@ -125,7 +126,9 @@ class CaptureScreenViewModel(
 }
 
 @Composable
-fun CaptureScreen() {
+fun CaptureScreen(
+    modifier: Modifier = Modifier
+) {
     val drawerRepo = LocalContainer.current.drawerRepo
     val vm = viewModel {
         CaptureScreenViewModel(drawerRepo = drawerRepo)

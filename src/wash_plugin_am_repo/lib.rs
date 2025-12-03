@@ -217,7 +217,13 @@ impl repo::Host for WashCtx {
 
         match plugin
             .am_ctx
-            .reconcile_path_at_heads(&doc_id_rust, &heads_rust, obj_id_rust, path_rust, &autosurgeon_json)
+            .reconcile_path_at_heads(
+                &doc_id_rust,
+                &heads_rust,
+                obj_id_rust,
+                path_rust,
+                &autosurgeon_json,
+            )
             .await
         {
             Ok(()) => Ok(Ok(())),

@@ -30,7 +30,7 @@ pub fn feature(reg: &TypeReg) -> Feature {
                     "blurhash",
                     RecordField::builder(doc_id).optional(reg).build(),
                 ),
-                ("blob", RecordField::builder(doc_id).build()),
+                ("blob_id", RecordField::builder(doc_id).build()),
             ])
             .build(),
     ));

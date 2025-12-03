@@ -69,7 +69,9 @@ fn pseudo_labeler(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<
                 return Err(JobErrorX::Terminal(ferr!("document not found: {doc_id}")));
             }
             Err(err) => {
-                return Err(JobErrorX::Terminal(ferr!("error getting document: {err:?}")));
+                return Err(JobErrorX::Terminal(ferr!(
+                    "error getting document: {err:?}"
+                )));
             }
         };
         let doc: crate::gen::doc::Doc = serde_json::from_str(&json)
@@ -113,12 +115,12 @@ fn pseudo_labeler(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<
 
     // Find or create the pseudo label tag
     let mut updated_tags = doc.tags.clone();
-    let pseudo_label_index = updated_tags.iter().position(|tag| {
-        matches!(tag, crate::gen::doc::DocTag::PseudoLabel(_))
-    });
-    
+    let pseudo_label_index = updated_tags
+        .iter()
+        .position(|tag| matches!(tag, crate::gen::doc::DocTag::PseudoLabel(_)));
+
     let new_labels = vec![llm_response.clone()];
-    
+
     match pseudo_label_index {
         Some(index) => {
             // Replace existing pseudo label tag at the found index

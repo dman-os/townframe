@@ -19,6 +19,7 @@ use crate::interlude::*;
 uniffi::setup_scaffolding!();
 
 mod am;
+mod config;
 mod drawer;
 mod ffi;
 mod globals;

@@ -1,8 +1,6 @@
 use crate::interlude::*;
 
-use crate::r#gen::doc::{
-    Doc, DocContent, DocContentKind, DocTag, DocTagKind,
-};
+use crate::r#gen::doc::{Doc, DocContent, DocContentKind, DocTag, DocTagKind};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PredicateClause {

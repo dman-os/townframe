@@ -107,6 +107,7 @@ interface metastore {
 
     variant wflow-service-meta {
         wasmcloud(wasmcloud-wflow-service-meta),
+        local-native,
     }
 
     record wasmcloud-wflow-service-meta {

@@ -19,7 +19,7 @@ dotenv-flow.workspace = true
 
 utils_rs = { workspace = true, features = ["native"] }
 
-tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time"] }
 http.workspace = true
 
 # generator

@@ -124,18 +124,10 @@ class RevealBottomSheetState(
         setProgressImmediate(anim.value)
     }
 
-    fun partialExpand(animationSpec: AnimationSpec<Float> = spring()) {
+    fun showToProgress(p: Float) {
         scope.launch {
             isVisible = true
-            anim.animateTo(0.5f, animationSpec = animationSpec)
-            setProgressImmediate(anim.value)
-        }
-    }
-
-    fun expand(animationSpec: AnimationSpec<Float> = spring()) {
-        scope.launch {
-            isVisible = true
-            anim.animateTo(1f, animationSpec = animationSpec)
+            anim.snapTo(p.coerceIn(0f, 1f))
             setProgressImmediate(anim.value)
         }
     }
@@ -244,13 +236,18 @@ fun RevealBottomSheetScaffold(
                 { content(PaddingValues(bottom = sheetPeekHeight)) },
                 {
                     // nested-scroll connection: convert nested pre-scroll into sheet progress
+                    // Use onPostScroll instead of onPreScroll to allow children to consume scroll first
                     val sheetNestedScroll = remember(sheetState, sheetHeightPx, peekPx) {
                         object : NestedScrollConnection {
-                            override fun onPreScroll(
+                            override fun onPostScroll(
+                                consumed: Offset,
                                 available: Offset,
                                 source: NestedScrollSource
                             ): Offset {
+                                // Only consume scroll if children didn't consume it (available.y != 0)
                                 val dy = available.y
+                                if (dy == 0f) return Offset.Zero
+                                
                                 val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
                                 if (total <= 0f) return Offset.Zero
                                 val currentVisible = peekPx + total * sheetState.progress

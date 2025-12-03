@@ -6,6 +6,7 @@ use autosurgeon::reconcile_prop;
 pub mod app {
     use super::*;
 
+    use daybook_core::config::ConfigStore;
     use daybook_core::tables::TablesStore;
 
     pub fn version_latest() -> Res<Vec<u8>> {
@@ -14,6 +15,7 @@ pub mod app {
         // annotate schema for app document
         doc.put(ROOT, "$schema", "daybook.app")?;
         reconcile_prop(&mut doc, ROOT, TablesStore::PROP, TablesStore::default())?;
+        reconcile_prop(&mut doc, ROOT, ConfigStore::PROP, ConfigStore::default())?;
         Ok(doc.save_nocompress())
     }
 }

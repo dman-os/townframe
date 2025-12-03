@@ -3,9 +3,7 @@ use crate::interlude::*;
 pub mod predicates;
 
 use crate::drawer::{DrawerEvent, DrawerRepo};
-use crate::r#gen::doc::{
-    Doc, DocId,
-};
+use crate::r#gen::doc::{Doc, DocId};
 
 pub use wflow::{PartitionLogIngress, WflowIngress};
 
@@ -38,8 +36,8 @@ pub async fn spawn_doc_triage_worker(
     ingress: Arc<dyn WflowIngress>,
     config_repo: Arc<crate::config::ConfigRepo>,
 ) -> Res<DocTriageWorkerHandle> {
-    use crate::repos::Repo;
     use crate::config::ConfigEvent;
+    use crate::repos::Repo;
 
     // Get initial config and heads
     let initial_config = config_repo.get_triage_config_sync().await;
@@ -49,7 +47,8 @@ pub async fn spawn_doc_triage_worker(
     let config_state = Arc::new(tokio::sync::RwLock::new((initial_config, initial_heads)));
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<DocChangeEvent>();
-    let (config_event_tx, mut config_event_rx) = tokio::sync::mpsc::unbounded_channel::<ConfigEvent>();
+    let (config_event_tx, mut config_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<ConfigEvent>();
 
     let listener = repo.register_listener({
         let event_tx = event_tx.clone();
@@ -73,7 +72,7 @@ pub async fn spawn_doc_triage_worker(
             // NOTE: we don't want to drop the listeners before we're done
             let _listener = listener;
             let _config_listener = config_listener;
-            
+
             let retry = |event: DocChangeEvent| {
                 tokio::spawn({
                     let event_tx = event_tx.clone();
@@ -225,17 +224,18 @@ pub async fn triage(
 ) -> Res<()> {
     for (processor_id, processor) in &config.processors {
         // Deserialize predicate from JSON
-        let predicate: predicates::PredicateClause = match serde_json::from_value(processor.predicate.0.clone()) {
-            Ok(p) => p,
-            Err(err) => {
-                error!(?err, processor_id = ?processor_id, "error deserializing predicate");
-                continue;
-            }
-        };
+        let predicate: predicates::PredicateClause =
+            match serde_json::from_value(processor.predicate.0.clone()) {
+                Ok(p) => p,
+                Err(err) => {
+                    error!(?err, processor_id = ?processor_id, "error deserializing predicate");
+                    continue;
+                }
+            };
         if predicate.matches(doc) {
             let job_id = {
-                use std::hash::{Hash, Hasher};
                 use data_encoding::BASE32;
+                use std::hash::{Hash, Hasher};
                 // FIXME: we probably want to use a stable hasher impl
                 let mut hasher = std::hash::DefaultHasher::default();
                 doc_heads.hash(&mut hasher);

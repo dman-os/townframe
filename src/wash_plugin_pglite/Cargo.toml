@@ -8,18 +8,15 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-path = "src/lib.rs"
+path = "lib.rs"
 
 [dependencies]
 # internal
 utils_rs.workspace = true
 
-# wasm - wasmtime 38 with WASI Preview1 support
-wasmtime = "*"
-wasmtime-wasi = { version = "38.0.4" }
-cap-std = "3"
-
-# wash runtime for plugin
+# wasm
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
 wash-runtime.workspace = true
 
 # async
@@ -37,27 +34,25 @@ tracing.workspace = true
 # runtime installation
 directories = "5"
 tar = "0.4"
-xz2 = "0.1"
 flate2 = "1"
 getrandom = "0.2"
 zstd = "0.13"
 
-
 # encoding
 serde.workspace = true
 serde_json.workspace = true
-bytes = "1"
+bytes.workspace = true
 postgres-protocol = "0.6.9"
 fallible-iterator = "0.2"
 uuid.workspace = true
 time = { workspace = true, default-features = false, features = ["serde", "parsing", "formatting"] }
-
 [build-dependencies]
-ureq = { version = "2", features = ["native-tls"] }
+reqwest = { version = "0.11", features = ["blocking", "rustls-tls"] }
+sha2 = "0.10"
 xz2 = "0.1"
 tar = "0.4"
 zstd = "0.13"
-wasmtime = "*"
+wasmtime.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

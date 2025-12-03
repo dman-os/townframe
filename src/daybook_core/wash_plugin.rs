@@ -122,9 +122,8 @@ impl drawer::Host for WashCtx {
             })
             .collect();
 
-        let heads_rust = heads_rust.map_err(|e| {
-            wasmtime::Error::msg(format!("error parsing heads: {e}"))
-        })?;
+        let heads_rust =
+            heads_rust.map_err(|e| wasmtime::Error::msg(format!("error parsing heads: {e}")))?;
 
         let change_hash_set = crate::ChangeHashSet(Arc::from(heads_rust));
 
@@ -142,7 +141,8 @@ impl drawer::Host for WashCtx {
             Err(e) => {
                 if e.to_string().contains("doc not found") {
                     Ok(Err(drawer::GetDocError::DocNotFound))
-                } else if e.to_string().contains("invalid heads") || e.to_string().contains("hash") {
+                } else if e.to_string().contains("invalid heads") || e.to_string().contains("hash")
+                {
                     Ok(Err(drawer::GetDocError::InvalidHeads(e.to_string())))
                 } else {
                     Ok(Err(drawer::GetDocError::Other(e.to_string())))
@@ -172,9 +172,8 @@ impl drawer::Host for WashCtx {
             })
             .collect();
 
-        let heads_rust = heads_rust.map_err(|e| {
-            wasmtime::Error::msg(format!("error parsing heads: {e}"))
-        })?;
+        let heads_rust =
+            heads_rust.map_err(|e| wasmtime::Error::msg(format!("error parsing heads: {e}")))?;
 
         let change_hash_set = crate::ChangeHashSet(Arc::from(heads_rust));
 
@@ -185,17 +184,19 @@ impl drawer::Host for WashCtx {
         // Construct DocPatch manually from JSON value
         use std::default::Default;
         let mut doc_patch = crate::gen::doc::DocPatch::default();
-        
+
         if let Some(id) = patch_value.get("id").and_then(|v| v.as_str()) {
             doc_patch.id = Some(id.to_string());
         }
         if let Some(created_at) = patch_value.get("created_at") {
-            doc_patch.created_at = serde_json::from_value(created_at.clone())
-                .map_err(|e| wasmtime::Error::msg(format!("error deserializing created_at: {e}")))?;
+            doc_patch.created_at = serde_json::from_value(created_at.clone()).map_err(|e| {
+                wasmtime::Error::msg(format!("error deserializing created_at: {e}"))
+            })?;
         }
         if let Some(updated_at) = patch_value.get("updated_at") {
-            doc_patch.updated_at = serde_json::from_value(updated_at.clone())
-                .map_err(|e| wasmtime::Error::msg(format!("error deserializing updated_at: {e}")))?;
+            doc_patch.updated_at = serde_json::from_value(updated_at.clone()).map_err(|e| {
+                wasmtime::Error::msg(format!("error deserializing updated_at: {e}"))
+            })?;
         }
         if let Some(content) = patch_value.get("content") {
             doc_patch.content = serde_json::from_value(content.clone())
@@ -233,9 +234,12 @@ impl drawer::Host for WashCtx {
             Err(e) => {
                 if e.to_string().contains("doc not found") {
                     Ok(Err(drawer::UpdateDocError::DocNotFound))
-                } else if e.to_string().contains("invalid heads") || e.to_string().contains("hash") {
+                } else if e.to_string().contains("invalid heads") || e.to_string().contains("hash")
+                {
                     Ok(Err(drawer::UpdateDocError::InvalidHeads(e.to_string())))
-                } else if e.to_string().contains("invalid patch") || e.to_string().contains("deserializ") {
+                } else if e.to_string().contains("invalid patch")
+                    || e.to_string().contains("deserializ")
+                {
                     Ok(Err(drawer::UpdateDocError::InvalidPatch(e.to_string())))
                 } else {
                     Ok(Err(drawer::UpdateDocError::Other(e.to_string())))
@@ -244,4 +248,3 @@ impl drawer::Host for WashCtx {
         }
     }
 }
-

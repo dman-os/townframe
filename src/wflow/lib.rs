@@ -10,15 +10,13 @@ pub use test::{InitialWorkload, WflowTestContext, WflowTestContextBuilder};
 
 pub mod ingress;
 pub mod kvstore;
-pub mod log;
-pub mod metastore;
-pub mod snapstore;
 
 pub use ingress::{PartitionLogIngress, WflowIngress};
-pub use kvstore::{CasError, CasGuard, KvStore, SqliteKvStore};
-pub use log::KvStoreLog;
-pub use metastore::KvStoreMetadtaStore;
-pub use snapstore::AtomicKvSnapStore;
+pub use kvstore::SqliteKvStore;
+pub use wflow_core::kvstore::log::KvStoreLog;
+pub use wflow_core::kvstore::metastore::KvStoreMetadtaStore;
+pub use wflow_core::kvstore::snapstore::AtomicKvSnapStore;
+pub use wflow_core::kvstore::{CasError, CasGuard, KvStore};
 pub use wflow_core::snapstore::PartitionSnapshot;
 
 use crate::interlude::*;
@@ -35,7 +33,6 @@ pub struct Ctx {
     pub snapstore: Arc<dyn wflow_core::snapstore::SnapStore>,
 }
 
-/// Build and start a wash runtime host with wflow and am-repo plugins
 pub async fn build_wash_host(
     plugins: Vec<Arc<dyn plugin::HostPlugin>>,
 ) -> Res<wash_runtime::host::Host> {
@@ -83,6 +80,7 @@ pub async fn start_partition_worker(
         wcx.log_store.clone(),
         next_entry_id,
         wflow_plugin,
+        Arc::new(wflow_tokio::local_native_host::LocalNativeHost{})
     );
 
     let last_applied_entry_id = next_entry_id.saturating_sub(1);

@@ -7,11 +7,7 @@ use crate::{AtomicKvSnapStore, KvStore, KvStoreLog, KvStoreMetadtaStore, SqliteK
 async fn test_fails_once() -> Res<()> {
     utils_rs::testing::setup_tracing().unwrap();
 
-    let test_cx = WflowTestContext::builder()
-        .build()
-        .await?
-        .start()
-        .await?;
+    let test_cx = WflowTestContext::builder().build().await?.start().await?;
 
     // Register the test_wflows workload
     test_cx
@@ -64,15 +60,9 @@ async fn test_fails_once_sqlite() -> Res<()> {
     // Wrap in Arc<Arc<>> to match the pattern used by in-memory stores
     // This is needed because AtomicKvSnapStore::new requires a concrete type S where S: KvStore
     // and Arc<SqliteKvStore> implements KvStore, so Arc<Arc<SqliteKvStore>> works
-    let metastore_kv = Arc::new(Arc::new(
-        SqliteKvStore::new(db_pool.clone(), "test_metastore").await?,
-    ));
-    let log_store_kv = Arc::new(Arc::new(
-        SqliteKvStore::new(db_pool.clone(), "test_log_store").await?,
-    ));
-    let snapstore_kv = Arc::new(Arc::new(
-        SqliteKvStore::new(db_pool.clone(), "test_snapstore").await?,
-    ));
+    let metastore_kv = Arc::new(SqliteKvStore::new(db_pool.clone(), "test_metastore").await?);
+    let log_store_kv = Arc::new(SqliteKvStore::new(db_pool.clone(), "test_log_store").await?);
+    let snapstore_kv = Arc::new(SqliteKvStore::new(db_pool.clone(), "test_snapstore").await?);
 
     // Create the stores
     let metastore = Arc::new(

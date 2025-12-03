@@ -1,0 +1,38 @@
+---
+source: src/wflow/test.rs
+assertion_line: 438
+expression: log_snapshot
+---
+- - 0
+  - JobInit:
+      job_id: test-pglite-select-one-1
+      timestamp: "[timestamp]"
+      args_json: "{}"
+      override_wflow_retry_policy: ~
+      wflow:
+        key: pglite_select_one
+        service:
+          Wasmcloud:
+            workload_id: workload_123
+- - 1
+  - JobPartitionEffects:
+      source_entry_id: 0
+      effects:
+        - job_id: test-pglite-select-one-1
+          deets:
+            RunJob:
+              run_id: 0
+- - 2
+  - JobEffectResult:
+      job_id: test-pglite-select-one-1
+      timestamp: "[timestamp]"
+      effect_id:
+        entry_id: 1
+        effect_idx: 0
+      run_id: 0
+      start_at: "[timestamp]"
+      end_at: "[timestamp]"
+      result:
+        WflowErr:
+          Terminal:
+            error_json: "query 'SELECT 32767::smallint AS int2_val', row 0, col 0: expected column 'int2_val', got 'col0'\n\[location]"

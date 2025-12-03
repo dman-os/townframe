@@ -52,8 +52,6 @@ mod interlude {
 
 use crate::interlude::*;
 
-use std::io::Write;
-
 mod expect_tags {
     pub const ERROR_TOKIO: &str = "tokio error";
     pub const ERROR_CHANNEL: &str = "channel error";
@@ -279,6 +277,8 @@ mod cheapstr {
 #[cfg(feature = "hash")]
 pub mod hash {
     use super::*;
+
+    use std::io::Write;
 
     const SHA2_256: u64 = 0x12;
     pub fn hash_obj<T: serde::Serialize>(obj: &T) -> String {

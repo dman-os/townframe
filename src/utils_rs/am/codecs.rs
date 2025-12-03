@@ -150,8 +150,8 @@ fn hydrate_value<D: autosurgeon::ReadDoc>(
 
 /// Helper function to convert a scalar value to JSON
 fn scalar_to_json(s: &automerge::ScalarValue) -> serde_json::Value {
-    use automerge::ScalarValue;
     use crate::codecs::sane_iso8601::FORMAT;
+    use automerge::ScalarValue;
     match s {
         ScalarValue::Null => serde_json::Value::Null,
         ScalarValue::Boolean(b) => serde_json::Value::Bool(*b),
@@ -262,7 +262,9 @@ pub mod date {
     ) -> Result<(), R::Error> {
         // Store as ISO 8601 string to match serde codec
         // Format errors should be extremely rare (only if FORMAT is misconfigured)
-        let iso_string = ts.format(&FORMAT).expect("timestamp format should always succeed");
+        let iso_string = ts
+            .format(&FORMAT)
+            .expect("timestamp format should always succeed");
         reconciler.str(iso_string.as_str())
     }
 
@@ -272,7 +274,7 @@ pub mod date {
         prop: autosurgeon::Prop<'a>,
     ) -> Result<OffsetDateTime, autosurgeon::HydrateError> {
         use automerge::{ScalarValue, Value};
-        
+
         // Read the value directly from the document
         let iso_string = match doc.get(obj, &prop)? {
             Some((Value::Scalar(s), _)) => {
@@ -280,22 +282,20 @@ pub mod date {
                     // If stored as a string (new format), use it directly
                     ScalarValue::Str(s) => s.to_string(),
                     // If stored as a timestamp (old format), convert to ISO 8601
-                    ScalarValue::Timestamp(t) => {
-                        match OffsetDateTime::from_unix_timestamp(*t) {
-                            Ok(dt) => dt.format(&FORMAT).map_err(|e| {
-                                autosurgeon::HydrateError::unexpected(
-                                    "a valid timestamp",
-                                    format!("error formatting timestamp: {e}"),
-                                )
-                            })?,
-                            Err(e) => {
-                                return Err(autosurgeon::HydrateError::unexpected(
-                                    "a valid timestamp",
-                                    format!("error converting timestamp: {e}"),
-                                ));
-                            }
+                    ScalarValue::Timestamp(t) => match OffsetDateTime::from_unix_timestamp(*t) {
+                        Ok(dt) => dt.format(&FORMAT).map_err(|e| {
+                            autosurgeon::HydrateError::unexpected(
+                                "a valid timestamp",
+                                format!("error formatting timestamp: {e}"),
+                            )
+                        })?,
+                        Err(e) => {
+                            return Err(autosurgeon::HydrateError::unexpected(
+                                "a valid timestamp",
+                                format!("error converting timestamp: {e}"),
+                            ));
                         }
-                    }
+                    },
                     _ => {
                         return Err(autosurgeon::HydrateError::unexpected(
                             "a string or timestamp",
@@ -311,7 +311,7 @@ pub mod date {
                 ));
             }
         };
-        
+
         OffsetDateTime::parse(&iso_string, &FORMAT).map_err(|err| {
             autosurgeon::HydrateError::unexpected(
                 "a valid ISO 8601 timestamp string",
@@ -437,8 +437,8 @@ pub mod json {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autosurgeon::{hydrate, reconcile};
     use automerge::transaction::Transactable;
+    use autosurgeon::{hydrate, reconcile};
 
     #[test]
     fn test_autosurgeon_json_hydrate_map() {
@@ -458,7 +458,9 @@ mod tests {
     #[test]
     fn test_autosurgeon_json_hydrate_seq() {
         let mut doc = automerge::AutoCommit::new();
-        let list_id = doc.put_object(automerge::ROOT, "items", automerge::ObjType::List).unwrap();
+        let list_id = doc
+            .put_object(automerge::ROOT, "items", automerge::ObjType::List)
+            .unwrap();
         doc.insert(&list_id, 0, "first").unwrap();
         doc.insert(&list_id, 1, "second").unwrap();
         doc.insert(&list_id, 2, 42u64).unwrap();
@@ -474,7 +476,9 @@ mod tests {
     #[test]
     fn test_autosurgeon_json_hydrate_text() {
         let mut doc = automerge::AutoCommit::new();
-        let text_id = doc.put_object(automerge::ROOT, "content", automerge::ObjType::Text).unwrap();
+        let text_id = doc
+            .put_object(automerge::ROOT, "content", automerge::ObjType::Text)
+            .unwrap();
         doc.splice_text(&text_id, 0, 0, "Hello, world!").unwrap();
 
         let hydrated: AutosurgeonJson = hydrate(&doc).unwrap();
@@ -546,7 +550,8 @@ mod tests {
     #[test]
     fn test_autosurgeon_json_hydrate_scalar() {
         let mut doc = automerge::AutoCommit::new();
-        doc.put(automerge::ROOT, "null_val", automerge::ScalarValue::Null).unwrap();
+        doc.put(automerge::ROOT, "null_val", automerge::ScalarValue::Null)
+            .unwrap();
         doc.put(automerge::ROOT, "bool_val", true).unwrap();
         doc.put(automerge::ROOT, "int_val", 42i64).unwrap();
         doc.put(automerge::ROOT, "uint_val", 100u64).unwrap();

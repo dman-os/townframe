@@ -48,11 +48,12 @@ impl SharedServerCtx {
             .expect_or_log("session not in extension");
         session.0
     }
-    
+
     pub async fn cookie_jar(&self) -> Arc<session::CookieJar> {
-        let cookie_jar = leptos_axum::extract::<axum::extract::Extension<std::sync::Weak<session::CookieJar>>>()
-            .await
-            .expect_or_log("cookie jar not in extension");
+        let cookie_jar =
+            leptos_axum::extract::<axum::extract::Extension<std::sync::Weak<session::CookieJar>>>()
+                .await
+                .expect_or_log("cookie jar not in extension");
         cookie_jar.0.upgrade().expect_or_log("cookie jar is gone")
     }
 }
