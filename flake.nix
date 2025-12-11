@@ -156,7 +156,7 @@
             pkg-config
             # libudev-sys
 
-            # openjdk21
+            openjdk21
             # sqlite
             # deno
 

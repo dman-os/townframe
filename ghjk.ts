@@ -40,7 +40,7 @@ ghjk
 		installs.node,
 		ports.pnpm(),
 		ports.pipi({ packageName: "pre-commit" })[0],
-		ports.cargobi({ crateName: "kanidm_tools", locked: true }),
+		// ports.cargobi({ crateName: "kanidm_tools", locked: true }),
 		ports.cargobi({ crateName: "cargo-nextest", locked: true }),
 		ports.cargobi({ crateName: "cargo-ndk", locked: true }),
 		// ports.cargobi({ crateName: "cargo-progenitor", locked: true }),
@@ -75,7 +75,7 @@ ghjk
 		// expo router
 		ports.npmi({ packageName: "eas-cli" })[0],
 		// ports.npmi({ packageName: "@google/gemini-cli" })[0],
-		jdk_temurin({ version: "21.0.8\\+9.0.LTS" }),
+		// jdk_temurin({ version: "21.0.8\\+9.0.LTS" }),
 	)
 	.vars({
 		// java tooling is not great with wayland scaling
@@ -310,7 +310,7 @@ ghjk.task(
 
 		// Run via shell to ensure gradle wrapper is executed correctly
 		const proc = Deno.run({
-			cmd: ["/bin/sh", "-lc", "./gradlew check"],
+			cmd: ["/bin/sh", "-lc", "./gradlew hotReloadDesktopMain"],
 			stdout: "piped",
 			stderr: "piped",
 			cwd: $.workingDir.toString(),

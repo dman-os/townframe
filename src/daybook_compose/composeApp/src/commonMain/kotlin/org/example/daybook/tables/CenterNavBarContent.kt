@@ -1,4 +1,4 @@
-@file:OptIn(kotlin.uuid.ExperimentalUuidApi::class)
+@file:OptIn(kotlin.uuid.ExperimentalUuidApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
 
 package org.example.daybook.tables
 
@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -34,10 +35,12 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import kotlinx.coroutines.launch
 import org.example.daybook.AppScreens
+import org.example.daybook.ChromeState
+import org.example.daybook.LocalChromeStateManager
 import org.example.daybook.LocalContainer
+import org.example.daybook.MainFeatureActionButton
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
-import org.example.daybook.capture.LocalCameraCaptureContext
 
 /**
  * Abstraction for center navigation bar content that adapts based on navigation state
@@ -61,12 +64,16 @@ fun RowScope.CenterNavBarContent(
     onFeatureActivate: suspend (FeatureItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val currentRoute = navController.currentBackStackEntry?.destination?.route
-    val isOnCaptureScreen = currentRoute == AppScreens.Capture.name
-    val captureContext = LocalCameraCaptureContext.current
     val scope = rememberCoroutineScope()
     
-    // When TABS sheet is open, show controls (add button). When closed, show current tab title or camera controls.
+    // Get chrome state from manager
+    val chromeStateManager = LocalChromeStateManager.current
+    val chromeState by chromeStateManager.currentState.collectAsState()
+    val mainFeatureActionButton = chromeState.mainFeatureActionButton
+    val prominentButtons = chromeState.additionalFeatureButtons.filter { it.prominent }
+    val isMenuOpen = showFeaturesMenu || (revealSheetState.isVisible && sheetContent == SheetContent.MENU)
+    
+    // When TABS sheet is open, show controls (add button). When closed, show nav bar features or chrome state button.
     if (revealSheetState.isVisible && sheetContent == SheetContent.TABS) {
         // Add-tab button expands to fill the center area
         Button(
@@ -88,92 +95,101 @@ fun RowScope.CenterNavBarContent(
         ) {
             if (addTabReadyState.value) Text("Release to Add") else Text("Add Tab")
         }
-    } else if (showFeaturesMenu || (revealSheetState.isVisible && sheetContent == SheetContent.MENU)) {
-        // rollout toolbar: fill the center area with nav-style buttons
-        AnimatedVisibility(
-            visible = showFeaturesMenu || (revealSheetState.isVisible && sheetContent == SheetContent.MENU),
-            enter = fadeIn(animationSpec = tween(220)) + slideInHorizontally(
-                initialOffsetX = { it / 4 },
-                animationSpec = tween(220)
-            ),
-            exit = fadeOut(animationSpec = tween(160)) + slideOutHorizontally(
-                targetOffsetX = { it / 4 },
-                animationSpec = tween(160)
-            )
+    } else if (prominentButtons.isNotEmpty() && (isMenuOpen || mainFeatureActionButton == null)) {
+        // Show prominent buttons when:
+        // 1. Menu is open (supplanting main feature action button if it exists), OR
+        // 2. No main feature action button exists (show prominent buttons always)
+        Row(
+            modifier = modifier
+                .weight(1f)
+                .padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                val btnModifier = Modifier.weight(1f).height(48.dp)
-
-                // Render features from the top-level `features` list and minimize the rollout on press
-                features.forEachIndexed { idx, feature ->
-                    val key = feature.key
-                    val iconText = feature.icon
-                    val labelText = feature.label
-
-                    // Highlight when pointer (during drag) is over the button rect, or controller reports ready
-                    val hoverOver =
-                        lastDragWindowPos?.let { pw -> featureButtonLayouts[key]?.contains(pw) }
-                            ?: false
-                    val ready = featureReadyStates.getOrNull(idx)?.value ?: false
-
-                    NavigationBarItem(
-                        onClick = {
+            prominentButtons.forEachIndexed { idx, button ->
+                // Get ready state for this prominent button
+                val prominentButtonKey = button.key
+                // Prominent buttons come after nav bar features in the ready states
+                val readyState = featureReadyStates.getOrNull(
+                    features.size + idx
+                )?.value ?: false
+                val hoverOver = lastDragWindowPos?.let { pw -> 
+                    featureButtonLayouts[prominentButtonKey]?.contains(pw) 
+                } ?: false
+                
+                NavigationBarItem(
+                    onClick = {
+                        if (button.enabled) {
                             scope.launch {
-                                onFeatureActivate(feature)
+                                button.onClick()
                             }
+                        }
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .onGloballyPositioned { layoutCoordinates ->
+                            onFeatureButtonLayout(button.key, layoutCoordinates.boundsInWindow())
                         },
-                        modifier = btnModifier.onGloballyPositioned { layoutCoordinates ->
-                            onFeatureButtonLayout(key, layoutCoordinates.boundsInWindow())
-                        },
-                        icon = {
-                            Text(iconText, style = MaterialTheme.typography.bodyLarge)
-                        },
-                        label = {
-                            Text(labelText, style = MaterialTheme.typography.labelSmall)
-                        },
-                        selected = hoverOver || ready,
-                    )
-                }
+                    icon = { button.icon() },
+                    label = { button.label() },
+                    selected = hoverOver || readyState,
+                    enabled = button.enabled
+                )
             }
         }
-    } else if (isOnCaptureScreen && captureContext != null) {
-        // Show camera capture button when on capture screen
-        val canCapture by captureContext.canCapture.collectAsState()
-        val isCapturing by captureContext.isCapturing.collectAsState()
-        
+    } else if (mainFeatureActionButton != null && !isMenuOpen) {
+        // Show button from ChromeState (only when menu is not open and no prominent buttons to show)
+        val button = mainFeatureActionButton as MainFeatureActionButton.Button
         Button(
             onClick = {
-                captureContext.requestCapture()
+                scope.launch {
+                    button.onClick()
+                }
             },
             modifier = modifier.weight(1f),
-            enabled = canCapture && !isCapturing
+            enabled = button.enabled
         ) {
-            Text(if (isCapturing) "Capturing..." else "Save Photo")
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                button.icon()
+                button.label()
+            }
         }
     } else {
-        // Default: show current tab title
-        val tablesRepo = LocalContainer.current.tablesRepo
-        val vmLocal = viewModel { TablesViewModel(tablesRepo) }
-        val selectedTableId = vmLocal.selectedTableId.collectAsState().value
-        val tablesState = vmLocal.tablesState.collectAsState().value
+        // Show default nav bar features (Home, Capture, Search) in the center
+        Row(
+            modifier = modifier
+                .weight(1f)
+                .padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            features.forEachIndexed { idx, feature ->
+                val hoverOver =
+                    lastDragWindowPos?.let { pw -> featureButtonLayouts[feature.key]?.contains(pw) }
+                        ?: false
+                val ready = featureReadyStates.getOrNull(idx)?.value ?: false
 
-        val currentTabTitle = if (selectedTableId != null && tablesState is TablesState.Data) {
-            val selectedTable = tablesState.tables[selectedTableId]
-            if (selectedTable != null && selectedTable.selectedTab != null) {
-                tablesState.tabs[selectedTable.selectedTab]?.title ?: "No Tab"
-            } else "No Tab"
-        } else "No Tab"
-
-        Box(modifier = modifier.weight(1f), contentAlignment = Alignment.Center) {
-            Text(
-                text = currentTabTitle,
-                style = MaterialTheme.typography.titleMedium,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+                NavigationBarItem(
+                    onClick = {
+                        scope.launch {
+                            onFeatureActivate(feature)
+                        }
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .onGloballyPositioned { layoutCoordinates ->
+                            onFeatureButtonLayout(feature.key, layoutCoordinates.boundsInWindow())
+                        },
+                    icon = {
+                        Text(feature.icon, style = MaterialTheme.typography.bodyLarge)
+                    },
+                    label = {
+                        Text(feature.label, style = MaterialTheme.typography.labelSmall)
+                    },
+                    selected = hoverOver || ready
+                )
+            }
         }
     }
 }

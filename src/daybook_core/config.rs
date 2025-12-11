@@ -4,57 +4,136 @@ use crate::triage::TriageConfig;
 #[derive(Reconcile, Hydrate, Default)]
 pub struct ConfigStore {
     pub triage: TriageConfig,
-    pub tab_list_vis_expanded: Option<TabListVisibility>,
-    pub table_view_mode_compact: Option<TableViewMode>,
-    pub table_rail_vis_compact: Option<TabListVisibility>,
-    pub table_rail_vis_expanded: Option<TabListVisibility>,
-    pub sidebar_vis_expanded: Option<SidebarVisibility>,
-    pub sidebar_pos_expanded: Option<SidebarPosition>,
-    pub sidebar_mode_expanded: Option<SidebarMode>,
-    pub sidebar_auto_hide_expanded: Option<bool>,
+    pub layout: LayoutWindowConfig,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct LayoutWindowConfig {
+    // pub tab_list_vis_expanded: Option<TabListVisibility>,
+    // pub table_view_mode_compact: Option<TableViewMode>,
+    // pub table_rail_vis_compact: Option<TabListVisibility>,
+    // pub table_rail_vis_expanded: Option<TabListVisibility>,
+    // pub sidebar_vis_expanded: Option<SidebarVisibility>,
+    // pub sidebar_pos_expanded: Option<SidebarPosition>,
+    // pub sidebar_mode_expanded: Option<SidebarMode>,
+    // pub sidebar_auto_hide_expanded: Option<bool>,
+    pub center_region: RootLayoutRegion,
+    // pub bottom_region: RootLayoutRegion,
+    pub left_region: RootLayoutRegion,
+    pub right_region: RootLayoutRegion,
+    // expanded specific settings
+    pub left_visible: bool,
+    pub right_visible: bool,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum RegionSize {
+    #[default]
+    Auto,
+    Weight, //(f32),
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct RootLayoutRegion {
+    size: RegionSize,
+    deets: LayoutPane,
+}
+
+impl Default for LayoutWindowConfig {
+    fn default() -> Self {
+        Self {
+            center_region: RootLayoutRegion {
+                size: default(),
+                deets: LayoutPane {
+                    key: "center".into(),
+                    variant: LayoutPaneVariant::Routes(LayoutRoutes {}),
+                },
+            },
+            left_region: RootLayoutRegion {
+                size: default(),
+                deets: LayoutPane {
+                    key: "left".into(),
+                    variant: LayoutPaneVariant::Sidebar(LayoutSidebar {}),
+                },
+            },
+            right_region: RootLayoutRegion {
+                size: default(),
+                deets: LayoutPane {
+                    key: "right".into(),
+                    variant: LayoutPaneVariant::Region(LayoutRegion {
+                        key: "right".into(),
+                        orientation: Orientation::Vertical,
+                        children: vec![
+                            LayoutPane {
+                                key: "top".into(),
+                                variant: LayoutPaneVariant::Region(LayoutRegion {
+                                    key: "top".into(),
+                                    orientation: Orientation::Vertical,
+                                    children: vec![],
+                                }),
+                            },
+                            LayoutPane {
+                                key: "bottom".into(),
+                                variant: LayoutPaneVariant::Region(LayoutRegion {
+                                    key: "bottom".into(),
+                                    orientation: Orientation::Vertical,
+                                    children: vec![],
+                                }),
+                            },
+                        ],
+                    }),
+                },
+            },
+            left_visible: true,
+            right_visible: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct LayoutPane {
+    key: String,
+    variant: LayoutPaneVariant,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum LayoutPaneVariant {
+    // TODO: disallow this pane center region
+    Sidebar(LayoutSidebar),
+    Routes(LayoutRoutes),
+    Region(LayoutRegion),
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct LayoutSidebar {}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct LayoutRoutes {}
+
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct LayoutRegion {
+    key: String,
+    orientation: Orientation,
+    children: Vec<LayoutPane>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Reconcile, Hydrate, Default)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum TabListVisibility {
-    Visible,
+pub enum Orientation {
+    Horizontal,
     #[default]
-    Hidden,
+    Vertical,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Reconcile, Hydrate, Default)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum TableViewMode {
-    #[default]
-    Hidden,
-    Rail,
-    TabRow,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Reconcile, Hydrate, Default)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum SidebarVisibility {
-    #[default]
-    Visible,
-    Hidden,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Reconcile, Hydrate, Default)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum SidebarPosition {
-    Left,
-    #[default]
-    Right,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Reconcile, Hydrate, Default)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum SidebarMode {
-    #[default]
-    Hidden,
-    Compact,
-    Expanded,
-}
+//
 
 impl ConfigStore {
     pub const PROP: &str = "config";
@@ -201,129 +280,14 @@ impl ConfigRepo {
     }
 
     // Tab list visibility settings
-    pub async fn get_tab_list_vis_expanded(&self) -> TabListVisibility {
-        self.store
-            .query_sync(|store| store.tab_list_vis_expanded.unwrap_or_default())
-            .await
+    pub async fn get_layout(&self) -> LayoutWindowConfig {
+        self.store.query_sync(|store| store.layout.clone()).await
     }
 
-    pub async fn set_tab_list_vis_expanded(&self, value: TabListVisibility) -> Res<()> {
-        info!(?value, "set_tab_list_vis_expanded XXX");
+    pub async fn set_layout(&self, value: LayoutWindowConfig) -> Res<()> {
         self.store
             .mutate_sync(move |store| {
-                store.tab_list_vis_expanded = Some(value);
-            })
-            .await?;
-        Ok(())
-    }
-
-    // Table view mode setting
-    pub async fn get_table_view_mode_compact(&self) -> TableViewMode {
-        self.store
-            .query_sync(|store| store.table_view_mode_compact.unwrap_or_default())
-            .await
-    }
-
-    pub async fn set_table_view_mode_compact(&self, value: TableViewMode) -> Res<()> {
-        self.store
-            .mutate_sync(move |store| {
-                store.table_view_mode_compact = Some(value);
-            })
-            .await?;
-        Ok(())
-    }
-
-    // Table rail visibility settings
-    pub async fn get_table_rail_vis_compact(&self) -> TabListVisibility {
-        self.store
-            .query_sync(|store| store.table_rail_vis_compact.unwrap_or_default())
-            .await
-    }
-
-    pub async fn set_table_rail_vis_compact(&self, value: TabListVisibility) -> Res<()> {
-        self.store
-            .mutate_sync(move |store| {
-                store.table_rail_vis_compact = Some(value);
-            })
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_table_rail_vis_expanded(&self) -> TabListVisibility {
-        self.store
-            .query_sync(|store| store.table_rail_vis_expanded.unwrap_or_default())
-            .await
-    }
-
-    pub async fn set_table_rail_vis_expanded(&self, value: TabListVisibility) -> Res<()> {
-        info!(?value, "XXX");
-        self.store
-            .mutate_sync(move |store| {
-                store.table_rail_vis_expanded = Some(value);
-            })
-            .await?;
-        Ok(())
-    }
-
-    // Sidebar visibility settings
-    pub async fn get_sidebar_vis_expanded(&self) -> SidebarVisibility {
-        self.store
-            .query_sync(|store| store.sidebar_vis_expanded.unwrap_or_default())
-            .await
-    }
-
-    pub async fn set_sidebar_vis_expanded(&self, value: SidebarVisibility) -> Res<()> {
-        self.store
-            .mutate_sync(move |store| {
-                store.sidebar_vis_expanded = Some(value);
-            })
-            .await?;
-        Ok(())
-    }
-
-    // Sidebar position settings
-    pub async fn get_sidebar_pos_expanded(&self) -> SidebarPosition {
-        self.store
-            .query_sync(|store| store.sidebar_pos_expanded.unwrap_or_default())
-            .await
-    }
-
-    pub async fn set_sidebar_pos_expanded(&self, value: SidebarPosition) -> Res<()> {
-        self.store
-            .mutate_sync(move |store| {
-                store.sidebar_pos_expanded = Some(value);
-            })
-            .await?;
-        Ok(())
-    }
-
-    // Sidebar mode settings
-    pub async fn get_sidebar_mode_expanded(&self) -> SidebarMode {
-        self.store
-            .query_sync(|store| store.sidebar_mode_expanded.unwrap_or_default())
-            .await
-    }
-
-    pub async fn set_sidebar_mode_expanded(&self, value: SidebarMode) -> Res<()> {
-        self.store
-            .mutate_sync(move |store| {
-                store.sidebar_mode_expanded = Some(value);
-            })
-            .await?;
-        Ok(())
-    }
-
-    // Sidebar auto-hide settings
-    pub async fn get_sidebar_auto_hide_expanded(&self) -> bool {
-        self.store
-            .query_sync(|store| store.sidebar_auto_hide_expanded.unwrap_or(false))
-            .await
-    }
-
-    pub async fn set_sidebar_auto_hide_expanded(&self, value: bool) -> Res<()> {
-        self.store
-            .mutate_sync(move |store| {
-                store.sidebar_auto_hide_expanded = Some(value);
+                store.layout = value;
             })
             .await?;
         Ok(())

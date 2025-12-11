@@ -21,11 +21,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.example.daybook.ConfigViewModel
 import org.example.daybook.LocalContainer
-import org.example.daybook.uniffi.core.SidebarMode
-import org.example.daybook.uniffi.core.SidebarPosition
-import org.example.daybook.uniffi.core.SidebarVisibility
-import org.example.daybook.uniffi.core.TabListVisibility
-import org.example.daybook.uniffi.core.TableViewMode
+// TODO: Update SettingsScreen to use new LayoutWindowConfig structure
+// import org.example.daybook.uniffi.core.SidebarMode
+// import org.example.daybook.uniffi.core.SidebarPosition
+// import org.example.daybook.uniffi.core.SidebarVisibility
+// import org.example.daybook.uniffi.core.TabListVisibility
+// import org.example.daybook.uniffi.core.TableViewMode
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -35,12 +36,15 @@ fun SettingsScreen(
     val configRepo = LocalContainer.current.configRepo
     val configVm = viewModel { ConfigViewModel(configRepo) }
     
+    // TODO: Update to use new LayoutWindowConfig structure
     // Observe sidebar settings
-    val sidebarPosExpandedState = configVm.sidebarPosExpanded.collectAsState()
-    val sidebarPos = sidebarPosExpandedState.value ?: SidebarPosition.RIGHT
+    // val sidebarPosExpandedState = configVm.sidebarPosExpanded.collectAsState()
+    // val sidebarPos = sidebarPosExpandedState.value ?: SidebarPosition.RIGHT
+    val sidebarPos = "RIGHT" // Placeholder
     
-    val sidebarAutoHideExpandedState = configVm.sidebarAutoHideExpanded.collectAsState()
-    val sidebarAutoHide = sidebarAutoHideExpandedState.value ?: false
+    // val sidebarAutoHideExpandedState = configVm.sidebarAutoHideExpanded.collectAsState()
+    // val sidebarAutoHide = sidebarAutoHideExpandedState.value ?: false
+    val sidebarAutoHide = false // Placeholder
     
     Column(
         modifier = modifier
@@ -68,14 +72,15 @@ fun SettingsScreen(
                 style = androidx.compose.material3.MaterialTheme.typography.bodyLarge
             )
             Switch(
-                checked = sidebarPos == SidebarPosition.RIGHT,
+                checked = sidebarPos == "RIGHT",
                 onCheckedChange = { isRight ->
-                    val newPos = if (isRight) SidebarPosition.RIGHT else SidebarPosition.LEFT
-                    configVm.setSidebarPosExpanded(newPos)
+                    // TODO: Update to use new LayoutWindowConfig structure
+                    // val newPos = if (isRight) SidebarPosition.RIGHT else SidebarPosition.LEFT
+                    // configVm.setSidebarPosExpanded(newPos)
                 }
             )
             Text(
-                text = if (sidebarPos == SidebarPosition.RIGHT) "Right" else "Left",
+                text = if (sidebarPos == "RIGHT") "Right" else "Left",
                 modifier = Modifier.padding(start = 8.dp),
                 style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
             )
@@ -95,7 +100,8 @@ fun SettingsScreen(
             Switch(
                 checked = sidebarAutoHide,
                 onCheckedChange = { checked ->
-                    configVm.setSidebarAutoHideExpanded(checked)
+                    // TODO: Update to use new LayoutWindowConfig structure
+                    // configVm.setSidebarAutoHideExpanded(checked)
                 }
             )
             Text(
@@ -118,15 +124,16 @@ fun SettingsScreen(
             )
             ResetLayoutButton(
                 onReset = {
+                    // TODO: Update to use new LayoutWindowConfig structure
                     // Reset all layout settings to defaults
-                    configVm.setSidebarPosExpanded(SidebarPosition.RIGHT)
-                    configVm.setSidebarVisExpanded(SidebarVisibility.VISIBLE)
-                    configVm.setSidebarModeExpanded(SidebarMode.COMPACT)
-                    configVm.setSidebarAutoHideExpanded(false)
-                    configVm.setTabListVisExpanded(TabListVisibility.VISIBLE)
-                    configVm.setTableRailVisExpanded(TabListVisibility.VISIBLE)
-                    configVm.setTableRailVisCompact(TabListVisibility.VISIBLE)
-                    configVm.setTableViewModeCompact(TableViewMode.HIDDEN)
+                    // configVm.setSidebarPosExpanded(SidebarPosition.RIGHT)
+                    // configVm.setSidebarVisExpanded(SidebarVisibility.VISIBLE)
+                    // configVm.setSidebarModeExpanded(SidebarMode.COMPACT)
+                    // configVm.setSidebarAutoHideExpanded(false)
+                    // configVm.setTabListVisExpanded(TabListVisibility.VISIBLE)
+                    // configVm.setTableRailVisExpanded(TabListVisibility.VISIBLE)
+                    // configVm.setTableRailVisCompact(TabListVisibility.VISIBLE)
+                    // configVm.setTableViewModeCompact(TableViewMode.HIDDEN)
                 }
             )
         }

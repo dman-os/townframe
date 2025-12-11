@@ -5,7 +5,6 @@ package org.example.daybook
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
@@ -18,6 +17,36 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
+ * Variants for main feature action button in ChromeState
+ */
+@Immutable
+sealed interface MainFeatureActionButton {
+    /**
+     * A button variant with icon, label (both as Composables), enabled state, and onClick handler
+     */
+    data class Button(
+        val icon: @Composable () -> Unit,
+        val label: @Composable () -> Unit,
+        val enabled: Boolean = true,
+        val onClick: suspend () -> Unit
+    ) : MainFeatureActionButton
+}
+
+/**
+ * Additional feature buttons that can be provided by chrome state.
+ * These can be prominent (shown in center nav bar/sidebar) or non-prominent (shown in menus).
+ */
+@Immutable
+data class AdditionalFeatureButton(
+    val key: String,
+    val icon: @Composable () -> Unit,
+    val label: @Composable () -> Unit,
+    val prominent: Boolean = false,
+    val enabled: Boolean = true,
+    val onClick: suspend () -> Unit
+)
+
+/**
  * State object that drives the Scaffold's chrome (AppBar, etc.)
  */
 @Immutable
@@ -25,7 +54,9 @@ data class ChromeState(
     val title: String? = null,
     val navigationIcon: (@Composable () -> Unit)? = null,
     val actions: (@Composable () -> Unit)? = null,
-    val showTopBar: Boolean = true
+    val showTopBar: Boolean = true,
+    val mainFeatureActionButton: MainFeatureActionButton? = null,
+    val additionalFeatureButtons: List<AdditionalFeatureButton> = emptyList()
 ) {
     companion object {
         val Empty = ChromeState(showTopBar = false)
@@ -33,77 +64,52 @@ data class ChromeState(
 }
 
 /**
- * Stack-based manager for ChromeState, allowing screens to push/pop their chrome configuration
+ * Direct manager for ChromeState - routes directly set their chrome state
  */
-class ChromeStateStack {
-    private val stack = mutableListOf<ChromeState>()
-    private val _topState = MutableStateFlow<ChromeState>(ChromeState.Empty)
+class ChromeStateManager {
+    private val _currentState = MutableStateFlow<ChromeState>(ChromeState.Empty)
     
     /**
-     * Reactive StateFlow for the top ChromeState
+     * Reactive StateFlow for the current ChromeState
      */
-    val topState: StateFlow<ChromeState> = _topState.asStateFlow()
+    val currentState: StateFlow<ChromeState> = _currentState.asStateFlow()
     
     /**
-     * Push a ChromeState onto the stack
+     * Set the current ChromeState directly
      */
-    fun push(state: ChromeState) {
-        stack.add(state)
-        println("${stack} pushing XXX")
-        _topState.value = state
+    fun setState(state: ChromeState) {
+        _currentState.value = state
     }
-    
-    /**
-     * Pop the top ChromeState from the stack
-     */
-    fun pop() {
-        println("popping XXX")
-        if (stack.isNotEmpty()) {
-            stack.removeAt(stack.size - 1)
-            _topState.value = stack.lastOrNull() ?: ChromeState.Empty
-        }
-    }
-    
-    /**
-     * Get the top ChromeState from the stack, or Empty if stack is empty
-     */
-    fun top(): ChromeState {
-        return stack.lastOrNull() ?: ChromeState.Empty
-    }
-    
-    /**
-     * Check if stack is empty
-     */
-    fun isEmpty(): Boolean = stack.isEmpty()
 }
 
 /**
- * CompositionLocal for ChromeStateStack, allowing screens to push/pop their chrome configuration
+ * CompositionLocal for ChromeStateManager, allowing screens to set their chrome configuration
  */
-val LocalChromeStateStack = compositionLocalOf<ChromeStateStack> { 
-    error("no ChromeStateStack provided")
+val LocalChromeStateManager = compositionLocalOf<ChromeStateManager> { 
+    error("no ChromeStateManager provided")
 }
 
 /**
- * Helper composable for screens to push their ChromeState when composing and pop when removed
+ * Helper composable for screens to set their ChromeState
+ * Routes should always call this, even if they don't want customization (use ChromeState.Empty)
+ * No cleanup needed - the next route will replace this state
  */
 @Composable
 fun ProvideChromeState(
     state: ChromeState,
     content: @Composable () -> Unit
 ) {
-    val stack = LocalChromeStateStack.current
+    val manager = LocalChromeStateManager.current
     
-    // Push state when composing
-    LaunchedEffect(state) {
-        stack.push(state)
+    // Set state immediately when composing and update when state changes
+    // Use SideEffect to ensure this happens synchronously during composition
+    androidx.compose.runtime.SideEffect {
+        manager.setState(state)
     }
     
-    // Pop state when removed
-    DisposableEffect(Unit) {
-        onDispose {
-            stack.pop()
-        }
+    // Also update in LaunchedEffect to catch any missed updates
+    LaunchedEffect(state) {
+        manager.setState(state)
     }
     
     content()

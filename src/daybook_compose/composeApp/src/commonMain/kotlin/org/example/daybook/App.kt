@@ -43,6 +43,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import org.example.daybook.AdditionalFeatureButton
 import org.example.daybook.ChromeState
 import org.example.daybook.ProvideChromeState
 import androidx.compose.ui.Alignment
@@ -65,6 +66,7 @@ import kotlinx.coroutines.launch
 import org.example.daybook.capture.CameraCaptureContext
 import org.example.daybook.capture.ProvideCameraCaptureContext
 import org.example.daybook.capture.screens.CaptureScreen
+import org.example.daybook.search.SearchScreen
 import org.example.daybook.settings.SettingsScreen
 import org.example.daybook.tables.CompactLayout
 import org.example.daybook.tables.ExpandedLayout
@@ -122,7 +124,7 @@ data class AppConfig(
 )
 
 enum class AppScreens {
-    Home, Capture, Tables, Settings
+    Home, Capture, Tables, Settings, Search
 }
 
 private sealed interface AppInitState {
@@ -479,9 +481,9 @@ fun App(
                 ) {
                     // Provide camera capture context for coordination between camera and bottom bar
                     val cameraCaptureContext = remember { CameraCaptureContext() }
-                    val chromeStateStack = remember { ChromeStateStack() }
+                    val chromeStateManager = remember { ChromeStateManager() }
                     ProvideCameraCaptureContext(cameraCaptureContext) {
-                        CompositionLocalProvider(LocalChromeStateStack provides chromeStateStack) {
+                        CompositionLocalProvider(LocalChromeStateManager provides chromeStateManager) {
                             AdaptiveAppLayout(
                                 modifier = surfaceModifier,
                                 navController = navController,
@@ -587,6 +589,54 @@ fun TablesScreen(
     val tabsForSelectedTable = if (selectedTable != null && tablesState is TablesState.Data) {
         selectedTable.tabs.mapNotNull { tabId -> tablesState.tabs[tabId] }
     } else emptyList()
+    
+    // Create chrome state with feature buttons
+    val chromeState = remember(selectedTableId, tablesState) {
+        ChromeState(
+            additionalFeatureButtons = listOf(
+                // Prominent button for creating new table
+                AdditionalFeatureButton(
+                    key = "tables_new_table",
+                    icon = { Text("➕") },
+                    label = { Text("New Table") },
+                    prominent = true,
+                    onClick = {
+                        vm.viewModelScope.launch {
+                            vm.createNewTable()
+                        }
+                    }
+                ),
+                // Prominent button for creating new tab (if table is selected)
+                if (selectedTableId != null) {
+                    AdditionalFeatureButton(
+                        key = "tables_new_tab",
+                        icon = { Text("📄") },
+                        label = { Text("New Tab") },
+                        prominent = true,
+                        onClick = {
+                            vm.viewModelScope.launch {
+                                selectedTableId?.let { tableId ->
+                                    vm.createNewTab(tableId)
+                                }
+                            }
+                        }
+                    )
+                } else null,
+                // Non-prominent button for table settings
+                AdditionalFeatureButton(
+                    key = "tables_settings",
+                    icon = { Text("⚙️") },
+                    label = { Text("Table Settings") },
+                    prominent = false,
+                    onClick = {
+                        // TODO: Open table settings
+                    }
+                )
+            ).filterNotNull()
+        )
+    }
+    
+    ProvideChromeState(chromeState) {
 
     when (tablesState) {
         is TablesState.Error -> {
@@ -660,6 +710,7 @@ fun TablesScreen(
             }
         }
     }
+    }
 }
 
 @Composable
@@ -673,6 +724,7 @@ fun Routes(
         navController = navController,
     ) {
         composable(route = AppScreens.Capture.name) {
+            // CaptureScreen provides its own chrome state internally
             CaptureScreen(modifier = modifier)
         }
         composable(route = AppScreens.Tables.name) {
@@ -683,7 +735,13 @@ fun Routes(
                 SettingsScreen(modifier = modifier)
             }
         }
+        composable(route = AppScreens.Search.name) {
+            ProvideChromeState(ChromeState(title = "Search")) {
+                SearchScreen(modifier = modifier)
+            }
+        }
         composable(route = AppScreens.Home.name) {
+            ProvideChromeState(ChromeState.Empty) {
             var showContent by remember { mutableStateOf(false) }
             Column(
                 modifier = modifier,
@@ -718,6 +776,7 @@ fun Routes(
                         Text("Compose: $greeting")
                     }
                 }
+            }
             }
         }
     }

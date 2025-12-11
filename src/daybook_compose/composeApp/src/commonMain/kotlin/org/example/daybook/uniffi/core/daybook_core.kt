@@ -1112,6 +1112,29 @@ public object FfiConverterLong: FfiConverter<Long, Long> {
 /**
  * @suppress
  */
+public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
+    override fun lift(value: Byte): Boolean {
+        return value.toInt() != 0
+    }
+
+    override fun read(buf: ByteBuffer): Boolean {
+        return lift(buf.get())
+    }
+
+    override fun lower(value: Boolean): Byte {
+        return if (value) 1.toByte() else 0.toByte()
+    }
+
+    override fun allocationSize(value: Boolean) = 1UL
+
+    override fun write(value: Boolean, buf: ByteBuffer) {
+        buf.put(lower(value))
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     // Note: we don't inherit from FfiConverterRustBuffer, because we use a
     // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
@@ -1726,6 +1749,174 @@ public object FfiConverterTypeDocPatch: FfiConverterRustBuffer<DocPatch> {
 
 
 
+data class LayoutPane (
+    var `key`: kotlin.String, 
+    var `variant`: LayoutPaneVariant
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLayoutPane: FfiConverterRustBuffer<LayoutPane> {
+    override fun read(buf: ByteBuffer): LayoutPane {
+        return LayoutPane(
+            FfiConverterString.read(buf),
+            FfiConverterTypeLayoutPaneVariant.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: LayoutPane) = (
+            FfiConverterString.allocationSize(value.`key`) +
+            FfiConverterTypeLayoutPaneVariant.allocationSize(value.`variant`)
+    )
+
+    override fun write(value: LayoutPane, buf: ByteBuffer) {
+            FfiConverterString.write(value.`key`, buf)
+            FfiConverterTypeLayoutPaneVariant.write(value.`variant`, buf)
+    }
+}
+
+
+
+data class LayoutRegion (
+    var `key`: kotlin.String, 
+    var `orientation`: Orientation, 
+    var `children`: List<LayoutPane>
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLayoutRegion: FfiConverterRustBuffer<LayoutRegion> {
+    override fun read(buf: ByteBuffer): LayoutRegion {
+        return LayoutRegion(
+            FfiConverterString.read(buf),
+            FfiConverterTypeOrientation.read(buf),
+            FfiConverterSequenceTypeLayoutPane.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: LayoutRegion) = (
+            FfiConverterString.allocationSize(value.`key`) +
+            FfiConverterTypeOrientation.allocationSize(value.`orientation`) +
+            FfiConverterSequenceTypeLayoutPane.allocationSize(value.`children`)
+    )
+
+    override fun write(value: LayoutRegion, buf: ByteBuffer) {
+            FfiConverterString.write(value.`key`, buf)
+            FfiConverterTypeOrientation.write(value.`orientation`, buf)
+            FfiConverterSequenceTypeLayoutPane.write(value.`children`, buf)
+    }
+}
+
+
+
+class LayoutRoutes {
+    override fun equals(other: Any?): Boolean {
+        return other is LayoutRoutes
+    }
+
+    override fun hashCode(): Int {
+        return javaClass.hashCode()
+    }
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLayoutRoutes: FfiConverterRustBuffer<LayoutRoutes> {
+    override fun read(buf: ByteBuffer): LayoutRoutes {
+        return LayoutRoutes()
+    }
+
+    override fun allocationSize(value: LayoutRoutes) = 0UL
+
+    override fun write(value: LayoutRoutes, buf: ByteBuffer) {
+    }
+}
+
+
+
+class LayoutSidebar {
+    override fun equals(other: Any?): Boolean {
+        return other is LayoutSidebar
+    }
+
+    override fun hashCode(): Int {
+        return javaClass.hashCode()
+    }
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLayoutSidebar: FfiConverterRustBuffer<LayoutSidebar> {
+    override fun read(buf: ByteBuffer): LayoutSidebar {
+        return LayoutSidebar()
+    }
+
+    override fun allocationSize(value: LayoutSidebar) = 0UL
+
+    override fun write(value: LayoutSidebar, buf: ByteBuffer) {
+    }
+}
+
+
+
+data class LayoutWindowConfig (
+    var `centerRegion`: RootLayoutRegion, 
+    var `leftRegion`: RootLayoutRegion, 
+    var `rightRegion`: RootLayoutRegion, 
+    var `leftVisible`: kotlin.Boolean, 
+    var `rightVisible`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLayoutWindowConfig: FfiConverterRustBuffer<LayoutWindowConfig> {
+    override fun read(buf: ByteBuffer): LayoutWindowConfig {
+        return LayoutWindowConfig(
+            FfiConverterTypeRootLayoutRegion.read(buf),
+            FfiConverterTypeRootLayoutRegion.read(buf),
+            FfiConverterTypeRootLayoutRegion.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: LayoutWindowConfig) = (
+            FfiConverterTypeRootLayoutRegion.allocationSize(value.`centerRegion`) +
+            FfiConverterTypeRootLayoutRegion.allocationSize(value.`leftRegion`) +
+            FfiConverterTypeRootLayoutRegion.allocationSize(value.`rightRegion`) +
+            FfiConverterBoolean.allocationSize(value.`leftVisible`) +
+            FfiConverterBoolean.allocationSize(value.`rightVisible`)
+    )
+
+    override fun write(value: LayoutWindowConfig, buf: ByteBuffer) {
+            FfiConverterTypeRootLayoutRegion.write(value.`centerRegion`, buf)
+            FfiConverterTypeRootLayoutRegion.write(value.`leftRegion`, buf)
+            FfiConverterTypeRootLayoutRegion.write(value.`rightRegion`, buf)
+            FfiConverterBoolean.write(value.`leftVisible`, buf)
+            FfiConverterBoolean.write(value.`rightVisible`, buf)
+    }
+}
+
+
+
 data class Panel (
     var `id`: Uuid, 
     var `title`: kotlin.String
@@ -1785,6 +1976,38 @@ public object FfiConverterTypePanelPatch: FfiConverterRustBuffer<PanelPatch> {
     override fun write(value: PanelPatch, buf: ByteBuffer) {
             FfiConverterOptionalTypeUuid.write(value.`id`, buf)
             FfiConverterOptionalString.write(value.`title`, buf)
+    }
+}
+
+
+
+data class RootLayoutRegion (
+    var `size`: RegionSize, 
+    var `deets`: LayoutPane
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRootLayoutRegion: FfiConverterRustBuffer<RootLayoutRegion> {
+    override fun read(buf: ByteBuffer): RootLayoutRegion {
+        return RootLayoutRegion(
+            FfiConverterTypeRegionSize.read(buf),
+            FfiConverterTypeLayoutPane.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RootLayoutRegion) = (
+            FfiConverterTypeRegionSize.allocationSize(value.`size`) +
+            FfiConverterTypeLayoutPane.allocationSize(value.`deets`)
+    )
+
+    override fun write(value: RootLayoutRegion, buf: ByteBuffer) {
+            FfiConverterTypeRegionSize.write(value.`size`, buf)
+            FfiConverterTypeLayoutPane.write(value.`deets`, buf)
     }
 }
 
@@ -2472,12 +2695,101 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
 
 
 
-
-enum class SidebarMode {
+sealed class LayoutPaneVariant {
     
-    HIDDEN,
-    COMPACT,
-    EXPANDED;
+    data class Sidebar(
+        val v1: LayoutSidebar) : LayoutPaneVariant() {
+        companion object
+    }
+    
+    data class Routes(
+        val v1: LayoutRoutes) : LayoutPaneVariant() {
+        companion object
+    }
+    
+    data class Region(
+        val v1: LayoutRegion) : LayoutPaneVariant() {
+        companion object
+    }
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLayoutPaneVariant : FfiConverterRustBuffer<LayoutPaneVariant>{
+    override fun read(buf: ByteBuffer): LayoutPaneVariant {
+        return when(buf.getInt()) {
+            1 -> LayoutPaneVariant.Sidebar(
+                FfiConverterTypeLayoutSidebar.read(buf),
+                )
+            2 -> LayoutPaneVariant.Routes(
+                FfiConverterTypeLayoutRoutes.read(buf),
+                )
+            3 -> LayoutPaneVariant.Region(
+                FfiConverterTypeLayoutRegion.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: LayoutPaneVariant) = when(value) {
+        is LayoutPaneVariant.Sidebar -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeLayoutSidebar.allocationSize(value.v1)
+            )
+        }
+        is LayoutPaneVariant.Routes -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeLayoutRoutes.allocationSize(value.v1)
+            )
+        }
+        is LayoutPaneVariant.Region -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeLayoutRegion.allocationSize(value.v1)
+            )
+        }
+    }
+
+    override fun write(value: LayoutPaneVariant, buf: ByteBuffer) {
+        when(value) {
+            is LayoutPaneVariant.Sidebar -> {
+                buf.putInt(1)
+                FfiConverterTypeLayoutSidebar.write(value.v1, buf)
+                Unit
+            }
+            is LayoutPaneVariant.Routes -> {
+                buf.putInt(2)
+                FfiConverterTypeLayoutRoutes.write(value.v1, buf)
+                Unit
+            }
+            is LayoutPaneVariant.Region -> {
+                buf.putInt(3)
+                FfiConverterTypeLayoutRegion.write(value.v1, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class Orientation {
+    
+    HORIZONTAL,
+    VERTICAL;
     companion object
 }
 
@@ -2485,16 +2797,16 @@ enum class SidebarMode {
 /**
  * @suppress
  */
-public object FfiConverterTypeSidebarMode: FfiConverterRustBuffer<SidebarMode> {
+public object FfiConverterTypeOrientation: FfiConverterRustBuffer<Orientation> {
     override fun read(buf: ByteBuffer) = try {
-        SidebarMode.values()[buf.getInt() - 1]
+        Orientation.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
         throw RuntimeException("invalid enum value, something is very wrong!!", e)
     }
 
-    override fun allocationSize(value: SidebarMode) = 4UL
+    override fun allocationSize(value: Orientation) = 4UL
 
-    override fun write(value: SidebarMode, buf: ByteBuffer) {
+    override fun write(value: Orientation, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -2504,10 +2816,10 @@ public object FfiConverterTypeSidebarMode: FfiConverterRustBuffer<SidebarMode> {
 
 
 
-enum class SidebarPosition {
+enum class RegionSize {
     
-    LEFT,
-    RIGHT;
+    AUTO,
+    WEIGHT;
     companion object
 }
 
@@ -2515,107 +2827,16 @@ enum class SidebarPosition {
 /**
  * @suppress
  */
-public object FfiConverterTypeSidebarPosition: FfiConverterRustBuffer<SidebarPosition> {
+public object FfiConverterTypeRegionSize: FfiConverterRustBuffer<RegionSize> {
     override fun read(buf: ByteBuffer) = try {
-        SidebarPosition.values()[buf.getInt() - 1]
+        RegionSize.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
         throw RuntimeException("invalid enum value, something is very wrong!!", e)
     }
 
-    override fun allocationSize(value: SidebarPosition) = 4UL
+    override fun allocationSize(value: RegionSize) = 4UL
 
-    override fun write(value: SidebarPosition, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-
-enum class SidebarVisibility {
-    
-    VISIBLE,
-    HIDDEN;
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeSidebarVisibility: FfiConverterRustBuffer<SidebarVisibility> {
-    override fun read(buf: ByteBuffer) = try {
-        SidebarVisibility.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: SidebarVisibility) = 4UL
-
-    override fun write(value: SidebarVisibility, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-
-enum class TabListVisibility {
-    
-    VISIBLE,
-    HIDDEN;
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTabListVisibility: FfiConverterRustBuffer<TabListVisibility> {
-    override fun read(buf: ByteBuffer) = try {
-        TabListVisibility.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: TabListVisibility) = 4UL
-
-    override fun write(value: TabListVisibility, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-
-enum class TableViewMode {
-    
-    HIDDEN,
-    RAIL,
-    TAB_ROW;
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTableViewMode: FfiConverterRustBuffer<TableViewMode> {
-    override fun read(buf: ByteBuffer) = try {
-        TableViewMode.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: TableViewMode) = 4UL
-
-    override fun write(value: TableViewMode, buf: ByteBuffer) {
+    override fun write(value: RegionSize, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -3314,6 +3535,34 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeLayoutPane: FfiConverterRustBuffer<List<LayoutPane>> {
+    override fun read(buf: ByteBuffer): List<LayoutPane> {
+        val len = buf.getInt()
+        return List<LayoutPane>(len) {
+            FfiConverterTypeLayoutPane.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<LayoutPane>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeLayoutPane.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<LayoutPane>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeLayoutPane.write(it, buf)
         }
     }
 }

@@ -49,27 +49,19 @@ import org.example.daybook.uniffi.core.FfiConverterTypeConfigEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeDoc
 import org.example.daybook.uniffi.core.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.core.FfiConverterTypeDrawerEvent
+import org.example.daybook.uniffi.core.FfiConverterTypeLayoutWindowConfig
 import org.example.daybook.uniffi.core.FfiConverterTypeListenerRegistration
 import org.example.daybook.uniffi.core.FfiConverterTypePanel
-import org.example.daybook.uniffi.core.FfiConverterTypeSidebarMode
-import org.example.daybook.uniffi.core.FfiConverterTypeSidebarPosition
-import org.example.daybook.uniffi.core.FfiConverterTypeSidebarVisibility
 import org.example.daybook.uniffi.core.FfiConverterTypeTab
-import org.example.daybook.uniffi.core.FfiConverterTypeTabListVisibility
 import org.example.daybook.uniffi.core.FfiConverterTypeTable
-import org.example.daybook.uniffi.core.FfiConverterTypeTableViewMode
 import org.example.daybook.uniffi.core.FfiConverterTypeTablesEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeTablesPatches
 import org.example.daybook.uniffi.core.FfiConverterTypeWindow
+import org.example.daybook.uniffi.core.LayoutWindowConfig
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.uniffi.core.Panel
-import org.example.daybook.uniffi.core.SidebarMode
-import org.example.daybook.uniffi.core.SidebarPosition
-import org.example.daybook.uniffi.core.SidebarVisibility
 import org.example.daybook.uniffi.core.Tab
-import org.example.daybook.uniffi.core.TabListVisibility
 import org.example.daybook.uniffi.core.Table
-import org.example.daybook.uniffi.core.TableViewMode
 import org.example.daybook.uniffi.core.TablesEvent
 import org.example.daybook.uniffi.core.TablesPatches
 import org.example.daybook.uniffi.core.Window
@@ -77,15 +69,11 @@ import org.example.daybook.uniffi.core.RustBuffer as RustBufferConfigEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDoc
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocPatch
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDrawerEvent
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferLayoutWindowConfig
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferListenerRegistration
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferPanel
-import org.example.daybook.uniffi.core.RustBuffer as RustBufferSidebarMode
-import org.example.daybook.uniffi.core.RustBuffer as RustBufferSidebarPosition
-import org.example.daybook.uniffi.core.RustBuffer as RustBufferSidebarVisibility
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTab
-import org.example.daybook.uniffi.core.RustBuffer as RustBufferTabListVisibility
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTable
-import org.example.daybook.uniffi.core.RustBuffer as RustBufferTableViewMode
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesPatches
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferWindow
@@ -916,34 +904,6 @@ internal open class UniffiVTableCallbackInterfaceTablesEventListener(
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -963,37 +923,9 @@ internal interface IntegrityCheckingUniffiLib : Library {
 ): Short
 fun uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener(
 ): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_auto_hide_expanded(
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_layout(
 ): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_mode_expanded(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_pos_expanded(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_vis_expanded(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_tab_list_vis_expanded(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_table_rail_vis_compact(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_table_rail_vis_expanded(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_table_view_mode_compact(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_auto_hide_expanded(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_mode_expanded(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_pos_expanded(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_vis_expanded(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_tab_list_vis_expanded(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_table_rail_vis_compact(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_table_rail_vis_expanded(
-): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_table_view_mode_compact(
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_layout(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event(
 ): Short
@@ -1126,37 +1058,9 @@ fun uniffi_daybook_ffi_fn_constructor_configrepoffi_load(`fcx`: Pointer,
 ): Long
 fun uniffi_daybook_ffi_fn_method_configrepoffi_ffi_register_listener(`ptr`: Pointer,`listener`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
-fun uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_auto_hide_expanded(`ptr`: Pointer,
+fun uniffi_daybook_ffi_fn_method_configrepoffi_get_layout(`ptr`: Pointer,
 ): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_mode_expanded(`ptr`: Pointer,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_pos_expanded(`ptr`: Pointer,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_vis_expanded(`ptr`: Pointer,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_get_tab_list_vis_expanded(`ptr`: Pointer,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_get_table_rail_vis_compact(`ptr`: Pointer,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_get_table_rail_vis_expanded(`ptr`: Pointer,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_get_table_view_mode_compact(`ptr`: Pointer,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_auto_hide_expanded(`ptr`: Pointer,`value`: Byte,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_mode_expanded(`ptr`: Pointer,`value`: RustBufferSidebarMode.ByValue,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_pos_expanded(`ptr`: Pointer,`value`: RustBufferSidebarPosition.ByValue,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_vis_expanded(`ptr`: Pointer,`value`: RustBufferSidebarVisibility.ByValue,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_set_tab_list_vis_expanded(`ptr`: Pointer,`value`: RustBufferTabListVisibility.ByValue,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_set_table_rail_vis_compact(`ptr`: Pointer,`value`: RustBufferTabListVisibility.ByValue,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_set_table_rail_vis_expanded(`ptr`: Pointer,`value`: RustBufferTabListVisibility.ByValue,
-): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_set_table_view_mode_compact(`ptr`: Pointer,`value`: RustBufferTableViewMode.ByValue,
+fun uniffi_daybook_ffi_fn_method_configrepoffi_set_layout(`ptr`: Pointer,`value`: RustBufferLayoutWindowConfig.ByValue,
 ): Long
 fun uniffi_daybook_ffi_fn_clone_drawereventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
@@ -1378,52 +1282,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener() != 18344.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_auto_hide_expanded() != 63700.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_layout() != 53485.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_mode_expanded() != 38299.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_pos_expanded() != 2774.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_sidebar_vis_expanded() != 45232.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_tab_list_vis_expanded() != 47117.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_table_rail_vis_compact() != 3060.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_table_rail_vis_expanded() != 40395.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_table_view_mode_compact() != 2165.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_auto_hide_expanded() != 26329.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_mode_expanded() != 44997.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_pos_expanded() != 60411.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_sidebar_vis_expanded() != 22891.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_tab_list_vis_expanded() != 5215.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_table_rail_vis_compact() != 10078.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_table_rail_vis_expanded() != 23532.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_table_view_mode_compact() != 61691.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_layout() != 5992.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event() != 441.toShort()) {
@@ -2228,37 +2090,9 @@ public interface ConfigRepoFfiInterface {
     
     fun `ffiRegisterListener`(`listener`: ConfigEventListener): ListenerRegistration
     
-    suspend fun `getSidebarAutoHideExpanded`(): kotlin.Boolean
+    suspend fun `getLayout`(): LayoutWindowConfig
     
-    suspend fun `getSidebarModeExpanded`(): SidebarMode
-    
-    suspend fun `getSidebarPosExpanded`(): SidebarPosition
-    
-    suspend fun `getSidebarVisExpanded`(): SidebarVisibility
-    
-    suspend fun `getTabListVisExpanded`(): TabListVisibility
-    
-    suspend fun `getTableRailVisCompact`(): TabListVisibility
-    
-    suspend fun `getTableRailVisExpanded`(): TabListVisibility
-    
-    suspend fun `getTableViewModeCompact`(): TableViewMode
-    
-    suspend fun `setSidebarAutoHideExpanded`(`value`: kotlin.Boolean)
-    
-    suspend fun `setSidebarModeExpanded`(`value`: SidebarMode)
-    
-    suspend fun `setSidebarPosExpanded`(`value`: SidebarPosition)
-    
-    suspend fun `setSidebarVisExpanded`(`value`: SidebarVisibility)
-    
-    suspend fun `setTabListVisExpanded`(`value`: TabListVisibility)
-    
-    suspend fun `setTableRailVisCompact`(`value`: TabListVisibility)
-    
-    suspend fun `setTableRailVisExpanded`(`value`: TabListVisibility)
-    
-    suspend fun `setTableViewModeCompact`(`value`: TableViewMode)
+    suspend fun `setLayout`(`value`: LayoutWindowConfig)
     
     companion object
 }
@@ -2359,159 +2193,19 @@ open class ConfigRepoFfi: Disposable, AutoCloseable, ConfigRepoFfiInterface
 
     
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getSidebarAutoHideExpanded`() : kotlin.Boolean {
+    override suspend fun `getLayout`() : LayoutWindowConfig {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_auto_hide_expanded(
-                thisPtr,
-                
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_i8(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_i8(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_i8(future) },
-        // lift function
-        { FfiConverterBoolean.lift(it) },
-        // Error FFI converter
-        UniffiNullRustCallStatusErrorHandler,
-    )
-    }
-
-    
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getSidebarModeExpanded`() : SidebarMode {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_mode_expanded(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_layout(
                 thisPtr,
                 
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferSidebarMode.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferLayoutWindowConfig.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
         { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterTypeSidebarMode.lift(it) },
-        // Error FFI converter
-        UniffiNullRustCallStatusErrorHandler,
-    )
-    }
-
-    
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getSidebarPosExpanded`() : SidebarPosition {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_pos_expanded(
-                thisPtr,
-                
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferSidebarPosition.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterTypeSidebarPosition.lift(it) },
-        // Error FFI converter
-        UniffiNullRustCallStatusErrorHandler,
-    )
-    }
-
-    
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getSidebarVisExpanded`() : SidebarVisibility {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_sidebar_vis_expanded(
-                thisPtr,
-                
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferSidebarVisibility.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterTypeSidebarVisibility.lift(it) },
-        // Error FFI converter
-        UniffiNullRustCallStatusErrorHandler,
-    )
-    }
-
-    
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getTabListVisExpanded`() : TabListVisibility {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_tab_list_vis_expanded(
-                thisPtr,
-                
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferTabListVisibility.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterTypeTabListVisibility.lift(it) },
-        // Error FFI converter
-        UniffiNullRustCallStatusErrorHandler,
-    )
-    }
-
-    
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getTableRailVisCompact`() : TabListVisibility {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_table_rail_vis_compact(
-                thisPtr,
-                
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferTabListVisibility.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterTypeTabListVisibility.lift(it) },
-        // Error FFI converter
-        UniffiNullRustCallStatusErrorHandler,
-    )
-    }
-
-    
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getTableRailVisExpanded`() : TabListVisibility {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_table_rail_vis_expanded(
-                thisPtr,
-                
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferTabListVisibility.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterTypeTabListVisibility.lift(it) },
-        // Error FFI converter
-        UniffiNullRustCallStatusErrorHandler,
-    )
-    }
-
-    
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getTableViewModeCompact`() : TableViewMode {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_table_view_mode_compact(
-                thisPtr,
-                
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferTableViewMode.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterTypeTableViewMode.lift(it) },
+        { FfiConverterTypeLayoutWindowConfig.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
@@ -2520,166 +2214,12 @@ open class ConfigRepoFfi: Disposable, AutoCloseable, ConfigRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setSidebarAutoHideExpanded`(`value`: kotlin.Boolean) {
+    override suspend fun `setLayout`(`value`: LayoutWindowConfig) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_auto_hide_expanded(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_layout(
                 thisPtr,
-                FfiConverterBoolean.lower(`value`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setSidebarModeExpanded`(`value`: SidebarMode) {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_mode_expanded(
-                thisPtr,
-                FfiConverterTypeSidebarMode.lower(`value`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setSidebarPosExpanded`(`value`: SidebarPosition) {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_pos_expanded(
-                thisPtr,
-                FfiConverterTypeSidebarPosition.lower(`value`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setSidebarVisExpanded`(`value`: SidebarVisibility) {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_sidebar_vis_expanded(
-                thisPtr,
-                FfiConverterTypeSidebarVisibility.lower(`value`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setTabListVisExpanded`(`value`: TabListVisibility) {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_tab_list_vis_expanded(
-                thisPtr,
-                FfiConverterTypeTabListVisibility.lower(`value`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setTableRailVisCompact`(`value`: TabListVisibility) {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_table_rail_vis_compact(
-                thisPtr,
-                FfiConverterTypeTabListVisibility.lower(`value`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setTableRailVisExpanded`(`value`: TabListVisibility) {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_table_rail_vis_expanded(
-                thisPtr,
-                FfiConverterTypeTabListVisibility.lower(`value`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setTableViewModeCompact`(`value`: TableViewMode) {
-        return uniffiRustCallAsync(
-        callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_table_view_mode_compact(
-                thisPtr,
-                FfiConverterTypeTableViewMode.lower(`value`),
+                FfiConverterTypeLayoutWindowConfig.lower(`value`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
@@ -5194,14 +4734,6 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
-
-
-
-
-
-
-
-
 
 
 

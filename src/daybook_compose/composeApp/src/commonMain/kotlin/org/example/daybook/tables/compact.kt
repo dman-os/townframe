@@ -71,14 +71,15 @@ import kotlinx.coroutines.launch
 import org.example.daybook.ChromeState
 import org.example.daybook.ChromeStateTopAppBar
 import org.example.daybook.ConfigViewModel
-import org.example.daybook.LocalChromeStateStack
+import org.example.daybook.LocalChromeStateManager
 import org.example.daybook.LocalContainer
 import org.example.daybook.Routes
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
 import org.example.daybook.uniffi.core.Tab
 import org.example.daybook.uniffi.core.Table
-import org.example.daybook.uniffi.core.TableViewMode
+// TODO: Update compact.kt to use new LayoutWindowConfig structure
+// import org.example.daybook.uniffi.core.TableViewMode
 import org.example.daybook.uniffi.core.Uuid
 
 // ViewModel-based hover-hold controller for abstracting the hover-to-create pattern
@@ -169,8 +170,10 @@ fun CompactLayout(
     val configRepo = LocalContainer.current.configRepo
     val configVm = viewModel { ConfigViewModel(configRepo) }
 
-    val tableViewModeState = configVm.tableViewModeCompact.collectAsState()
-    val tableViewMode = tableViewModeState.value ?: org.example.daybook.uniffi.core.TableViewMode.HIDDEN
+    // TODO: Update to use new LayoutWindowConfig structure
+    // val tableViewModeState = configVm.tableViewModeCompact.collectAsState()
+    // val tableViewMode = tableViewModeState.value ?: org.example.daybook.uniffi.core.TableViewMode.HIDDEN
+    val tableViewMode = "HIDDEN" // Placeholder
     
     // Error handling
     val snackbarHostState = remember { SnackbarHostState() }
@@ -203,16 +206,43 @@ fun CompactLayout(
     // feature button layout rects (populated when toolbar renders)
     var featureButtonLayouts by remember { mutableStateOf(mapOf<String, Rect>()) }
 
-    // Use common features source
-    val features = rememberFeatures(navController)
+    // Use separate feature lists: navBar features for center rollout, menu features for menu sheet
+    val navBarFeatures = rememberNavBarFeatures(navController)
+    val baseMenuFeatures = rememberMenuFeatures(navController)
+    
+    // Get chrome state to check for prominent buttons
+    val chromeStateManager = LocalChromeStateManager.current
+    val chromeState by chromeStateManager.currentState.collectAsState()
+    val prominentButtons = chromeState.additionalFeatureButtons.filter { it.prominent }
+    
+    // If prominent buttons are displacing nav bar features, add displaced features to menu
+    val menuFeatures = remember(baseMenuFeatures, navBarFeatures, prominentButtons) {
+        if (prominentButtons.isNotEmpty()) {
+            // Prominent buttons displace nav bar features, so add them to menu
+            baseMenuFeatures + navBarFeatures
+        } else {
+            baseMenuFeatures
+        }
+    }
 
-    // Create controllers and ready-state trackers for each feature
-    val featureKeys = features.map { it.key }
-    val featureControllers = featureKeys.map { k ->
+    // Create controllers and ready-state trackers for each navBar feature (used in center rollout)
+    val navBarFeatureKeys = navBarFeatures.map { it.key }
+    val navBarFeatureControllers = navBarFeatureKeys.map { k ->
         viewModel<HoverHoldControllerViewModel>(key = k).also {
             it.label = k
         }
     }
+    
+    // Create controllers for prominent buttons too
+    val prominentButtonKeys = prominentButtons.map { it.key }
+    val prominentButtonControllers = prominentButtonKeys.map { k ->
+        viewModel<HoverHoldControllerViewModel>(key = "prominent_$k").also {
+            it.label = "prominent_$k"
+        }
+    }
+    
+    // Combine all controllers and ready states
+    val featureControllers = navBarFeatureControllers + prominentButtonControllers
     val featureReadyStates = featureControllers.map { it.ready.collectAsState() }
     var featuresButtonWindowRect by remember { mutableStateOf<Rect?>(null) }
 
@@ -237,10 +267,20 @@ fun CompactLayout(
                     
                     // Also update controllers with their target rects for toolbar rollout
                     featureButtonLayouts.forEach { (k, r) ->
-                        val idx = featureKeys.indexOf(k)
-                        if (idx >= 0) featureControllers[idx].targetRect = r
+                        // Check if it's a nav bar feature
+                        val navIdx = navBarFeatureKeys.indexOf(k)
+                        if (navIdx >= 0) {
+                            navBarFeatureControllers[navIdx].targetRect = r
+                        } else {
+                            // Check if it's a prominent button
+                            val prominentIdx = prominentButtonKeys.indexOf(k)
+                            if (prominentIdx >= 0) {
+                                prominentButtonControllers[prominentIdx].targetRect = r
+                            }
+                        }
                     }
-                    featureControllers.forEach { it.update(windowPos) }
+                    navBarFeatureControllers.forEach { it.update(windowPos) }
+                    prominentButtonControllers.forEach { it.update(windowPos) }
                 },
                 onDragEnd = {
                     scope.launch {
@@ -249,18 +289,30 @@ fun CompactLayout(
                         // If released over a menu item, activate it and close
                         if (highlightedMenuItem != null && lastDragWindowPos != null) {
                             val menuItemKey = highlightedMenuItem
-                            val feature = features.find { it.key == menuItemKey }
+                            val feature = menuFeatures.find { it.key == menuItemKey }
                             if (feature != null) {
                                 feature.onActivate()
                                 shouldClose = true
                             }
                         } else {
                             // Otherwise, activate any ready feature from toolbar rollout
-                            featureControllers.forEachIndexed { idx, ctrl ->
+                            // Check nav bar features first
+                            navBarFeatureControllers.forEachIndexed { idx, ctrl ->
                                 if (ctrl.ready.value) {
-                                    val feature = features.getOrNull(idx)
+                                    val feature = navBarFeatures.getOrNull(idx)
                                     if (feature != null) {
                                         scope.launch { feature.onActivate() }
+                                        shouldClose = true
+                                    }
+                                }
+                                ctrl.cancel()
+                            }
+                            // Check prominent buttons
+                            prominentButtonControllers.forEachIndexed { idx, ctrl ->
+                                if (ctrl.ready.value) {
+                                    val button = prominentButtons.getOrNull(idx)
+                                    if (button != null && button.enabled) {
+                                        scope.launch { button.onClick() }
                                         shouldClose = true
                                     }
                                 }
@@ -274,7 +326,8 @@ fun CompactLayout(
                         isDragging = false
                         
                         // Cancel all controllers
-                        featureControllers.forEach { it.cancel() }
+                        navBarFeatureControllers.forEach { it.cancel() }
+                        prominentButtonControllers.forEach { it.cancel() }
                         showFeaturesMenu = false
                         
                         // Close sheet if item was activated, otherwise settle to nearest anchor
@@ -287,7 +340,8 @@ fun CompactLayout(
                 },
                 onDragCancel = {
                     scope.launch {
-                        featureControllers.forEach { it.cancel() }
+                        navBarFeatureControllers.forEach { it.cancel() }
+                        prominentButtonControllers.forEach { it.cancel() }
                         highlightedMenuItem = null
                         lastDragWindowPos = null
                         isDragging = false
@@ -320,7 +374,7 @@ fun CompactLayout(
         }
     }
 
-    val centerNavBarContent: @Composable RowScope.() -> Unit = {
+    val             centerNavBarContent: @Composable RowScope.() -> Unit = {
         CenterNavBarContent(
             navController = navController,
             revealSheetState = revealSheetState,
@@ -329,7 +383,7 @@ fun CompactLayout(
             addTabReadyState = addTabReadyState,
             addTableReadyState = addTableReadyState,
             featureReadyStates = featureReadyStates,
-            features = features,
+            features = navBarFeatures,
             featureButtonLayouts = featureButtonLayouts,
             lastDragWindowPos = lastDragWindowPos,
             onAddButtonLayout = { r ->
@@ -355,7 +409,13 @@ fun CompactLayout(
             },
             onFeatureActivate = { feature ->
                 showFeaturesMenu = false
-                feature.onActivate()
+                scope.launch {
+                    feature.onActivate()
+                    // Close the sheet if it's open and showing the menu
+                    if (revealSheetState.isVisible && sheetContent == SheetContent.MENU) {
+                        revealSheetState.hide()
+                    }
+                }
             }
         )
     }
@@ -559,20 +619,22 @@ fun CompactLayout(
                                         // Toggle button for view mode
                                         IconButton(
                                             onClick = {
-                                                configVm.setTableViewModeCompact(
-                                                    when (tableViewMode) {
-                                                        TableViewMode.HIDDEN -> TableViewMode.RAIL
-                                                        TableViewMode.RAIL -> TableViewMode.TAB_ROW
-                                                        TableViewMode.TAB_ROW -> TableViewMode.HIDDEN
-                                                    }
-                                                )
+                                                // TODO: Update to use new LayoutWindowConfig structure
+                                                // configVm.setTableViewModeCompact(
+                                                //     when (tableViewMode) {
+                                                //         TableViewMode.HIDDEN -> TableViewMode.RAIL
+                                                //         TableViewMode.RAIL -> TableViewMode.TAB_ROW
+                                                //         TableViewMode.TAB_ROW -> TableViewMode.HIDDEN
+                                                //     }
+                                                // )
                                             }
                                         ) {
                                             Text(
                                                 text = when (tableViewMode) {
-                                                    TableViewMode.HIDDEN -> "☰"
-                                                    TableViewMode.RAIL -> "⊞"
-                                                    TableViewMode.TAB_ROW -> "☷"
+                                                    "HIDDEN" -> "☰"
+                                                    "RAIL" -> "⊞"
+                                                    "TAB_ROW" -> "☷"
+                                                    else -> "☰"
                                                 },
                                                 style = MaterialTheme.typography.titleLarge
                                             )
@@ -629,9 +691,9 @@ fun CompactLayout(
                 }
             },
             topBar = {
-                // Get chrome state stack and observe the top state (from the current screen)
-                val chromeStateStack = LocalChromeStateStack.current
-                val screenChromeState by chromeStateStack.topState.collectAsState()
+                // Get chrome state manager and observe the current state (from the current screen)
+                val chromeStateManager = LocalChromeStateManager.current
+                val screenChromeState by chromeStateManager.currentState.collectAsState()
                 
                 // Merge layout-specific chrome with screen chrome
                 // Check if screen chrome is empty (no title, no navigation icon, no actions, and showTopBar is false)
@@ -667,6 +729,12 @@ fun CompactLayout(
                     onDismiss = {
                         revealSheetState.hide()
                     },
+                    onFeatureActivate = {
+                        showFeaturesMenu = false
+                        scope.launch {
+                            revealSheetState.hide()
+                        }
+                    },
                     onTabLayout = { tabId, rect ->
                         tabItemLayouts = tabItemLayouts + (tabId to rect)
                     },
@@ -684,7 +752,7 @@ fun CompactLayout(
                     addTableController = addTableController,
                     highlightedTab = highlightedTab,
                     highlightedTable = highlightedTable,
-                    features = features,
+                    features = menuFeatures,
                     onMenuItemLayout = { key, rect ->
                         menuItemLayouts = menuItemLayouts + (key to rect)
                     },
@@ -744,6 +812,7 @@ fun DaybookBottomNavigationBar(
      */
     
     BottomAppBar(
+        modifier = Modifier.height(70.dp), // Reduced from default height
         floatingActionButton = {
             // Right (features) button area - shows RevealBottomSheet with menu
             IconButton(
@@ -889,7 +958,8 @@ fun SheetContentHost(
     features: List<FeatureItem>,
     onMenuItemLayout: (key: String, rect: Rect) -> Unit,
     highlightedMenuItem: String?,
-    tableViewMode: TableViewMode
+    tableViewMode: String, // TODO: Update to use new LayoutWindowConfig structure (was TableViewMode)
+    onFeatureActivate: (() -> Unit)? = null // Callback when a feature is activated from the menu
 ) {
     // Action buttons: allow quick creation of tabs/tables from the sheet
     val tablesRepo = LocalContainer.current.tablesRepo
@@ -898,6 +968,23 @@ fun SheetContentHost(
     val addTableReadyState = addTableController.ready.collectAsState()
     val tablesState = vm.tablesState.collectAsState().value
     val selectedTableId = vm.selectedTableId.collectAsState().value
+    
+    // Get chrome state to include non-prominent buttons in menu
+    val chromeStateManager = LocalChromeStateManager.current
+    val chromeState by chromeStateManager.currentState.collectAsState()
+    val nonProminentButtons = chromeState.additionalFeatureButtons.filter { !it.prominent }
+    
+    // Combine menu features with non-prominent chrome buttons
+    val allMenuItems = remember(features, nonProminentButtons) {
+        features + nonProminentButtons.map { button ->
+            FeatureItem(
+                key = button.key,
+                icon = "", // Will use button.icon() composable instead
+                label = "", // Will use button.label() composable instead
+                onActivate = { button.onClick() }
+            )
+        }
+    }
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -916,7 +1003,7 @@ fun SheetContentHost(
                     // Main content area: tabs list, optionally with NavigationRail for table switching
                     Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         // NavigationRail-based table switcher on the LEFT of the sheet (only when view mode is RAIL)
-                        if (tableViewMode == TableViewMode.RAIL) {
+                        if (tableViewMode == "RAIL") {
                             TablesRail(
                                 showTitles = false,
                                 growUpward = true,
@@ -933,7 +1020,7 @@ fun SheetContentHost(
                             modifier = Modifier
                                 .weight(1f)
                                 .padding(
-                                    start = if (tableViewMode == TableViewMode.RAIL) 16.dp else 16.dp,
+                                    start = if (tableViewMode == "RAIL") 16.dp else 16.dp,
                                     end = 8.dp
                                 ),
                             growUpward = true,
@@ -943,7 +1030,7 @@ fun SheetContentHost(
                     }
 
                     // TabRow at the bottom for table selection with fixed Add button (only when view mode is TAB_ROW)
-                    if (tableViewMode == TableViewMode.TAB_ROW && tablesState is TablesState.Data) {
+                    if (tableViewMode == "TAB_ROW" && tablesState is TablesState.Data) {
                         val tablesListSnapshot = tablesState.tablesList.toList()
                         val listSize = tablesListSnapshot.size
                         
@@ -1028,7 +1115,7 @@ fun SheetContentHost(
                 }
             }
             SheetContent.MENU -> {
-                // Show list of navigation buttons from features
+                // Show list of navigation buttons from features and non-prominent chrome buttons
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1036,22 +1123,41 @@ fun SheetContentHost(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    features.forEach { feature ->
-                        val isHighlighted = feature.key == highlightedMenuItem
+                    allMenuItems.forEach { item ->
+                        val isHighlighted = item.key == highlightedMenuItem
+                        // Check if this is a chrome button (has empty icon/label strings)
+                        val isChromeButton = item.icon.isEmpty() && item.label.isEmpty()
+                        val chromeButton = if (isChromeButton) {
+                            nonProminentButtons.find { it.key == item.key }
+                        } else null
+                        
                         NavigationDrawerItem(
                             selected = isHighlighted,
                             onClick = {
                                 scope.launch {
-                                    feature.onActivate()
+                                    item.onActivate()
+                                    onFeatureActivate?.invoke()
                                     onDismiss()
                                 }
                             },
-                            icon = { Text(feature.icon) },
-                            label = { Text(feature.label) },
+                            icon = {
+                                if (chromeButton != null) {
+                                    chromeButton.icon()
+                                } else {
+                                    Text(item.icon)
+                                }
+                            },
+                            label = {
+                                if (chromeButton != null) {
+                                    chromeButton.label()
+                                } else {
+                                    Text(item.label)
+                                }
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .onGloballyPositioned { 
-                                    onMenuItemLayout(feature.key, it.boundsInWindow()) 
+                                    onMenuItemLayout(item.key, it.boundsInWindow()) 
                                 }
                         )
                     }

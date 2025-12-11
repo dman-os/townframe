@@ -2,9 +2,7 @@ use crate::interlude::*;
 
 use crate::ffi::{FfiError, SharedFfiCtx};
 
-use daybook_core::config::{
-    ConfigEvent, ConfigRepo, SidebarMode, SidebarPosition, SidebarVisibility, TabListVisibility, TableViewMode,
-};
+use daybook_core::config::{ConfigEvent, ConfigRepo, LayoutWindowConfig};
 
 #[derive(uniffi::Object)]
 struct ConfigRepoFfi {
@@ -39,167 +37,18 @@ impl ConfigRepoFfi {
 
     // Tab list visibility settings
     #[tracing::instrument(skip(self))]
-    async fn get_tab_list_vis_expanded(self: Arc<Self>) -> TabListVisibility {
+    async fn get_layout(self: Arc<Self>) -> LayoutWindowConfig {
         let this = self.clone();
         self.fcx
-            .do_on_rt(async move { this.repo.get_tab_list_vis_expanded().await })
+            .do_on_rt(async move { this.repo.get_layout().await })
             .await
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn set_tab_list_vis_expanded(
-        self: Arc<Self>,
-        value: TabListVisibility,
-    ) -> Result<(), FfiError> {
+    async fn set_layout(self: Arc<Self>, value: LayoutWindowConfig) -> Result<(), FfiError> {
         let this = self.clone();
         self.fcx
-            .do_on_rt(async move { this.repo.set_tab_list_vis_expanded(value).await })
-            .await?;
-        Ok(())
-    }
-
-    // Table view mode setting
-    #[tracing::instrument(skip(self))]
-    async fn get_table_view_mode_compact(self: Arc<Self>) -> TableViewMode {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.get_table_view_mode_compact().await })
-            .await
-    }
-
-    #[tracing::instrument(err, skip(self))]
-    async fn set_table_view_mode_compact(
-        self: Arc<Self>,
-        value: TableViewMode,
-    ) -> Result<(), FfiError> {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.set_table_view_mode_compact(value).await })
-            .await?;
-        Ok(())
-    }
-
-    // Table rail visibility settings
-    #[tracing::instrument(skip(self))]
-    async fn get_table_rail_vis_compact(self: Arc<Self>) -> TabListVisibility {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.get_table_rail_vis_compact().await })
-            .await
-    }
-
-    #[tracing::instrument(err, skip(self))]
-    async fn set_table_rail_vis_compact(
-        self: Arc<Self>,
-        value: TabListVisibility,
-    ) -> Result<(), FfiError> {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.set_table_rail_vis_compact(value).await })
-            .await?;
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn get_table_rail_vis_expanded(self: Arc<Self>) -> TabListVisibility {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.get_table_rail_vis_expanded().await })
-            .await
-    }
-
-    #[tracing::instrument(err, skip(self))]
-    async fn set_table_rail_vis_expanded(
-        self: Arc<Self>,
-        value: TabListVisibility,
-    ) -> Result<(), FfiError> {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.set_table_rail_vis_expanded(value).await })
-            .await?;
-        Ok(())
-    }
-
-    // Sidebar visibility settings
-    #[tracing::instrument(skip(self))]
-    async fn get_sidebar_vis_expanded(self: Arc<Self>) -> SidebarVisibility {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.get_sidebar_vis_expanded().await })
-            .await
-    }
-
-    #[tracing::instrument(err, skip(self))]
-    async fn set_sidebar_vis_expanded(
-        self: Arc<Self>,
-        value: SidebarVisibility,
-    ) -> Result<(), FfiError> {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.set_sidebar_vis_expanded(value).await })
-            .await?;
-        Ok(())
-    }
-
-    // Sidebar position settings
-    #[tracing::instrument(skip(self))]
-    async fn get_sidebar_pos_expanded(self: Arc<Self>) -> SidebarPosition {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.get_sidebar_pos_expanded().await })
-            .await
-    }
-
-    #[tracing::instrument(err, skip(self))]
-    async fn set_sidebar_pos_expanded(
-        self: Arc<Self>,
-        value: SidebarPosition,
-    ) -> Result<(), FfiError> {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.set_sidebar_pos_expanded(value).await })
-            .await?;
-        Ok(())
-    }
-
-    // Sidebar mode settings
-    #[tracing::instrument(skip(self))]
-    async fn get_sidebar_mode_expanded(self: Arc<Self>) -> SidebarMode {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.get_sidebar_mode_expanded().await })
-            .await
-    }
-
-    #[tracing::instrument(err, skip(self))]
-    async fn set_sidebar_mode_expanded(
-        self: Arc<Self>,
-        value: SidebarMode,
-    ) -> Result<(), FfiError> {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.set_sidebar_mode_expanded(value).await })
-            .await?;
-        Ok(())
-    }
-
-    // Sidebar auto-hide settings
-    #[tracing::instrument(skip(self))]
-    async fn get_sidebar_auto_hide_expanded(self: Arc<Self>) -> bool {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.get_sidebar_auto_hide_expanded().await })
-            .await
-    }
-
-    #[tracing::instrument(err, skip(self))]
-    async fn set_sidebar_auto_hide_expanded(
-        self: Arc<Self>,
-        value: bool,
-    ) -> Result<(), FfiError> {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.set_sidebar_auto_hide_expanded(value).await })
+            .do_on_rt(async move { this.repo.set_layout(value).await })
             .await?;
         Ok(())
     }
