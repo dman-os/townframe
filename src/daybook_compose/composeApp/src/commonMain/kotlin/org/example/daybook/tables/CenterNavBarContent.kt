@@ -157,7 +157,7 @@ fun RowScope.CenterNavBarContent(
             }
         }
     } else {
-        // Show default nav bar features (Home, Capture, Search) in the center
+        // Show default nav bar features (Home, Capture, Documents) in the center
         Row(
             modifier = modifier
                 .weight(1f)

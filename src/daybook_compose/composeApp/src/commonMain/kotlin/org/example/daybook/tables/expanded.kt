@@ -459,7 +459,7 @@ fun SidebarContent(
             "nav_home" -> AppScreens.Home.name
             "nav_tables" -> AppScreens.Tables.name
             "nav_capture" -> AppScreens.Capture.name
-            "nav_search" -> AppScreens.Search.name
+            "nav_documents" -> AppScreens.Documents.name
             "nav_settings" -> AppScreens.Settings.name
             else -> null
         }
@@ -519,7 +519,7 @@ fun SidebarContent(
                         }
                     }
                     
-                    // Features section - Home, Search, and prominent chrome buttons
+                    // Features section - Home, Documents, and prominent chrome buttons
                     allSidebarFeatures.forEach { item ->
                         val featureRoute = getRouteForFeature(item)
                         val isSelected = featureRoute != null && featureRoute == currentRoute

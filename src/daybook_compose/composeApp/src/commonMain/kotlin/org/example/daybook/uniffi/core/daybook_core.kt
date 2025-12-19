@@ -2035,7 +2035,7 @@ data class Window (
     var `selectedTable`: Uuid?, 
     var `layout`: WindowLayout, 
     var `lastCaptureMode`: CaptureMode, 
-    var `searchScreenListSizeExpanded`: WindowLayoutRegionSize
+    var `documentsScreenListSizeExpanded`: WindowLayoutRegionSize
 ) {
     
     companion object
@@ -2064,7 +2064,7 @@ public object FfiConverterTypeWindow: FfiConverterRustBuffer<Window> {
             FfiConverterOptionalTypeUuid.allocationSize(value.`selectedTable`) +
             FfiConverterTypeWindowLayout.allocationSize(value.`layout`) +
             FfiConverterTypeCaptureMode.allocationSize(value.`lastCaptureMode`) +
-            FfiConverterTypeWindowLayoutRegionSize.allocationSize(value.`searchScreenListSizeExpanded`)
+            FfiConverterTypeWindowLayoutRegionSize.allocationSize(value.`documentsScreenListSizeExpanded`)
     )
 
     override fun write(value: Window, buf: ByteBuffer) {
@@ -2074,7 +2074,7 @@ public object FfiConverterTypeWindow: FfiConverterRustBuffer<Window> {
             FfiConverterOptionalTypeUuid.write(value.`selectedTable`, buf)
             FfiConverterTypeWindowLayout.write(value.`layout`, buf)
             FfiConverterTypeCaptureMode.write(value.`lastCaptureMode`, buf)
-            FfiConverterTypeWindowLayoutRegionSize.write(value.`searchScreenListSizeExpanded`, buf)
+            FfiConverterTypeWindowLayoutRegionSize.write(value.`documentsScreenListSizeExpanded`, buf)
     }
 }
 
@@ -2287,7 +2287,7 @@ data class WindowPatch (
     var `selectedTable`: Uuid??, 
     var `layout`: WindowLayout?, 
     var `lastCaptureMode`: CaptureMode?, 
-    var `searchScreenListSizeExpanded`: WindowLayoutRegionSize?
+    var `documentsScreenListSizeExpanded`: WindowLayoutRegionSize?
 ) {
     
     companion object
@@ -2316,7 +2316,7 @@ public object FfiConverterTypeWindowPatch: FfiConverterRustBuffer<WindowPatch> {
             FfiConverterOptionalOptionalTypeUuid.allocationSize(value.`selectedTable`) +
             FfiConverterOptionalTypeWindowLayout.allocationSize(value.`layout`) +
             FfiConverterOptionalTypeCaptureMode.allocationSize(value.`lastCaptureMode`) +
-            FfiConverterOptionalTypeWindowLayoutRegionSize.allocationSize(value.`searchScreenListSizeExpanded`)
+            FfiConverterOptionalTypeWindowLayoutRegionSize.allocationSize(value.`documentsScreenListSizeExpanded`)
     )
 
     override fun write(value: WindowPatch, buf: ByteBuffer) {
@@ -2326,7 +2326,7 @@ public object FfiConverterTypeWindowPatch: FfiConverterRustBuffer<WindowPatch> {
             FfiConverterOptionalOptionalTypeUuid.write(value.`selectedTable`, buf)
             FfiConverterOptionalTypeWindowLayout.write(value.`layout`, buf)
             FfiConverterOptionalTypeCaptureMode.write(value.`lastCaptureMode`, buf)
-            FfiConverterOptionalTypeWindowLayoutRegionSize.write(value.`searchScreenListSizeExpanded`, buf)
+            FfiConverterOptionalTypeWindowLayoutRegionSize.write(value.`documentsScreenListSizeExpanded`, buf)
     }
 }
 

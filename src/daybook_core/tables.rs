@@ -12,7 +12,7 @@ pub struct Window {
     pub selected_table: Option<Uuid>,
     pub layout: WindowLayout,
     pub last_capture_mode: CaptureMode,
-    pub search_screen_list_size_expanded: WindowLayoutRegionSize,
+    pub documents_screen_list_size_expanded: WindowLayoutRegionSize,
 }
 
 #[derive(Debug, Clone, Copy, Reconcile, Hydrate, Default, PartialEq)]
@@ -269,7 +269,7 @@ impl TablesStore {
             selected_table: Some(table_id),
             layout: WindowLayout::default(),
             last_capture_mode: CaptureMode::default(),
-            search_screen_list_size_expanded: WindowLayoutRegionSize::Weight(0.4),
+            documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(0.4),
         };
         self.windows.insert(window_id, window);
 
@@ -872,7 +872,7 @@ impl TablesRepo {
                         selected_table: Some(table_id),
                         layout: WindowLayout::default(),
                         last_capture_mode: CaptureMode::default(),
-                        search_screen_list_size_expanded: WindowLayoutRegionSize::Weight(0.4),
+                        documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(0.4),
                     };
                     store.windows.insert(new_window_id, window);
                     new_window_id
@@ -954,7 +954,7 @@ impl TablesRepo {
                                 selected_table: Some(table_id),
                                 layout: WindowLayout::default(),
                                 last_capture_mode: CaptureMode::default(),
-                                search_screen_list_size_expanded: WindowLayoutRegionSize::Weight(0.4),
+                                documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(0.4),
                             };
                             store.windows.insert(new_window_id, window);
                             new_window_id

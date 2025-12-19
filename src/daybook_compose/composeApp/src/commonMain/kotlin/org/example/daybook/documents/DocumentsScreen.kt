@@ -1,6 +1,6 @@
 @file:OptIn(kotlin.uuid.ExperimentalUuidApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class, kotlin.time.ExperimentalTime::class)
 
-package org.example.daybook.search
+package org.example.daybook.documents
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -37,20 +37,20 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
-sealed interface SearchState {
-    data class Data(val docs: List<Doc>) : SearchState
-    data class Error(val error: FfiException) : SearchState
-    object Loading : SearchState
+sealed interface DocumentsState {
+    data class Data(val docs: List<Doc>) : DocumentsState
+    data class Error(val error: FfiException) : DocumentsState
+    object Loading : DocumentsState
 }
 
-class SearchScreenViewModel(
+class DocumentsScreenViewModel(
     val drawerRepo: DrawerRepoFfi,
     val tablesRepo: TablesRepoFfi,
     val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
     val tablesVm: TablesViewModel
 ) : ViewModel() {
-    private val _searchState = MutableStateFlow<SearchState>(SearchState.Loading)
-    val searchState = _searchState.asStateFlow()
+    private val _documentsState = MutableStateFlow<DocumentsState>(DocumentsState.Loading)
+    val documentsState = _documentsState.asStateFlow()
 
     private val _selectedDocId = MutableStateFlow<String?>(null)
     val selectedDocId = _selectedDocId.asStateFlow()
@@ -70,7 +70,7 @@ class SearchScreenViewModel(
                 }
             }
             windowId?.let { id ->
-                state.windows[id]?.searchScreenListSizeExpanded
+                state.windows[id]?.documentsScreenListSizeExpanded
             } ?: WindowLayoutRegionSize.Weight(0.4f)
         } else {
             WindowLayoutRegionSize.Weight(0.4f)
@@ -105,7 +105,7 @@ class SearchScreenViewModel(
 
     fun refreshDocs() {
         viewModelScope.launch {
-            _searchState.value = SearchState.Loading
+            _documentsState.value = DocumentsState.Loading
             try {
                 val ids = drawerRepo.list()
                 val docs = ids.mapNotNull { id ->
@@ -115,9 +115,9 @@ class SearchScreenViewModel(
                         null
                     }
                 }
-                _searchState.value = SearchState.Data(docs)
+                _documentsState.value = DocumentsState.Data(docs)
             } catch (e: FfiException) {
-                _searchState.value = SearchState.Error(e)
+                _documentsState.value = DocumentsState.Error(e)
             }
         }
     }
@@ -155,7 +155,7 @@ class SearchScreenViewModel(
                 windowId?.let { id ->
                     state.windows[id]?.let { window ->
                         try {
-                            tablesRepo.setWindow(id, window.copy(searchScreenListSizeExpanded = WindowLayoutRegionSize.Weight(weight)))
+                            tablesRepo.setWindow(id, window.copy(documentsScreenListSizeExpanded = WindowLayoutRegionSize.Weight(weight)))
                         } catch (e: FfiException) {
                             // Log error
                         }
@@ -198,15 +198,15 @@ class SearchScreenViewModel(
 }
 
 @Composable
-fun SearchScreen(
+fun DocumentsScreen(
     contentType: DaybookContentType,
     modifier: Modifier = Modifier
 ) {
     val container = LocalContainer.current
     val tablesVm: TablesViewModel = viewModel { TablesViewModel(container.tablesRepo) }
-    val vm = viewModel { SearchScreenViewModel(container.drawerRepo, container.tablesRepo, container.blobsRepo, tablesVm) }
+    val vm = viewModel { DocumentsScreenViewModel(container.drawerRepo, container.tablesRepo, container.blobsRepo, tablesVm) }
     
-    val searchState by vm.searchState.collectAsState()
+    val documentsState by vm.documentsState.collectAsState()
     val selectedDocId by vm.selectedDocId.collectAsState()
     val selectedDoc by vm.selectedDoc.collectAsState()
 
@@ -216,7 +216,7 @@ fun SearchScreen(
             is WindowLayoutRegionSize.Weight -> s.v1
         }
         
-        ProvideChromeState(ChromeState(title = "Search")) {
+        ProvideChromeState(ChromeState(title = "Documents")) {
             DockableRegion(
                 modifier = modifier.fillMaxSize(),
                 orientation = Orientation.Horizontal,
@@ -228,7 +228,7 @@ fun SearchScreen(
                 pane("list") {
                     Box(modifier = Modifier.fillMaxSize()) {
                         DocList(
-                            state = searchState,
+                            state = documentsState,
                             selectedDocId = selectedDocId,
                             onDocClick = { vm.selectDoc(it.id) }
                         )
@@ -271,9 +271,9 @@ fun SearchScreen(
                 }
             }
         } else {
-            ProvideChromeState(ChromeState(title = "Search")) {
+            ProvideChromeState(ChromeState(title = "Documents")) {
                 DocList(
-                    state = searchState,
+                    state = documentsState,
                     selectedDocId = null,
                     onDocClick = { vm.selectDoc(it.id) },
                     modifier = modifier
@@ -285,23 +285,23 @@ fun SearchScreen(
 
 @Composable
 fun DocList(
-    state: SearchState,
+    state: DocumentsState,
     selectedDocId: String?,
     onDocClick: (Doc) -> Unit,
     modifier: Modifier = Modifier
 ) {
     when (state) {
-        is SearchState.Loading -> {
+        is DocumentsState.Loading -> {
             Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
         }
-        is SearchState.Error -> {
+        is DocumentsState.Error -> {
             Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("Error: ${state.error.message()}")
             }
         }
-        is SearchState.Data -> {
+        is DocumentsState.Data -> {
             if (state.docs.isEmpty()) {
                 Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("No documents in drawer", style = MaterialTheme.typography.bodyLarge)

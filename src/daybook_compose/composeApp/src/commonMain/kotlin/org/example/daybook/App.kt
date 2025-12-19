@@ -66,7 +66,7 @@ import kotlinx.coroutines.launch
 import org.example.daybook.capture.CameraCaptureContext
 import org.example.daybook.capture.ProvideCameraCaptureContext
 import org.example.daybook.capture.screens.CaptureScreen
-import org.example.daybook.search.SearchScreen
+import org.example.daybook.documents.DocumentsScreen
 import org.example.daybook.settings.SettingsScreen
 import org.example.daybook.tables.CompactLayout
 import org.example.daybook.tables.ExpandedLayout
@@ -125,7 +125,7 @@ data class AppConfig(
 )
 
 enum class AppScreens {
-    Home, Capture, Tables, Settings, Search
+    Home, Capture, Tables, Settings, Documents
 }
 
 private sealed interface AppInitState {
@@ -739,9 +739,9 @@ fun Routes(
                 SettingsScreen(modifier = modifier)
             }
         }
-        composable(route = AppScreens.Search.name) {
-            ProvideChromeState(ChromeState(title = "Search")) {
-                SearchScreen(modifier = modifier, contentType = contentType)
+        composable(route = AppScreens.Documents.name) {
+            ProvideChromeState(ChromeState(title = "Documents")) {
+                DocumentsScreen(modifier = modifier, contentType = contentType)
             }
         }
         composable(route = AppScreens.Home.name) {

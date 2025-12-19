@@ -26,9 +26,9 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> {
                 navController.navigate(AppScreens.Capture.name)
             }
         },
-        FeatureItem("nav_search", "🔍", "Search") {
+        FeatureItem("nav_documents", "📄", "Documents") {
             scope.launch {
-                navController.navigate(AppScreens.Search.name)
+                navController.navigate(AppScreens.Documents.name)
             }
         },
         FeatureItem("nav_tables", "T", "Tables") {
@@ -41,47 +41,47 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> {
 
 /**
  * Features that appear in the bottom nav bar (compact).
- * For compact layout: show Home, Capture, Search in that order in the bottom bar.
+ * For compact layout: show Home, Capture, Documents in that order in the bottom bar.
  */
 @Composable
 fun rememberNavBarFeatures(navController: NavHostController): List<FeatureItem> {
     val allFeatures = rememberAllFeatures(navController)
     
-    // Return Home, Capture, Search in that order
+    // Return Home, Capture, Documents in that order
     return listOfNotNull(
         allFeatures.find { it.key == "nav_home" },
         allFeatures.find { it.key == "nav_capture" },
-        allFeatures.find { it.key == "nav_search" }
+        allFeatures.find { it.key == "nav_documents" }
     )
 }
 
 /**
  * Features that appear in the sidebar (expanded layout).
- * For sidebar: show only Home and Search.
+ * For sidebar: show only Home and Documents.
  */
 @Composable
 fun rememberSidebarFeatures(navController: NavHostController): List<FeatureItem> {
     val allFeatures = rememberAllFeatures(navController)
     
-    // Return only Home and Search
+    // Return only Home and Documents
     return listOfNotNull(
         allFeatures.find { it.key == "nav_home" },
-        allFeatures.find { it.key == "nav_search" }
+        allFeatures.find { it.key == "nav_documents" }
     )
 }
 
 /**
  * Features that appear in the menu/dropdown (hidden by default).
  * These are secondary features that are accessed via menu.
- * For compact layout: everything except Home, Capture, Search goes in the menu.
+ * For compact layout: everything except Home, Capture, Documents goes in the menu.
  */
 @Composable
 fun rememberMenuFeatures(navController: NavHostController): List<FeatureItem> {
     val scope = rememberCoroutineScope()
     val allFeatures = rememberAllFeatures(navController)
     
-    // Get the bottom bar features (Home, Capture, Search)
-    val bottomBarKeys = setOf("nav_home", "nav_capture", "nav_search")
+    // Get the bottom bar features (Home, Capture, Documents)
+    val bottomBarKeys = setOf("nav_home", "nav_capture", "nav_documents")
     
     // Return all features except those in the bottom bar, plus Settings
     val otherFeatures = allFeatures.filter { it.key !in bottomBarKeys }
