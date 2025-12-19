@@ -71,6 +71,10 @@ impl FfiCtx {
             .inspect_err(|err| tracing::error!(?err))?;
         Ok(Arc::new(Self { cx, rt }))
     }
+
+    pub fn blobs(self: Arc<Self>) -> Arc<crate::blobs::BlobsRepoFfi> {
+        crate::blobs::BlobsRepoFfi::new(self)
+    }
 }
 
 async fn do_on_rt<O, F>(rt: &tokio::runtime::Runtime, future: F) -> O

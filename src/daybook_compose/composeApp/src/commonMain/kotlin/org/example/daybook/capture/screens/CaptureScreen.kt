@@ -2,43 +2,39 @@
 
 package org.example.daybook.capture.screens
 
-import androidx.compose.material3.Button
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import org.example.daybook.AdditionalFeatureButton
 import org.example.daybook.ChromeState
 import org.example.daybook.LocalContainer
 import org.example.daybook.MainFeatureActionButton
 import org.example.daybook.ProvideChromeState
-// removed Doc/DocContent imports - using Uuid list for drawer
-import org.example.daybook.uniffi.core.Doc
-import org.example.daybook.uniffi.core.DocContent
-import org.example.daybook.uniffi.core.DrawerEvent
+import org.example.daybook.TablesState
+import org.example.daybook.TablesViewModel
+import org.example.daybook.capture.DaybookCameraPreview
+import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
-import org.example.daybook.uniffi.core.ListenerRegistration
-import org.example.daybook.capture.DaybookCameraPreview
-import org.example.daybook.capture.LocalCameraCaptureContext
+import org.example.daybook.uniffi.TablesRepoFfi
+import org.example.daybook.uniffi.core.*
 import kotlin.time.Clock
 import kotlin.uuid.Uuid
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
-import androidx.compose.ui.Modifier
-
-enum class CaptureMode {
-    Text,
-    Camera,
-    Mic
-}
+import org.example.daybook.ui.DocEditor
 
 sealed interface DocsListState {
     data class Data(val docs: List<Doc>) : DocsListState
@@ -48,14 +44,155 @@ sealed interface DocsListState {
 
 class CaptureScreenViewModel(
     val drawerRepo: DrawerRepoFfi,
-    val initialMode: CaptureMode = CaptureMode.Camera,
-    val availableModes: Set<CaptureMode> = setOf(CaptureMode.Text, CaptureMode.Camera),
+    val tablesRepo: TablesRepoFfi,
+    val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
+    val tablesVm: TablesViewModel,
+    val initialDocId: String? = null
 ) : ViewModel() {
-    private val _captureMode = MutableStateFlow(initialMode)
+    private val _captureMode = MutableStateFlow(CaptureMode.TEXT)
     val captureMode = _captureMode.asStateFlow()
-    
+
+    private val _currentDocId = MutableStateFlow<String?>(null)
+    val currentDocId = _currentDocId.asStateFlow()
+
+    private val _currentDoc = MutableStateFlow<Doc?>(null)
+    val currentDoc = _currentDoc.asStateFlow()
+
+    private val _message = MutableStateFlow<String?>(null)
+    val message = _message.asStateFlow()
+
+    private var isCreatingDoc = false
+
     fun setCaptureMode(mode: CaptureMode) {
+        if (_captureMode.value == mode) return
         _captureMode.value = mode
+        persistCaptureMode(mode)
+    }
+
+    private fun persistCaptureMode(mode: CaptureMode) {
+        viewModelScope.launch {
+            val state = tablesVm.tablesState.value
+            val selectedTableId = tablesVm.selectedTableId.value
+            if (state is TablesState.Data && selectedTableId != null) {
+                val windowId = state.tables[selectedTableId]?.window?.let { windowPolicy ->
+                    when (windowPolicy) {
+                        is TableWindow.Specific -> windowPolicy.id
+                        is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                    }
+                }
+                windowId?.let { id ->
+                    state.windows[id]?.let { window ->
+                        try {
+                            tablesRepo.setWindow(id, window.copy(lastCaptureMode = mode))
+                        } catch (e: FfiException) {
+                            // Log error
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun saveImage(bytes: ByteArray) {
+        viewModelScope.launch {
+            try {
+                val hashStr = blobsRepo.put(bytes)
+                
+                // Create Doc
+                val newDoc = Doc(
+                    id = "",
+                    createdAt = Clock.System.now(),
+                    updatedAt = Clock.System.now(),
+                    content = DocContent.Blob(
+                        DocBlob(
+                            lengthOctets = bytes.size.toULong(),
+                            hash = hashStr
+                        )
+                    ),
+                    tags = listOf(
+                        DocTag.ImageMetadata(
+                            ImageMeta(
+                                mime = "image/jpeg",
+                                widthPx = 0uL,
+                                heightPx = 0uL
+                            )
+                        )
+                    )
+                )
+                
+                drawerRepo.add(newDoc)
+                _message.value = "Photo saved successfully"
+            } catch (e: FfiException) {
+                println("Error saving image: $e")
+                _message.value = "Error saving photo: ${e.message}"
+            }
+        }
+    }
+
+    fun clearMessage() {
+        _message.value = null
+    }
+
+    fun updateDocContent(content: String) {
+        viewModelScope.launch {
+            val docId = _currentDocId.value
+            if (docId == null) {
+                if (isCreatingDoc) return@launch
+                isCreatingDoc = true
+                // Create new doc
+                val newDoc = Doc(
+                    id = "", // Rust will generate the ID
+                    createdAt = Clock.System.now(),
+                    updatedAt = Clock.System.now(),
+                    content = DocContent.Text(content),
+                    tags = listOf()
+                )
+                try {
+                    val returnedId = drawerRepo.add(newDoc)
+                    _currentDocId.value = returnedId
+                    _currentDoc.value = newDoc.copy(id = returnedId)
+                } catch (e: FfiException) {
+                    // Log error
+                } finally {
+                    isCreatingDoc = false
+                }
+            } else {
+                // Update existing doc
+                val current = _currentDoc.value
+                if (current != null) {
+                    // Optimistically update local state to avoid lag
+                    val updatedDoc = current.copy(
+                        content = DocContent.Text(content),
+                        updatedAt = Clock.System.now()
+                    )
+                    _currentDoc.value = updatedDoc
+                    
+                    try {
+                        drawerRepo.updateBatch(listOf(org.example.daybook.uniffi.core.DocPatch(
+                            id = docId,
+                            createdAt = null,
+                            content = DocContent.Text(content),
+                            updatedAt = Clock.System.now(),
+                            tags = null
+                        )))
+                    } catch (e: FfiException) {
+                        // Log error
+                    }
+                }
+            }
+        }
+    }
+
+    fun loadDoc(id: String) {
+        viewModelScope.launch {
+            try {
+                val doc = drawerRepo.get(id)
+                _currentDocId.value = id
+                _currentDoc.value = doc
+            } catch (e: FfiException) {
+                // Log error
+            }
+        }
     }
 
     private val _docsList = MutableStateFlow(DocsListState.Loading as DocsListState)
@@ -67,27 +204,47 @@ class CaptureScreenViewModel(
     // Listener instance implemented on Kotlin side
     private val listener = object : DrawerEventListener {
         override fun onDrawerEvent(event: DrawerEvent) {
-            // Ensure UI updates happen on main thread
             viewModelScope.launch {
                 when (event) {
-                    DrawerEvent.ListChanged -> {
-                        // Refresh from source of truth in Rust
-                        refreshDocs()
+                    DrawerEvent.ListChanged -> refreshDocs()
+                    is DrawerEvent.DocUpdated -> {
+                        if (event.id == _currentDocId.value) {
+                            loadDoc(event.id)
+                        }
                     }
-                    else -> {
-
-                    }
+                    else -> {}
                 }
             }
         }
     }
 
     init {
-        // initial load
         loadLatestDocs()
-        // register listener
+        if (initialDocId != null) {
+            loadDoc(initialDocId)
+        }
         viewModelScope.launch {
             listenerRegistration = drawerRepo.ffiRegisterListener(listener)
+        }
+        
+        // Initialize mode from current window
+        viewModelScope.launch {
+            tablesVm.tablesState.collect { state ->
+                if (state is TablesState.Data) {
+                    val selectedTableId = tablesVm.selectedTableId.value
+                    val windowId = state.tables[selectedTableId]?.window?.let { windowPolicy ->
+                        when (windowPolicy) {
+                            is TableWindow.Specific -> windowPolicy.id
+                            is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                        }
+                    }
+                    windowId?.let { id ->
+                        state.windows[id]?.let { window ->
+                            _captureMode.value = window.lastCaptureMode
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -114,162 +271,142 @@ class CaptureScreenViewModel(
         }
     }
 
-    fun addOne() {
-        viewModelScope.launch {
-            val id = Uuid.random()
-            // create a new Doc and send as a single-item batch to ffi_update_batch
-            val doc = Doc(
-                id = id.toString(),
-                createdAt = Clock.System.now(),
-                updatedAt = Clock.System.now(),
-                content = DocContent.Text("hello"),
-                tags = listOf()
-            )
-            drawerRepo.add(doc)
-        }
-    }
-
     override fun onCleared() {
-        // Clean up registration
         listenerRegistration?.unregister()
         super.onCleared()
     }
 }
 
+
 @Composable
 fun CaptureScreen(
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    initialDocId: String? = null
 ) {
-    val drawerRepo = LocalContainer.current.drawerRepo
+    val container = LocalContainer.current
+    val tablesVm = viewModel { TablesViewModel(container.tablesRepo) }
     val vm = viewModel {
-        CaptureScreenViewModel(drawerRepo = drawerRepo)
+        CaptureScreenViewModel(
+            drawerRepo = container.drawerRepo,
+            tablesRepo = container.tablesRepo,
+            blobsRepo = container.blobsRepo,
+            tablesVm = tablesVm,
+            initialDocId = initialDocId
+        )
     }
 
-    val captureMode = vm.captureMode.collectAsState().value
-    val docsList = vm.docsList.collectAsState().value
+    val captureMode by vm.captureMode.collectAsState()
+    val currentDoc by vm.currentDoc.collectAsState()
     
-    // Get capture context for camera mode
     val captureContext = LocalCameraCaptureContext.current
-    
-    // Get capture state for chrome state button
-    val canCapture = if (captureContext != null && captureMode == CaptureMode.Camera) {
+    val canCapture = if (captureContext != null && captureMode == CaptureMode.CAMERA) {
         captureContext.canCapture.collectAsState().value
     } else {
         false
     }
-    val isCapturing = if (captureContext != null && captureMode == CaptureMode.Camera) {
+    val isCapturing = if (captureContext != null && captureMode == CaptureMode.CAMERA) {
         captureContext.isCapturing.collectAsState().value
     } else {
         false
     }
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    val message by vm.message.collectAsState()
+
+    LaunchedEffect(message) {
+        message?.let {
+            snackbarHostState.showSnackbar(it)
+            vm.clearMessage()
+        }
+    }
     
-    // Create chrome state with main feature action button for camera mode
-    // Use remember to stabilize the state object - only recreate when actual values change
-    val chromeState = remember(captureMode == CaptureMode.Camera, captureContext != null, canCapture, isCapturing) {
-        if (captureMode == CaptureMode.Camera && captureContext != null) {
-            val ctx = captureContext // Capture for the lambda
+    val chromeState = remember(captureMode, canCapture, isCapturing) {
+        if (captureMode == CaptureMode.CAMERA && captureContext != null) {
+            val ctx = captureContext
             ChromeState(
                 mainFeatureActionButton = MainFeatureActionButton.Button(
-                    icon = {
-                        Text("📷")
-                    },
-                    label = {
-                        Text(if (isCapturing) "Capturing..." else "Save Photo")
-                    },
+                    icon = { Text("📷") },
+                    label = { Text(if (isCapturing) "Capturing..." else "Save Photo") },
                     enabled = canCapture && !isCapturing,
-                    onClick = {
-                        ctx.requestCapture()
-                    }
-                ),
-                additionalFeatureButtons = listOf(
-                    // Prominent button for switching to text mode
-                    AdditionalFeatureButton(
-                        key = "capture_switch_text",
-                        icon = { Text("📝") },
-                        label = { Text("Text Mode") },
-                        prominent = true,
-                        onClick = {
-                            // Switch to text mode
-                            vm.setCaptureMode(CaptureMode.Text)
-                        }
-                    ),
-                    // Non-prominent button for settings
-                    AdditionalFeatureButton(
-                        key = "capture_settings",
-                        icon = { Text("⚙️") },
-                        label = { Text("Capture Settings") },
-                        prominent = false,
-                        onClick = {
-                            // TODO: Open capture settings
-                        }
-                    )
+                    onClick = { ctx.requestCapture() }
                 )
             )
         } else {
-            ChromeState(
-                additionalFeatureButtons = listOf(
-                    // Prominent button for switching to camera mode
-                    AdditionalFeatureButton(
-                        key = "capture_switch_camera",
-                        icon = { Text("📷") },
-                        label = { Text("Camera Mode") },
-                        prominent = true,
-                        onClick = {
-                            // Switch to camera mode
-                            vm.setCaptureMode(CaptureMode.Camera)
-                        }
-                    ),
-                    // Non-prominent button for settings
-                    AdditionalFeatureButton(
-                        key = "capture_settings",
-                        icon = { Text("⚙️") },
-                        label = { Text("Capture Settings") },
-                        prominent = false,
-                        onClick = {
-                            // TODO: Open capture settings
-                        }
-                    )
-                )
-            )
+            ChromeState.Empty
         }
     }
 
     ProvideChromeState(chromeState) {
-        when (captureMode) {
-            CaptureMode.Camera -> {
-                DaybookCameraPreview(
-                    onImageSaved = { byteArray ->
-                        // Optionally save the image as a Doc
-                        // For now, just log that it was saved
-                        println("Image saved: ${byteArray.size} bytes")
-                    },
-                    onCaptureRequested = {
-                        // This will be handled by the camera preview via the context
-                    }
-                )
-            }
-            else -> {
-                when (docsList) {
-                    is DocsListState.Error -> {
-                        Text("error loading docs: ${docsList.error.message()}")
-                    }
-
-                    is DocsListState.Loading -> {
-                        Text("Loading...")
-                    }
-
-                    is DocsListState.Data -> {
-                        Button(
-                            onClick = {
-                                vm.addOne()
-                            }
-                        ) {
-                            Text("Add")
+        Box(modifier = modifier.fillMaxSize()) {
+            when (captureMode) {
+                CaptureMode.CAMERA -> {
+                    DaybookCameraPreview(
+                        onImageSaved = { byteArray ->
+                            vm.saveImage(byteArray)
+                        },
+                        onCaptureRequested = {}
+                    )
+                }
+                CaptureMode.TEXT -> {
+                    DocEditor(
+                        doc = currentDoc,
+                        onContentChange = { vm.updateDocContent(it) },
+                        modifier = Modifier.padding(16.dp)
+                    )
+                }
+                CaptureMode.MIC -> {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("🎤", style = MaterialTheme.typography.displayLarge)
+                            Text("Mic mode placeholder", style = MaterialTheme.typography.headlineMedium)
                         }
-                        Text("${docsList.docs}")
                     }
                 }
             }
+
+            // Floating Action Buttons for mode switching
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                ModeFab(
+                    icon = Icons.Default.TextFields,
+                    selected = captureMode == CaptureMode.TEXT,
+                    onClick = { vm.setCaptureMode(CaptureMode.TEXT) }
+                )
+                ModeFab(
+                    icon = Icons.Default.CameraAlt,
+                    selected = captureMode == CaptureMode.CAMERA,
+                    onClick = { vm.setCaptureMode(CaptureMode.CAMERA) }
+                )
+                ModeFab(
+                    icon = Icons.Default.Mic,
+                    selected = captureMode == CaptureMode.MIC,
+                    onClick = { vm.setCaptureMode(CaptureMode.MIC) }
+                )
+            }
+
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp)
+            )
         }
+    }
+}
+
+@Composable
+fun ModeFab(
+    icon: ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    FloatingActionButton(
+        onClick = onClick,
+        containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSecondaryContainer
+    ) {
+        Icon(icon, contentDescription = null)
     }
 }

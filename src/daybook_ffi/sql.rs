@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 pub struct SqlCtx {
-    db_pool: sqlx::SqlitePool,
+    pub db_pool: sqlx::SqlitePool,
 }
 
 /// Configuration for SQLite storage

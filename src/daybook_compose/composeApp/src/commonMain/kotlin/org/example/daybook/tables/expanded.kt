@@ -9,6 +9,11 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MenuOpen
+import androidx.compose.material3.*
+import org.example.daybook.DaybookContentType
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -72,20 +77,24 @@ import org.example.daybook.LocalChromeStateManager
 import org.example.daybook.LocalContainer
 import org.example.daybook.AppScreens
 import org.example.daybook.Routes
-import org.example.daybook.uniffi.core.LayoutPane
-import org.example.daybook.uniffi.core.LayoutPaneVariant
-import org.example.daybook.uniffi.core.LayoutRegion
-import org.example.daybook.uniffi.core.LayoutWindowConfig
-import org.example.daybook.uniffi.core.Orientation as ConfigOrientation
-import org.example.daybook.uniffi.core.RegionSize
-import org.example.daybook.uniffi.core.RootLayoutRegion
+import org.example.daybook.TablesState
+import org.example.daybook.TablesViewModel
+import org.example.daybook.uniffi.FfiException
+import org.example.daybook.uniffi.core.WindowLayoutPane
+import org.example.daybook.uniffi.core.WindowLayoutPaneVariant
+import org.example.daybook.uniffi.core.WindowLayoutRegion
+import org.example.daybook.uniffi.core.WindowLayout
+import org.example.daybook.uniffi.core.WindowLayoutOrientation as ConfigOrientation
+import org.example.daybook.uniffi.core.WindowLayoutRegionSize
+import org.example.daybook.uniffi.core.WindowLayoutRegionChild
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExpandedLayout(
     modifier: Modifier = Modifier,
     navController: NavHostController,
-    extraAction: (() -> Unit)? = null
+    extraAction: (() -> Unit)? = null,
+    contentType: DaybookContentType
 ) {
     var showFeaturesMenu by remember { mutableStateOf(false) }
     val navBarFeatures = rememberNavBarFeatures(navController)
@@ -93,13 +102,31 @@ fun ExpandedLayout(
     val menuFeatures = rememberMenuFeatures(navController)
     val scope = rememberCoroutineScope()
 
-    // Config ViewModel
+    // Tables ViewModel
+    val tablesRepo = LocalContainer.current.tablesRepo
+    val tablesVm = viewModel { TablesViewModel(tablesRepo) }
+
+    // Config ViewModel (for error handling)
     val configRepo = LocalContainer.current.configRepo
     val configVm = viewModel { ConfigViewModel(configRepo) }
 
-    // Observe layout config
-    val layoutConfigState = configVm.layoutConfig.collectAsState()
-    val layoutConfig = layoutConfigState.value
+    // Observe layout config from the selected window
+    val tablesState by tablesVm.tablesState.collectAsState()
+    val selectedTableId by tablesVm.selectedTableId.collectAsState()
+    
+    val layoutConfig: WindowLayout? = remember(tablesState, selectedTableId) {
+        if (tablesState is TablesState.Data && selectedTableId != null) {
+            val state = tablesState as TablesState.Data
+            // Find the window that contains this table
+            val windowId = state.tables[selectedTableId]?.window?.let { windowPolicy ->
+                when (windowPolicy) {
+                    is org.example.daybook.uniffi.core.TableWindow.Specific -> windowPolicy.id
+                    is org.example.daybook.uniffi.core.TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                }
+            }
+            windowId?.let { state.windows[it]?.layout }
+        } else null
+    }
 
     // Error handling
     val snackbarHostState = remember { SnackbarHostState() }
@@ -138,11 +165,55 @@ fun ExpandedLayout(
         title = screenChromeState.title ?: "Daybook",
         navigationIcon = screenChromeState.navigationIcon ?: {
             IconButton(onClick = {
-                // TODO: toggle left pane
+                // Toggle left pane: Visible 0.4 -> Visible 0.1 -> Hidden
+                if (layoutConfig != null && tablesState is TablesState.Data && selectedTableId != null) {
+                    val state = tablesState as TablesState.Data
+                    val windowId = state.tables[selectedTableId]?.window?.let { windowPolicy ->
+                        when (windowPolicy) {
+                            is org.example.daybook.uniffi.core.TableWindow.Specific -> windowPolicy.id
+                            is org.example.daybook.uniffi.core.TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                        }
+                    }
+                    
+                    windowId?.let { id ->
+                        val window = state.windows[id]
+                        if (window != null) {
+                            val currentVisible = window.layout.leftVisible
+                            val currentWeight = when (val s = window.layout.leftRegion.size) {
+                                is org.example.daybook.uniffi.core.WindowLayoutRegionSize.Weight -> s.v1
+                            }
+                            
+                            val (nextVisible, nextWeight) = when {
+                                !currentVisible -> true to 0.4f
+                                currentWeight > 0.15f -> true to 0.1f
+                                else -> false to 0.4f
+                            }
+                            
+                            scope.launch {
+                                try {
+                                    tablesRepo.setWindow(id, window.copy(
+                                        layout = window.layout.copy(
+                                            leftVisible = nextVisible,
+                                            leftRegion = window.layout.leftRegion.copy(
+                                                size = org.example.daybook.uniffi.core.WindowLayoutRegionSize.Weight(nextWeight)
+                                            )
+                                        )
+                                    ))
+                                } catch (e: Exception) {
+                                    // Log error
+                                }
+                            }
+                        }
+                    }
+                }
             }) {
-                Text("☰")
+                Icon(
+                    imageVector = if (layoutConfig?.leftVisible == true) Icons.Default.MenuOpen else Icons.Default.Menu,
+                    contentDescription = "Toggle Sidebar"
+                )
             }
         },
+        onBack = screenChromeState.onBack,
         actions = {
             // Screen actions first, then layout actions
             screenChromeState.actions?.invoke()
@@ -200,10 +271,11 @@ fun ExpandedLayout(
         if (layoutConfig != null) {
             LayoutFromConfig(
                 layoutConfig = layoutConfig,
-                configVm = configVm,
+                tablesVm = tablesVm,
                 navController = navController,
                 extraAction = extraAction,
-                modifier = Modifier.padding(innerPadding).fillMaxSize()
+                modifier = Modifier.padding(innerPadding).fillMaxSize(),
+                contentType = contentType
             )
         } else {
             // Loading state - show empty or default layout
@@ -216,20 +288,84 @@ fun ExpandedLayout(
 
 @Composable
 fun LayoutFromConfig(
-    layoutConfig: LayoutWindowConfig,
-    configVm: ConfigViewModel,
+    layoutConfig: WindowLayout,
+    tablesVm: TablesViewModel,
     navController: NavHostController,
     extraAction: (() -> Unit)?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    contentType: DaybookContentType
 ) {
+    val scope = rememberCoroutineScope()
+    val tablesState by tablesVm.tablesState.collectAsState()
+    val selectedTableId by tablesVm.selectedTableId.collectAsState()
+
+    fun updateWeights(newWeights: Map<Any, Float>) {
+        if (tablesState is TablesState.Data && selectedTableId != null) {
+            val state = tablesState as TablesState.Data
+            val windowId = state.tables[selectedTableId]?.window?.let { windowPolicy ->
+                when (windowPolicy) {
+                    is org.example.daybook.uniffi.core.TableWindow.Specific -> windowPolicy.id
+                    is org.example.daybook.uniffi.core.TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                }
+            }
+            
+            windowId?.let { id ->
+                val window = state.windows[id]
+                if (window != null) {
+                    val currentLayout = window.layout
+                    val newLayout = currentLayout.copy(
+                        leftRegion = currentLayout.leftRegion.copy(
+                            size = WindowLayoutRegionSize.Weight(
+                                newWeights[currentLayout.leftRegion.deets.key] 
+                                    ?: (currentLayout.leftRegion.size as? WindowLayoutRegionSize.Weight)?.v1 
+                                    ?: 0.4f
+                            )
+                        ),
+                        centerRegion = currentLayout.centerRegion.copy(
+                            size = WindowLayoutRegionSize.Weight(
+                                newWeights[currentLayout.centerRegion.deets.key] 
+                                    ?: (currentLayout.centerRegion.size as? WindowLayoutRegionSize.Weight)?.v1 
+                                    ?: 1.0f
+                            )
+                        ),
+                        rightRegion = currentLayout.rightRegion.copy(
+                            size = WindowLayoutRegionSize.Weight(
+                                newWeights[currentLayout.rightRegion.deets.key] 
+                                    ?: (currentLayout.rightRegion.size as? WindowLayoutRegionSize.Weight)?.v1 
+                                    ?: 0.4f
+                            )
+                        )
+                    )
+                    scope.launch {
+                        try {
+                            tablesVm.tablesRepo.setWindow(id, window.copy(layout = newLayout))
+                        } catch (e: FfiException) {
+                            // Error handling
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    val initialWeights = remember(layoutConfig) {
+        val weights = mutableMapOf<Any, Float>()
+        weights[layoutConfig.leftRegion.deets.key] = (layoutConfig.leftRegion.size as? WindowLayoutRegionSize.Weight)?.v1 ?: 0.4f
+        weights[layoutConfig.centerRegion.deets.key] = (layoutConfig.centerRegion.size as? WindowLayoutRegionSize.Weight)?.v1 ?: 1.0f
+        weights[layoutConfig.rightRegion.deets.key] = (layoutConfig.rightRegion.size as? WindowLayoutRegionSize.Weight)?.v1 ?: 0.4f
+        weights
+    }
+
     DockableRegion(
         orientation = Orientation.Horizontal,
+        initialWeights = initialWeights,
+        onWeightsChanged = { updateWeights(it) },
         modifier = modifier
     ) {
         // Left region (if visible)
         if (layoutConfig.leftVisible) {
             val leftPane = layoutConfig.leftRegion.deets
-            val leftRegimes = if (leftPane.variant is LayoutPaneVariant.Sidebar) {
+            val leftRegimes = if (leftPane.variant is WindowLayoutPaneVariant.Sidebar) {
                 // Sidebar: discrete 0-80dp for rail mode (80dp size), continuous above
                 listOf(
                     PaneSizeRegime.Discrete(minDp = 0f, maxDp = 235f, sizeDp = 80f),
@@ -244,7 +380,8 @@ fun LayoutFromConfig(
                     pane = leftPane,
                     navController = navController,
                     extraAction = extraAction,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    contentType = contentType
                 )
             }
         }
@@ -255,7 +392,8 @@ fun LayoutFromConfig(
                 pane = layoutConfig.centerRegion.deets,
                 navController = navController,
                 extraAction = extraAction,
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize(),
+                contentType = contentType
             )
         }
         
@@ -266,7 +404,8 @@ fun LayoutFromConfig(
                     pane = layoutConfig.rightRegion.deets,
                     navController = navController,
                     extraAction = extraAction,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    contentType = contentType
                 )
             }
         }
@@ -514,34 +653,37 @@ fun SidebarContent(
 
 @Composable
 fun RenderLayoutPane(
-    pane: LayoutPane,
+    pane: WindowLayoutPane,
     navController: NavHostController,
-    extraAction: (() -> Unit)?,
-    modifier: Modifier = Modifier
+    extraAction: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+    contentType: DaybookContentType
 ) {
     when (val variant = pane.variant) {
-        is LayoutPaneVariant.Sidebar -> {
+        is WindowLayoutPaneVariant.Sidebar -> {
             // Render sidebar UI
             SidebarContent(
                 navController = navController,
                 modifier = modifier
             )
         }
-        is LayoutPaneVariant.Routes -> {
+        is WindowLayoutPaneVariant.Routes -> {
             // Render routes
             Routes(
                 extraAction = extraAction,
                 navController = navController,
-                modifier = modifier
+                modifier = modifier,
+                contentType = contentType
             )
         }
-        is LayoutPaneVariant.Region -> {
+        is WindowLayoutPaneVariant.Region -> {
             // Render nested region recursively
             RenderLayoutRegion(
                 region = variant.v1,
                 navController = navController,
                 extraAction = extraAction,
-                modifier = modifier
+                modifier = modifier,
+                contentType = contentType
             )
         }
     }
@@ -549,22 +691,32 @@ fun RenderLayoutPane(
 
 @Composable
 fun RenderLayoutRegion(
-    region: LayoutRegion,
+    region: WindowLayoutRegion,
     navController: NavHostController,
-    extraAction: (() -> Unit)?,
-    modifier: Modifier = Modifier
+    extraAction: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+    contentType: DaybookContentType
 ) {
     val orientation = when (region.orientation) {
         ConfigOrientation.HORIZONTAL -> Orientation.Horizontal
         ConfigOrientation.VERTICAL -> Orientation.Vertical
     }
     
+    val initialWeights = remember(region) {
+        region.children.associate { child ->
+            child.deets.key as Any to ((child.size as? WindowLayoutRegionSize.Weight)?.v1 ?: 1.0f)
+        }
+    }
+
     DockableRegion(
         orientation = orientation,
+        initialWeights = initialWeights,
+        onWeightsChanged = { /* TODO: Implement persistence for nested regions */ },
         modifier = modifier
     ) {
-        region.children.forEach { childPane ->
-            val childRegimes = if (childPane.variant is LayoutPaneVariant.Sidebar) {
+        region.children.forEach { child ->
+            val childPane = child.deets
+            val childRegimes = if (childPane.variant is WindowLayoutPaneVariant.Sidebar) {
                 // Sidebar: discrete 0-80dp for rail mode (80dp size), continuous above
                 listOf(
                     PaneSizeRegime.Discrete(minDp = 0f, maxDp = 235f, sizeDp = 80f),
@@ -576,10 +728,11 @@ fun RenderLayoutRegion(
             }
             pane(key = childPane.key, regimes = childRegimes) {
                 RenderLayoutPane(
-                    pane = childPane,
+                    pane = child.deets,
                     navController = navController,
                     extraAction = extraAction,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    contentType = contentType
                 )
             }
         }
@@ -634,6 +787,8 @@ interface GenericLayoutScope {
 fun DockableRegion(
     modifier: Modifier,
     orientation: Orientation,
+    initialWeights: Map<Any, Float> = emptyMap(),
+    onWeightsChanged: ((Map<Any, Float>) -> Unit)? = null,
     block: DockedRegionScope.() -> Unit
 ) {
 
@@ -660,11 +815,15 @@ fun DockableRegion(
     @Stable
     class State(
         private val density: androidx.compose.ui.unit.Density,
-        private val paneRegimes: Map<Any, List<PaneSizeRegime>>
+        private val paneRegimes: Map<Any, List<PaneSizeRegime>>,
+        initialWeights: Map<Any, Float>,
+        private val onWeightsChanged: ((Map<Any, Float>) -> Unit)? = null
     ) {
         // We map Keys to Weights.
         // This ensures if you reorder items, their size travels with them.
-        private val weightMap = mutableStateMapOf<Any, Float>()
+        private val weightMap = mutableStateMapOf<Any, Float>().apply {
+            putAll(initialWeights)
+        }
         // Track size in dp for regime detection
         private val sizeDpMap = mutableStateMapOf<Any, Float>()
         // Track virtual drag offset (cumulative delta during drag, as if continuous)
@@ -707,14 +866,8 @@ fun DockableRegion(
                 // Update size in dp
                 sizeDpMap[key] = getSizeDp(key, totalSizePx, totalWeight)
             }
-            // Optional: Garbage collect keys that are no longer in the list
+            
             val currentKeySet = keys.toSet()
-            val iterator = weightMap.iterator()
-            while (iterator.hasNext()) {
-                if (!currentKeySet.contains(iterator.next().key)) {
-                    iterator.remove()
-                }
-            }
             val sizeIterator = sizeDpMap.iterator()
             while (sizeIterator.hasNext()) {
                 if (!currentKeySet.contains(sizeIterator.next().key)) {
@@ -838,12 +991,24 @@ fun DockableRegion(
                 }
             }
             
+            onWeightsChanged?.invoke(weightMap.toMap())
+            
             // Reset drag state
             dragStartSizeDpA = null
             dragStartSizeDpB = null
             dragStartKeyA = null
             dragStartKeyB = null
             dragOffsetPx = 0f
+        }
+
+        fun syncWeights(newWeights: Map<Any, Float>) {
+            if (dragStartKeyA == null) {
+                newWeights.forEach { (k, v) ->
+                    if (weightMap[k] != v) {
+                        weightMap[k] = v
+                    }
+                }
+            }
         }
 
         private fun getTotalWeight(): Float {
@@ -981,7 +1146,7 @@ fun DockableRegion(
         scope.items.associate { it.key to it.regimes }
     }
     val state = remember(density, paneRegimes) { 
-        State(density, paneRegimes) 
+        State(density, paneRegimes, initialWeights, onWeightsChanged) 
     }
 
     val currentKeys = scope.items.map { it.key }
@@ -990,6 +1155,11 @@ fun DockableRegion(
     // Reconcile when keys or total size changes
     androidx.compose.runtime.LaunchedEffect(currentKeys, totalSizePx) {
         state.reconcile(currentKeys, totalSizePx)
+    }
+    
+    // Sync weights from DB when they change
+    androidx.compose.runtime.LaunchedEffect(initialWeights) {
+        state.syncWeights(initialWeights)
     }
     
     val draw: @Composable GenericLayoutScope.() -> Unit = @Composable {

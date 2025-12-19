@@ -73,10 +73,12 @@ impl DrawerRepoFfi {
     #[tracing::instrument(err, skip(self))]
     async fn update_batch(self: Arc<Self>, docs: Vec<DocPatch>) -> Result<(), FfiError> {
         let this = self.clone();
-        Ok(self
+        Ok(
+            self
             .fcx
             .do_on_rt(async move { this.repo.update_batch(docs).await })
-            .await?)
+            .await?
+        )
     }
 
     #[tracing::instrument(err, skip(self))]

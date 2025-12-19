@@ -83,6 +83,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 multihash = "0.19.3"
 data-encoding = "2.9"
+blake3 = "1.8"
 
 # web
 leptos = { version = "0.8", default-features = false }

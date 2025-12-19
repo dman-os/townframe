@@ -112,7 +112,8 @@ data class AppContainer(
     val ffiCtx: FfiCtx, 
     val drawerRepo: DrawerRepoFfi, 
     val tablesRepo: TablesRepoFfi,
-    val configRepo: ConfigRepoFfi
+    val configRepo: ConfigRepoFfi,
+    val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi
 )
 
 val LocalContainer = staticCompositionLocalOf<AppContainer> {
@@ -435,6 +436,7 @@ fun App(
         val drawerRepo = DrawerRepoFfi.load(fcx = fcx)
         val tablesRepo = TablesRepoFfi.load(fcx = fcx)
         val configRepo = ConfigRepoFfi.load(fcx = fcx)
+        val blobsRepo = org.example.daybook.uniffi.BlobsRepoFfi.load(fcx = fcx)
         
         // Initialize first-time data if needed
         val tablesViewModel = TablesViewModel(tablesRepo)
@@ -445,7 +447,8 @@ fun App(
                 ffiCtx = fcx, 
                 drawerRepo = drawerRepo, 
                 tablesRepo = tablesRepo,
-                configRepo = configRepo
+                configRepo = configRepo,
+                blobsRepo = blobsRepo
             )
         )
     }
@@ -550,19 +553,19 @@ fun DaybookHomeScreen(
     when (navigationType) {
         DaybookNavigationType.PERMANENT_NAVIGATION_DRAWER -> {
             ExpandedLayout(
-                modifier = modifier, navController = navController, extraAction = extraAction
+                modifier = modifier, navController = navController, extraAction = extraAction, contentType = contentType
             )
         }
 
         DaybookNavigationType.NAVIGATION_RAIL -> {
             ExpandedLayout(
-                modifier = modifier, navController = navController, extraAction = extraAction
+                modifier = modifier, navController = navController, extraAction = extraAction, contentType = contentType
             )
         }
 
         DaybookNavigationType.BOTTOM_NAVIGATION -> {
             CompactLayout(
-                modifier = modifier, navController = navController, extraAction = extraAction
+                modifier = modifier, navController = navController, extraAction = extraAction, contentType = contentType
             )
         }
     }
@@ -716,6 +719,7 @@ fun TablesScreen(
 @Composable
 fun Routes(
     modifier: Modifier = Modifier,
+    contentType: DaybookContentType,
     extraAction: (() -> Unit)? = null,
     navController: NavHostController,
 ) {
@@ -737,7 +741,7 @@ fun Routes(
         }
         composable(route = AppScreens.Search.name) {
             ProvideChromeState(ChromeState(title = "Search")) {
-                SearchScreen(modifier = modifier)
+                SearchScreen(modifier = modifier, contentType = contentType)
             }
         }
         composable(route = AppScreens.Home.name) {

@@ -18,8 +18,8 @@
 - [x] Sqlite backed KvStore impl
 - [x] Get uniffi working on android
 - [x] Save a photo
-- [ ] Blobstore
-  - [ ] Blake3 sums
+- [x] Blobstore
+  - [x] Blake3 sums
 - [ ] Receipt parsing
 - [ ] wflow
   - [x] in-memory smoke

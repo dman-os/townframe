@@ -8,17 +8,12 @@ import kotlinx.coroutines.launch
 import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.core.ListenerRegistration
-import org.example.daybook.uniffi.core.LayoutWindowConfig
 
 data class ConfigError(val message: String, val exception: FfiException)
 
 class ConfigViewModel(
     val configRepo: ConfigRepoFfi
 ) : ViewModel() {
-    // Layout config state
-    private val _layoutConfig = MutableStateFlow<LayoutWindowConfig?>(null)
-    val layoutConfig = _layoutConfig.asStateFlow()
-    
     // Error state for showing snackbar
     private val _error = MutableStateFlow<ConfigError?>(null)
     val error = _error.asStateFlow()
@@ -59,20 +54,9 @@ class ConfigViewModel(
     private fun loadAllSettings() {
         viewModelScope.launch {
             try {
-                _layoutConfig.value = configRepo.getLayout()
+                // No settings to load currently
             } catch (e: FfiException) {
                 _error.value = ConfigError("Failed to load settings: ${e.message}", e)
-            }
-        }
-    }
-    
-    fun setLayout(value: LayoutWindowConfig) {
-        viewModelScope.launch {
-            try {
-                configRepo.setLayout(value)
-                _layoutConfig.value = value
-            } catch (e: FfiException) {
-                _error.value = ConfigError("Failed to set layout: ${e.message}", e)
             }
         }
     }

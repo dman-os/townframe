@@ -15,7 +15,6 @@ fn content_to_content_kind(content: &DocContent) -> DocContentKind {
     match content {
         DocContent::Text(_) => DocContentKind::Text,
         DocContent::Blob(_) => DocContentKind::Blob,
-        DocContent::Image(_) => DocContentKind::Image,
     }
 }
 
@@ -24,6 +23,7 @@ fn tag_to_tag_kind(tag: &DocTag) -> DocTagKind {
         DocTag::RefGeneric(_) => DocTagKind::RefGeneric,
         DocTag::LabelGeneric(_) => DocTagKind::LabelGeneric,
         DocTag::PseudoLabel(_) => DocTagKind::PseudoLabel,
+        DocTag::ImageMetadata(_) => DocTagKind::ImageMetadata,
     }
 }
 

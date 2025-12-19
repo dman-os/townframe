@@ -8,6 +8,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.os.Build
+import android.util.Log
 import android.provider.MediaStore
 import android.util.Range
 import androidx.camera.camera2.interop.Camera2Interop
@@ -90,6 +91,11 @@ actual fun DaybookCameraPreview(
     var frameRateRanges: Array<Range<Int>>? by remember { mutableStateOf(null) }
     var currentIso by remember { mutableIntStateOf(100) }
     var currentFrameRate by remember { mutableIntStateOf(30) }
+    
+    // Values actually bound to the camera (to avoid rebinding on every slider move)
+    var boundIso by remember { mutableIntStateOf(100) }
+    var boundFrameRate by remember { mutableIntStateOf(30) }
+    
     var showControls by remember { mutableStateOf(false) }
     
     // Initialize camera provider and query characteristics
@@ -111,6 +117,7 @@ actual fun DaybookCameraPreview(
             characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let { range ->
                 isoRange = range
                 currentIso = range.lower
+                boundIso = range.lower
             }
             
             // Get frame rate ranges
@@ -118,6 +125,7 @@ actual fun DaybookCameraPreview(
                 frameRateRanges = ranges
                 ranges.firstOrNull()?.let { range ->
                     currentFrameRate = range.upper
+                    boundFrameRate = range.upper
                 }
             }
         }
@@ -129,47 +137,26 @@ actual fun DaybookCameraPreview(
             val capture = imageCapture!!
             captureContext.setCanCapture(true)
             captureContext.setCaptureCallback {
+                Log.d("DaybookCamera", "Capture requested")
                 scope.launch {
-                    // Create time stamped name
-                    val name = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
-                        .format(System.currentTimeMillis())
-                    val contentValues = ContentValues().apply {
-                        put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                        put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
-                            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Daybook")
-                        }
-                    }
-                    
-                    // Create output options
-                    val outputOptions = ImageCapture.OutputFileOptions
-                        .Builder(
-                            context.contentResolver,
-                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                            contentValues
-                        )
-                        .build()
-                    
                     captureContext.setIsCapturing(true)
-                    
                     // Take picture
                     capture.takePicture(
-                        outputOptions,
                         cameraExecutor,
-                        object : ImageCapture.OnImageSavedCallback {
+                        object : ImageCapture.OnImageCapturedCallback() {
                             override fun onError(exception: ImageCaptureException) {
-                                println("Image capture failed: ${exception.message}")
+                                Log.e("DaybookCamera", "Image capture failed: ${exception.message}", exception)
                                 captureContext.setIsCapturing(false)
                             }
-                            
-                            override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                                // Read the saved image as ByteArray
-                                output.savedUri?.let { uri ->
-                                    context.contentResolver.openInputStream(uri)?.use { inputStream ->
-                                        val byteArray = inputStream.readBytes()
-                                        onImageSaved?.invoke(byteArray)
-                                    }
-                                }
+
+                            override fun onCaptureSuccess(image: androidx.camera.core.ImageProxy) {
+                                Log.d("DaybookCamera", "Image capture success, size: ${image.width}x${image.height}")
+                                val buffer = image.planes[0].buffer
+                                val bytes = ByteArray(buffer.remaining())
+                                buffer.get(bytes)
+                                Log.d("DaybookCamera", "Invoking onImageSaved with ${bytes.size} bytes")
+                                onImageSaved?.invoke(bytes)
+                                image.close()
                                 captureContext.setIsCapturing(false)
                             }
                         }
@@ -189,6 +176,7 @@ actual fun DaybookCameraPreview(
     fun attachSettingsTo(useCaseBuilder: ExtendableBuilder<*>) {
         Camera2Interop.Extender(useCaseBuilder).apply {
             // Disable auto exposure to enable manual ISO
+            /*
             setCaptureRequestOption(
                 CaptureRequest.CONTROL_AE_MODE,
                 CaptureRequest.CONTROL_AE_MODE_OFF
@@ -196,26 +184,33 @@ actual fun DaybookCameraPreview(
             
             // Set ISO
             isoRange?.let { range ->
-                val clampedIso = currentIso.coerceIn(range.lower, range.upper)
+                val clampedIso = boundIso.coerceIn(range.lower, range.upper)
                 setCaptureRequestOption(
                     CaptureRequest.SENSOR_SENSITIVITY,
                     clampedIso
                 )
             }
+            */
             
             // Set frame rate using target FPS range
             frameRateRanges?.let { ranges ->
-                val fpsRange = Range(currentFrameRate, currentFrameRate)
-                setCaptureRequestOption(
-                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                    fpsRange
-                )
+                // Find a range that contains boundFrameRate, or the closest one
+                val bestRange = ranges.find { it.contains(boundFrameRate) }
+                    ?: ranges.minByOrNull { Math.abs(it.upper - boundFrameRate) }
+                
+                bestRange?.let { range ->
+                    Log.d("DaybookCamera", "Setting FPS range to $range (requested $boundFrameRate)")
+                    setCaptureRequestOption(
+                        CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                        range
+                    )
+                }
             }
         }
     }
     
     // Rebind camera when ISO or frame rate changes
-    LaunchedEffect(currentIso, currentFrameRate, cameraProvider, previewView) {
+    LaunchedEffect(boundIso, boundFrameRate, cameraProvider, previewView) {
         val provider = cameraProvider ?: return@LaunchedEffect
         val pv = previewView ?: return@LaunchedEffect
         
@@ -299,6 +294,7 @@ actual fun DaybookCameraPreview(
                         Slider(
                             value = currentIso.toFloat(),
                             onValueChange = { currentIso = it.toInt() },
+                            onValueChangeFinished = { boundIso = currentIso },
                             valueRange = range.lower.toFloat()..range.upper.toFloat(),
                             steps = ((range.upper - range.lower) / 100).coerceAtMost(100)
                         )
@@ -312,6 +308,7 @@ actual fun DaybookCameraPreview(
                         Slider(
                             value = currentFrameRate.toFloat(),
                             onValueChange = { currentFrameRate = it.toInt() },
+                            onValueChangeFinished = { boundFrameRate = currentFrameRate },
                             valueRange = minFps.toFloat()..maxFps.toFloat(),
                             steps = (maxFps - minFps).coerceAtMost(30)
                         )

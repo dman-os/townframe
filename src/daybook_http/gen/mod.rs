@@ -14,15 +14,6 @@ pub mod doc {
     pub type Multihash = String;
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-    pub struct DocImage {
-        pub mime: MimeType,
-        pub width_px: u64,
-        pub height_px: u64,
-        pub blurhash: Option<DocId>,
-        pub blob_id: DocId,
-    }
-
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
     pub struct DocBlob {
         pub length_octets: u64,
         pub hash: Multihash,
@@ -34,7 +25,6 @@ pub mod doc {
     pub enum DocContentKind {
         Text,
         Blob,
-        Image,
     }
     impl DocContentKind {
         pub fn _lift(val:u8) -> DocContentKind {
@@ -42,7 +32,6 @@ pub mod doc {
 
                 0 => DocContentKind::Text,
                 1 => DocContentKind::Blob,
-                2 => DocContentKind::Image,
 
                 _ => panic!("invalid enum discriminant"),
             }
@@ -54,15 +43,22 @@ pub mod doc {
     pub enum DocContent {
         Text(String),
         Blob(DocBlob),
-        Image(DocImage),
     }
 
     pub type DocRef = DocId;
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    pub struct ImageMeta {
+        pub mime: MimeType,
+        pub width_px: u64,
+        pub height_px: u64,
+    }
+
+    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
     pub enum DocTagKind {
         RefGeneric,
         LabelGeneric,
+        ImageMetadata,
         PseudoLabel,
     }
     impl DocTagKind {
@@ -71,7 +67,8 @@ pub mod doc {
 
                 0 => DocTagKind::RefGeneric,
                 1 => DocTagKind::LabelGeneric,
-                2 => DocTagKind::PseudoLabel,
+                2 => DocTagKind::ImageMetadata,
+                3 => DocTagKind::PseudoLabel,
 
                 _ => panic!("invalid enum discriminant"),
             }
@@ -84,6 +81,7 @@ pub mod doc {
         /// A link to another document.
         RefGeneric(DocRef),
         LabelGeneric(String),
+        ImageMetadata(ImageMeta),
         PseudoLabel(Vec<String>),
     }
 

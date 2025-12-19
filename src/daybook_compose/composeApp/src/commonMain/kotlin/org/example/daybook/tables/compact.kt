@@ -8,6 +8,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import org.example.daybook.DaybookContentType
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -158,7 +159,8 @@ data class FeatureItem(
 fun CompactLayout(
     modifier: Modifier = Modifier,
     navController: NavHostController,
-    extraAction: (() -> Unit)? = null
+    extraAction: (() -> Unit)? = null,
+    contentType: DaybookContentType
 ) {
     var showFeaturesMenu by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -705,6 +707,7 @@ fun CompactLayout(
                 val mergedChromeState = ChromeState(
                     title = screenChromeState.title ?: "Daybook",
                     navigationIcon = screenChromeState.navigationIcon,
+                    onBack = screenChromeState.onBack,
                     actions = {
                         // Only screen actions in compact view (no layout actions since menu is in bottom bar)
                         screenChromeState.actions?.invoke()
@@ -770,10 +773,11 @@ fun CompactLayout(
             ) {
                 Box(modifier = Modifier.weight(1f, fill = true)) {
                     Routes(
-                        modifier = Modifier.fillMaxSize().safeContentPadding(),
-                        extraAction = extraAction,
-                        navController = navController
-                    )
+                    modifier = Modifier.fillMaxSize(),
+                    navController = navController,
+                    extraAction = extraAction,
+                    contentType = contentType
+                )
                 }
                 
                 // Sidebar not shown in compact view

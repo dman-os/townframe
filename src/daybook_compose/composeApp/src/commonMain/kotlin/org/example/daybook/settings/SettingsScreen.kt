@@ -21,12 +21,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.example.daybook.ConfigViewModel
 import org.example.daybook.LocalContainer
-// TODO: Update SettingsScreen to use new LayoutWindowConfig structure
-// import org.example.daybook.uniffi.core.SidebarMode
-// import org.example.daybook.uniffi.core.SidebarPosition
-// import org.example.daybook.uniffi.core.SidebarVisibility
-// import org.example.daybook.uniffi.core.TabListVisibility
-// import org.example.daybook.uniffi.core.TableViewMode
+// TODO: Update SettingsScreen to use new WindowLayout structure
+// import org.example.daybook.uniffi.core.WindowLayoutSidebarMode
+// import org.example.daybook.uniffi.core.WindowLayoutSidebarPosition
+// import org.example.daybook.uniffi.core.WindowLayoutSidebarVisibility
+// import org.example.daybook.uniffi.core.WindowLayoutTabListVisibility
+// import org.example.daybook.uniffi.core.WindowLayoutTableViewMode
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

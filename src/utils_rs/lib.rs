@@ -281,6 +281,8 @@ pub mod hash {
     use std::io::Write;
 
     const SHA2_256: u64 = 0x12;
+    const BLAKE3: u64 = 0x1e;
+
     pub fn hash_obj<T: serde::Serialize>(obj: &T) -> String {
         use sha2::Digest;
         let mut hash = sha2::Sha256::new();
@@ -289,7 +291,7 @@ pub mod hash {
 
         let hash =
             multihash::Multihash::<32>::wrap(SHA2_256, &hash[..]).expect("error multihashing");
-        encode_base32_multibase(hash.digest())
+        encode_base32_multibase(hash.to_bytes())
     }
 
     pub fn hash_str(string: &str) -> String {
@@ -304,7 +306,36 @@ pub mod hash {
 
         let hash =
             multihash::Multihash::<32>::wrap(SHA2_256, &hash[..]).expect("error multihashing");
-        encode_base32_multibase(hash.digest())
+        encode_base32_multibase(hash.to_bytes())
+    }
+
+    pub fn blake3_hash_bytes(bytes: &[u8]) -> String {
+        let hash = blake3::hash(bytes);
+        let hash =
+            multihash::Multihash::<32>::wrap(BLAKE3, hash.as_bytes()).expect("error multihashing");
+        encode_base32_multibase(hash.to_bytes())
+    }
+
+    pub async fn blake3_hash_reader<T: tokio::io::AsyncRead>(reader: T) -> Res<String> {
+        use tokio::io::*;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0u8; 65536];
+
+        let reader = tokio::io::BufReader::new(reader);
+        let mut reader = std::pin::pin!(reader);
+
+        loop {
+            let bytes_read = reader.read(&mut buf).await?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buf[..bytes_read]);
+        }
+        let hash = hasher.finalize();
+
+        let hash =
+            multihash::Multihash::<32>::wrap(BLAKE3, hash.as_bytes()).expect("error multihashing");
+        Ok(encode_base32_multibase(hash.to_bytes()))
     }
 
     pub async fn hash_reader<T: tokio::io::AsyncRead>(reader: T) -> Res<String> {
@@ -332,7 +363,7 @@ pub mod hash {
 
         let hash =
             multihash::Multihash::<32>::wrap(SHA2_256, &hash[..]).expect("error multihashing");
-        let hash = encode_base32_multibase(hash.digest());
+        let hash = encode_base32_multibase(hash.to_bytes());
         Ok(hash)
     }
 

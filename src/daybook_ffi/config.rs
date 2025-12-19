@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 use crate::ffi::{FfiError, SharedFfiCtx};
 
-use daybook_core::config::{ConfigEvent, ConfigRepo, LayoutWindowConfig};
+use daybook_core::config::{ConfigEvent, ConfigRepo};
 
 #[derive(uniffi::Object)]
 struct ConfigRepoFfi {
@@ -35,21 +35,4 @@ impl ConfigRepoFfi {
         Ok(Arc::new(Self { fcx, repo }))
     }
 
-    // Tab list visibility settings
-    #[tracing::instrument(skip(self))]
-    async fn get_layout(self: Arc<Self>) -> LayoutWindowConfig {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.get_layout().await })
-            .await
-    }
-
-    #[tracing::instrument(err, skip(self))]
-    async fn set_layout(self: Arc<Self>, value: LayoutWindowConfig) -> Result<(), FfiError> {
-        let this = self.clone();
-        self.fcx
-            .do_on_rt(async move { this.repo.set_layout(value).await })
-            .await?;
-        Ok(())
-    }
 }

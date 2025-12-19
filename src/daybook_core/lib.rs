@@ -18,6 +18,7 @@ mod interlude {
 use crate::interlude::*;
 
 pub mod config;
+pub mod blobs;
 pub mod drawer;
 #[allow(unused)]
 pub mod gen;

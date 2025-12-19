@@ -391,11 +391,11 @@ impl DrawerRepo {
             }
         }
         if !errors.is_empty() {
-            let mut root_err = ferr!("error applying patches");
-            for err in errors {
-                use color_eyre::Section;
-                root_err = root_err.section(err);
-            }
+            let mut root_err = ferr!("error applying patches: {errors:?}");
+            // for err in errors {
+            //     use color_eyre::Section;
+            //     root_err = root_err.section(err);
+            // }
             Err(root_err)
         } else {
             Ok(())

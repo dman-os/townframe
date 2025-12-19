@@ -4,134 +4,9 @@ use crate::triage::TriageConfig;
 #[derive(Reconcile, Hydrate, Default)]
 pub struct ConfigStore {
     pub triage: TriageConfig,
-    pub layout: LayoutWindowConfig,
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct LayoutWindowConfig {
-    // pub tab_list_vis_expanded: Option<TabListVisibility>,
-    // pub table_view_mode_compact: Option<TableViewMode>,
-    // pub table_rail_vis_compact: Option<TabListVisibility>,
-    // pub table_rail_vis_expanded: Option<TabListVisibility>,
-    // pub sidebar_vis_expanded: Option<SidebarVisibility>,
-    // pub sidebar_pos_expanded: Option<SidebarPosition>,
-    // pub sidebar_mode_expanded: Option<SidebarMode>,
-    // pub sidebar_auto_hide_expanded: Option<bool>,
-    pub center_region: RootLayoutRegion,
-    // pub bottom_region: RootLayoutRegion,
-    pub left_region: RootLayoutRegion,
-    pub right_region: RootLayoutRegion,
-    // expanded specific settings
-    pub left_visible: bool,
-    pub right_visible: bool,
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate, Default)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum RegionSize {
-    #[default]
-    Auto,
-    Weight, //(f32),
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct RootLayoutRegion {
-    size: RegionSize,
-    deets: LayoutPane,
-}
-
-impl Default for LayoutWindowConfig {
-    fn default() -> Self {
-        Self {
-            center_region: RootLayoutRegion {
-                size: default(),
-                deets: LayoutPane {
-                    key: "center".into(),
-                    variant: LayoutPaneVariant::Routes(LayoutRoutes {}),
-                },
-            },
-            left_region: RootLayoutRegion {
-                size: default(),
-                deets: LayoutPane {
-                    key: "left".into(),
-                    variant: LayoutPaneVariant::Sidebar(LayoutSidebar {}),
-                },
-            },
-            right_region: RootLayoutRegion {
-                size: default(),
-                deets: LayoutPane {
-                    key: "right".into(),
-                    variant: LayoutPaneVariant::Region(LayoutRegion {
-                        key: "right".into(),
-                        orientation: Orientation::Vertical,
-                        children: vec![
-                            LayoutPane {
-                                key: "top".into(),
-                                variant: LayoutPaneVariant::Region(LayoutRegion {
-                                    key: "top".into(),
-                                    orientation: Orientation::Vertical,
-                                    children: vec![],
-                                }),
-                            },
-                            LayoutPane {
-                                key: "bottom".into(),
-                                variant: LayoutPaneVariant::Region(LayoutRegion {
-                                    key: "bottom".into(),
-                                    orientation: Orientation::Vertical,
-                                    children: vec![],
-                                }),
-                            },
-                        ],
-                    }),
-                },
-            },
-            left_visible: true,
-            right_visible: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct LayoutPane {
-    key: String,
-    variant: LayoutPaneVariant,
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum LayoutPaneVariant {
-    // TODO: disallow this pane center region
-    Sidebar(LayoutSidebar),
-    Routes(LayoutRoutes),
-    Region(LayoutRegion),
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate, Default)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct LayoutSidebar {}
-
-#[derive(Debug, Clone, Reconcile, Hydrate, Default)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct LayoutRoutes {}
-
-#[derive(Debug, Clone, Reconcile, Hydrate)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct LayoutRegion {
-    key: String,
-    orientation: Orientation,
-    children: Vec<LayoutPane>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Reconcile, Hydrate, Default)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum Orientation {
-    Horizontal,
-    #[default]
-    Vertical,
-}
+//
 
 //
 
@@ -274,20 +149,6 @@ impl ConfigRepo {
         self.store
             .mutate_sync(move |store| {
                 store.triage.processors.insert(processor_id, processor);
-            })
-            .await?;
-        Ok(())
-    }
-
-    // Tab list visibility settings
-    pub async fn get_layout(&self) -> LayoutWindowConfig {
-        self.store.query_sync(|store| store.layout.clone()).await
-    }
-
-    pub async fn set_layout(&self, value: LayoutWindowConfig) -> Res<()> {
-        self.store
-            .mutate_sync(move |store| {
-                store.layout = value;
             })
             .await?;
         Ok(())

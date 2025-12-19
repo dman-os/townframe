@@ -19,28 +19,12 @@ pub fn feature(reg: &TypeReg) -> Feature {
             ])
             .build(),
     ));
-    let doc_image = reg.add_type(Type::Record(
-        Record::builder("DocImage")
-            .with_fields([
-                ("mime", RecordField::builder(mime_ty).build()),
-                ("width_px", RecordField::builder(reg.u64()).build()),
-                ("height_px", RecordField::builder(reg.u64()).build()),
-                (
-                    // FIXME: find something better than blurhash
-                    "blurhash",
-                    RecordField::builder(doc_id).optional(reg).build(),
-                ),
-                ("blob_id", RecordField::builder(doc_id).build()),
-            ])
-            .build(),
-    ));
     // NOTE:
     //  - If breaking changes are needed on the schema of contents and tags
     //    declare v2 like `text2`
     let doc_content_variants = vec![
         ("text", reg.string()),
         ("blob", doc_blob),
-        ("image", doc_image),
     ];
     let doc_content_kind = reg.add_type(Type::Enum(
         Enum::builder("DocContentKind")
@@ -62,6 +46,20 @@ pub fn feature(reg: &TypeReg) -> Feature {
             .build(),
     ));
     let doc_ref = reg.add_type(Type::Alias(Alias::builder("DocRef", doc_id).build()));
+    let image_meta = reg.add_type(Type::Record(
+        Record::builder("ImageMeta")
+            .with_fields([
+                ("mime", RecordField::builder(mime_ty).build()),
+                ("width_px", RecordField::builder(reg.u64()).build()),
+                ("height_px", RecordField::builder(reg.u64()).build()),
+                // (
+                //     // FIXME: find something better than blurhash
+                //     "blurhash",
+                //     RecordField::builder(doc_id).optional(reg).build(),
+                // ),
+            ])
+            .build(),
+    ));
     let doc_tag_variants = vec![
         (
             "ref_generic",
@@ -72,6 +70,10 @@ pub fn feature(reg: &TypeReg) -> Feature {
         (
             "label_generic",
             VariantVariant::builder(VariantVariantType::Wrapped(reg.string())).build(),
+        ),
+        (
+            "image_metadata",
+            VariantVariant::builder(VariantVariantType::Wrapped(image_meta)).build(),
         ),
         (
             "pseudo_label",
@@ -131,12 +133,12 @@ pub fn feature(reg: &TypeReg) -> Feature {
         schema_types: vec![
             mime_ty,
             multihash,
-            doc_image,
             doc_blob,
             doc_id,
             doc_content_kind,
             doc_content,
             doc_ref,
+            image_meta,
             doc_tag_kind,
             doc_tag,
             doc,

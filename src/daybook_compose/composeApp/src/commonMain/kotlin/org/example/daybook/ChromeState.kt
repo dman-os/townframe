@@ -2,7 +2,11 @@
 
 package org.example.daybook
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
@@ -53,6 +57,7 @@ data class AdditionalFeatureButton(
 data class ChromeState(
     val title: String? = null,
     val navigationIcon: (@Composable () -> Unit)? = null,
+    val onBack: (() -> Unit)? = null,
     val actions: (@Composable () -> Unit)? = null,
     val showTopBar: Boolean = true,
     val mainFeatureActionButton: MainFeatureActionButton? = null,
@@ -129,7 +134,15 @@ fun ChromeStateTopAppBar(chromeState: ChromeState) {
                 androidx.compose.material3.Text(chromeState.title)
             }
         },
-        navigationIcon = chromeState.navigationIcon ?: {},
+        navigationIcon = {
+            if (chromeState.navigationIcon != null) {
+                chromeState.navigationIcon.invoke()
+            } else if (chromeState.onBack != null) {
+                IconButton(onClick = chromeState.onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                }
+            }
+        },
         actions = {
             chromeState.actions?.invoke() ?: Unit
         }

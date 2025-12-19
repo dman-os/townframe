@@ -20,6 +20,8 @@ uniffi::setup_scaffolding!();
 
 mod am;
 mod config;
+pub mod blobs;
+pub use blobs::*;
 mod drawer;
 mod ffi;
 mod globals;
@@ -32,13 +34,14 @@ mod tables;
 pub struct Config {
     pub am: utils_rs::am::Config,
     pub sql: sql::Config,
+    pub blobs_root: PathBuf,
 }
 
 impl Config {
     /// Create a new config with platform-specific defaults
     pub fn new() -> Res<Self> {
         #[cfg(target_os = "android")]
-        let (am, sql) = {
+        let (am, sql, blobs_root) = {
             // On Android, use the app's internal storage directory
             // This will be something like /data/data/org.example.daybook/files/samod
             let app_dir = std::env::var("ANDROID_DATA")
@@ -63,11 +66,12 @@ impl Config {
                         format!("sqlite://{}", db_path.display())
                     },
                 },
+                app_dir.join("blobs"),
             )
         };
 
         #[cfg(not(target_os = "android"))]
-        let (am, sql) = {
+        let (am, sql, blobs_root) = {
             // On desktop platforms, use XDG directories
             let dirs = directories::ProjectDirs::from("org", "daybook", "daybook")
                 .ok_or_eyre("failed to get xdg directories")?;
@@ -84,9 +88,10 @@ impl Config {
                         format!("sqlite://{}", db_path.display())
                     },
                 },
+                dirs.data_dir().join("blobs"),
             )
         };
-        Ok(Self { am, sql })
+        Ok(Self { am, sql, blobs_root })
     }
 }
 
@@ -95,6 +100,7 @@ struct Ctx {
     acx: utils_rs::am::AmCtx,
     // rt: tokio::runtime::Handle,
     sql: sql::SqlCtx,
+    blobs: daybook_core::blobs::BlobsRepo,
 
     doc_app: tokio::sync::OnceCell<::samod::DocHandle>,
     doc_drawer: tokio::sync::OnceCell<::samod::DocHandle>,
@@ -105,6 +111,7 @@ type SharedCtx = Arc<Ctx>;
 impl Ctx {
     async fn init(config: Config) -> Result<Arc<Self>, eyre::Report> {
         let sql = sql::SqlCtx::new(config.sql.clone()).await?;
+        let blobs = daybook_core::blobs::BlobsRepo::new(config.blobs_root.clone()).await?;
         let acx =
             utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
                 .await?;
@@ -115,6 +122,7 @@ impl Ctx {
             acx,
             // rt: tokio::runtime::Handle::current(),
             sql,
+            blobs,
             doc_app: default(),
             doc_drawer: default(),
         });

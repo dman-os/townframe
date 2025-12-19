@@ -10,6 +10,143 @@ pub struct Window {
     pub title: String,
     pub tabs: Vec<Uuid>,
     pub selected_table: Option<Uuid>,
+    pub layout: WindowLayout,
+    pub last_capture_mode: CaptureMode,
+    pub search_screen_list_size_expanded: WindowLayoutRegionSize,
+}
+
+#[derive(Debug, Clone, Copy, Reconcile, Hydrate, Default, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum CaptureMode {
+    #[default]
+    Text,
+    Camera,
+    Mic,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct WindowLayout {
+    pub center_region: WindowLayoutRegionChild,
+    pub left_region: WindowLayoutRegionChild,
+    pub right_region: WindowLayoutRegionChild,
+    pub left_visible: bool,
+    pub right_visible: bool,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum WindowLayoutRegionSize {
+    Weight(f32),
+}
+
+impl Default for WindowLayoutRegionSize {
+    fn default() -> Self {
+        Self::Weight(1.0)
+    }
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct WindowLayoutRegionChild {
+    pub size: WindowLayoutRegionSize,
+    pub deets: WindowLayoutPane,
+}
+
+impl Default for WindowLayout {
+    fn default() -> Self {
+        Self {
+            center_region: WindowLayoutRegionChild {
+                size: WindowLayoutRegionSize::Weight(1.0),
+                deets: WindowLayoutPane {
+                    key: "center".into(),
+                    variant: WindowLayoutPaneVariant::Routes(WindowLayoutRoutes {}),
+                },
+            },
+            left_region: WindowLayoutRegionChild {
+                size: WindowLayoutRegionSize::Weight(0.4),
+                deets: WindowLayoutPane {
+                    key: "left".into(),
+                    variant: WindowLayoutPaneVariant::Sidebar(WindowLayoutSidebar {}),
+                },
+            },
+            right_region: WindowLayoutRegionChild {
+                size: WindowLayoutRegionSize::Weight(0.4),
+                deets: WindowLayoutPane {
+                    key: "right".into(),
+                    variant: WindowLayoutPaneVariant::Region(WindowLayoutRegion {
+                        key: "right".into(),
+                        orientation: WindowLayoutOrientation::Vertical,
+                        children: vec![
+                            WindowLayoutRegionChild {
+                                size: WindowLayoutRegionSize::Weight(0.5),
+                                deets: WindowLayoutPane {
+                                    key: "top".into(),
+                                    variant: WindowLayoutPaneVariant::Region(WindowLayoutRegion {
+                                        key: "top".into(),
+                                        orientation: WindowLayoutOrientation::Vertical,
+                                        children: vec![],
+                                    }),
+                                },
+                            },
+                            WindowLayoutRegionChild {
+                                size: WindowLayoutRegionSize::Weight(0.5),
+                                deets: WindowLayoutPane {
+                                    key: "bottom".into(),
+                                    variant: WindowLayoutPaneVariant::Region(WindowLayoutRegion {
+                                        key: "bottom".into(),
+                                        orientation: WindowLayoutOrientation::Vertical,
+                                        children: vec![],
+                                    }),
+                                },
+                            },
+                        ],
+                    }),
+                },
+            },
+            left_visible: true,
+            right_visible: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct WindowLayoutPane {
+    pub key: String,
+    pub variant: WindowLayoutPaneVariant,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum WindowLayoutPaneVariant {
+    Sidebar(WindowLayoutSidebar),
+    Routes(WindowLayoutRoutes),
+    Region(WindowLayoutRegion),
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, Default, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct WindowLayoutSidebar {}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, Default, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct WindowLayoutRoutes {}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct WindowLayoutRegion {
+    pub key: String,
+    pub orientation: WindowLayoutOrientation,
+    pub children: Vec<WindowLayoutRegionChild>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Reconcile, Hydrate, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum WindowLayoutOrientation {
+    Horizontal,
+    #[default]
+    Vertical,
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Patch)]
@@ -130,6 +267,9 @@ impl TablesStore {
             title: "Main Window".to_string(),
             tabs: vec![tab_id],
             selected_table: Some(table_id),
+            layout: WindowLayout::default(),
+            last_capture_mode: CaptureMode::default(),
+            search_screen_list_size_expanded: WindowLayoutRegionSize::Weight(0.4),
         };
         self.windows.insert(window_id, window);
 
@@ -730,6 +870,9 @@ impl TablesRepo {
                         title: "Main Window".to_string(),
                         tabs: vec![tab_id],
                         selected_table: Some(table_id),
+                        layout: WindowLayout::default(),
+                        last_capture_mode: CaptureMode::default(),
+                        search_screen_list_size_expanded: WindowLayoutRegionSize::Weight(0.4),
                     };
                     store.windows.insert(new_window_id, window);
                     new_window_id
@@ -809,6 +952,9 @@ impl TablesRepo {
                                 title: "Main Window".to_string(),
                                 tabs: vec![],
                                 selected_table: Some(table_id),
+                                layout: WindowLayout::default(),
+                                last_capture_mode: CaptureMode::default(),
+                                search_screen_list_size_expanded: WindowLayoutRegionSize::Weight(0.4),
                             };
                             store.windows.insert(new_window_id, window);
                             new_window_id
