@@ -2,7 +2,13 @@ use crate::interlude::*;
 
 use crate::ffi::{FfiError, SharedFfiCtx};
 
-use daybook_core::config::{ConfigEvent, ConfigRepo};
+use daybook_core::config::{ConfigEvent, ConfigRepo, MetaTableKeyConfig};
+
+#[derive(uniffi::Record)]
+pub struct MetaTableKeyConfigEntry {
+    pub key: String,
+    pub config: MetaTableKeyConfig,
+}
 
 #[derive(uniffi::Object)]
 struct ConfigRepoFfi {
@@ -35,4 +41,44 @@ impl ConfigRepoFfi {
         Ok(Arc::new(Self { fcx, repo }))
     }
 
+    #[tracing::instrument(err, skip(self))]
+    async fn get_meta_table_key_configs(&self) -> Result<Vec<MetaTableKeyConfigEntry>, FfiError> {
+        let repo = self.repo.clone();
+        let configs = self
+            .fcx
+            .do_on_rt(async move { repo.get_meta_table_key_configs_sync().await })
+            .await;
+        Ok(configs
+            .into_iter()
+            .map(|(k, v)| MetaTableKeyConfigEntry { key: k, config: v })
+            .collect())
+    }
+
+    #[tracing::instrument(err, skip(self))]
+    async fn get_meta_table_key_config(
+        &self,
+        key: String,
+    ) -> Result<Option<daybook_core::config::MetaTableKeyConfig>, FfiError> {
+        let repo = self.repo.clone();
+        Ok(self
+            .fcx
+            .do_on_rt(async move { repo.get_meta_table_key_config_sync(key).await })
+            .await)
+    }
+
+    #[tracing::instrument(err, skip(self))]
+    async fn set_meta_table_key_config(
+        &self,
+        key: String,
+        config: daybook_core::config::MetaTableKeyConfig,
+    ) -> Result<(), FfiError> {
+        let repo = self.repo.clone();
+        self.fcx
+            .do_on_rt(async move {
+                repo.set_meta_table_key_config(key, config)
+                    .await
+                    .map_err(FfiError::from)
+            })
+            .await
+    }
 }

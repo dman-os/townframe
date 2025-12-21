@@ -20,6 +20,10 @@
 - [x] Save a photo
 - [x] Blobstore
   - [x] Blake3 sums
+- [ ] daybook_server
+  - [ ] Decide on wrpc vs json
+- [ ] Overhaul bottom bar
+- [ ] Title editor
 - [ ] Receipt parsing
 - [ ] wflow
   - [x] in-memory smoke

@@ -79,6 +79,14 @@ pub fn feature(reg: &TypeReg) -> Feature {
             "pseudo_label",
             VariantVariant::builder(VariantVariantType::Wrapped(reg.list(reg.string()))).build(),
         ),
+        (
+            "path_generic",
+            VariantVariant::builder(VariantVariantType::Wrapped(reg.string())).build(),
+        ),
+        (
+            "title_generic",
+            VariantVariant::builder(VariantVariantType::Wrapped(reg.string())).build(),
+        ),
         // (),
         // path_generic
         // version_branch

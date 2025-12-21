@@ -7,7 +7,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.FfiException
+import org.example.daybook.uniffi.MetaTableKeyConfigEntry
 import org.example.daybook.uniffi.core.ListenerRegistration
+import org.example.daybook.uniffi.core.MetaTableKeyConfig
 
 data class ConfigError(val message: String, val exception: FfiException)
 
@@ -17,6 +19,10 @@ class ConfigViewModel(
     // Error state for showing snackbar
     private val _error = MutableStateFlow<ConfigError?>(null)
     val error = _error.asStateFlow()
+    
+    // Meta table key configs
+    private val _metaTableKeyConfigs = MutableStateFlow<Map<String, MetaTableKeyConfig>>(emptyMap())
+    val metaTableKeyConfigs = _metaTableKeyConfigs.asStateFlow()
     
     // Registration handle to auto-unregister
     private var listenerRegistration: ListenerRegistration? = null
@@ -54,10 +60,21 @@ class ConfigViewModel(
     private fun loadAllSettings() {
         viewModelScope.launch {
             try {
-                // No settings to load currently
+                val configs = configRepo.getMetaTableKeyConfigs()
+                _metaTableKeyConfigs.value = configs.associate { it.key to it.config }
             } catch (e: FfiException) {
                 _error.value = ConfigError("Failed to load settings: ${e.message}", e)
             }
+        }
+    }
+    
+    suspend fun setMetaTableKeyConfig(key: String, config: MetaTableKeyConfig) {
+        try {
+            configRepo.setMetaTableKeyConfig(key, config)
+            // Reload to get updated configs
+            loadAllSettings()
+        } catch (e: FfiException) {
+            _error.value = ConfigError("Failed to save config for $key: ${e.message}", e)
         }
     }
 }

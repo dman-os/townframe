@@ -6,6 +6,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.foundation.gestures.Orientation
@@ -13,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.size
 import org.example.daybook.tables.DockableRegion
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -27,7 +30,9 @@ import org.example.daybook.ProvideChromeState
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
 import org.example.daybook.ui.DocEditor
-import org.example.daybook.uniffi.DrawerEventListener
+import org.example.daybook.DrawerViewModel
+import org.example.daybook.uniffi.core.DocTag
+import org.example.daybook.DocListState
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.TablesRepoFfi
@@ -37,26 +42,12 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
-sealed interface DocumentsState {
-    data class Data(val docs: List<Doc>) : DocumentsState
-    data class Error(val error: FfiException) : DocumentsState
-    object Loading : DocumentsState
-}
-
 class DocumentsScreenViewModel(
-    val drawerRepo: DrawerRepoFfi,
+    val drawerVm: DrawerViewModel,
     val tablesRepo: TablesRepoFfi,
     val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
     val tablesVm: TablesViewModel
 ) : ViewModel() {
-    private val _documentsState = MutableStateFlow<DocumentsState>(DocumentsState.Loading)
-    val documentsState = _documentsState.asStateFlow()
-
-    private val _selectedDocId = MutableStateFlow<String?>(null)
-    val selectedDocId = _selectedDocId.asStateFlow()
-
-    private val _selectedDoc = MutableStateFlow<Doc?>(null)
-    val selectedDoc = _selectedDoc.asStateFlow()
 
     val listSizeExpanded = tablesVm.tablesState.map { state ->
         if (state is TablesState.Data) {
@@ -76,66 +67,6 @@ class DocumentsScreenViewModel(
             WindowLayoutRegionSize.Weight(0.4f)
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), WindowLayoutRegionSize.Weight(0.4f))
-
-    private var listenerRegistration: ListenerRegistration? = null
-
-    private val listener = object : DrawerEventListener {
-        override fun onDrawerEvent(event: DrawerEvent) {
-            viewModelScope.launch {
-                when (event) {
-                    DrawerEvent.ListChanged -> refreshDocs()
-                    is DrawerEvent.DocUpdated -> {
-                        if (event.id == _selectedDocId.value) {
-                            loadSelectedDoc(event.id)
-                        }
-                        refreshDocs()
-                    }
-                    else -> {}
-                }
-            }
-        }
-    }
-
-    init {
-        refreshDocs()
-        viewModelScope.launch {
-            listenerRegistration = drawerRepo.ffiRegisterListener(listener)
-        }
-    }
-
-    fun refreshDocs() {
-        viewModelScope.launch {
-            _documentsState.value = DocumentsState.Loading
-            try {
-                val ids = drawerRepo.list()
-                val docs = ids.mapNotNull { id ->
-                    try {
-                        drawerRepo.get(id)
-                    } catch (e: FfiException) {
-                        null
-                    }
-                }
-                _documentsState.value = DocumentsState.Data(docs)
-            } catch (e: FfiException) {
-                _documentsState.value = DocumentsState.Error(e)
-            }
-        }
-    }
-
-    fun selectDoc(id: String?) {
-        _selectedDocId.value = id
-        if (id != null) {
-            loadSelectedDoc(id)
-        } else {
-            _selectedDoc.value = null
-        }
-    }
-
-    private fun loadSelectedDoc(id: String) {
-        viewModelScope.launch {
-            _selectedDoc.value = drawerRepo.get(id)
-        }
-    }
 
     fun updateListSize(weight: Float) {
         viewModelScope.launch {
@@ -157,31 +88,32 @@ class DocumentsScreenViewModel(
         }
     }
 
+    private var debounceJob: kotlinx.coroutines.Job? = null
+    
     fun updateDocContent(content: String) {
-        viewModelScope.launch {
-            val docId = _selectedDocId.value ?: return@launch
-            val current = _selectedDoc.value ?: return@launch
-            
-            // Optimistic update
-            val updatedDoc = current.copy(
-                content = DocContent.Text(content),
-                updatedAt = Clock.System.now()
-            )
-            _selectedDoc.value = updatedDoc
+        val docId = drawerVm.selectedDocId.value ?: return
+        val current = drawerVm.selectedDoc.value ?: return
+        
+        // Optimistic update
+        val updatedDoc = current.copy(
+            content = DocContent.Text(content),
+            updatedAt = Clock.System.now()
+        )
+        drawerVm._selectedDocMutable.value = updatedDoc
 
-            drawerRepo.updateBatch(listOf(DocPatch(
+        // Cancel previous debounce job
+        debounceJob?.cancel()
+        // Start new debounce job
+        debounceJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(500) // 500ms debounce
+            drawerVm.updateDoc(DocPatch(
                 id = docId,
                 createdAt = null,
                 content = DocContent.Text(content),
                 updatedAt = Clock.System.now(),
                 tags = null
-            )))
+            ))
         }
-    }
-
-    override fun onCleared() {
-        listenerRegistration?.unregister()
-        super.onCleared()
     }
 }
 
@@ -192,11 +124,11 @@ fun DocumentsScreen(
 ) {
     val container = LocalContainer.current
     val tablesVm: TablesViewModel = viewModel { TablesViewModel(container.tablesRepo) }
-    val vm = viewModel { DocumentsScreenViewModel(container.drawerRepo, container.tablesRepo, container.blobsRepo, tablesVm) }
+    val drawerVm: DrawerViewModel = viewModel { DrawerViewModel(container.drawerRepo) }
+    val vm = viewModel { DocumentsScreenViewModel(drawerVm, container.tablesRepo, container.blobsRepo, tablesVm) }
     
-    val documentsState by vm.documentsState.collectAsState()
-    val selectedDocId by vm.selectedDocId.collectAsState()
-    val selectedDoc by vm.selectedDoc.collectAsState()
+    val selectedDocId by drawerVm.selectedDocId.collectAsState()
+    val selectedDoc by drawerVm.selectedDoc.collectAsState()
 
     if (contentType == DaybookContentType.LIST_AND_DETAIL) {
         val listSize by vm.listSizeExpanded.collectAsState()
@@ -216,9 +148,9 @@ fun DocumentsScreen(
                 pane("list") {
                     Box(modifier = Modifier.fillMaxSize()) {
                         DocList(
-                            state = documentsState,
+                            drawerViewModel = drawerVm,
                             selectedDocId = selectedDocId,
-                            onDocClick = { vm.selectDoc(it.id) }
+                            onDocClick = { drawerVm.selectDoc(it) }
                         )
                     }
                 }
@@ -230,7 +162,8 @@ fun DocumentsScreen(
                                 doc = selectedDoc,
                                 onContentChange = { vm.updateDocContent(it) },
                                 modifier = Modifier.padding(16.dp),
-                                blobsRepo = vm.blobsRepo
+                                blobsRepo = vm.blobsRepo,
+                                drawerViewModel = drawerVm
                             )
                         } else {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -246,7 +179,7 @@ fun DocumentsScreen(
             ProvideChromeState(
                 ChromeState(
                     title = "Edit Document",
-                    onBack = { vm.selectDoc(null) }
+                    onBack = { drawerVm.selectDoc(null) }
                 )
             ) {
                 Box(modifier = modifier.fillMaxSize()) {
@@ -254,16 +187,18 @@ fun DocumentsScreen(
                             doc = selectedDoc,
                             onContentChange = { vm.updateDocContent(it) },
                             modifier = Modifier.padding(16.dp),
-                            blobsRepo = vm.blobsRepo
+                            blobsRepo = vm.blobsRepo,
+                            drawerViewModel = drawerVm
                         )
                 }
             }
         } else {
             ProvideChromeState(ChromeState(title = "Documents")) {
+                // Observe drawerState reactively
                 DocList(
-                    state = documentsState,
+                    drawerViewModel = drawerVm,
                     selectedDocId = null,
-                    onDocClick = { vm.selectDoc(it.id) },
+                    onDocClick = { drawerVm.selectDoc(it) },
                     modifier = modifier
                 )
             }
@@ -273,49 +208,133 @@ fun DocumentsScreen(
 
 @Composable
 fun DocList(
-    state: DocumentsState,
+    drawerViewModel: DrawerViewModel,
     selectedDocId: String?,
-    onDocClick: (Doc) -> Unit,
+    onDocClick: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    when (state) {
-        is DocumentsState.Loading -> {
+    val docListState by drawerViewModel.docListState.collectAsState()
+    val loadedDocs by drawerViewModel.loadedDocs.collectAsState()
+    val loadingDocs by drawerViewModel.loadingDocs.collectAsState()
+    
+    val listState = rememberLazyListState()
+    
+    val currentState = docListState
+    when (currentState) {
+        is DocListState.Loading -> {
             Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
         }
-        is DocumentsState.Error -> {
+        is DocListState.Error -> {
             Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Error: ${state.error.message()}")
+                Text("Error: ${currentState.error.message()}")
             }
         }
-        is DocumentsState.Data -> {
-            if (state.docs.isEmpty()) {
+        is DocListState.Data -> {
+            val docIds = currentState.docIds
+            if (docIds.isEmpty()) {
                 Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("No documents in drawer", style = MaterialTheme.typography.bodyLarge)
                 }
             } else {
-                LazyColumn(modifier = modifier.fillMaxSize()) {
-                    items(state.docs) { doc ->
-                        val isSelected = doc.id == selectedDocId
-                        ListItem(
-                            headlineContent = { 
-                                Text(
-                                    text = when (val content = doc.content) {
-                                        is DocContent.Text -> content.v1.take(50).ifEmpty { "Empty document" }
-                                        else -> "Unsupported content"
+                // Track visible items and preload next documents
+                LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
+                    val layoutInfo = listState.layoutInfo
+                    val firstVisible = listState.firstVisibleItemIndex
+                    val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: firstVisible
+                    val preloadCount = 10 // Preload next 10 items
+                    val endIndex = (lastVisible + preloadCount).coerceAtMost(docIds.size - 1)
+                    
+                    val idsToLoad = docIds.subList(firstVisible.coerceAtLeast(0), endIndex + 1)
+                    drawerViewModel.loadDocs(idsToLoad)
+                }
+                
+                LazyColumn(
+                    state = listState,
+                    modifier = modifier.fillMaxSize()
+                ) {
+                    items(docIds.size, key = { idx -> docIds[idx] }) { index ->
+                        val docId = docIds[index]
+                        val doc = loadedDocs[docId]
+                        val isLoading = loadingDocs.contains(docId)
+                        val isSelected = docId == selectedDocId
+                        
+                        if (doc != null) {
+                            // Document is loaded, show it
+                            val draw = @Composable {
+                                ListItem(
+                                    headlineContent = { 
+                                        val titleTag = doc.tags.firstOrNull { it is DocTag.TitleGeneric } as? DocTag.TitleGeneric
+                                        Text(
+                                            text = titleTag?.v1 ?: when (val content = doc.content) {
+                                                is DocContent.Text -> content.v1.take(50).ifEmpty { "Empty document" }
+                                                else -> "Unsupported content"
+                                            },
+                                            maxLines = 1
+                                        )
                                     },
-                                    maxLines = 1
+                                    supportingContent = {
+                                        Text("ID: ${doc.id.take(8)}...")
+                                    }
                                 )
-                            },
-                            supportingContent = {
-                                Text("ID: ${doc.id.take(8)}...")
-                            },
-                            modifier = Modifier
-                                .clickable { onDocClick(doc) }
-                                .then(if (isSelected) Modifier.background(MaterialTheme.colorScheme.primaryContainer) else Modifier)
-                        )
-                        HorizontalDivider()
+                            }
+                            if (isSelected) {
+                                OutlinedCard(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    onClick = { onDocClick(docId) },
+                                ) {
+                                    draw()
+                                }
+                            } else {
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    onClick = { onDocClick(docId) },
+                                ) {
+                                    draw()
+                                }
+                            }
+                        } else if (isLoading) {
+                            // Document is loading, show loading indicator
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                ListItem(
+                                    headlineContent = {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text("Loading...", style = MaterialTheme.typography.bodyMedium)
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    },
+                                    supportingContent = {
+                                        Text("ID: ${docId.take(8)}...")
+                                    }
+                                )
+                            }
+                        } else {
+                            // Document not loaded yet, trigger load and show placeholder
+                            LaunchedEffect(docId) {
+                                drawerViewModel.loadDoc(docId)
+                            }
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                ListItem(
+                                    headlineContent = {
+                                        Text("Loading...", style = MaterialTheme.typography.bodyMedium)
+                                    },
+                                    supportingContent = {
+                                        Text("ID: ${docId.take(8)}...")
+                                    }
+                                )
+                            }
+                        }
                     }
                 }
             }

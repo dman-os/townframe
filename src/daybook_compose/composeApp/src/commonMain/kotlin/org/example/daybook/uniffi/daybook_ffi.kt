@@ -50,6 +50,7 @@ import org.example.daybook.uniffi.core.FfiConverterTypeDoc
 import org.example.daybook.uniffi.core.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.core.FfiConverterTypeDrawerEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeListenerRegistration
+import org.example.daybook.uniffi.core.FfiConverterTypeMetaTableKeyConfig
 import org.example.daybook.uniffi.core.FfiConverterTypePanel
 import org.example.daybook.uniffi.core.FfiConverterTypeTab
 import org.example.daybook.uniffi.core.FfiConverterTypeTable
@@ -57,6 +58,7 @@ import org.example.daybook.uniffi.core.FfiConverterTypeTablesEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeTablesPatches
 import org.example.daybook.uniffi.core.FfiConverterTypeWindow
 import org.example.daybook.uniffi.core.ListenerRegistration
+import org.example.daybook.uniffi.core.MetaTableKeyConfig
 import org.example.daybook.uniffi.core.Panel
 import org.example.daybook.uniffi.core.Tab
 import org.example.daybook.uniffi.core.Table
@@ -68,6 +70,7 @@ import org.example.daybook.uniffi.core.RustBuffer as RustBufferDoc
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocPatch
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDrawerEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferListenerRegistration
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferMetaTableKeyConfig
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferPanel
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTab
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTable
@@ -907,6 +910,12 @@ internal open class UniffiVTableCallbackInterfaceTablesEventListener(
 
 
 
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -929,6 +938,12 @@ fun uniffi_daybook_ffi_checksum_method_blobsrepoffi_put(
 fun uniffi_daybook_ffi_checksum_method_configeventlistener_on_config_event(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_meta_table_key_config(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_meta_table_key_configs(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_meta_table_key_config(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event(
 ): Short
@@ -1075,6 +1090,12 @@ fun uniffi_daybook_ffi_fn_constructor_configrepoffi_load(`fcx`: Pointer,
 ): Long
 fun uniffi_daybook_ffi_fn_method_configrepoffi_ffi_register_listener(`ptr`: Pointer,`listener`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
+fun uniffi_daybook_ffi_fn_method_configrepoffi_get_meta_table_key_config(`ptr`: Pointer,`key`: RustBuffer.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_get_meta_table_key_configs(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_set_meta_table_key_config(`ptr`: Pointer,`key`: RustBuffer.ByValue,`config`: RustBufferMetaTableKeyConfig.ByValue,
+): Long
 fun uniffi_daybook_ffi_fn_clone_drawereventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
 fun uniffi_daybook_ffi_fn_free_drawereventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -1301,6 +1322,15 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener() != 18344.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_meta_table_key_config() != 29114.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_meta_table_key_configs() != 25744.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_meta_table_key_config() != 16890.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event() != 441.toShort()) {
@@ -2396,6 +2426,12 @@ public interface ConfigRepoFfiInterface {
     
     fun `ffiRegisterListener`(`listener`: ConfigEventListener): ListenerRegistration
     
+    suspend fun `getMetaTableKeyConfig`(`key`: kotlin.String): MetaTableKeyConfig?
+    
+    suspend fun `getMetaTableKeyConfigs`(): List<MetaTableKeyConfigEntry>
+    
+    suspend fun `setMetaTableKeyConfig`(`key`: kotlin.String, `config`: MetaTableKeyConfig)
+    
     companion object
 }
 
@@ -2492,6 +2528,70 @@ open class ConfigRepoFfi: Disposable, AutoCloseable, ConfigRepoFfiInterface
     )
     }
     
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getMetaTableKeyConfig`(`key`: kotlin.String) : MetaTableKeyConfig? {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_meta_table_key_config(
+                thisPtr,
+                FfiConverterString.lower(`key`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeMetaTableKeyConfig.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getMetaTableKeyConfigs`() : List<MetaTableKeyConfigEntry> {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_meta_table_key_configs(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeMetaTableKeyConfigEntry.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setMetaTableKeyConfig`(`key`: kotlin.String, `config`: MetaTableKeyConfig) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_meta_table_key_config(
+                thisPtr,
+                FfiConverterString.lower(`key`),FfiConverterTypeMetaTableKeyConfig.lower(`config`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
 
     
 
@@ -4599,6 +4699,38 @@ public object FfiConverterTypeTablesRepoFfi: FfiConverter<TablesRepoFfi, Pointer
 
 
 
+data class MetaTableKeyConfigEntry (
+    var `key`: kotlin.String, 
+    var `config`: MetaTableKeyConfig
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMetaTableKeyConfigEntry: FfiConverterRustBuffer<MetaTableKeyConfigEntry> {
+    override fun read(buf: ByteBuffer): MetaTableKeyConfigEntry {
+        return MetaTableKeyConfigEntry(
+            FfiConverterString.read(buf),
+            FfiConverterTypeMetaTableKeyConfig.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MetaTableKeyConfigEntry) = (
+            FfiConverterString.allocationSize(value.`key`) +
+            FfiConverterTypeMetaTableKeyConfig.allocationSize(value.`config`)
+    )
+
+    override fun write(value: MetaTableKeyConfigEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`key`, buf)
+            FfiConverterTypeMetaTableKeyConfig.write(value.`config`, buf)
+    }
+}
+
+
+
 
 /**
  * @suppress
@@ -4625,6 +4757,38 @@ public object FfiConverterOptionalTypeDoc: FfiConverterRustBuffer<Doc?> {
         } else {
             buf.put(1)
             FfiConverterTypeDoc.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeMetaTableKeyConfig: FfiConverterRustBuffer<MetaTableKeyConfig?> {
+    override fun read(buf: ByteBuffer): MetaTableKeyConfig? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeMetaTableKeyConfig.read(buf)
+    }
+
+    override fun allocationSize(value: MetaTableKeyConfig?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeMetaTableKeyConfig.allocationSize(value)
+        }
+    }
+
+    override fun write(value: MetaTableKeyConfig?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeMetaTableKeyConfig.write(value, buf)
         }
     }
 }
@@ -4928,6 +5092,34 @@ public object FfiConverterSequenceTypeWindow: FfiConverterRustBuffer<List<Window
 
 
 
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeMetaTableKeyConfigEntry: FfiConverterRustBuffer<List<MetaTableKeyConfigEntry>> {
+    override fun read(buf: ByteBuffer): List<MetaTableKeyConfigEntry> {
+        val len = buf.getInt()
+        return List<MetaTableKeyConfigEntry>(len) {
+            FfiConverterTypeMetaTableKeyConfigEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<MetaTableKeyConfigEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeMetaTableKeyConfigEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<MetaTableKeyConfigEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeMetaTableKeyConfigEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
 
 /**
  * Typealias from the type name used in the UDL file to the custom type.  This
@@ -5008,6 +5200,8 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+
+
 
 
 

@@ -328,6 +328,7 @@ impl DrawerRepo {
         let doc = Arc::new(doc);
         self.cache.insert(id.clone(), (doc.clone(), heads.clone()));
 
+        info!(?doc, "XXX");
         Ok(Some(doc))
     }
 
@@ -339,20 +340,32 @@ impl DrawerRepo {
         let Some(id) = patch.id.take() else {
             eyre::bail!("patch has no id set");
         };
+        
+        // If updated_at is not set in the patch, set it to now
+        if patch.updated_at.is_none() {
+            patch.updated_at = Some(time::OffsetDateTime::now_utc());
+        }
+        
         let Some(handle) = self.get_handle(&id).await? else {
             eyre::bail!("patch for unknown document for id {id})");
         };
         let cache = self.cache.clone();
-        tokio::task::spawn_blocking(move || {
+        let store = self.store.clone();
+        let id_clone = id.clone();
+        let new_heads = tokio::task::spawn_blocking(move || {
             handle
                 .with_document(move |am_doc| {
-                    am_doc.transact(move |tx| {
-                        match cache.get_mut(&id) {
+                    let result = am_doc.transact(move |tx| {
+                        match cache.get_mut(&id_clone) {
                             Some(mut entry) => {
                                 let mut doc = (*entry.0).clone();
                                 doc.apply(patch);
                                 autosurgeon::reconcile(tx, &doc).wrap_err("error reconciling")?;
+                                info!(?doc, "XXX");
+                                let heads = crate::ChangeHashSet(tx.get_heads().into());
                                 entry.0 = Arc::new(doc);
+                                entry.1 = heads.clone();
+                                eyre::Ok(heads)
                             }
                             None => {
                                 let mut doc: Doc =
@@ -360,17 +373,34 @@ impl DrawerRepo {
                                 doc.apply(patch);
                                 autosurgeon::reconcile(tx, &doc).wrap_err("error reconciling")?;
                                 let doc = Arc::new(doc);
+                                info!(?doc, "XXX");
                                 let heads = crate::ChangeHashSet(tx.get_heads().into());
-                                cache.insert(id.clone(), (doc, heads));
+                                cache.insert(id_clone.clone(), (doc, heads.clone()));
+                                eyre::Ok(heads)
                             }
                         }
-                        eyre::Ok(())
-                    })
+                    });
+                    result.map(|val| val.result).map_err(|err| err.error)
                 })
-                .map_err(|err| err.error)
         })
         .await
         .wrap_err(ERROR_TOKIO)??;
+        
+        // Update the store's map with the new heads
+        let old_heads = store
+            .mutate_sync(|store| store.map.insert(id.clone(), new_heads.clone()))
+            .await?;
+        
+        // Explicitly notify about the update (similar to how handle_notifs does it)
+        // This ensures the event is fired even if the change notification is delayed
+        if old_heads.is_some() {
+            self.registry.notify(DrawerEvent::DocUpdated {
+                id,
+                new_heads,
+                old_heads: old_heads.unwrap(),
+            });
+        }
+        
         eyre::Ok(())
     }
 
@@ -391,7 +421,7 @@ impl DrawerRepo {
             }
         }
         if !errors.is_empty() {
-            let mut root_err = ferr!("error applying patches: {errors:?}");
+            let root_err = ferr!("error applying patches: {errors:?}");
             // for err in errors {
             //     use color_eyre::Section;
             //     root_err = root_err.section(err);

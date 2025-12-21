@@ -22,6 +22,8 @@ fn tag_to_tag_kind(tag: &DocTag) -> DocTagKind {
     match tag {
         DocTag::RefGeneric(_) => DocTagKind::RefGeneric,
         DocTag::LabelGeneric(_) => DocTagKind::LabelGeneric,
+        DocTag::PathGeneric(_) => DocTagKind::PathGeneric,
+        DocTag::TitleGeneric(_) => DocTagKind::TitleGeneric,
         DocTag::PseudoLabel(_) => DocTagKind::PseudoLabel,
         DocTag::ImageMetadata(_) => DocTagKind::ImageMetadata,
     }

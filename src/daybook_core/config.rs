@@ -1,9 +1,76 @@
 use crate::interlude::*;
 use crate::triage::TriageConfig;
+use std::collections::HashMap;
 
-#[derive(Reconcile, Hydrate, Default)]
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum DateTimeDisplayType {
+    Relative,
+    TimeOnly,
+    DateOnly,
+    TimeAndDate,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum MetaTableKeyDisplayType {
+    DateTime { display_type: DateTimeDisplayType },
+    UnixPath,
+    Title,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MetaTableKeyConfig {
+    pub always_visible: bool,
+    pub display_type: MetaTableKeyDisplayType,
+    pub display_title: Option<String>,
+    pub show_title_editor: Option<bool>,
+}
+
+#[derive(Reconcile, Hydrate)]
 pub struct ConfigStore {
     pub triage: TriageConfig,
+    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
+    pub meta_table_key_configs: HashMap<String, MetaTableKeyConfig>,
+}
+
+impl Default for ConfigStore {
+    fn default() -> Self {
+        let mut key_configs = HashMap::new();
+        
+        // Default configs for created_at and updated_at
+        let datetime_config = MetaTableKeyDisplayType::DateTime { display_type: DateTimeDisplayType::Relative };
+        key_configs.insert("created_at".to_string(), MetaTableKeyConfig {
+            always_visible: false,
+            display_type: datetime_config.clone(),
+            display_title: Some("Created At".to_string()),
+            show_title_editor: None,
+        });
+        key_configs.insert("updated_at".to_string(), MetaTableKeyConfig {
+            always_visible: false,
+            display_type: datetime_config.clone(),
+            display_title: Some("Updated At".to_string()),
+            show_title_editor: None,
+        });
+        key_configs.insert("path_generic".to_string(), MetaTableKeyConfig {
+            always_visible: true,
+            display_type: MetaTableKeyDisplayType::UnixPath,
+            display_title: Some("Path".to_string()),
+            show_title_editor: None,
+        });
+        key_configs.insert("title_generic".to_string(), MetaTableKeyConfig {
+            always_visible: false,
+            display_type: MetaTableKeyDisplayType::Title,
+            display_title: Some("Title".to_string()),
+            show_title_editor: Some(true),
+        });
+        
+        Self {
+            triage: TriageConfig::default(),
+            meta_table_key_configs: key_configs,
+        }
+    }
 }
 
 //
@@ -149,6 +216,34 @@ impl ConfigRepo {
         self.store
             .mutate_sync(move |store| {
                 store.triage.processors.insert(processor_id, processor);
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_meta_table_key_configs_sync(&self) -> HashMap<String, MetaTableKeyConfig> {
+        self.store
+            .query_sync(|store| store.meta_table_key_configs.clone())
+            .await
+    }
+
+    pub async fn get_meta_table_key_config_sync(
+        &self,
+        key: String,
+    ) -> Option<MetaTableKeyConfig> {
+        self.store
+            .query_sync(move |store| store.meta_table_key_configs.get(&key).cloned())
+            .await
+    }
+
+    pub async fn set_meta_table_key_config(
+        &self,
+        key: String,
+        config: MetaTableKeyConfig,
+    ) -> Res<()> {
+        self.store
+            .mutate_sync(move |store| {
+                store.meta_table_key_configs.insert(key, config);
             })
             .await?;
         Ok(())

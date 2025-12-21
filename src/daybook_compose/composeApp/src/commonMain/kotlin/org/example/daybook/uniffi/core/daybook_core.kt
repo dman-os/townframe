@@ -1756,6 +1756,46 @@ public object FfiConverterTypeImageMetaPatch: FfiConverterRustBuffer<ImageMetaPa
 
 
 
+data class MetaTableKeyConfig (
+    var `alwaysVisible`: kotlin.Boolean, 
+    var `displayType`: MetaTableKeyDisplayType, 
+    var `displayTitle`: kotlin.String?, 
+    var `showTitleEditor`: kotlin.Boolean?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMetaTableKeyConfig: FfiConverterRustBuffer<MetaTableKeyConfig> {
+    override fun read(buf: ByteBuffer): MetaTableKeyConfig {
+        return MetaTableKeyConfig(
+            FfiConverterBoolean.read(buf),
+            FfiConverterTypeMetaTableKeyDisplayType.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MetaTableKeyConfig) = (
+            FfiConverterBoolean.allocationSize(value.`alwaysVisible`) +
+            FfiConverterTypeMetaTableKeyDisplayType.allocationSize(value.`displayType`) +
+            FfiConverterOptionalString.allocationSize(value.`displayTitle`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`showTitleEditor`)
+    )
+
+    override fun write(value: MetaTableKeyConfig, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`alwaysVisible`, buf)
+            FfiConverterTypeMetaTableKeyDisplayType.write(value.`displayType`, buf)
+            FfiConverterOptionalString.write(value.`displayTitle`, buf)
+            FfiConverterOptionalBoolean.write(value.`showTitleEditor`, buf)
+    }
+}
+
+
+
 data class Panel (
     var `id`: Uuid, 
     var `title`: kotlin.String
@@ -2392,6 +2432,38 @@ public object FfiConverterTypeConfigEvent: FfiConverterRustBuffer<ConfigEvent> {
 
 
 
+
+enum class DateTimeDisplayType {
+    
+    RELATIVE,
+    TIME_ONLY,
+    DATE_ONLY,
+    TIME_AND_DATE;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDateTimeDisplayType: FfiConverterRustBuffer<DateTimeDisplayType> {
+    override fun read(buf: ByteBuffer) = try {
+        DateTimeDisplayType.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: DateTimeDisplayType) = 4UL
+
+    override fun write(value: DateTimeDisplayType, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 sealed class DocContent {
     
     data class Text(
@@ -2517,6 +2589,16 @@ sealed class DocTag {
         companion object
     }
     
+    data class PathGeneric(
+        val v1: kotlin.String) : DocTag() {
+        companion object
+    }
+    
+    data class TitleGeneric(
+        val v1: kotlin.String) : DocTag() {
+        companion object
+    }
+    
 
     
     companion object
@@ -2539,6 +2621,12 @@ public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
                 )
             4 -> DocTag.PseudoLabel(
                 FfiConverterSequenceString.read(buf),
+                )
+            5 -> DocTag.PathGeneric(
+                FfiConverterString.read(buf),
+                )
+            6 -> DocTag.TitleGeneric(
+                FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -2573,6 +2661,20 @@ public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
                 + FfiConverterSequenceString.allocationSize(value.v1)
             )
         }
+        is DocTag.PathGeneric -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+        }
+        is DocTag.TitleGeneric -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+        }
     }
 
     override fun write(value: DocTag, buf: ByteBuffer) {
@@ -2597,6 +2699,16 @@ public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
                 FfiConverterSequenceString.write(value.v1, buf)
                 Unit
             }
+            is DocTag.PathGeneric -> {
+                buf.putInt(5)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is DocTag.TitleGeneric -> {
+                buf.putInt(6)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
@@ -2611,7 +2723,9 @@ enum class DocTagKind {
     REF_GENERIC,
     LABEL_GENERIC,
     IMAGE_METADATA,
-    PSEUDO_LABEL;
+    PSEUDO_LABEL,
+    PATH_GENERIC,
+    TITLE_GENERIC;
     companion object
 }
 
@@ -2747,6 +2861,84 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
                 buf.putInt(4)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`oldHeads`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+sealed class MetaTableKeyDisplayType {
+    
+    data class DateTime(
+        val `displayType`: DateTimeDisplayType) : MetaTableKeyDisplayType() {
+        companion object
+    }
+    
+    object UnixPath : MetaTableKeyDisplayType()
+    
+    
+    object Title : MetaTableKeyDisplayType()
+    
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMetaTableKeyDisplayType : FfiConverterRustBuffer<MetaTableKeyDisplayType>{
+    override fun read(buf: ByteBuffer): MetaTableKeyDisplayType {
+        return when(buf.getInt()) {
+            1 -> MetaTableKeyDisplayType.DateTime(
+                FfiConverterTypeDateTimeDisplayType.read(buf),
+                )
+            2 -> MetaTableKeyDisplayType.UnixPath
+            3 -> MetaTableKeyDisplayType.Title
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: MetaTableKeyDisplayType) = when(value) {
+        is MetaTableKeyDisplayType.DateTime -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeDateTimeDisplayType.allocationSize(value.`displayType`)
+            )
+        }
+        is MetaTableKeyDisplayType.UnixPath -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is MetaTableKeyDisplayType.Title -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: MetaTableKeyDisplayType, buf: ByteBuffer) {
+        when(value) {
+            is MetaTableKeyDisplayType.DateTime -> {
+                buf.putInt(1)
+                FfiConverterTypeDateTimeDisplayType.write(value.`displayType`, buf)
+                Unit
+            }
+            is MetaTableKeyDisplayType.UnixPath -> {
+                buf.putInt(2)
+                Unit
+            }
+            is MetaTableKeyDisplayType.Title -> {
+                buf.putInt(3)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -3141,6 +3333,38 @@ public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
         } else {
             buf.put(1)
             FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalBoolean: FfiConverterRustBuffer<kotlin.Boolean?> {
+    override fun read(buf: ByteBuffer): kotlin.Boolean? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterBoolean.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Boolean?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterBoolean.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Boolean?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterBoolean.write(value, buf)
         }
     }
 }

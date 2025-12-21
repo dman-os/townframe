@@ -60,6 +60,8 @@ pub mod doc {
         LabelGeneric,
         ImageMetadata,
         PseudoLabel,
+        PathGeneric,
+        TitleGeneric,
     }
     impl DocTagKind {
         pub fn _lift(val:u8) -> DocTagKind {
@@ -69,6 +71,8 @@ pub mod doc {
                 1 => DocTagKind::LabelGeneric,
                 2 => DocTagKind::ImageMetadata,
                 3 => DocTagKind::PseudoLabel,
+                4 => DocTagKind::PathGeneric,
+                5 => DocTagKind::TitleGeneric,
 
                 _ => panic!("invalid enum discriminant"),
             }
@@ -83,6 +87,8 @@ pub mod doc {
         LabelGeneric(String),
         ImageMetadata(ImageMeta),
         PseudoLabel(Vec<String>),
+        PathGeneric(String),
+        TitleGeneric(String),
     }
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
