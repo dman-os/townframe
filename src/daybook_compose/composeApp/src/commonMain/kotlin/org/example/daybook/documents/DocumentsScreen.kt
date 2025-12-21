@@ -133,11 +133,7 @@ class DocumentsScreenViewModel(
 
     private fun loadSelectedDoc(id: String) {
         viewModelScope.launch {
-            try {
-                _selectedDoc.value = drawerRepo.get(id)
-            } catch (e: FfiException) {
-                // Log error
-            }
+            _selectedDoc.value = drawerRepo.get(id)
         }
     }
 
@@ -154,11 +150,7 @@ class DocumentsScreenViewModel(
                 }
                 windowId?.let { id ->
                     state.windows[id]?.let { window ->
-                        try {
-                            tablesRepo.setWindow(id, window.copy(documentsScreenListSizeExpanded = WindowLayoutRegionSize.Weight(weight)))
-                        } catch (e: FfiException) {
-                            // Log error
-                        }
+                        tablesRepo.setWindow(id, window.copy(documentsScreenListSizeExpanded = WindowLayoutRegionSize.Weight(weight)))
                     }
                 }
             }
@@ -177,17 +169,13 @@ class DocumentsScreenViewModel(
             )
             _selectedDoc.value = updatedDoc
 
-            try {
-                drawerRepo.updateBatch(listOf(DocPatch(
-                    id = docId,
-                    createdAt = null,
-                    content = DocContent.Text(content),
-                    updatedAt = Clock.System.now(),
-                    tags = null
-                )))
-            } catch (e: FfiException) {
-                // Log error
-            }
+            drawerRepo.updateBatch(listOf(DocPatch(
+                id = docId,
+                createdAt = null,
+                content = DocContent.Text(content),
+                updatedAt = Clock.System.now(),
+                tags = null
+            )))
         }
     }
 

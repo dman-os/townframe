@@ -165,6 +165,8 @@
             # fish
             # needed to build tonic for console-subscriber
             protobuf
+            v4l-utils     # v4l2-ctl, device discovery
+            libv4l        # V4L2 compatibility layer
           ]);
 
           shellHook = with pkgs; ''

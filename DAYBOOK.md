@@ -64,6 +64,7 @@
   - [ ] Status bar/Gesture bar insets for puck and widgets
   - [ ] Puck drop required to be on center bug
 - [ ] Tutorial
+- [ ] WYSIWYG editor
 
 ### Upstream Issues
 

@@ -23,6 +23,7 @@ jna = "5.18.1"
 gobley = "0.3.7"
 camerax = "1.5.1"
 coil = "3.0.4"
+webcam-capture = "0.3.12"
 
 [libraries]
 calf-permissions = { module = "com.mohamedrejeb.calf:calf-permissions", version.ref = "calfPermissions" }
@@ -52,6 +53,15 @@ camerax-view = { group = "androidx.camera", name = "camera-view", version.ref = 
 camerax-extensions = { group = "androidx.camera", name = "camera-extensions", version.ref = "camerax" }
 coil-compose = { module = "io.coil-kt.coil3:coil-compose", version.ref = "coil" }
 coil-network-ktor = { module = "io.coil-kt.coil3:coil-network-ktor3", version.ref = "coil" }
+webcam-capture = { module = "com.github.sarxos:webcam-capture", version.ref = "webcam-capture" }
+webcam-capture-v4l4j = { module = "com.github.sarxos:webcam-capture-driver-v4l4j", version.ref = "webcam-capture" }
+webcam-capture-gstreamer = { module = "com.github.sarxos:webcam-capture-driver-gstreamer", version.ref = "webcam-capture" }
+webcam-capture-openimaj = { module = "com.github.sarxos:webcam-capture-driver-openimaj", version.ref = "webcam-capture" }
+webcam-capture-javacv = { module = "com.github.sarxos:webcam-capture-driver-opencv", version.ref = "webcam-capture" }
+webcam-capture-vlcj = { module = "com.github.sarxos:webcam-capture-driver-vlcj", version.ref = "webcam-capture" }
+webcam-capture-fswebcam = { module = "com.github.sarxos:webcam-capture-driver-fswebcam", version.ref = "webcam-capture" }
+webcam-capture-lti-civil = { module = "com.github.sarxos:webcam-capture-driver-lti-civil", version.ref = "webcam-capture" }
+webcam-capture-jmf = { module = "com.github.sarxos:webcam-capture-driver-jmf", version.ref = "webcam-capture" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }

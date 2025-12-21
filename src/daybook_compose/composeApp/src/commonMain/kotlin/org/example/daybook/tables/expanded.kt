@@ -88,6 +88,29 @@ import org.example.daybook.uniffi.core.WindowLayoutOrientation as ConfigOrientat
 import org.example.daybook.uniffi.core.WindowLayoutRegionSize
 import org.example.daybook.uniffi.core.WindowLayoutRegionChild
 
+/**
+ * Constants for sidebar layout weights and sizes
+ */
+private object SidebarLayoutConstants {
+    /** Default expanded sidebar weight (40% of available space) */
+    const val DEFAULT_SIDEBAR_WEIGHT = 0.4f
+    
+    /** Collapsed/rail sidebar weight (10% of available space) */
+    const val COLLAPSED_SIDEBAR_WEIGHT = 0.10f
+    
+    /** Threshold weight to determine if sidebar is expanded or collapsed */
+    const val SIDEBAR_EXPANDED_THRESHOLD = 0.15f
+    
+    /** Minimum weight for any pane to prevent it from disappearing */
+    const val MIN_PANE_WEIGHT = 0.10f
+    
+    /** Rail mode size in dp (icon-only navigation rail) */
+    const val RAIL_SIZE_DP = 40f
+    
+    /** Maximum dp for discrete regime (transition point from rail to drawer) */
+    const val DISCRETE_REGIME_MAX_DP = 235f
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExpandedLayout(
@@ -165,7 +188,7 @@ fun ExpandedLayout(
         title = screenChromeState.title ?: "Daybook",
         navigationIcon = screenChromeState.navigationIcon ?: {
             IconButton(onClick = {
-                // Toggle left pane: Visible 0.4 -> Visible 0.1 -> Hidden
+                // Toggle left pane: Hidden -> Visible (expanded) -> Visible (collapsed/rail) -> Hidden
                 if (layoutConfig != null && tablesState is TablesState.Data && selectedTableId != null) {
                     val state = tablesState as TablesState.Data
                     val windowId = state.tables[selectedTableId]?.window?.let { windowPolicy ->
@@ -184,24 +207,20 @@ fun ExpandedLayout(
                             }
                             
                             val (nextVisible, nextWeight) = when {
-                                !currentVisible -> true to 0.4f
-                                currentWeight > 0.15f -> true to 0.1f
-                                else -> false to 0.4f
+                                !currentVisible -> true to SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
+                                currentWeight > SidebarLayoutConstants.SIDEBAR_EXPANDED_THRESHOLD -> true to SidebarLayoutConstants.COLLAPSED_SIDEBAR_WEIGHT
+                                else -> false to SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
                             }
                             
                             scope.launch {
-                                try {
-                                    tablesRepo.setWindow(id, window.copy(
-                                        layout = window.layout.copy(
-                                            leftVisible = nextVisible,
-                                            leftRegion = window.layout.leftRegion.copy(
-                                                size = org.example.daybook.uniffi.core.WindowLayoutRegionSize.Weight(nextWeight)
-                                            )
+                                tablesRepo.setWindow(id, window.copy(
+                                    layout = window.layout.copy(
+                                        leftVisible = nextVisible,
+                                        leftRegion = window.layout.leftRegion.copy(
+                                            size = org.example.daybook.uniffi.core.WindowLayoutRegionSize.Weight(nextWeight)
                                         )
-                                    ))
-                                } catch (e: Exception) {
-                                    // Log error
-                                }
+                                    )
+                                ))
                             }
                         }
                     }
@@ -318,7 +337,7 @@ fun LayoutFromConfig(
                             size = WindowLayoutRegionSize.Weight(
                                 newWeights[currentLayout.leftRegion.deets.key] 
                                     ?: (currentLayout.leftRegion.size as? WindowLayoutRegionSize.Weight)?.v1 
-                                    ?: 0.4f
+                                    ?: SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
                             )
                         ),
                         centerRegion = currentLayout.centerRegion.copy(
@@ -332,16 +351,12 @@ fun LayoutFromConfig(
                             size = WindowLayoutRegionSize.Weight(
                                 newWeights[currentLayout.rightRegion.deets.key] 
                                     ?: (currentLayout.rightRegion.size as? WindowLayoutRegionSize.Weight)?.v1 
-                                    ?: 0.4f
+                                    ?: SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
                             )
                         )
                     )
                     scope.launch {
-                        try {
-                            tablesVm.tablesRepo.setWindow(id, window.copy(layout = newLayout))
-                        } catch (e: FfiException) {
-                            // Error handling
-                        }
+                        tablesVm.tablesRepo.setWindow(id, window.copy(layout = newLayout))
                     }
                 }
             }
@@ -350,9 +365,9 @@ fun LayoutFromConfig(
 
     val initialWeights = remember(layoutConfig) {
         val weights = mutableMapOf<Any, Float>()
-        weights[layoutConfig.leftRegion.deets.key] = (layoutConfig.leftRegion.size as? WindowLayoutRegionSize.Weight)?.v1 ?: 0.4f
+        weights[layoutConfig.leftRegion.deets.key] = (layoutConfig.leftRegion.size as? WindowLayoutRegionSize.Weight)?.v1 ?: SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
         weights[layoutConfig.centerRegion.deets.key] = (layoutConfig.centerRegion.size as? WindowLayoutRegionSize.Weight)?.v1 ?: 1.0f
-        weights[layoutConfig.rightRegion.deets.key] = (layoutConfig.rightRegion.size as? WindowLayoutRegionSize.Weight)?.v1 ?: 0.4f
+        weights[layoutConfig.rightRegion.deets.key] = (layoutConfig.rightRegion.size as? WindowLayoutRegionSize.Weight)?.v1 ?: SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
         weights
     }
 
@@ -366,10 +381,10 @@ fun LayoutFromConfig(
         if (layoutConfig.leftVisible) {
             val leftPane = layoutConfig.leftRegion.deets
             val leftRegimes = if (leftPane.variant is WindowLayoutPaneVariant.Sidebar) {
-                // Sidebar: discrete 0-80dp for rail mode (80dp size), continuous above
+                // Sidebar: discrete 0-RAIL_SIZE_DP for rail mode, continuous above
                 listOf(
-                    PaneSizeRegime.Discrete(minDp = 0f, maxDp = 235f, sizeDp = 80f),
-                    PaneSizeRegime.Continuous(minDp = 80f)
+                    PaneSizeRegime.Discrete(minDp = 0f, maxDp = SidebarLayoutConstants.DISCRETE_REGIME_MAX_DP, sizeDp = SidebarLayoutConstants.RAIL_SIZE_DP),
+                    PaneSizeRegime.Continuous(minDp = SidebarLayoutConstants.RAIL_SIZE_DP)
                 )
             } else {
                 // Default: continuous
@@ -637,13 +652,7 @@ fun SidebarContent(
                                 Text(item.icon)
                             }
                         },
-                        label = {
-                            if (chromeButton != null) {
-                                chromeButton.label()
-                            } else {
-                                Text(item.label)
-                            }
-                        }
+                        label = null // Rail mode: icon-only, no labels
                     )
                 }
             }
@@ -717,10 +726,10 @@ fun RenderLayoutRegion(
         region.children.forEach { child ->
             val childPane = child.deets
             val childRegimes = if (childPane.variant is WindowLayoutPaneVariant.Sidebar) {
-                // Sidebar: discrete 0-80dp for rail mode (80dp size), continuous above
+                // Sidebar: discrete 0-RAIL_SIZE_DP for rail mode, continuous above
                 listOf(
-                    PaneSizeRegime.Discrete(minDp = 0f, maxDp = 235f, sizeDp = 80f),
-                    PaneSizeRegime.Continuous(minDp = 80f)
+                    PaneSizeRegime.Discrete(minDp = 0f, maxDp = SidebarLayoutConstants.DISCRETE_REGIME_MAX_DP, sizeDp = SidebarLayoutConstants.RAIL_SIZE_DP),
+                    PaneSizeRegime.Continuous(minDp = SidebarLayoutConstants.RAIL_SIZE_DP)
                 )
             } else {
                 // Default: continuous
@@ -922,22 +931,22 @@ fun DockableRegion(
                         // Both in discrete ranges - larger one wins
                         if (sizeA >= sizeB) {
                             val targetWeightA = (sizeA / totalSizeDp) * totalWeight
-                            val newWeightA = targetWeightA.coerceAtLeast(0.1f)
-                            val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(0.1f)
+                            val newWeightA = targetWeightA.coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
+                            val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
                             weightMap[keyA] = newWeightA
                             weightMap[keyB] = newWeightB
                         } else {
                             val targetWeightB = (sizeB / totalSizeDp) * totalWeight
-                            val newWeightB = targetWeightB.coerceAtLeast(0.1f)
-                            val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(0.1f)
+                            val newWeightB = targetWeightB.coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
+                            val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
                             weightMap[keyA] = newWeightA
                             weightMap[keyB] = newWeightB
                         }
                     } else {
                         // One or both outside discrete range - use virtual sizes
                         val targetWeightA = (virtualSizeDpA / totalSizeDp) * totalWeight
-                        val newWeightA = targetWeightA.coerceAtLeast(0.1f).coerceAtMost(totalCurrentWeight - 0.1f)
-                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(0.1f)
+                        val newWeightA = targetWeightA.coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT).coerceAtMost(totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT)
+                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                     }
@@ -948,15 +957,15 @@ fun DockableRegion(
                     val inRangeA = virtualSizeDpA >= regimeA.minDp && virtualSizeDpA <= regimeA.maxDp
                     if (inRangeA) {
                         val targetWeightA = (regimeA.sizeDp / totalSizeDp) * totalWeight
-                        val newWeightA = targetWeightA.coerceAtLeast(0.1f)
-                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(0.1f)
+                        val newWeightA = targetWeightA.coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
+                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                     } else {
                         // Outside discrete range - use virtual size
                         val targetWeightA = (virtualSizeDpA / totalSizeDp) * totalWeight
-                        val newWeightA = targetWeightA.coerceAtLeast(0.1f).coerceAtMost(totalCurrentWeight - 0.1f)
-                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(0.1f)
+                        val newWeightA = targetWeightA.coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT).coerceAtMost(totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT)
+                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                     }
@@ -967,15 +976,15 @@ fun DockableRegion(
                     val inRangeB = virtualSizeDpB >= regimeB.minDp && virtualSizeDpB <= regimeB.maxDp
                     if (inRangeB) {
                         val targetWeightB = (regimeB.sizeDp / totalSizeDp) * totalWeight
-                        val newWeightB = targetWeightB.coerceAtLeast(0.1f)
-                        val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(0.1f)
+                        val newWeightB = targetWeightB.coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
+                        val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                     } else {
                         // Outside discrete range - use virtual size
                         val targetWeightA = (virtualSizeDpA / totalSizeDp) * totalWeight
-                        val newWeightA = targetWeightA.coerceAtLeast(0.1f).coerceAtMost(totalCurrentWeight - 0.1f)
-                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(0.1f)
+                        val newWeightA = targetWeightA.coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT).coerceAtMost(totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT)
+                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                     }
@@ -984,8 +993,8 @@ fun DockableRegion(
                 // Both continuous: use virtual sizes
                 else -> {
                     val targetWeightA = (virtualSizeDpA / totalSizeDp) * totalWeight
-                    val newWeightA = targetWeightA.coerceAtLeast(0.1f).coerceAtMost(totalCurrentWeight - 0.1f)
-                    val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(0.1f)
+                    val newWeightA = targetWeightA.coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT).coerceAtMost(totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT)
+                    val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
                     weightMap[keyA] = newWeightA
                     weightMap[keyB] = newWeightB
                 }
@@ -1088,8 +1097,8 @@ fun DockableRegion(
                         val weightA = getWeight(keyA)
                         val weightB = getWeight(keyB)
                         val totalCurrentWeight = weightA + weightB
-                        val newWeightA = targetWeightA.coerceAtLeast(0.1f)
-                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(0.1f)
+                        val newWeightA = targetWeightA.coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
+                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                         return true
@@ -1100,8 +1109,8 @@ fun DockableRegion(
                         val weightA = getWeight(keyA)
                         val weightB = getWeight(keyB)
                         val totalCurrentWeight = weightA + weightB
-                        val newWeightB = targetWeightB.coerceAtLeast(0.1f)
-                        val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(0.1f)
+                        val newWeightB = targetWeightB.coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
+                        val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                         return true
@@ -1120,8 +1129,8 @@ fun DockableRegion(
             val weightB = getWeight(keyB)
             val totalCurrentWeight = weightA + weightB
             
-            val newWeightA = targetWeightA.coerceAtLeast(0.1f).coerceAtMost(totalCurrentWeight - 0.1f)
-            val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(0.1f)
+            val newWeightA = targetWeightA.coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT).coerceAtMost(totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT)
+            val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(SidebarLayoutConstants.MIN_PANE_WEIGHT)
 
             // Update state
             weightMap[keyA] = newWeightA

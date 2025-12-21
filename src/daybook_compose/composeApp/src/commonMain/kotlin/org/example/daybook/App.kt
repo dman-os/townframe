@@ -355,12 +355,7 @@ class TablesViewModel(
         return if (currentState is TablesState.Data && selectedId != null) {
             currentState.tables[selectedId]
         } else {
-            // If no explicit selection, try to get the selected table from the repo
-            try {
-                tablesRepo.getSelectedTable()
-            } catch (e: FfiException) {
-                null
-            }
+            tablesRepo.getSelectedTable()
         }
     }
     

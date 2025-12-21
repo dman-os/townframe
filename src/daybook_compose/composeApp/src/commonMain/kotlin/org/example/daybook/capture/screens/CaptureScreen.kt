@@ -82,11 +82,7 @@ class CaptureScreenViewModel(
                 }
                 windowId?.let { id ->
                     state.windows[id]?.let { window ->
-                        try {
-                            tablesRepo.setWindow(id, window.copy(lastCaptureMode = mode))
-                        } catch (e: FfiException) {
-                            // Log error
-                        }
+                        tablesRepo.setWindow(id, window.copy(lastCaptureMode = mode))
                     }
                 }
             }
@@ -147,15 +143,9 @@ class CaptureScreenViewModel(
                     content = DocContent.Text(content),
                     tags = listOf()
                 )
-                try {
-                    val returnedId = drawerRepo.add(newDoc)
-                    _currentDocId.value = returnedId
-                    _currentDoc.value = newDoc.copy(id = returnedId)
-                } catch (e: FfiException) {
-                    // Log error
-                } finally {
-                    isCreatingDoc = false
-                }
+                val returnedId = drawerRepo.add(newDoc)
+                _currentDocId.value = returnedId
+                _currentDoc.value = newDoc.copy(id = returnedId)
             } else {
                 // Update existing doc
                 val current = _currentDoc.value
@@ -167,17 +157,13 @@ class CaptureScreenViewModel(
                     )
                     _currentDoc.value = updatedDoc
                     
-                    try {
-                        drawerRepo.updateBatch(listOf(org.example.daybook.uniffi.core.DocPatch(
-                            id = docId,
-                            createdAt = null,
-                            content = DocContent.Text(content),
-                            updatedAt = Clock.System.now(),
-                            tags = null
-                        )))
-                    } catch (e: FfiException) {
-                        // Log error
-                    }
+                    drawerRepo.updateBatch(listOf(org.example.daybook.uniffi.core.DocPatch(
+                        id = docId,
+                        createdAt = null,
+                        content = DocContent.Text(content),
+                        updatedAt = Clock.System.now(),
+                        tags = null
+                    )))
                 }
             }
         }
@@ -185,13 +171,9 @@ class CaptureScreenViewModel(
 
     fun loadDoc(id: String) {
         viewModelScope.launch {
-            try {
-                val doc = drawerRepo.get(id)
-                _currentDocId.value = id
-                _currentDoc.value = doc
-            } catch (e: FfiException) {
-                // Log error
-            }
+            val doc = drawerRepo.get(id)
+            _currentDocId.value = id
+            _currentDoc.value = doc
         }
     }
 

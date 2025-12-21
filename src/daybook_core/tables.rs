@@ -1,5 +1,17 @@
 use crate::interlude::*;
 
+/// Constants for sidebar layout weights
+mod sidebar_layout {
+    /// Default expanded sidebar weight (40% of available space)
+    pub const DEFAULT_SIDEBAR_WEIGHT: f32 = 0.4;
+    
+    /// Collapsed/rail sidebar weight (10% of available space)
+    pub const COLLAPSED_SIDEBAR_WEIGHT: f32 = 0.1;
+    
+    /// Default weight for documents screen list size when expanded
+    pub const DOCUMENTS_LIST_EXPANDED_WEIGHT: f32 = 0.4;
+}
+
 #[derive(Debug, Clone, Reconcile, Hydrate, Patch, PartialEq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[patch(attribute(derive(Debug, Default)))]
@@ -64,14 +76,14 @@ impl Default for WindowLayout {
                 },
             },
             left_region: WindowLayoutRegionChild {
-                size: WindowLayoutRegionSize::Weight(0.4),
+                size: WindowLayoutRegionSize::Weight(sidebar_layout::DEFAULT_SIDEBAR_WEIGHT),
                 deets: WindowLayoutPane {
                     key: "left".into(),
                     variant: WindowLayoutPaneVariant::Sidebar(WindowLayoutSidebar {}),
                 },
             },
             right_region: WindowLayoutRegionChild {
-                size: WindowLayoutRegionSize::Weight(0.4),
+                size: WindowLayoutRegionSize::Weight(sidebar_layout::DEFAULT_SIDEBAR_WEIGHT),
                 deets: WindowLayoutPane {
                     key: "right".into(),
                     variant: WindowLayoutPaneVariant::Region(WindowLayoutRegion {
@@ -269,7 +281,7 @@ impl TablesStore {
             selected_table: Some(table_id),
             layout: WindowLayout::default(),
             last_capture_mode: CaptureMode::default(),
-            documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(0.4),
+            documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT),
         };
         self.windows.insert(window_id, window);
 
@@ -872,7 +884,7 @@ impl TablesRepo {
                         selected_table: Some(table_id),
                         layout: WindowLayout::default(),
                         last_capture_mode: CaptureMode::default(),
-                        documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(0.4),
+                        documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT),
                     };
                     store.windows.insert(new_window_id, window);
                     new_window_id
@@ -954,7 +966,7 @@ impl TablesRepo {
                                 selected_table: Some(table_id),
                                 layout: WindowLayout::default(),
                                 last_capture_mode: CaptureMode::default(),
-                                documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(0.4),
+                                documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT),
                             };
                             store.windows.insert(new_window_id, window);
                             new_window_id
