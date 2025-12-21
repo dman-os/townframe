@@ -183,7 +183,7 @@ impl drawer::Host for WashCtx {
 
         // Construct DocPatch manually from JSON value
         use std::default::Default;
-        let mut doc_patch = crate::gen::doc::DocPatch::default();
+        let mut doc_patch = daybook_types::doc::DocPatch::default();
 
         if let Some(id) = patch_value.get("id").and_then(|v| v.as_str()) {
             doc_patch.id = Some(id.to_string());
@@ -202,9 +202,9 @@ impl drawer::Host for WashCtx {
             doc_patch.content = serde_json::from_value(content.clone())
                 .map_err(|e| wasmtime::Error::msg(format!("error deserializing content: {e}")))?;
         }
-        if let Some(tags) = patch_value.get("tags") {
-            doc_patch.tags = serde_json::from_value(tags.clone())
-                .map_err(|e| wasmtime::Error::msg(format!("error deserializing tags: {e}")))?;
+        if let Some(props) = patch_value.get("props") {
+            doc_patch.props = serde_json::from_value(props.clone())
+                .map_err(|e| wasmtime::Error::msg(format!("error deserializing props: {e}")))?;
         }
 
         // Set the doc_id in the patch

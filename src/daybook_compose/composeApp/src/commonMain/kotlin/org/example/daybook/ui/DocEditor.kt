@@ -26,7 +26,7 @@ import org.example.daybook.DrawerViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.example.daybook.uniffi.core.Doc
 import org.example.daybook.uniffi.core.DocContent
-import org.example.daybook.uniffi.core.DocTag
+import org.example.daybook.uniffi.core.DocProp
 import org.example.daybook.uniffi.core.DocPatch
 import org.example.daybook.uniffi.core.DateTimeDisplayType
 import org.example.daybook.uniffi.core.MetaTableKeyDisplayType
@@ -66,7 +66,7 @@ fun DocEditor(
             
             if (showTitleEditor) {
                 val titleText = when (val tag = titleTagInfo?.tag) {
-                    is DocTag.TitleGeneric -> tag.v1
+                    is DocProp.TitleGeneric -> tag.v1
                     else -> ""
                 }
                 // Allow editing if we have an editable title tag, or if we can create a title_generic tag
@@ -80,16 +80,16 @@ fun DocEditor(
                         
                         scope.launch {
                             try {
-                                val currentTags = currentDoc.tags.toMutableList()
+                                val currentTags = currentDoc.props.toMutableList()
                                 val tagIndex = titleTagInfo?.index
                                 
                                 when {
                                     newTitle.isNotBlank() -> {
                                         // Update existing tag or add new one
                                         if (tagIndex != null && tagIndex in currentTags.indices) {
-                                            currentTags[tagIndex] = DocTag.TitleGeneric(newTitle)
+                                            currentTags[tagIndex] = DocProp.TitleGeneric(newTitle)
                                         } else {
-                                            currentTags.add(DocTag.TitleGeneric(newTitle))
+                                            currentTags.add(DocProp.TitleGeneric(newTitle))
                                         }
                                     }
                                     tagIndex != null && tagIndex in currentTags.indices -> {
@@ -104,7 +104,7 @@ fun DocEditor(
                                     createdAt = null,
                                     updatedAt = null,
                                     content = null,
-                                    tags = currentTags
+                                    props = currentTags
                                 )
                                 
                                 if (actualDrawerViewModel != null) {
@@ -293,18 +293,18 @@ fun PropertiesTable(
     }
     
     // Build properties rows with formatting
-    // Use actualDoc.id and actualDoc.tags as keys to ensure recomposition when tags change
-    // Note: We need to track tags changes explicitly since remember uses reference equality for lists
-    val tagsKey = remember(actualDoc.tags) { 
-        // Create a stable key from tags that changes when tags change
-        actualDoc.tags.joinToString("|") { tag ->
+    // Use actualDoc.id and actualDoc.props as keys to ensure recomposition when props change
+    // Note: We need to track props changes explicitly since remember uses reference equality for lists
+    val tagsKey = remember(actualDoc.props) { 
+        // Create a stable key from props that changes when props change
+        actualDoc.props.joinToString("|") { tag ->
             when (tag) {
-                is DocTag.TitleGeneric -> "title:${tag.v1}"
-                is DocTag.PathGeneric -> "path:${tag.v1}"
-                is DocTag.LabelGeneric -> "label:${tag.v1}"
-                is DocTag.RefGeneric -> "ref:${tag.v1}"
-                is DocTag.ImageMetadata -> "image:${tag.v1.mime}-${tag.v1.widthPx}-${tag.v1.heightPx}"
-                is DocTag.PseudoLabel -> "pseudo:${tag.v1.joinToString(",")}"
+                is DocProp.TitleGeneric -> "title:${tag.v1}"
+                is DocProp.PathGeneric -> "path:${tag.v1}"
+                is DocProp.LabelGeneric -> "label:${tag.v1}"
+                is DocProp.RefGeneric -> "ref:${tag.v1}"
+                is DocProp.ImageMetadata -> "image:${tag.v1.mime}-${tag.v1.widthPx}-${tag.v1.heightPx}"
+                is DocProp.PseudoLabel -> "pseudo:${tag.v1.joinToString(",")}"
             }
         }
     }
@@ -327,10 +327,10 @@ fun PropertiesTable(
         rows.add(PropertiesRow("updated_at", updatedAtDisplayKey, updatedAtResult.formatted, updatedAtResult.error, actualDoc.updatedAt, null, updatedAtIso))
         
         // Tags
-        actualDoc.tags.forEachIndexed { index, tag ->
+        actualDoc.props.forEachIndexed { index, tag ->
             val key = when (tag) {
-                is DocTag.TitleGeneric -> "title_generic"
-                is DocTag.PathGeneric -> "path_generic"
+                is DocProp.TitleGeneric -> "title_generic"
+                is DocProp.PathGeneric -> "path_generic"
                 else -> "tag_$index"
             }
             val tagConfig = keyConfigs[key]
@@ -388,18 +388,18 @@ fun PropertiesTable(
                 onKeyClick = { showConfigBottomSheet = row.key },
                 onValueClick = { showEditValueBottomSheet = row },
                 onValueChange = if (isUnixPath && row.tagValue != null && row.tagIndex != null) { newValue ->
-                    val currentTags = actualDoc.tags.toMutableList()
+                    val currentTags = actualDoc.props.toMutableList()
                     val tagIndex = row.tagIndex
                     if (tagIndex >= 0 && tagIndex < currentTags.size) {
                         when (row.tagValue) {
-                            is DocTag.PathGeneric -> {
-                                currentTags[tagIndex] = DocTag.PathGeneric(newValue)
+                            is DocProp.PathGeneric -> {
+                                currentTags[tagIndex] = DocProp.PathGeneric(newValue)
                             }
-                            is DocTag.TitleGeneric -> {
-                                currentTags[tagIndex] = DocTag.TitleGeneric(newValue)
+                            is DocProp.TitleGeneric -> {
+                                currentTags[tagIndex] = DocProp.TitleGeneric(newValue)
                             }
-                            is DocTag.LabelGeneric -> {
-                                currentTags[tagIndex] = DocTag.LabelGeneric(newValue)
+                            is DocProp.LabelGeneric -> {
+                                currentTags[tagIndex] = DocProp.LabelGeneric(newValue)
                             }
                             else -> {}
                         }
@@ -409,7 +409,7 @@ fun PropertiesTable(
                         createdAt = null,
                         updatedAt = null,
                         content = null,
-                        tags = currentTags
+                        props = currentTags
                     )
                     if (drawerViewModel != null) {
                         drawerViewModel.updateDoc(patch)
@@ -440,18 +440,18 @@ fun PropertiesTable(
                         onValueChange = if (isUnixPath && row.tagValue != null && row.tagIndex != null) { newValue ->
                             scope.launch {
                                 try {
-                                    val currentTags = actualDoc.tags.toMutableList()
+                                    val currentTags = actualDoc.props.toMutableList()
                                     val tagIndex = row.tagIndex
                                     if (tagIndex >= 0 && tagIndex < currentTags.size) {
                                         when (row.tagValue) {
-                                            is DocTag.PathGeneric -> {
-                                                currentTags[tagIndex] = DocTag.PathGeneric(newValue)
+                                            is DocProp.PathGeneric -> {
+                                                currentTags[tagIndex] = DocProp.PathGeneric(newValue)
                                             }
-                                            is DocTag.TitleGeneric -> {
-                                                currentTags[tagIndex] = DocTag.TitleGeneric(newValue)
+                                            is DocProp.TitleGeneric -> {
+                                                currentTags[tagIndex] = DocProp.TitleGeneric(newValue)
                                             }
-                                            is DocTag.LabelGeneric -> {
-                                                currentTags[tagIndex] = DocTag.LabelGeneric(newValue)
+                                            is DocProp.LabelGeneric -> {
+                                                currentTags[tagIndex] = DocProp.LabelGeneric(newValue)
                                             }
                                             else -> {}
                                         }
@@ -461,7 +461,7 @@ fun PropertiesTable(
                                         createdAt = null,
                                         updatedAt = null,
                                         content = null,
-                                        tags = currentTags
+                                        props = currentTags
                                     )
                                     if (drawerViewModel != null) {
                                         drawerViewModel.updateDoc(patch)
@@ -514,14 +514,14 @@ fun PropertiesTable(
             AddTagBottomSheet(
                 configViewModel = configViewModel,
                 onTagAdded = { tag ->
-                    val currentTags = actualDoc.tags.toMutableList()
+                    val currentTags = actualDoc.props.toMutableList()
                     currentTags.add(tag)
                     val patch = DocPatch(
                         id = actualDoc.id,
                         createdAt = null,
                         updatedAt = null,
                         content = null,
-                        tags = currentTags
+                        props = currentTags
                     )
                     if (drawerViewModel != null) {
                         drawerViewModel.updateDoc(patch)
@@ -566,7 +566,7 @@ data class PropertiesRow(
     val value: String,
     val error: String? = null,
     val instantValue: Instant? = null,
-    val tagValue: DocTag? = null,
+    val tagValue: DocProp? = null,
     val rawValue: String? = null,
     val tagIndex: Int? = null  // Index of the tag in the document's tags list
 )
@@ -612,9 +612,9 @@ fun PropertiesTableRow(
             // Use inline editor for UnixPath keys
             if (canInlineEdit) {
                 val currentValue = when (row.tagValue) {
-                    is DocTag.PathGeneric -> row.tagValue.v1
-                    is DocTag.TitleGeneric -> row.tagValue.v1
-                    is DocTag.LabelGeneric -> row.tagValue.v1
+                    is DocProp.PathGeneric -> row.tagValue.v1
+                    is DocProp.TitleGeneric -> row.tagValue.v1
+                    is DocProp.LabelGeneric -> row.tagValue.v1
                     else -> row.value
                 }
                 var editedValue by remember(row.tagValue) { mutableStateOf(currentValue) }
@@ -962,7 +962,7 @@ fun PropertiesKeyConfigBottomSheet(
 @Composable
 fun AddTagBottomSheet(
     configViewModel: ConfigViewModel,
-    onTagAdded: (DocTag) -> Unit,
+    onTagAdded: (DocProp) -> Unit,
     onDismiss: () -> Unit
 ) {
     var searchQuery by remember { mutableStateOf("") }
@@ -1046,10 +1046,10 @@ fun AddTagBottomSheet(
                                     Spacer(modifier = Modifier.height(8.dp))
                                     Button(
                                         onClick = {
-                                            // Note: PathGeneric doesn't exist yet in DocTag, 
+                                            // Note: PathGeneric doesn't exist yet in DocProp, 
                                             // this is a placeholder for when it's added
                                             // For now, we'll use LabelGeneric as a workaround
-                                            onTagAdded(DocTag.PathGeneric(pathValue))
+                                            onTagAdded(DocProp.PathGeneric(pathValue))
                                             onDismiss()
                                         },
                                         enabled = pathValue.isNotBlank(),
@@ -1125,9 +1125,9 @@ fun EditValueBottomSheet(
             when {
                 row.tagValue != null -> {
                     when (row.tagValue) {
-                        is DocTag.TitleGeneric -> row.tagValue.v1
-                        is DocTag.PathGeneric -> row.tagValue.v1
-                        is DocTag.LabelGeneric -> row.tagValue.v1
+                        is DocProp.TitleGeneric -> row.tagValue.v1
+                        is DocProp.PathGeneric -> row.tagValue.v1
+                        is DocProp.LabelGeneric -> row.tagValue.v1
                         else -> row.value
                     }
                 }
@@ -1215,7 +1215,7 @@ fun EditValueBottomSheet(
                 Text("Editing: ${row.displayKey}")
                 Spacer(modifier = Modifier.height(8.dp))
                 when (row.tagValue) {
-                    is DocTag.TitleGeneric -> {
+                    is DocProp.TitleGeneric -> {
                         OutlinedTextField(
                             value = editedValue,
                             onValueChange = { editedValue = it },
@@ -1223,7 +1223,7 @@ fun EditValueBottomSheet(
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
-                    is DocTag.PathGeneric -> {
+                    is DocProp.PathGeneric -> {
                         OutlinedTextField(
                             value = editedValue,
                             onValueChange = { editedValue = it },
@@ -1231,7 +1231,7 @@ fun EditValueBottomSheet(
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
-                    is DocTag.LabelGeneric -> {
+                    is DocProp.LabelGeneric -> {
                         OutlinedTextField(
                             value = editedValue,
                             onValueChange = { editedValue = it },
@@ -1267,14 +1267,14 @@ fun EditValueBottomSheet(
                                             createdAt = newInstant,
                                             updatedAt = null,
                                             content = null,
-                                            tags = null
+                                            props = null
                                         )
                                         "updated_at" -> DocPatch(
                                             id = doc.id,
                                             createdAt = null,
                                             updatedAt = newInstant,
                                             content = null,
-                                            tags = null
+                                            props = null
                                         )
                                         else -> null
                                     }
@@ -1288,17 +1288,17 @@ fun EditValueBottomSheet(
                             row.tagValue != null -> {
                                 // Update tag using index from row
                                 val tagIndex = row.tagIndex ?: row.key.removePrefix("tag_").toIntOrNull()
-                                if (tagIndex != null && tagIndex >= 0 && tagIndex < doc.tags.size) {
-                                    val currentTags = doc.tags.toMutableList()
+                                if (tagIndex != null && tagIndex >= 0 && tagIndex < doc.props.size) {
+                                    val currentTags = doc.props.toMutableList()
                                     when (row.tagValue) {
-                                        is DocTag.LabelGeneric -> {
-                                            currentTags[tagIndex] = DocTag.LabelGeneric(editedValue)
+                                        is DocProp.LabelGeneric -> {
+                                            currentTags[tagIndex] = DocProp.LabelGeneric(editedValue)
                                         }
-                                        is DocTag.TitleGeneric -> {
-                                            currentTags[tagIndex] = DocTag.TitleGeneric(editedValue)
+                                        is DocProp.TitleGeneric -> {
+                                            currentTags[tagIndex] = DocProp.TitleGeneric(editedValue)
                                         }
-                                        is DocTag.PathGeneric -> {
-                                            currentTags[tagIndex] = DocTag.PathGeneric(editedValue)
+                                        is DocProp.PathGeneric -> {
+                                            currentTags[tagIndex] = DocProp.PathGeneric(editedValue)
                                         }
                                         else -> {}
                                     }
@@ -1308,7 +1308,7 @@ fun EditValueBottomSheet(
                                             createdAt = null,
                                             updatedAt = null,
                                             content = null,
-                                            tags = currentTags
+                                            props = currentTags
                                         ))
                                     } else {
                                         drawerRepo.updateBatch(listOf(DocPatch(
@@ -1316,7 +1316,7 @@ fun EditValueBottomSheet(
                                             createdAt = null,
                                             updatedAt = null,
                                             content = null,
-                                            tags = currentTags
+                                            props = currentTags
                                         )))
                                     }
                                 }
@@ -1341,7 +1341,7 @@ fun formatValue(
     value: Any,
     config: MetaTableKeyConfig?,
     key: String,
-    tag: DocTag? = null
+    tag: DocProp? = null
 ): FormatResult {
     val displayType = config?.displayType ?: when {
         key == "created_at" || key == "updated_at" -> MetaTableKeyDisplayType.DateTime(displayType = DateTimeDisplayType.RELATIVE)
@@ -1426,25 +1426,25 @@ fun formatDateOnly(instant: Instant): String {
     return String.format("%04d-%02d-%02d", localDate.year, localDate.monthValue, localDate.dayOfMonth)
 }
 
-fun getTagValue(tag: DocTag): String {
+fun getTagValue(tag: DocProp): String {
     return when (tag) {
-        is DocTag.RefGeneric -> tag.v1
-        is DocTag.LabelGeneric -> tag.v1
-        is DocTag.TitleGeneric -> tag.v1
-        is DocTag.PathGeneric -> tag.v1
-        is DocTag.ImageMetadata -> tag.v1.toString()
-        is DocTag.PseudoLabel -> tag.v1.joinToString(", ")
+        is DocProp.RefGeneric -> tag.v1
+        is DocProp.LabelGeneric -> tag.v1
+        is DocProp.TitleGeneric -> tag.v1
+        is DocProp.PathGeneric -> tag.v1
+        is DocProp.ImageMetadata -> tag.v1.toString()
+        is DocProp.PseudoLabel -> tag.v1.joinToString(", ")
     }
 }
 
-fun getTagKind(tag: DocTag): String {
+fun getTagKind(tag: DocProp): String {
     return when (tag) {
-        is DocTag.RefGeneric -> "RefGeneric"
-        is DocTag.LabelGeneric -> "LabelGeneric"
-        is DocTag.ImageMetadata -> "ImageMetadata"
-        is DocTag.PseudoLabel -> "PseudoLabel"
-        is DocTag.TitleGeneric -> "TitleGeneric"
-        is DocTag.PathGeneric -> "PathGeneric"
+        is DocProp.RefGeneric -> "RefGeneric"
+        is DocProp.LabelGeneric -> "LabelGeneric"
+        is DocProp.ImageMetadata -> "ImageMetadata"
+        is DocProp.PseudoLabel -> "PseudoLabel"
+        is DocProp.TitleGeneric -> "TitleGeneric"
+        is DocProp.PathGeneric -> "PathGeneric"
     }
 }
 
@@ -1452,20 +1452,20 @@ fun getTagKind(tag: DocTag): String {
 private val KNOWN_EDITABLE_TITLE_TAGS = setOf("title_generic")
 
 data class TitleTagInfo(
-    val tag: DocTag,
+    val tag: DocProp,
     val key: String,
     val isEditable: Boolean,
     val index: Int
 )
 
 fun findTitleTag(doc: Doc, keyConfigs: Map<String, MetaTableKeyConfig>): TitleTagInfo? {
-    // Find all tags that have display type of Title
+    // Find all props that have display type of Title
     val titleTags = mutableListOf<TitleTagInfo>()
     
-    doc.tags.forEachIndexed { index, tag ->
+    doc.props.forEachIndexed { index, tag ->
         val key = when (tag) {
-            is DocTag.TitleGeneric -> "title_generic"
-            is DocTag.PathGeneric -> "path_generic"
+            is DocProp.TitleGeneric -> "title_generic"
+            is DocProp.PathGeneric -> "path_generic"
             else -> "tag_$index"
         }
         val config = keyConfigs[key]

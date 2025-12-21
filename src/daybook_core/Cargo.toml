@@ -13,9 +13,10 @@ uniffi = ["dep:uniffi"]
 
 [dependencies]
 # internal
-utils_rs = { workspace = true, features = ["hash", "native"] }
+utils_rs = { workspace = true, features = ["hash", "native", "automerge-repo"] }
 api_utils_rs = { workspace = true, features = ["automerge"] }
 wflow = { workspace = true }
+daybook_types = { workspace = true, features = ["automerge", "uniffi"] }
 
 # encoding
 serde.workspace = true

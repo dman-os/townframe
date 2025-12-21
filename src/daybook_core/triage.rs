@@ -3,7 +3,7 @@ use crate::interlude::*;
 pub mod predicates;
 
 use crate::drawer::{DrawerEvent, DrawerRepo};
-use crate::r#gen::doc::{Doc, DocId};
+use daybook_types::{Doc, DocId};
 
 pub use wflow::{PartitionLogIngress, WflowIngress};
 
@@ -246,7 +246,7 @@ pub async fn triage(
             };
             // Serialize DocAddedEvent as args
             let heads_str = utils_rs::am::serialize_commit_heads(doc_heads.as_ref());
-            let args = crate::gen::doc::DocAddedEvent {
+            let args = daybook_types::doc::DocAddedEvent {
                 id: doc_id.clone(),
                 heads: heads_str,
             };

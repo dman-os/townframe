@@ -16,7 +16,7 @@ pub mod prelude {
     pub use dotenv_flow;
     pub use educe;
     pub use regex;
-    #[cfg(feature = "automerge")]
+    #[cfg(feature = "automerge-repo")]
     pub use samod;
     pub use serde_json;
     pub use tokio;

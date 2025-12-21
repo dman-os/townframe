@@ -1,0 +1,33 @@
+[package]
+name = "daybook_cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "daybook"
+path = "main.rs"
+
+[dependencies]
+clap = { version = "4.5.47", features = ["derive", "env"] }
+clap_complete = "4.5.0"
+dotenv-flow.workspace = true
+
+utils_rs = { workspace = true, features = ["native"] }
+daybook_core = { workspace = true }
+daybook_types = { workspace = true, features = ["automerge"] }
+
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time"] }
+
+color-eyre.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+directories = "6.0.0"
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+serde = { workspace = true }
+serde_json.workspace = true
+automerge.workspace = true
+autosurgeon = { workspace = true, features = ["uuid"] }
+samod = { workspace = true, features = ["tokio"] }
+comfy-table = "7.2"
+

@@ -1,12 +1,17 @@
+#[cfg(feature = "automerge-repo")]
 use crate::interlude::*;
 
+#[cfg(feature = "automerge-repo")]
 use autosurgeon::Prop;
+#[cfg(feature = "automerge-repo")]
 use samod::DocumentId;
+#[cfg(feature = "automerge-repo")]
 use tokio::{
     sync::{mpsc, RwLock},
     task::JoinHandle,
 };
 
+#[cfg(feature = "automerge-repo")]
 #[derive(Debug, Clone)]
 pub struct ChangeNotification {
     pub patch: Arc<automerge::Patch>,
@@ -14,28 +19,33 @@ pub struct ChangeNotification {
     // TODO: timestamp
 }
 
+#[cfg(feature = "automerge-repo")]
 pub struct ChangeFilter {
     pub doc_id: Option<DocIdFilter>,
     pub path: Vec<Prop<'static>>,
 }
 
+#[cfg(feature = "automerge-repo")]
 struct ChangeListener {
     filter: ChangeFilter,
     on_change: Box<dyn Fn(Vec<ChangeNotification>) + Send + Sync + 'static>,
 }
 
+#[cfg(feature = "automerge-repo")]
 pub struct ChangeListenerManager {
     listeners: RwLock<Vec<ChangeListener>>,
     change_tx: mpsc::UnboundedSender<(DocumentId, Vec<ChangeNotification>)>,
     brokers: DHashMap<DocumentId, Arc<DocChangeBroker>>,
 }
 
+#[cfg(feature = "automerge-repo")]
 pub struct DocChangeBroker {
     doc_id: DocumentId,
     join_handle: JoinHandle<Res<()>>,
     term_signal_tx: tokio::sync::watch::Sender<bool>,
 }
 
+#[cfg(feature = "automerge-repo")]
 impl DocChangeBroker {
     pub async fn stop(self) -> Res<()> {
         self.term_signal_tx.send(true).wrap_err("already stopped")?;
@@ -50,12 +60,14 @@ impl DocChangeBroker {
     }
 }
 
+#[cfg(feature = "automerge-repo")]
 pub struct DocIdFilter {
     pub doc_id: DocumentId,
     // forces one to have broker before adding a listener
     _seal: (),
 }
 
+#[cfg(feature = "automerge-repo")]
 impl ChangeListenerManager {
     pub fn boot() -> Arc<Self> {
         let (change_tx, change_rx) = mpsc::unbounded_channel();
@@ -86,7 +98,7 @@ impl ChangeListenerManager {
         let (term_signal_tx, mut term_signal_rx) = tokio::sync::watch::channel(false);
         let join_handle = tokio::spawn(
             async move {
-                info!("listening on doc");
+                debug!("listening on doc");
 
                 let heads = handle.with_document(|doc| doc.get_heads());
                 let mut heads: Arc<[automerge::ChangeHash]> = heads.into();
@@ -222,6 +234,7 @@ impl ChangeListenerManager {
 }
 
 /// Check if a change path matches a listener path (including subpaths)
+#[cfg(feature = "automerge-repo")]
 pub fn path_matches(
     listener_path: &[Prop<'_>],
     change_path: &[(automerge::ObjId, automerge::Prop)],
@@ -239,6 +252,7 @@ pub fn path_matches(
 }
 
 /// Check if two properties match (handles different property types)
+#[cfg(feature = "automerge-repo")]
 pub fn prop_matches(listener_prop: &Prop<'_>, change_prop: &automerge::Prop) -> bool {
     match (listener_prop, change_prop) {
         (Prop::Key(listener_key), automerge::Prop::Map(change_key)) => listener_key == change_key,

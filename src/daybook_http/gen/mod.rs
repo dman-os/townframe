@@ -13,7 +13,7 @@ pub mod doc {
 
     pub type Multihash = String;
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, utoipa::ToSchema, Serialize, Deserialize)]
     pub struct DocBlob {
         pub length_octets: u64,
         pub hash: Multihash,
@@ -21,7 +21,7 @@ pub mod doc {
 
     pub type DocId = String;
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize, PartialEq)]
     pub enum DocContentKind {
         Text,
         Blob,
@@ -39,7 +39,7 @@ pub mod doc {
     }
 
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize, PartialEq)]
     pub enum DocContent {
         Text(String),
         Blob(DocBlob),
@@ -47,15 +47,15 @@ pub mod doc {
 
     pub type DocRef = DocId;
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, utoipa::ToSchema, Serialize, Deserialize)]
     pub struct ImageMeta {
         pub mime: MimeType,
         pub width_px: u64,
         pub height_px: u64,
     }
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-    pub enum DocTagKind {
+    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize, PartialEq)]
+    pub enum DocPropKind {
         RefGeneric,
         LabelGeneric,
         ImageMetadata,
@@ -63,16 +63,16 @@ pub mod doc {
         PathGeneric,
         TitleGeneric,
     }
-    impl DocTagKind {
-        pub fn _lift(val:u8) -> DocTagKind {
+    impl DocPropKind {
+        pub fn _lift(val:u8) -> DocPropKind {
             match val {
 
-                0 => DocTagKind::RefGeneric,
-                1 => DocTagKind::LabelGeneric,
-                2 => DocTagKind::ImageMetadata,
-                3 => DocTagKind::PseudoLabel,
-                4 => DocTagKind::PathGeneric,
-                5 => DocTagKind::TitleGeneric,
+                0 => DocPropKind::RefGeneric,
+                1 => DocPropKind::LabelGeneric,
+                2 => DocPropKind::ImageMetadata,
+                3 => DocPropKind::PseudoLabel,
+                4 => DocPropKind::PathGeneric,
+                5 => DocPropKind::TitleGeneric,
 
                 _ => panic!("invalid enum discriminant"),
             }
@@ -80,8 +80,8 @@ pub mod doc {
     }
 
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-    pub enum DocTag {
+    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize, PartialEq)]
+    pub enum DocProp {
         /// A link to another document.
         RefGeneric(DocRef),
         LabelGeneric(String),
@@ -91,18 +91,8 @@ pub mod doc {
         TitleGeneric(String),
     }
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
-    pub struct Doc {
-        pub id: DocId,
-        #[serde(with = "api_utils_rs::codecs::datetime")]
-        pub created_at: Datetime,
-        #[serde(with = "api_utils_rs::codecs::datetime")]
-        pub updated_at: Datetime,
-        pub content: DocContent,
-        pub tags: Vec<DocTag>,
-    }
 
-    #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, utoipa::ToSchema, Serialize, Deserialize)]
     pub struct DocAddedEvent {
         pub id: DocId,
         pub heads: Vec<String>,
@@ -114,7 +104,7 @@ pub mod doc {
         #[derive(Debug, Clone)]
         pub struct DocCreate;
 
-        pub type Output = SchemaRef<Doc>;
+        pub type Output = SchemaRef<daybook_types::Doc>;
 
         #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize)]
         pub struct Input {

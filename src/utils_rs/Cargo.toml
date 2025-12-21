@@ -7,8 +7,9 @@ edition.workspace = true
 path = "lib.rs"
 
 [features]
-default = ["automerge", "hash", "native"]
-automerge = ["dep:autosurgeon", "dep:automerge", "dep:samod", "dep:tokio-tungstenite"]
+default = ["automerge-repo", "hash", "native"]
+automerge = ["dep:autosurgeon", "dep:automerge"]
+automerge-repo = ["automerge", "dep:samod", "dep:tokio-tungstenite"]
 hash = ["dep:multihash", "dep:json-canon", "dep:sha2", "dep:data-encoding", "tokio/io-util", "dep:blake3"]
 console-subscriber = ["dep:console-subscriber"]
 native = [
@@ -23,7 +24,7 @@ browser = [
 # futures
 async-trait.workspace = true
 futures.workspace = true
-tokio = { workspace = true, features = ["sync", "macros"] }
+tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
 
 # encoding
 serde.workspace = true

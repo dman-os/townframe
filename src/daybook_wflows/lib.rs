@@ -5,7 +5,6 @@ mod interlude {
     pub use std::str::FromStr;
 }
 
-mod gen;
 
 mod wit {
     wit_bindgen::generate!({
@@ -50,12 +49,12 @@ struct Component;
 impl wit::exports::townframe::wflow::bundle::Guest for Component {
     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
         wflow_sdk::route_wflows!(args, {
-            "pseudo-labeler" => |cx, args: crate::gen::doc::DocAddedEvent| pseudo_labeler(cx, args),
+            "pseudo-labeler" => |cx, args: daybook_types::gen::wit::doc::DocAddedEvent| pseudo_labeler(cx, args),
         })
     }
 }
 
-fn pseudo_labeler(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<(), JobErrorX> {
+fn pseudo_labeler(cx: WflowCtx, args: daybook_types::gen::wit::doc::DocAddedEvent) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::drawer;
 
     // Call the daybook plugin to get the document at the specified heads
@@ -74,7 +73,7 @@ fn pseudo_labeler(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<
                 )));
             }
         };
-        let doc: crate::gen::doc::Doc = serde_json::from_str(&json)
+        let doc: daybook_types::Doc = serde_json::from_str(&json)
             .wrap_err("error parsing json doc")
             .map_err(JobErrorX::Terminal)?;
 
@@ -83,9 +82,8 @@ fn pseudo_labeler(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<
 
     // Extract text content for LLM
     let content_text = match &doc.content {
-        crate::gen::doc::DocContent::Text(text) => text.clone(),
-        crate::gen::doc::DocContent::Blob(_) => "Binary content".to_string(),
-        crate::gen::doc::DocContent::Image(_) => "Image content".to_string(),
+        daybook_types::DocContent::Text(text) => text.clone(),
+        daybook_types::DocContent::Blob(_) => "Binary content".to_string(),
     };
 
     // Call the LLM to generate a label
@@ -114,21 +112,21 @@ fn pseudo_labeler(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<
     })?;
 
     // Find or create the pseudo label tag
-    let mut updated_tags = doc.tags.clone();
+    let mut updated_tags = doc.props.clone();
     let pseudo_label_index = updated_tags
         .iter()
-        .position(|tag| matches!(tag, crate::gen::doc::DocTag::PseudoLabel(_)));
+        .position(|tag| matches!(tag, daybook_types::DocProp::PseudoLabel(_)));
 
     let new_labels = vec![llm_response.clone()];
 
     match pseudo_label_index {
         Some(index) => {
             // Replace existing pseudo label tag at the found index
-            updated_tags[index] = crate::gen::doc::DocTag::PseudoLabel(new_labels);
+            updated_tags[index] = daybook_types::DocProp::PseudoLabel(new_labels);
         }
         None => {
             // Add new pseudo label tag
-            updated_tags.push(crate::gen::doc::DocTag::PseudoLabel(new_labels));
+            updated_tags.push(daybook_types::DocProp::PseudoLabel(new_labels));
         }
     }
 
@@ -137,9 +135,9 @@ fn pseudo_labeler(cx: WflowCtx, args: crate::gen::doc::DocAddedEvent) -> Result<
         let doc_id = args.id.clone();
         let heads = args.heads.clone();
 
-        // Create a patch with just the tags field
+        // Create a patch with just the props field
         let patch = serde_json::json!({
-            "tags": updated_tags
+            "props": updated_tags
         });
         let patch_str = serde_json::to_string(&patch)
             .wrap_err("error serializing patch")

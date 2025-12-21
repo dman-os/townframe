@@ -5,7 +5,7 @@ use crate::interlude::*;
 
 pub use crate::gen::doc::doc_create::*;
 // pub use crate::gen::doc::wit::exports::townframe::daybook_api::doc_create::GuestHandler;
-use crate::gen::doc::Doc;
+use daybook_types::Doc;
 pub use crate::wit::exports::townframe::daybook_api::doc_create::GuestService;
 
 impl GuestService for DocCreate {
@@ -63,7 +63,7 @@ impl GuestService for DocCreate {
                 .expect("bad response")
                 .to_datetime(),
             content: todo!(),
-            tags: todo!(),
+            props: todo!(),
         };
         Ok(out)
     }

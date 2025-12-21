@@ -1,17 +1,22 @@
 use crate::interlude::*;
 
+#[cfg(feature = "automerge-repo")]
 pub mod changes;
 pub mod codecs;
 
 use automerge::{Automerge, ChangeHash};
 use autosurgeon::{Hydrate, Prop, Reconcile};
-use samod::{DocHandle, DocumentId};
 
 pub use codecs::AutosurgeonJson;
 
+#[cfg(feature = "automerge-repo")]
+use samod::{DocHandle, DocumentId};
+
+#[cfg(feature = "automerge-repo")]
 use changes::ChangeListenerManager;
 
 /// Configuration for Automerge storage
+#[cfg(feature = "automerge-repo")]
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Peer ID for this client
@@ -20,12 +25,14 @@ pub struct Config {
     pub storage: StorageConfig,
 }
 
+#[cfg(feature = "automerge-repo")]
 #[derive(Debug, Clone)]
 pub enum StorageConfig {
     Disk { path: PathBuf },
     Memory,
 }
 
+#[cfg(feature = "automerge-repo")]
 #[derive(Clone)]
 pub struct AmCtx {
     repo: samod::Repo,
@@ -35,6 +42,7 @@ pub struct AmCtx {
     handle_cache: Arc<DHashMap<DocumentId, DocHandle>>,
 }
 
+#[cfg(feature = "automerge-repo")]
 impl AmCtx {
     pub async fn boot<A: samod::AnnouncePolicy>(
         config: Config,

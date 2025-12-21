@@ -105,8 +105,8 @@ class CaptureScreenViewModel(
                             hash = hashStr
                         )
                     ),
-                    tags = listOf(
-                        DocTag.ImageMetadata(
+                    props = listOf(
+                        DocProp.ImageMetadata(
                             ImageMeta(
                                 mime = "image/jpeg",
                                 widthPx = 0uL,
@@ -141,7 +141,7 @@ class CaptureScreenViewModel(
                     createdAt = Clock.System.now(),
                     updatedAt = Clock.System.now(),
                     content = DocContent.Text(content),
-                    tags = listOf()
+                    props = listOf()
                 )
                 val returnedId = drawerRepo.add(newDoc)
                 _currentDocId.value = returnedId
@@ -162,7 +162,7 @@ class CaptureScreenViewModel(
                         createdAt = null,
                         content = DocContent.Text(content),
                         updatedAt = Clock.System.now(),
-                        tags = null
+                        props = null
                     )))
                 }
             }

@@ -7,8 +7,10 @@ members = [
   "./src/btress_api",
   "./src/btress_http",
   "./src/daybook_api",
+  "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
+  "./src/daybook_types",
   "./src/daybook_http",
   "./src/daybook_sync",
   "./src/daybook_wflows/",
@@ -51,6 +53,7 @@ api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
 btress_api = { path = "./src/btress_api" }
 macros = { path = "./src/macros" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
+daybook_types = { path = "./src/daybook_types", default-features = false }
 wflow = { path = "./src/wflow", default-features = false }
 wflow_core = { path = "./src/wflow_core", default-features = false }
 wflow_tokio = { path = "./src/wflow_tokio", default-features = false }

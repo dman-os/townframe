@@ -10,6 +10,7 @@ path = "main.rs"
 [dependencies]
 api_utils_rs.workspace = true
 daybook_core = { workspace = true, features = [] }
+daybook_types = { workspace = true, features = ["automerge"] }
 utils_rs = { workspace = true, features = ["automerge", "hash"] }
 macros.workspace = true
 

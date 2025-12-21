@@ -1,11 +1,9 @@
 use crate::interlude::*;
 
-use crate::gen::doc::{Doc, DocContent, DocTag};
+use daybook_types::{Doc, DocContent, DocProp};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_pseudo_labeler_workflow() -> Res<()> {
-    utils_rs::testing::setup_tracing()?;
-
     let test_cx = crate::e2e::test_cx(utils_rs::function_full!()).await?;
 
     // Create and add a document to the drawer
@@ -14,7 +12,7 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
         created_at: OffsetDateTime::now_utc(),
         updated_at: OffsetDateTime::now_utc(),
         content: DocContent::Text("Hello, world!".to_string()),
-        tags: vec![],
+        props: vec![],
     };
 
     // Add the document - DocTriageWorker will automatically queue the workflow job
@@ -34,16 +32,16 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
         .ok_or_eyre("doc not found")?;
 
     let has_pseudo_label = updated_doc
-        .tags
+        .props
         .iter()
-        .any(|tag| matches!(tag, DocTag::PseudoLabel(v) if !v.is_empty()));
+        .any(|tag| matches!(tag, DocProp::PseudoLabel(v) if !v.is_empty()));
 
     info!(?updated_doc, "result");
 
     assert!(
         has_pseudo_label,
-        "doc should have a PseudoLabel tag after pseudo-labeler workflow completes. Tags: {:?}",
-        updated_doc.tags
+        "doc should have a PseudoLabel tag after pseudo-labeler workflow completes. Props: {:?}",
+        updated_doc.props
     );
 
     // Cleanup

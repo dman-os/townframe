@@ -21,7 +21,6 @@ pub mod config;
 pub mod blobs;
 pub mod drawer;
 #[allow(unused)]
-pub mod gen;
 pub mod repos;
 pub mod stores;
 pub mod tables;

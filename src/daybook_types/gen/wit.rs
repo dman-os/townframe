@@ -1,5 +1,7 @@
 //! @generated
-use super::*;
+//! Do not edit manually - changes will be overwritten.
+
+use crate::interlude::*;
 
 pub mod doc {
     use super::*;
@@ -92,36 +94,4 @@ pub mod doc {
         pub id: DocId,
         pub heads: Vec<String>,
     }
-
-    pub mod doc_create {
-        use super::*;
-
-        #[derive(Debug, Clone)]
-        pub struct DocCreate;
-
-        pub type Output = daybook_types::Doc;
-
-        #[derive(Debug, Clone, garde::Validate, Serialize, Deserialize)]
-        pub struct Input {
-            #[garde(length(min = 1, max = 1024))]
-            pub id: String,
-        }
-
-        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]
-        /// Id occupied: {id}
-        pub struct ErrorIdOccupied {
-            pub id: String,
-        }
-
-        #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]
-        pub enum Error {
-            /// Id occupied {0}
-            IdOccupied(#[from] ErrorIdOccupied),
-            /// Invalid input {0}
-            InvalidInput(#[from] ErrorsValidation),
-            /// Internal server error {0}
-            Internal(#[from] ErrorInternal),
-        }
-    }
-
 }

@@ -35,6 +35,8 @@ use super::*;
                 patch: false,
                 ..default()
             },
+            mode: None,
+            excluded_types: std::collections::HashMap::new(),
         };
         for feature in &features {
             service_rust::feature_module(&cx, buf, feature)?;
@@ -114,7 +116,17 @@ package townframe:btress-api;"#
         let mut out = String::new();
         let buf = &mut out;
         write!(buf, "//! @generated\nuse super::*;\n\n")?;
-        let cx = service_rust::RustGenCtx { reg: &reg, attrs };
+        // For crates with wit feature, exclude Doc (uses Datetime which doesn't implement PartialEq)
+        let mut excluded_types = std::collections::HashMap::new();
+        if attrs.wit {
+            excluded_types.insert("Doc".to_string(), "daybook_types::Doc".to_string());
+        }
+        let cx = service_rust::RustGenCtx { 
+            reg: &reg, 
+            attrs, 
+            mode: None,
+            excluded_types,
+        };
         for feature in &features {
             service_rust::feature_module(&cx, buf, feature)?;
         }
@@ -137,6 +149,8 @@ package townframe:btress-api;"#
                 serde: true,
                 ..default()
             },
+            mode: None,
+            excluded_types: std::collections::HashMap::new(),
         };
         for feature in &features {
             service_rust::feature_module(&cx, buf, feature)?;
@@ -144,6 +158,96 @@ package townframe:btress-api;"#
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../wflow_core/gen/");
         std::fs::create_dir_all(&path)?;
         std::fs::write(path.join("mod.rs"), &out)?;
+    }
+
+    // Generate daybook_types crate
+    {
+        let features = daybook_api::daybook_api_features(&reg);
+        
+        // Generate root types (gen/root.rs)
+        {
+            let mut out = String::new();
+            let buf = &mut out;
+            service_rust::generate_daybook_types_mode(
+                &reg,
+                buf,
+                &features,
+                service_rust::GenerationMode::Root,
+            )?;
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_types/gen/root.rs");
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, &out)?;
+        }
+        
+        // Generate automerge types (gen/automerge.rs)
+        {
+            let mut out = String::new();
+            let buf = &mut out;
+            service_rust::generate_daybook_types_mode(
+                &reg,
+                buf,
+                &features,
+                service_rust::GenerationMode::Automerge,
+            )?;
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_types/gen/automerge.rs");
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, &out)?;
+        }
+        
+        // Generate wit types (gen/wit.rs)
+        {
+            let mut out = String::new();
+            let buf = &mut out;
+            service_rust::generate_daybook_types_mode(
+                &reg,
+                buf,
+                &features,
+                service_rust::GenerationMode::Wit,
+            )?;
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_types/gen/wit.rs");
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, &out)?;
+        }
+        
+        // Generate gen/mod.rs
+        {
+            let mut out = String::new();
+            let buf = &mut out;
+            writeln!(buf, "//! @generated")?;
+            writeln!(buf, "//! This module contains generated type definitions.")?;
+            writeln!(buf, "//! Do not edit manually - changes will be overwritten.")?;
+            writeln!(buf)?;
+            writeln!(buf, "// Root types module (generated in gen/root.rs)")?;
+            writeln!(buf, "pub mod root;")?;
+            writeln!(buf)?;
+            writeln!(buf, "// Re-export all generated root types")?;
+            writeln!(buf, "pub use root::*;")?;
+            writeln!(buf)?;
+            writeln!(buf, "// Automerge types module (generated in gen/automerge.rs)")?;
+            writeln!(buf, "#[cfg(feature = \"automerge\")]")?;
+            writeln!(buf, "pub mod automerge;")?;
+            writeln!(buf)?;
+            writeln!(buf, "#[cfg(feature = \"automerge\")]")?;
+            writeln!(buf, "pub use automerge::*;")?;
+            writeln!(buf)?;
+            writeln!(buf, "// WIT types module (generated in gen/wit.rs)")?;
+            writeln!(buf, "#[cfg(feature = \"wit\")]")?;
+            writeln!(buf, "pub mod wit;")?;
+            writeln!(buf)?;
+            writeln!(buf, "#[cfg(feature = \"wit\")]")?;
+            writeln!(buf, "pub use wit::*;")?;
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_types/gen/mod.rs");
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, &out)?;
+        }
     }
 
     Ok(())

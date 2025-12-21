@@ -1,0 +1,39 @@
+[package]
+name = "daybook_types"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "daybook_types"
+path = "lib.rs"
+
+[features]
+default = ["automerge", "uniffi", "wit"]
+automerge = ["dep:autosurgeon", "dep:automerge", "utils_rs/automerge", "utils_rs/hash"]
+uniffi = ["dep:uniffi", "dep:uuid"]
+wit = ["dep:wit-bindgen"]
+
+[dependencies]
+# encoding
+serde.workspace = true
+serde_json.workspace = true
+
+# internal
+api_utils_rs = { workspace = true, default-features = false }
+utils_rs = { workspace = true, default-features = false }
+
+# time (needed for root Doc type)
+time = { workspace = true, features = ["serde"] }
+
+# automerge (feature-gated)
+autosurgeon = { workspace = true, features = ["uuid"], optional = true }
+automerge = { workspace = true, optional = true }
+struct-patch = "0.10.4"
+
+# ffi (feature-gated)
+uniffi = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+# wit (feature-gated)
+wit-bindgen = { workspace = true, optional = true }
+

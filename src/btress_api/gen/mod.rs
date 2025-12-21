@@ -4,7 +4,7 @@ use super::*;
 pub mod user {
     use super::*;
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct User {
         pub id: Uuid,
         #[serde(with = "utils_rs::codecs::sane_iso8601")]

@@ -60,7 +60,7 @@ pub fn feature(reg: &TypeReg) -> Feature {
             ])
             .build(),
     ));
-    let doc_tag_variants = vec![
+    let doc_prop_variants = vec![
         (
             "ref_generic",
             VariantVariant::builder(VariantVariantType::Wrapped(doc_ref))
@@ -91,18 +91,18 @@ pub fn feature(reg: &TypeReg) -> Feature {
         // path_generic
         // version_branch
     ];
-    let doc_tag_kind = reg.add_type(Type::Enum(
-        Enum::builder("DocTagKind")
+    let doc_prop_kind = reg.add_type(Type::Enum(
+        Enum::builder("DocPropKind")
             .with_variants(
-                doc_tag_variants
+                doc_prop_variants
                     .iter()
                     .map(|(key, _)| (*key, EnumVariant::builder().build())),
             )
             .build(),
     ));
-    let doc_tag = reg.add_type(Type::Variant(
-        Variant::builder("DocTag")
-            .with_variants(doc_tag_variants)
+    let doc_prop = reg.add_type(Type::Variant(
+        Variant::builder("DocProp")
+            .with_variants(doc_prop_variants)
             .build(),
     ));
     let doc = reg.add_type(Type::Record(
@@ -116,7 +116,7 @@ pub fn feature(reg: &TypeReg) -> Feature {
                 //     RecordField::builder(doc_content_kind).build(),
                 // ),
                 ("content", RecordField::builder(doc_content).build()),
-                ("tags", RecordField::builder(reg.list(doc_tag)).build()),
+                ("props", RecordField::builder(reg.list(doc_prop)).build()),
             ])
             .build(),
     ));
@@ -147,8 +147,8 @@ pub fn feature(reg: &TypeReg) -> Feature {
             doc_content,
             doc_ref,
             image_meta,
-            doc_tag_kind,
-            doc_tag,
+            doc_prop_kind,
+            doc_prop,
             doc,
             doc_added_event,
         ],

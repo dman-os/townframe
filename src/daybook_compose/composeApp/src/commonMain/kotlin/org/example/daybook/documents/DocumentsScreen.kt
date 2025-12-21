@@ -31,7 +31,7 @@ import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.DrawerViewModel
-import org.example.daybook.uniffi.core.DocTag
+import org.example.daybook.uniffi.core.DocProp
 import org.example.daybook.DocListState
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
@@ -111,7 +111,7 @@ class DocumentsScreenViewModel(
                 createdAt = null,
                 content = DocContent.Text(content),
                 updatedAt = Clock.System.now(),
-                tags = null
+                props = null
             ))
         }
     }
@@ -265,7 +265,7 @@ fun DocList(
                             val draw = @Composable {
                                 ListItem(
                                     headlineContent = { 
-                                        val titleTag = doc.tags.firstOrNull { it is DocTag.TitleGeneric } as? DocTag.TitleGeneric
+                                        val titleTag = doc.props.firstOrNull { it is DocProp.TitleGeneric } as? DocProp.TitleGeneric
                                         Text(
                                             text = titleTag?.v1 ?: when (val content = doc.content) {
                                                 is DocContent.Text -> content.v1.take(50).ifEmpty { "Empty document" }

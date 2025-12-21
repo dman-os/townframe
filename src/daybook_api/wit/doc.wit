@@ -37,12 +37,12 @@ interface doc {
         image(doc-image), 
     }
 
-    enum doc-tag-kind {
+    enum doc-prop-kind {
         ref-generic,
         label-generic,
     }
 
-    variant doc-tag {
+    variant doc-prop {
         /// A link to another document.
         ref-generic(mutlihash), 
         label-generic(string), 
@@ -53,7 +53,7 @@ interface doc {
         created-at: datetime,
         updated-at: datetime,
         content: doc-kind,
-        tags: list<doc-tag>,
+        props: list<doc-prop>,
     }
 }
 interface doc-create {
@@ -68,8 +68,8 @@ interface doc-create {
     use doc.{mutlihash};
     use doc.{doc-kind};
     use doc.{doc-content};
-    use doc.{doc-tag-kind};
-    use doc.{doc-tag};
+    use doc.{doc-prop-kind};
+    use doc.{doc-prop};
     use doc.{doc};
 
     /// Id occupied

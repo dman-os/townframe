@@ -4,24 +4,24 @@ use super::*;
 pub mod metastore {
     use super::*;
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct WasmcloudWflowServiceMeta {
         pub workload_id: String,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     pub enum WflowServiceMeta {
         Wasmcloud(WasmcloudWflowServiceMeta),
         LocalNative,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct WflowMeta {
         pub key: String,
         pub service: WflowServiceMeta,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct PartitionsMeta {
         pub version: String,
         pub partition_count: u64,

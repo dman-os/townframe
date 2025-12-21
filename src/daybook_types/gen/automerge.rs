@@ -1,5 +1,7 @@
 //! @generated
-use super::*;
+//! Do not edit manually - changes will be overwritten.
+
+use crate::interlude::*;
 
 pub mod doc {
     use super::*;
@@ -9,6 +11,7 @@ pub mod doc {
     pub type Multihash = String;
 
     #[derive(Debug, Clone, Hydrate, Reconcile, PartialEq, Serialize, Deserialize)]
+    #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
     pub struct DocBlob {
         pub length_octets: u64,
         pub hash: Multihash,
@@ -17,12 +20,14 @@ pub mod doc {
     pub type DocId = String;
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
+    #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
     pub enum DocContentKind {
         Text,
         Blob,
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
+    #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
     pub enum DocContent {
         Text(String),
         Blob(DocBlob),
@@ -31,6 +36,7 @@ pub mod doc {
     pub type DocRef = DocId;
 
     #[derive(Debug, Clone, Hydrate, Reconcile, PartialEq, Serialize, Deserialize)]
+    #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
     pub struct ImageMeta {
         pub mime: MimeType,
         pub width_px: u64,
@@ -38,6 +44,7 @@ pub mod doc {
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
+    #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
     pub enum DocPropKind {
         RefGeneric,
         LabelGeneric,
@@ -48,6 +55,7 @@ pub mod doc {
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
+    #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
     pub enum DocProp {
         /// A link to another document.
         RefGeneric(DocRef),
@@ -58,53 +66,11 @@ pub mod doc {
         TitleGeneric(String),
     }
 
-    #[derive(Debug, Clone, Hydrate, Reconcile, PartialEq, Serialize, Deserialize)]
-    pub struct Doc {
-        pub id: DocId,
-        #[serde(with = "utils_rs::codecs::sane_iso8601")]
-        #[autosurgeon(with = "utils_rs::am::codecs::date")]
-        pub created_at: OffsetDateTime,
-        #[serde(with = "utils_rs::codecs::sane_iso8601")]
-        #[autosurgeon(with = "utils_rs::am::codecs::date")]
-        pub updated_at: OffsetDateTime,
-        pub content: DocContent,
-        pub props: Vec<DocProp>,
-    }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, PartialEq, Serialize, Deserialize)]
+    #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
     pub struct DocAddedEvent {
         pub id: DocId,
         pub heads: Vec<String>,
     }
-
-    pub mod doc_create {
-        use super::*;
-
-        #[derive(Debug, Clone)]
-        pub struct DocCreate;
-
-        pub type Output = Doc;
-
-        #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize)]
-        pub struct Input {
-            pub id: Uuid,
-        }
-
-        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
-        /// Id occupied: {id}
-        pub struct ErrorIdOccupied {
-            pub id: String,
-        }
-
-        #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
-        pub enum Error {
-            /// Id occupied {0}
-            IdOccupied(#[from] ErrorIdOccupied),
-            /// Invalid input {0}
-            InvalidInput(#[from] ErrorsValidation),
-            /// Internal server error {0}
-            Internal(#[from] ErrorInternal),
-        }
-    }
-
 }

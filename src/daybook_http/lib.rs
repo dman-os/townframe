@@ -40,7 +40,7 @@ mod wit {
             "townframe:daybook-api/doc": crate::gen::doc,
             "townframe:daybook-api/doc/doc": crate::gen::doc::Doc,
             "townframe:daybook-api/doc/doc-kind": generate,
-            "townframe:daybook-api/doc/doc-tag": crate::gen::doc::DocTag,
+            "townframe:daybook-api/doc/doc-prop": crate::gen::doc::DocProp,
             "townframe:daybook-api/doc/doc-blob": crate::gen::doc::DocBlob,
             "townframe:daybook-api/doc/doc-content": crate::gen::doc::DocContent,
             // "townframe:daybook-api/doc/doc-kind": crate::gen::doc::DocKind,
@@ -48,8 +48,8 @@ mod wit {
 
             "townframe:daybook-api/doc-create/input": crate::gen::doc::doc_create::Input,
             "townframe:daybook-api/doc-create/error-id-occupied": crate::gen::doc::doc_create::ErrorIdOccupied,
-            // "townframe:daybook-api/doc/doc-tag-kind": crate::gen::doc::DocTagKind,
-            "townframe:daybook-api/doc/doc-tag-kind": generate,
+            // "townframe:daybook-api/doc/doc-prop-kind": crate::gen::doc::DocPropKind,
+            "townframe:daybook-api/doc/doc-prop-kind": generate,
             "townframe:daybook-api/doc-create": generate,
             "townframe:daybook-api/doc-create/error": crate::gen::doc::doc_create::Error,
         }

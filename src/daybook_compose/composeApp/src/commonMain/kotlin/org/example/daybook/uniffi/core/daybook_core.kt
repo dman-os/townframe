@@ -1473,7 +1473,7 @@ data class Doc (
     var `createdAt`: OffsetDateTime, 
     var `updatedAt`: OffsetDateTime, 
     var `content`: DocContent, 
-    var `tags`: List<DocTag>
+    var `props`: List<DocProp>
 ) {
     
     companion object
@@ -1489,7 +1489,7 @@ public object FfiConverterTypeDoc: FfiConverterRustBuffer<Doc> {
             FfiConverterTypeOffsetDateTime.read(buf),
             FfiConverterTypeOffsetDateTime.read(buf),
             FfiConverterTypeDocContent.read(buf),
-            FfiConverterSequenceTypeDocTag.read(buf),
+            FfiConverterSequenceTypeDocProp.read(buf),
         )
     }
 
@@ -1498,7 +1498,7 @@ public object FfiConverterTypeDoc: FfiConverterRustBuffer<Doc> {
             FfiConverterTypeOffsetDateTime.allocationSize(value.`createdAt`) +
             FfiConverterTypeOffsetDateTime.allocationSize(value.`updatedAt`) +
             FfiConverterTypeDocContent.allocationSize(value.`content`) +
-            FfiConverterSequenceTypeDocTag.allocationSize(value.`tags`)
+            FfiConverterSequenceTypeDocProp.allocationSize(value.`props`)
     )
 
     override fun write(value: Doc, buf: ByteBuffer) {
@@ -1506,7 +1506,7 @@ public object FfiConverterTypeDoc: FfiConverterRustBuffer<Doc> {
             FfiConverterTypeOffsetDateTime.write(value.`createdAt`, buf)
             FfiConverterTypeOffsetDateTime.write(value.`updatedAt`, buf)
             FfiConverterTypeDocContent.write(value.`content`, buf)
-            FfiConverterSequenceTypeDocTag.write(value.`tags`, buf)
+            FfiConverterSequenceTypeDocProp.write(value.`props`, buf)
     }
 }
 
@@ -1645,7 +1645,7 @@ data class DocPatch (
     var `createdAt`: OffsetDateTime?, 
     var `updatedAt`: OffsetDateTime?, 
     var `content`: DocContent?, 
-    var `tags`: List<DocTag>?
+    var `props`: List<DocProp>?
 ) {
     
     companion object
@@ -1661,7 +1661,7 @@ public object FfiConverterTypeDocPatch: FfiConverterRustBuffer<DocPatch> {
             FfiConverterOptionalTypeOffsetDateTime.read(buf),
             FfiConverterOptionalTypeOffsetDateTime.read(buf),
             FfiConverterOptionalTypeDocContent.read(buf),
-            FfiConverterOptionalSequenceTypeDocTag.read(buf),
+            FfiConverterOptionalSequenceTypeDocProp.read(buf),
         )
     }
 
@@ -1670,7 +1670,7 @@ public object FfiConverterTypeDocPatch: FfiConverterRustBuffer<DocPatch> {
             FfiConverterOptionalTypeOffsetDateTime.allocationSize(value.`createdAt`) +
             FfiConverterOptionalTypeOffsetDateTime.allocationSize(value.`updatedAt`) +
             FfiConverterOptionalTypeDocContent.allocationSize(value.`content`) +
-            FfiConverterOptionalSequenceTypeDocTag.allocationSize(value.`tags`)
+            FfiConverterOptionalSequenceTypeDocProp.allocationSize(value.`props`)
     )
 
     override fun write(value: DocPatch, buf: ByteBuffer) {
@@ -1678,7 +1678,7 @@ public object FfiConverterTypeDocPatch: FfiConverterRustBuffer<DocPatch> {
             FfiConverterOptionalTypeOffsetDateTime.write(value.`createdAt`, buf)
             FfiConverterOptionalTypeOffsetDateTime.write(value.`updatedAt`, buf)
             FfiConverterOptionalTypeDocContent.write(value.`content`, buf)
-            FfiConverterOptionalSequenceTypeDocTag.write(value.`tags`, buf)
+            FfiConverterOptionalSequenceTypeDocProp.write(value.`props`, buf)
     }
 }
 
@@ -2564,38 +2564,38 @@ public object FfiConverterTypeDocContentKind: FfiConverterRustBuffer<DocContentK
 
 
 
-sealed class DocTag {
+sealed class DocProp {
     
     /**
      * A link to another document.
      */
     data class RefGeneric(
-        val v1: kotlin.String) : DocTag() {
+        val v1: kotlin.String) : DocProp() {
         companion object
     }
     
     data class LabelGeneric(
-        val v1: kotlin.String) : DocTag() {
+        val v1: kotlin.String) : DocProp() {
         companion object
     }
     
     data class ImageMetadata(
-        val v1: ImageMeta) : DocTag() {
+        val v1: ImageMeta) : DocProp() {
         companion object
     }
     
     data class PseudoLabel(
-        val v1: List<kotlin.String>) : DocTag() {
+        val v1: List<kotlin.String>) : DocProp() {
         companion object
     }
     
     data class PathGeneric(
-        val v1: kotlin.String) : DocTag() {
+        val v1: kotlin.String) : DocProp() {
         companion object
     }
     
     data class TitleGeneric(
-        val v1: kotlin.String) : DocTag() {
+        val v1: kotlin.String) : DocProp() {
         companion object
     }
     
@@ -2607,68 +2607,68 @@ sealed class DocTag {
 /**
  * @suppress
  */
-public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
-    override fun read(buf: ByteBuffer): DocTag {
+public object FfiConverterTypeDocProp : FfiConverterRustBuffer<DocProp>{
+    override fun read(buf: ByteBuffer): DocProp {
         return when(buf.getInt()) {
-            1 -> DocTag.RefGeneric(
+            1 -> DocProp.RefGeneric(
                 FfiConverterString.read(buf),
                 )
-            2 -> DocTag.LabelGeneric(
+            2 -> DocProp.LabelGeneric(
                 FfiConverterString.read(buf),
                 )
-            3 -> DocTag.ImageMetadata(
+            3 -> DocProp.ImageMetadata(
                 FfiConverterTypeImageMeta.read(buf),
                 )
-            4 -> DocTag.PseudoLabel(
+            4 -> DocProp.PseudoLabel(
                 FfiConverterSequenceString.read(buf),
                 )
-            5 -> DocTag.PathGeneric(
+            5 -> DocProp.PathGeneric(
                 FfiConverterString.read(buf),
                 )
-            6 -> DocTag.TitleGeneric(
+            6 -> DocProp.TitleGeneric(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
 
-    override fun allocationSize(value: DocTag) = when(value) {
-        is DocTag.RefGeneric -> {
+    override fun allocationSize(value: DocProp) = when(value) {
+        is DocProp.RefGeneric -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
                 + FfiConverterString.allocationSize(value.v1)
             )
         }
-        is DocTag.LabelGeneric -> {
+        is DocProp.LabelGeneric -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
                 + FfiConverterString.allocationSize(value.v1)
             )
         }
-        is DocTag.ImageMetadata -> {
+        is DocProp.ImageMetadata -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
                 + FfiConverterTypeImageMeta.allocationSize(value.v1)
             )
         }
-        is DocTag.PseudoLabel -> {
+        is DocProp.PseudoLabel -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
                 + FfiConverterSequenceString.allocationSize(value.v1)
             )
         }
-        is DocTag.PathGeneric -> {
+        is DocProp.PathGeneric -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
                 + FfiConverterString.allocationSize(value.v1)
             )
         }
-        is DocTag.TitleGeneric -> {
+        is DocProp.TitleGeneric -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
@@ -2677,34 +2677,34 @@ public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
         }
     }
 
-    override fun write(value: DocTag, buf: ByteBuffer) {
+    override fun write(value: DocProp, buf: ByteBuffer) {
         when(value) {
-            is DocTag.RefGeneric -> {
+            is DocProp.RefGeneric -> {
                 buf.putInt(1)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is DocTag.LabelGeneric -> {
+            is DocProp.LabelGeneric -> {
                 buf.putInt(2)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is DocTag.ImageMetadata -> {
+            is DocProp.ImageMetadata -> {
                 buf.putInt(3)
                 FfiConverterTypeImageMeta.write(value.v1, buf)
                 Unit
             }
-            is DocTag.PseudoLabel -> {
+            is DocProp.PseudoLabel -> {
                 buf.putInt(4)
                 FfiConverterSequenceString.write(value.v1, buf)
                 Unit
             }
-            is DocTag.PathGeneric -> {
+            is DocProp.PathGeneric -> {
                 buf.putInt(5)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is DocTag.TitleGeneric -> {
+            is DocProp.TitleGeneric -> {
                 buf.putInt(6)
                 FfiConverterString.write(value.v1, buf)
                 Unit
@@ -2718,7 +2718,7 @@ public object FfiConverterTypeDocTag : FfiConverterRustBuffer<DocTag>{
 
 
 
-enum class DocTagKind {
+enum class DocPropKind {
     
     REF_GENERIC,
     LABEL_GENERIC,
@@ -2733,16 +2733,16 @@ enum class DocTagKind {
 /**
  * @suppress
  */
-public object FfiConverterTypeDocTagKind: FfiConverterRustBuffer<DocTagKind> {
+public object FfiConverterTypeDocPropKind: FfiConverterRustBuffer<DocPropKind> {
     override fun read(buf: ByteBuffer) = try {
-        DocTagKind.values()[buf.getInt() - 1]
+        DocPropKind.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
         throw RuntimeException("invalid enum value, something is very wrong!!", e)
     }
 
-    override fun allocationSize(value: DocTagKind) = 4UL
+    override fun allocationSize(value: DocPropKind) = 4UL
 
-    override fun write(value: DocTagKind, buf: ByteBuffer) {
+    override fun write(value: DocPropKind, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -3759,28 +3759,28 @@ public object FfiConverterOptionalSequenceTypeWindowPatch: FfiConverterRustBuffe
 /**
  * @suppress
  */
-public object FfiConverterOptionalSequenceTypeDocTag: FfiConverterRustBuffer<List<DocTag>?> {
-    override fun read(buf: ByteBuffer): List<DocTag>? {
+public object FfiConverterOptionalSequenceTypeDocProp: FfiConverterRustBuffer<List<DocProp>?> {
+    override fun read(buf: ByteBuffer): List<DocProp>? {
         if (buf.get().toInt() == 0) {
             return null
         }
-        return FfiConverterSequenceTypeDocTag.read(buf)
+        return FfiConverterSequenceTypeDocProp.read(buf)
     }
 
-    override fun allocationSize(value: List<DocTag>?): ULong {
+    override fun allocationSize(value: List<DocProp>?): ULong {
         if (value == null) {
             return 1UL
         } else {
-            return 1UL + FfiConverterSequenceTypeDocTag.allocationSize(value)
+            return 1UL + FfiConverterSequenceTypeDocProp.allocationSize(value)
         }
     }
 
-    override fun write(value: List<DocTag>?, buf: ByteBuffer) {
+    override fun write(value: List<DocProp>?, buf: ByteBuffer) {
         if (value == null) {
             buf.put(0)
         } else {
             buf.put(1)
-            FfiConverterSequenceTypeDocTag.write(value, buf)
+            FfiConverterSequenceTypeDocProp.write(value, buf)
         }
     }
 }
@@ -4055,24 +4055,24 @@ public object FfiConverterSequenceTypeWindowPatch: FfiConverterRustBuffer<List<W
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeDocTag: FfiConverterRustBuffer<List<DocTag>> {
-    override fun read(buf: ByteBuffer): List<DocTag> {
+public object FfiConverterSequenceTypeDocProp: FfiConverterRustBuffer<List<DocProp>> {
+    override fun read(buf: ByteBuffer): List<DocProp> {
         val len = buf.getInt()
-        return List<DocTag>(len) {
-            FfiConverterTypeDocTag.read(buf)
+        return List<DocProp>(len) {
+            FfiConverterTypeDocProp.read(buf)
         }
     }
 
-    override fun allocationSize(value: List<DocTag>): ULong {
+    override fun allocationSize(value: List<DocProp>): ULong {
         val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeDocTag.allocationSize(it) }.sum()
+        val sizeForItems = value.map { FfiConverterTypeDocProp.allocationSize(it) }.sum()
         return sizeForLength + sizeForItems
     }
 
-    override fun write(value: List<DocTag>, buf: ByteBuffer) {
+    override fun write(value: List<DocProp>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
-            FfiConverterTypeDocTag.write(it, buf)
+            FfiConverterTypeDocProp.write(it, buf)
         }
     }
 }

@@ -1,10 +1,10 @@
 use crate::interlude::*;
 
-use crate::r#gen::doc::{Doc, DocContent, DocContentKind, DocTag, DocTagKind};
+use daybook_types::{Doc, DocContent, DocContentKind, DocProp, DocPropKind};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PredicateClause {
-    HasTag(DocTagKind),
+    HasTag(DocPropKind),
     IsContentKind(DocContentKind),
     Or(Vec<PredicateClause>),
     And(Vec<PredicateClause>),
@@ -18,14 +18,14 @@ fn content_to_content_kind(content: &DocContent) -> DocContentKind {
     }
 }
 
-fn tag_to_tag_kind(tag: &DocTag) -> DocTagKind {
+fn tag_to_tag_kind(tag: &DocProp) -> DocPropKind {
     match tag {
-        DocTag::RefGeneric(_) => DocTagKind::RefGeneric,
-        DocTag::LabelGeneric(_) => DocTagKind::LabelGeneric,
-        DocTag::PathGeneric(_) => DocTagKind::PathGeneric,
-        DocTag::TitleGeneric(_) => DocTagKind::TitleGeneric,
-        DocTag::PseudoLabel(_) => DocTagKind::PseudoLabel,
-        DocTag::ImageMetadata(_) => DocTagKind::ImageMetadata,
+        DocProp::RefGeneric(_) => DocPropKind::RefGeneric,
+        DocProp::LabelGeneric(_) => DocPropKind::LabelGeneric,
+        DocProp::PathGeneric(_) => DocPropKind::PathGeneric,
+        DocProp::TitleGeneric(_) => DocPropKind::TitleGeneric,
+        DocProp::PseudoLabel(_) => DocPropKind::PseudoLabel,
+        DocProp::ImageMetadata(_) => DocPropKind::ImageMetadata,
     }
 }
 
@@ -33,7 +33,7 @@ impl PredicateClause {
     pub fn matches(&self, doc: &Doc) -> bool {
         match self {
             PredicateClause::HasTag(tag_kind) => {
-                doc.tags.iter().any(|tag| *tag_kind == tag_to_tag_kind(tag))
+                doc.props.iter().any(|tag| *tag_kind == tag_to_tag_kind(tag))
             }
             PredicateClause::IsContentKind(content_kind) => {
                 *content_kind == content_to_content_kind(&doc.content)

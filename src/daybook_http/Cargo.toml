@@ -20,6 +20,7 @@ wit-bindgen.workspace = true
 utils_rs.workspace = true
 api_utils_rs.workspace = true
 macros.workspace = true
+daybook_types = { workspace = true, features = ["wit"] }
 
 serde.workspace = true
 serde_json.workspace = true

@@ -314,7 +314,7 @@ mod wit {
                                 let id = TypeId::of::<T>();
                                 match LAST_TYPE {
                                     Some(ty) => {
-                                        assert!(ty =  = id,"cannot use two types with this resource type")
+                                        assert!(ty == id,"cannot use two types with this resource type")
                                     }
                                     None => LAST_TYPE = Some(id),
                                 }
@@ -414,7 +414,7 @@ mod wit {
                                         created_at: created_at3,
                                         updated_at: updated_at3,
                                         content: content3,
-                                        tags: tags3,
+                                        props: tags3,
                                     } = e;
                                     let vec4 = (id3.into_bytes()).into_boxed_slice();
                                     let ptr4 = vec4.as_ptr().cast::<u8>();
@@ -463,7 +463,7 @@ mod wit {
                                         let base = result10
                                             .add(i * (3 * ::core::mem::size_of::<*const u8>()));
                                         {
-                                            use crate::gen::doc::DocTag as V9;
+                                            use daybook_types::DocProp as V9;
                                             match e {
                                                 V9::RefGeneric(e) => {
                                                     *base.add(0).cast::<u8>() = (0i32) as u8;
@@ -866,7 +866,7 @@ mod wit {
         impl<T: WasmResource> Resource<T> {
             #[doc(hidden)]
             pub unsafe fn from_handle(handle: u32) -> Self {
-                debug_assert!(handle! = 0&&handle! = u32::MAX);
+                debug_assert!(handle != 0 && handle != u32::MAX);
                 Self {
                     handle: AtomicU32::new(handle),
                     _marker: marker::PhantomData,

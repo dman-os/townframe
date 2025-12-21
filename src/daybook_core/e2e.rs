@@ -62,13 +62,13 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
     let triage_config = config_repo.get_triage_config_sync().await;
 
     if triage_config.processors.is_empty() {
-        use crate::gen::doc::{DocContentKind, DocTagKind};
+        use daybook_types::{DocContentKind, DocPropKind};
         use crate::triage::predicates::PredicateClause;
         use crate::triage::{CancellationPolicy, Processor};
 
         let predicate = PredicateClause::And(vec![
             PredicateClause::IsContentKind(DocContentKind::Text),
-            PredicateClause::Not(Box::new(PredicateClause::HasTag(DocTagKind::PseudoLabel))),
+            PredicateClause::Not(Box::new(PredicateClause::HasTag(DocPropKind::PseudoLabel))),
         ]);
         let predicate_json = serde_json::to_value(&predicate).expect("error serializing predicate");
         let processor = Processor {
