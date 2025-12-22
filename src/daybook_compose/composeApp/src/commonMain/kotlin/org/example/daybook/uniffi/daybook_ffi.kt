@@ -42,12 +42,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.example.daybook.uniffi.core.ConfigEvent
-import org.example.daybook.uniffi.core.Doc
-import org.example.daybook.uniffi.core.DocPatch
 import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeConfigEvent
-import org.example.daybook.uniffi.core.FfiConverterTypeDoc
-import org.example.daybook.uniffi.core.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.core.FfiConverterTypeDrawerEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeListenerRegistration
 import org.example.daybook.uniffi.core.FfiConverterTypeMetaTableKeyConfig
@@ -65,9 +61,11 @@ import org.example.daybook.uniffi.core.Table
 import org.example.daybook.uniffi.core.TablesEvent
 import org.example.daybook.uniffi.core.TablesPatches
 import org.example.daybook.uniffi.core.Window
+import org.example.daybook.uniffi.types.Doc
+import org.example.daybook.uniffi.types.DocPatch
+import org.example.daybook.uniffi.types.FfiConverterTypeDoc
+import org.example.daybook.uniffi.types.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferConfigEvent
-import org.example.daybook.uniffi.core.RustBuffer as RustBufferDoc
-import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocPatch
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDrawerEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferListenerRegistration
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferMetaTableKeyConfig
@@ -77,6 +75,8 @@ import org.example.daybook.uniffi.core.RustBuffer as RustBufferTable
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesPatches
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferWindow
+import org.example.daybook.uniffi.types.RustBuffer as RustBufferDoc
+import org.example.daybook.uniffi.types.RustBuffer as RustBufferDocPatch
 
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
@@ -1053,6 +1053,7 @@ internal interface UniffiLib : Library {
             uniffiCallbackInterfaceDrawerEventListener.register(lib)
             uniffiCallbackInterfaceTablesEventListener.register(lib)
             org.example.daybook.uniffi.core.uniffiEnsureInitialized()
+            org.example.daybook.uniffi.types.uniffiEnsureInitialized()
             // Loading of library with integrity check done.
             lib
         }
@@ -1336,7 +1337,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event() != 441.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_add() != 11782.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_add() != 46112.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_del() != 21112.toShort()) {
@@ -1345,13 +1346,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_ffi_register_listener() != 23247.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get() != 38578.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get() != 4149.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_list() != 16795.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch() != 59938.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch() != 57093.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_ffictx_blobs() != 64625.toShort()) {
@@ -4735,38 +4736,6 @@ public object FfiConverterTypeMetaTableKeyConfigEntry: FfiConverterRustBuffer<Me
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeDoc: FfiConverterRustBuffer<Doc?> {
-    override fun read(buf: ByteBuffer): Doc? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeDoc.read(buf)
-    }
-
-    override fun allocationSize(value: Doc?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeDoc.allocationSize(value)
-        }
-    }
-
-    override fun write(value: Doc?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeDoc.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
 public object FfiConverterOptionalTypeMetaTableKeyConfig: FfiConverterRustBuffer<MetaTableKeyConfig?> {
     override fun read(buf: ByteBuffer): MetaTableKeyConfig? {
         if (buf.get().toInt() == 0) {
@@ -4927,6 +4896,38 @@ public object FfiConverterOptionalTypeWindow: FfiConverterRustBuffer<Window?> {
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeDoc: FfiConverterRustBuffer<Doc?> {
+    override fun read(buf: ByteBuffer): Doc? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeDoc.read(buf)
+    }
+
+    override fun allocationSize(value: Doc?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeDoc.allocationSize(value)
+        }
+    }
+
+    override fun write(value: Doc?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeDoc.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
@@ -4945,34 +4946,6 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterString.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypeDocPatch: FfiConverterRustBuffer<List<DocPatch>> {
-    override fun read(buf: ByteBuffer): List<DocPatch> {
-        val len = buf.getInt()
-        return List<DocPatch>(len) {
-            FfiConverterTypeDocPatch.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<DocPatch>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeDocPatch.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<DocPatch>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeDocPatch.write(it, buf)
         }
     }
 }
@@ -5113,6 +5086,34 @@ public object FfiConverterSequenceTypeMetaTableKeyConfigEntry: FfiConverterRustB
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeMetaTableKeyConfigEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeDocPatch: FfiConverterRustBuffer<List<DocPatch>> {
+    override fun read(buf: ByteBuffer): List<DocPatch> {
+        val len = buf.getInt()
+        return List<DocPatch>(len) {
+            FfiConverterTypeDocPatch.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<DocPatch>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeDocPatch.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<DocPatch>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeDocPatch.write(it, buf)
         }
     }
 }

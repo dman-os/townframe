@@ -3,7 +3,8 @@ use crate::interlude::*;
 use crate::ffi::{FfiError, SharedFfiCtx};
 
 use daybook_core::drawer::{DrawerEvent, DrawerRepo};
-use daybook_core::gen::doc::{Doc, DocId, DocPatch};
+use daybook_types::{Doc, DocId};
+use daybook_types::doc::DocPatch;
 
 #[derive(uniffi::Object)]
 struct DrawerRepoFfi {

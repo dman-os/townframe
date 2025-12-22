@@ -16,6 +16,10 @@ mod interlude {
 
 use crate::interlude::*;
 
+// Re-export types from daybook_types for uniffi bindings
+pub use daybook_types::{Doc, DocContent, DocContentKind, DocId, DocProp, DocPropKind};
+pub use daybook_types::doc::DocPatch;
+
 uniffi::setup_scaffolding!();
 
 mod am;

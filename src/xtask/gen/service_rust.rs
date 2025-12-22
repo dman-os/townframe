@@ -136,9 +136,9 @@ pub fn generate_daybook_types_mode(
             ..Default::default()
         },
         GenerationMode::Automerge => RustAttrs {
-            serde: true,
+            serde: false,
             automerge: true,
-            uniffi: true,
+            uniffi: false,
             ..Default::default()
         },
         GenerationMode::Wit => RustAttrs {

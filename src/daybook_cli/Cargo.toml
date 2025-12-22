@@ -14,7 +14,7 @@ dotenv-flow.workspace = true
 
 utils_rs = { workspace = true, features = ["native"] }
 daybook_core = { workspace = true }
-daybook_types = { workspace = true, features = ["automerge"] }
+daybook_types = { workspace = true }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time"] }
 

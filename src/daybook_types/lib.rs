@@ -23,11 +23,30 @@ pub mod gen;
 #[cfg(feature = "automerge")]
 pub mod automerge;
 
+// Re-export automerge::Doc for easier access when automerge feature is enabled
+#[cfg(feature = "automerge")]
+pub use crate::automerge::Doc as AutomergeDoc;
+
 #[cfg(feature = "wit")]
 pub mod wit;
 
-// Re-export generated types from gen module
-pub use gen::*;
+// Re-export root types (always available, with serde/uniffi)
+pub use gen::root::*;
+
+// When wit feature is enabled, re-export WIT types at crate root for wit-bindgen compatibility
+// This allows wit-bindgen generated code to use daybook_types::DocProp etc. and get WIT types
+#[cfg(feature = "wit")]
+pub use gen::wit::doc::{DocContent, DocProp, DocPropKind, ImageMeta, DocBlob};
+
+// Re-export root doc types (when wit is not enabled, or for types not overridden by WIT)
+#[cfg(not(feature = "wit"))]
+pub use gen::root::doc::*;
+
+// Document types module
+pub mod doc;
+
+// Re-export Doc and DocPatch from doc module for convenience
+pub use doc::{Doc, DocPatch};
 
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
@@ -58,50 +77,4 @@ mod uniffi_uuid {
     });
 }
 
-// Re-export types based on enabled features
-// When automerge feature is enabled, use automerge types, otherwise use root types
-#[cfg(feature = "automerge")]
-mod _types {
-    pub use crate::gen::automerge::doc::{
-        DocContent, DocContentKind, DocId, DocProp, DocPropKind,
-    };
-    pub use crate::automerge::Doc;
-}
-
-#[cfg(not(feature = "automerge"))]
-mod _types {
-    use crate::interlude::*;
-    
-    pub use crate::gen::root::doc::{
-        DocContent, DocContentKind, DocId, DocProp, DocPropKind,
-    };
-    
-    /// Document type - manually written (excluded from generation)
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-    pub struct Doc {
-        pub id: DocId,
-        #[serde(with = "utils_rs::codecs::sane_iso8601")]
-        pub created_at: time::OffsetDateTime,
-        #[serde(with = "utils_rs::codecs::sane_iso8601")]
-        pub updated_at: time::OffsetDateTime,
-        pub content: DocContent,
-        pub props: Vec<DocProp>,
-    }
-}
-
-pub use _types::*;
-
-// Re-export gen::doc module for backward compatibility (for DocPatch access)
-pub mod doc {
-    #[cfg(feature = "automerge")]
-    pub use crate::gen::automerge::doc::*;
-    #[cfg(not(feature = "automerge"))]
-    pub use crate::gen::root::doc::*;
-    
-    // Re-export DocPatch from automerge module when feature is enabled
-    // struct_patch generates DocPatch in the same module as Doc
-    #[cfg(feature = "automerge")]
-    pub use crate::automerge::DocPatch;
-}
 

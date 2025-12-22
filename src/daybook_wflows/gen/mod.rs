@@ -101,9 +101,8 @@ pub mod doc {
 
         pub type Output = daybook_types::Doc;
 
-        #[derive(Debug, Clone, garde::Validate, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Serialize, Deserialize)]
         pub struct Input {
-            #[garde(length(min = 1, max = 1024))]
             pub id: String,
         }
 

@@ -6,6 +6,7 @@ edition.workspace = true
 [lib]
 name = "daybook_types"
 path = "lib.rs"
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
 default = ["automerge", "uniffi", "wit"]

@@ -8,8 +8,8 @@ import kotlinx.coroutines.launch
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
-import org.example.daybook.uniffi.core.Doc
-import org.example.daybook.uniffi.core.DocPatch
+import org.example.daybook.uniffi.types.Doc
+import org.example.daybook.uniffi.types.DocPatch
 import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.ListenerRegistration
 

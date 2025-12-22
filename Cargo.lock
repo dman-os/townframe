@@ -1908,6 +1908,7 @@ dependencies = [
  "autosurgeon",
  "color-eyre",
  "daybook_core",
+ "daybook_types",
  "directories 6.0.0",
  "displaydoc",
  "futures",

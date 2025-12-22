@@ -246,7 +246,7 @@ pub async fn triage(
             };
             // Serialize DocAddedEvent as args
             let heads_str = utils_rs::am::serialize_commit_heads(doc_heads.as_ref());
-            let args = daybook_types::doc::DocAddedEvent {
+            let args = daybook_types::DocAddedEvent {
                 id: doc_id.clone(),
                 heads: heads_str,
             };

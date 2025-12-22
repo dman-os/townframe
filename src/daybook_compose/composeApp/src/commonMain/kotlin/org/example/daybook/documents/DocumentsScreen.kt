@@ -31,7 +31,7 @@ import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.DrawerViewModel
-import org.example.daybook.uniffi.core.DocProp
+import org.example.daybook.uniffi.types.*
 import org.example.daybook.DocListState
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException

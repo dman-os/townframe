@@ -23,7 +23,7 @@
 - [ ] daybook_server
   - [ ] Decide on wrpc vs json
 - [ ] Overhaul bottom bar
-- [ ] Title editor
+- [x] Title editor
 - [ ] Receipt parsing
 - [ ] wflow
   - [x] in-memory smoke

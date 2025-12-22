@@ -2,6 +2,13 @@
 
 package org.example.daybook.capture.screens
 
+import org.example.daybook.uniffi.types.Doc
+import org.example.daybook.uniffi.types.DocContent
+import org.example.daybook.uniffi.types.DocBlob
+import org.example.daybook.uniffi.types.DocProp
+import org.example.daybook.uniffi.types.DocPatch
+import org.example.daybook.uniffi.types.ImageMeta
+
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
@@ -157,7 +164,7 @@ class CaptureScreenViewModel(
                     )
                     _currentDoc.value = updatedDoc
                     
-                    drawerRepo.updateBatch(listOf(org.example.daybook.uniffi.core.DocPatch(
+                    drawerRepo.updateBatch(listOf(DocPatch(
                         id = docId,
                         createdAt = null,
                         content = DocContent.Text(content),

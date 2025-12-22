@@ -5,7 +5,7 @@ use crate::interlude::*;
 
 pub use crate::gen::doc::doc_create::*;
 // pub use crate::gen::doc::wit::exports::townframe::daybook_api::doc_create::GuestHandler;
-use daybook_types::Doc;
+use daybook_types::wit::Doc;
 pub use crate::wit::exports::townframe::daybook_api::doc_create::GuestService;
 
 impl GuestService for DocCreate {

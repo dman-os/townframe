@@ -24,10 +24,10 @@ import org.example.daybook.LocalContainer
 import org.example.daybook.ConfigViewModel
 import org.example.daybook.DrawerViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
-import org.example.daybook.uniffi.core.Doc
-import org.example.daybook.uniffi.core.DocContent
-import org.example.daybook.uniffi.core.DocProp
-import org.example.daybook.uniffi.core.DocPatch
+import org.example.daybook.uniffi.types.Doc
+import org.example.daybook.uniffi.types.DocContent
+import org.example.daybook.uniffi.types.DocProp
+import org.example.daybook.uniffi.types.DocPatch
 import org.example.daybook.uniffi.core.DateTimeDisplayType
 import org.example.daybook.uniffi.core.MetaTableKeyDisplayType
 import org.example.daybook.uniffi.core.MetaTableKeyConfig

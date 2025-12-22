@@ -17,6 +17,7 @@ path = "lib.rs"
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
 daybook_core = { workspace = true, features = ["uniffi"] }
+daybook_types = { workspace = true, features = ["uniffi"] }
 
 # serde
 serde.workspace = true

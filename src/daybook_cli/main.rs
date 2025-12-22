@@ -49,10 +49,13 @@ async fn main_main() -> Res<()> {
                     }
                 }
 
-                // Display in table format using comfy-table
+                // Display in table format using comfy-table (kubectl-style, no borders)
+                use comfy_table::presets::NOTHING;
                 use comfy_table::Table;
                 let mut table = Table::new();
-                table.set_header(vec!["ID", "Title"]);
+                table
+                    .load_preset(NOTHING)
+                    .set_header(vec!["ID", "Title"]);
                 for (id, doc) in docs {
                     let title = doc
                         .props
