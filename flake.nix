@@ -124,7 +124,7 @@
           tools = with pkgs; [
             rogcat
             opentofu
-            terragrunt
+            # terragrunt
 
             # checkov
             # terrascan

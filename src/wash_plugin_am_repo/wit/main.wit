@@ -23,6 +23,7 @@ interface repo {
         obj-not-found,
         // corresponds to none on AmCtx::hydrate_at_head
         path-not-found,
+        invalid-heads(string),
     }
 
     hydrate-path-at-head: func(
@@ -35,7 +36,8 @@ interface repo {
     variant reconcile-error {
         doc-not-found,
         invalid-json(string),
-        other(string),
+        invalid-heads(string),
+        // other(string),
     }
 
     reconcile-path: func(

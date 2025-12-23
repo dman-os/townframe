@@ -13,6 +13,7 @@ pub mod kvstore;
 
 pub use ingress::{PartitionLogIngress, WflowIngress};
 pub use kvstore::SqliteKvStore;
+pub use wash_plugin_wflow::WflowPlugin;
 pub use wflow_core::kvstore::log::KvStoreLog;
 pub use wflow_core::kvstore::metastore::KvStoreMetadtaStore;
 pub use wflow_core::kvstore::snapstore::AtomicKvSnapStore;
@@ -51,7 +52,7 @@ pub async fn build_wash_host(
 /// Returns both the worker handle and the working state for observation
 pub async fn start_partition_worker(
     wcx: &Ctx,
-    wflow_plugin: Arc<wash_plugin_wflow::TownframewflowPlugin>,
+    wflow_plugin: Arc<wash_plugin_wflow::WflowPlugin>,
     partition_id: PartitionId,
 ) -> Res<(
     wflow_tokio::partition::TokioPartitionWorkerHandle,
@@ -80,7 +81,7 @@ pub async fn start_partition_worker(
         wcx.log_store.clone(),
         next_entry_id,
         wflow_plugin,
-        Arc::new(wflow_tokio::local_native_host::LocalNativeHost{})
+        Arc::new(wflow_tokio::local_native_host::LocalNativeHost {}),
     );
 
     let last_applied_entry_id = next_entry_id.saturating_sub(1);

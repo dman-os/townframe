@@ -4,15 +4,16 @@ use utils_rs::am::AmCtx;
 use wflow::test::WflowTestContext;
 
 use crate::drawer::DrawerRepo;
-use crate::triage::DocTriageWorkerHandle;
+use crate::rt::triage::DocTriageWorkerHandle;
 
 mod doc_created_wflow;
 
 pub struct DaybookTestContext {
-    pub am_ctx: Arc<AmCtx>,
+    pub acx: AmCtx,
     pub drawer_repo: Arc<DrawerRepo>,
     pub wflow_test_cx: WflowTestContext,
     _doc_changes_worker: DocTriageWorkerHandle,
+    dispatcher_repo: Arc<crate::rt::DispatcherRepo>,
 }
 
 impl DaybookTestContext {
@@ -36,7 +37,6 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
         Option::<samod::AlwaysAnnounce>::None,
     )
     .await?;
-    let acx = Arc::new(acx);
 
     // Create a drawer document
     let drawer_doc_id = {
@@ -52,23 +52,23 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
         handle.document_id().clone()
     };
 
-    // Load the drawer repo (DrawerRepo::load takes ownership of AmCtx, so we clone)
-    let drawer_repo = DrawerRepo::load((*acx).clone(), drawer_doc_id).await?;
-
-    // Load the config repo
-    let config_repo = crate::config::ConfigRepo::load((*acx).clone(), app_doc_id).await?;
+    let drawer_repo = DrawerRepo::load(acx.clone(), drawer_doc_id).await?;
+    let config_repo = crate::config::ConfigRepo::load(acx.clone(), app_doc_id.clone()).await?;
+    let dispatcher_repo = crate::rt::DispatcherRepo::load(acx.clone(), app_doc_id).await?;
 
     // Initialize default pseudo-labeler processor if needed
     let triage_config = config_repo.get_triage_config_sync().await;
 
     if triage_config.processors.is_empty() {
-        use daybook_types::{DocContentKind, DocPropKind};
-        use crate::triage::predicates::PredicateClause;
-        use crate::triage::{CancellationPolicy, Processor};
+        use crate::rt::triage::PredicateClause;
+        use crate::rt::triage::{CancellationPolicy, Processor};
+        use daybook_types::doc::{DocContentKind, DocPropKey};
 
         let predicate = PredicateClause::And(vec![
             PredicateClause::IsContentKind(DocContentKind::Text),
-            PredicateClause::Not(Box::new(PredicateClause::HasTag(DocPropKind::PseudoLabel))),
+            PredicateClause::Not(Box::new(PredicateClause::HasKey(DocPropKey::WellKnown(
+                daybook_types::doc::WellKnownDocPropKeys::PseudoLabel,
+            )))),
         ]);
         let predicate_json = serde_json::to_value(&predicate).expect("error serializing predicate");
         let processor = Processor {
@@ -81,7 +81,10 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
             .await?;
     }
 
-    let daybook_plugin = Arc::new(crate::wash_plugin::DaybookPlugin::new(drawer_repo.clone()));
+    let daybook_plugin = Arc::new(crate::rt::wash_plugin::DaybookPlugin::new(
+        drawer_repo.clone(),
+        dispatcher_repo.clone(),
+    ));
     let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {
         ollama_url: utils_rs::get_env_var("OLLAMA_URL")?,
         ollama_model: utils_rs::get_env_var("OLLAMA_MODEL")?,
@@ -105,7 +108,7 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
         .await?;
 
     // Start the DocTriageWorker to automatically queue jobs when docs are added
-    let doc_changes_worker = crate::triage::spawn_doc_triage_worker(
+    let doc_changes_worker = crate::rt::triage::spawn_doc_triage_worker(
         drawer_repo.clone(),
         wflow_test_cx.ingress.clone(),
         config_repo,
@@ -113,8 +116,9 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
     .await?;
 
     Ok(DaybookTestContext {
-        am_ctx: acx,
+        acx,
         drawer_repo,
+        dispatcher_repo,
         wflow_test_cx,
         _doc_changes_worker: doc_changes_worker,
     })

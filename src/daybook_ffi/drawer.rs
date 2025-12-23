@@ -3,8 +3,7 @@ use crate::interlude::*;
 use crate::ffi::{FfiError, SharedFfiCtx};
 
 use daybook_core::drawer::{DrawerEvent, DrawerRepo};
-use daybook_types::{Doc, DocId};
-use daybook_types::doc::DocPatch;
+use daybook_types::doc::{Doc, DocId, DocPatch};
 
 #[derive(uniffi::Object)]
 struct DrawerRepoFfi {
@@ -69,17 +68,25 @@ impl DrawerRepoFfi {
             .await?)
     }
 
-    // singular update removed; expose batch-only API
+    #[tracing::instrument(err, skip(self))]
+    async fn update(self: Arc<Self>, patch: DocPatch) -> Result<(), FfiError> {
+        let this = self.clone();
+        Ok(self
+            .fcx
+            .do_on_rt(async move { this.repo.update(patch).await })
+            .await?)
+    }
 
     #[tracing::instrument(err, skip(self))]
-    async fn update_batch(self: Arc<Self>, docs: Vec<DocPatch>) -> Result<(), FfiError> {
+    async fn update_batch(
+        self: Arc<Self>,
+        patches: Vec<(daybook_types::doc::ChangeHashSet, DocPatch)>,
+    ) -> Result<(), FfiError> {
         let this = self.clone();
-        Ok(
-            self
+        Ok(self
             .fcx
-            .do_on_rt(async move { this.repo.update_batch(docs).await })
-            .await?
-        )
+            .do_on_rt(async move { this.repo.update_batch(patches).await })
+            .await?)
     }
 
     #[tracing::instrument(err, skip(self))]

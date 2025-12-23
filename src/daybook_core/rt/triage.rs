@@ -1,9 +1,7 @@
 use crate::interlude::*;
 
-pub mod predicates;
-
 use crate::drawer::{DrawerEvent, DrawerRepo};
-use daybook_types::{Doc, DocId};
+use daybook_types::doc::{Doc, DocContent, DocContentKind, DocId, DocPropKey};
 
 pub use wflow::{PartitionLogIngress, WflowIngress};
 
@@ -224,14 +222,14 @@ pub async fn triage(
 ) -> Res<()> {
     for (processor_id, processor) in &config.processors {
         // Deserialize predicate from JSON
-        let predicate: predicates::PredicateClause =
-            match serde_json::from_value(processor.predicate.0.clone()) {
-                Ok(p) => p,
-                Err(err) => {
-                    error!(?err, processor_id = ?processor_id, "error deserializing predicate");
-                    continue;
-                }
-            };
+        let predicate: PredicateClause = match serde_json::from_value(processor.predicate.0.clone())
+        {
+            Ok(val) => val,
+            Err(err) => {
+                error!(?err, processor_id = ?processor_id, "error deserializing predicate");
+                continue;
+            }
+        };
         if predicate.matches(doc) {
             let job_id = {
                 use data_encoding::BASE32;
@@ -246,7 +244,7 @@ pub async fn triage(
             };
             // Serialize DocAddedEvent as args
             let heads_str = utils_rs::am::serialize_commit_heads(doc_heads.as_ref());
-            let args = daybook_types::DocAddedEvent {
+            let args = daybook_types::doc::DocAddedEvent {
                 id: doc_id.clone(),
                 heads: heads_str,
             };
@@ -262,4 +260,34 @@ pub async fn triage(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PredicateClause {
+    HasKey(DocPropKey),
+    IsContentKind(DocContentKind),
+    Or(Vec<PredicateClause>),
+    And(Vec<PredicateClause>),
+    Not(Box<PredicateClause>),
+}
+
+fn content_to_content_kind(content: &DocContent) -> DocContentKind {
+    match content {
+        DocContent::Text(_) => DocContentKind::Text,
+        DocContent::Blob(_) => DocContentKind::Blob,
+    }
+}
+
+impl PredicateClause {
+    pub fn matches(&self, doc: &Doc) -> bool {
+        match self {
+            PredicateClause::HasKey(check_key) => doc.props.keys().any(|key| check_key == key),
+            PredicateClause::IsContentKind(content_kind) => {
+                *content_kind == content_to_content_kind(&doc.content)
+            }
+            PredicateClause::Not(inner) => !inner.matches(doc),
+            PredicateClause::Or(clauses) => clauses.iter().any(|clause| clause.matches(doc)),
+            PredicateClause::And(clauses) => clauses.iter().all(|clause| clause.matches(doc)),
+        }
+    }
 }

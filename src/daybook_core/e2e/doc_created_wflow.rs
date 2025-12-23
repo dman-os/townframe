@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
-use daybook_types::{Doc, DocContent, DocProp};
+use daybook_types::doc::{Doc, DocContent, DocProp};
+use std::collections::HashMap;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_pseudo_labeler_workflow() -> Res<()> {
@@ -12,7 +13,7 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
         created_at: OffsetDateTime::now_utc(),
         updated_at: OffsetDateTime::now_utc(),
         content: DocContent::Text("Hello, world!".to_string()),
-        props: vec![],
+        props: HashMap::new(),
     };
 
     // Add the document - DocTriageWorker will automatically queue the workflow job
@@ -33,7 +34,7 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
 
     let has_pseudo_label = updated_doc
         .props
-        .iter()
+        .values()
         .any(|tag| matches!(tag, DocProp::PseudoLabel(v) if !v.is_empty()));
 
     info!(?updated_doc, "result");

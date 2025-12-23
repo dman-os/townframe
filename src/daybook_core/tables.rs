@@ -4,10 +4,7 @@ use crate::interlude::*;
 mod sidebar_layout {
     /// Default expanded sidebar weight (40% of available space)
     pub const DEFAULT_SIDEBAR_WEIGHT: f32 = 0.4;
-    
-    /// Collapsed/rail sidebar weight (10% of available space)
-    pub const COLLAPSED_SIDEBAR_WEIGHT: f32 = 0.1;
-    
+
     /// Default weight for documents screen list size when expanded
     pub const DOCUMENTS_LIST_EXPANDED_WEIGHT: f32 = 0.4;
 }
@@ -206,6 +203,17 @@ pub struct Panel {
     pub title: String,
 }
 
+#[derive(Debug)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct TablesPatches {
+    pub tab_updates: Option<Vec<TabPatch>>,
+    pub window_updates: Option<Vec<WindowPatch>>,
+    pub panel_updates: Option<Vec<PanelPatch>>,
+    pub table_updates: Option<Vec<TablePatch>>,
+}
+
+// FIXME: store leaf types in Arcs and
+// just use new Arcs on update. (No mutexes)
 #[derive(Reconcile, Hydrate, Default)]
 pub struct TablesStore {
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
@@ -228,44 +236,10 @@ pub struct TablesStore {
 
 #[async_trait]
 impl crate::stores::Store for TablesStore {
-    type FlushArgs = (AmCtx, DocumentId);
-
-    async fn flush(&mut self, (acx, app_doc_id): &mut Self::FlushArgs) -> Res<()> {
-        acx.reconcile_prop(app_doc_id, automerge::ROOT, Self::PROP, self)
-            .await
-    }
+    const PROP: &str = "tables";
 }
 
 impl TablesStore {
-    pub const PROP: &str = "tables";
-
-    pub async fn load(acx: &AmCtx, app_doc_id: &DocumentId) -> Res<Self> {
-        acx.hydrate_path::<Self>(app_doc_id, automerge::ROOT, vec![Self::PROP.into()])
-            .await?
-            .ok_or_eyre("unable to find obj in am")
-    }
-
-    /// Register a change listener for tables changes
-    pub async fn register_change_listener<F>(
-        acx: &AmCtx,
-        broker: &utils_rs::am::changes::DocChangeBroker,
-        on_change: F,
-    ) -> Res<()>
-    where
-        F: Fn(Vec<utils_rs::am::changes::ChangeNotification>) + Send + Sync + 'static,
-    {
-        acx.change_manager()
-            .add_listener(
-                utils_rs::am::changes::ChangeFilter {
-                    path: vec![Self::PROP.into()],
-                    doc_id: Some(broker.filter()),
-                },
-                on_change,
-            )
-            .await;
-        Ok(())
-    }
-
     // Auto-create a default table with window, tab, and panel
     fn auto_create_default_all(&mut self) {
         let window_id = Uuid::new_v4();
@@ -281,7 +255,9 @@ impl TablesStore {
             selected_table: Some(table_id),
             layout: WindowLayout::default(),
             last_capture_mode: CaptureMode::default(),
-            documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT),
+            documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(
+                sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT,
+            ),
         };
         self.windows.insert(window_id, window);
 
@@ -418,21 +394,12 @@ pub enum TablesEvent {
     TableChanged { id: Uuid },
 }
 
-#[derive(Debug)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct TablesPatches {
-    pub tab_updates: Option<Vec<TabPatch>>,
-    pub window_updates: Option<Vec<WindowPatch>>,
-    pub panel_updates: Option<Vec<PanelPatch>>,
-    pub table_updates: Option<Vec<TablePatch>>,
-}
-
 impl TablesRepo {
     pub async fn load(acx: AmCtx, app_doc_id: DocumentId) -> Res<Arc<Self>> {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store = TablesStore::load(&acx, &app_doc_id).await?;
-        let store = crate::stores::StoreHandle::new(store, (acx.clone(), app_doc_id.clone()));
+        let store = crate::stores::StoreHandle::new(store, acx.clone(), app_doc_id.clone());
         store
             .mutate_sync(|store| {
                 store.rebuild_indices();
@@ -451,7 +418,7 @@ impl TablesRepo {
             Vec<utils_rs::am::changes::ChangeNotification>,
         >();
         // Register change listener to automatically notify repo listeners
-        TablesStore::register_change_listener(&acx, &broker, {
+        TablesStore::register_change_listener(&acx, &broker, vec![], {
             move |notifs| notif_tx.send(notifs).expect(ERROR_CHANNEL)
         })
         .await?;
@@ -478,6 +445,7 @@ impl TablesRepo {
             Vec<utils_rs::am::changes::ChangeNotification>,
         >,
     ) -> Res<()> {
+        // FIXME: this code doesn't seem right and has missing features
         let mut events = vec![];
         while let Some(notifs) = notif_rx.recv().await {
             events.clear();
@@ -884,7 +852,9 @@ impl TablesRepo {
                         selected_table: Some(table_id),
                         layout: WindowLayout::default(),
                         last_capture_mode: CaptureMode::default(),
-                        documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT),
+                        documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(
+                            sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT,
+                        ),
                     };
                     store.windows.insert(new_window_id, window);
                     new_window_id
@@ -966,7 +936,9 @@ impl TablesRepo {
                                 selected_table: Some(table_id),
                                 layout: WindowLayout::default(),
                                 last_capture_mode: CaptureMode::default(),
-                                documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT),
+                                documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(
+                                    sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT,
+                                ),
                             };
                             store.windows.insert(new_window_id, window);
                             new_window_id

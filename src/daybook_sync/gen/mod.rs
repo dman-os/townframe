@@ -17,12 +17,14 @@ pub mod doc {
     pub type DocId = String;
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
     pub enum DocContentKind {
         Text,
         Blob,
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
     pub enum DocContent {
         Text(String),
         Blob(DocBlob),
@@ -38,16 +40,7 @@ pub mod doc {
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
-    pub enum DocPropKind {
-        RefGeneric,
-        LabelGeneric,
-        ImageMetadata,
-        PseudoLabel,
-        PathGeneric,
-        TitleGeneric,
-    }
-
-    #[derive(Debug, Clone, Hydrate, Reconcile, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
     pub enum DocProp {
         /// A link to another document.
         RefGeneric(DocRef),

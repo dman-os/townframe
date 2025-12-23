@@ -1,0 +1,49 @@
+package townframe:daybook-types;
+
+interface doc {
+    use townframe:api-utils/utils.{errors-validation};
+    use townframe:api-utils/utils.{error-internal};
+    use townframe:api-utils/utils.{uuid};
+    use townframe:api-utils/utils.{datetime};
+    
+    // Re-export all generated types from gen-doc using aliases to avoid name clashes
+    use gen-doc.{
+        mime-type as mime-type-gen,
+        multihash as multihash-gen,
+        doc-blob as doc-blob-gen,
+        doc-id as doc-id-gen,
+        doc-content-kind as doc-content-kind-gen,
+        doc-content as doc-content-gen,
+        doc-ref as doc-ref-gen,
+        image-meta as image-meta-gen,
+        doc-prop as doc-prop-gen,
+        doc-added-event as doc-added-event-gen,
+    };
+    
+    // Re-export generated types with original names
+    type mime-type = mime-type-gen;
+    type multihash = multihash-gen;
+    type doc-blob = doc-blob-gen;
+    type doc-id = doc-id-gen;
+    type doc-content-kind = doc-content-kind-gen;
+    type doc-content = doc-content-gen;
+    type doc-ref = doc-ref-gen;
+    type image-meta = image-meta-gen;
+    type doc-prop = doc-prop-gen;
+    type doc-added-event = doc-added-event-gen;
+    
+    record doc {
+        id: doc-id,
+        created-at: datetime,
+        updated-at: datetime,
+        content: doc-content,
+        props: list<tuple<string, doc-prop>>,
+    }
+    
+    record doc-patch {
+        id: doc-id,
+        content: option<doc-content>,
+        props-set: list<tuple<string, doc-prop>>,
+        props-remove: list<string>,
+    }
+}

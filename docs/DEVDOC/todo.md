@@ -1,0 +1,79 @@
+# TODO
+
+## Stack
+
+- [ ] Plugins
+  - [ ] Manifest
+  - [ ] Commands
+  - [ ] Handlers
+  - [ ] Processors
+- [ ] Cleanup for public alpha
+- [ ] Consider making `content` a prop
+- [ ] daybook_server
+  - [ ] Decide on wrpc vs json
+- [ ] Overhaul bottom bar
+- [ ] Receipt parsing
+- [ ] wflow
+  - [ ] Non-wasm impl
+    - [ ] Catch panics
+  - [x] in-memory smoke
+  - [ ] Ingress workload
+  - [ ] Durablity
+  - [x] Snapshots
+  - [ ] Use flatbuffers instead of JSON
+  - [ ] web UI
+  - [ ] Service for wflow_tokio
+- [ ] pauperfuse
+- [ ] CI/CD
+  - [ ] Publish
+    - [ ] Docker image
+    - [ ] WASM OCI
+    - [ ] Android APK 
+      - [ ] to F-Droid
+    - [ ] Linux Appimage
+      - [ ] to Flathub
+    - [ ] Windows.exe
+      - [ ] to Scoop.sh
+  - [ ] Deploy
+    - [ ] Buy domain
+      - [ ] https://daybook.tf
+- [ ] PgLite based testing
+- [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
+- [ ] DRY up all the wit bindgen
+- [ ] Move http tests into api crates
+  - [ ] Replace http with wrpc?
+- [ ] Code generator for http wrapper
+- [ ] Policy against tokio mutexes (cancel safety)
+- [ ] Move to wasmcloud v2
+  - [ ] Use async on wit_bindgen
+    - [ ] Replace tokio with wstd or wit_bindgen::block_on
+  - [ ] Wasi 0.3
+    - [ ] wRPC everything??
+- [ ] Replace time with jiff??
+- [ ] Pipeline editor web app
+- [ ] wrpc + iroh
+- [ ] Magic wand
+  - [ ] Follow bubble behavior from android
+  - [ ] Status bar/Gesture bar insets for puck and widgets
+  - [ ] Puck drop required to be on center bug
+- [ ] Tutorial
+- [ ] WYSIWYG editor
+- [ ] FUSE
+  - [ ] Make it feature complete
+- [ ] PgLite
+  - [ ] Get parametrized queries to work
+  - [ ] It should accept engine from outside
+- [ ] Finish autosurgeon::Patch
+  - [ ] Fork with context generic programming
+  - [ ] autosurgeon doens't respect serde attribs like untagged and camelCase
+- [ ] Lints and pre-commit hooks
+  - [ ] Triple X comment detector
+- [ ] UI tests
+- [ ] Cross-platform testing
+  - [ ] iOS
+  - [ ] Windows
+  - [ ] macOS
+
+## Upstream Issues
+
+- [ ] Get cargo-doc-md to work reliably

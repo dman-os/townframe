@@ -204,7 +204,7 @@ fn spawn_doc_setup_worker(cx: SharedCtx) -> DocSetupWorker {
         let request_tx = request_tx.clone();
         async move {
             let mut listen_list = std::collections::HashSet::new();
-            let mut drawer_change_workers = std::collections::HashMap::new();
+            // let mut drawer_change_workers = std::collections::HashMap::new();
 
             // with exponential backoff
             let retry = |task: DocSetupRequest| {

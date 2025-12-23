@@ -58,7 +58,6 @@ samod = { workspace = true, features = ["tokio", "tungstenite"] }
 sqlx = { workspace = true, features = ["sqlite"] }
 
 pastey = "0.1"
-struct-patch = "0.10.4"
 directories = "6.0.0"
 
 [build-dependencies]

@@ -1,14 +1,12 @@
 #[allow(unused)]
 mod interlude {
-    pub use std::path::PathBuf;
-    pub use std::sync::Arc;
-
     pub use utils_rs::prelude::*;
 }
 
 use crate::interlude::*;
 
 mod context;
+// mod fuse;
 
 use clap::builder::styling::AnsiColor;
 
@@ -28,8 +26,8 @@ async fn main_main() -> Res<()> {
         Commands::Docs { id } => {
             let ctx = context::init_context().await?;
             let drawer_doc_id = ctx.doc_drawer().document_id().clone();
-            let repo = daybook_core::drawer::DrawerRepo::load(ctx.acx.clone(), drawer_doc_id)
-                .await?;
+            let repo =
+                daybook_core::drawer::DrawerRepo::load(ctx.acx.clone(), drawer_doc_id).await?;
 
             if let Some(id) = id {
                 // Show details for a specific document
@@ -53,15 +51,15 @@ async fn main_main() -> Res<()> {
                 use comfy_table::presets::NOTHING;
                 use comfy_table::Table;
                 let mut table = Table::new();
-                table
-                    .load_preset(NOTHING)
-                    .set_header(vec!["ID", "Title"]);
+                table.load_preset(NOTHING).set_header(vec!["ID", "Title"]);
                 for (id, doc) in docs {
                     let title = doc
                         .props
-                        .iter()
-                        .find_map(|prop| match prop {
-                            daybook_types::DocProp::TitleGeneric(s) => Some(s.clone()),
+                        .get(&daybook_types::doc::DocPropKey::WellKnown(
+                            daybook_types::doc::WellKnownDocPropKeys::TitleGeneric,
+                        ))
+                        .and_then(|val| match val {
+                            daybook_types::doc::DocProp::TitleGeneric(s) => Some(s.clone()),
                             _ => None,
                         })
                         .unwrap_or_else(|| "<no title>".to_string());
@@ -74,7 +72,33 @@ async fn main_main() -> Res<()> {
             use clap::CommandFactory;
             let mut cmd = Args::command();
             clap_complete::generate(shell, &mut cmd, "daybook", &mut std::io::stdout());
-        }
+        } // Commands::Fuse { path } => {
+          //     let ctx = context::init_context().await?;
+          //     let drawer_doc_id = ctx.doc_drawer().document_id().clone();
+          //     let repo =
+          //         daybook_core::drawer::DrawerRepo::load(ctx.acx.clone(), drawer_doc_id).await?;
+          //
+          //     let rt_handle = tokio::runtime::Handle::current();
+          //     let fs = fuse::DaybookAsyncFS::new(repo, rt_handle).await?;
+          //
+          //     let mountpoint = path.to_string_lossy().to_string();
+          //     let options = vec![
+          //         fuser::MountOption::FSName("daybook".to_string()),
+          //         fuser::MountOption::AutoUnmount,
+          //     ];
+          //
+          //     tracing::info!(?mountpoint, "Mounting FUSE filesystem");
+          //
+          //     // Run mount2 in its own thread to avoid blocking the Tokio runtime
+          //     // This allows block_on to work properly when FUSE operations need async access
+          //     std::thread::spawn(move || {
+          //         if let Err(e) = fuser::mount2(fs, &mountpoint, &options) {
+          //             tracing::error!(?e, "FUSE mount error");
+          //         }
+          //     })
+          //     .join()
+          //     .map_err(|_| eyre::eyre!("FUSE mount thread panicked"))?;
+          // }
     }
 
     Ok(())
@@ -110,5 +134,9 @@ enum Commands {
         #[clap(value_enum)]
         shell: clap_complete::Shell,
     },
+    // /// Mount a FUSE filesystem showing all documents as JSON files
+    // Fuse {
+    //     /// Mount point path
+    //     path: PathBuf,
+    // },
 }
-

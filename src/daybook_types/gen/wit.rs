@@ -19,6 +19,7 @@ pub mod doc {
     pub type DocId = String;
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
     pub enum DocContentKind {
         Text,
         Blob,
@@ -37,6 +38,7 @@ pub mod doc {
 
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
     pub enum DocContent {
         Text(String),
         Blob(DocBlob),
@@ -52,32 +54,7 @@ pub mod doc {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub enum DocPropKind {
-        RefGeneric,
-        LabelGeneric,
-        ImageMetadata,
-        PseudoLabel,
-        PathGeneric,
-        TitleGeneric,
-    }
-    impl DocPropKind {
-        pub fn _lift(val:u8) -> DocPropKind {
-            match val {
-
-                0 => DocPropKind::RefGeneric,
-                1 => DocPropKind::LabelGeneric,
-                2 => DocPropKind::ImageMetadata,
-                3 => DocPropKind::PseudoLabel,
-                4 => DocPropKind::PathGeneric,
-                5 => DocPropKind::TitleGeneric,
-
-                _ => panic!("invalid enum discriminant"),
-            }
-        }
-    }
-
-
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
     pub enum DocProp {
         /// A link to another document.
         RefGeneric(DocRef),

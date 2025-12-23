@@ -40,16 +40,6 @@ pub mod doc {
     }
 
     #[derive(Debug, Clone, Hydrate, Reconcile, PartialEq)]
-    pub enum DocPropKind {
-        RefGeneric,
-        LabelGeneric,
-        ImageMetadata,
-        PseudoLabel,
-        PathGeneric,
-        TitleGeneric,
-    }
-
-    #[derive(Debug, Clone, Hydrate, Reconcile, PartialEq)]
     pub enum DocProp {
         /// A link to another document.
         RefGeneric(DocRef),

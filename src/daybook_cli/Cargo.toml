@@ -30,4 +30,13 @@ automerge.workspace = true
 autosurgeon = { workspace = true, features = ["uuid"] }
 samod = { workspace = true, features = ["tokio"] }
 comfy-table = "7.2"
+fuser = { version = "0.16", features = ["abi-7-31"] }
+parking_lot = "0.12"
+libc = "0.2"
+struct-patch = "0.10"
+
+[dev-dependencies]
+tempfile = "3.10"
+futures = "0.3"
+uuid = { version = "1.0", features = ["v4"] }
 

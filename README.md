@@ -69,3 +69,9 @@ Repo guide:
 
   - Ghjk tasks like `compose-up` and `compose-logs` take profile names.
 
+
+## Notes
+
+- Avoid adding dependencies if possible
+- Always audit LLM code in an editor with an IDE present.
+  - Assume you'll need to slightly improve every result.

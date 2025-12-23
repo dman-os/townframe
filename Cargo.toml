@@ -10,16 +10,16 @@ members = [
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
-  "./src/daybook_types",
   "./src/daybook_http",
   "./src/daybook_sync",
+  "./src/daybook_types",
   "./src/daybook_wflows/",
   "./src/macros",
-  "./src/wash_plugin_pglite/",
+  "./src/pauperfuse/",
   "./src/test_wflows",
-  # "./src/tests_http",
   "./src/utils_rs",
   "./src/wash_plugin_am_repo/",
+  "./src/wash_plugin_pglite/",
   "./src/wash_plugin_utils/",
   "./src/wash_plugin_wflow/",
   "./src/wflow/",
@@ -29,7 +29,7 @@ members = [
   "./src/wflow_tokio/",
   "./src/wflow_webui/",
   "./src/xtask",
-  # "./src/daybook_restate/",
+  # "./src/tests_http",
   # "./src/sdk-shared-core/",
   # "./src/granary_web",
   # "./src/leptos_wasi/",
@@ -97,6 +97,7 @@ leptos_router = { version = "0.8", default-features = false }
 # macros
 displaydoc = "0.2"
 educe = "0.6"
+struct-patch = "0.10.4"
 
 # errors
 thiserror = "2"

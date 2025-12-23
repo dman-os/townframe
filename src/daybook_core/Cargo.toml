@@ -16,7 +16,7 @@ uniffi = ["dep:uniffi"]
 utils_rs = { workspace = true, features = ["hash", "native", "automerge-repo"] }
 api_utils_rs = { workspace = true, features = ["automerge"] }
 wflow = { workspace = true }
-daybook_types = { workspace = true, features = ["automerge", "uniffi"] }
+daybook_types = { workspace = true, features = ["automerge", "uniffi", "wit"] }
 
 # encoding
 serde.workspace = true
@@ -39,7 +39,7 @@ rust_decimal = "1.37.2"
 parking_lot.workspace = true
 url.workspace = true
 garde.workspace = true
-struct-patch = "0.10.4"
+struct-patch.workspace = true
 
 # async
 tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs"] }
@@ -69,6 +69,7 @@ wash-runtime = { workspace = true }
 wasmtime = { workspace = true }
 anyhow = { workspace = true }
 sqlite-vec = "0.1.6"
+semver = "1.0.27"
 
 [build-dependencies]
 uniffi = { workspace = true, features = [ "build" ], optional = true }

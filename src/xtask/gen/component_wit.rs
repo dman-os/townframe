@@ -44,12 +44,21 @@ impl TypeReg {
 pub(crate) fn feature_file(
     reg: &TypeReg,
     buf: &mut impl Write,
+    feature: &Feature,
+) -> Res<()> {
+    feature_file_with_schema_types(reg, buf, feature, &feature.schema_types)
+}
+
+pub(crate) fn feature_file_with_schema_types(
+    reg: &TypeReg,
+    buf: &mut impl Write,
     Feature {
         tag,
-        schema_types,
+        schema_types: _,
         endpoints,
         wit_module: _,
     }: &Feature,
+    schema_types: &[TypeId],
 ) -> Res<()> {
     let mut imports = vec![
         "townframe:api-utils/utils.{errors-validation}".to_string(),
@@ -244,7 +253,7 @@ fn input_type(this: &InputType, reg: &TypeReg, buf: &mut impl Write) -> Res<()> 
     Ok(())
 }
 
-fn schema_type(reg: &TypeReg, buf: &mut impl Write, id: TypeId) -> Res<()> {
+pub(crate) fn schema_type(reg: &TypeReg, buf: &mut impl Write, id: TypeId) -> Res<()> {
     let borrow = reg.types.get(&id).unwrap();
     match borrow.value() {
         Type::Record(record) => schema_record(reg, buf, record)?,

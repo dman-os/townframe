@@ -35,7 +35,6 @@ use super::*;
                 patch: false,
                 ..default()
             },
-            mode: None,
             excluded_types: std::collections::HashMap::new(),
         };
         for feature in &features {
@@ -63,13 +62,6 @@ package townframe:btress-api;"#
     }
     // Generate different feature modules with specific attribute sets
     let mapping = vec![
-        (
-            "../daybook_restate/gen/mod.rs",
-            RustAttrs {
-                automerge: true,
-                ..default()
-            },
-        ),
         (
             "../daybook_wflows/gen/mod.rs",
             RustAttrs {
@@ -121,10 +113,9 @@ package townframe:btress-api;"#
         if attrs.wit {
             excluded_types.insert("Doc".to_string(), "daybook_types::Doc".to_string());
         }
-        let cx = service_rust::RustGenCtx { 
-            reg: &reg, 
-            attrs, 
-            mode: None,
+        let cx = service_rust::RustGenCtx {
+            reg: &reg,
+            attrs,
             excluded_types,
         };
         for feature in &features {
@@ -149,7 +140,6 @@ package townframe:btress-api;"#
                 serde: true,
                 ..default()
             },
-            mode: None,
             excluded_types: std::collections::HashMap::new(),
         };
         for feature in &features {
@@ -163,16 +153,32 @@ package townframe:btress-api;"#
     // Generate daybook_types crate
     {
         let features = daybook_api::daybook_api_features(&reg);
-        
+
         // Generate root types (gen/root.rs)
         {
             let mut out = String::new();
             let buf = &mut out;
-            service_rust::generate_daybook_types_mode(
+            let mut excluded_types = std::collections::HashMap::new();
+            excluded_types.insert("Doc".to_string(), "crate::Doc".to_string());
+            excluded_types.insert(
+                "WellKnownDocPropKeys".to_string(),
+                "crate::doc::WellKnownDocPropKeys".to_string(),
+            );
+            excluded_types.insert(
+                "DocPropKeys".to_string(),
+                "crate::doc::DocPropKeys".to_string(),
+            );
+            service_rust::generate_types(
                 &reg,
                 buf,
                 &features,
-                service_rust::GenerationMode::Root,
+                RustAttrs {
+                    serde: true,
+                    uniffi: true,
+                    ..default()
+                },
+                excluded_types,
+                Some("use crate::interlude::*;"),
             )?;
             let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_types/gen/root.rs");
             if let Some(parent) = path.parent() {
@@ -180,33 +186,52 @@ package townframe:btress-api;"#
             }
             std::fs::write(path, &out)?;
         }
-        
+
         // Generate automerge types (gen/automerge.rs)
         {
             let mut out = String::new();
             let buf = &mut out;
-            service_rust::generate_daybook_types_mode(
+            let mut excluded_types = std::collections::HashMap::new();
+            excluded_types.insert("Doc".to_string(), "crate::automerge::Doc".to_string());
+            service_rust::generate_types(
                 &reg,
                 buf,
                 &features,
-                service_rust::GenerationMode::Automerge,
+                RustAttrs {
+                    serde: false,
+                    automerge: true,
+                    uniffi: false,
+                    ..default()
+                },
+                excluded_types,
+                Some("use crate::interlude::*;"),
             )?;
-            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_types/gen/automerge.rs");
+            let path =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_types/gen/automerge.rs");
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(path, &out)?;
         }
-        
+
         // Generate wit types (gen/wit.rs)
         {
             let mut out = String::new();
             let buf = &mut out;
-            service_rust::generate_daybook_types_mode(
+            let mut excluded_types = std::collections::HashMap::new();
+            excluded_types.insert("Doc".to_string(), "crate::wit::Doc".to_string());
+            service_rust::generate_types(
                 &reg,
                 buf,
                 &features,
-                service_rust::GenerationMode::Wit,
+                RustAttrs {
+                    serde: true,
+                    wit: true,
+                    uniffi: false,
+                    ..default()
+                },
+                excluded_types,
+                Some("use crate::interlude::*;"),
             )?;
             let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_types/gen/wit.rs");
             if let Some(parent) = path.parent() {
@@ -214,40 +239,146 @@ package townframe:btress-api;"#
             }
             std::fs::write(path, &out)?;
         }
-        
+
         // Generate gen/mod.rs
         {
             let mut out = String::new();
             let buf = &mut out;
             writeln!(buf, "//! @generated")?;
             writeln!(buf, "//! This module contains generated type definitions.")?;
-            writeln!(buf, "//! Do not edit manually - changes will be overwritten.")?;
+            writeln!(
+                buf,
+                "//! Do not edit manually - changes will be overwritten."
+            )?;
             writeln!(buf)?;
             writeln!(buf, "// Root types module (generated in gen/root.rs)")?;
-            writeln!(buf, "// Always available - root types are the primary types with all derives")?;
+            writeln!(
+                buf,
+                "// Always available - root types are the primary types with all derives"
+            )?;
             writeln!(buf, "pub mod root;")?;
             writeln!(buf)?;
-            writeln!(buf, "// Re-export all generated root types (always available)")?;
+            writeln!(
+                buf,
+                "// Re-export all generated root types (always available)"
+            )?;
             writeln!(buf, "pub use root::*;")?;
             writeln!(buf)?;
-            writeln!(buf, "// Automerge types module (generated in gen/automerge.rs)")?;
-            writeln!(buf, "// Minimal boundary types with only Hydrate/Reconcile derives")?;
+            writeln!(
+                buf,
+                "// Automerge types module (generated in gen/automerge.rs)"
+            )?;
+            writeln!(
+                buf,
+                "// Minimal boundary types with only Hydrate/Reconcile derives"
+            )?;
             writeln!(buf, "#[cfg(feature = \"automerge\")]")?;
             writeln!(buf, "pub mod automerge;")?;
             writeln!(buf)?;
             writeln!(buf, "// Don't re-export automerge types at root level - they're accessed via gen::automerge::* or automerge::*")?;
-            writeln!(buf, "// This prevents conflicts and makes it clear when automerge types are being used")?;
+            writeln!(
+                buf,
+                "// This prevents conflicts and makes it clear when automerge types are being used"
+            )?;
             writeln!(buf)?;
             writeln!(buf, "// WIT types module (generated in gen/wit.rs)")?;
             writeln!(buf, "// WIT types are in a separate namespace (wit::) so they don't conflict with root/automerge types")?;
             writeln!(buf, "#[cfg(feature = \"wit\")]")?;
             writeln!(buf, "pub mod wit;")?;
             writeln!(buf)?;
-            writeln!(buf, "// Don't re-export WIT types at root level - they're accessed via wit:: module")?;
+            writeln!(
+                buf,
+                "// Don't re-export WIT types at root level - they're accessed via wit:: module"
+            )?;
             let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_types/gen/mod.rs");
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            std::fs::write(path, &out)?;
+        }
+
+        // Generate WIT files for daybook_types - generate to gen-doc interface
+        {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_types/wit/");
+            std::fs::create_dir_all(&path)?;
+            for feature in &features {
+                let mut out = String::new();
+                let buf = &mut out;
+                writeln!(
+                    buf,
+                    r#"// @generated
+package townframe:daybook-types;"#
+                )?;
+                // Generate interface with all schema types (including Doc, but we'll exclude it from the manual doc interface)
+                let mut imports = vec![
+                    "townframe:api-utils/utils.{errors-validation}".to_string(),
+                    "townframe:api-utils/utils.{error-internal}".to_string(),
+                    "townframe:api-utils/utils.{uuid}".to_string(),
+                    "townframe:api-utils/utils.{datetime}".to_string(),
+                ];
+                writeln!(
+                    buf,
+                    "interface gen-{name} {{",
+                    name = AsKebabCase(&feature.tag.name[..])
+                )?;
+                {
+                    let mut out = indenter::indented(buf).with_str("    ");
+                    let buf = &mut out;
+                    for import in &imports {
+                        writeln!(buf, "use {import};")?;
+                    }
+                    // Generate all schema types (including Doc, but doc.wit will override it)
+                    for id in &feature.schema_types {
+                        writeln!(buf)?;
+                        component_wit::schema_type(&reg, buf, *id)?;
+                    }
+                }
+                writeln!(buf, "}}")?;
+                let path = path.join(format!("gen-{}.wit", feature.tag.name.to_kebab_case()));
+                std::fs::write(path, &out)?;
+            }
+        }
+    }
+
+    // Generate WIT files for daybook_api (only endpoints, using daybook-types imports)
+    {
+        let features = daybook_api::daybook_api_features(&reg);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../daybook_api/wit/");
+        std::fs::create_dir_all(&path)?;
+        for feature in &features {
+            let mut out = String::new();
+            let buf = &mut out;
+            writeln!(
+                buf,
+                r#"// @generated
+package townframe:daybook-api;
+
+use townframe:api-utils/utils.{{errors-validation}};
+use townframe:api-utils/utils.{{error-internal}};
+use townframe:api-utils/utils.{{uuid}};
+use townframe:api-utils/utils.{{datetime}};
+use townframe:daybook-types/doc.{{mime-type}};
+use townframe:daybook-types/doc.{{doc-id}};
+use townframe:daybook-types/doc.{{image-meta}};
+use townframe:daybook-types/doc.{{doc-blob}};
+use townframe:daybook-types/doc.{{multihash}};
+use townframe:daybook-types/doc.{{doc-content-kind}};
+use townframe:daybook-types/doc.{{doc-content}};
+use townframe:daybook-types/doc.{{doc-prop}};
+use townframe:daybook-types/doc.{{doc}};"#
+            )?;
+            // Generate only endpoint interfaces (not schema types)
+            let imports = vec![
+                "townframe:api-utils/utils.{errors-validation}".to_string(),
+                "townframe:api-utils/utils.{error-internal}".to_string(),
+                "townframe:api-utils/utils.{uuid}".to_string(),
+                "townframe:api-utils/utils.{datetime}".to_string(),
+            ];
+            for epoint in &feature.endpoints {
+                writeln!(buf)?;
+                component_wit::endpoint_interface(&reg, buf, epoint, &imports)?;
+            }
+            let path = path.join(format!("{}.wit", feature.tag.name.to_kebab_case()));
             std::fs::write(path, &out)?;
         }
     }

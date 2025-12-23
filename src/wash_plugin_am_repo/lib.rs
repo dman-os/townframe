@@ -8,6 +8,7 @@ use crate::interlude::*;
 mod binds_guest {
     wash_runtime::wasmtime::component::bindgen!({
         world: "guest",
+
         imports: { default: async | trappable | tracing },
         exports: { default: async | trappable | tracing },
     });
@@ -145,22 +146,14 @@ impl repo::Host for WashCtx {
         // Convert JSON to AutosurgeonJson for reconciliation
         let autosurgeon_json = utils_rs::am::AutosurgeonJson(json_value);
 
-        match plugin
+        plugin
             .am_ctx
             .reconcile_path(&doc_id_rust, obj_id_rust, path_rust, &autosurgeon_json)
             .await
-        {
-            Ok(()) => Ok(Ok(())),
-            Err(e) => {
-                if e.to_string().contains("doc not found") {
-                    Ok(Err(repo::ReconcileError::DocNotFound))
-                } else if e.to_string().contains("invalid json") {
-                    Ok(Err(repo::ReconcileError::InvalidJson(e.to_string())))
-                } else {
-                    Ok(Err(repo::ReconcileError::Other(e.to_string())))
-                }
-            }
-        }
+            .wrap_err("error on reconcile")
+            .to_anyhow()?;
+
+        Ok(Ok(()))
     }
 
     async fn reconcile_path_at_head(
@@ -178,21 +171,10 @@ impl repo::Host for WashCtx {
             .parse()
             .map_err(|e| wasmtime::Error::msg(format!("invalid doc-id: {e}")))?;
 
-        // Parse heads from base32 strings to ChangeHash
-        let heads_rust: Result<Vec<automerge::ChangeHash>, _> = heads
-            .iter()
-            .map(|head_str| {
-                utils_rs::hash::decode_base32_multibase(head_str).and_then(|bytes| {
-                    bytes
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| ferr!("invalid change hash length"))
-                })
-            })
-            .collect();
-
-        let heads_rust =
-            heads_rust.map_err(|e| wasmtime::Error::msg(format!("error parsing heads: {e}")))?;
+        let heads = match utils_rs::am::parse_commit_heads(&heads) {
+            Ok(val) => val,
+            Err(err) => return Ok(Err(repo::ReconcileError::InvalidHeads(format!("{err:?}")))),
+        };
 
         let obj_id_rust = match obj_id {
             repo::ObjId::Root => automerge::ObjId::Root,
@@ -215,28 +197,20 @@ impl repo::Host for WashCtx {
         // Convert JSON to AutosurgeonJson for reconciliation
         let autosurgeon_json = utils_rs::am::AutosurgeonJson(json_value);
 
-        match plugin
+        plugin
             .am_ctx
             .reconcile_path_at_heads(
                 &doc_id_rust,
-                &heads_rust,
+                &heads,
                 obj_id_rust,
                 path_rust,
                 &autosurgeon_json,
             )
             .await
-        {
-            Ok(()) => Ok(Ok(())),
-            Err(e) => {
-                if e.to_string().contains("doc not found") {
-                    Ok(Err(repo::ReconcileError::DocNotFound))
-                } else if e.to_string().contains("invalid json") {
-                    Ok(Err(repo::ReconcileError::InvalidJson(e.to_string())))
-                } else {
-                    Ok(Err(repo::ReconcileError::Other(e.to_string())))
-                }
-            }
-        }
+            .wrap_err("error on reconcile")
+            .to_anyhow()?;
+
+        Ok(Ok(()))
     }
 
     async fn hydrate_path_at_head(
@@ -253,21 +227,14 @@ impl repo::Host for WashCtx {
             .parse()
             .map_err(|e| wasmtime::Error::msg(format!("invalid doc-id: {e}")))?;
 
-        // Parse heads from base32 strings to ChangeHash
-        let heads_rust: Result<Vec<automerge::ChangeHash>, _> = heads
-            .iter()
-            .map(|head_str| {
-                utils_rs::hash::decode_base32_multibase(head_str).and_then(|bytes| {
-                    bytes
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| ferr!("invalid change hash length"))
-                })
-            })
-            .collect();
-
-        let heads_rust =
-            heads_rust.map_err(|e| wasmtime::Error::msg(format!("error parsing heads: {e}")))?;
+        let heads = match utils_rs::am::parse_commit_heads(&heads) {
+            Ok(val) => val,
+            Err(err) => {
+                return Ok(Err(repo::HydrateAtHeadError::InvalidHeads(format!(
+                    "{err:?}"
+                ))))
+            }
+        };
 
         // Convert obj-id to automerge::ObjId
         let obj_id_rust = match obj_id {
@@ -287,17 +254,16 @@ impl repo::Host for WashCtx {
             .collect();
 
         // Use hydrate_path_at_head with AutosurgeonJson
-        let result = plugin
+        match plugin
             .am_ctx
             .hydrate_path_at_heads::<utils_rs::am::AutosurgeonJson>(
                 &doc_id_rust,
-                &heads_rust,
+                &heads,
                 obj_id_rust,
                 path_rust,
             )
-            .await;
-
-        match result {
+            .await
+        {
             Ok(Some(json_wrapper)) => {
                 let json_str = serde_json::to_string(&json_wrapper.0)
                     .map_err(|e| wasmtime::Error::msg(format!("error serializing to json: {e}")))?;
@@ -305,17 +271,10 @@ impl repo::Host for WashCtx {
             }
             Ok(None) => Ok(Err(repo::HydrateAtHeadError::PathNotFound)),
             Err(utils_rs::am::HydrateAtHeadError::HashNotFound(hash)) => Ok(Err(
-                repo::HydrateAtHeadError::HashNotFound(format!("{:?}", hash)),
+                repo::HydrateAtHeadError::HashNotFound(format!("{hash:?}")),
             )),
-            Err(utils_rs::am::HydrateAtHeadError::Other(e)) => {
-                // Check if it's a doc-not-found error
-                if e.to_string().contains("doc not found") {
-                    Ok(Err(repo::HydrateAtHeadError::DocNotFound))
-                } else if e.to_string().contains("obj not found") {
-                    Ok(Err(repo::HydrateAtHeadError::ObjNotFound))
-                } else {
-                    Err(wasmtime::Error::msg(format!("error hydrating: {e}")))
-                }
+            Err(utils_rs::am::HydrateAtHeadError::Other(err)) => {
+                Err(anyhow::anyhow!("error on hydrate: {err:?}"))
             }
         }
     }

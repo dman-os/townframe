@@ -18,6 +18,7 @@ wit = ["dep:wit-bindgen"]
 # encoding
 serde.workspace = true
 serde_json.workspace = true
+struct-patch.workspace = true
 
 # internal
 api_utils_rs = { workspace = true, default-features = false }
@@ -29,7 +30,6 @@ time = { workspace = true, features = ["serde"] }
 # automerge (feature-gated)
 autosurgeon = { workspace = true, features = ["uuid"], optional = true }
 automerge = { workspace = true, optional = true }
-struct-patch = "0.10.4"
 
 # ffi (feature-gated)
 uniffi = { workspace = true, optional = true }

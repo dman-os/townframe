@@ -16,7 +16,6 @@ pub mod wit {
             "townframe:daybook-api/doc/doc-image": daybook_types::gen::wit::doc::DocImage,
             "townframe:daybook-api/doc-create/input": daybook_types::gen::wit::doc::doc_create::Input,
             "townframe:daybook-api/doc/doc": daybook_types::wit::Doc,
-            "townframe:daybook-api/doc/doc-prop-kind": daybook_types::gen::wit::doc::DocPropKind,
             "townframe:daybook-api/doc-create/error-id-occupied": daybook_types::gen::wit::doc::doc_create::ErrorIdOccupied,
             "townframe:daybook-api/doc/doc-content": daybook_types::gen::wit::doc::DocContent,
         }

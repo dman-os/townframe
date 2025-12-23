@@ -3,19 +3,55 @@ use crate::interlude::*;
 use futures::future::BoxFuture;
 
 #[async_trait]
-pub trait Store {
-    type FlushArgs;
-    async fn flush(&mut self, args: &mut Self::FlushArgs) -> Res<()>;
+pub trait Store: Hydrate + Reconcile + Send + Sync + 'static {
+    // type FlushArgs;
+    const PROP: &'static str;
+
+    // async fn flush(&mut self, args: &mut Self::FlushArgs) -> Res<()> {
+    async fn flush(&mut self, acx: &mut AmCtx, doc_id: &DocumentId) -> Res<()> {
+        acx.reconcile_prop(doc_id, automerge::ROOT, Self::PROP, self)
+            .await
+    }
+
+    async fn load(acx: &AmCtx, app_doc_id: &DocumentId) -> Res<Self> {
+        acx.hydrate_path::<Self>(app_doc_id, automerge::ROOT, vec![Self::PROP.into()])
+            .await?
+            .ok_or_eyre("unable to find obj in am")
+    }
+
+    async fn register_change_listener<F>(
+        acx: &AmCtx,
+        broker: &utils_rs::am::changes::DocChangeBroker,
+        mut path: Vec<autosurgeon::Prop<'static>>,
+        on_change: F,
+    ) -> Res<()>
+    where
+        F: Fn(Vec<utils_rs::am::changes::ChangeNotification>) + Send + Sync + 'static,
+    {
+        path.insert(0, Self::PROP.into());
+        acx.change_manager()
+            .add_listener(
+                utils_rs::am::changes::ChangeFilter {
+                    path,
+                    doc_id: Some(broker.filter()),
+                },
+                on_change,
+            )
+            .await;
+        Ok(())
+    }
 }
 
-struct Inner<S: Store> {
+struct Inner<S> {
     store: S,
-    flush_args: S::FlushArgs,
+    acx: AmCtx,
+    doc_id: DocumentId,
+    // flush_args: S::FlushArgs,
 }
 
 impl<S: Store> Inner<S> {
     async fn flush(&mut self) -> Res<()> {
-        self.store.flush(&mut self.flush_args).await
+        self.store.flush(&mut self.acx, &self.doc_id).await
     }
 }
 
@@ -34,9 +70,14 @@ impl<S> StoreHandle<S>
 where
     S: Store,
 {
-    pub fn new(store: S, flush_args: S::FlushArgs) -> Self {
+    pub fn new(
+        store: S,
+        //flush_args: S::FlushArgs,
+        acx: AmCtx,
+        doc_id: DocumentId,
+    ) -> Self {
         Self {
-            inner: Arc::new(tokio::sync::RwLock::new(Inner { store, flush_args })),
+            inner: Arc::new(tokio::sync::RwLock::new(Inner { store, acx, doc_id })),
         }
     }
 

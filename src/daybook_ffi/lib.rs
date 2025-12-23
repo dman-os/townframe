@@ -10,21 +10,16 @@ mod interlude {
         rc::Rc,
         sync::{Arc, LazyLock, RwLock},
     };
-    pub use struct_patch::Patch;
     pub use utils_rs::{CHeapStr, DHashMap};
 }
 
 use crate::interlude::*;
 
-// Re-export types from daybook_types for uniffi bindings
-pub use daybook_types::{Doc, DocContent, DocContentKind, DocId, DocProp, DocPropKind};
-pub use daybook_types::doc::DocPatch;
-
 uniffi::setup_scaffolding!();
 
 mod am;
-mod config;
 pub mod blobs;
+mod config;
 pub use blobs::*;
 mod drawer;
 mod ffi;
@@ -95,7 +90,11 @@ impl Config {
                 dirs.data_dir().join("blobs"),
             )
         };
-        Ok(Self { am, sql, blobs_root })
+        Ok(Self {
+            am,
+            sql,
+            blobs_root,
+        })
     }
 }
 

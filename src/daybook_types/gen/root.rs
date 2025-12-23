@@ -21,6 +21,7 @@ pub mod doc {
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+    #[serde(rename_all = "camelCase")]
     pub enum DocContentKind {
         Text,
         Blob,
@@ -28,6 +29,7 @@ pub mod doc {
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+    #[serde(rename_all = "camelCase")]
     pub enum DocContent {
         Text(String),
         Blob(DocBlob),
@@ -45,17 +47,7 @@ pub mod doc {
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-    pub enum DocPropKind {
-        RefGeneric,
-        LabelGeneric,
-        ImageMetadata,
-        PseudoLabel,
-        PathGeneric,
-        TitleGeneric,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+    #[serde(rename_all = "camelCase")]
     pub enum DocProp {
         /// A link to another document.
         RefGeneric(DocRef),

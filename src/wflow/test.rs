@@ -117,9 +117,7 @@ impl WflowTestContextBuilder {
             .keyvalue_plugin
             .unwrap_or_else(|| Arc::new(keyvalue_plugin::WasiKeyvalue::new()));
 
-        let wflow_plugin = Arc::new(wash_plugin_wflow::TownframewflowPlugin::new(
-            metastore.clone(),
-        ));
+        let wflow_plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new(metastore.clone()));
         let runtime_config_plugin = plugin::wasi_config::WasiConfig::default();
 
         self.plugins.extend_from_slice(&[
@@ -159,7 +157,7 @@ pub struct WflowTestContext {
     initial_workloads: Vec<InitialWorkload>,
     pending_host: Option<wash_runtime::host::Host>,
     host: Option<Arc<wash_runtime::host::Host>>,
-    wflow_plugin: Arc<wash_plugin_wflow::TownframewflowPlugin>,
+    wflow_plugin: Arc<wash_plugin_wflow::WflowPlugin>,
     worker_handle: Option<wflow_tokio::partition::TokioPartitionWorkerHandle>,
     working_state: Option<Arc<wflow_tokio::partition::state::PartitionWorkingState>>,
 }

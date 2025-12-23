@@ -3,21 +3,9 @@ use super::*;
 use std::collections::HashMap;
 use std::fmt::Write;
 
-/// Generation mode for daybook_types crate
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GenerationMode {
-    /// Root types with serde + uniffi (feature-gated)
-    Root,
-    /// Automerge types with Hydrate/Reconcile derives
-    Automerge,
-    /// WIT types with wit_bindgen
-    Wit,
-}
-
 pub struct RustGenCtx<'a> {
     pub reg: &'a TypeReg,
     pub attrs: RustAttrs,
-    pub mode: Option<GenerationMode>,
     /// Map of excluded type names to their Rust paths (e.g., "Doc" -> "daybook_types::Doc")
     pub excluded_types: HashMap<String, String>,
 }
@@ -122,68 +110,43 @@ impl ExportedTypesAppender {
     }
 }
 
-/// Generate types for daybook_types crate in a specific mode
-pub fn generate_daybook_types_mode(
+/// Generate schema types for features
+///
+/// This is a generic function that generates Rust types from schema definitions.
+/// It accepts configuration through `attrs` and `excluded_types` parameters.
+pub fn generate_types(
     reg: &TypeReg,
     buf: &mut impl Write,
     features: &[Feature],
-    mode: GenerationMode,
+    attrs: RustAttrs,
+    excluded_types: HashMap<String, String>,
+    prelude: Option<&str>,
 ) -> Res<()> {
-    let attrs = match mode {
-        GenerationMode::Root => RustAttrs {
-            serde: true,
-            uniffi: true,
-            ..Default::default()
-        },
-        GenerationMode::Automerge => RustAttrs {
-            serde: false,
-            automerge: true,
-            uniffi: false,
-            ..Default::default()
-        },
-        GenerationMode::Wit => RustAttrs {
-            serde: true,
-            wit: true,
-            uniffi: false, // WIT types don't need uniffi derives
-            ..Default::default()
-        },
-    };
-    
-    // For daybook_types, exclude Doc and provide its path based on mode
-    let mut excluded_types = HashMap::new();
-    match mode {
-        GenerationMode::Root => {
-            excluded_types.insert("Doc".to_string(), "crate::Doc".to_string());
-        }
-        GenerationMode::Automerge => {
-            excluded_types.insert("Doc".to_string(), "crate::automerge::Doc".to_string());
-        }
-        GenerationMode::Wit => {
-            excluded_types.insert("Doc".to_string(), "crate::wit::Doc".to_string());
-        }
-    }
-    
     let cx = RustGenCtx {
         reg,
         attrs,
-        mode: Some(mode),
         excluded_types,
     };
-    
+
     writeln!(buf, "//! @generated")?;
-    writeln!(buf, "//! Do not edit manually - changes will be overwritten.")?;
+    writeln!(
+        buf,
+        "//! Do not edit manually - changes will be overwritten."
+    )?;
     writeln!(buf)?;
-    writeln!(buf, "use crate::interlude::*;")?;
-    writeln!(buf)?;
-    
-    for feature in features {
-        feature_module_for_daybook_types(&cx, buf, feature)?;
+    if let Some(prelude) = prelude {
+        writeln!(buf, "{}", prelude)?;
+        writeln!(buf)?;
     }
-    
+
+    for feature in features {
+        feature_module_schema_only(&cx, buf, feature)?;
+    }
+
     Ok(())
 }
 
-fn feature_module_for_daybook_types(
+fn feature_module_schema_only(
     cx: &RustGenCtx,
     buf: &mut impl Write,
     Feature {
@@ -202,7 +165,7 @@ fn feature_module_for_daybook_types(
         let mut out = indenter::indented(buf).with_str("    ");
         let buf = &mut out;
         writeln!(buf, "use super::*;")?;
-        
+
         for id in schema_types {
             writeln!(buf)?;
             let mut exp = ExportedTypesAppender {
@@ -433,13 +396,13 @@ fn schema_type(
         Type::Alias(alias) => &alias.name,
         _ => return Ok(()),
     };
-    
+
     // Check if type should be excluded from generation
     if cx.excluded_types.contains_key(type_name.as_str()) {
         // Type is excluded - don't generate it, it's manually written
         return Ok(());
     }
-    
+
     match borrow.value() {
         Type::Record(record) => schema_record(cx, buf, exp, record)?,
         Type::Enum(r#enum) => schema_enum(cx, buf, exp, r#enum)?,
@@ -475,7 +438,7 @@ fn schema_record(
     if cx.attrs.patch {
         derives.push("Patch");
     }
-    // Always include PartialEq for records (needed for Doc struct)
+    // Always include PartialEq for records (needed for equality comparisons)
     derives.push("PartialEq");
     if cx.attrs.utoipa {
         derives.push("utoipa::ToSchema");
@@ -497,7 +460,7 @@ fn schema_record(
     }
     if cx.attrs.patch {
         // emit patch attribute so generated Patch types derive the desired attributes for patches
-        let mut patch_parts: Vec<&str> = vec!["Debug", "Default"];
+        let patch_parts: Vec<&str> = vec!["Debug", "Default"];
         writeln!(
             buf,
             "#[patch(attribute(derive({})))]",
@@ -563,7 +526,8 @@ fn schema_enum(
         )?;
     }
     if cx.attrs.serde {
-        // writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
+        writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
+        // writeln!(buf, "#[serde(tag = \"ty\")]")?;
     }
     // For enums we keep serde derives only; autosurgeon derive is only emitted for records
     writeln!(
@@ -634,7 +598,7 @@ fn schema_variant(
         derives.push("Serialize");
         derives.push("Deserialize");
     }
-    // Always include PartialEq for variants (needed for Doc struct)
+    // Always include PartialEq for variants (needed for equality comparisons)
     derives.push("PartialEq");
     writeln!(buf, "#[derive({})]", derives.join(", "))?;
     if cx.attrs.uniffi {
@@ -644,7 +608,8 @@ fn schema_variant(
         )?;
     }
     if cx.attrs.serde {
-        // writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
+        writeln!(buf, "#[serde(rename_all = \"camelCase\")]")?;
+        // writeln!(buf, "#[serde(tag = \"ty\")]")?;
     }
     // autosurgeon derives are only emitted for records — enums are intentionally left with serde only
     writeln!(
@@ -680,9 +645,7 @@ fn output_type(
 ) -> Res<()> {
     let rust_name: String = match this {
         OutputType::Ref(ty_id) => {
-            let name = cx
-                .rust_name(*ty_id)
-                .expect("unregistered field type");
+            let name = cx.rust_name(*ty_id).expect("unregistered field type");
             // If type is excluded, use the provided Rust path
             if let Some(rust_path) = cx.excluded_types.get(name.as_str()) {
                 rust_path.clone()

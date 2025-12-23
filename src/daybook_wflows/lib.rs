@@ -5,9 +5,9 @@ mod interlude {
     pub use std::str::FromStr;
 }
 
-
 mod wit {
     wit_bindgen::generate!({
+        path: "wit",
         world: "bundle",
         // generate_all,
         // async: true,
@@ -26,13 +26,15 @@ mod wit {
             "townframe:wflow/types": wflow_sdk::wit::townframe::wflow::types,
             "townframe:wflow/host": wflow_sdk::wit::townframe::wflow::host,
             "townframe:wflow/bundle": generate,
-            "townframe:daybook/drawer": generate,
+
             "townframe:utils/llm-chat": generate,
 
-            // "wasi:io/poll@0.2.6": generate,
-            // "wasi:io/error@0.2.6": generate,
-            // "wasi:io/streams@0.2.6": generate,
-            // "wasi:http/types@0.2.6": generate,
+            "townframe:daybook-types/gen-doc": daybook_types::wit::doc,
+            "townframe:daybook-types/doc": daybook_types::wit::doc,
+
+            "townframe:daybook/types": generate,
+            "townframe:daybook/capabilities": generate,
+            "townframe:daybook/prop-routine": generate,
         }
     });
 }
@@ -49,41 +51,25 @@ struct Component;
 impl wit::exports::townframe::wflow::bundle::Guest for Component {
     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
         wflow_sdk::route_wflows!(args, {
-            "pseudo-labeler" => |cx, args: daybook_types::gen::wit::doc::DocAddedEvent| pseudo_labeler(cx, args),
+            "pseudo-labeler" => |cx, _args: serde_json::Value| pseudo_labeler(cx),
         })
     }
 }
 
-fn pseudo_labeler(cx: WflowCtx, args: daybook_types::gen::wit::doc::DocAddedEvent) -> Result<(), JobErrorX> {
-    use crate::wit::townframe::daybook::drawer;
+fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
+    use crate::wit::townframe::daybook::prop_routine;
 
-    // Call the daybook plugin to get the document at the specified heads
-    let doc = cx.effect(|| {
-        let doc_id = args.id.clone();
-        let heads = args.heads.clone();
+    let args = prop_routine::get_args();
 
-        let json = match drawer::get_doc_at_heads(&doc_id, &heads) {
-            Ok(Some(json)) => json,
-            Ok(None) => {
-                return Err(JobErrorX::Terminal(ferr!("document not found: {doc_id}")));
-            }
-            Err(err) => {
-                return Err(JobErrorX::Terminal(ferr!(
-                    "error getting document: {err:?}"
-                )));
-            }
-        };
-        let doc: daybook_types::Doc = serde_json::from_str(&json)
-            .wrap_err("error parsing json doc")
-            .map_err(JobErrorX::Terminal)?;
-
-        Ok(Json(doc))
-    })?;
+    let doc = args.doc_token.get();
+    let doc: daybook_types::doc::Doc = doc.into();
 
     // Extract text content for LLM
+    // Use root types since Doc uses root types (not WIT types)
+    use daybook_types::doc::DocContent;
     let content_text = match &doc.content {
-        daybook_types::DocContent::Text(text) => text.clone(),
-        daybook_types::DocContent::Blob(_) => "Binary content".to_string(),
+        DocContent::Text(text) => text.clone(),
+        DocContent::Blob(_) => "Binary content".to_string(),
     };
 
     // Call the LLM to generate a label
@@ -111,41 +97,12 @@ fn pseudo_labeler(cx: WflowCtx, args: daybook_types::gen::wit::doc::DocAddedEven
         }
     })?;
 
-    // Find or create the pseudo label tag
-    let mut updated_tags = doc.props.clone();
-    let pseudo_label_index = updated_tags
-        .iter()
-        .position(|tag| matches!(tag, daybook_types::DocProp::PseudoLabel(_)));
-
     let new_labels = vec![llm_response.clone()];
 
-    match pseudo_label_index {
-        Some(index) => {
-            // Replace existing pseudo label tag at the found index
-            updated_tags[index] = daybook_types::DocProp::PseudoLabel(new_labels);
-        }
-        None => {
-            // Add new pseudo label tag
-            updated_tags.push(daybook_types::DocProp::PseudoLabel(new_labels));
-        }
-    }
-
-    // Update the doc with the new tags at the original heads
     cx.effect(|| {
-        let doc_id = args.id.clone();
-        let heads = args.heads.clone();
-
-        // Create a patch with just the props field
-        let patch = serde_json::json!({
-            "props": updated_tags
-        });
-        let patch_str = serde_json::to_string(&patch)
-            .wrap_err("error serializing patch")
-            .map_err(JobErrorX::Terminal)?;
-
-        drawer::update_doc_at_heads(&doc_id, &heads, &patch_str)
-            .map_err(|err| JobErrorX::Terminal(ferr!("error updating document: {err:?}")))?;
-
+        let new_prop: daybook_types::wit::doc::DocProp =
+            daybook_types::doc::DocProp::PseudoLabel(new_labels).into();
+        args.prop_token.update(&new_prop);
         Ok(Json(()))
     })?;
 

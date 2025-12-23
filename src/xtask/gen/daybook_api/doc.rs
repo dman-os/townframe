@@ -22,10 +22,7 @@ pub fn feature(reg: &TypeReg) -> Feature {
     // NOTE:
     //  - If breaking changes are needed on the schema of contents and tags
     //    declare v2 like `text2`
-    let doc_content_variants = vec![
-        ("text", reg.string()),
-        ("blob", doc_blob),
-    ];
+    let doc_content_variants = vec![("text", reg.string()), ("blob", doc_blob)];
     let doc_content_kind = reg.add_type(Type::Enum(
         Enum::builder("DocContentKind")
             .with_variants(
@@ -91,15 +88,15 @@ pub fn feature(reg: &TypeReg) -> Feature {
         // path_generic
         // version_branch
     ];
-    let doc_prop_kind = reg.add_type(Type::Enum(
-        Enum::builder("DocPropKind")
-            .with_variants(
-                doc_prop_variants
-                    .iter()
-                    .map(|(key, _)| (*key, EnumVariant::builder().build())),
-            )
-            .build(),
-    ));
+    // let doc_prop_kind = reg.add_type(Type::Enum(
+    //     Enum::builder("DocPropKind")
+    //         .with_variants(
+    //             doc_prop_variants
+    //                 .iter()
+    //                 .map(|(key, _)| (*key, EnumVariant::builder().build())),
+    //         )
+    //         .build(),
+    // ));
     let doc_prop = reg.add_type(Type::Variant(
         Variant::builder("DocProp")
             .with_variants(doc_prop_variants)
@@ -147,7 +144,7 @@ pub fn feature(reg: &TypeReg) -> Feature {
             doc_content,
             doc_ref,
             image_meta,
-            doc_prop_kind,
+            // doc_prop_kind,
             doc_prop,
             doc,
             doc_added_event,

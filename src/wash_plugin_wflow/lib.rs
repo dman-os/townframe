@@ -101,7 +101,7 @@ impl host::Host for WashCtx {
         &mut self,
         job_id: partition_host::JobId,
     ) -> wasmtime::Result<Result<host::StepState, String>> {
-        let plugin = TownframewflowPlugin::from_ctx(self);
+        let plugin = WflowPlugin::from_ctx(self);
         let Some(mut job) = plugin.active_jobs.get_mut(job_id.as_str()) else {
             anyhow::bail!("job not active");
         };
@@ -160,7 +160,7 @@ impl host::Host for WashCtx {
         step_id: host::StepId,
         value_json: String,
     ) -> wasmtime::Result<Result<(), String>> {
-        let plugin = TownframewflowPlugin::from_ctx(self);
+        let plugin = WflowPlugin::from_ctx(self);
         let Some(mut job) = plugin.active_jobs.get_mut(job_id.as_str()) else {
             anyhow::bail!("job not active");
         };
@@ -209,7 +209,7 @@ impl partition_host::Host for WashCtx {
 
 impl metastore::Host for WashCtx {
     async fn get_wflow(&mut self, key: String) -> wasmtime::Result<Option<metastore::WflowMeta>> {
-        let plugin = TownframewflowPlugin::from_ctx(self);
+        let plugin = WflowPlugin::from_ctx(self);
         let meta = plugin.metastore.get_wflow(&key).await.to_anyhow()?;
         Ok(meta.map(|meta| metastore::WflowMeta {
             key: meta.key,
@@ -225,7 +225,7 @@ impl metastore::Host for WashCtx {
     }
 
     async fn get_partitions(&mut self) -> wasmtime::Result<metastore::PartitionsMeta> {
-        let plugin = TownframewflowPlugin::from_ctx(self);
+        let plugin = WflowPlugin::from_ctx(self);
         let meta = plugin.metastore.get_partitions().await.to_anyhow()?;
         Ok(metastore::PartitionsMeta {
             version: meta.version,
@@ -234,37 +234,50 @@ impl metastore::Host for WashCtx {
     }
 }
 
-pub struct TownframewflowPlugin {
+pub struct WflowPlugin {
     pending_workloads: DHashMap<Arc<str>, HashSet<Arc<str>>>,
 
     // workload_id -> workload
     active_workloads: DHashMap<Arc<str>, Arc<WflowWorkload>>,
     // wflow key -> workload_id
     active_keys: DHashMap<Arc<str>, Arc<str>>,
-    // job id
+    // job id ->
     active_jobs: DHashMap<Arc<str>, ActiveJobCtx>,
+    // ctx id -> job id
+    active_contexts: DHashMap<Arc<str>, Arc<str>>,
 
     metastore: Arc<dyn MetdataStore>,
 }
 
-impl TownframewflowPlugin {
+impl WflowPlugin {
     pub fn new(metastore: Arc<dyn MetdataStore>) -> Self {
         Self {
             active_workloads: default(),
             pending_workloads: default(),
             active_keys: default(),
             active_jobs: default(),
+            active_contexts: default(),
             metastore,
         }
     }
 
     const ID: &str = "townframe:wflow";
 
+    pub fn try_from_ctx(wcx: &WashCtx) -> Option<Arc<Self>> {
+        wcx.get_plugin::<Self>(Self::ID)
+    }
+
     fn from_ctx(wcx: &WashCtx) -> Arc<Self> {
         let Some(this) = wcx.get_plugin::<Self>(Self::ID) else {
             panic!("plugin not on ctx");
         };
         this
+    }
+
+    pub fn job_id_of_ctx(&self, wcx: &WashCtx) -> Option<Arc<str>> {
+        self.active_contexts
+            .get(&wcx.id[..])
+            .map(|val| val.value().clone())
     }
 }
 
@@ -279,7 +292,7 @@ struct WflowWorkload {
 }
 
 #[async_trait]
-impl wash_runtime::plugin::HostPlugin for TownframewflowPlugin {
+impl wash_runtime::plugin::HostPlugin for WflowPlugin {
     fn id(&self) -> &'static str {
         Self::ID
     }
@@ -340,7 +353,7 @@ impl wash_runtime::plugin::HostPlugin for TownframewflowPlugin {
     async fn on_component_bind(
         &self,
         component: &mut wash_runtime::engine::workload::WorkloadComponent,
-        interface_configs: std::collections::HashSet<WitInterface>,
+        _interface_configs: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
         let world = component.world();
         for iface in world.imports {
@@ -430,7 +443,7 @@ impl wash_runtime::plugin::HostPlugin for TownframewflowPlugin {
 }
 
 #[async_trait]
-impl service::WflowServiceHost for TownframewflowPlugin {
+impl service::WflowServiceHost for WflowPlugin {
     type ExtraArgs = WasmcloudWflowServiceMeta;
     async fn run(
         &self,
@@ -463,6 +476,8 @@ impl service::WflowServiceHost for TownframewflowPlugin {
             wflow_key: journal.wflow.key.clone(),
             args_json: journal.init_args_json.to_string(),
         };
+
+        let ctx_id: Arc<str> = store.data().id.clone().into();
         let fut = instance
             .townframe_wflow_bundle()
             .call_run(&mut store, &bundle_args);
@@ -479,7 +494,10 @@ impl service::WflowServiceHost for TownframewflowPlugin {
             },
         );
         assert!(_old.is_none(), "fishy");
+
+        self.active_contexts.insert(ctx_id.clone(), job_id.clone());
         scopeguard::defer! {
+            let _ = self.active_contexts.remove(&ctx_id);
             let _ = self.active_jobs.remove(&job_id);
         }
 

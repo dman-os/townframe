@@ -1,80 +1,70 @@
 //! Daybook types crate
-//! 
+//!
 //! This crate provides type definitions for daybook with feature-gated support
 //! for automerge, uniffi, and wit bindings.
 
 mod interlude {
     pub use serde::{Deserialize, Serialize};
-    
+
     #[cfg(feature = "automerge")]
     pub use autosurgeon::{Hydrate, Reconcile};
-    
-    #[cfg(feature = "automerge")]
-    pub use time::OffsetDateTime;
-    
-    #[cfg(feature = "wit")]
-    pub use api_utils_rs::wit::townframe::api_utils::utils::Datetime;
 
     pub use utils_rs::prelude::*;
 }
 
-pub mod gen;
+// Internal generated modules - not exported directly
+mod gen;
 
-#[cfg(feature = "automerge")]
-pub mod automerge;
+// Feature modules - these are the public API
+// Each module re-exports both manual and generated types, hiding generation details
 
-// Re-export automerge::Doc for easier access when automerge feature is enabled
-#[cfg(feature = "automerge")]
-pub use crate::automerge::Doc as AutomergeDoc;
-
-#[cfg(feature = "wit")]
-pub mod wit;
-
-// Re-export root types (always available, with serde/uniffi)
-pub use gen::root::*;
-
-// When wit feature is enabled, re-export WIT types at crate root for wit-bindgen compatibility
-// This allows wit-bindgen generated code to use daybook_types::DocProp etc. and get WIT types
-#[cfg(feature = "wit")]
-pub use gen::wit::doc::{DocContent, DocProp, DocPropKind, ImageMeta, DocBlob};
-
-// Re-export root doc types (when wit is not enabled, or for types not overridden by WIT)
-#[cfg(not(feature = "wit"))]
-pub use gen::root::doc::*;
-
-// Document types module
+/// Document types module - root types for general use
+///
+/// This module contains manually written types (Doc, DocPatch, etc.) and
+/// re-exports all generated root types, hiding the generation details.
 pub mod doc;
 
-// Re-export Doc and DocPatch from doc module for convenience
-pub use doc::{Doc, DocPatch};
+#[cfg(feature = "automerge")]
+/// Automerge types module - for hydrate/reconcile boundaries
+///
+/// This module contains manually written automerge types and
+/// re-exports all generated automerge types, hiding the generation details.
+pub mod automerge;
+
+#[cfg(feature = "wit")]
+/// WIT types module - for WebAssembly Interface Types
+///
+/// This module contains manually written WIT types and
+/// re-exports all generated WIT types, hiding the generation details.
+pub mod wit;
 
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
 
-#[cfg(feature = "uniffi")]
-mod uniffi_custom_types {
-    use time::OffsetDateTime;
-    
-    uniffi::custom_type!(OffsetDateTime, i64, {
-        remote,
-        lower: |dt| dt.unix_timestamp(),
-        try_lift: |int| OffsetDateTime::from_unix_timestamp(int)
+use crate::interlude::*;
+
+uniffi::custom_type!(OffsetDateTime, i64, {
+    remote,
+    lower: |dt| dt.unix_timestamp(),
+    try_lift: |int| OffsetDateTime::from_unix_timestamp(int)
+        .map_err(|err| uniffi::deps::anyhow::anyhow!(err))
+});
+
+uniffi::custom_type!(Uuid, Vec<u8>, {
+    remote,
+    lower: |uuid| uuid.as_bytes().to_vec(),
+    try_lift: |bytes: Vec<u8>| {
+        Uuid::from_slice(&bytes)
             .map_err(|err| uniffi::deps::anyhow::anyhow!(err))
-    });
-}
+    }
+});
 
+use crate::doc::ChangeHashSet;
 #[cfg(feature = "uniffi")]
-mod uniffi_uuid {
-    use uuid::Uuid;
-    
-    uniffi::custom_type!(Uuid, Vec<u8>, {
-        remote,
-        lower: |uuid| uuid.as_bytes().to_vec(),
-        try_lift: |bytes: Vec<u8>| {
-            Uuid::from_slice(&bytes)
-                .map_err(|err| uniffi::deps::anyhow::anyhow!(err))
-        }
-    });
-}
-
-
+uniffi::custom_type!(ChangeHashSet, Vec<String>, {
+    remote,
+    lower: |hash| utils_rs::am::serialize_commit_heads(&hash.0),
+    try_lift: |strings: Vec<String>| {
+        Ok(ChangeHashSet(utils_rs::am::parse_commit_heads(&strings).to_anyhow()?))
+    }
+});

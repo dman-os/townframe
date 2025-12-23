@@ -1,204 +1,81 @@
-# daybook
+# dev-log
 
-## Notes
+## 2025-12-23 | plugin system
 
-- Avoid adding dependencies if possible
+Requirements:
+- Commands for daybook_cli
+- Commands for daybook_compose command palette
+- Processors for props
+- Event handlers for events
 
-## TODO
+Early decisions:
+- Capability based security
+- Wasm worlds for each variant of plugin code
+- Modifications from a routine get their own ActorId and go in a branch by default.
 
-### Stack
+---
 
-- [ ] PgLite
-  - [ ] Get parametrized queries to work
-  - [ ] It should accept engine from outside
-- [ ] Finish autosurgeon::Patch
-  - [ ] Fork with context generic programming
-  - [ ] autosurgeon doens't respect serde attribs like untagged and camelCase
-- [x] Test to assert snapshot recovery works
-- [x] Sqlite backed KvStore impl
-- [x] Get uniffi working on android
-- [x] Save a photo
-- [x] Blobstore
-  - [x] Blake3 sums
-- [ ] daybook_server
-  - [ ] Decide on wrpc vs json
-- [ ] Overhaul bottom bar
-- [x] Title editor
-- [ ] Receipt parsing
-- [ ] wflow
-  - [x] in-memory smoke
-  - [ ] Ingress workload
-  - [ ] Durablity
-  - [x] Snapshots
-  - [ ] Use flatbuffers instead of JSON
-  - [ ] web UI
-  - [ ] Non-wasm impl
-    - [ ] Catch panics
-  - [ ] Service for wflow_tokio
-- [ ] CI/CD
-  - [ ] Publish
-    - [ ] Docker image
-    - [ ] WASM OCI
-    - [ ] Android APK 
-      - [ ] to F-Droid
-    - [ ] Linux Appimage
-      - [ ] to Flathub
-    - [ ] Windows.exe
-      - [ ] to Scoop.sh
-  - [ ] Deploy
-    - [ ] Buy domain
-      - [ ] https://daybook.tf
-- [ ] PgLite based testing
-- [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
-- [ ] DRY up all the wit bindgen
-- [ ] Move http tests into api crates
-  - [ ] Replace http with wrpc?
-- [ ] Code generator for http wrapper
-- [ ] Policy against tokio mutexes (cancel safety)
-- [ ] Move to wasmcloud v2
-  - [ ] Use async on wit_bindgen
-    - [ ] Replace tokio with wstd or wit_bindgen::block_on
-  - [ ] Wasi 0.3
-    - [ ] wRPC everything??
-- [ ] Replace time with jiff??
-- [ ] Pipeline editor web app
-- [ ] wrpc + iroh
-- [ ] Magic wand
-  - [ ] Follow bubble behavior from android
-  - [ ] Status bar/Gesture bar insets for puck and widgets
-  - [ ] Puck drop required to be on center bug
-- [ ] Tutorial
-- [ ] WYSIWYG editor
+Wait a minute, if I make `content` itself a `Doc`...essentially make all details of a `Doc` a `prop`, I can use prop predicates to properly ACL doc access by user code.
+I.e. any routine must define what props it can read and write up front.
+Since prop keys are namespaced by reverse domain notation, this shouldn't lead to issues with clashes across plugins.
 
-### Upstream Issues
+- Reverse domain names tie this system to DNS names? Maybe we should use the plugin registry as our name system?
+  - Or maybe I can use `dns.com.example.key1` and `github.townframe.daybook.key2` where the first segment corresponds to the namespace itself?
+- Okay but this is basically a type ontology in disguise. Do key names mandate what shape the value takes?
+  - Or make it convention based??
+  - YES! Each key must register the schema of the prop type.
+    - It's easier to reason about.
+    - Removes the need to create separate schema zoo.
+- A big aspect of the design is to foster a positive, low-effort ecosystem. Think the glorious nixpkgs. Any other ecosystem would have a hard time mantaining large package trees if the system wasn't reliable.
+  - Assume short context window by plugin authors. Most of the details should be handled by the system.
+  - Bad plugins shouldn't run and destroy/ruin data.
+    - Automerge should make this recoverable but still.
+  - Plugins that want to depend on keys not defined by the manifest must declare the originating plugin as a dependency.
+    - Through semver.
+    - Systematically assure breaking key schema changes lead to major version increments?
+    - Is there a non-convoluted way to assure that besides a semver, a package depends on a specific shape of a key?
+      - Instead of depending on a package, it depends on a specific key+schema combo.
+      - A package either declares/owns key+schema or depends on specific key+schema.
+        - Reject there's a mismatch between the key+schema depended and the key+schema defined by owning package??
+        - This would lead to issues if semantics change but shape stays the same.
+        - On the other hand, this would allow us to do the type checking at boundaries instead of plugin code.
+      - What happens when the owning package breaking changes a key?
+        - This should lead to a new key.
+        - Plugins ought to support old keys.
+        - Key+schema migration can be done mechanically in some cases.
+          - But mandating all documents being updated is silly.
+          - Automechanical upgrade system would incentivze breaking changes.
+          - Docs in cold-storage would go stale fast.
+          - Plugin can always provide a command I guess.
+            - Provide specialized case/ui for this but registry should de-weight packages that do this per instance.
+        - Who's the arbiter of keys+schema validity?
+          - The code in daybook_core, not just the online registry.
+      - Generic schemas seem like a good ida, hope JSON schema supports this.
+        - Or I suppose let's make do with `any` holes.
+  - Just looked it up and the large number of packages in NixOS is bullshit apparently? Well, the explanation number is less impressive than I thought. Still, there's magic there.
 
-## design-doc
+      
+Start from least generic impl and expanded as needed
+  - Invoke doc routines
+    - Execute on a user specified doc
+  - Prop routines.
+    - Execute when props are present on a doc and can only modify said prop
+      - Must the prop be defined/namespaced to plugin?
+  - Predicate routines
+    - Execute on all documents that satisfy a predicate
+    - By default will go into a branch that must be merged by a user
+    - Can either be user invocation based or add a prop when a predicate is satisfied
+  - Collators
+    - Can read documents that satisfy a predicate but can modify pre-set document.
+      - Are they run when collation document is modified or when predciate docments are modified?
+        - For now, the former.
 
-### Usecases
 
-- Expense tracking [MVP]
-- Sleep tracking 
-- Work tracking
-- Goals and planning
-	- Budgeting
-	- Tasks
+Concrete worlds:
+- plug-wflow-bundle
+- plug-routine
 
-### Architecture
-
-- Compose Multiplatform
-- Custom wash runtime
-  - Locally
-  - And also through wasmcloud
-- SQlite or PGLite
-- Durable execution
-  - Homebrew
-
-### Features
-
-- Immediate proveout
-  - [ ] Plugins/extensability
-    - [ ] Registry
-      - [ ] OCI based
-    - [ ] Un-previlaged processors should go in their own branch
-  - [ ] Chatbot
-  - [ ] Dynamic UI
-  - [ ] FUSE
-  - [ ] Programmability
-  - [ ] Granary
-
-- Daybook
-  - Core
-    - E2ee
-    - Muti-device
-    - Auth
-    - Multi-user 
-      - Multiplayer editing
-      - Collaborative vaults
-    - Branch based workflow (think Patchwork)
-  - Application
-    - For you screen
-      - Short form like swiping based call-to-action/summary
-    - Inbox screen
-      - Gen UI based assistant
-    - Capture screen [MVP]
-      - Photo [MVP]
-      - Video [MVP]
-        - Live transcript
-      - Audio [MVP]
-        - Live transcript
-      - Text [MVP]
-    - Config screen [MVP]
-    - Collection screen
-      - Timespan #MPV
-        - Dayspan
-        - Weekspan
-        - Monthspan
-        - Longspan
-      - Path based tree [MVP]
-      - Table
-      - Kanban [Stretch]
-    - Markdown editor
-      - Subtext better?
-    - Screenshots [MVP]
-    - Magic wand [MVP]
-    - Share reciever [MVP]
-    - Print doc [Stretch]
-    - Import/export
-      - Markdown
-    - Multiple window support [Stretch]
-    - Self hosted auto-updates for android app (think Telegram)
-    - Document types
-      - Images
-        - Thumbnails
-      - Videos
-        - Thumbnails
-      - Audio
-      - Markdown/subtext
-    - Embed web browser [Stretch]
-  - Server [MVP]
-    - Object store [MVP]
-  - Processors
-    - Pseudo labeler [MVP]
-    - OCR [MVP]
-    - ContentToTag
-    - Transcript
-    - Thumbnails
-  - Ingest
-    - Telegram bot [MVP]
-    - Browser extension
-    - Discord bot
-    - Mastodon bot
-  - CLI
-    - FUSE tree on Linux (think Ethersync) [MVP]
-    - Directly run processor on given file
-  - Quality
-    - CI/CD [MVP]
-    - GUI tests
-- Granary
-  - Metering for LLM requests
-  - Metering for object store
-
-### Guiding stars
-
-- I don't want to be a librarian
-  - I don't want the burden of maintaining the documents of my life
-- I should be able to just use one feature without being overloaded by the others.
-- I should be able to get some value even during periods of low usage.
-- I don't want to talk to a robot unless I want to
-  - Language is a vector of manipulation
-- Third-party server host should have zero leverage over me
-  - Might be impossible but let's try
-- Don't assume the resources of silicon valley
-  - Captial
-  - Brain cells
-  - Free time
-  - I.e. codebase should require low-effort maintaince
-- No walled garden
-  - Easily find new uses for their vault
-
-## dev-log
-
-### 2025-12-09 | branch first
+## 2025-12-09 | branch first
 
 Patchwork is a big inspiration for this system and I've been thinking a lot about their branch based workflow.
 - Fantastic place to stuff in unverified modifications.
@@ -206,7 +83,7 @@ Patchwork is a big inspiration for this system and I've been thinking a lot abou
   - Other users
   - Processors
 
-### 2025-12-03 | pglite
+## 2025-12-03 | pglite
 
 My Cursor subscription finally reset and I just blew 20$ of the allowance porting [pglite-oxide](https://github.com/f0rr0/pglite-oxide) to a wash plugin.
 Not even sure if I'll stick with it honestly, but it does trump out SQLite on "shiny" which is a metric for some reason :p.
@@ -242,7 +119,7 @@ I can't afford any such detours.
 
 Make that $40 ;;
 
-### 2025-11-29 | "routing"
+## 2025-11-29 | "routing"
 
 So there are a bunch of overlapping concerns here. 
 My brain is fried for some reason but I'll try my best to lay them and a general plan of action out.
@@ -397,17 +274,17 @@ New version
   - Redis for kv
 - Processing queue
 
-### 2025-11-29 | serverless wflow
+## 2025-11-29 | serverless wflow
 
 Right now, with the path I'm treading, wflow will be of the "scale up partition" when needed and scale down to zero when not.
 That's good enough for now but I'll have to keep it mind on how we can make it more efficent.
 What's more, it'd be great if it can all be wasm native, all parts of the engine.
 
-### 2025-11-22 | wflow in memory
+## 2025-11-22 | wflow in memory
 
 Well, we have the in memory version with zero features working.
 
-### 2025-11-08 | wflow details
+## 2025-11-08 | wflow details
 
 This will be a rough reimpl of restate.
 I don't want to loose time inventing from scratch.
@@ -437,13 +314,13 @@ worker.addEvt(wflowEvt)
   partition.eventAdded(newJobEvt)
 ```
 
-### 2025-11-07 | wflow
+## 2025-11-07 | wflow
 
 I am guilty of yak-shaving here but I think it's critical workflows are able to run on local devices.
 Still, the only way to asuage my guilt is to power through the impl asap.
 I feel that I'm just setting myself up for failure.
 
-### 2025-10-26 | architecture
+## 2025-10-26 | architecture
 
 As I start to build out more features, I'd love to have in hand something that will take me far.
 
@@ -458,7 +335,7 @@ Concerns:
     - Crux provide a nice abstraction here but maybe too much abstraction?
       - I think I'll wait on them to make some progress and see how that shakes out
 
-### 2025-07-26
+## 2025-07-26
 
 Spent the day trying to get it to start on desktop.
 That's like 3 hours of trying to debug the JDK issues and 3 hours of writing a ghjk port for it.
@@ -470,6 +347,6 @@ Spent the weekend vibe coding the magic puck stuff.
 I feel productive somewhat productive.
 I have to downscope fast.
 
-### 2025-05-31 | daybook
+## 2025-05-31 | daybook
 
 I need to make this happen ASAP. Everything depends on it.

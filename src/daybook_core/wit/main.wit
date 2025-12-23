@@ -1,39 +1,81 @@
 package townframe:daybook;
 
-interface drawer {
-    type doc-id = string;
-    
+interface types {
     type heads = list<string>;
-    
-    type json = string;
-    
+}
+
+interface drawer {
+    use townframe:daybook-types/doc.{doc, doc-patch, doc-prop, doc-id};
+    use types.{heads};
+
     variant get-doc-error {
         doc-not-found,
         invalid-heads(string),
-        other(string),
     }
-    
-    get-doc-at-heads: func(
-        doc-id: doc-id,
-        heads: heads,
-    ) -> result<option<json>, get-doc-error>;
     
     variant update-doc-error {
         doc-not-found,
         invalid-heads(string),
         invalid-patch(string),
-        other(string),
     }
     
-    update-doc-at-heads: func(
+    get-doc-at-heads: func(
         doc-id: doc-id,
         heads: heads,
-        patch: json,
+    ) -> result<doc, get-doc-error>;
+    
+    update-doc-at-heads: func(
+        heads: heads,
+        patch: doc-patch,
     ) -> result<_, update-doc-error>;
 }
 
-world guest {
-    import drawer;
-    import wasi:filesystem/preopens@0.2.6;
+interface capabilities {
+    use townframe:daybook-types/doc.{doc, doc-patch, doc-prop, doc-id};
+
+    variant update-doc-error {
+        invalid-patch(string),
+        other(string),
+    }
+
+    resource doc-token-ro {
+        get: func() -> doc;
+    }
+
+    resource doc-token-rw {
+        get: func() -> doc;
+        update: func(patch: doc-patch) -> result<_, update-doc-error>;
+    }
+
+    resource prop-token-rw {
+        get: func() -> doc-prop;
+        update: func(prop: doc-prop);
+    }
 }
 
+interface prop-routine {
+    use townframe:daybook-types/doc.{doc-id};
+    use types.{heads};
+    use capabilities.{doc-token-ro, prop-token-rw};
+
+    record prop-routine-args {
+        doc-id: doc-id,
+        heads: heads,
+        prop-key: string,
+
+        doc-token: doc-token-ro,
+        prop-token: prop-token-rw,
+    }
+
+    /// Aquire args for prop-routine-args.
+    /// If the running instance isn't reconginzed to be a routine,
+    /// a trap is raised to the host.
+    get-args: func() -> prop-routine-args;
+}
+
+world all-guest {
+    import drawer;
+    import capabilities;
+    import prop-routine;
+    import wasi:filesystem/preopens@0.2.6;
+}

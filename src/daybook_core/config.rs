@@ -1,5 +1,5 @@
 use crate::interlude::*;
-use crate::triage::TriageConfig;
+use crate::rt::triage::TriageConfig;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
@@ -38,34 +38,48 @@ pub struct ConfigStore {
 impl Default for ConfigStore {
     fn default() -> Self {
         let mut key_configs = HashMap::new();
-        
+
         // Default configs for created_at and updated_at
-        let datetime_config = MetaTableKeyDisplayType::DateTime { display_type: DateTimeDisplayType::Relative };
-        key_configs.insert("created_at".to_string(), MetaTableKeyConfig {
-            always_visible: false,
-            display_type: datetime_config.clone(),
-            display_title: Some("Created At".to_string()),
-            show_title_editor: None,
-        });
-        key_configs.insert("updated_at".to_string(), MetaTableKeyConfig {
-            always_visible: false,
-            display_type: datetime_config.clone(),
-            display_title: Some("Updated At".to_string()),
-            show_title_editor: None,
-        });
-        key_configs.insert("path_generic".to_string(), MetaTableKeyConfig {
-            always_visible: true,
-            display_type: MetaTableKeyDisplayType::UnixPath,
-            display_title: Some("Path".to_string()),
-            show_title_editor: None,
-        });
-        key_configs.insert("title_generic".to_string(), MetaTableKeyConfig {
-            always_visible: false,
-            display_type: MetaTableKeyDisplayType::Title,
-            display_title: Some("Title".to_string()),
-            show_title_editor: Some(true),
-        });
-        
+        let datetime_config = MetaTableKeyDisplayType::DateTime {
+            display_type: DateTimeDisplayType::Relative,
+        };
+        key_configs.insert(
+            "created_at".to_string(),
+            MetaTableKeyConfig {
+                always_visible: false,
+                display_type: datetime_config.clone(),
+                display_title: Some("Created At".to_string()),
+                show_title_editor: None,
+            },
+        );
+        key_configs.insert(
+            "updated_at".to_string(),
+            MetaTableKeyConfig {
+                always_visible: false,
+                display_type: datetime_config.clone(),
+                display_title: Some("Updated At".to_string()),
+                show_title_editor: None,
+            },
+        );
+        key_configs.insert(
+            "path_generic".to_string(),
+            MetaTableKeyConfig {
+                always_visible: true,
+                display_type: MetaTableKeyDisplayType::UnixPath,
+                display_title: Some("Path".to_string()),
+                show_title_editor: None,
+            },
+        );
+        key_configs.insert(
+            "title_generic".to_string(),
+            MetaTableKeyConfig {
+                always_visible: false,
+                display_type: MetaTableKeyDisplayType::Title,
+                display_title: Some("Title".to_string()),
+                show_title_editor: Some(true),
+            },
+        );
+
         Self {
             triage: TriageConfig::default(),
             meta_table_key_configs: key_configs,
@@ -73,50 +87,9 @@ impl Default for ConfigStore {
     }
 }
 
-//
-
-//
-
-impl ConfigStore {
-    pub const PROP: &str = "config";
-
-    pub async fn load(acx: &AmCtx, app_doc_id: &DocumentId) -> Res<Self> {
-        Ok(acx
-            .hydrate_path::<Self>(app_doc_id, automerge::ROOT, vec![Self::PROP.into()])
-            .await?
-            .unwrap_or_default())
-    }
-
-    /// Register a change listener for config changes
-    pub async fn register_change_listener<F>(
-        acx: &AmCtx,
-        broker: &utils_rs::am::changes::DocChangeBroker,
-        on_change: F,
-    ) -> Res<()>
-    where
-        F: Fn(Vec<utils_rs::am::changes::ChangeNotification>) + Send + Sync + 'static,
-    {
-        acx.change_manager()
-            .add_listener(
-                utils_rs::am::changes::ChangeFilter {
-                    path: vec![Self::PROP.into()],
-                    doc_id: Some(broker.filter()),
-                },
-                on_change,
-            )
-            .await;
-        Ok(())
-    }
-}
-
 #[async_trait]
 impl crate::stores::Store for ConfigStore {
-    type FlushArgs = (AmCtx, DocumentId);
-
-    async fn flush(&mut self, (acx, app_doc_id): &mut Self::FlushArgs) -> Res<()> {
-        acx.reconcile_prop(app_doc_id, automerge::ROOT, Self::PROP, self)
-            .await
-    }
+    const PROP: &str = "config";
 }
 
 #[derive(Debug, Clone)]
@@ -130,7 +103,7 @@ pub struct ConfigRepo {
     app_doc_id: DocumentId,
     store: crate::stores::StoreHandle<ConfigStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
-    broker: Arc<utils_rs::am::changes::DocChangeBroker>,
+    _broker: Arc<utils_rs::am::changes::DocChangeBroker>,
 }
 
 impl crate::repos::Repo for ConfigRepo {
@@ -145,7 +118,7 @@ impl ConfigRepo {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store = ConfigStore::load(&acx, &app_doc_id).await?;
-        let store = crate::stores::StoreHandle::new(store, (acx.clone(), app_doc_id.clone()));
+        let store = crate::stores::StoreHandle::new(store, acx.clone(), app_doc_id.clone());
 
         let broker = {
             let handle = acx
@@ -159,7 +132,7 @@ impl ConfigRepo {
             Vec<utils_rs::am::changes::ChangeNotification>,
         >();
         // Register change listener to automatically notify repo listeners
-        ConfigStore::register_change_listener(&acx, &broker, {
+        ConfigStore::register_change_listener(&acx, &broker, vec![], {
             move |notifs| notif_tx.send(notifs).expect(ERROR_CHANNEL)
         })
         .await?;
@@ -169,7 +142,7 @@ impl ConfigRepo {
             app_doc_id: app_doc_id.clone(),
             store,
             registry: registry.clone(),
-            broker,
+            _broker: broker,
         };
         let repo = Arc::new(repo);
 
@@ -211,7 +184,7 @@ impl ConfigRepo {
     pub async fn add_processor(
         &self,
         processor_id: String,
-        processor: crate::triage::Processor,
+        processor: crate::rt::triage::Processor,
     ) -> Res<()> {
         self.store
             .mutate_sync(move |store| {
@@ -227,10 +200,7 @@ impl ConfigRepo {
             .await
     }
 
-    pub async fn get_meta_table_key_config_sync(
-        &self,
-        key: String,
-    ) -> Option<MetaTableKeyConfig> {
+    pub async fn get_meta_table_key_config_sync(&self, key: String) -> Option<MetaTableKeyConfig> {
         self.store
             .query_sync(move |store| store.meta_table_key_configs.get(&key).cloned())
             .await

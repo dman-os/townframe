@@ -49,7 +49,6 @@ mod wit {
             "townframe:daybook-api/doc-create/input": crate::gen::doc::doc_create::Input,
             "townframe:daybook-api/doc-create/error-id-occupied": crate::gen::doc::doc_create::ErrorIdOccupied,
             // "townframe:daybook-api/doc/doc-prop-kind": crate::gen::doc::DocPropKind,
-            "townframe:daybook-api/doc/doc-prop-kind": generate,
             "townframe:daybook-api/doc-create": generate,
             "townframe:daybook-api/doc-create/error": crate::gen::doc::doc_create::Error,
         }

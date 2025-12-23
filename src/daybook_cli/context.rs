@@ -1,7 +1,10 @@
 use crate::interlude::*;
 
 mod version_updates {
-    use super::*;
+    use crate::interlude::*;
+
+    use daybook_core::stores::Store;
+
     use automerge::{transaction::Transactable, ActorId, AutoCommit, ROOT};
     use autosurgeon::reconcile_prop;
 
@@ -99,7 +102,11 @@ impl Config {
                 dirs.data_dir().join("blobs"),
             )
         };
-        Ok(Self { am, sql, blobs_root })
+        Ok(Self {
+            am,
+            sql,
+            blobs_root,
+        })
     }
 }
 
@@ -176,9 +183,10 @@ impl Ctx {
     pub async fn init(config: Config) -> Result<Arc<Self>, eyre::Report> {
         let sql = SqlCtx::new(config.sql.clone()).await?;
         let blobs = daybook_core::blobs::BlobsRepo::new(config.blobs_root.clone()).await?;
-        let acx = utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
-            .await?;
-        acx.spawn_ws_connector("ws://0.0.0.0:8090".into());
+        let acx =
+            utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
+                .await?;
+        // acx.spawn_ws_connector("ws://0.0.0.0:8090".into());
 
         let cx = Arc::new(Self {
             acx,
@@ -239,7 +247,8 @@ async fn init_from_globals(cx: &Ctx) -> Res<()> {
             None => {
                 update_state = true;
                 let doc = latest_fn()?;
-                let doc = automerge::Automerge::load(&doc).wrap_err("error loading version_latest")?;
+                let doc =
+                    automerge::Automerge::load(&doc).wrap_err("error loading version_latest")?;
                 let handle = cx.acx.add_doc(doc).await?;
                 handle
             }
@@ -275,4 +284,3 @@ pub async fn init_context() -> Res<SharedCtx> {
     let config = Config::new()?;
     Ctx::init(config).await
 }
-
