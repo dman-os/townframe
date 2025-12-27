@@ -1,7 +1,8 @@
 use crate::interlude::*;
 
-use daybook_types::doc::{Doc, DocContent, DocProp};
-use std::collections::HashMap;
+use daybook_types::doc::{
+    Doc, DocContent, DocProp, DocPropKey, DocPropTag, WellKnownProp, WellKnownPropTag,
+};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_pseudo_labeler_workflow() -> Res<()> {
@@ -12,8 +13,17 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
         id: "test-doc-1".to_string(),
         created_at: OffsetDateTime::now_utc(),
         updated_at: OffsetDateTime::now_utc(),
-        content: DocContent::Text("Hello, world!".to_string()),
-        props: HashMap::new(),
+        props: [
+            //
+            (
+                DocPropKey::from(WellKnownPropTag::Content),
+                DocProp::WellKnown(WellKnownProp::Content(DocContent::Text(
+                    //
+                    "Hello, world!".into(),
+                ))),
+            ),
+        ]
+        .into(),
     };
 
     // Add the document - DocTriageWorker will automatically queue the workflow job
@@ -32,10 +42,12 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
         .await?
         .ok_or_eyre("doc not found")?;
 
-    let has_pseudo_label = updated_doc
-        .props
-        .values()
-        .any(|tag| matches!(tag, DocProp::PseudoLabel(v) if !v.is_empty()));
+    let has_pseudo_label = updated_doc.props.keys().any(|tag| {
+        matches!(
+            tag,
+            DocPropKey::Tag(DocPropTag::WellKnown(WellKnownPropTag::PseudoLabel))
+        )
+    });
 
     info!(?updated_doc, "result");
 

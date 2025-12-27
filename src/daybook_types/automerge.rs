@@ -1,149 +1,115 @@
 pub mod doc {
+    use std::collections::HashMap;
 
     use crate::interlude::*;
 
-    pub use crate::gen::automerge::doc::*;
+    pub use crate::doc::{Blob, DocContent, DocContentKind, DocId, DocPropKey, MimeType, Text};
 
-    use autosurgeon::{Hydrate, Reconcile};
-    use std::collections::HashMap;
-    use time::OffsetDateTime;
+    crate::define_enum_and_tag!(
+        "wk.db",
+        // we use the standard keys
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        __WellKnownPropTagAm,
+        #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+        WellKnownPropAm {
+            // type CreatedAt OffsetDateTime,
+            // type UpdatedAt OffsetDateTime,
+            RefGeneric type (DocId),
+            LabelGeneric type (String),
+            PseudoLabel type (String),
+            TitleGeneric type (String),
+            PathGeneric type (String),
+            ImageMetadata type (crate::doc::ImageMetadata),
+            Content type (DocContent),
+            Pending type (crate::doc::Pending),
+        }
+    );
 
-    /// Document type for automerge - manually written (excluded from generation)
-    /// This is a minimal boundary type with only Hydrate/Reconcile derives.
-    /// Use root types (crate::doc::Doc) for most operations.
-    #[derive(Debug, Clone, Hydrate, Reconcile, PartialEq)]
+    #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+    pub enum DocPropAm {
+        WellKnown(WellKnownPropAm),
+        Any(utils_rs::am::AutosurgeonJson),
+    }
+
+    #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
     pub struct Doc {
         pub id: DocId,
         #[autosurgeon(with = "utils_rs::am::codecs::date")]
-        pub created_at: OffsetDateTime,
+        pub created_at: time::OffsetDateTime,
         #[autosurgeon(with = "utils_rs::am::codecs::date")]
-        pub updated_at: OffsetDateTime,
-        pub content: DocContent,
-        pub props: HashMap<String, DocProp>,
+        pub updated_at: time::OffsetDateTime,
+        #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
+        pub props: HashMap<DocPropKey, DocPropAm>,
     }
 
-    // From/Into impls between root and automerge types
+    impl From<crate::doc::WellKnownProp> for WellKnownPropAm {
+        fn from(val: crate::doc::WellKnownProp) -> Self {
+            match val {
+                crate::doc::WellKnownProp::RefGeneric(val) => Self::RefGeneric(val),
+                crate::doc::WellKnownProp::LabelGeneric(val) => Self::LabelGeneric(val),
+                crate::doc::WellKnownProp::PseudoLabel(val) => Self::PseudoLabel(val),
+                crate::doc::WellKnownProp::TitleGeneric(val) => Self::TitleGeneric(val),
+                crate::doc::WellKnownProp::PathGeneric(val) => {
+                    Self::PathGeneric(val.to_string_lossy().into_owned())
+                }
+                crate::doc::WellKnownProp::ImageMetadata(val) => Self::ImageMetadata(val),
+                crate::doc::WellKnownProp::Content(val) => Self::Content(val),
+                crate::doc::WellKnownProp::Pending(val) => Self::Pending(val),
+            }
+        }
+    }
+
+    impl From<WellKnownPropAm> for crate::doc::WellKnownProp {
+        fn from(val: WellKnownPropAm) -> Self {
+            match val {
+                WellKnownPropAm::RefGeneric(val) => Self::RefGeneric(val),
+                WellKnownPropAm::LabelGeneric(val) => Self::LabelGeneric(val),
+                WellKnownPropAm::PseudoLabel(val) => Self::PseudoLabel(val),
+                WellKnownPropAm::TitleGeneric(val) => Self::TitleGeneric(val),
+                WellKnownPropAm::PathGeneric(val) => Self::PathGeneric(val.into()),
+                WellKnownPropAm::ImageMetadata(val) => Self::ImageMetadata(val),
+                WellKnownPropAm::Content(val) => Self::Content(val),
+                WellKnownPropAm::Pending(val) => Self::Pending(val),
+            }
+        }
+    }
+
+    impl From<crate::doc::DocProp> for DocPropAm {
+        fn from(val: crate::doc::DocProp) -> Self {
+            match val {
+                crate::doc::DocProp::WellKnown(v) => Self::WellKnown(v.into()),
+                crate::doc::DocProp::Any(v) => Self::Any(utils_rs::am::AutosurgeonJson(v)),
+            }
+        }
+    }
+
+    impl From<DocPropAm> for crate::doc::DocProp {
+        fn from(val: DocPropAm) -> Self {
+            match val {
+                DocPropAm::WellKnown(v) => Self::WellKnown(v.into()),
+                DocPropAm::Any(v) => Self::Any(v.0),
+            }
+        }
+    }
+
     impl From<crate::doc::Doc> for Doc {
-        fn from(root: crate::doc::Doc) -> Self {
+        fn from(val: crate::doc::Doc) -> Self {
             Self {
-                id: root.id,
-                created_at: root.created_at,
-                updated_at: root.updated_at,
-                content: root.content.into(),
-                props: root
-                    .props
-                    .into_iter()
-                    .map(|(key, val)| (key.to_string(), val.into()))
-                    .collect(),
+                id: val.id,
+                created_at: val.created_at,
+                updated_at: val.updated_at,
+                props: val.props.into_iter().map(|(k, v)| (k, v.into())).collect(),
             }
         }
     }
 
     impl From<Doc> for crate::doc::Doc {
-        fn from(am: Doc) -> Self {
-            use crate::doc::DocPropKey;
-            // Reconstruct HashMap from Vec by inferring keys from DocProp variants
-            let props: HashMap<DocPropKey, crate::doc::DocProp> = am
-                .props
-                .into_iter()
-                .map(|(key, val)| (key.into(), val.into()))
-                .collect();
+        fn from(val: Doc) -> Self {
             Self {
-                id: am.id,
-                created_at: am.created_at,
-                updated_at: am.updated_at,
-                content: am.content.into(),
-                props,
-            }
-        }
-    }
-
-    // Conversions for nested types
-    use crate::automerge::doc as am_doc;
-    use crate::doc as root_doc;
-
-    impl From<root_doc::DocContent> for am_doc::DocContent {
-        fn from(root: root_doc::DocContent) -> Self {
-            match root {
-                root_doc::DocContent::Text(text) => am_doc::DocContent::Text(text),
-                root_doc::DocContent::Blob(blob) => am_doc::DocContent::Blob(blob.into()),
-            }
-        }
-    }
-
-    impl From<am_doc::DocContent> for root_doc::DocContent {
-        fn from(am: am_doc::DocContent) -> Self {
-            match am {
-                am_doc::DocContent::Text(text) => root_doc::DocContent::Text(text),
-                am_doc::DocContent::Blob(blob) => root_doc::DocContent::Blob(blob.into()),
-            }
-        }
-    }
-
-    impl From<root_doc::DocBlob> for am_doc::DocBlob {
-        fn from(root: root_doc::DocBlob) -> Self {
-            Self {
-                length_octets: root.length_octets,
-                hash: root.hash,
-            }
-        }
-    }
-
-    impl From<am_doc::DocBlob> for root_doc::DocBlob {
-        fn from(am: am_doc::DocBlob) -> Self {
-            Self {
-                length_octets: am.length_octets,
-                hash: am.hash,
-            }
-        }
-    }
-
-    impl From<root_doc::DocProp> for am_doc::DocProp {
-        fn from(root: root_doc::DocProp) -> Self {
-            match root {
-                root_doc::DocProp::RefGeneric(ref_id) => am_doc::DocProp::RefGeneric(ref_id),
-                root_doc::DocProp::LabelGeneric(label) => am_doc::DocProp::LabelGeneric(label),
-                root_doc::DocProp::ImageMetadata(meta) => {
-                    am_doc::DocProp::ImageMetadata(meta.into())
-                }
-                root_doc::DocProp::PseudoLabel(labels) => am_doc::DocProp::PseudoLabel(labels),
-                root_doc::DocProp::PathGeneric(path) => am_doc::DocProp::PathGeneric(path),
-                root_doc::DocProp::TitleGeneric(title) => am_doc::DocProp::TitleGeneric(title),
-            }
-        }
-    }
-
-    impl From<am_doc::DocProp> for root_doc::DocProp {
-        fn from(am: am_doc::DocProp) -> Self {
-            match am {
-                am_doc::DocProp::RefGeneric(ref_id) => root_doc::DocProp::RefGeneric(ref_id),
-                am_doc::DocProp::LabelGeneric(label) => root_doc::DocProp::LabelGeneric(label),
-                am_doc::DocProp::ImageMetadata(meta) => {
-                    root_doc::DocProp::ImageMetadata(meta.into())
-                }
-                am_doc::DocProp::PseudoLabel(labels) => root_doc::DocProp::PseudoLabel(labels),
-                am_doc::DocProp::PathGeneric(path) => root_doc::DocProp::PathGeneric(path),
-                am_doc::DocProp::TitleGeneric(title) => root_doc::DocProp::TitleGeneric(title),
-            }
-        }
-    }
-
-    impl From<root_doc::ImageMeta> for am_doc::ImageMeta {
-        fn from(root: root_doc::ImageMeta) -> Self {
-            Self {
-                mime: root.mime,
-                width_px: root.width_px,
-                height_px: root.height_px,
-            }
-        }
-    }
-
-    impl From<am_doc::ImageMeta> for root_doc::ImageMeta {
-        fn from(am: am_doc::ImageMeta) -> Self {
-            Self {
-                mime: am.mime,
-                width_px: am.width_px,
-                height_px: am.height_px,
+                id: val.id,
+                created_at: val.created_at,
+                updated_at: val.updated_at,
+                props: val.props.into_iter().map(|(k, v)| (k, v.into())).collect(),
             }
         }
     }

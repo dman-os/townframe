@@ -56,6 +56,11 @@ pub enum DrawerEvent {
 pub enum UpdateDocErr {
     /// patch for unrecognized document: {id}
     DocNotFound { id: DocId },
+    /// patch has an invalid key: {inner}
+    InvalidKey {
+        #[from]
+        inner: daybook_types::doc::DocPropTagParseError,
+    },
     /// unexpected error: {inner}
     Other {
         #[from]
@@ -326,7 +331,7 @@ impl DrawerRepo {
 
     pub async fn update_at_heads(
         &self,
-        patch: DocPatch,
+        mut patch: DocPatch,
         heads: &ChangeHashSet,
     ) -> Result<(), UpdateDocErr> {
         if patch.is_empty() {
@@ -535,8 +540,23 @@ mod tests {
                 id: "client".into(),
                 created_at: OffsetDateTime::now_utc(),
                 updated_at: OffsetDateTime::now_utc(),
-                content: daybook_types::doc::DocContent::Text("Hello, world!".into()),
-                props: std::collections::HashMap::new(),
+                props: [
+                    //
+                    (
+                        daybook_types::doc::DocPropKey::from(
+                            daybook_types::doc::WellKnownPropTag::Content,
+                        ),
+                        daybook_types::doc::DocProp::WellKnown(
+                            daybook_types::doc::WellKnownProp::Content(
+                                daybook_types::doc::DocContent::Text(
+                                    //
+                                    "Hello, world!".into(),
+                                ),
+                            ),
+                        ),
+                    ),
+                ]
+                .into(),
             })
             .await?;
 

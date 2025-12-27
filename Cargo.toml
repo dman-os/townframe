@@ -95,6 +95,7 @@ leptos_meta = { version = "0.8" }
 leptos_router = { version = "0.8", default-features = false }
 
 # macros
+pastey = "0.1"
 displaydoc = "0.2"
 educe = "0.6"
 struct-patch = "0.10.4"
@@ -128,7 +129,8 @@ kanidm_proto = "1.7.2"
 
 
 # os
-dotenv-flow = "0.16.2"
+dotenv-flow = "0.16"
+directories = "6.0"
 
 # http
 axum = { version = "0.8.6", default-features = false }

@@ -9,6 +9,7 @@ mod wit {
     wit_bindgen::generate!({
         path: "wit",
         world: "bundle",
+
         // generate_all,
         // async: true,
         with: {
@@ -29,7 +30,6 @@ mod wit {
 
             "townframe:utils/llm-chat": generate,
 
-            "townframe:daybook-types/gen-doc": daybook_types::wit::doc,
             "townframe:daybook-types/doc": daybook_types::wit::doc,
 
             "townframe:daybook/types": generate,
@@ -62,14 +62,16 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
     let args = prop_routine::get_args();
 
     let doc = args.doc_token.get();
-    let doc: daybook_types::doc::Doc = doc.into();
+    let doc: daybook_types::doc::Doc = doc
+        .try_into()
+        .map_err(|err| JobErrorX::Terminal(ferr!("failure on doc parsing: {err:?}")))?;
 
     // Extract text content for LLM
     // Use root types since Doc uses root types (not WIT types)
-    use daybook_types::doc::DocContent;
-    let content_text = match &doc.content {
-        DocContent::Text(text) => text.clone(),
-        DocContent::Blob(_) => "Binary content".to_string(),
+    use daybook_types::doc::{DocContent, DocProp, WellKnownProp, WellKnownPropTag};
+    let content_text = match &doc.props.get(&WellKnownPropTag::Content.into()) {
+        Some(DocProp::WellKnown(WellKnownProp::Content(DocContent::Text(text)))) => text.clone(),
+        content => return Err(ferr!("Unsupported content: {content:?}").into()),
     };
 
     // Call the LLM to generate a label
@@ -101,7 +103,7 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
 
     cx.effect(|| {
         let new_prop: daybook_types::wit::doc::DocProp =
-            daybook_types::doc::DocProp::PseudoLabel(new_labels).into();
+            DocProp::WellKnown(WellKnownProp::PseudoLabel(new_labels.join(","))).into();
         args.prop_token.update(&new_prop);
         Ok(Json(()))
     })?;

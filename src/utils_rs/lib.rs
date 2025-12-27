@@ -56,6 +56,7 @@ mod expect_tags {
     pub const ERROR_TOKIO: &str = "tokio error";
     pub const ERROR_CHANNEL: &str = "channel error";
     pub const ERROR_JSON: &str = "json error";
+    pub const ERROR_UTF8: &str = "utf8 error";
 }
 
 #[inline]

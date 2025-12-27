@@ -15,6 +15,7 @@ interface drawer {
     
     variant update-doc-error {
         doc-not-found,
+        invalid-key(string),
         invalid-heads(string),
         invalid-patch(string),
     }
@@ -35,6 +36,7 @@ interface capabilities {
 
     variant update-doc-error {
         invalid-patch(string),
+        invalid-key(string),
         other(string),
     }
 
@@ -49,7 +51,7 @@ interface capabilities {
 
     resource prop-token-rw {
         get: func() -> doc-prop;
-        update: func(prop: doc-prop);
+        update: func(patch: doc-prop) -> result<_, update-doc-error>;
     }
 }
 

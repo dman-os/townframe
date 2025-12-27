@@ -1,19 +1,22 @@
 # dev-log
 
-## 2025-12-23 | plugin system
+## 2025-12-27 | plugin-system
 
-Requirements:
-- Commands for daybook_cli
-- Commands for daybook_compose command palette
-- Processors for props
-- Event handlers for events
+The doc scheme I have...
 
-Early decisions:
-- Capability based security
-- Wasm worlds for each variant of plugin code
-- Modifications from a routine get their own ActorId and go in a branch by default.
+```
+{
+  "org.example.my.foo":  Foo {}
+  "org.example.my.bar/1":  Bar {}
+  "org.example.my.bar/2":  Bar {}
+}
+```
 
----
+
+..is essentially RDF. 
+Not sure what to think about that.
+
+## 2025-12-25 | plugin system
 
 Wait a minute, if I make `content` itself a `Doc`...essentially make all details of a `Doc` a `prop`, I can use prop predicates to properly ACL doc access by user code.
 I.e. any routine must define what props it can read and write up front.
@@ -70,6 +73,20 @@ Start from least generic impl and expanded as needed
       - Are they run when collation document is modified or when predciate docments are modified?
         - For now, the former.
 
+## 2025-12-23 | plugin system
+
+Requirements:
+- Commands for daybook_cli
+- Commands for daybook_compose command palette
+- Processors for props
+- Event handlers for events
+
+Early decisions:
+- Capability based security
+- Wasm worlds for each variant of plugin code
+- Modifications from a routine get their own ActorId and go in a branch by default.
+
+---
 
 Concrete worlds:
 - plug-wflow-bundle

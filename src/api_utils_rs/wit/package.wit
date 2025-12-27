@@ -11,6 +11,7 @@ interface utils {
     }
     type datetime = dt;
     type uuid = string;
+    type json = string;
 
     // note: we don't include the errors since we don't want those generated
     noop: func(inc: tuple<errors-validation, error-internal, datetime, uuid>) -> result;

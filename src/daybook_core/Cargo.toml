@@ -16,7 +16,12 @@ uniffi = ["dep:uniffi"]
 utils_rs = { workspace = true, features = ["hash", "native", "automerge-repo"] }
 api_utils_rs = { workspace = true, features = ["automerge"] }
 wflow = { workspace = true }
-daybook_types = { workspace = true, features = ["automerge", "uniffi", "wit"] }
+daybook_types = { workspace = true, features = [
+    "automerge",
+    "uniffi",
+    "wit",
+    "schemars",
+] }
 
 # encoding
 serde.workspace = true
@@ -26,6 +31,7 @@ serde_json.workspace = true
 color-eyre.workspace = true
 thiserror.workspace = true
 displaydoc.workspace = true
+anyhow = { workspace = true }
 
 # log
 tracing.workspace = true
@@ -35,14 +41,21 @@ tracing-unwrap.workspace = true
 # ds
 once_cell.workspace = true
 time.workspace = true
-rust_decimal = "1.37.2"
 parking_lot.workspace = true
 url.workspace = true
 garde.workspace = true
 struct-patch.workspace = true
+data-encoding.workspace = true
+blake3.workspace = true
+semver = "1"
 
 # async
-tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs"] }
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "sync",
+    "macros",
+    "fs",
+] }
 tokio-util.workspace = true
 futures = { workspace = true }
 async-trait.workspace = true
@@ -58,21 +71,27 @@ samod = { workspace = true, features = ["tokio", "tungstenite"] }
 # http
 reqwest.workspace = true
 
-# misc
+# db
 sqlx = { workspace = true, features = ["sqlite"] }
-pastey = "0.1"
-directories = "6.0.0"
-data-encoding.workspace = true
-blake3.workspace = true
+sqlite-vec = "0.1.6"
+
+# misc
+pastey.workspace = true
+directories.workspace = true
 
 wash-runtime = { workspace = true }
 wasmtime = { workspace = true }
-anyhow = { workspace = true }
-sqlite-vec = "0.1.6"
-semver = "1.0.27"
+
+schemars = { version = "1.2", features = [
+    "uuid1",
+    "semver1",
+    "url2",
+    "jiff02",
+    "indexmap2",
+] }
 
 [build-dependencies]
-uniffi = { workspace = true, features = [ "build" ], optional = true }
+uniffi = { workspace = true, features = ["build"], optional = true }
 
 [dev-dependencies]
 tokio-stream = "0.1.17"

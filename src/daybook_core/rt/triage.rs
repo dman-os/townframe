@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use crate::drawer::{DrawerEvent, DrawerRepo};
-use daybook_types::doc::{Doc, DocContent, DocContentKind, DocId, DocPropKey};
+use daybook_types::doc::{Doc, DocAddedEvent, DocContent, DocContentKind, DocId, DocPropKey};
 
 pub use wflow::{PartitionLogIngress, WflowIngress};
 
@@ -282,9 +282,23 @@ impl PredicateClause {
     pub fn matches(&self, doc: &Doc) -> bool {
         match self {
             PredicateClause::HasKey(check_key) => doc.props.keys().any(|key| check_key == key),
-            PredicateClause::IsContentKind(content_kind) => {
-                *content_kind == content_to_content_kind(&doc.content)
-            }
+            PredicateClause::IsContentKind(content_kind) => doc
+                .props
+                .get(&DocPropKey::Tag(daybook_types::doc::DocPropTag::WellKnown(
+                    daybook_types::doc::WellKnownPropTag::Content,
+                )))
+                .and_then(|prop| {
+                    if let daybook_types::doc::DocProp::WellKnown(
+                        daybook_types::doc::WellKnownProp::Content(content),
+                    ) = prop
+                    {
+                        Some(content_to_content_kind(content))
+                    } else {
+                        None
+                    }
+                })
+                .map(|kind| kind == *content_kind)
+                .unwrap_or(false),
             PredicateClause::Not(inner) => !inner.matches(doc),
             PredicateClause::Or(clauses) => clauses.iter().any(|clause| clause.matches(doc)),
             PredicateClause::And(clauses) => clauses.iter().all(|clause| clause.matches(doc)),

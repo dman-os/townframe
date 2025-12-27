@@ -1,49 +1,69 @@
 package townframe:daybook-types;
 
 interface doc {
-    use townframe:api-utils/utils.{errors-validation};
-    use townframe:api-utils/utils.{error-internal};
-    use townframe:api-utils/utils.{uuid};
-    use townframe:api-utils/utils.{datetime};
-    
-    // Re-export all generated types from gen-doc using aliases to avoid name clashes
-    use gen-doc.{
-        mime-type as mime-type-gen,
-        multihash as multihash-gen,
-        doc-blob as doc-blob-gen,
-        doc-id as doc-id-gen,
-        doc-content-kind as doc-content-kind-gen,
-        doc-content as doc-content-gen,
-        doc-ref as doc-ref-gen,
-        image-meta as image-meta-gen,
-        doc-prop as doc-prop-gen,
-        doc-added-event as doc-added-event-gen,
-    };
-    
-    // Re-export generated types with original names
-    type mime-type = mime-type-gen;
-    type multihash = multihash-gen;
-    type doc-blob = doc-blob-gen;
-    type doc-id = doc-id-gen;
-    type doc-content-kind = doc-content-kind-gen;
-    type doc-content = doc-content-gen;
-    type doc-ref = doc-ref-gen;
-    type image-meta = image-meta-gen;
-    type doc-prop = doc-prop-gen;
-    type doc-added-event = doc-added-event-gen;
-    
+    use townframe:api-utils/utils.{datetime, json};
+
+    type mime-type = string;
+    type multihash = string;
+    type doc-id = string;
+    type doc-ref = doc-id;
+
+    record blob {
+        length-octets: u64,
+        hash: multihash,
+    }
+
+    enum doc-content-kind {
+        text,
+        blob,
+    }
+
+    variant doc-content {
+        text(string), 
+        blob(blob), 
+    }
+
+    record image-metadata {
+        mime: mime-type,
+        width-px: u64,
+        height-px: u64,
+    }
+
+    record pending {
+        key: string
+    }
+
+    variant well-known-prop {
+        ref-generic(doc-ref), 
+        label-generic(string), 
+        pseudo-label(string), 
+        title-generic(string), 
+        path-generic(string), 
+        image-metadata(image-metadata), 
+        content(doc-content),
+        pending(pending),
+    }
+
+    variant doc-prop {
+        well-known(well-known-prop),
+        any(json), // JSON string
+    }
+
     record doc {
         id: doc-id,
         created-at: datetime,
         updated-at: datetime,
-        content: doc-content,
         props: list<tuple<string, doc-prop>>,
     }
-    
+
     record doc-patch {
         id: doc-id,
-        content: option<doc-content>,
         props-set: list<tuple<string, doc-prop>>,
         props-remove: list<string>,
+    }
+
+    record doc-added-event {
+        id: doc-id,
+        heads: list<string>,
     }
 }

@@ -13,16 +13,23 @@ default = ["automerge", "uniffi", "wit"]
 automerge = ["dep:autosurgeon", "dep:automerge", "utils_rs/automerge", "utils_rs/hash"]
 uniffi = ["dep:uniffi", "dep:uuid"]
 wit = ["dep:wit-bindgen"]
+schemars = ["dep:schemars"]
 
 [dependencies]
 # encoding
 serde.workspace = true
 serde_json.workspace = true
 struct-patch.workspace = true
+schemars = { version = "1", features = ["uuid1"], optional = true }
 
 # internal
 api_utils_rs = { workspace = true, default-features = false }
 utils_rs = { workspace = true, default-features = false }
+
+# error
+thiserror.workspace = true
+displaydoc.workspace = true
+
 
 # time (needed for root Doc type)
 time = { workspace = true, features = ["serde"] }
@@ -38,3 +45,5 @@ uuid = { workspace = true, optional = true }
 # wit (feature-gated)
 wit-bindgen = { workspace = true, optional = true }
 
+pastey.workspace = true
+addr = "0.15.6"

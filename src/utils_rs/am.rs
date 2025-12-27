@@ -4,7 +4,9 @@ use crate::interlude::*;
 pub mod changes;
 pub mod codecs;
 
-use automerge::{Automerge, ChangeHash};
+#[cfg(feature = "automerge-repo")]
+use automerge::Automerge;
+use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
 
 pub use codecs::AutosurgeonJson;
