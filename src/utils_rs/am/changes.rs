@@ -10,6 +10,7 @@ use tokio::{
     sync::{mpsc, RwLock},
     task::JoinHandle,
 };
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "automerge-repo")]
 #[derive(Debug, Clone)]
@@ -27,6 +28,7 @@ pub struct ChangeFilter {
 
 #[cfg(feature = "automerge-repo")]
 struct ChangeListener {
+    id: Uuid,
     filter: ChangeFilter,
     on_change: Box<dyn Fn(Vec<ChangeNotification>) + Send + Sync + 'static>,
 }
@@ -36,19 +38,21 @@ pub struct ChangeListenerManager {
     listeners: RwLock<Vec<ChangeListener>>,
     change_tx: mpsc::UnboundedSender<(DocumentId, Vec<ChangeNotification>)>,
     brokers: DHashMap<DocumentId, Arc<DocChangeBroker>>,
+    switchboard_handle: RwLock<Option<JoinHandle<Res<()>>>>,
+    cancel_token: CancellationToken,
 }
 
 #[cfg(feature = "automerge-repo")]
 pub struct DocChangeBroker {
     doc_id: DocumentId,
     join_handle: JoinHandle<Res<()>>,
-    term_signal_tx: tokio::sync::watch::Sender<bool>,
+    cancel_token: CancellationToken,
 }
 
 #[cfg(feature = "automerge-repo")]
 impl DocChangeBroker {
     pub async fn stop(self) -> Res<()> {
-        self.term_signal_tx.send(true).wrap_err("already stopped")?;
+        self.cancel_token.cancel();
         self.join_handle.await.wrap_err("tokio task error")?
     }
 
@@ -72,21 +76,40 @@ impl ChangeListenerManager {
     pub fn boot() -> Arc<Self> {
         let (change_tx, change_rx) = mpsc::unbounded_channel();
         let listeners = RwLock::new(Vec::new());
+        let cancel_token = CancellationToken::new();
         let out = Self {
             listeners,
             change_tx,
             brokers: default(),
+            switchboard_handle: RwLock::new(None),
+            cancel_token,
         };
         let out = Arc::new(out);
 
         // Start the change notification worker
-        out.clone().spawn_switchboard(change_rx);
+        let handle = out.clone().spawn_switchboard(change_rx);
+        tokio::task::block_in_place(|| {
+            out.switchboard_handle.blocking_write().replace(handle);
+        });
 
         out
     }
 
+    pub async fn stop(&self) -> Res<()> {
+        self.cancel_token.cancel();
+
+        // Stop all brokers
+        for entry in self.brokers.iter() {
+            entry.value().cancel_token.cancel();
+        }
+
+        if let Some(handle) = self.switchboard_handle.write().await.take() {
+            handle.await.wrap_err("switchboard task error")??;
+        }
+        Ok(())
+    }
+
     /// Start listening for events on the given document
-    /// TODO: the returned handle should allow unregistration
     pub fn add_doc(self: &Arc<Self>, handle: samod::DocHandle) -> Arc<DocChangeBroker> {
         if let Some(arc) = self.brokers.get(handle.document_id()) {
             return arc.clone();
@@ -95,7 +118,8 @@ impl ChangeListenerManager {
 
         let doc_id = handle.document_id().clone();
         let span = tracing::info_span!("doc listener task", ?doc_id);
-        let (term_signal_tx, mut term_signal_rx) = tokio::sync::watch::channel(false);
+        let cancel_token = CancellationToken::new();
+        let cancel_token_task = cancel_token.clone();
         let join_handle = tokio::spawn(
             async move {
                 debug!("listening on doc");
@@ -109,7 +133,7 @@ impl ChangeListenerManager {
                 loop {
                     let changes = tokio::select! {
                         biased;
-                        _ = term_signal_rx.wait_for(|signal| *signal) => {
+                        _ = cancel_token_task.cancelled() => {
                             break;
                         },
                         val = doc_change_stream.next() => {
@@ -121,7 +145,6 @@ impl ChangeListenerManager {
                     };
                     let (new_heads, all_changes) = handle.with_document(|doc| {
                         let patches = doc.diff(&heads, &changes.new_heads[..]);
-                        // let meta = doc.get_changes_meta(&changes.new_heads[..]);
                         let new_heads: Arc<[automerge::ChangeHash]> = changes.new_heads.into();
 
                         let collected_changes = patches
@@ -159,7 +182,7 @@ impl ChangeListenerManager {
 
         let out = DocChangeBroker {
             join_handle,
-            term_signal_tx,
+            cancel_token,
             doc_id: doc_id.clone(),
         };
         let out = Arc::new(out);
@@ -169,15 +192,22 @@ impl ChangeListenerManager {
 
     /// Register a change listener
     /// The listener will receive notifications for changes at the path or any subpath
-    pub async fn add_listener<F>(&self, filter: ChangeFilter, on_change: F)
-    where
-        F: Fn(Vec<ChangeNotification>) + Send + Sync + 'static,
-    {
+    pub async fn add_listener(
+        self: &Arc<Self>,
+        filter: ChangeFilter,
+        on_change: Box<dyn Fn(Vec<ChangeNotification>) + Send + Sync + 'static>,
+    ) -> ChangeListenerRegistration {
+        let id = Uuid::new_v4();
         let mut listeners = self.listeners.write().await;
         listeners.push(ChangeListener {
+            id,
             filter,
-            on_change: Box::new(on_change),
+            on_change,
         });
+        ChangeListenerRegistration {
+            manager: Arc::downgrade(self),
+            id,
+        }
     }
 
     /// Start the change notification worker
@@ -185,6 +215,7 @@ impl ChangeListenerManager {
         self: Arc<Self>,
         mut change_rx: mpsc::UnboundedReceiver<(DocumentId, Vec<ChangeNotification>)>,
     ) -> JoinHandle<Res<()>> {
+        let cancel_token = self.cancel_token.clone();
         tokio::spawn(
             async move {
                 // Group notifications by listener
@@ -192,7 +223,21 @@ impl ChangeListenerManager {
                     usize,
                     Vec<ChangeNotification>,
                 > = std::collections::HashMap::new();
-                while let Some((id, notifications)) = change_rx.recv().await {
+                loop {
+                    let msg = tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            break;
+                        }
+                        msg = change_rx.recv() => {
+                            msg
+                        }
+                    };
+
+                    let Some((id, notifications)) = msg else {
+                        break;
+                    };
+
                     listener_notifications.clear();
 
                     let listeners = self.listeners.read().await;
@@ -230,6 +275,23 @@ impl ChangeListenerManager {
             }
             .instrument(tracing::info_span!("change notif switchboard task")),
         )
+    }
+}
+
+pub struct ChangeListenerRegistration {
+    manager: std::sync::Weak<ChangeListenerManager>,
+    id: Uuid,
+}
+
+impl Drop for ChangeListenerRegistration {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            let id = self.id;
+            tokio::spawn(async move {
+                let mut listeners = manager.listeners.write().await;
+                listeners.retain(|l| l.id != id);
+            });
+        }
     }
 }
 

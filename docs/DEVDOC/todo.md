@@ -2,8 +2,9 @@
 
 ## Stack
 
+- [ ] Vaults
 - [ ] Plugins
-  - [ ] Manifest
+  - [x] Manifest
   - [ ] Commands
   - [ ] Handlers
   - [ ] Processors

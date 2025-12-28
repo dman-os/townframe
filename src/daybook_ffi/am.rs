@@ -1,7 +1,5 @@
 use crate::interlude::*;
 
-mod version_updates;
-
 /// Initialize the automerge document based on globals, and start connector lazily.
 pub async fn init_from_globals(cx: &Ctx) -> Res<()> {
     // Try to recover existing doc_id from local globals kv
@@ -30,7 +28,7 @@ pub async fn init_from_globals(cx: &Ctx) -> Res<()> {
     for (handle, latest_fn) in [
         (
             handle_app,
-            version_updates::app::version_latest as fn() -> Res<Vec<u8>>,
+            daybook_core::app::version_updates::version_latest as fn() -> Res<Vec<u8>>,
         ),
         (
             handle_drarwer,

@@ -25,55 +25,56 @@ pub mod wit;
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
 
-use crate::interlude::*;
-
 #[cfg(feature = "uniffi")]
-uniffi::custom_type!(OffsetDateTime, i64, {
-    remote,
-    lower: |dt| dt.unix_timestamp(),
-    try_lift: |int| OffsetDateTime::from_unix_timestamp(int)
-        .map_err(|err| uniffi::deps::anyhow::anyhow!(err))
-});
+custom_type_set!();
 
-#[cfg(feature = "uniffi")]
-uniffi::custom_type!(PathBuf, String, {
-    remote,
-    lower: |path| path.into_os_string().into_string().expect(ERROR_UTF8),
-    try_lift: |str| Ok(PathBuf::from(str)),
-});
+#[macro_export]
+macro_rules! custom_type_set {
+    () => {
+        use crate::interlude::*;
 
-#[cfg(feature = "uniffi")]
-type Json = serde_json::Value;
+        uniffi::custom_type!(OffsetDateTime, i64, {
+            remote,
+            lower: |dt| dt.unix_timestamp(),
+            try_lift: |int| OffsetDateTime::from_unix_timestamp(int)
+                .map_err(|err| uniffi::deps::anyhow::anyhow!(err))
+        });
 
-#[cfg(feature = "uniffi")]
-uniffi::custom_type!(Json, String, {
-    remote,
-    lower: |json| serde_json::to_string(&json).expect(ERROR_JSON),
-    try_lift: |str| serde_json::from_str(&str)
-        .map_err(|err| uniffi::deps::anyhow::anyhow!(err)),
-});
+        uniffi::custom_type!(PathBuf, String, {
+            remote,
+            lower: |path| path.into_os_string().into_string().expect(ERROR_UTF8),
+            try_lift: |str| Ok(PathBuf::from(str)),
+        });
 
-#[cfg(feature = "uniffi")]
-uniffi::custom_type!(Uuid, Vec<u8>, {
-    remote,
-    lower: |uuid| uuid.as_bytes().to_vec(),
-    try_lift: |bytes: Vec<u8>| {
-        Uuid::from_slice(&bytes)
-            .map_err(|err| uniffi::deps::anyhow::anyhow!(err))
-    }
-});
+        type Json = serde_json::Value;
 
-#[cfg(feature = "automerge")]
-use crate::doc::ChangeHashSet;
-#[cfg(feature = "uniffi")]
-uniffi::custom_type!(ChangeHashSet, Vec<String>, {
-    remote,
-    lower: |hash| utils_rs::am::serialize_commit_heads(&hash.0),
-    try_lift: |strings: Vec<String>| {
-        Ok(ChangeHashSet(utils_rs::am::parse_commit_heads(&strings).to_anyhow()?))
-    }
-});
+        uniffi::custom_type!(Json, String, {
+            remote,
+            lower: |json| serde_json::to_string(&json).expect(ERROR_JSON),
+            try_lift: |str| serde_json::from_str(&str)
+                .map_err(|err| uniffi::deps::anyhow::anyhow!(err)),
+        });
 
+        uniffi::custom_type!(Uuid, Vec<u8>, {
+            remote,
+            lower: |uuid| uuid.as_bytes().to_vec(),
+            try_lift: |bytes: Vec<u8>| {
+                Uuid::from_slice(&bytes)
+                    .map_err(|err| uniffi::deps::anyhow::anyhow!(err))
+            }
+        });
+
+        use $crate::doc::ChangeHashSet;
+        uniffi::custom_type!(ChangeHashSet, Vec<String>, {
+            remote,
+            lower: |hash| utils_rs::am::serialize_commit_heads(&hash.0),
+            try_lift: |strings: Vec<String>| {
+                Ok(ChangeHashSet(utils_rs::am::parse_commit_heads(&strings).to_anyhow()?))
+            }
+        });
+
+    };
+}
 #[macro_export]
 macro_rules! define_enum_and_tag {
     (@item
@@ -87,6 +88,7 @@ macro_rules! define_enum_and_tag {
     };
     (@item
         $(#[$attr:meta])*
+        // NOTE: parens around alias to allow $body::tt to capture the whole path
         type $key:ident ($alias:path)
     ) => {
         $(#[$attr])*
@@ -109,6 +111,8 @@ macro_rules! define_enum_and_tag {
         $ty_name:ident {
             $(
                 $(#[$attr_item:meta])*
+                // NOTE: $kind comes after $key to avoid ambiguity with tt capturin
+                // the $attr_item for some reason
                 $key:ident $kind:tt $body:tt
             ),*
             $(,)?
@@ -167,7 +171,7 @@ macro_rules! define_enum_and_tag {
                             concat!(
                                 $reverse_domain_name,
                                 pastey::paste! {
-                                    stringify!($key:snake)
+                                    stringify!([<$key:snake>])
                                 }
                             ),
                     )*
@@ -179,7 +183,7 @@ macro_rules! define_enum_and_tag {
                     if s.eq_ignore_ascii_case(concat!(
                         $reverse_domain_name,
                         pastey::paste! {
-                            stringify!($key:snake)
+                            stringify!([<$key:snake>])
                         }
                     )) {
                         return Some(Self::$key);
@@ -192,6 +196,12 @@ macro_rules! define_enum_and_tag {
         impl std::fmt::Display for $tag_ty_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}", self.as_str())
+            }
+        }
+
+        impl Into<String> for $tag_ty_name {
+            fn into(self) -> String {
+                self.as_str().into()
             }
         }
 
@@ -228,8 +238,6 @@ macro_rules! define_enum_and_tag {
 
                 deserializer.deserialize_str(Visitor)
             }
-        }
-        pastey::paste! {
         }
     };
 }

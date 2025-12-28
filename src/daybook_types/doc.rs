@@ -147,6 +147,35 @@ pub struct Doc {
     pub props: HashMap<DocPropKey, DocProp>,
 }
 
+impl Doc {
+    /// Calculate the difference between two documents and return a patch.
+    /// The patch can be applied to `old` to get `new`.
+    pub fn diff(old: &Doc, new: &Doc) -> DocPatch {
+        let mut props_set = HashMap::new();
+        let mut props_remove = Vec::new();
+
+        // Find added or changed properties
+        for (key, val) in &new.props {
+            if old.props.get(key) != Some(val) {
+                props_set.insert(key.clone(), val.clone());
+            }
+        }
+
+        // Find removed properties
+        for key in old.props.keys() {
+            if !new.props.contains_key(key) {
+                props_remove.push(key.clone());
+            }
+        }
+
+        DocPatch {
+            id: new.id.clone(),
+            props_set,
+            props_remove,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DocPatch {
@@ -409,6 +438,46 @@ mod tests {
     use super::*;
     use automerge::transaction::Transactable;
     use autosurgeon::{hydrate_prop, reconcile_prop};
+
+    #[test]
+    fn test_doc_diff() {
+        let mut old = Doc {
+            id: "doc1".into(),
+            created_at: time::OffsetDateTime::now_utc(),
+            updated_at: time::OffsetDateTime::now_utc(),
+            props: HashMap::new(),
+        };
+        let tag_title = DocPropTag::WellKnown(WellKnownPropTag::TitleGeneric);
+        let tag_label = DocPropTag::WellKnown(WellKnownPropTag::LabelGeneric);
+        
+        old.props.insert(tag_title.clone().into(), WellKnownProp::TitleGeneric("Old Title".into()).into());
+        old.props.insert(tag_label.clone().into(), WellKnownProp::LabelGeneric("Label".into()).into());
+
+        let mut new = old.clone();
+        // Update Title
+        new.props.insert(tag_title.clone().into(), WellKnownProp::TitleGeneric("New Title".into()).into());
+        // Remove Label
+        new.props.remove(&tag_label.clone().into());
+        // Add Path
+        let tag_path = DocPropTag::WellKnown(WellKnownPropTag::PathGeneric);
+        new.props.insert(tag_path.clone().into(), WellKnownProp::PathGeneric(std::path::PathBuf::from("/tmp")).into());
+
+        let patch = Doc::diff(&old, &new);
+
+        assert_eq!(patch.id, "doc1");
+        // Check props_set
+        assert_eq!(patch.props_set.len(), 2);
+        assert!(patch.props_set.contains_key(&tag_title.into()));
+        assert!(patch.props_set.contains_key(&tag_path.into()));
+
+        // Check props_remove
+        assert_eq!(patch.props_remove.len(), 1);
+        assert_eq!(patch.props_remove[0], tag_label.into());
+        
+        // Test no changes
+        let patch_none = Doc::diff(&new, &new);
+        assert!(patch_none.is_empty());
+    }
 
     #[test]
     fn test_change_hash_set_hydrate_seq() {

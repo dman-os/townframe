@@ -4,6 +4,7 @@ mod interlude {
 
 use crate::interlude::*;
 
+#[allow(unused)]
 pub mod gen;
 pub mod kvstore;
 pub mod log;

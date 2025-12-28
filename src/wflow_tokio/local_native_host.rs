@@ -10,9 +10,9 @@ impl service::WflowServiceHost for LocalNativeHost {
 
     async fn run(
         &self,
-        job_id: Arc<str>,
-        journal: state::JobState,
-        args: &Self::ExtraArgs,
+        _job_id: Arc<str>,
+        _journal: state::JobState,
+        _args: &Self::ExtraArgs,
     ) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
         todo!()
     }

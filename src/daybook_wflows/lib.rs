@@ -51,7 +51,7 @@ struct Component;
 impl wit::exports::townframe::wflow::bundle::Guest for Component {
     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
         wflow_sdk::route_wflows!(args, {
-            "pseudo-labeler" => |cx, _args: serde_json::Value| pseudo_labeler(cx),
+            "pseudo-label" => |cx, _args: serde_json::Value| pseudo_labeler(cx),
         })
     }
 }

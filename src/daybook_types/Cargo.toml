@@ -30,7 +30,6 @@ utils_rs = { workspace = true, default-features = false }
 thiserror.workspace = true
 displaydoc.workspace = true
 
-
 # time (needed for root Doc type)
 time = { workspace = true, features = ["serde"] }
 
@@ -46,4 +45,4 @@ uuid = { workspace = true, optional = true }
 wit-bindgen = { workspace = true, optional = true }
 
 pastey.workspace = true
-addr = "0.15.6"
+addr.workspace = true

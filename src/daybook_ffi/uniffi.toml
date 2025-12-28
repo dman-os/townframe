@@ -5,7 +5,7 @@ package_name = "org.example.daybook.uniffi"
 # Name of the type in the Kotlin code
 type_name = "Instant"
 # Classes that need to be imported
-imports = [ "kotlin.time.Instant" ]
+imports = ["kotlin.time.Instant"]
 # Expression to convert the builtin type the custom type.  In this example, `{}` will be replaced with the int value.
 lift = "Instant.fromEpochSeconds({}, 0)"
 # Expression to convert the custom type to the builtin type.  In this example, `{}` will be replaced with the URL value.
@@ -13,6 +13,18 @@ lower = "{}.epochSeconds"
 
 [bindings.kotlin.custom_types.Uuid]
 type_name = "Uuid"
-imports = [ "kotlin.uuid.Uuid" ]
+imports = ["kotlin.uuid.Uuid"]
 lift = "Uuid.fromByteArray({})"
 lower = "{}.toByteArray()"
+
+# [bindings.kotlin.custom_types.PathBuf]
+# type_name = "String"
+# imports = []
+# lift = "{}"
+# lower = "{}"
+
+# [bindings.kotlin.custom_types.Json]
+# type_name = "String"
+# imports = []
+# lift = "{}"
+# lower = "{}"

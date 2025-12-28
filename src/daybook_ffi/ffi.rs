@@ -2,21 +2,7 @@ use tokio::sync::oneshot;
 
 use crate::interlude::*;
 
-uniffi::custom_type!(OffsetDateTime, i64, {
-    remote,
-    lower: |dt| dt.unix_timestamp(),
-    try_lift: |int| OffsetDateTime::from_unix_timestamp(int)
-        .map_err(|err| uniffi::deps::anyhow::anyhow!(err))
-});
-
-uniffi::custom_type!(Uuid, Vec<u8>, {
-    remote,
-    lower: |uuid| uuid.as_bytes().to_vec(),
-    try_lift: |bytes: Vec<u8>| {
-        uuid::Uuid::from_slice(&bytes)
-            .map_err(|err| uniffi::deps::anyhow::anyhow!(err))
-    }
-});
+daybook_types::custom_type_set!();
 
 #[derive(Debug, thiserror::Error, uniffi::Object)]
 #[error(transparent)]
@@ -70,10 +56,6 @@ impl FfiCtx {
             .wrap_err("error initializing main Ctx")
             .inspect_err(|err| tracing::error!(?err))?;
         Ok(Arc::new(Self { cx, rt }))
-    }
-
-    pub fn blobs(self: Arc<Self>) -> Arc<crate::blobs::BlobsRepoFfi> {
-        crate::blobs::BlobsRepoFfi::new(self)
     }
 }
 

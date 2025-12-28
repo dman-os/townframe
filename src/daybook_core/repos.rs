@@ -1,9 +1,11 @@
 use crate::interlude::*;
+use tokio_util::sync::CancellationToken;
 
 pub trait Repo {
     type Event: Send + Sync + 'static;
 
     fn registry(&self) -> &Arc<crate::repos::ListenersRegistry>;
+    fn cancel_token(&self) -> &CancellationToken;
 
     /// Add a listener to the repository.
     ///
@@ -22,6 +24,10 @@ pub trait Repo {
             registry: Arc::downgrade(self.registry()),
             id,
         }
+    }
+
+    fn stop(&self) {
+        self.cancel_token().cancel();
     }
 }
 

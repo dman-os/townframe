@@ -79,6 +79,7 @@ once_cell = "1"
 parking_lot = "0.12"
 bytes = "1"
 url = "2.5.7"
+addr = "0.15.6"
 # scopeguard = "1.2.0"
 
 # encoding

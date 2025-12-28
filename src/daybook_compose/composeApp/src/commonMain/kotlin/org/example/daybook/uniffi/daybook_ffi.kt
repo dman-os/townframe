@@ -46,16 +46,18 @@ import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeConfigEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeDrawerEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeListenerRegistration
-import org.example.daybook.uniffi.core.FfiConverterTypeMetaTableKeyConfig
 import org.example.daybook.uniffi.core.FfiConverterTypePanel
+import org.example.daybook.uniffi.core.FfiConverterTypePlugsEvent
+import org.example.daybook.uniffi.core.FfiConverterTypePropKeyDisplayHint
 import org.example.daybook.uniffi.core.FfiConverterTypeTab
 import org.example.daybook.uniffi.core.FfiConverterTypeTable
 import org.example.daybook.uniffi.core.FfiConverterTypeTablesEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeTablesPatches
 import org.example.daybook.uniffi.core.FfiConverterTypeWindow
 import org.example.daybook.uniffi.core.ListenerRegistration
-import org.example.daybook.uniffi.core.MetaTableKeyConfig
 import org.example.daybook.uniffi.core.Panel
+import org.example.daybook.uniffi.core.PlugsEvent
+import org.example.daybook.uniffi.core.PropKeyDisplayHint
 import org.example.daybook.uniffi.core.Tab
 import org.example.daybook.uniffi.core.Table
 import org.example.daybook.uniffi.core.TablesEvent
@@ -68,8 +70,9 @@ import org.example.daybook.uniffi.types.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferConfigEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDrawerEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferListenerRegistration
-import org.example.daybook.uniffi.core.RustBuffer as RustBufferMetaTableKeyConfig
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferPanel
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferPlugsEvent
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferPropKeyDisplayHint
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTab
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTable
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesEvent
@@ -706,6 +709,9 @@ internal interface UniffiCallbackInterfaceConfigEventListenerMethod0 : com.sun.j
 internal interface UniffiCallbackInterfaceDrawerEventListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`event`: RustBufferDrawerEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfacePlugsEventListenerMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferPlugsEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceTablesEventListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`event`: RustBufferTablesEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -741,6 +747,22 @@ internal open class UniffiVTableCallbackInterfaceDrawerEventListener(
     }
 
 }
+@Structure.FieldOrder("onPlugsEvent", "uniffiFree")
+internal open class UniffiVTableCallbackInterfacePlugsEventListener(
+    @JvmField internal var `onPlugsEvent`: UniffiCallbackInterfacePlugsEventListenerMethod0? = null,
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+) : Structure() {
+    class UniffiByValue(
+        `onPlugsEvent`: UniffiCallbackInterfacePlugsEventListenerMethod0? = null,
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    ): UniffiVTableCallbackInterfacePlugsEventListener(`onPlugsEvent`,`uniffiFree`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfacePlugsEventListener) {
+        `onPlugsEvent` = other.`onPlugsEvent`
+        `uniffiFree` = other.`uniffiFree`
+    }
+
+}
 @Structure.FieldOrder("onTablesEvent", "uniffiFree")
 internal open class UniffiVTableCallbackInterfaceTablesEventListener(
     @JvmField internal var `onTablesEvent`: UniffiCallbackInterfaceTablesEventListenerMethod0? = null,
@@ -757,6 +779,19 @@ internal open class UniffiVTableCallbackInterfaceTablesEventListener(
     }
 
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -939,9 +974,9 @@ fun uniffi_daybook_ffi_checksum_method_configeventlistener_on_config_event(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener(
 ): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_meta_table_key_config(
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_prop_display_hint(
 ): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_meta_table_key_configs(
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_meta_table_key_config(
 ): Short
@@ -957,11 +992,17 @@ fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_list(
 ): Short
+fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update(
+): Short
 fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_ffictx_blobs(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_ffierror_message(
+): Short
+fun uniffi_daybook_ffi_checksum_method_plugseventlistener_on_plugs_event(
+): Short
+fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event(
 ): Short
@@ -1009,6 +1050,8 @@ fun uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load(
 ): Short
 fun uniffi_daybook_ffi_checksum_constructor_ffictx_for_ffi(
 ): Short
+fun uniffi_daybook_ffi_checksum_constructor_plugsrepoffi_load(
+): Short
 fun uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load(
 ): Short
 fun ffi_daybook_ffi_uniffi_contract_version(
@@ -1051,6 +1094,7 @@ internal interface UniffiLib : Library {
             // we already did that with `IntegrityCheckingUniffiLib` above.
             uniffiCallbackInterfaceConfigEventListener.register(lib)
             uniffiCallbackInterfaceDrawerEventListener.register(lib)
+            uniffiCallbackInterfacePlugsEventListener.register(lib)
             uniffiCallbackInterfaceTablesEventListener.register(lib)
             org.example.daybook.uniffi.core.uniffiEnsureInitialized()
             org.example.daybook.uniffi.types.uniffiEnsureInitialized()
@@ -1087,15 +1131,15 @@ fun uniffi_daybook_ffi_fn_clone_configrepoffi(`ptr`: Pointer,uniffi_out_err: Uni
 ): Pointer
 fun uniffi_daybook_ffi_fn_free_configrepoffi(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-fun uniffi_daybook_ffi_fn_constructor_configrepoffi_load(`fcx`: Pointer,
+fun uniffi_daybook_ffi_fn_constructor_configrepoffi_load(`fcx`: Pointer,`plugRepo`: Pointer,
 ): Long
 fun uniffi_daybook_ffi_fn_method_configrepoffi_ffi_register_listener(`ptr`: Pointer,`listener`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
-fun uniffi_daybook_ffi_fn_method_configrepoffi_get_meta_table_key_config(`ptr`: Pointer,`key`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_configrepoffi_get_prop_display_hint(`ptr`: Pointer,`id`: RustBuffer.ByValue,
 ): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_get_meta_table_key_configs(`ptr`: Pointer,
+fun uniffi_daybook_ffi_fn_method_configrepoffi_list_display_hints(`ptr`: Pointer,
 ): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_set_meta_table_key_config(`ptr`: Pointer,`key`: RustBuffer.ByValue,`config`: RustBufferMetaTableKeyConfig.ByValue,
+fun uniffi_daybook_ffi_fn_method_configrepoffi_set_meta_table_key_config(`ptr`: Pointer,`key`: RustBuffer.ByValue,`config`: RustBufferPropKeyDisplayHint.ByValue,
 ): Long
 fun uniffi_daybook_ffi_fn_clone_drawereventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
@@ -1121,7 +1165,9 @@ fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get(`ptr`: Pointer,`id`: RustBuff
 ): Long
 fun uniffi_daybook_ffi_fn_method_drawerrepoffi_list(`ptr`: Pointer,
 ): Long
-fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update_batch(`ptr`: Pointer,`docs`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update(`ptr`: Pointer,`patch`: RustBufferDocPatch.ByValue,`heads`: RustBuffer.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update_batch(`ptr`: Pointer,`patches`: RustBuffer.ByValue,
 ): Long
 fun uniffi_daybook_ffi_fn_clone_ffictx(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
@@ -1137,6 +1183,22 @@ fun uniffi_daybook_ffi_fn_free_ffierror(`ptr`: Pointer,uniffi_out_err: UniffiRus
 ): Unit
 fun uniffi_daybook_ffi_fn_method_ffierror_message(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+fun uniffi_daybook_ffi_fn_clone_plugseventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Pointer
+fun uniffi_daybook_ffi_fn_free_plugseventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_daybook_ffi_fn_init_callback_vtable_plugseventlistener(`vtable`: UniffiVTableCallbackInterfacePlugsEventListener,
+): Unit
+fun uniffi_daybook_ffi_fn_method_plugseventlistener_on_plugs_event(`ptr`: Pointer,`event`: RustBufferPlugsEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_daybook_ffi_fn_clone_plugsrepoffi(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Pointer
+fun uniffi_daybook_ffi_fn_free_plugsrepoffi(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_daybook_ffi_fn_constructor_plugsrepoffi_load(`fcx`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_plugsrepoffi_ffi_register_listener(`ptr`: Pointer,`listener`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Pointer
 fun uniffi_daybook_ffi_fn_clone_tableseventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
 fun uniffi_daybook_ffi_fn_free_tableseventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -1325,13 +1387,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener() != 18344.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_meta_table_key_config() != 29114.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_prop_display_hint() != 58061.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_meta_table_key_configs() != 25744.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints() != 65522.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_meta_table_key_config() != 16890.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_meta_table_key_config() != 19238.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event() != 441.toShort()) {
@@ -1352,13 +1414,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_list() != 16795.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch() != 57093.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update() != 13505.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch() != 63518.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_ffictx_blobs() != 64625.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_ffierror_message() != 19212.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_plugseventlistener_on_plugs_event() != 59383.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener() != 36037.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event() != 42965.toShort()) {
@@ -1421,13 +1492,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_constructor_blobsrepoffi_load() != 24576.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_configrepoffi_load() != 55968.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_configrepoffi_load() != 48867.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load() != 61455.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_constructor_ffictx_for_ffi() != 65525.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_constructor_plugsrepoffi_load() != 20383.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load() != 29288.toShort()) {
@@ -2427,11 +2501,11 @@ public interface ConfigRepoFfiInterface {
     
     fun `ffiRegisterListener`(`listener`: ConfigEventListener): ListenerRegistration
     
-    suspend fun `getMetaTableKeyConfig`(`key`: kotlin.String): MetaTableKeyConfig?
+    suspend fun `getPropDisplayHint`(`id`: kotlin.String): PropKeyDisplayHint?
     
-    suspend fun `getMetaTableKeyConfigs`(): List<MetaTableKeyConfigEntry>
+    suspend fun `listDisplayHints`(): Map<kotlin.String, PropKeyDisplayHint>
     
-    suspend fun `setMetaTableKeyConfig`(`key`: kotlin.String, `config`: MetaTableKeyConfig)
+    suspend fun `setMetaTableKeyConfig`(`key`: kotlin.String, `config`: PropKeyDisplayHint)
     
     companion object
 }
@@ -2531,33 +2605,31 @@ open class ConfigRepoFfi: Disposable, AutoCloseable, ConfigRepoFfiInterface
     
 
     
-    @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getMetaTableKeyConfig`(`key`: kotlin.String) : MetaTableKeyConfig? {
+    override suspend fun `getPropDisplayHint`(`id`: kotlin.String) : PropKeyDisplayHint? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_meta_table_key_config(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_prop_display_hint(
                 thisPtr,
-                FfiConverterString.lower(`key`),
+                FfiConverterString.lower(`id`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterOptionalTypeMetaTableKeyConfig.lift(it) },
+        { FfiConverterOptionalTypePropKeyDisplayHint.lift(it) },
         // Error FFI converter
-        FfiException.ErrorHandler,
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
     
-    @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getMetaTableKeyConfigs`() : List<MetaTableKeyConfigEntry> {
+    override suspend fun `listDisplayHints`() : Map<kotlin.String, PropKeyDisplayHint> {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_get_meta_table_key_configs(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_list_display_hints(
                 thisPtr,
                 
             )
@@ -2566,21 +2638,21 @@ open class ConfigRepoFfi: Disposable, AutoCloseable, ConfigRepoFfiInterface
         { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterSequenceTypeMetaTableKeyConfigEntry.lift(it) },
+        { FfiConverterMapStringTypePropKeyDisplayHint.lift(it) },
         // Error FFI converter
-        FfiException.ErrorHandler,
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setMetaTableKeyConfig`(`key`: kotlin.String, `config`: MetaTableKeyConfig) {
+    override suspend fun `setMetaTableKeyConfig`(`key`: kotlin.String, `config`: PropKeyDisplayHint) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_meta_table_key_config(
                 thisPtr,
-                FfiConverterString.lower(`key`),FfiConverterTypeMetaTableKeyConfig.lower(`config`),
+                FfiConverterString.lower(`key`),FfiConverterTypePropKeyDisplayHint.lower(`config`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
@@ -2601,9 +2673,9 @@ open class ConfigRepoFfi: Disposable, AutoCloseable, ConfigRepoFfiInterface
         
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-     suspend fun `load`(`fcx`: FfiCtx) : ConfigRepoFfi {
+     suspend fun `load`(`fcx`: FfiCtx, `plugRepo`: PlugsRepoFfi) : ConfigRepoFfi {
         return uniffiRustCallAsync(
-        UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_constructor_configrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_constructor_configrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypePlugsRepoFfi.lower(`plugRepo`),),
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_pointer(future, callback, continuation) },
         { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_pointer(future, continuation) },
         { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_pointer(future) },
@@ -3028,7 +3100,9 @@ public interface DrawerRepoFfiInterface {
     
     suspend fun `list`(): List<kotlin.String>
     
-    suspend fun `updateBatch`(`docs`: List<DocPatch>)
+    suspend fun `update`(`patch`: DocPatch, `heads`: ChangeHashSet)
+    
+    suspend fun `updateBatch`(`patches`: List<PatchAndHeads>)
     
     companion object
 }
@@ -3213,12 +3287,34 @@ open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `updateBatch`(`docs`: List<DocPatch>) {
+    override suspend fun `update`(`patch`: DocPatch, `heads`: ChangeHashSet) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_update(
+                thisPtr,
+                FfiConverterTypeDocPatch.lower(`patch`),FfiConverterTypeChangeHashSet.lower(`heads`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `updateBatch`(`patches`: List<PatchAndHeads>) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_update_batch(
                 thisPtr,
-                FfiConverterSequenceTypeDocPatch.lower(`docs`),
+                FfiConverterSequenceTypePatchAndHeads.lower(`patches`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
@@ -3778,6 +3874,529 @@ public object FfiConverterTypeFfiError: FfiConverter<FfiException, Pointer> {
     override fun allocationSize(value: FfiException) = 8UL
 
     override fun write(value: FfiException, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(Pointer.nativeValue(lower(value)))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a Pointer/Arc<T>
+// to the live Rust struct on the other side of the FFI.
+//
+// Each instance implements core operations for working with the Rust `Arc<T>` and the
+// Kotlin Pointer to work with the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque pointer to the underlying Rust struct.
+//     Method calls need to read this pointer from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its pointer should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the pointer, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
+//      before it can pass the pointer over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+public interface PlugsEventListener {
+    
+    fun `onPlugsEvent`(`event`: PlugsEvent)
+    
+    companion object
+}
+
+open class PlugsEventListenerImpl: Disposable, AutoCloseable, PlugsEventListener
+{
+
+    constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val pointer: Pointer?) : Runnable {
+        override fun run() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_free_plugseventlistener(ptr, status)
+                }
+            }
+        }
+    }
+
+    fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall() { status ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_clone_plugseventlistener(pointer!!, status)
+        }
+    }
+
+    override fun `onPlugsEvent`(`event`: PlugsEvent)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_plugseventlistener_on_plugs_event(
+        it, FfiConverterTypePlugsEvent.lower(`event`),_status)
+}
+    }
+    
+    
+
+    
+
+    
+    
+    companion object
+    
+}
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfacePlugsEventListener {
+    internal object `onPlugsEvent`: UniffiCallbackInterfacePlugsEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferPlugsEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypePlugsEventListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onPlugsEvent`(
+                    FfiConverterTypePlugsEvent.lift(`event`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypePlugsEventListener.handleMap.remove(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfacePlugsEventListener.UniffiByValue(
+        `onPlugsEvent`,
+        uniffiFree,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_daybook_ffi_fn_init_callback_vtable_plugseventlistener(vtable)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePlugsEventListener: FfiConverter<PlugsEventListener, Pointer> {
+    internal val handleMap = UniffiHandleMap<PlugsEventListener>()
+
+    override fun lower(value: PlugsEventListener): Pointer {
+        return Pointer(handleMap.insert(value))
+    }
+
+    override fun lift(value: Pointer): PlugsEventListener {
+        return PlugsEventListenerImpl(value)
+    }
+
+    override fun read(buf: ByteBuffer): PlugsEventListener {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(Pointer(buf.getLong()))
+    }
+
+    override fun allocationSize(value: PlugsEventListener) = 8UL
+
+    override fun write(value: PlugsEventListener, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(Pointer.nativeValue(lower(value)))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a Pointer/Arc<T>
+// to the live Rust struct on the other side of the FFI.
+//
+// Each instance implements core operations for working with the Rust `Arc<T>` and the
+// Kotlin Pointer to work with the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque pointer to the underlying Rust struct.
+//     Method calls need to read this pointer from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its pointer should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the pointer, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
+//      before it can pass the pointer over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+public interface PlugsRepoFfiInterface {
+    
+    fun `ffiRegisterListener`(`listener`: PlugsEventListener): ListenerRegistration
+    
+    companion object
+}
+
+open class PlugsRepoFfi: Disposable, AutoCloseable, PlugsRepoFfiInterface
+{
+
+    constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val pointer: Pointer?) : Runnable {
+        override fun run() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_free_plugsrepoffi(ptr, status)
+                }
+            }
+        }
+    }
+
+    fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall() { status ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_clone_plugsrepoffi(pointer!!, status)
+        }
+    }
+
+    override fun `ffiRegisterListener`(`listener`: PlugsEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_plugsrepoffi_ffi_register_listener(
+        it, FfiConverterTypePlugsEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx) : PlugsRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_constructor_plugsrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_pointer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_pointer(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_pointer(future) },
+        // lift function
+        { FfiConverterTypePlugsRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePlugsRepoFfi: FfiConverter<PlugsRepoFfi, Pointer> {
+
+    override fun lower(value: PlugsRepoFfi): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): PlugsRepoFfi {
+        return PlugsRepoFfi(value)
+    }
+
+    override fun read(buf: ByteBuffer): PlugsRepoFfi {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(Pointer(buf.getLong()))
+    }
+
+    override fun allocationSize(value: PlugsRepoFfi) = 8UL
+
+    override fun write(value: PlugsRepoFfi, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(Pointer.nativeValue(lower(value)))
@@ -4700,9 +5319,9 @@ public object FfiConverterTypeTablesRepoFfi: FfiConverter<TablesRepoFfi, Pointer
 
 
 
-data class MetaTableKeyConfigEntry (
-    var `key`: kotlin.String, 
-    var `config`: MetaTableKeyConfig
+data class PatchAndHeads (
+    var `heads`: ChangeHashSet, 
+    var `patch`: DocPatch
 ) {
     
     companion object
@@ -4711,54 +5330,54 @@ data class MetaTableKeyConfigEntry (
 /**
  * @suppress
  */
-public object FfiConverterTypeMetaTableKeyConfigEntry: FfiConverterRustBuffer<MetaTableKeyConfigEntry> {
-    override fun read(buf: ByteBuffer): MetaTableKeyConfigEntry {
-        return MetaTableKeyConfigEntry(
-            FfiConverterString.read(buf),
-            FfiConverterTypeMetaTableKeyConfig.read(buf),
+public object FfiConverterTypePatchAndHeads: FfiConverterRustBuffer<PatchAndHeads> {
+    override fun read(buf: ByteBuffer): PatchAndHeads {
+        return PatchAndHeads(
+            FfiConverterTypeChangeHashSet.read(buf),
+            FfiConverterTypeDocPatch.read(buf),
         )
     }
 
-    override fun allocationSize(value: MetaTableKeyConfigEntry) = (
-            FfiConverterString.allocationSize(value.`key`) +
-            FfiConverterTypeMetaTableKeyConfig.allocationSize(value.`config`)
+    override fun allocationSize(value: PatchAndHeads) = (
+            FfiConverterTypeChangeHashSet.allocationSize(value.`heads`) +
+            FfiConverterTypeDocPatch.allocationSize(value.`patch`)
     )
 
-    override fun write(value: MetaTableKeyConfigEntry, buf: ByteBuffer) {
-            FfiConverterString.write(value.`key`, buf)
-            FfiConverterTypeMetaTableKeyConfig.write(value.`config`, buf)
+    override fun write(value: PatchAndHeads, buf: ByteBuffer) {
+            FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+            FfiConverterTypeDocPatch.write(value.`patch`, buf)
     }
 }
 
 
 
+data class PropKeyDisplayHintEntry (
+    var `key`: kotlin.String, 
+    var `config`: PropKeyDisplayHint
+) {
+    
+    companion object
+}
 
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeMetaTableKeyConfig: FfiConverterRustBuffer<MetaTableKeyConfig?> {
-    override fun read(buf: ByteBuffer): MetaTableKeyConfig? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeMetaTableKeyConfig.read(buf)
+public object FfiConverterTypePropKeyDisplayHintEntry: FfiConverterRustBuffer<PropKeyDisplayHintEntry> {
+    override fun read(buf: ByteBuffer): PropKeyDisplayHintEntry {
+        return PropKeyDisplayHintEntry(
+            FfiConverterString.read(buf),
+            FfiConverterTypePropKeyDisplayHint.read(buf),
+        )
     }
 
-    override fun allocationSize(value: MetaTableKeyConfig?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeMetaTableKeyConfig.allocationSize(value)
-        }
-    }
+    override fun allocationSize(value: PropKeyDisplayHintEntry) = (
+            FfiConverterString.allocationSize(value.`key`) +
+            FfiConverterTypePropKeyDisplayHint.allocationSize(value.`config`)
+    )
 
-    override fun write(value: MetaTableKeyConfig?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeMetaTableKeyConfig.write(value, buf)
-        }
+    override fun write(value: PropKeyDisplayHintEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`key`, buf)
+            FfiConverterTypePropKeyDisplayHint.write(value.`config`, buf)
     }
 }
 
@@ -4790,6 +5409,38 @@ public object FfiConverterOptionalTypePanel: FfiConverterRustBuffer<Panel?> {
         } else {
             buf.put(1)
             FfiConverterTypePanel.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypePropKeyDisplayHint: FfiConverterRustBuffer<PropKeyDisplayHint?> {
+    override fun read(buf: ByteBuffer): PropKeyDisplayHint? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypePropKeyDisplayHint.read(buf)
+    }
+
+    override fun allocationSize(value: PropKeyDisplayHint?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypePropKeyDisplayHint.allocationSize(value)
+        }
+    }
+
+    override fun write(value: PropKeyDisplayHint?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypePropKeyDisplayHint.write(value, buf)
         }
     }
 }
@@ -5068,24 +5719,24 @@ public object FfiConverterSequenceTypeWindow: FfiConverterRustBuffer<List<Window
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeMetaTableKeyConfigEntry: FfiConverterRustBuffer<List<MetaTableKeyConfigEntry>> {
-    override fun read(buf: ByteBuffer): List<MetaTableKeyConfigEntry> {
+public object FfiConverterSequenceTypePatchAndHeads: FfiConverterRustBuffer<List<PatchAndHeads>> {
+    override fun read(buf: ByteBuffer): List<PatchAndHeads> {
         val len = buf.getInt()
-        return List<MetaTableKeyConfigEntry>(len) {
-            FfiConverterTypeMetaTableKeyConfigEntry.read(buf)
+        return List<PatchAndHeads>(len) {
+            FfiConverterTypePatchAndHeads.read(buf)
         }
     }
 
-    override fun allocationSize(value: List<MetaTableKeyConfigEntry>): ULong {
+    override fun allocationSize(value: List<PatchAndHeads>): ULong {
         val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeMetaTableKeyConfigEntry.allocationSize(it) }.sum()
+        val sizeForItems = value.map { FfiConverterTypePatchAndHeads.allocationSize(it) }.sum()
         return sizeForLength + sizeForItems
     }
 
-    override fun write(value: List<MetaTableKeyConfigEntry>, buf: ByteBuffer) {
+    override fun write(value: List<PatchAndHeads>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
-            FfiConverterTypeMetaTableKeyConfigEntry.write(it, buf)
+            FfiConverterTypePatchAndHeads.write(it, buf)
         }
     }
 }
@@ -5096,27 +5747,58 @@ public object FfiConverterSequenceTypeMetaTableKeyConfigEntry: FfiConverterRustB
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeDocPatch: FfiConverterRustBuffer<List<DocPatch>> {
-    override fun read(buf: ByteBuffer): List<DocPatch> {
+public object FfiConverterMapStringTypePropKeyDisplayHint: FfiConverterRustBuffer<Map<kotlin.String, PropKeyDisplayHint>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, PropKeyDisplayHint> {
         val len = buf.getInt()
-        return List<DocPatch>(len) {
-            FfiConverterTypeDocPatch.read(buf)
+        return buildMap<kotlin.String, PropKeyDisplayHint>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterTypePropKeyDisplayHint.read(buf)
+                this[k] = v
+            }
         }
     }
 
-    override fun allocationSize(value: List<DocPatch>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeDocPatch.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
+    override fun allocationSize(value: Map<kotlin.String, PropKeyDisplayHint>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterTypePropKeyDisplayHint.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
     }
 
-    override fun write(value: List<DocPatch>, buf: ByteBuffer) {
+    override fun write(value: Map<kotlin.String, PropKeyDisplayHint>, buf: ByteBuffer) {
         buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeDocPatch.write(it, buf)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterTypePropKeyDisplayHint.write(v, buf)
         }
     }
 }
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias ChangeHashSet = List<kotlin.String>
+public typealias FfiConverterTypeChangeHashSet = FfiConverterSequenceString
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias Json = kotlin.String
+public typealias FfiConverterTypeJson = FfiConverterString
 
 
 
@@ -5162,6 +5844,16 @@ public object FfiConverterTypeOffsetDateTime: FfiConverter<OffsetDateTime, Long>
 
 
 
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias PathBuf = kotlin.String
+public typealias FfiConverterTypePathBuf = FfiConverterString
+
+
+
 
 
 /**
@@ -5201,6 +5893,8 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+
+
 
 
 

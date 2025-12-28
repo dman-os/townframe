@@ -18,13 +18,10 @@ use crate::interlude::*;
 uniffi::setup_scaffolding!();
 
 mod am;
-pub mod blobs;
-mod config;
-pub use blobs::*;
-mod drawer;
 mod ffi;
 mod globals;
 mod macros;
+mod repos;
 mod sql;
 mod tables;
 
@@ -99,11 +96,10 @@ impl Config {
 }
 
 struct Ctx {
-    // config: Config,
+    config: Config,
     acx: utils_rs::am::AmCtx,
     // rt: tokio::runtime::Handle,
     sql: sql::SqlCtx,
-    blobs: daybook_core::blobs::BlobsRepo,
 
     doc_app: tokio::sync::OnceCell<::samod::DocHandle>,
     doc_drawer: tokio::sync::OnceCell<::samod::DocHandle>,
@@ -114,18 +110,16 @@ type SharedCtx = Arc<Ctx>;
 impl Ctx {
     async fn init(config: Config) -> Result<Arc<Self>, eyre::Report> {
         let sql = sql::SqlCtx::new(config.sql.clone()).await?;
-        let blobs = daybook_core::blobs::BlobsRepo::new(config.blobs_root.clone()).await?;
         let acx =
             utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
                 .await?;
         acx.spawn_ws_connector("ws://0.0.0.0:8090".into());
 
         let cx = Arc::new(Self {
-            // config,
+            config,
             acx,
             // rt: tokio::runtime::Handle::current(),
             sql,
-            blobs,
             doc_app: default(),
             doc_drawer: default(),
         });

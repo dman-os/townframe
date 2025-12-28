@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use tokio_util::sync::CancellationToken;
 
 /// Constants for sidebar layout weights
 mod sidebar_layout {
@@ -370,16 +371,19 @@ impl TablesStore {
 }
 
 pub struct TablesRepo {
-    acx: AmCtx,
     store: crate::stores::StoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
-    broker: Arc<utils_rs::am::changes::DocChangeBroker>,
+    cancel_token: CancellationToken,
+    _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
 }
 
 impl crate::repos::Repo for TablesRepo {
     type Event = TablesEvent;
     fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
         &self.registry
+    }
+    fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel_token
     }
 }
 
@@ -418,22 +422,28 @@ impl TablesRepo {
             Vec<utils_rs::am::changes::ChangeNotification>,
         >();
         // Register change listener to automatically notify repo listeners
-        TablesStore::register_change_listener(&acx, &broker, vec![], {
-            move |notifs| notif_tx.send(notifs).expect(ERROR_CHANNEL)
+        let ticket = TablesStore::register_change_listener(&acx, &broker, vec![], {
+            move |notifs| {
+                if let Err(err) = notif_tx.send(notifs) {
+                    warn!("failed to send change notifications: {err}");
+                }
+            }
         })
         .await?;
 
+        let cancel_token = CancellationToken::new();
         let repo = Self {
-            acx,
             store,
             registry: registry.clone(),
-            broker,
+            cancel_token: cancel_token.clone(),
+            _change_listener_tickets: vec![ticket],
         };
         let repo = Arc::new(repo);
 
         let _notif_worker = tokio::spawn({
             let repo = repo.clone();
-            async move { repo.handle_notifs(notif_rx).await }
+            let cancel_token = cancel_token.clone();
+            async move { repo.handle_notifs(notif_rx, cancel_token).await }
         });
 
         Ok(repo)
@@ -444,72 +454,97 @@ impl TablesRepo {
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
             Vec<utils_rs::am::changes::ChangeNotification>,
         >,
+        cancel_token: CancellationToken,
     ) -> Res<()> {
         // FIXME: this code doesn't seem right and has missing features
         let mut events = vec![];
-        while let Some(notifs) = notif_rx.recv().await {
-            events.clear();
-            for notif in notifs {
-                match &notif.patch.action {
-                    automerge::PatchAction::PutMap { key, .. } => {
-                        // Check if this is a specific item change
-                        if let Ok(uuid) = Uuid::parse_str(key) {
-                            // Determine which type of item changed based on path
-                            if notif.patch.path.len() >= 2 {
-                                match &notif.patch.path[1].1 {
-                                    automerge::Prop::Map(path_key) => match path_key.as_ref() {
-                                        "windows" => {
-                                            events.push(TablesEvent::WindowChanged { id: uuid })
-                                        }
-                                        "tables" => {
-                                            events.push(TablesEvent::TableChanged { id: uuid })
-                                        }
-                                        "tabs" => events.push(TablesEvent::TabChanged { id: uuid }),
-                                        "panels" => {
-                                            events.push(TablesEvent::PanelChanged { id: uuid })
-                                        }
-                                        _ => events.push(TablesEvent::ListChanged),
-                                    },
-                                    _ => events.push(TablesEvent::ListChanged),
-                                }
-                            } else {
-                                events.push(TablesEvent::ListChanged);
-                            }
-                        }
+        loop {
+            let notifs = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    while let Ok(notifs) = notif_rx.try_recv() {
+                        self.process_notifs(notifs, &mut events).await?;
                     }
-                    automerge::PatchAction::DeleteMap { key } => {
-                        // Handle deletions
-                        if let Ok(uuid) = Uuid::parse_str(key) {
-                            if notif.patch.path.len() >= 2 {
-                                match &notif.patch.path[1].1 {
-                                    automerge::Prop::Map(path_key) => match path_key.as_ref() {
-                                        "windows" => {
-                                            events.push(TablesEvent::WindowChanged { id: uuid })
-                                        }
-                                        "tables" => {
-                                            events.push(TablesEvent::TableChanged { id: uuid })
-                                        }
-                                        "tabs" => events.push(TablesEvent::TabChanged { id: uuid }),
-                                        "panels" => {
-                                            events.push(TablesEvent::PanelChanged { id: uuid })
-                                        }
-                                        _ => events.push(TablesEvent::ListChanged),
-                                    },
-                                    _ => events.push(TablesEvent::ListChanged),
-                                }
-                            } else {
-                                events.push(TablesEvent::ListChanged);
-                            }
-                        }
-                    }
-                    _ => {
-                        // For other operations, send ListChanged
+                    break;
+                }
+                msg = notif_rx.recv() => {
+                    match msg {
+                        Some(notifs) => notifs,
+                        None => break,
                     }
                 }
+            };
+            self.process_notifs(notifs, &mut events).await?;
+        }
+        Ok(())
+    }
+
+    async fn process_notifs(
+        &self,
+        notifs: Vec<utils_rs::am::changes::ChangeNotification>,
+        events: &mut Vec<TablesEvent>,
+    ) -> Res<()> {
+        events.clear();
+        for notif in notifs {
+            match &notif.patch.action {
+                automerge::PatchAction::PutMap { key, .. } => {
+                    // Check if this is a specific item change
+                    if let Ok(uuid) = Uuid::parse_str(key) {
+                        // Determine which type of item changed based on path
+                        if notif.patch.path.len() >= 2 {
+                            match &notif.patch.path[1].1 {
+                                automerge::Prop::Map(path_key) => match path_key.as_ref() {
+                                    "windows" => {
+                                        events.push(TablesEvent::WindowChanged { id: uuid })
+                                    }
+                                    "tables" => {
+                                        events.push(TablesEvent::TableChanged { id: uuid })
+                                    }
+                                    "tabs" => events.push(TablesEvent::TabChanged { id: uuid }),
+                                    "panels" => {
+                                        events.push(TablesEvent::PanelChanged { id: uuid })
+                                    }
+                                    _ => events.push(TablesEvent::ListChanged),
+                                },
+                                _ => events.push(TablesEvent::ListChanged),
+                            }
+                        } else {
+                            events.push(TablesEvent::ListChanged);
+                        }
+                    }
+                }
+                automerge::PatchAction::DeleteMap { key } => {
+                    // Handle deletions
+                    if let Ok(uuid) = Uuid::parse_str(key) {
+                        if notif.patch.path.len() >= 2 {
+                            match &notif.patch.path[1].1 {
+                                automerge::Prop::Map(path_key) => match path_key.as_ref() {
+                                    "windows" => {
+                                        events.push(TablesEvent::WindowChanged { id: uuid })
+                                    }
+                                    "tables" => {
+                                        events.push(TablesEvent::TableChanged { id: uuid })
+                                    }
+                                    "tabs" => events.push(TablesEvent::TabChanged { id: uuid }),
+                                    "panels" => {
+                                        events.push(TablesEvent::PanelChanged { id: uuid })
+                                    }
+                                    _ => events.push(TablesEvent::ListChanged),
+                                },
+                                _ => events.push(TablesEvent::ListChanged),
+                            }
+                        } else {
+                            events.push(TablesEvent::ListChanged);
+                        }
+                    }
+                }
+                _ => {
+                    // For other operations, send ListChanged
+                }
             }
-            for evt in events.drain(..) {
-                self.registry.notify(evt);
-            }
+        }
+        for evt in events.drain(..) {
+            self.registry.notify(evt);
         }
         Ok(())
     }
@@ -544,6 +579,9 @@ impl TablesRepo {
     }
 
     pub async fn set_window(&self, id: Uuid, val: Window) -> Res<Option<Window>> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
         self.store
             .mutate_sync(|store| {
                 let old_window = store.windows.get(&id).cloned();
@@ -589,6 +627,9 @@ impl TablesRepo {
     }
 
     pub async fn set_tab(&self, id: Uuid, val: Tab) -> Res<Option<Tab>> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
         let old = self
             .store
             .mutate_sync(|store| {
@@ -645,6 +686,9 @@ impl TablesRepo {
     }
 
     pub async fn set_table(&self, id: Uuid, val: Table) -> Res<Option<Table>> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
         let old = self
             .store
             .mutate_sync(|store| {
@@ -699,6 +743,9 @@ impl TablesRepo {
     }
 
     pub async fn list_tables(&self) -> Res<Vec<Table>> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
         let tables = self
             .store
             .mutate_sync(|store| {
@@ -722,6 +769,9 @@ impl TablesRepo {
     }
 
     pub async fn set_panel(&self, id: Uuid, val: Panel) -> Res<Option<Panel>> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
         let old = self
             .store
             .mutate_sync(|store| store.panels.insert(id, val))
@@ -753,6 +803,9 @@ impl TablesRepo {
     }
 
     pub async fn update_batch(&self, patches: TablesPatches) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
         // Move patches into the closure to avoid cloning non-cloneable patch types
         self.store
             .mutate_sync(move |store| {

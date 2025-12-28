@@ -5,6 +5,7 @@ mod interlude {
 
 use crate::interlude::*;
 
+mod config;
 mod context;
 // mod fuse;
 
@@ -22,83 +23,126 @@ fn main() -> Res<()> {
 async fn main_main() -> Res<()> {
     use clap::Parser;
     let args = Args::parse();
+
     match args.command {
-        Commands::Docs { id } => {
-            let ctx = context::init_context().await?;
+        Commands::Ls | Commands::Cat { .. } | Commands::Touch | Commands::Ed { .. } => {
+            let cli_config = config::CliConfig::source().await?;
+            let config = context::Config::new(cli_config)?;
+            let ctx = context::Ctx::init(config).await?;
             let drawer_doc_id = ctx.doc_drawer().document_id().clone();
             let repo =
                 daybook_core::drawer::DrawerRepo::load(ctx.acx.clone(), drawer_doc_id).await?;
 
-            if let Some(id) = id {
-                // Show details for a specific document
-                let doc = repo.get(&id).await?;
-                if let Some(doc) = doc {
-                    println!("{:#?}", doc);
-                } else {
-                    eyre::bail!("Document not found: {}", id);
+            match args.command {
+                Commands::Ls => {
+                    let doc_ids = repo.list().await;
+                    repo.store().query_sync(|store| {
+                        debug!("DEBUG: store keys: {:?}", store.map.keys().collect::<Vec<_>>());
+                    }).await;
+                    let mut docs = Vec::new();
+                    for doc_id in &doc_ids {
+                        if let Some(doc) = repo.get(doc_id).await? {
+                            docs.push((doc_id.clone(), doc));
+                        }
+                    }
+
+                    use comfy_table::presets::NOTHING;
+                    use comfy_table::Table;
+                    let mut table = Table::new();
+                    table.load_preset(NOTHING).set_header(vec!["ID", "Title"]);
+                    for (id, doc) in docs {
+                        let title = doc
+                            .props
+                            .get(&daybook_types::doc::DocPropKey::Tag(
+                                daybook_types::doc::WellKnownPropTag::TitleGeneric.into(),
+                            ))
+                            .and_then(|val| match val {
+                                daybook_types::doc::DocProp::WellKnown(
+                                    daybook_types::doc::WellKnownProp::TitleGeneric(str),
+                                ) => Some(str.clone()),
+                                _ => None,
+                             })
+                            .unwrap_or_else(|| "<no title>".to_string());
+                        table.add_row(vec![id, title]);
+                    }
+                    println!("{table}");
                 }
-            } else {
-                // List all documents
-                let doc_ids = repo.list().await;
-                let mut docs = Vec::new();
-                for doc_id in &doc_ids {
-                    if let Some(doc) = repo.get(doc_id).await? {
-                        docs.push((doc_id.clone(), doc));
+                Commands::Cat { id } => {
+                    let doc = repo.get(&id).await?;
+                    if let Some(doc) = doc {
+                        println!("{}", serde_json::to_string_pretty(&*doc)?);
+                    } else {
+                        eyre::bail!("Document not found: {id}");
                     }
                 }
-
-                // Display in table format using comfy-table (kubectl-style, no borders)
-                use comfy_table::presets::NOTHING;
-                use comfy_table::Table;
-                let mut table = Table::new();
-                table.load_preset(NOTHING).set_header(vec!["ID", "Title"]);
-                for (id, doc) in docs {
-                    let title = doc
-                        .props
-                        .get(&daybook_types::doc::DocPropKey::WellKnown(
-                            daybook_types::doc::WellKnownDocPropKeys::TitleGeneric,
-                        ))
-                        .and_then(|val| match val {
-                            daybook_types::doc::DocProp::TitleGeneric(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| "<no title>".to_string());
-                    table.add_row(vec![id, title]);
+                Commands::Touch => {
+                    let doc = daybook_types::doc::Doc {
+                        id: "".into(), // will be assigned by repo
+                        created_at: time::OffsetDateTime::now_utc(),
+                        updated_at: time::OffsetDateTime::now_utc(),
+                        props: {
+                            let mut p = HashMap::new();
+                            p.insert(
+                                daybook_types::doc::WellKnownPropTag::TitleGeneric.into(),
+                                daybook_types::doc::WellKnownProp::TitleGeneric("Untitled".into()).into(),
+                            );
+                            p
+                        },
+                    };
+                    let id = repo.add(doc).await?;
+                    println!("Created document: {id}");
                 }
-                println!("{table}");
+                Commands::Ed { id } => {
+                    let Some((doc, heads)) = repo.get_with_heads(&id).await? else {
+                        eyre::bail!("Document not found: {id}");
+                    };
+
+                    let content = serde_json::to_string_pretty(&*doc)?;
+                    
+                    // Create temporary file
+                    // TODO: replace with tempfile crate usage
+                    let tmp_dir = std::env::temp_dir();
+                    let tmp_path = tmp_dir.join(format!("daybook-edit-{}.json", id));
+                    std::fs::write(&tmp_path, &content)?;
+
+                    // Open editor
+                    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+                    let status = std::process::Command::new(editor)
+                        .arg(&tmp_path)
+                        .status()?;
+
+                    if !status.success() {
+                        eyre::bail!("Editor exited with failure");
+                    }
+
+                    // Read back and compare
+                    let new_content = std::fs::read_to_string(&tmp_path)?;
+                    let new_doc: daybook_types::doc::Doc = serde_json::from_str(&new_content)
+                        .wrap_err("Failed to parse modified document as JSON")?;
+
+                    let mut patch = daybook_types::doc::Doc::diff(&*doc, &new_doc);
+                    if patch.is_empty() {
+                        println!("No changes detected.");
+                    } else {
+                        patch.id = id.clone();
+                        repo.update_at_heads(patch, &heads).await?;
+                        println!("Updated document: {id}");
+                    }
+
+                    // Cleanup
+                    let _ = std::fs::remove_file(&tmp_path);
+                }
+                _ => unreachable!(),
             }
+            use daybook_core::repos::Repo;
+            repo.stop();
+            ctx.acx.stop().await?;
         }
         Commands::Completions { shell } => {
             use clap::CommandFactory;
             let mut cmd = Args::command();
             clap_complete::generate(shell, &mut cmd, "daybook", &mut std::io::stdout());
-        } // Commands::Fuse { path } => {
-          //     let ctx = context::init_context().await?;
-          //     let drawer_doc_id = ctx.doc_drawer().document_id().clone();
-          //     let repo =
-          //         daybook_core::drawer::DrawerRepo::load(ctx.acx.clone(), drawer_doc_id).await?;
-          //
-          //     let rt_handle = tokio::runtime::Handle::current();
-          //     let fs = fuse::DaybookAsyncFS::new(repo, rt_handle).await?;
-          //
-          //     let mountpoint = path.to_string_lossy().to_string();
-          //     let options = vec![
-          //         fuser::MountOption::FSName("daybook".to_string()),
-          //         fuser::MountOption::AutoUnmount,
-          //     ];
-          //
-          //     tracing::info!(?mountpoint, "Mounting FUSE filesystem");
-          //
-          //     // Run mount2 in its own thread to avoid blocking the Tokio runtime
-          //     // This allows block_on to work properly when FUSE operations need async access
-          //     std::thread::spawn(move || {
-          //         if let Err(e) = fuser::mount2(fs, &mountpoint, &options) {
-          //             tracing::error!(?e, "FUSE mount error");
-          //         }
-          //     })
-          //     .join()
-          //     .map_err(|_| eyre::eyre!("FUSE mount thread panicked"))?;
-          // }
+        }
     }
 
     Ok(())
@@ -124,19 +168,17 @@ struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
-    /// List documents or show details for a specific document
-    Docs {
-        /// Optional document ID to show details for
-        id: Option<String>,
-    },
+    /// List documents
+    Ls,
+    /// Show details for a specific document
+    Cat { id: String },
+    /// Create a new document
+    Touch,
+    /// Edit a document
+    Ed { id: String },
     /// Generate shell completions
     Completions {
         #[clap(value_enum)]
         shell: clap_complete::Shell,
     },
-    // /// Mount a FUSE filesystem showing all documents as JSON files
-    // Fuse {
-    //     /// Mount point path
-    //     path: PathBuf,
-    // },
 }

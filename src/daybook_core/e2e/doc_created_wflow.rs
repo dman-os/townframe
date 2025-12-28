@@ -53,7 +53,7 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
 
     assert!(
         has_pseudo_label,
-        "doc should have a PseudoLabel tag after pseudo-labeler workflow completes. Props: {:?}",
+        "doc should have a PseudoLabel tag after pseudo-label workflow completes. Props: {:?}",
         updated_doc.props
     );
 

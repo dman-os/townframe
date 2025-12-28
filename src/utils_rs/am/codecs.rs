@@ -1,254 +1,57 @@
 use super::*;
 use automerge::ObjId;
 
+use autosurgeon::{HydrateError, ReadDoc, Reconciler};
+
 /// A newtype wrapper around `serde_json::Value` that implements `Hydrate` and `Reconcile`
 /// to allow hydrating JSON values directly from Automerge documents.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AutosurgeonJson(pub serde_json::Value);
 
-impl autosurgeon::Hydrate for AutosurgeonJson {
-    fn hydrate_map<D: autosurgeon::ReadDoc>(
-        doc: &D,
-        obj: &automerge::ObjId,
-    ) -> Result<Self, autosurgeon::HydrateError> {
-        use automerge::Value;
-        let mut map = serde_json::Map::new();
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThroughJson<T>(pub T);
 
-        for item in doc.map_range(obj.clone(), ..) {
-            let key = item.key.to_string();
-            let prop = automerge::Prop::Map(key.clone());
-            match doc.get(obj, prop)? {
-                Some((Value::Object(inner_type), id)) => {
-                    let json_value = hydrate_value(doc, &id, inner_type)?;
-                    map.insert(key, json_value);
-                }
-                Some((Value::Scalar(s), _)) => {
-                    let json_value = scalar_to_json(s.as_ref());
-                    map.insert(key, json_value);
-                }
-                None => {}
-            }
-        }
-
-        Ok(AutosurgeonJson(serde_json::Value::Object(map)))
-    }
-
-    fn hydrate_seq<D: autosurgeon::ReadDoc>(
-        doc: &D,
-        obj: &automerge::ObjId,
-    ) -> Result<Self, autosurgeon::HydrateError> {
-        use automerge::Value;
-        let mut arr = Vec::new();
-
-        for i in 0..doc.length(obj) {
-            match doc.get(obj, i)? {
-                Some((Value::Object(inner_type), id)) => {
-                    arr.push(hydrate_value(doc, &id, inner_type)?);
-                }
-                Some((Value::Scalar(s), _)) => {
-                    arr.push(scalar_to_json(s.as_ref()));
-                }
-                None => {
-                    arr.push(serde_json::Value::Null);
-                }
-            }
-        }
-
-        Ok(AutosurgeonJson(serde_json::Value::Array(arr)))
-    }
-
-    fn hydrate_text<D: autosurgeon::ReadDoc>(
-        doc: &D,
-        obj: &automerge::ObjId,
-    ) -> Result<Self, autosurgeon::HydrateError> {
-        let text = doc.text(obj)?;
-        Ok(AutosurgeonJson(serde_json::Value::String(text)))
-    }
-
-    fn hydrate_scalar(
-        s: std::borrow::Cow<'_, automerge::ScalarValue>,
-    ) -> Result<Self, autosurgeon::HydrateError> {
-        use automerge::ScalarValue;
-        let json_value = match s.as_ref() {
-            ScalarValue::Null => serde_json::Value::Null,
-            ScalarValue::Boolean(b) => serde_json::Value::Bool(*b),
-            ScalarValue::Bytes(b) => {
-                // Encode bytes as base32 string
-                serde_json::Value::String(data_encoding::BASE32_NOPAD.encode(b))
-            }
-            ScalarValue::Counter(c) => {
-                let counter_val: i64 = c.clone().into();
-                serde_json::Value::Number(counter_val.into())
-            }
-            ScalarValue::F64(f) => serde_json::Value::Number(
-                serde_json::Number::from_f64(*f).unwrap_or(serde_json::Number::from(0)),
-            ),
-            ScalarValue::Int(i) => serde_json::Value::Number((*i).into()),
-            ScalarValue::Uint(u) => serde_json::Value::Number((*u).into()),
-            ScalarValue::Str(s) => serde_json::Value::String(s.to_string()),
-            ScalarValue::Timestamp(t) => serde_json::Value::Number((*t).into()),
-            ScalarValue::Unknown { .. } => serde_json::Value::Null,
-        };
-        Ok(AutosurgeonJson(json_value))
-    }
-
-    fn hydrate_none() -> Result<Self, autosurgeon::HydrateError> {
-        Ok(AutosurgeonJson(serde_json::Value::Null))
+impl<T> std::ops::Deref for ThroughJson<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
-/// Helper function to hydrate a value from an Automerge object
-fn hydrate_value<D: autosurgeon::ReadDoc>(
-    doc: &D,
-    obj: &automerge::ObjId,
-    obj_type: automerge::ObjType,
-) -> Result<serde_json::Value, autosurgeon::HydrateError> {
-    use automerge::{ObjType, Value};
-    match obj_type {
-        ObjType::Map | ObjType::Table => {
-            let mut map = serde_json::Map::new();
-            for item in doc.map_range(obj.clone(), ..) {
-                let key = item.key.to_string();
-                let prop = automerge::Prop::Map(key.clone());
-                match doc.get(obj, prop)? {
-                    Some((Value::Object(inner_type), id)) => {
-                        let json_value = hydrate_value(doc, &id, inner_type)?;
-                        map.insert(key, json_value);
-                    }
-                    Some((Value::Scalar(s), _)) => {
-                        let json_value = scalar_to_json(s.as_ref());
-                        map.insert(key, json_value);
-                    }
-                    None => {}
-                }
-            }
-            Ok(serde_json::Value::Object(map))
-        }
-        ObjType::List => {
-            let mut arr = Vec::new();
-            for i in 0..doc.length(obj) {
-                match doc.get(obj, i)? {
-                    Some((Value::Object(inner_type), id)) => {
-                        arr.push(hydrate_value(doc, &id, inner_type)?);
-                    }
-                    Some((Value::Scalar(s), _)) => {
-                        arr.push(scalar_to_json(s.as_ref()));
-                    }
-                    None => {
-                        arr.push(serde_json::Value::Null);
-                    }
-                }
-            }
-            Ok(serde_json::Value::Array(arr))
-        }
-        ObjType::Text => {
-            let text = doc.text(obj)?;
-            Ok(serde_json::Value::String(text))
-        }
+impl<T> std::ops::DerefMut for ThroughJson<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
-/// Helper function to convert a scalar value to JSON
-fn scalar_to_json(s: &automerge::ScalarValue) -> serde_json::Value {
-    use crate::codecs::sane_iso8601::FORMAT;
-    use automerge::ScalarValue;
-    match s {
-        ScalarValue::Null => serde_json::Value::Null,
-        ScalarValue::Boolean(b) => serde_json::Value::Bool(*b),
-        ScalarValue::Bytes(b) => {
-            // Encode bytes as base32 string
-            serde_json::Value::String(data_encoding::BASE32_NOPAD.encode(b))
-        }
-        ScalarValue::Counter(c) => {
-            let counter_val: i64 = c.clone().into();
-            serde_json::Value::Number(counter_val.into())
-        }
-        ScalarValue::F64(f) => serde_json::Value::Number(
-            serde_json::Number::from_f64(*f).unwrap_or(serde_json::Number::from(0)),
-        ),
-        ScalarValue::Int(i) => serde_json::Value::Number((*i).into()),
-        ScalarValue::Uint(u) => serde_json::Value::Number((*u).into()),
-        ScalarValue::Str(s) => serde_json::Value::String(s.to_string()),
-        ScalarValue::Timestamp(t) => {
-            // Convert timestamp to ISO 8601 string to match serde codec
-            // Note: This assumes timestamps stored as strings in automerge (via date codec)
-            // If we encounter a numeric timestamp, convert it
-            match OffsetDateTime::from_unix_timestamp(*t) {
-                Ok(dt) => dt
-                    .format(&FORMAT)
-                    .map(serde_json::Value::String)
-                    .unwrap_or_else(|_| serde_json::Value::Number((*t).into())),
-                Err(_) => serde_json::Value::Number((*t).into()),
-            }
-        }
-        ScalarValue::Unknown { .. } => serde_json::Value::Null,
+impl<T> From<T> for ThroughJson<T> {
+    fn from(value: T) -> Self {
+        Self(value)
     }
 }
 
-impl autosurgeon::Reconcile for AutosurgeonJson {
+impl<T> autosurgeon::Hydrate for ThroughJson<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    fn hydrate<D: ReadDoc>(
+        doc: &D,
+        obj: &automerge::ObjId,
+        prop: Prop<'_>,
+    ) -> Result<Self, HydrateError> {
+        let val = through_json::hydrate(doc, obj, prop)?;
+        Ok(Self(val))
+    }
+}
+
+impl<T> autosurgeon::Reconcile for ThroughJson<T>
+where
+    T: serde::Serialize,
+{
     type Key<'a> = ();
 
     fn reconcile<R: autosurgeon::Reconciler>(&self, reconciler: R) -> Result<(), R::Error> {
-        reconcile_json_value(&self.0, reconciler)
-    }
-}
-
-fn reconcile_json_value<R: autosurgeon::Reconciler>(
-    value: &serde_json::Value,
-    mut reconciler: R,
-) -> Result<(), R::Error> {
-    use autosurgeon::reconcile::{MapReconciler, SeqReconciler};
-    match value {
-        serde_json::Value::Null => reconciler.none(),
-        serde_json::Value::Bool(b) => reconciler.boolean(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                reconciler.i64(i)
-            } else if let Some(u) = n.as_u64() {
-                reconciler.u64(u)
-            } else if let Some(f) = n.as_f64() {
-                reconciler.f64(f)
-            } else {
-                reconciler.none()
-            }
-        }
-        serde_json::Value::String(s) => reconciler.str(s),
-        serde_json::Value::Array(arr) => {
-            let mut seq = reconciler.seq()?;
-            // Delete any extra items
-            let old_len = seq.len()?;
-            if old_len > arr.len() {
-                for i in (arr.len()..old_len).rev() {
-                    seq.delete(i)?;
-                }
-            }
-            // Set or insert items
-            for (idx, item) in arr.iter().enumerate() {
-                if idx < old_len {
-                    seq.set(idx, &AutosurgeonJson(item.clone()))?;
-                } else {
-                    seq.insert(idx, &AutosurgeonJson(item.clone()))?;
-                }
-            }
-            Ok(())
-        }
-        serde_json::Value::Object(map) => {
-            let mut map_reconciler = reconciler.map()?;
-            // Get existing keys and delete ones not in the new map
-            let old_keys: std::collections::HashSet<String> = map_reconciler
-                .entries()
-                .map(|(k, _)| k.to_string())
-                .collect();
-            let new_keys: std::collections::HashSet<String> = map.keys().cloned().collect();
-            for key in old_keys.difference(&new_keys) {
-                map_reconciler.delete(key)?;
-            }
-            // Put or update entries
-            for (key, value) in map {
-                map_reconciler.put(key, &AutosurgeonJson(value.clone()))?;
-            }
-            Ok(())
-        }
+        through_json::reconcile(&self.0, reconciler)
     }
 }
 
@@ -323,7 +126,6 @@ pub mod date {
 
 pub mod skip {
     use super::*;
-    use autosurgeon::{HydrateError, ReadDoc, Reconciler};
 
     pub fn reconcile<T: Default, R: Reconciler>(
         _value: &T,
@@ -341,9 +143,84 @@ pub mod skip {
     }
 }
 
-pub mod json {
+pub mod through_str {
     use super::*;
-    use autosurgeon::{HydrateError, ReadDoc};
+
+    use std::str::FromStr;
+
+    pub fn reconcile<T: AsRef<str>, R: Reconciler>(
+        value: &T,
+        mut reconciler: R,
+    ) -> Result<(), R::Error> {
+        reconciler.str(value)
+    }
+
+    pub fn hydrate<'a, D: ReadDoc, T: FromStr>(
+        doc: &D,
+        obj: &ObjId,
+        prop: autosurgeon::Prop<'a>,
+    ) -> Result<T, HydrateError> {
+        use automerge::{ScalarValue, Value};
+        let string = match doc.get(obj, &prop)? {
+            Some((Value::Scalar(s), _)) => {
+                match s.as_ref() {
+                    // If stored as a string (new format), use it directly
+                    ScalarValue::Str(s) => s.to_string(),
+                    // If stored as a timestamp (old format), convert to ISO 8601
+                    _ => {
+                        return Err(autosurgeon::HydrateError::unexpected(
+                            "a string",
+                            format!("unexpected scalar type: {:?}", s),
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(autosurgeon::HydrateError::unexpected(
+                    "a scalar value",
+                    "value is not a scalar".to_string(),
+                ));
+            }
+        };
+        match string.parse() {
+            Ok(val) => Ok(val),
+            Err(_err) => Err(autosurgeon::HydrateError::unexpected(
+                format!("a string repr of {}", std::any::type_name::<T>()),
+                format!("failure parsing string"),
+            )),
+        }
+    }
+}
+
+pub mod through_json {
+    use super::*;
+
+    pub fn reconcile<T: serde::Serialize, R: Reconciler>(
+        value: &T,
+        reconciler: R,
+    ) -> Result<(), R::Error> {
+        let value = serde_json::to_value(value).expect(ERROR_JSON);
+        super::json::reconcile_json_value(&value, reconciler)
+    }
+
+    pub fn hydrate<'a, D: ReadDoc, T: serde::de::DeserializeOwned>(
+        doc: &D,
+        obj: &ObjId,
+        prop: autosurgeon::Prop<'a>,
+    ) -> Result<T, HydrateError> {
+        let value = super::json::hydrate(doc, obj, prop)?;
+        match serde_json::from_value(value) {
+            Ok(value) => Ok(value),
+            Err(err) => Err(autosurgeon::HydrateError::unexpected(
+                format!("a json repr of {}", std::any::type_name::<T>()),
+                format!("failure parsing json: {err:?}"),
+            )),
+        }
+    }
+}
+
+mod json {
+    use super::*;
 
     /// Hydrate a serde_json::Value from an automerge object
     /// This creates a temporary document with the object at ROOT and uses AutoSerde
@@ -431,6 +308,252 @@ pub mod json {
             }
         }
         Ok(())
+    }
+
+    impl autosurgeon::Hydrate for AutosurgeonJson {
+        fn hydrate_map<D: autosurgeon::ReadDoc>(
+            doc: &D,
+            obj: &automerge::ObjId,
+        ) -> Result<Self, autosurgeon::HydrateError> {
+            use automerge::Value;
+            let mut map = serde_json::Map::new();
+
+            for item in doc.map_range(obj.clone(), ..) {
+                let key = item.key.to_string();
+                let prop = automerge::Prop::Map(key.clone());
+                match doc.get(obj, prop)? {
+                    Some((Value::Object(inner_type), id)) => {
+                        let json_value = hydrate_value(doc, &id, inner_type)?;
+                        map.insert(key, json_value);
+                    }
+                    Some((Value::Scalar(s), _)) => {
+                        let json_value = scalar_to_json(s.as_ref());
+                        map.insert(key, json_value);
+                    }
+                    None => {}
+                }
+            }
+
+            Ok(AutosurgeonJson(serde_json::Value::Object(map)))
+        }
+
+        fn hydrate_seq<D: autosurgeon::ReadDoc>(
+            doc: &D,
+            obj: &automerge::ObjId,
+        ) -> Result<Self, autosurgeon::HydrateError> {
+            use automerge::Value;
+            let mut arr = Vec::new();
+
+            for i in 0..doc.length(obj) {
+                match doc.get(obj, i)? {
+                    Some((Value::Object(inner_type), id)) => {
+                        arr.push(hydrate_value(doc, &id, inner_type)?);
+                    }
+                    Some((Value::Scalar(s), _)) => {
+                        arr.push(scalar_to_json(s.as_ref()));
+                    }
+                    None => {
+                        arr.push(serde_json::Value::Null);
+                    }
+                }
+            }
+
+            Ok(AutosurgeonJson(serde_json::Value::Array(arr)))
+        }
+
+        fn hydrate_text<D: autosurgeon::ReadDoc>(
+            doc: &D,
+            obj: &automerge::ObjId,
+        ) -> Result<Self, autosurgeon::HydrateError> {
+            let text = doc.text(obj)?;
+            Ok(AutosurgeonJson(serde_json::Value::String(text)))
+        }
+
+        fn hydrate_scalar(
+            s: std::borrow::Cow<'_, automerge::ScalarValue>,
+        ) -> Result<Self, autosurgeon::HydrateError> {
+            use automerge::ScalarValue;
+            let json_value = match s.as_ref() {
+                ScalarValue::Null => serde_json::Value::Null,
+                ScalarValue::Boolean(b) => serde_json::Value::Bool(*b),
+                ScalarValue::Bytes(b) => {
+                    // Encode bytes as base32 string
+                    serde_json::Value::String(data_encoding::BASE32_NOPAD.encode(b))
+                }
+                ScalarValue::Counter(c) => {
+                    let counter_val: i64 = c.clone().into();
+                    serde_json::Value::Number(counter_val.into())
+                }
+                ScalarValue::F64(f) => serde_json::Value::Number(
+                    serde_json::Number::from_f64(*f).unwrap_or(serde_json::Number::from(0)),
+                ),
+                ScalarValue::Int(i) => serde_json::Value::Number((*i).into()),
+                ScalarValue::Uint(u) => serde_json::Value::Number((*u).into()),
+                ScalarValue::Str(s) => serde_json::Value::String(s.to_string()),
+                ScalarValue::Timestamp(t) => serde_json::Value::Number((*t).into()),
+                ScalarValue::Unknown { .. } => serde_json::Value::Null,
+            };
+            Ok(AutosurgeonJson(json_value))
+        }
+
+        fn hydrate_none() -> Result<Self, autosurgeon::HydrateError> {
+            Ok(AutosurgeonJson(serde_json::Value::Null))
+        }
+    }
+
+    /// Helper function to hydrate a value from an Automerge object
+    fn hydrate_value<D: autosurgeon::ReadDoc>(
+        doc: &D,
+        obj: &automerge::ObjId,
+        obj_type: automerge::ObjType,
+    ) -> Result<serde_json::Value, autosurgeon::HydrateError> {
+        use automerge::{ObjType, Value};
+        match obj_type {
+            ObjType::Map | ObjType::Table => {
+                let mut map = serde_json::Map::new();
+                for item in doc.map_range(obj.clone(), ..) {
+                    let key = item.key.to_string();
+                    let prop = automerge::Prop::Map(key.clone());
+                    match doc.get(obj, prop)? {
+                        Some((Value::Object(inner_type), id)) => {
+                            let json_value = hydrate_value(doc, &id, inner_type)?;
+                            map.insert(key, json_value);
+                        }
+                        Some((Value::Scalar(s), _)) => {
+                            let json_value = scalar_to_json(s.as_ref());
+                            map.insert(key, json_value);
+                        }
+                        None => {}
+                    }
+                }
+                Ok(serde_json::Value::Object(map))
+            }
+            ObjType::List => {
+                let mut arr = Vec::new();
+                for i in 0..doc.length(obj) {
+                    match doc.get(obj, i)? {
+                        Some((Value::Object(inner_type), id)) => {
+                            arr.push(hydrate_value(doc, &id, inner_type)?);
+                        }
+                        Some((Value::Scalar(s), _)) => {
+                            arr.push(scalar_to_json(s.as_ref()));
+                        }
+                        None => {
+                            arr.push(serde_json::Value::Null);
+                        }
+                    }
+                }
+                Ok(serde_json::Value::Array(arr))
+            }
+            ObjType::Text => {
+                let text = doc.text(obj)?;
+                Ok(serde_json::Value::String(text))
+            }
+        }
+    }
+
+    /// Helper function to convert a scalar value to JSON
+    fn scalar_to_json(s: &automerge::ScalarValue) -> serde_json::Value {
+        use crate::codecs::sane_iso8601::FORMAT;
+        use automerge::ScalarValue;
+        match s {
+            ScalarValue::Null => serde_json::Value::Null,
+            ScalarValue::Boolean(b) => serde_json::Value::Bool(*b),
+            ScalarValue::Bytes(b) => {
+                // Encode bytes as base32 string
+                serde_json::Value::String(data_encoding::BASE32_NOPAD.encode(b))
+            }
+            ScalarValue::Counter(c) => {
+                let counter_val: i64 = c.clone().into();
+                serde_json::Value::Number(counter_val.into())
+            }
+            ScalarValue::F64(f) => serde_json::Value::Number(
+                serde_json::Number::from_f64(*f).unwrap_or(serde_json::Number::from(0)),
+            ),
+            ScalarValue::Int(i) => serde_json::Value::Number((*i).into()),
+            ScalarValue::Uint(u) => serde_json::Value::Number((*u).into()),
+            ScalarValue::Str(s) => serde_json::Value::String(s.to_string()),
+            ScalarValue::Timestamp(t) => {
+                // Convert timestamp to ISO 8601 string to match serde codec
+                // Note: This assumes timestamps stored as strings in automerge (via date codec)
+                // If we encounter a numeric timestamp, convert it
+                match OffsetDateTime::from_unix_timestamp(*t) {
+                    Ok(dt) => dt
+                        .format(&FORMAT)
+                        .map(serde_json::Value::String)
+                        .unwrap_or_else(|_| serde_json::Value::Number((*t).into())),
+                    Err(_) => serde_json::Value::Number((*t).into()),
+                }
+            }
+            ScalarValue::Unknown { .. } => serde_json::Value::Null,
+        }
+    }
+
+    impl autosurgeon::Reconcile for AutosurgeonJson {
+        type Key<'a> = ();
+
+        fn reconcile<R: autosurgeon::Reconciler>(&self, reconciler: R) -> Result<(), R::Error> {
+            reconcile_json_value(&self.0, reconciler)
+        }
+    }
+
+    pub fn reconcile_json_value<R: autosurgeon::Reconciler>(
+        value: &serde_json::Value,
+        mut reconciler: R,
+    ) -> Result<(), R::Error> {
+        use autosurgeon::reconcile::{MapReconciler, SeqReconciler};
+        match value {
+            serde_json::Value::Null => reconciler.none(),
+            serde_json::Value::Bool(b) => reconciler.boolean(*b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    reconciler.i64(i)
+                } else if let Some(u) = n.as_u64() {
+                    reconciler.u64(u)
+                } else if let Some(f) = n.as_f64() {
+                    reconciler.f64(f)
+                } else {
+                    reconciler.none()
+                }
+            }
+            serde_json::Value::String(s) => reconciler.str(s),
+            serde_json::Value::Array(arr) => {
+                let mut seq = reconciler.seq()?;
+                // Delete any extra items
+                let old_len = seq.len()?;
+                if old_len > arr.len() {
+                    for i in (arr.len()..old_len).rev() {
+                        seq.delete(i)?;
+                    }
+                }
+                // Set or insert items
+                for (idx, item) in arr.iter().enumerate() {
+                    if idx < old_len {
+                        seq.set(idx, &AutosurgeonJson(item.clone()))?;
+                    } else {
+                        seq.insert(idx, &AutosurgeonJson(item.clone()))?;
+                    }
+                }
+                Ok(())
+            }
+            serde_json::Value::Object(map) => {
+                let mut map_reconciler = reconciler.map()?;
+                // Get existing keys and delete ones not in the new map
+                let old_keys: std::collections::HashSet<String> = map_reconciler
+                    .entries()
+                    .map(|(k, _)| k.to_string())
+                    .collect();
+                let new_keys: std::collections::HashSet<String> = map.keys().cloned().collect();
+                for key in old_keys.difference(&new_keys) {
+                    map_reconciler.delete(key)?;
+                }
+                // Put or update entries
+                for (key, value) in map {
+                    map_reconciler.put(key, &AutosurgeonJson(value.clone()))?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 

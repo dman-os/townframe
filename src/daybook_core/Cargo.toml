@@ -48,6 +48,7 @@ struct-patch.workspace = true
 data-encoding.workspace = true
 blake3.workspace = true
 semver = "1"
+addr.workspace = true
 
 # async
 tokio = { workspace = true, features = [
@@ -95,7 +96,7 @@ uniffi = { workspace = true, features = ["build"], optional = true }
 
 [dev-dependencies]
 tokio-stream = "0.1.17"
-tokio-util = { workspace = true, features = [] }
+tokio-util = { workspace = true }
 insta = { workspace = true, features = ["json"] }
 wflow = { workspace = true, features = ["test-harness"] }
 wash_plugin_am_repo.workspace = true

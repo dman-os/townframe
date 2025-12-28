@@ -5,7 +5,7 @@
 The doc scheme I have...
 
 ```
-{
+Doc {
   "org.example.my.foo":  Foo {}
   "org.example.my.bar/1":  Bar {}
   "org.example.my.bar/2":  Bar {}

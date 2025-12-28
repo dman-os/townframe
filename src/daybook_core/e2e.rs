@@ -4,6 +4,7 @@ use utils_rs::am::AmCtx;
 use wflow::test::WflowTestContext;
 
 use crate::drawer::DrawerRepo;
+use crate::plugs::PlugsRepo;
 use crate::rt::triage::DocTriageWorkerHandle;
 
 mod doc_created_wflow;
@@ -53,17 +54,18 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
     };
 
     let drawer_repo = DrawerRepo::load(acx.clone(), drawer_doc_id).await?;
-    let config_repo = crate::config::ConfigRepo::load(acx.clone(), app_doc_id.clone()).await?;
+    let plug_repo = PlugsRepo::load(acx.clone(), app_doc_id.clone()).await?;
+    let config_repo =
+        crate::config::ConfigRepo::load(acx.clone(), app_doc_id.clone(), plug_repo.clone()).await?;
     let dispatcher_repo = crate::rt::DispatcherRepo::load(acx.clone(), app_doc_id).await?;
 
-    // Initialize default pseudo-labeler processor if needed
+    // Initialize default pseudo-label processor if needed
     let triage_config = config_repo.get_triage_config_sync().await;
 
     if triage_config.processors.is_empty() {
         use crate::rt::triage::PredicateClause;
         use crate::rt::triage::{CancellationPolicy, Processor};
         use daybook_types::doc::DocContentKind;
-        use daybook_types::doc::DocPropKey;
 
         let predicate = PredicateClause::And(vec![
             PredicateClause::IsContentKind(DocContentKind::Text),
@@ -75,10 +77,10 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
         let processor = Processor {
             cancellation_policy: CancellationPolicy::NoSupport,
             predicate: utils_rs::am::AutosurgeonJson(predicate_json),
-            wflow_key: "pseudo-labeler".to_string(),
+            wflow_key: "pseudo-label".to_string(),
         };
         config_repo
-            .add_processor("pseudo-labeler".to_string(), processor)
+            .add_processor("pseudo-label".to_string(), processor)
             .await?;
     }
 
@@ -104,7 +106,7 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
     wflow_test_cx
         .register_workload(
             "../../target/wasm32-wasip2/debug/daybook_wflows.wasm",
-            vec!["pseudo-labeler".to_string()],
+            vec!["pseudo-label".to_string()],
         )
         .await?;
 

@@ -8,6 +8,8 @@ pub mod am;
 pub mod prelude {
     pub use crate::interlude::*;
 
+    pub use crate::am::codecs::ThroughJson;
+
     #[cfg(feature = "automerge")]
     pub use automerge;
     #[cfg(feature = "automerge")]
@@ -26,6 +28,7 @@ mod interlude {
     pub use crate::{default, CHeapStr, DHashMap, JsonExt, ToAnyhow, ToEyre};
 
     pub use std::{
+        collections::{HashMap, HashSet},
         path::{Path, PathBuf},
         rc::Rc,
         sync::{Arc, LazyLock},
@@ -366,6 +369,30 @@ pub mod hash {
             multihash::Multihash::<32>::wrap(SHA2_256, &hash[..]).expect("error multihashing");
         let hash = encode_base32_multibase(hash.to_bytes());
         Ok(hash)
+    }
+
+    pub fn encode_base58_multibase<T: AsRef<[u8]>>(source: T) -> String {
+        let mut string = "z".into();
+        bs58::encode(source)
+            .onto(&mut string)
+            .expect("error encoding into string");
+        string
+    }
+
+    pub fn decode_base58_multibase(source: &str) -> eyre::Result<Vec<u8>> {
+        let mut buf = vec![];
+        match (
+            &source[0..1],
+            bs58::decode(source[1..].as_bytes()).onto(&mut buf),
+        ) {
+            ("z", Ok(_count)) => Ok(buf),
+            (prefix, Ok(_)) => Err(eyre::format_err!(
+                "unexpected multibase prefix for base58bitcoin multibase: {prefix}"
+            )),
+            (_, Err(err)) => Err(eyre::format_err!(
+                "error decoding base58bitcoin ({source}): {err}"
+            )),
+        }
     }
 
     pub fn encode_base32_multibase<T: AsRef<[u8]>>(source: T) -> String {

@@ -1,88 +1,48 @@
 use crate::interlude::*;
+
+use crate::plugs::{manifest::PropKeyDisplayHint, PlugsRepo};
+use tokio_util::sync::CancellationToken;
 use crate::rt::triage::TriageConfig;
-use std::collections::HashMap;
-
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum DateTimeDisplayType {
-    Relative,
-    TimeOnly,
-    DateOnly,
-    TimeAndDate,
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum MetaTableKeyDisplayType {
-    DateTime { display_type: DateTimeDisplayType },
-    UnixPath,
-    Title,
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct MetaTableKeyConfig {
-    pub always_visible: bool,
-    pub display_type: MetaTableKeyDisplayType,
-    pub display_title: Option<String>,
-    pub show_title_editor: Option<bool>,
-}
 
 #[derive(Reconcile, Hydrate)]
 pub struct ConfigStore {
     pub triage: TriageConfig,
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    pub meta_table_key_configs: HashMap<String, MetaTableKeyConfig>,
+    pub prop_display: HashMap<String, ThroughJson<PropKeyDisplayHint>>,
 }
 
 impl Default for ConfigStore {
     fn default() -> Self {
+        use crate::plugs::manifest::*;
+
         let mut key_configs = HashMap::new();
 
-        // Default configs for created_at and updated_at
-        let datetime_config = MetaTableKeyDisplayType::DateTime {
-            display_type: DateTimeDisplayType::Relative,
-        };
         key_configs.insert(
             "created_at".to_string(),
-            MetaTableKeyConfig {
+            PropKeyDisplayHint {
                 always_visible: false,
-                display_type: datetime_config.clone(),
                 display_title: Some("Created At".to_string()),
-                show_title_editor: None,
-            },
+                deets: PropKeyDisplayDeets::DateTime {
+                    display_type: DateTimePropDisplayType::Relative,
+                },
+            }
+            .into(),
         );
         key_configs.insert(
             "updated_at".to_string(),
-            MetaTableKeyConfig {
+            PropKeyDisplayHint {
                 always_visible: false,
-                display_type: datetime_config.clone(),
                 display_title: Some("Updated At".to_string()),
-                show_title_editor: None,
-            },
-        );
-        key_configs.insert(
-            "path_generic".to_string(),
-            MetaTableKeyConfig {
-                always_visible: true,
-                display_type: MetaTableKeyDisplayType::UnixPath,
-                display_title: Some("Path".to_string()),
-                show_title_editor: None,
-            },
-        );
-        key_configs.insert(
-            "title_generic".to_string(),
-            MetaTableKeyConfig {
-                always_visible: false,
-                display_type: MetaTableKeyDisplayType::Title,
-                display_title: Some("Title".to_string()),
-                show_title_editor: Some(true),
-            },
+                deets: PropKeyDisplayDeets::DateTime {
+                    display_type: DateTimePropDisplayType::Relative,
+                },
+            }
+            .into(),
         );
 
         Self {
             triage: TriageConfig::default(),
-            meta_table_key_configs: key_configs,
+            prop_display: key_configs,
         }
     }
 }
@@ -103,7 +63,9 @@ pub struct ConfigRepo {
     app_doc_id: DocumentId,
     store: crate::stores::StoreHandle<ConfigStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
-    _broker: Arc<utils_rs::am::changes::DocChangeBroker>,
+    plug_repo: Arc<PlugsRepo>,
+    cancel_token: CancellationToken,
+    _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
 }
 
 impl crate::repos::Repo for ConfigRepo {
@@ -111,10 +73,17 @@ impl crate::repos::Repo for ConfigRepo {
     fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
         &self.registry
     }
+    fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel_token
+    }
 }
 
 impl ConfigRepo {
-    pub async fn load(acx: AmCtx, app_doc_id: DocumentId) -> Res<Arc<Self>> {
+    pub async fn load(
+        acx: AmCtx,
+        app_doc_id: DocumentId,
+        plug_repo: Arc<PlugsRepo>,
+    ) -> Res<Arc<Self>> {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store = ConfigStore::load(&acx, &app_doc_id).await?;
@@ -132,23 +101,31 @@ impl ConfigRepo {
             Vec<utils_rs::am::changes::ChangeNotification>,
         >();
         // Register change listener to automatically notify repo listeners
-        ConfigStore::register_change_listener(&acx, &broker, vec![], {
-            move |notifs| notif_tx.send(notifs).expect(ERROR_CHANNEL)
+        let ticket = ConfigStore::register_change_listener(&acx, &broker, vec![], {
+            move |notifs| {
+                if let Err(err) = notif_tx.send(notifs) {
+                    warn!("failed to send change notifications: {err}");
+                }
+            }
         })
         .await?;
 
+        let cancel_token = CancellationToken::new();
         let repo = Self {
             acx: acx.clone(),
             app_doc_id: app_doc_id.clone(),
             store,
             registry: registry.clone(),
-            _broker: broker,
+            plug_repo,
+            cancel_token: cancel_token.clone(),
+            _change_listener_tickets: vec![ticket],
         };
         let repo = Arc::new(repo);
 
         let _notif_worker = tokio::spawn({
             let repo = repo.clone();
-            async move { repo.handle_notifs(notif_rx).await }
+            let cancel_token = cancel_token.clone();
+            async move { repo.handle_notifs(notif_rx, cancel_token).await }
         });
 
         Ok(repo)
@@ -159,8 +136,21 @@ impl ConfigRepo {
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
             Vec<utils_rs::am::changes::ChangeNotification>,
         >,
+        cancel_token: CancellationToken,
     ) -> Res<()> {
-        while let Some(_notifs) = notif_rx.recv().await {
+        loop {
+            let _notifs = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    break;
+                }
+                msg = notif_rx.recv() => {
+                    match msg {
+                        Some(notifs) => notifs,
+                        None => break,
+                    }
+                }
+            };
             // Config changed, notify listeners
             self.registry.notify(ConfigEvent::Changed);
         }
@@ -186,6 +176,9 @@ impl ConfigRepo {
         processor_id: String,
         processor: crate::rt::triage::Processor,
     ) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
         self.store
             .mutate_sync(move |store| {
                 store.triage.processors.insert(processor_id, processor);
@@ -194,26 +187,46 @@ impl ConfigRepo {
         Ok(())
     }
 
-    pub async fn get_meta_table_key_configs_sync(&self) -> HashMap<String, MetaTableKeyConfig> {
+    pub async fn get_prop_display_hint(&self, key: String) -> Option<PropKeyDisplayHint> {
+        let hint = self
+            .store
+            .query_sync(|store| store.prop_display.get(&key).cloned())
+            .await;
+        if let Some(hint) = hint {
+            return Some(hint.0);
+        }
+        let hint = self.plug_repo.get_display_hint(&key).await;
+        if let Some(hint) = hint {
+            return Some(hint);
+        }
+        None
+    }
+
+    pub async fn list_display_hints(&self) -> HashMap<String, PropKeyDisplayHint> {
+        let mut defaults: HashMap<_, _> = self
+            .plug_repo
+            .list_display_hints()
+            .await
+            .into_iter()
+            .collect();
+
         self.store
-            .query_sync(|store| store.meta_table_key_configs.clone())
+            .query_sync(move |store| {
+                for (key, val) in &store.prop_display {
+                    defaults.insert(key.clone(), val.0.clone());
+                }
+                defaults
+            })
             .await
     }
 
-    pub async fn get_meta_table_key_config_sync(&self, key: String) -> Option<MetaTableKeyConfig> {
-        self.store
-            .query_sync(move |store| store.meta_table_key_configs.get(&key).cloned())
-            .await
-    }
-
-    pub async fn set_meta_table_key_config(
-        &self,
-        key: String,
-        config: MetaTableKeyConfig,
-    ) -> Res<()> {
+    pub async fn set_prop_display_hint(&self, key: String, hint: PropKeyDisplayHint) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
         self.store
             .mutate_sync(move |store| {
-                store.meta_table_key_configs.insert(key, config);
+                store.prop_display.insert(key, hint.into());
             })
             .await?;
         Ok(())

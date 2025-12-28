@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use crate::drawer::{DrawerEvent, DrawerRepo};
-use daybook_types::doc::{Doc, DocAddedEvent, DocContent, DocContentKind, DocId, DocPropKey};
+use daybook_types::doc::{Doc, DocContent, DocContentKind, DocId, DocPropKey};
 
 pub use wflow::{PartitionLogIngress, WflowIngress};
 

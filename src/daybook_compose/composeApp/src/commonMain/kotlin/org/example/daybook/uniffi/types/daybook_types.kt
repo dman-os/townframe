@@ -1103,15 +1103,43 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 
 
 
+data class Blob (
+    var `lengthOctets`: kotlin.ULong, 
+    var `hash`: kotlin.String
+) {
+    
+    companion object
+}
+
 /**
- * Document type for automerge - manually written (excluded from generation)
+ * @suppress
  */
+public object FfiConverterTypeBlob: FfiConverterRustBuffer<Blob> {
+    override fun read(buf: ByteBuffer): Blob {
+        return Blob(
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Blob) = (
+            FfiConverterULong.allocationSize(value.`lengthOctets`) +
+            FfiConverterString.allocationSize(value.`hash`)
+    )
+
+    override fun write(value: Blob, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`lengthOctets`, buf)
+            FfiConverterString.write(value.`hash`, buf)
+    }
+}
+
+
+
 data class Doc (
     var `id`: kotlin.String, 
     var `createdAt`: OffsetDateTime, 
     var `updatedAt`: OffsetDateTime, 
-    var `content`: DocContent, 
-    var `props`: List<DocProp>
+    var `props`: Map<DocPropKey, DocProp>
 ) {
     
     companion object
@@ -1126,8 +1154,7 @@ public object FfiConverterTypeDoc: FfiConverterRustBuffer<Doc> {
             FfiConverterString.read(buf),
             FfiConverterTypeOffsetDateTime.read(buf),
             FfiConverterTypeOffsetDateTime.read(buf),
-            FfiConverterTypeDocContent.read(buf),
-            FfiConverterSequenceTypeDocProp.read(buf),
+            FfiConverterMapTypeDocPropKeyTypeDocProp.read(buf),
         )
     }
 
@@ -1135,16 +1162,14 @@ public object FfiConverterTypeDoc: FfiConverterRustBuffer<Doc> {
             FfiConverterString.allocationSize(value.`id`) +
             FfiConverterTypeOffsetDateTime.allocationSize(value.`createdAt`) +
             FfiConverterTypeOffsetDateTime.allocationSize(value.`updatedAt`) +
-            FfiConverterTypeDocContent.allocationSize(value.`content`) +
-            FfiConverterSequenceTypeDocProp.allocationSize(value.`props`)
+            FfiConverterMapTypeDocPropKeyTypeDocProp.allocationSize(value.`props`)
     )
 
     override fun write(value: Doc, buf: ByteBuffer) {
             FfiConverterString.write(value.`id`, buf)
             FfiConverterTypeOffsetDateTime.write(value.`createdAt`, buf)
             FfiConverterTypeOffsetDateTime.write(value.`updatedAt`, buf)
-            FfiConverterTypeDocContent.write(value.`content`, buf)
-            FfiConverterSequenceTypeDocProp.write(value.`props`, buf)
+            FfiConverterMapTypeDocPropKeyTypeDocProp.write(value.`props`, buf)
     }
 }
 
@@ -1182,44 +1207,16 @@ public object FfiConverterTypeDocAddedEvent: FfiConverterRustBuffer<DocAddedEven
 
 
 
-data class DocBlob (
-    var `lengthOctets`: kotlin.ULong, 
-    var `hash`: kotlin.String
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocBlob: FfiConverterRustBuffer<DocBlob> {
-    override fun read(buf: ByteBuffer): DocBlob {
-        return DocBlob(
-            FfiConverterULong.read(buf),
-            FfiConverterString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: DocBlob) = (
-            FfiConverterULong.allocationSize(value.`lengthOctets`) +
-            FfiConverterString.allocationSize(value.`hash`)
-    )
-
-    override fun write(value: DocBlob, buf: ByteBuffer) {
-            FfiConverterULong.write(value.`lengthOctets`, buf)
-            FfiConverterString.write(value.`hash`, buf)
-    }
-}
-
-
-
 data class DocPatch (
-    var `id`: kotlin.String?, 
-    var `createdAt`: OffsetDateTime?, 
-    var `updatedAt`: OffsetDateTime?, 
-    var `content`: DocContent?, 
-    var `props`: List<DocProp>?
+    var `id`: kotlin.String, 
+    /**
+     * Props to set (insert or update)
+     */
+    var `propsSet`: Map<DocPropKey, DocProp>, 
+    /**
+     * Props to remove (by key)
+     */
+    var `propsRemove`: List<DocPropKey>
 ) {
     
     companion object
@@ -1231,34 +1228,28 @@ data class DocPatch (
 public object FfiConverterTypeDocPatch: FfiConverterRustBuffer<DocPatch> {
     override fun read(buf: ByteBuffer): DocPatch {
         return DocPatch(
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalTypeOffsetDateTime.read(buf),
-            FfiConverterOptionalTypeOffsetDateTime.read(buf),
-            FfiConverterOptionalTypeDocContent.read(buf),
-            FfiConverterOptionalSequenceTypeDocProp.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterMapTypeDocPropKeyTypeDocProp.read(buf),
+            FfiConverterSequenceTypeDocPropKey.read(buf),
         )
     }
 
     override fun allocationSize(value: DocPatch) = (
-            FfiConverterOptionalString.allocationSize(value.`id`) +
-            FfiConverterOptionalTypeOffsetDateTime.allocationSize(value.`createdAt`) +
-            FfiConverterOptionalTypeOffsetDateTime.allocationSize(value.`updatedAt`) +
-            FfiConverterOptionalTypeDocContent.allocationSize(value.`content`) +
-            FfiConverterOptionalSequenceTypeDocProp.allocationSize(value.`props`)
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterMapTypeDocPropKeyTypeDocProp.allocationSize(value.`propsSet`) +
+            FfiConverterSequenceTypeDocPropKey.allocationSize(value.`propsRemove`)
     )
 
     override fun write(value: DocPatch, buf: ByteBuffer) {
-            FfiConverterOptionalString.write(value.`id`, buf)
-            FfiConverterOptionalTypeOffsetDateTime.write(value.`createdAt`, buf)
-            FfiConverterOptionalTypeOffsetDateTime.write(value.`updatedAt`, buf)
-            FfiConverterOptionalTypeDocContent.write(value.`content`, buf)
-            FfiConverterOptionalSequenceTypeDocProp.write(value.`props`, buf)
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterMapTypeDocPropKeyTypeDocProp.write(value.`propsSet`, buf)
+            FfiConverterSequenceTypeDocPropKey.write(value.`propsRemove`, buf)
     }
 }
 
 
 
-data class ImageMeta (
+data class ImageMetadata (
     var `mime`: kotlin.String, 
     var `widthPx`: kotlin.ULong, 
     var `heightPx`: kotlin.ULong
@@ -1270,25 +1261,53 @@ data class ImageMeta (
 /**
  * @suppress
  */
-public object FfiConverterTypeImageMeta: FfiConverterRustBuffer<ImageMeta> {
-    override fun read(buf: ByteBuffer): ImageMeta {
-        return ImageMeta(
+public object FfiConverterTypeImageMetadata: FfiConverterRustBuffer<ImageMetadata> {
+    override fun read(buf: ByteBuffer): ImageMetadata {
+        return ImageMetadata(
             FfiConverterString.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
         )
     }
 
-    override fun allocationSize(value: ImageMeta) = (
+    override fun allocationSize(value: ImageMetadata) = (
             FfiConverterString.allocationSize(value.`mime`) +
             FfiConverterULong.allocationSize(value.`widthPx`) +
             FfiConverterULong.allocationSize(value.`heightPx`)
     )
 
-    override fun write(value: ImageMeta, buf: ByteBuffer) {
+    override fun write(value: ImageMetadata, buf: ByteBuffer) {
             FfiConverterString.write(value.`mime`, buf)
             FfiConverterULong.write(value.`widthPx`, buf)
             FfiConverterULong.write(value.`heightPx`, buf)
+    }
+}
+
+
+
+data class Pending (
+    var `key`: DocPropKey
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePending: FfiConverterRustBuffer<Pending> {
+    override fun read(buf: ByteBuffer): Pending {
+        return Pending(
+            FfiConverterTypeDocPropKey.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Pending) = (
+            FfiConverterTypeDocPropKey.allocationSize(value.`key`)
+    )
+
+    override fun write(value: Pending, buf: ByteBuffer) {
+            FfiConverterTypeDocPropKey.write(value.`key`, buf)
     }
 }
 
@@ -1302,7 +1321,7 @@ sealed class DocContent {
     }
     
     data class Blob(
-        val v1: DocBlob) : DocContent() {
+        val v1: Blob) : DocContent() {
         companion object
     }
     
@@ -1321,7 +1340,7 @@ public object FfiConverterTypeDocContent : FfiConverterRustBuffer<DocContent>{
                 FfiConverterString.read(buf),
                 )
             2 -> DocContent.Blob(
-                FfiConverterTypeDocBlob.read(buf),
+                FfiConverterTypeBlob.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -1339,7 +1358,7 @@ public object FfiConverterTypeDocContent : FfiConverterRustBuffer<DocContent>{
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterTypeDocBlob.allocationSize(value.v1)
+                + FfiConverterTypeBlob.allocationSize(value.v1)
             )
         }
     }
@@ -1353,7 +1372,7 @@ public object FfiConverterTypeDocContent : FfiConverterRustBuffer<DocContent>{
             }
             is DocContent.Blob -> {
                 buf.putInt(2)
-                FfiConverterTypeDocBlob.write(value.v1, buf)
+                FfiConverterTypeBlob.write(value.v1, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -1396,36 +1415,13 @@ public object FfiConverterTypeDocContentKind: FfiConverterRustBuffer<DocContentK
 
 sealed class DocProp {
     
-    /**
-     * A link to another document.
-     */
-    data class RefGeneric(
-        val v1: kotlin.String) : DocProp() {
+    data class WellKnown(
+        val v1: WellKnownProp) : DocProp() {
         companion object
     }
     
-    data class LabelGeneric(
-        val v1: kotlin.String) : DocProp() {
-        companion object
-    }
-    
-    data class ImageMetadata(
-        val v1: ImageMeta) : DocProp() {
-        companion object
-    }
-    
-    data class PseudoLabel(
-        val v1: List<kotlin.String>) : DocProp() {
-        companion object
-    }
-    
-    data class PathGeneric(
-        val v1: kotlin.String) : DocProp() {
-        companion object
-    }
-    
-    data class TitleGeneric(
-        val v1: kotlin.String) : DocProp() {
+    data class Any(
+        val v1: Json) : DocProp() {
         companion object
     }
     
@@ -1440,65 +1436,169 @@ sealed class DocProp {
 public object FfiConverterTypeDocProp : FfiConverterRustBuffer<DocProp>{
     override fun read(buf: ByteBuffer): DocProp {
         return when(buf.getInt()) {
-            1 -> DocProp.RefGeneric(
-                FfiConverterString.read(buf),
+            1 -> DocProp.WellKnown(
+                FfiConverterTypeWellKnownProp.read(buf),
                 )
-            2 -> DocProp.LabelGeneric(
-                FfiConverterString.read(buf),
-                )
-            3 -> DocProp.ImageMetadata(
-                FfiConverterTypeImageMeta.read(buf),
-                )
-            4 -> DocProp.PseudoLabel(
-                FfiConverterSequenceString.read(buf),
-                )
-            5 -> DocProp.PathGeneric(
-                FfiConverterString.read(buf),
-                )
-            6 -> DocProp.TitleGeneric(
-                FfiConverterString.read(buf),
+            2 -> DocProp.Any(
+                FfiConverterTypeJson.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
 
     override fun allocationSize(value: DocProp) = when(value) {
-        is DocProp.RefGeneric -> {
+        is DocProp.WellKnown -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterString.allocationSize(value.v1)
+                + FfiConverterTypeWellKnownProp.allocationSize(value.v1)
             )
         }
-        is DocProp.LabelGeneric -> {
+        is DocProp.Any -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterString.allocationSize(value.v1)
+                + FfiConverterTypeJson.allocationSize(value.v1)
             )
         }
-        is DocProp.ImageMetadata -> {
+    }
+
+    override fun write(value: DocProp, buf: ByteBuffer) {
+        when(value) {
+            is DocProp.WellKnown -> {
+                buf.putInt(1)
+                FfiConverterTypeWellKnownProp.write(value.v1, buf)
+                Unit
+            }
+            is DocProp.Any -> {
+                buf.putInt(2)
+                FfiConverterTypeJson.write(value.v1, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+sealed class DocPropKey {
+    
+    data class Tag(
+        val v1: DocPropTag) : DocPropKey() {
+        companion object
+    }
+    
+    data class TagAndId(
+        val `tag`: DocPropTag, 
+        val `id`: kotlin.String) : DocPropKey() {
+        companion object
+    }
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDocPropKey : FfiConverterRustBuffer<DocPropKey>{
+    override fun read(buf: ByteBuffer): DocPropKey {
+        return when(buf.getInt()) {
+            1 -> DocPropKey.Tag(
+                FfiConverterTypeDocPropTag.read(buf),
+                )
+            2 -> DocPropKey.TagAndId(
+                FfiConverterTypeDocPropTag.read(buf),
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: DocPropKey) = when(value) {
+        is DocPropKey.Tag -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterTypeImageMeta.allocationSize(value.v1)
+                + FfiConverterTypeDocPropTag.allocationSize(value.v1)
             )
         }
-        is DocProp.PseudoLabel -> {
+        is DocPropKey.TagAndId -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterSequenceString.allocationSize(value.v1)
+                + FfiConverterTypeDocPropTag.allocationSize(value.`tag`)
+                + FfiConverterString.allocationSize(value.`id`)
             )
         }
-        is DocProp.PathGeneric -> {
+    }
+
+    override fun write(value: DocPropKey, buf: ByteBuffer) {
+        when(value) {
+            is DocPropKey.Tag -> {
+                buf.putInt(1)
+                FfiConverterTypeDocPropTag.write(value.v1, buf)
+                Unit
+            }
+            is DocPropKey.TagAndId -> {
+                buf.putInt(2)
+                FfiConverterTypeDocPropTag.write(value.`tag`, buf)
+                FfiConverterString.write(value.`id`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+sealed class DocPropTag {
+    
+    data class WellKnown(
+        val v1: WellKnownPropTag) : DocPropTag() {
+        companion object
+    }
+    
+    data class Any(
+        val v1: kotlin.String) : DocPropTag() {
+        companion object
+    }
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDocPropTag : FfiConverterRustBuffer<DocPropTag>{
+    override fun read(buf: ByteBuffer): DocPropTag {
+        return when(buf.getInt()) {
+            1 -> DocPropTag.WellKnown(
+                FfiConverterTypeWellKnownPropTag.read(buf),
+                )
+            2 -> DocPropTag.Any(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: DocPropTag) = when(value) {
+        is DocPropTag.WellKnown -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterString.allocationSize(value.v1)
+                + FfiConverterTypeWellKnownPropTag.allocationSize(value.v1)
             )
         }
-        is DocProp.TitleGeneric -> {
+        is DocPropTag.Any -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
@@ -1507,35 +1607,15 @@ public object FfiConverterTypeDocProp : FfiConverterRustBuffer<DocProp>{
         }
     }
 
-    override fun write(value: DocProp, buf: ByteBuffer) {
+    override fun write(value: DocPropTag, buf: ByteBuffer) {
         when(value) {
-            is DocProp.RefGeneric -> {
+            is DocPropTag.WellKnown -> {
                 buf.putInt(1)
-                FfiConverterString.write(value.v1, buf)
+                FfiConverterTypeWellKnownPropTag.write(value.v1, buf)
                 Unit
             }
-            is DocProp.LabelGeneric -> {
+            is DocPropTag.Any -> {
                 buf.putInt(2)
-                FfiConverterString.write(value.v1, buf)
-                Unit
-            }
-            is DocProp.ImageMetadata -> {
-                buf.putInt(3)
-                FfiConverterTypeImageMeta.write(value.v1, buf)
-                Unit
-            }
-            is DocProp.PseudoLabel -> {
-                buf.putInt(4)
-                FfiConverterSequenceString.write(value.v1, buf)
-                Unit
-            }
-            is DocProp.PathGeneric -> {
-                buf.putInt(5)
-                FfiConverterString.write(value.v1, buf)
-                Unit
-            }
-            is DocProp.TitleGeneric -> {
-                buf.putInt(6)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
@@ -1547,15 +1627,207 @@ public object FfiConverterTypeDocProp : FfiConverterRustBuffer<DocProp>{
 
 
 
+sealed class WellKnownProp {
+    
+    data class RefGeneric(
+        val v1: kotlin.String) : WellKnownProp() {
+        companion object
+    }
+    
+    data class LabelGeneric(
+        val v1: kotlin.String) : WellKnownProp() {
+        companion object
+    }
+    
+    data class PseudoLabel(
+        val v1: kotlin.String) : WellKnownProp() {
+        companion object
+    }
+    
+    data class TitleGeneric(
+        val v1: kotlin.String) : WellKnownProp() {
+        companion object
+    }
+    
+    data class PathGeneric(
+        val v1: PathBuf) : WellKnownProp() {
+        companion object
+    }
+    
+    data class ImageMetadata(
+        val v1: ImageMetadata) : WellKnownProp() {
+        companion object
+    }
+    
+    data class Content(
+        val v1: DocContent) : WellKnownProp() {
+        companion object
+    }
+    
+    data class Pending(
+        val v1: Pending) : WellKnownProp() {
+        companion object
+    }
+    
 
-enum class DocPropKind {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWellKnownProp : FfiConverterRustBuffer<WellKnownProp>{
+    override fun read(buf: ByteBuffer): WellKnownProp {
+        return when(buf.getInt()) {
+            1 -> WellKnownProp.RefGeneric(
+                FfiConverterString.read(buf),
+                )
+            2 -> WellKnownProp.LabelGeneric(
+                FfiConverterString.read(buf),
+                )
+            3 -> WellKnownProp.PseudoLabel(
+                FfiConverterString.read(buf),
+                )
+            4 -> WellKnownProp.TitleGeneric(
+                FfiConverterString.read(buf),
+                )
+            5 -> WellKnownProp.PathGeneric(
+                FfiConverterTypePathBuf.read(buf),
+                )
+            6 -> WellKnownProp.ImageMetadata(
+                FfiConverterTypeImageMetadata.read(buf),
+                )
+            7 -> WellKnownProp.Content(
+                FfiConverterTypeDocContent.read(buf),
+                )
+            8 -> WellKnownProp.Pending(
+                FfiConverterTypePending.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WellKnownProp) = when(value) {
+        is WellKnownProp.RefGeneric -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+        }
+        is WellKnownProp.LabelGeneric -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+        }
+        is WellKnownProp.PseudoLabel -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+        }
+        is WellKnownProp.TitleGeneric -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+        }
+        is WellKnownProp.PathGeneric -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypePathBuf.allocationSize(value.v1)
+            )
+        }
+        is WellKnownProp.ImageMetadata -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeImageMetadata.allocationSize(value.v1)
+            )
+        }
+        is WellKnownProp.Content -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeDocContent.allocationSize(value.v1)
+            )
+        }
+        is WellKnownProp.Pending -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypePending.allocationSize(value.v1)
+            )
+        }
+    }
+
+    override fun write(value: WellKnownProp, buf: ByteBuffer) {
+        when(value) {
+            is WellKnownProp.RefGeneric -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is WellKnownProp.LabelGeneric -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is WellKnownProp.PseudoLabel -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is WellKnownProp.TitleGeneric -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is WellKnownProp.PathGeneric -> {
+                buf.putInt(5)
+                FfiConverterTypePathBuf.write(value.v1, buf)
+                Unit
+            }
+            is WellKnownProp.ImageMetadata -> {
+                buf.putInt(6)
+                FfiConverterTypeImageMetadata.write(value.v1, buf)
+                Unit
+            }
+            is WellKnownProp.Content -> {
+                buf.putInt(7)
+                FfiConverterTypeDocContent.write(value.v1, buf)
+                Unit
+            }
+            is WellKnownProp.Pending -> {
+                buf.putInt(8)
+                FfiConverterTypePending.write(value.v1, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class WellKnownPropTag {
     
     REF_GENERIC,
     LABEL_GENERIC,
-    IMAGE_METADATA,
     PSEUDO_LABEL,
+    TITLE_GENERIC,
     PATH_GENERIC,
-    TITLE_GENERIC;
+    IMAGE_METADATA,
+    CONTENT,
+    PENDING;
     companion object
 }
 
@@ -1563,149 +1835,21 @@ enum class DocPropKind {
 /**
  * @suppress
  */
-public object FfiConverterTypeDocPropKind: FfiConverterRustBuffer<DocPropKind> {
+public object FfiConverterTypeWellKnownPropTag: FfiConverterRustBuffer<WellKnownPropTag> {
     override fun read(buf: ByteBuffer) = try {
-        DocPropKind.values()[buf.getInt() - 1]
+        WellKnownPropTag.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
         throw RuntimeException("invalid enum value, something is very wrong!!", e)
     }
 
-    override fun allocationSize(value: DocPropKind) = 4UL
+    override fun allocationSize(value: WellKnownPropTag) = 4UL
 
-    override fun write(value: DocPropKind, buf: ByteBuffer) {
+    override fun write(value: WellKnownPropTag, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
 
 
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
-    override fun read(buf: ByteBuffer): kotlin.String? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterString.read(buf)
-    }
-
-    override fun allocationSize(value: kotlin.String?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterString.allocationSize(value)
-        }
-    }
-
-    override fun write(value: kotlin.String?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterString.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalTypeDocContent: FfiConverterRustBuffer<DocContent?> {
-    override fun read(buf: ByteBuffer): DocContent? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeDocContent.read(buf)
-    }
-
-    override fun allocationSize(value: DocContent?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeDocContent.allocationSize(value)
-        }
-    }
-
-    override fun write(value: DocContent?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeDocContent.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalSequenceTypeDocProp: FfiConverterRustBuffer<List<DocProp>?> {
-    override fun read(buf: ByteBuffer): List<DocProp>? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterSequenceTypeDocProp.read(buf)
-    }
-
-    override fun allocationSize(value: List<DocProp>?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterSequenceTypeDocProp.allocationSize(value)
-        }
-    }
-
-    override fun write(value: List<DocProp>?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterSequenceTypeDocProp.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalTypeOffsetDateTime: FfiConverterRustBuffer<OffsetDateTime?> {
-    override fun read(buf: ByteBuffer): OffsetDateTime? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeOffsetDateTime.read(buf)
-    }
-
-    override fun allocationSize(value: OffsetDateTime?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeOffsetDateTime.allocationSize(value)
-        }
-    }
-
-    override fun write(value: OffsetDateTime?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeOffsetDateTime.write(value, buf)
-        }
-    }
-}
 
 
 
@@ -1741,27 +1885,86 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeDocProp: FfiConverterRustBuffer<List<DocProp>> {
-    override fun read(buf: ByteBuffer): List<DocProp> {
+public object FfiConverterSequenceTypeDocPropKey: FfiConverterRustBuffer<List<DocPropKey>> {
+    override fun read(buf: ByteBuffer): List<DocPropKey> {
         val len = buf.getInt()
-        return List<DocProp>(len) {
-            FfiConverterTypeDocProp.read(buf)
+        return List<DocPropKey>(len) {
+            FfiConverterTypeDocPropKey.read(buf)
         }
     }
 
-    override fun allocationSize(value: List<DocProp>): ULong {
+    override fun allocationSize(value: List<DocPropKey>): ULong {
         val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeDocProp.allocationSize(it) }.sum()
+        val sizeForItems = value.map { FfiConverterTypeDocPropKey.allocationSize(it) }.sum()
         return sizeForLength + sizeForItems
     }
 
-    override fun write(value: List<DocProp>, buf: ByteBuffer) {
+    override fun write(value: List<DocPropKey>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
-            FfiConverterTypeDocProp.write(it, buf)
+            FfiConverterTypeDocPropKey.write(it, buf)
         }
     }
 }
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapTypeDocPropKeyTypeDocProp: FfiConverterRustBuffer<Map<DocPropKey, DocProp>> {
+    override fun read(buf: ByteBuffer): Map<DocPropKey, DocProp> {
+        val len = buf.getInt()
+        return buildMap<DocPropKey, DocProp>(len) {
+            repeat(len) {
+                val k = FfiConverterTypeDocPropKey.read(buf)
+                val v = FfiConverterTypeDocProp.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<DocPropKey, DocProp>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterTypeDocPropKey.allocationSize(k) +
+            FfiConverterTypeDocProp.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<DocPropKey, DocProp>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterTypeDocPropKey.write(k, buf)
+            FfiConverterTypeDocProp.write(v, buf)
+        }
+    }
+}
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias ChangeHashSet = List<kotlin.String>
+public typealias FfiConverterTypeChangeHashSet = FfiConverterSequenceString
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias Json = kotlin.String
+public typealias FfiConverterTypeJson = FfiConverterString
 
 
 
@@ -1804,6 +2007,16 @@ public object FfiConverterTypeOffsetDateTime: FfiConverter<OffsetDateTime, Long>
         FfiConverterLong.write(builtinValue, buf)
     }
 }
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias PathBuf = kotlin.String
+public typealias FfiConverterTypePathBuf = FfiConverterString
 
 
 

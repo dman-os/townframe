@@ -156,16 +156,15 @@ impl AmCtx {
         P: Into<Prop<'a>> + Send + Sync + 'static,
     {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
-        tokio::task::block_in_place(move || {
-            handle.with_document(move |doc| {
-                doc.transact(move |tx| {
+        handle
+            .with_document(|doc| {
+                doc.transact(|tx| {
                     autosurgeon::reconcile_prop(tx, obj_id, prop_name, update)
                         .wrap_err("error reconciling")?;
                     eyre::Ok(())
                 })
             })
-        })
-        .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
+            .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
         Ok(())
     }
 
@@ -177,20 +176,18 @@ impl AmCtx {
         path: Vec<Prop<'static>>,
     ) -> Res<Option<T>> {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
-        tokio::task::block_in_place(move || {
-            handle.with_document(move |doc| {
-                // If path is empty and obj_id is root, use hydrate instead of hydrate_path
-                if path.is_empty() && obj_id == automerge::ROOT {
-                    let value: T = autosurgeon::hydrate(doc).wrap_err("error hydrating")?;
-                    eyre::Ok(Some(value))
-                } else {
-                    match autosurgeon::hydrate_path(doc, &obj_id, path) {
-                        Ok(Some(value)) => eyre::Ok(Some(value)),
-                        Ok(None) => Err(ferr!("path not found in document")),
-                        Err(e) => Err(ferr!("error hydrating: {e:?}")),
-                    }
+        handle.with_document(|doc| {
+            // If path is empty and obj_id is root, use hydrate instead of hydrate_path
+            if path.is_empty() && obj_id == automerge::ROOT {
+                let value: T = autosurgeon::hydrate(doc).wrap_err("error hydrating")?;
+                eyre::Ok(Some(value))
+            } else {
+                match autosurgeon::hydrate_path(doc, &obj_id, path) {
+                    Ok(Some(value)) => eyre::Ok(Some(value)),
+                    Ok(None) => Err(ferr!("path not found in document")),
+                    Err(e) => Err(ferr!("error hydrating: {e:?}")),
                 }
-            })
+            }
         })
     }
 
@@ -202,9 +199,9 @@ impl AmCtx {
         value: &T,
     ) -> Res<()> {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
-        tokio::task::block_in_place(move || {
-            handle.with_document(move |doc| {
-                doc.transact(move |tx| {
+        handle
+            .with_document(|doc| {
+                doc.transact(|tx| {
                     use automerge::transaction::Transactable;
                     use automerge::ReadDoc;
 
@@ -277,8 +274,7 @@ impl AmCtx {
                     eyre::Ok(())
                 })
             })
-        })
-        .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
+            .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
         Ok(())
     }
 
@@ -292,8 +288,8 @@ impl AmCtx {
     ) -> Res<()> {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         let heads = heads.to_vec();
-        tokio::task::block_in_place(move || {
-            handle.with_document(move |doc| {
+        handle
+            .with_document(|doc| {
                 // Start transaction at the specified heads
                 let mut tx = doc.transaction_at(automerge::PatchLog::null(), &heads);
 
@@ -367,8 +363,7 @@ impl AmCtx {
                 tx.commit();
                 eyre::Ok(())
             })
-        })
-        .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
+            .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
         Ok(())
     }
 
@@ -380,28 +375,26 @@ impl AmCtx {
         path: Vec<Prop<'static>>,
     ) -> Result<Option<T>, HydrateAtHeadError> {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
-        tokio::task::block_in_place(move || {
-            handle.with_document(move |doc| {
-                let version = match doc.fork_at(heads) {
-                    Err(automerge::AutomergeError::InvalidHash(hash)) => {
-                        return Err(HydrateAtHeadError::HashNotFound(hash))
+        handle.with_document(|doc| {
+            let version = match doc.fork_at(heads) {
+                Err(automerge::AutomergeError::InvalidHash(hash)) => {
+                    return Err(HydrateAtHeadError::HashNotFound(hash))
+                }
+                val => val.wrap_err("error forking doc at change")?,
+            };
+            // If path is empty and obj_id is root, use hydrate instead of hydrate_path
+            let value: Option<T> = if path.is_empty() && obj_id == automerge::ROOT {
+                Some(autosurgeon::hydrate(&version).wrap_err("error hydrating")?)
+            } else {
+                match autosurgeon::hydrate_path(&version, &obj_id, path) {
+                    Ok(Some(v)) => Some(v),
+                    Ok(None) => None,
+                    Err(e) => {
+                        return Err(HydrateAtHeadError::Other(ferr!("error hydrating: {e:?}")))
                     }
-                    val => val.wrap_err("error forking doc at change")?,
-                };
-                // If path is empty and obj_id is root, use hydrate instead of hydrate_path
-                let value: Option<T> = if path.is_empty() && obj_id == automerge::ROOT {
-                    Some(autosurgeon::hydrate(&version).wrap_err("error hydrating")?)
-                } else {
-                    match autosurgeon::hydrate_path(&version, &obj_id, path) {
-                        Ok(Some(v)) => Some(v),
-                        Ok(None) => None,
-                        Err(e) => {
-                            return Err(HydrateAtHeadError::Other(ferr!("error hydrating: {e:?}")))
-                        }
-                    }
-                };
-                Ok(value)
-            })
+                }
+            };
+            Ok(value)
         })
     }
 
@@ -423,12 +416,20 @@ impl AmCtx {
         Ok(Some(handle))
     }
 
+    // FIXME: hide samod from AmCtx consumers
+    #[deprecated]
     pub fn repo(&self) -> &samod::Repo {
         &self.repo
     }
 
     pub fn change_manager(&self) -> &Arc<ChangeListenerManager> {
         &self.change_manager
+    }
+
+    pub async fn stop(&self) -> Res<()> {
+        self.change_manager.stop().await?;
+        self.repo.stop().await;
+        Ok(())
     }
 }
 
@@ -445,7 +446,7 @@ pub fn parse_commit_heads<S: AsRef<str>>(heads: &[S]) -> Res<Arc<[ChangeHash]>> 
     heads
         .iter()
         .map(|commit| {
-            crate::hash::decode_base32_multibase(commit.as_ref())
+            crate::hash::decode_base58_multibase(commit.as_ref())
                 .and_then(|bytes| bytes.as_slice().try_into().wrap_err("invalid change hash"))
         })
         .collect()
@@ -455,6 +456,6 @@ pub fn parse_commit_heads<S: AsRef<str>>(heads: &[S]) -> Res<Arc<[ChangeHash]>> 
 pub fn serialize_commit_heads(heads: &[ChangeHash]) -> Vec<String> {
     heads
         .iter()
-        .map(|commit| crate::hash::encode_base32_multibase(commit.0))
+        .map(|commit| crate::hash::encode_base58_multibase(commit.0))
         .collect()
 }

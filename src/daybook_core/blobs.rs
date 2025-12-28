@@ -6,15 +6,15 @@ pub struct BlobsRepo {
 }
 
 impl BlobsRepo {
-    pub async fn new(root: PathBuf) -> Result<Self, eyre::Report> {
+    pub async fn new(root: PathBuf) -> Result<Arc<Self>, eyre::Report> {
         tokio::fs::create_dir_all(&root).await?;
-        Ok(Self { root })
+        Ok(Arc::new(Self { root }))
     }
 
     pub async fn put(&self, data: &[u8]) -> Result<String, eyre::Report> {
         let hash = utils_rs::hash::blake3_hash_bytes(data);
         let path = self.root.join(&hash);
-        
+
         if !path.exists() {
             tokio::fs::write(&path, data).await?;
         }
@@ -37,7 +37,7 @@ impl BlobsRepo {
 mod tests {
     use super::*;
 
-    async fn setup() -> (BlobsRepo, tempfile::TempDir) {
+    async fn setup() -> (Arc<BlobsRepo>, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = BlobsRepo::new(temp_dir.path().to_path_buf()).await.unwrap();
         (repo, temp_dir)
@@ -47,7 +47,7 @@ mod tests {
     async fn test_blobs_smoke() -> Res<()> {
         let (repo, _temp) = setup().await;
         let data = b"hello world";
-        
+
         let hash = repo.put(data).await?;
         let expected_hash = utils_rs::hash::blake3_hash_bytes(data);
         assert_eq!(hash, expected_hash);
@@ -63,10 +63,10 @@ mod tests {
     async fn test_blobs_deduplication() -> Res<()> {
         let (repo, temp) = setup().await;
         let data = b"duplicate data";
-        
+
         let hash1 = repo.put(data).await?;
         let hash2 = repo.put(data).await?;
-        
+
         assert_eq!(hash1, hash2);
 
         // Check filesystem

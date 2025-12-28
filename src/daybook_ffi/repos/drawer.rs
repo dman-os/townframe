@@ -3,7 +3,7 @@ use crate::interlude::*;
 use crate::ffi::{FfiError, SharedFfiCtx};
 
 use daybook_core::drawer::{DrawerEvent, DrawerRepo};
-use daybook_types::doc::{Doc, DocId, DocPatch};
+use daybook_types::doc::{ChangeHashSet, Doc, DocId, DocPatch};
 
 #[derive(uniffi::Object)]
 struct DrawerRepoFfi {
@@ -16,6 +16,12 @@ impl daybook_core::repos::Repo for DrawerRepoFfi {
     fn registry(&self) -> &Arc<daybook_core::repos::ListenersRegistry> {
         &self.repo.registry
     }
+}
+
+#[derive(uniffi::Record, Debug)]
+struct PatchAndHeads {
+    heads: ChangeHashSet,
+    patch: DocPatch,
 }
 
 crate::uniffi_repo_listeners!(DrawerRepoFfi, DrawerEvent);
@@ -69,23 +75,34 @@ impl DrawerRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn update(self: Arc<Self>, patch: DocPatch) -> Result<(), FfiError> {
-        let this = self.clone();
-        Ok(self
-            .fcx
-            .do_on_rt(async move { this.repo.update(patch).await })
-            .await?)
-    }
-
-    #[tracing::instrument(err, skip(self))]
-    async fn update_batch(
+    async fn update(
         self: Arc<Self>,
-        patches: Vec<(daybook_types::doc::ChangeHashSet, DocPatch)>,
+        patch: DocPatch,
+        heads: ChangeHashSet,
     ) -> Result<(), FfiError> {
         let this = self.clone();
         Ok(self
             .fcx
-            .do_on_rt(async move { this.repo.update_batch(patches).await })
+            .do_on_rt(async move {
+                this.repo
+                    .update_at_heads(patch, &heads)
+                    .await
+                    .wrap_err("error applying patch")
+            })
+            .await?)
+    }
+
+    #[tracing::instrument(err, skip(self))]
+    async fn update_batch(self: Arc<Self>, patches: Vec<PatchAndHeads>) -> Result<(), FfiError> {
+        let this = self.clone();
+        Ok(self
+            .fcx
+            .do_on_rt(async move {
+                this.repo
+                    .update_batch(patches.into_iter().map(|p| (p.heads, p.patch)).collect())
+                    .await
+                    .wrap_err("error applying patches")
+            })
             .await?)
     }
 

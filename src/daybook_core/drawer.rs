@@ -1,16 +1,17 @@
 use crate::interlude::*;
 
 use daybook_types::doc::{ChangeHashSet, Doc, DocId, DocPatch};
+use tokio_util::sync::CancellationToken;
 // Automerge types for hydrate/reconcile boundaries
 // We use the conversion functions from daybook_types::automerge module
 // The automerge::Doc type is accessed through conversions
 use crate::repos::Repo;
 use std::str::FromStr;
 
-#[derive(Default, Reconcile, Hydrate)]
+#[derive(Default, Debug, Reconcile, Hydrate)]
 pub struct DrawerStore {
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    map: HashMap<DocId, ChangeHashSet>,
+    pub map: HashMap<DocId, ChangeHashSet>,
 }
 
 #[async_trait]
@@ -28,8 +29,9 @@ pub struct DrawerRepo {
     handles: Arc<DHashMap<DocId, samod::DocHandle>>,
     cache: Arc<DHashMap<DocId, (Arc<Doc>, ChangeHashSet)>>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
-    _broker: Arc<utils_rs::am::changes::DocChangeBroker>,
     drawer_doc_id: DocumentId,
+    cancel_token: CancellationToken,
+    _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
 }
 
 // Minimal event enum so Kotlin can refresh via ffiList on changes
@@ -76,6 +78,10 @@ pub struct UpdateDocBatchErr {
 pub enum DrawerUpdate {}
 
 impl DrawerRepo {
+    pub fn store(&self) -> &crate::stores::StoreHandle<DrawerStore> {
+        &self.store
+    }
+
     pub async fn load(acx: AmCtx, drawer_doc_id: DocumentId) -> Res<Arc<Self>> {
         let registry = crate::repos::ListenersRegistry::new();
 
@@ -93,11 +99,16 @@ impl DrawerRepo {
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
             Vec<utils_rs::am::changes::ChangeNotification>,
         >();
-        DrawerStore::register_change_listener(&acx, &broker, vec!["map".into()], {
-            move |notifs| notif_tx.send(notifs).expect(ERROR_CHANNEL)
+        let ticket = DrawerStore::register_change_listener(&acx, &broker, vec!["map".into()], {
+            move |notifs| {
+                if let Err(err) = notif_tx.send(notifs) {
+                    warn!("failed to send change notifications: {err}");
+                }
+            }
         })
         .await?;
 
+        let cancel_token = CancellationToken::new();
         let repo = Self {
             acx,
             drawer_doc_id,
@@ -105,13 +116,15 @@ impl DrawerRepo {
             registry: Arc::clone(&registry),
             handles: default(),
             cache: default(),
-            _broker: broker,
+            cancel_token: cancel_token.clone(),
+            _change_listener_tickets: vec![ticket],
         };
         let repo = Arc::new(repo);
 
         let _notif_worker = tokio::spawn({
             let repo = Arc::clone(&repo);
-            async move { repo.handle_notifs(notif_rx).await }
+            let cancel_token = cancel_token.clone();
+            async move { repo.handle_notifs(notif_rx, cancel_token).await }
         });
 
         Ok(repo)
@@ -122,84 +135,106 @@ impl DrawerRepo {
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
             Vec<utils_rs::am::changes::ChangeNotification>,
         >,
+        cancel_token: CancellationToken,
     ) -> Res<()> {
         // FIXME: this code doesn't seem right and has missing features
 
         // let mut added_docs = std::collections::HashSet::new();
         // let mut updated_docs = std::collections::HashSet::new();
         // let mut deleted_docs = std::collections::HashSet::new();
-        while let Some(notifs) = notif_rx.recv().await {
-            // added_docs.clear();
-            // updated_docs.clear();
-            // deleted_docs.clear();
-            for notif in notifs {
-                if utils_rs::am::changes::path_matches(
-                    &[DrawerStore::PROP.into(), "map".into()],
-                    &notif.patch.path,
-                ) {
-                    match &notif.patch.action {
-                        automerge::PatchAction::PutMap {
-                            key: new_doc_id,
-                            value: (val, obj_id),
-                            ..
-                        } => {
-                            let Some(automerge::ObjType::List) = val.to_objtype() else {
-                                panic!("schema violation");
-                            };
+        loop {
+            let notifs = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    // Try to drain remaining notifications
+                    while let Ok(notifs) = notif_rx.try_recv() {
+                        self.process_notifs(notifs).await?;
+                    }
+                    break;
+                }
+                msg = notif_rx.recv() => {
+                    match msg {
+                        Some(notifs) => notifs,
+                        None => break,
+                    }
+                }
+            };
+            self.process_notifs(notifs).await?;
+        }
+        // Notify repo listeners that the docs list changed
+        self.registry.notify(DrawerEvent::ListChanged);
+        Ok(())
+    }
 
-                            let new_heads = self
-                                .acx
-                                .hydrate_path_at_heads::<ChangeHashSet>(
-                                    &self.drawer_doc_id,
-                                    &notif.heads,
-                                    obj_id.clone(),
-                                    vec![],
-                                )
-                                .await
-                                .expect("error hydrating at head")
-                                .expect("schema violation");
+    async fn process_notifs(
+        &self,
+        notifs: Vec<utils_rs::am::changes::ChangeNotification>,
+    ) -> Res<()> {
+        for notif in notifs {
+            if utils_rs::am::changes::path_matches(
+                &[DrawerStore::PROP.into(), "map".into()],
+                &notif.patch.path,
+            ) {
+                match &notif.patch.action {
+                    automerge::PatchAction::PutMap {
+                        key: new_doc_id,
+                        value: (val, obj_id),
+                        ..
+                    } => {
+                        let Some(automerge::ObjType::List) = val.to_objtype() else {
+                            panic!("schema violation");
+                        };
 
-                            let old_heads = self
-                                .store
-                                .mutate_sync({
-                                    let key = new_doc_id.clone();
-                                    |store| store.map.insert(key, new_heads.clone())
-                                })
-                                .await?;
-                            if let Some(old_heads) = old_heads {
-                                self.registry.notify(DrawerEvent::DocUpdated {
-                                    id: new_doc_id.clone(),
-                                    new_heads,
-                                    old_heads,
-                                })
-                            } else {
-                                self.registry.notify(DrawerEvent::DocAdded {
-                                    id: new_doc_id.clone(),
-                                    heads: new_heads,
-                                })
-                            }
+                        let new_heads = self
+                            .acx
+                            .hydrate_path_at_heads::<ChangeHashSet>(
+                                &self.drawer_doc_id,
+                                &notif.heads,
+                                obj_id.clone(),
+                                vec![],
+                            )
+                            .await
+                            .expect("error hydrating at head")
+                            .expect("schema violation");
+
+                        let old_heads = self
+                            .store
+                            .mutate_sync({
+                                let key = new_doc_id.clone();
+                                |store| store.map.insert(key, new_heads.clone())
+                            })
+                            .await?;
+                        if let Some(old_heads) = old_heads {
+                            self.registry.notify(DrawerEvent::DocUpdated {
+                                id: new_doc_id.clone(),
+                                new_heads,
+                                old_heads,
+                            })
+                        } else {
+                            self.registry.notify(DrawerEvent::DocAdded {
+                                id: new_doc_id.clone(),
+                                heads: new_heads,
+                            })
                         }
-                        automerge::PatchAction::DeleteMap { key } => {
-                            let old_heads = self
-                                .store
-                                .mutate_sync(|store| store.map.remove(key))
-                                .await?;
-                            if let Some(old_heads) = old_heads {
-                                self.registry.notify(DrawerEvent::DocDeleted {
-                                    id: key.clone(),
-                                    old_heads,
-                                })
-                            }
+                    }
+                    automerge::PatchAction::DeleteMap { key } => {
+                        let old_heads = self
+                            .store
+                            .mutate_sync(|store| store.map.remove(key))
+                            .await?;
+                        if let Some(old_heads) = old_heads {
+                            self.registry.notify(DrawerEvent::DocDeleted {
+                                id: key.clone(),
+                                old_heads,
+                            })
                         }
-                        _ => {
-                            info!(?notif.patch, "XXX weird patch action");
-                        }
+                    }
+                    _ => {
+                        info!(?notif.patch, "XXX weird patch action");
                     }
                 }
             }
         }
-        // Notify repo listeners that the docs list changed
-        self.registry.notify(DrawerEvent::ListChanged);
         Ok(())
     }
 
@@ -211,46 +246,45 @@ impl DrawerRepo {
             .await
     }
 
-    // Create a new doc (Automerge), reconcile the provided `Doc` into it, store and cache handle,
-    // and add its id to the drawer set.
     pub async fn add(&self, mut new_doc: Doc) -> Res<DocId> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
         // Use AutoCommit for reconciliation
         let handle = self.acx.add_doc(automerge::Automerge::new()).await?;
 
         new_doc.id = handle.document_id().to_string();
 
-        let (new_doc, heads) = tokio::task::spawn_blocking({
-            let handle = handle.clone();
-            move || {
-                handle.with_document(move |doc_am| {
-                    let doc = doc_am
-                        .transact(move |tx| {
-                            use automerge::transaction::Transactable;
-                            tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
-                            // Convert root Doc to automerge Doc for reconciliation
-                            // Use the helper function to avoid needing to import the type
-                            let am_doc: daybook_types::automerge::doc::Doc = new_doc.into();
-                            autosurgeon::reconcile(tx, &am_doc)
-                                .map_err(|err| ferr!(err.to_string()))
-                                .wrap_err("error reconciling new doc")?;
-                            // Convert back to root Doc
-                            let root_doc: Doc = am_doc.into();
-                            eyre::Ok(root_doc)
-                        })
-                        .map(|val| val.result)
-                        .map_err(|err| err.error)?;
-                    eyre::Ok((doc, doc_am.get_heads()))
-                })
-            }
-        })
-        .await
-        .wrap_err(ERROR_TOKIO)??;
+        let (new_doc, heads) = handle
+            .with_document(move |doc_am| {
+                let doc = doc_am
+                    .transact(move |tx| {
+                        use automerge::transaction::Transactable;
+                        tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
+                        // Convert root Doc to automerge Doc for reconciliation
+                        // Use the helper function to avoid needing to import the type
+                        let am_doc: daybook_types::automerge::doc::Doc = new_doc.into();
+                        autosurgeon::reconcile(tx, &am_doc)
+                            .map_err(|err| ferr!(err.to_string()))
+                            .wrap_err("error reconciling new doc")?;
+                        // Convert back to root Doc
+                        let root_doc: Doc = am_doc.into();
+                        eyre::Ok(root_doc)
+                    })
+                    .map(|val| val.result)
+                    .map_err(|err| err.error)?;
+                eyre::Ok((doc, doc_am.get_heads()))
+            })
+            .wrap_err(ERROR_TOKIO)?;
         let new_doc = Arc::new(new_doc);
         let heads = ChangeHashSet(heads.into());
 
         // store id in drawer AM
         self.store
-            .mutate_sync(|store| store.map.insert(new_doc.id.clone(), heads.clone()))
+            .mutate_sync(|store| {
+                store.map.insert(new_doc.id.clone(), heads.clone());
+                debug!(?heads, "XXX {store:#?}")
+            })
             .await?;
 
         // cache the handle under the doc's Uuid id
@@ -292,6 +326,13 @@ impl DrawerRepo {
 
     // Get a Doc by id by hydrating its automerge document
     pub async fn get(&self, id: &DocId) -> Res<Option<Arc<Doc>>> {
+        self.get_with_heads(id)
+            .await
+            .map(|opt| opt.map(|(doc, _)| doc))
+    }
+
+    /// Get a doc along with its current heads (for later patching)
+    pub async fn get_with_heads(&self, id: &DocId) -> Res<Option<(Arc<Doc>, ChangeHashSet)>> {
         // latest head is stored in the drawer
         let Some(latest_heads) = self
             .store
@@ -300,7 +341,8 @@ impl DrawerRepo {
         else {
             return Ok(None);
         };
-        self.get_at_heads(id, &latest_heads).await
+        let doc = self.get_at_heads(id, &latest_heads).await?;
+        Ok(doc.map(|d| (d, latest_heads)))
     }
 
     pub async fn get_at_heads(&self, id: &DocId, heads: &ChangeHashSet) -> Res<Option<Arc<Doc>>> {
@@ -312,15 +354,13 @@ impl DrawerRepo {
         let Some(handle) = self.get_handle(id).await? else {
             return Ok(None);
         };
-        let (doc, heads) = tokio::task::block_in_place(move || {
-            handle.with_document(move |doc| {
-                let version = doc.fork_at(&heads).wrap_err("error forking doc at heads")?;
-                // Hydrate as automerge Doc, then convert to root Doc
-                let am_doc: daybook_types::automerge::doc::Doc =
-                    autosurgeon::hydrate(&version).wrap_err("error hydrating")?;
-                let root_doc: Doc = am_doc.into();
-                eyre::Ok((root_doc, heads))
-            })
+        let (doc, heads) = handle.with_document(move |doc| {
+            let version = doc.fork_at(&heads).wrap_err("error forking doc at heads")?;
+            // Hydrate as automerge Doc, then convert to root Doc
+            let am_doc: daybook_types::automerge::doc::Doc =
+                autosurgeon::hydrate(&version).wrap_err("error hydrating")?;
+            let root_doc: Doc = am_doc.into();
+            eyre::Ok((root_doc, heads))
         })?;
         let doc: Arc<Doc> = Arc::new(doc);
         self.cache.insert(id.clone(), (doc.clone(), heads.clone()));
@@ -334,6 +374,11 @@ impl DrawerRepo {
         mut patch: DocPatch,
         heads: &ChangeHashSet,
     ) -> Result<(), UpdateDocErr> {
+        if self.cancel_token.is_cancelled() {
+            return Err(UpdateDocErr::Other {
+                inner: ferr!("repo is stopped"),
+            });
+        }
         if patch.is_empty() {
             return Ok(());
         }
@@ -342,81 +387,62 @@ impl DrawerRepo {
             return Err(UpdateDocErr::DocNotFound { id: patch.id });
         };
         let id = patch.id.clone();
-        let new_heads = tokio::task::spawn_blocking({
-            let cache = self.cache.clone();
-            let heads = heads.clone();
-            move || {
-                handle.with_document(move |am_doc| {
-                    let mut version = am_doc
-                        .fork_at(&heads)
-                        .wrap_err("error forking doc at heads")?;
-                    let result = version.transact(move |tx| {
-                        match cache.get_mut(&patch.id) {
-                            // if the cached doc is at the head we're
-                            // looking for
-                            Some(mut entry) if entry.1 == heads => {
-                                let mut doc = (*entry.0).clone();
-                                // Apply the patch
-                                patch.apply(&mut doc);
-                                // Update updated_at
-                                doc.updated_at = time::OffsetDateTime::now_utc();
-                                // Convert to automerge Doc for reconciliation
-                                use daybook_types::automerge::doc::Doc as AmDoc;
-                                let am_doc: AmDoc = doc.into();
-                                autosurgeon::reconcile(tx, &am_doc)
-                                    .wrap_err("error reconciling")?;
-                                // Convert back to root Doc
-                                let root_doc: Doc = am_doc.into();
-                                let heads = ChangeHashSet(tx.get_heads().into());
-                                entry.0 = Arc::new(root_doc);
-                                entry.1 = heads.clone();
-                                eyre::Ok(heads)
-                            }
-                            _ => {
-                                // Hydrate as automerge Doc, then convert to root Doc
-                                let am_doc: daybook_types::automerge::doc::Doc =
-                                    autosurgeon::hydrate(tx).wrap_err("error hydrating")?;
-                                let mut doc: Doc = am_doc.into();
-                                // Apply the patch
-                                patch.apply(&mut doc);
-                                // Update updated_at
-                                doc.updated_at = time::OffsetDateTime::now_utc();
-                                // Convert back to automerge Doc for reconciliation
-                                let am_doc: daybook_types::automerge::doc::Doc = doc.into();
-                                autosurgeon::reconcile(tx, &am_doc)
-                                    .wrap_err("error reconciling")?;
-                                // Convert back to root Doc
-                                let root_doc: Doc = am_doc.into();
-                                let doc = Arc::new(root_doc);
-                                let heads = ChangeHashSet(tx.get_heads().into());
-                                cache.insert(patch.id.clone(), (doc, heads.clone()));
-                                eyre::Ok(heads)
-                            }
-                        }
-                    });
-                    result.map(|val| val.result).map_err(|err| err.error)
-                })
-            }
-        })
-        .await
-        .wrap_err(ERROR_TOKIO)??;
+        let new_heads = handle
+            .with_document(|am_doc| {
+                let mut tx = am_doc.transaction_at(automerge::PatchLog::null(), &heads);
 
-        // Update the store's map with the new heads
-        let _old_heads = self
-            .store
-            .mutate_sync(|store| store.map.insert(id.clone(), new_heads.clone()))
+                let new_heads = match self.cache.get_mut(&patch.id) {
+                    // if the cached doc is at the head we're
+                    // looking for
+                    Some(mut entry) if entry.1 == *heads => {
+                        let mut doc = (*entry.0).clone();
+                        // Apply the patch
+                        patch.apply(&mut doc);
+                        // Update updated_at
+                        doc.updated_at = time::OffsetDateTime::now_utc();
+                        // Convert to automerge Doc for reconciliation
+                        use daybook_types::automerge::doc::Doc as AmDoc;
+                        let doc: AmDoc = doc.into();
+                        autosurgeon::reconcile(&mut tx, &doc).wrap_err("error reconciling")?;
+                        tx.commit();
+                        // Convert back to root Doc
+                        let root_doc: Doc = doc.into();
+                        let heads = ChangeHashSet(am_doc.get_heads().into());
+                        entry.0 = Arc::new(root_doc);
+                        entry.1 = heads.clone();
+                        eyre::Ok(heads)
+                    }
+                    _ => {
+                        // Hydrate as automerge Doc, then convert to root Doc
+                        let doc: daybook_types::automerge::doc::Doc =
+                            autosurgeon::hydrate(&tx).wrap_err("error hydrating")?;
+                        let mut doc: Doc = doc.into();
+                        // Apply the patch
+                        patch.apply(&mut doc);
+                        // Update updated_at
+                        doc.updated_at = time::OffsetDateTime::now_utc();
+                        // Convert back to automerge Doc for reconciliation
+                        let doc: daybook_types::automerge::doc::Doc = doc.into();
+                        autosurgeon::reconcile(&mut tx, &doc).wrap_err("error reconciling")?;
+                        tx.commit();
+                        // Convert back to root Doc
+                        let root_doc: Doc = doc.into();
+                        let doc = Arc::new(root_doc);
+                        let heads = ChangeHashSet(am_doc.get_heads().into());
+                        self.cache.insert(patch.id.clone(), (doc, heads.clone()));
+                        eyre::Ok(heads)
+                    }
+                }?;
+                eyre::Ok(new_heads)
+            })
+            .wrap_err(ERROR_TOKIO)?;
+
+        self.store
+            .mutate_sync(|store| {
+                let old_heads = store.map.insert(id.clone(), new_heads.clone());
+                debug!(?old_heads, ?new_heads, "XXX {store:#?}")
+            })
             .await?;
-
-        // FIXME: not sure if this is needed
-        // Explicitly notify about the update (similar to how handle_notifs does it)
-        // This ensures the event is fired even if the change notification is delayed
-        // if old_heads.is_some() {
-        //     self.registry.notify(DrawerEvent::DocUpdated {
-        //         id,
-        //         new_heads,
-        //         old_heads: old_heads.unwrap(),
-        //     });
-        // }
 
         Ok(())
     }
@@ -450,6 +476,9 @@ impl DrawerRepo {
 
     // Delete: evict from drawer and cache (document remains in repo for now)
     pub async fn del(&self, id: &DocId) -> Res<bool> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
         let existed = self
             .store
             .mutate_sync(|store| store.map.remove(id).is_some())
@@ -467,6 +496,9 @@ impl Repo for DrawerRepo {
     type Event = DrawerEvent;
     fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
         &self.registry
+    }
+    fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel_token
     }
 }
 

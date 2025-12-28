@@ -24,21 +24,21 @@ pub trait Store: Hydrate + Reconcile + Send + Sync + 'static {
         broker: &utils_rs::am::changes::DocChangeBroker,
         mut path: Vec<autosurgeon::Prop<'static>>,
         on_change: F,
-    ) -> Res<()>
+    ) -> Res<utils_rs::am::changes::ChangeListenerRegistration>
     where
         F: Fn(Vec<utils_rs::am::changes::ChangeNotification>) + Send + Sync + 'static,
     {
         path.insert(0, Self::PROP.into());
-        acx.change_manager()
+        let ticket = acx.change_manager()
             .add_listener(
                 utils_rs::am::changes::ChangeFilter {
                     path,
                     doc_id: Some(broker.filter()),
                 },
-                on_change,
+                Box::new(on_change),
             )
             .await;
-        Ok(())
+        Ok(ticket)
     }
 }
 

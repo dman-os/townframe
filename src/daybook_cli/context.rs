@@ -1,29 +1,5 @@
 use crate::interlude::*;
 
-mod version_updates {
-    use crate::interlude::*;
-
-    use daybook_core::stores::Store;
-
-    use automerge::{transaction::Transactable, ActorId, AutoCommit, ROOT};
-    use autosurgeon::reconcile_prop;
-
-    pub mod app {
-        use super::*;
-        use daybook_core::config::ConfigStore;
-        use daybook_core::tables::TablesStore;
-
-        pub fn version_latest() -> Res<Vec<u8>> {
-            let mut doc = AutoCommit::new().with_actor(ActorId::random());
-            doc.put(ROOT, "version", "0")?;
-            doc.put(ROOT, "$schema", "daybook.app")?;
-            reconcile_prop(&mut doc, ROOT, TablesStore::PROP, TablesStore::default())?;
-            reconcile_prop(&mut doc, ROOT, ConfigStore::PROP, ConfigStore::default())?;
-            Ok(doc.save_nocompress())
-        }
-    }
-}
-
 /// Configuration for the daybook core storage systems
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -40,7 +16,6 @@ pub struct SqlConfig {
 pub struct Ctx {
     pub acx: utils_rs::am::AmCtx,
     pub sql: SqlCtx,
-    pub blobs: daybook_core::blobs::BlobsRepo,
     pub doc_app: tokio::sync::OnceCell<samod::DocHandle>,
     pub doc_drawer: tokio::sync::OnceCell<samod::DocHandle>,
 }
@@ -53,53 +28,22 @@ pub struct SqlCtx {
 
 impl Config {
     /// Create a new config with platform-specific defaults
-    pub fn new() -> Res<Self> {
-        #[cfg(target_os = "android")]
+    pub fn new(cli_config: crate::config::CliConfig) -> Res<Self> {
         let (am, sql, blobs_root) = {
-            let app_dir = std::env::var("ANDROID_DATA")
-                .map(|data| {
-                    PathBuf::from(data)
-                        .join("data")
-                        .join("org.example.daybook")
-                        .join("files")
-                })
-                .unwrap_or_else(|_| PathBuf::from("/data/data/org.example.daybook/files"));
-
             (
                 utils_rs::am::Config {
                     storage: utils_rs::am::StorageConfig::Disk {
-                        path: app_dir.join("samod"),
+                        path: cli_config.repo_path.join("samod"),
                     },
                     peer_id: "daybook_client".to_string(),
                 },
                 SqlConfig {
                     database_url: {
-                        let db_path = app_dir.join("sqlite.db");
+                        let db_path = cli_config.repo_path.join("sqlite.db");
                         format!("sqlite://{}", db_path.display())
                     },
                 },
-                app_dir.join("blobs"),
-            )
-        };
-
-        #[cfg(not(target_os = "android"))]
-        let (am, sql, blobs_root) = {
-            let dirs = directories::ProjectDirs::from("org", "daybook", "daybook")
-                .ok_or_eyre("failed to get xdg directories")?;
-            (
-                utils_rs::am::Config {
-                    storage: utils_rs::am::StorageConfig::Disk {
-                        path: dirs.data_dir().join("samod"),
-                    },
-                    peer_id: "daybook_client".to_string(),
-                },
-                SqlConfig {
-                    database_url: {
-                        let db_path = dirs.data_dir().join("sqlite.db");
-                        format!("sqlite://{}", db_path.display())
-                    },
-                },
-                dirs.data_dir().join("blobs"),
+                cli_config.repo_path.join("blobs"),
             )
         };
         Ok(Self {
@@ -182,7 +126,6 @@ async fn set_init_state(cx: &Ctx, state: &InitState) -> Res<()> {
 impl Ctx {
     pub async fn init(config: Config) -> Result<Arc<Self>, eyre::Report> {
         let sql = SqlCtx::new(config.sql.clone()).await?;
-        let blobs = daybook_core::blobs::BlobsRepo::new(config.blobs_root.clone()).await?;
         let acx =
             utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
                 .await?;
@@ -191,7 +134,6 @@ impl Ctx {
         let cx = Arc::new(Self {
             acx,
             sql,
-            blobs,
             doc_app: default(),
             doc_drawer: default(),
         });
@@ -235,7 +177,7 @@ async fn init_from_globals(cx: &Ctx) -> Res<()> {
     for (handle, latest_fn) in [
         (
             handle_app,
-            version_updates::app::version_latest as fn() -> Res<Vec<u8>>,
+            daybook_core::app::version_updates::version_latest as fn() -> Res<Vec<u8>>,
         ),
         (
             handle_drawer,
@@ -278,9 +220,4 @@ async fn init_from_globals(cx: &Ctx) -> Res<()> {
         eyre::bail!("double ctx initialization");
     };
     Ok(())
-}
-
-pub async fn init_context() -> Res<SharedCtx> {
-    let config = Config::new()?;
-    Ctx::init(config).await
 }

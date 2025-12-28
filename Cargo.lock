@@ -1813,6 +1813,7 @@ dependencies = [
 name = "daybook_core"
 version = "0.1.0"
 dependencies = [
+ "addr",
  "anyhow",
  "api_utils_rs",
  "async-trait",
@@ -7883,6 +7884,7 @@ dependencies = [
  "automerge",
  "autosurgeon",
  "blake3",
+ "bs58",
  "color-eyre",
  "console-subscriber",
  "dashmap",
@@ -7904,6 +7906,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-tungstenite 0.27.0",
+ "tokio-util",
  "tracing",
  "tracing-android",
  "tracing-appender",
