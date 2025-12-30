@@ -5,7 +5,7 @@ use crate::interlude::*;
 pub struct Config {
     pub am: utils_rs::am::Config,
     pub sql: SqlConfig,
-    pub blobs_root: PathBuf,
+    pub _blobs_root: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -28,7 +28,7 @@ pub struct SqlCtx {
 
 impl Config {
     /// Create a new config with platform-specific defaults
-    pub fn new(cli_config: crate::config::CliConfig) -> Res<Self> {
+    pub fn new(cli_config: &crate::config::CliConfig) -> Res<Self> {
         let (am, sql, blobs_root) = {
             (
                 utils_rs::am::Config {
@@ -49,7 +49,7 @@ impl Config {
         Ok(Self {
             am,
             sql,
-            blobs_root,
+            _blobs_root: blobs_root,
         })
     }
 }

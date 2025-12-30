@@ -1,6 +1,5 @@
 use crate::interlude::*;
 use daybook_types::doc::{self as root_doc, DocPropKey};
-use std::str::FromStr;
 
 mod binds_guest {
     use daybook_types::doc::{self as root_doc};
@@ -557,7 +556,7 @@ impl prop_routine::Host for WashCtx {
             prop_token: self.table.push(PropTokenRw {
                 doc_id: doc_id.clone(),
                 heads: heads.clone(),
-                prop_key: DocPropKey::from_str(prop_key.as_str()).unwrap(),
+                prop_key: DocPropKey::from(prop_key.as_str()),
             })?,
         })
     }

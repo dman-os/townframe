@@ -49,7 +49,6 @@ pub fn init_sqlite_vec() {
 }
 
 pub mod app {
-    use crate::interlude::*;
 
     pub mod version_updates {
         use crate::interlude::*;

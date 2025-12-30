@@ -70,57 +70,6 @@ fn test_wit_to_root_conversion() -> Res<()> {
 }
 
 #[test]
-#[cfg(feature = "automerge")]
-fn test_root_to_automerge_conversion() {
-    let root_doc = create_test_doc();
-    let am_doc: crate::automerge::doc::Doc = root_doc.clone().into();
-
-    assert_eq!(am_doc.id, root_doc.id);
-    assert_eq!(am_doc.created_at, root_doc.created_at);
-    assert_eq!(am_doc.updated_at, root_doc.updated_at);
-    assert_eq!(am_doc.props.len(), root_doc.props.len());
-}
-
-#[test]
-#[cfg(feature = "automerge")]
-fn test_automerge_to_root_conversion() {
-    let root_doc = create_test_doc();
-    let am_doc: crate::automerge::doc::Doc = root_doc.clone().into();
-    let converted_back: Doc = am_doc.into();
-
-    assert_eq!(converted_back.id, root_doc.id);
-    assert_eq!(converted_back.props.len(), root_doc.props.len());
-}
-
-#[test]
-#[cfg(feature = "automerge")]
-fn test_automerge_to_wit_conversion() {
-    let root_doc = create_test_doc();
-    let am_doc: crate::automerge::doc::Doc = root_doc.clone().into();
-    // Convert through root Doc
-    let root_from_am: Doc = am_doc.clone().into();
-    let wit_doc: wit::doc::Doc = root_from_am.into();
-
-    assert_eq!(wit_doc.id, am_doc.id);
-    assert_eq!(wit_doc.props.len(), am_doc.props.len());
-}
-
-#[test]
-#[cfg(feature = "automerge")]
-fn test_wit_to_automerge_conversion() -> Res<()> {
-    let root_doc = create_test_doc();
-    let wit_doc: wit::doc::Doc = root_doc.clone().into();
-    // Convert through root Doc
-    let root_from_wit: Doc = wit_doc.try_into()?;
-    let am_doc: crate::automerge::doc::Doc = root_from_wit.into();
-
-    assert_eq!(am_doc.id, root_doc.id);
-    assert_eq!(am_doc.props.len(), root_doc.props.len());
-
-    Ok(())
-}
-
-#[test]
 fn test_round_trip_root_wit_root() -> Res<()> {
     let original = create_test_doc();
     let wit: wit::doc::Doc = original.clone().into();
@@ -131,18 +80,6 @@ fn test_round_trip_root_wit_root() -> Res<()> {
     assert_eq!(back.props, original.props);
 
     Ok(())
-}
-
-#[test]
-#[cfg(feature = "automerge")]
-fn test_round_trip_root_automerge_root() {
-    let original = create_test_doc();
-    let am: crate::automerge::doc::Doc = original.clone().into();
-    let back: Doc = am.into();
-
-    assert_eq!(back.id, original.id);
-    assert_eq!(back.props.len(), original.props.len());
-    assert_eq!(back.props, original.props);
 }
 
 #[test]

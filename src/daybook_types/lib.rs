@@ -6,18 +6,12 @@
 mod interlude {
     pub use serde::{Deserialize, Serialize};
 
-    #[cfg(feature = "automerge")]
-    pub use autosurgeon::{Hydrate, Reconcile};
-
     pub use utils_rs::prelude::*;
 }
 
 pub mod doc;
 #[cfg(test)]
 mod test;
-
-#[cfg(feature = "automerge")]
-pub mod automerge;
 
 #[cfg(feature = "wit")]
 pub mod wit;
@@ -161,7 +155,7 @@ macro_rules! define_enum_and_tag {
             ];
 
             pub const ALL_STR: &[&str] = &[
-                $(concat!($reverse_domain_name, stringify!($key:snake)),)*
+                $(concat!($reverse_domain_name, stringify!($key:lower)),)*
             ];
 
             pub fn as_str(&self) -> &'static str {
@@ -171,7 +165,7 @@ macro_rules! define_enum_and_tag {
                             concat!(
                                 $reverse_domain_name,
                                 pastey::paste! {
-                                    stringify!([<$key:snake>])
+                                    stringify!([<$key:lower>])
                                 }
                             ),
                     )*
@@ -183,7 +177,7 @@ macro_rules! define_enum_and_tag {
                     if s.eq_ignore_ascii_case(concat!(
                         $reverse_domain_name,
                         pastey::paste! {
-                            stringify!([<$key:snake>])
+                            stringify!([<$key:lower>])
                         }
                     )) {
                         return Some(Self::$key);

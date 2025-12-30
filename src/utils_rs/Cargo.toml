@@ -9,7 +9,13 @@ path = "lib.rs"
 [features]
 default = ["automerge-repo", "hash", "native"]
 automerge = ["dep:autosurgeon", "dep:automerge"]
-automerge-repo = ["automerge", "dep:samod", "dep:tokio-tungstenite"]
+automerge-repo = [
+    "automerge",
+    "dep:samod",
+    "samod/tokio",
+    "samod/tungstenite",
+    "dep:tokio-tungstenite"
+]
 hash = [
     "dep:multihash",
     "dep:json-canon",
@@ -80,3 +86,6 @@ bs58 = "0.5.1"
 
 [target.'cfg(target_os = "android")'.dependencies]
 tracing-android = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

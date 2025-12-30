@@ -12,7 +12,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
         PlugManifest {
             namespace: "daybook".into(),
             name: "core".into(),
-            version: "v0.0.1".parse().unwrap(),
+            version: "0.0.1".parse().unwrap(),
             title: "Daybook Core".into(),
             desc: "Core keys and routines".into(),
             dependencies: default(),
@@ -68,7 +68,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
         PlugManifest {
             namespace: "daybook".into(),
             name: "wip".into(),
-            version: "v0.0.1".parse().unwrap(),
+            version: "0.0.1".parse().unwrap(),
             title: "Daybook WIP".into(),
             desc: "Experiment bed for WIP features".into(),
             dependencies: [
@@ -143,7 +143,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
 #[derive(Default, Reconcile, Hydrate)]
 pub struct PlugsStore {
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    pub manifests: HashMap<String, ThroughJson<manifest::PlugManifest>>,
+    pub manifests: HashMap<String, ThroughJson<Arc<manifest::PlugManifest>>>,
 
     /// Index: property tag -> plug id (@ns/name)
     #[autosurgeon(with = "utils_rs::am::codecs::skip")]
@@ -155,7 +155,6 @@ impl PlugsStore {
         self.tag_to_plug.clear();
 
         for (plug_id, manifest) in &self.manifests {
-            let manifest = &**manifest;
             for prop in &manifest.props {
                 self.tag_to_plug
                     .insert(prop.key_tag.to_string(), plug_id.clone());
@@ -221,6 +220,7 @@ impl PlugsRepo {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store = PlugsStore::load(&acx, &app_doc_id).await?;
+        let is_empty = store.manifests.is_empty();
         let store = crate::stores::StoreHandle::new(store, acx.clone(), app_doc_id.clone());
 
         store.mutate_sync(|s| s.rebuild_indices()).await?;
@@ -260,6 +260,12 @@ impl PlugsRepo {
             let cancel_token = cancel_token.clone();
             async move { repo.handle_notifs(notif_rx, cancel_token).await }
         });
+
+        if is_empty {
+            for plug in system_plugs() {
+                repo.add(plug).await?;
+            }
+        }
 
         Ok(repo)
     }
@@ -344,9 +350,9 @@ impl PlugsRepo {
         Ok(())
     }
 
-    pub async fn get(&self, id: &str) -> Option<manifest::PlugManifest> {
+    pub async fn get(&self, id: &str) -> Option<Arc<manifest::PlugManifest>> {
         self.store
-            .query_sync(|store| store.manifests.get(id).map(|m| (**m).clone()))
+            .query_sync(|store| store.manifests.get(id).map(|man| Arc::clone(&man.0)))
             .await
     }
 
@@ -391,6 +397,12 @@ impl PlugsRepo {
             .await
     }
 
+    pub async fn list_plugs(&self) -> Vec<Arc<manifest::PlugManifest>> {
+        self.store
+            .query_sync(|store| store.manifests.values().map(|man| man.0.clone()).collect())
+            .await
+    }
+
     /// Add a new plug to the repo after validating it.
     ///
     /// This method follows a literate programming approach to clearly document
@@ -416,10 +428,11 @@ impl PlugsRepo {
 
         self.store
             .mutate_sync(move |store| {
+                info!("XXX {manifest:?}");
                 // Update the manifest in the store
                 store
                     .manifests
-                    .insert(plug_id.clone(), ThroughJson(manifest));
+                    .insert(plug_id.clone(), ThroughJson(Arc::new(manifest)));
 
                 // 3. Rebuild indices
                 // Indices are in-memory caches (marked with #[autosurgeon(skip)])

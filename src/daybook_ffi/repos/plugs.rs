@@ -5,7 +5,7 @@ use daybook_core::plugs::{PlugsEvent, PlugsRepo};
 
 #[derive(uniffi::Object)]
 pub struct PlugsRepoFfi {
-    fcx: SharedFfiCtx,
+    _fcx: SharedFfiCtx,
     pub repo: Arc<PlugsRepo>,
 }
 
@@ -13,6 +13,10 @@ impl daybook_core::repos::Repo for PlugsRepoFfi {
     type Event = PlugsEvent;
     fn registry(&self) -> &Arc<daybook_core::repos::ListenersRegistry> {
         &self.repo.registry
+    }
+
+    fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {
+        self.repo.cancel_token()
     }
 }
 
@@ -31,6 +35,6 @@ impl PlugsRepoFfi {
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
-        Ok(Arc::new(Self { fcx, repo }))
+        Ok(Arc::new(Self { _fcx: fcx, repo }))
     }
 }

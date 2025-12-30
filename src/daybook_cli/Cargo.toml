@@ -8,9 +8,12 @@ name = "daybook"
 path = "main.rs"
 
 [dependencies]
-clap = { version = "4.5.47", features = ["derive", "env"] }
-clap_complete = "4.5.0"
+clap = { workspace = true, features = ["derive", "env", "string"] }
+clap_complete.workspace = true
+comfy-table = "7.2"
+
 dotenv-flow.workspace = true
+directories = "6.0.0"
 
 utils_rs = { workspace = true, features = ["native"] }
 daybook_core = { workspace = true }
@@ -22,18 +25,22 @@ color-eyre.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-directories = "6.0.0"
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+
 serde = { workspace = true }
 serde_json.workspace = true
+
 automerge.workspace = true
 autosurgeon = { workspace = true, features = ["uuid"] }
 samod = { workspace = true, features = ["tokio"] }
-comfy-table = "7.2"
+
 fuser = { version = "0.16", features = ["abi-7-31"] }
+
 parking_lot = "0.12"
 libc = "0.2"
 struct-patch = "0.10"
+
+scopeguard.workspace = true
 
 [dev-dependencies]
 tempfile = "3.10"

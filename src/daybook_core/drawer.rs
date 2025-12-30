@@ -261,15 +261,11 @@ impl DrawerRepo {
                     .transact(move |tx| {
                         use automerge::transaction::Transactable;
                         tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
-                        // Convert root Doc to automerge Doc for reconciliation
-                        // Use the helper function to avoid needing to import the type
-                        let am_doc: daybook_types::automerge::doc::Doc = new_doc.into();
-                        autosurgeon::reconcile(tx, &am_doc)
+                        let new_doc = ThroughJson(new_doc);
+                        autosurgeon::reconcile(tx, &new_doc)
                             .map_err(|err| ferr!(err.to_string()))
                             .wrap_err("error reconciling new doc")?;
-                        // Convert back to root Doc
-                        let root_doc: Doc = am_doc.into();
-                        eyre::Ok(root_doc)
+                        eyre::Ok(new_doc.0)
                     })
                     .map(|val| val.result)
                     .map_err(|err| err.error)?;
@@ -283,7 +279,6 @@ impl DrawerRepo {
         self.store
             .mutate_sync(|store| {
                 store.map.insert(new_doc.id.clone(), heads.clone());
-                debug!(?heads, "XXX {store:#?}")
             })
             .await?;
 
@@ -354,18 +349,17 @@ impl DrawerRepo {
         let Some(handle) = self.get_handle(id).await? else {
             return Ok(None);
         };
-        let (doc, heads) = handle.with_document(move |doc| {
-            let version = doc.fork_at(&heads).wrap_err("error forking doc at heads")?;
+        let (doc, heads) = handle.with_document(move |am_doc| {
+            let version = am_doc
+                .fork_at(&heads)
+                .wrap_err("error forking doc at heads")?;
             // Hydrate as automerge Doc, then convert to root Doc
-            let am_doc: daybook_types::automerge::doc::Doc =
+            let doc: ThroughJson<Doc> =
                 autosurgeon::hydrate(&version).wrap_err("error hydrating")?;
-            let root_doc: Doc = am_doc.into();
-            eyre::Ok((root_doc, heads))
+            eyre::Ok((doc.0, heads))
         })?;
         let doc: Arc<Doc> = Arc::new(doc);
         self.cache.insert(id.clone(), (doc.clone(), heads.clone()));
-
-        info!(?doc, "XXX");
         Ok(Some(doc))
     }
 
@@ -396,38 +390,32 @@ impl DrawerRepo {
                     // looking for
                     Some(mut entry) if entry.1 == *heads => {
                         let mut doc = (*entry.0).clone();
-                        // Apply the patch
                         patch.apply(&mut doc);
-                        // Update updated_at
                         doc.updated_at = time::OffsetDateTime::now_utc();
-                        // Convert to automerge Doc for reconciliation
-                        use daybook_types::automerge::doc::Doc as AmDoc;
-                        let doc: AmDoc = doc.into();
+
+                        let doc = ThroughJson(doc);
                         autosurgeon::reconcile(&mut tx, &doc).wrap_err("error reconciling")?;
                         tx.commit();
-                        // Convert back to root Doc
-                        let root_doc: Doc = doc.into();
+                        let doc = doc.0;
+
                         let heads = ChangeHashSet(am_doc.get_heads().into());
-                        entry.0 = Arc::new(root_doc);
+                        entry.0 = Arc::new(doc);
                         entry.1 = heads.clone();
                         eyre::Ok(heads)
                     }
                     _ => {
                         // Hydrate as automerge Doc, then convert to root Doc
-                        let doc: daybook_types::automerge::doc::Doc =
+                        let mut doc: ThroughJson<Doc> =
                             autosurgeon::hydrate(&tx).wrap_err("error hydrating")?;
-                        let mut doc: Doc = doc.into();
-                        // Apply the patch
                         patch.apply(&mut doc);
-                        // Update updated_at
+
                         doc.updated_at = time::OffsetDateTime::now_utc();
-                        // Convert back to automerge Doc for reconciliation
-                        let doc: daybook_types::automerge::doc::Doc = doc.into();
+
                         autosurgeon::reconcile(&mut tx, &doc).wrap_err("error reconciling")?;
                         tx.commit();
-                        // Convert back to root Doc
-                        let root_doc: Doc = doc.into();
-                        let doc = Arc::new(root_doc);
+
+                        let doc = doc.0;
+                        let doc = Arc::new(doc);
                         let heads = ChangeHashSet(am_doc.get_heads().into());
                         self.cache.insert(patch.id.clone(), (doc, heads.clone()));
                         eyre::Ok(heads)
@@ -439,8 +427,7 @@ impl DrawerRepo {
 
         self.store
             .mutate_sync(|store| {
-                let old_heads = store.map.insert(id.clone(), new_heads.clone());
-                debug!(?old_heads, ?new_heads, "XXX {store:#?}")
+                let _old_heads = store.map.insert(id.clone(), new_heads.clone());
             })
             .await?;
 
@@ -618,6 +605,9 @@ mod tests {
                 _ => eyre::bail!("unexpected event"),
             }
         }
+
+        client_acx.stop().await?;
+        server_acx.stop().await?;
 
         Ok(())
     }

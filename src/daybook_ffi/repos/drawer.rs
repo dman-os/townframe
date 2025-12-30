@@ -16,6 +16,10 @@ impl daybook_core::repos::Repo for DrawerRepoFfi {
     fn registry(&self) -> &Arc<daybook_core::repos::ListenersRegistry> {
         &self.repo.registry
     }
+
+    fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {
+        self.repo.cancel_token()
+    }
 }
 
 #[derive(uniffi::Record, Debug)]

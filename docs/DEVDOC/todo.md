@@ -2,18 +2,25 @@
 
 ## Stack
 
-- [ ] Vaults
+- [ ] Repos
+  - [ ] CLI support
+  - [ ] GUI support
 - [ ] Plugins
   - [x] Manifest
   - [ ] Commands
+    - [x] `daybook x command`
+  - [ ] Rt
+    - [ ] Wflow preparation
+    - [ ] Predicates
   - [ ] Handlers
   - [ ] Processors
-- [ ] Cleanup for public alpha
-- [ ] Consider making `content` a prop
-- [ ] daybook_server
+  - [ ] OCI (8 hrs)
+- [ ] Cleanup for public alpha (16 hrs)
+- [ ] daybook_server (1 week)
   - [ ] Decide on wrpc vs json
-- [ ] Overhaul bottom bar
-- [ ] Receipt parsing
+- [ ] Overhaul bottom bar (8 hrs)
+- [ ] Receipt parsing (8 hrs)
+- [ ] Local inference
 - [ ] wflow
   - [ ] Non-wasm impl
     - [ ] Catch panics
@@ -24,8 +31,8 @@
   - [ ] Use flatbuffers instead of JSON
   - [ ] web UI
   - [ ] Service for wflow_tokio
-- [ ] pauperfuse
-- [ ] CI/CD
+- [ ] pauperfuse (48 hrs)
+- [ ] CI/CD (48 hrs)
   - [ ] Publish
     - [ ] Docker image
     - [ ] WASM OCI

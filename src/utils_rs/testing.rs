@@ -24,6 +24,7 @@ pub fn setup_tracing() -> Res<()> {
         .with(tracing_subscriber::EnvFilter::new(filter))
         .with(
             tracing_subscriber::fmt::layer()
+                .with_test_writer()
                 //.pretty()
                 .with_timer(tracing_subscriber::fmt::time::uptime()),
         )

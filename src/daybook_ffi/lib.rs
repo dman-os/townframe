@@ -23,7 +23,6 @@ mod globals;
 mod macros;
 mod repos;
 mod sql;
-mod tables;
 
 /// Configuration for the daybook core storage systems
 #[derive(Debug, Clone)]

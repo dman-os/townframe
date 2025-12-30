@@ -88,7 +88,6 @@
   - Processors
     - Pseudo labeler [MVP]
     - OCR [MVP]
-    - ContentToTag
     - Transcript
     - Thumbnails
   - Ingest

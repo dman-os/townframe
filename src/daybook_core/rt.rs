@@ -7,8 +7,8 @@ pub mod wash_plugin;
 pub struct RtConfig {}
 
 pub struct Rt {
-    config: RtConfig,
-    dispatcher_repo: Arc<DispatcherRepo>,
+    _config: RtConfig,
+    _dispatcher_repo: Arc<DispatcherRepo>,
 }
 
 #[derive(Hydrate, Reconcile, Serialize, Deserialize)]
@@ -156,8 +156,9 @@ impl DispatcherRepo {
                     if notif.patch.path.len() >= 2 {
                         match &notif.patch.path[1].1 {
                             automerge::Prop::Map(path_key) => match path_key.as_ref() {
-                                "active_dispatches" => events
-                                    .push(DispatcherEvent::DispatchChanged { id: key.into() }),
+                                "active_dispatches" => {
+                                    events.push(DispatcherEvent::DispatchChanged { id: key.into() })
+                                }
                                 _ => events.push(DispatcherEvent::ListChanged),
                             },
                             _ => events.push(DispatcherEvent::ListChanged),
@@ -170,8 +171,9 @@ impl DispatcherRepo {
                     if notif.patch.path.len() >= 2 {
                         match &notif.patch.path[1].1 {
                             automerge::Prop::Map(path_key) => match path_key.as_ref() {
-                                "active_dispatches" => events
-                                    .push(DispatcherEvent::DispatchDeleted { id: key.into() }),
+                                "active_dispatches" => {
+                                    events.push(DispatcherEvent::DispatchDeleted { id: key.into() })
+                                }
                                 _ => events.push(DispatcherEvent::ListChanged),
                             },
                             _ => events.push(DispatcherEvent::ListChanged),

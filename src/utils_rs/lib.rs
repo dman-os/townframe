@@ -139,6 +139,7 @@ pub fn setup_tracing() -> Res<()> {
         .with(
             tracing_subscriber::fmt::layer()
                 .compact()
+                .with_writer(std::io::stderr)
                 .with_timer(tracing_subscriber::fmt::time::time()),
         )
         .with(tracing_error::ErrorLayer::default());

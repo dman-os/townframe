@@ -9,8 +9,6 @@ use automerge::Automerge;
 use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
 
-pub use codecs::AutosurgeonJson;
-
 #[cfg(feature = "automerge-repo")]
 use samod::{DocHandle, DocumentId};
 

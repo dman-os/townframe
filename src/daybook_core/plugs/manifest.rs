@@ -47,7 +47,10 @@ impl std::ops::Deref for PropTag {
 #[serde(transparent)]
 #[garde(transparent)]
 #[repr(transparent)]
-pub struct KeyGeneric(#[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 1024))] String);
+#[serde(rename_all = "camelCase")]
+pub struct KeyGeneric(
+    #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 1024))] pub String,
+);
 
 impl<T> From<T> for KeyGeneric
 where
@@ -80,10 +83,11 @@ impl std::ops::Deref for KeyGeneric {
 
 /// Versions work lik @foo/bar@1.2.3
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct PlugManifest {
-    #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 25))]
+    #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 32))]
     pub namespace: String,
-    #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 25))]
+    #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 32))]
     pub name: String,
     #[garde(skip)]
     pub version: semver::Version,
@@ -113,6 +117,7 @@ impl PlugManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct PropKeyManifest {
     /// Must be reverse domain notation
     #[garde(dive)]
@@ -125,12 +130,14 @@ pub struct PropKeyManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct PlugDependencyManifest {
     #[garde(dive)]
     pub keys: Vec<PropKeyDependencyManifest>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct PropKeyDependencyManifest {
     #[garde(dive)]
     pub key_tag: PropTag,
@@ -139,6 +146,7 @@ pub struct PropKeyDependencyManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct PropKeyDisplayHint {
     #[serde(default)]
@@ -153,6 +161,7 @@ pub struct PropKeyDisplayHint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, Reconcile, Hydrate, PartialEq)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PropKeyDisplayDeets {
     #[default]
@@ -167,6 +176,7 @@ pub enum PropKeyDisplayDeets {
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize, Reconcile, Hydrate, PartialEq)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum DateTimePropDisplayType {
     #[default]
@@ -177,6 +187,7 @@ pub enum DateTimePropDisplayType {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct WflowBundleManifest {
     #[garde(dive)]
     pub keys: Vec<KeyGeneric>,
@@ -185,6 +196,7 @@ pub struct WflowBundleManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct RoutineManifest {
     #[garde(dive)]
     pub r#impl: RoutineImpl,
@@ -195,6 +207,7 @@ pub struct RoutineManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub enum RoutineImpl {
     Wflow {
         #[garde(dive)]
@@ -203,6 +216,7 @@ pub enum RoutineImpl {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub enum RoutineManifestDeets {
     /// Routine that can be invoked on a document with rw access on whole doc
     DocInvoke {},
@@ -218,6 +232,7 @@ pub enum RoutineManifestDeets {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct RoutinePropAccess {
     #[garde(dive)]
     pub tag: PropTag,
@@ -232,6 +247,7 @@ pub struct RoutinePropAccess {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct CommandManifest {
     #[garde(dive)]
     pub name: KeyGeneric,
@@ -245,6 +261,7 @@ pub struct CommandManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub enum CommandDeets {
     // NOTE: behavior differs depending on the routine
     //  - if a DocInvoke, it's invoked

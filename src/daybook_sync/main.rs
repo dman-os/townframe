@@ -9,7 +9,6 @@ mod interlude {
 }
 
 mod gen;
-mod restate;
 
 use std::collections::HashSet;
 
@@ -32,9 +31,7 @@ fn main() -> Res<()> {
 }
 
 async fn app_main() -> Res<()> {
-    let config = Config {
-        restate_base_url: "http://localhost:9080".parse().expect("error parsing url"),
-    };
+    let config = Config {};
     let cx = Ctx::init(config).await?;
 
     let app = Router::new()
@@ -86,14 +83,11 @@ async fn app_main() -> Res<()> {
     Ok(())
 }
 
-struct Config {
-    restate_base_url: url::Url,
-}
+struct Config {}
 
 struct Ctx {
-    config: Config,
+    _config: Config,
     acx: utils_rs::am::AmCtx,
-    rcx: restate::RestateCtx,
     _peer_docs: Arc<DHashMap<PeerId, HashSet<DocumentId>>>,
     _doc_peers: Arc<DHashMap<DocumentId, PeerId>>,
     _gen_store: generational_box::Owner<SyncStorage>,
@@ -144,9 +138,8 @@ impl Ctx {
 
         use generational_box::AnyStorage;
         let cx = Arc::new(Self {
-            rcx: restate::RestateCtx::new()?,
             acx,
-            config,
+            _config: config,
             _peer_docs: peer_docs,
             _doc_peers: doc_peers,
             _gen_store: SyncStorage::owner(),
@@ -166,9 +159,9 @@ impl Ctx {
                 },
                 {
                     // let cx = cx.clone();
-                    move |changes| {
+                    Box::new(move |changes| {
                         info!(?changes, "XXX change");
-                    }
+                    })
                 },
             )
             .await;

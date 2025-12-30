@@ -4,13 +4,9 @@ members = [
   "./src/api_utils_rs",
   "./src/autosurgeon/autosurgeon",
   "./src/autosurgeon/autosurgeon-derive/",
-  "./src/btress_api",
-  "./src/btress_http",
-  "./src/daybook_api",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
-  "./src/daybook_http",
   "./src/daybook_sync",
   "./src/daybook_types",
   "./src/daybook_wflows/",
@@ -29,13 +25,17 @@ members = [
   "./src/wflow_tokio/",
   "./src/wflow_webui/",
   "./src/xtask",
-  # "./src/tests_http",
-  # "./src/sdk-shared-core/",
-  # "./src/granary_web",
-  # "./src/leptos_wasi/",
 ]
 exclude = [
-  "./src/samod"
+  "./src/btress_api",
+  "./src/btress_http",
+  "./src/daybook_api",
+  "./src/daybook_http",
+  "./src/samod",
+  #
+  "./src/tests_http",
+  "./src/granary_web",
+  "./src/leptos_wasi/",
 ]
 
 [workspace.package]
@@ -50,7 +50,7 @@ repository = ""
 # internal
 utils_rs = { path = "./src/utils_rs", default-features = false }
 api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
-btress_api = { path = "./src/btress_api" }
+# btress_api = { path = "./src/btress_api" }
 macros = { path = "./src/macros" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
@@ -184,6 +184,10 @@ wasmtime-wasi = { version = "*" }
 wash-runtime = { path = "../wash/crates/wash-runtime/"}
 
 scopeguard = "1.2.0"
+
+# cli
+clap = "4.5"
+clap_complete = "4.5"
 
 # [patch.crates-io]
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}

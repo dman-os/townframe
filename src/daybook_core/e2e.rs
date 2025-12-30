@@ -10,11 +10,11 @@ use crate::rt::triage::DocTriageWorkerHandle;
 mod doc_created_wflow;
 
 pub struct DaybookTestContext {
-    pub acx: AmCtx,
+    pub _acx: AmCtx,
     pub drawer_repo: Arc<DrawerRepo>,
     pub wflow_test_cx: WflowTestContext,
     _doc_changes_worker: DocTriageWorkerHandle,
-    dispatcher_repo: Arc<crate::rt::DispatcherRepo>,
+    pub _dispatcher_repo: Arc<crate::rt::DispatcherRepo>,
 }
 
 impl DaybookTestContext {
@@ -24,7 +24,7 @@ impl DaybookTestContext {
     }
 }
 
-pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
+pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
     tokio::task::block_in_place(|| {
         utils_rs::testing::load_envs_once();
     });
@@ -73,10 +73,9 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
                 daybook_types::doc::WellKnownPropTag::PseudoLabel.into(),
             ))),
         ]);
-        let predicate_json = serde_json::to_value(&predicate).expect("error serializing predicate");
         let processor = Processor {
             cancellation_policy: CancellationPolicy::NoSupport,
-            predicate: utils_rs::am::AutosurgeonJson(predicate_json),
+            predicate: ThroughJson(predicate),
             wflow_key: "pseudo-label".to_string(),
         };
         config_repo
@@ -119,9 +118,9 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
     .await?;
 
     Ok(DaybookTestContext {
-        acx,
+        _acx: acx,
         drawer_repo,
-        dispatcher_repo,
+        _dispatcher_repo: dispatcher_repo,
         wflow_test_cx,
         _doc_changes_worker: doc_changes_worker,
     })

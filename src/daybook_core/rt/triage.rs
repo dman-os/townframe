@@ -201,7 +201,7 @@ pub enum CancellationPolicy {
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
 pub struct Processor {
     pub cancellation_policy: CancellationPolicy,
-    pub predicate: utils_rs::am::AutosurgeonJson,
+    pub predicate: ThroughJson<PredicateClause>,
     pub wflow_key: String,
 }
 
@@ -222,15 +222,7 @@ pub async fn triage(
 ) -> Res<()> {
     for (processor_id, processor) in &config.processors {
         // Deserialize predicate from JSON
-        let predicate: PredicateClause = match serde_json::from_value(processor.predicate.0.clone())
-        {
-            Ok(val) => val,
-            Err(err) => {
-                error!(?err, processor_id = ?processor_id, "error deserializing predicate");
-                continue;
-            }
-        };
-        if predicate.matches(doc) {
+        if processor.predicate.matches(doc) {
             let job_id = {
                 use data_encoding::BASE32;
                 use std::hash::{Hash, Hasher};

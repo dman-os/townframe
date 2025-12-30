@@ -1,6 +1,5 @@
 pub mod doc {
     use crate::interlude::*;
-    use std::str::FromStr;
 
     use crate::doc as root_doc;
     use api_utils_rs::wit::townframe::api_utils::utils::Datetime;
@@ -85,21 +84,12 @@ pub mod doc {
                 props_set: val
                     .props_set
                     .into_iter()
-                    .map(|(key, val)| {
-                        Ok((
-                            DocPropKey::from_str(&key)
-                                .unwrap_or(DocPropKey::Tag(root_doc::DocPropTag::Any(key))),
-                            val.try_into()?,
-                        ))
-                    })
+                    .map(|(key, val)| Ok((DocPropKey::from(&key), val.try_into()?)))
                     .collect::<Result<_, _>>()?,
                 props_remove: val
                     .props_remove
                     .into_iter()
-                    .map(|k| {
-                        DocPropKey::from_str(&k)
-                            .unwrap_or(DocPropKey::Tag(root_doc::DocPropTag::Any(k)))
-                    })
+                    .map(|key| DocPropKey::from(&key))
                     .collect(),
             })
         }
@@ -137,7 +127,7 @@ pub mod doc {
                 WellKnownProp::ImageMetadata(val) => Self::ImageMetadata(val),
                 WellKnownProp::Content(val) => Self::Content(val),
                 WellKnownProp::Pending(val) => Self::Pending(crate::doc::Pending {
-                    key: val.key.parse()?,
+                    key: val.key.into(),
                 }),
             })
         }
@@ -203,8 +193,8 @@ pub mod doc {
                     .into_iter()
                     .map(|(key, val)| {
                         Ok((
-                            DocPropKey::from_str(&key)
-                                .unwrap_or(DocPropKey::Tag(root_doc::DocPropTag::Any(key))),
+                            DocPropKey::from(&key),
+                            //.unwrap_or(DocPropKey::Tag(root_doc::DocPropTag::Any(key))),
                             val.try_into()?,
                         ))
                     })

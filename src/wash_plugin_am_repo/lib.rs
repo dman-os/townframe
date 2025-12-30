@@ -143,12 +143,14 @@ impl repo::Host for WashCtx {
         let json_value: serde_json::Value = serde_json::from_str(&json)
             .map_err(|e| wasmtime::Error::msg(format!("invalid json: {e}")))?;
 
-        // Convert JSON to AutosurgeonJson for reconciliation
-        let autosurgeon_json = utils_rs::am::AutosurgeonJson(json_value);
-
         plugin
             .am_ctx
-            .reconcile_path(&doc_id_rust, obj_id_rust, path_rust, &autosurgeon_json)
+            .reconcile_path(
+                &doc_id_rust,
+                obj_id_rust,
+                path_rust,
+                &ThroughJson(json_value),
+            )
             .await
             .wrap_err("error on reconcile")
             .to_anyhow()?;
@@ -194,9 +196,6 @@ impl repo::Host for WashCtx {
         let json_value: serde_json::Value = serde_json::from_str(&json)
             .map_err(|e| wasmtime::Error::msg(format!("invalid json: {e}")))?;
 
-        // Convert JSON to AutosurgeonJson for reconciliation
-        let autosurgeon_json = utils_rs::am::AutosurgeonJson(json_value);
-
         plugin
             .am_ctx
             .reconcile_path_at_heads(
@@ -204,7 +203,7 @@ impl repo::Host for WashCtx {
                 &heads,
                 obj_id_rust,
                 path_rust,
-                &autosurgeon_json,
+                &ThroughJson(json_value),
             )
             .await
             .wrap_err("error on reconcile")
@@ -253,10 +252,9 @@ impl repo::Host for WashCtx {
             })
             .collect();
 
-        // Use hydrate_path_at_head with AutosurgeonJson
         match plugin
             .am_ctx
-            .hydrate_path_at_heads::<utils_rs::am::AutosurgeonJson>(
+            .hydrate_path_at_heads::<ThroughJson<serde_json::Value>>(
                 &doc_id_rust,
                 &heads,
                 obj_id_rust,

@@ -15,6 +15,10 @@ impl daybook_core::repos::Repo for TablesRepoFfi {
     fn registry(&self) -> &Arc<daybook_core::repos::ListenersRegistry> {
         &self.repo.registry
     }
+
+    fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {
+        self.repo.cancel_token()
+    }
 }
 
 crate::uniffi_repo_listeners!(TablesRepoFfi, TablesEvent);

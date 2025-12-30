@@ -1,18 +1,14 @@
 use crate::interlude::*;
 
-use std::collections::HashMap;
-
 pub type Multihash = String;
 
 crate::define_enum_and_tag!(
     "",
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-    #[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
     DocContentKind,
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-    #[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
     #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
     DocContent {
         // type CreatedAt OffsetDateTime,
@@ -20,7 +16,6 @@ crate::define_enum_and_tag!(
         Text type (String),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-        #[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         Blob struct {
             pub length_octets: u64,
@@ -32,10 +27,9 @@ crate::define_enum_and_tag!(
 pub type MimeType = String;
 
 crate::define_enum_and_tag!(
-    "org.example.daybook",
+    "org.example.daybook.",
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-    #[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
     #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
     WellKnownPropTag,
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -52,7 +46,6 @@ crate::define_enum_and_tag!(
         PathGeneric type (PathBuf),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-        #[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         ImageMetadata struct {
             pub mime: MimeType,
@@ -62,7 +55,6 @@ crate::define_enum_and_tag!(
         Content type (DocContent),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-        #[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         Pending struct {
             pub key: DocPropKey
@@ -72,7 +64,6 @@ crate::define_enum_and_tag!(
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum DocPropTag {
     WellKnown(WellKnownPropTag),
@@ -86,7 +77,6 @@ impl From<WellKnownPropTag> for DocPropTag {
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display, PartialEq)]
-#[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
 pub enum DocPropTagParseError {
     /// A valid key must consist of a reverse domain name notation
     NotDomainName { tag: String },
@@ -94,19 +84,21 @@ pub enum DocPropTagParseError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum DocPropKey {
     Tag(DocPropTag),
     TagAndId { tag: DocPropTag, id: String },
 }
 
-impl<T> From<T> for DocPropKey
-where
-    T: Into<DocPropTag>,
-{
-    fn from(value: T) -> Self {
+impl From<WellKnownPropTag> for DocPropKey {
+    fn from(value: WellKnownPropTag) -> Self {
         Self::Tag(value.into())
+    }
+}
+
+impl From<DocPropTag> for DocPropKey {
+    fn from(value: DocPropTag) -> Self {
+        Self::Tag(value)
     }
 }
 
@@ -143,7 +135,6 @@ pub struct Doc {
     #[serde(with = "utils_rs::codecs::sane_iso8601")]
     pub updated_at: time::OffsetDateTime,
     // FIXME: I'm not sure I like this
-    #[serde(with = "ser_de::props_serde")]
     pub props: HashMap<DocPropKey, DocProp>,
 }
 
@@ -241,26 +232,179 @@ impl std::ops::Deref for ChangeHashSet {
     }
 }
 
+mod ord {
+    use super::*;
+
+    impl PartialOrd for DocPropTag {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            match (self, other) {
+                (DocPropTag::WellKnown(one), DocPropTag::WellKnown(two)) => {
+                    one.as_str().partial_cmp(two.as_str())
+                }
+                (DocPropTag::WellKnown(one), DocPropTag::Any(two)) => {
+                    one.as_str().partial_cmp(two.as_str())
+                }
+                (DocPropTag::Any(one), DocPropTag::WellKnown(two)) => {
+                    one.as_str().partial_cmp(two.as_str())
+                }
+                (DocPropTag::Any(two), DocPropTag::Any(one)) => {
+                    one.as_str().partial_cmp(two.as_str())
+                }
+            }
+        }
+    }
+
+    impl Ord for DocPropTag {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            match (self, other) {
+                (DocPropTag::WellKnown(one), DocPropTag::WellKnown(two)) => {
+                    one.as_str().cmp(two.as_str())
+                }
+                (DocPropTag::WellKnown(one), DocPropTag::Any(two)) => {
+                    one.as_str().cmp(two.as_str())
+                }
+                (DocPropTag::Any(one), DocPropTag::WellKnown(two)) => {
+                    one.as_str().cmp(two.as_str())
+                }
+                (DocPropTag::Any(two), DocPropTag::Any(one)) => one.as_str().cmp(two.as_str()),
+            }
+        }
+    }
+
+    impl PartialOrd for DocPropKey {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            match (self, other) {
+                (DocPropKey::Tag(one), DocPropKey::Tag(two)) => one.partial_cmp(two),
+                (DocPropKey::Tag(one), DocPropKey::TagAndId { tag: two, .. }) => {
+                    match one.partial_cmp(two) {
+                        // id always comes afer none ided keys
+                        Some(std::cmp::Ordering::Equal) => Some(std::cmp::Ordering::Less),
+                        ord => ord,
+                    }
+                }
+                (DocPropKey::TagAndId { tag: one, .. }, DocPropKey::Tag(two)) => {
+                    match one.partial_cmp(two) {
+                        // id always comes afer none ided keys
+                        Some(std::cmp::Ordering::Equal) => Some(std::cmp::Ordering::Greater),
+                        ord => ord,
+                    }
+                }
+                (
+                    DocPropKey::TagAndId {
+                        tag: one,
+                        id: id_one,
+                    },
+                    DocPropKey::TagAndId {
+                        tag: two,
+                        id: id_two,
+                    },
+                ) => match one.partial_cmp(two) {
+                    // id always comes afer none ided keys
+                    Some(std::cmp::Ordering::Equal) => id_one.partial_cmp(id_two),
+                    ord => ord,
+                },
+            }
+        }
+    }
+
+    impl Ord for DocPropKey {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            match (self, other) {
+                (DocPropKey::Tag(one), DocPropKey::Tag(two)) => one.cmp(two),
+                (DocPropKey::Tag(one), DocPropKey::TagAndId { tag: two, .. }) => {
+                    match one.cmp(two) {
+                        // id always comes afer none ided keys
+                        std::cmp::Ordering::Equal => std::cmp::Ordering::Less,
+                        ord => ord,
+                    }
+                }
+                (DocPropKey::TagAndId { tag: one, .. }, DocPropKey::Tag(two)) => {
+                    match one.cmp(two) {
+                        // id always comes afer none ided keys
+                        std::cmp::Ordering::Equal => std::cmp::Ordering::Greater,
+                        ord => ord,
+                    }
+                }
+                (
+                    DocPropKey::TagAndId {
+                        tag: one,
+                        id: id_one,
+                    },
+                    DocPropKey::TagAndId {
+                        tag: two,
+                        id: id_two,
+                    },
+                ) => match one.cmp(two) {
+                    // id always comes afer none ided keys
+                    std::cmp::Ordering::Equal => id_one.cmp(id_two),
+                    ord => ord,
+                },
+            }
+        }
+    }
+}
+
 mod ser_de {
     use super::*;
 
-    use std::fmt;
-    use std::str::FromStr;
+    use std::{borrow::Cow, fmt};
 
     use serde::{de::Visitor, Deserializer, Serializer};
 
-    impl FromStr for DocPropTag {
-        type Err = DocPropTagParseError;
-
-        fn from_str(str: &str) -> Result<Self, Self::Err> {
-            if let Some(val) = WellKnownPropTag::from_str(str) {
-                return Ok(Self::WellKnown(val));
+    // impl FromStr for DocPropTag {
+    //     type Err = DocPropTagParseError;
+    //
+    //     fn from_str(str: &str) -> Result<Self, Self::Err> {
+    //         if let Some(val) = WellKnownPropTag::from_str(str) {
+    //             return Ok(Self::WellKnown(val));
+    //         }
+    //         let _parsed = addr::parse_domain_name(str)
+    //             .map_err(|_err| DocPropTagParseError::NotDomainName { tag: str.into() })?;
+    //         Ok(Self::Any(_parsed.as_str().into()))
+    //     }
+    // }
+    impl<'a, T> From<T> for DocPropTag
+    where
+        T: Into<Cow<'a, str>>,
+    {
+        fn from(value: T) -> Self {
+            let value = value.into();
+            if let Some(val) = WellKnownPropTag::from_str(&value[..]) {
+                return Self::WellKnown(val);
             }
-            let _parsed = addr::parse_domain_name(str)
-                .map_err(|_err| DocPropTagParseError::NotDomainName { tag: str.into() })?;
-            Ok(Self::Any(_parsed.as_str().into()))
+            // let _parsed = addr::parse_domain_name(str)
+            //     .map_err(|_err| DocPropTagParseError::NotDomainName { tag: str.into() })?;
+            // Ok(Self::Any(_parsed.as_str().into()))
+            Self::Any(value.into())
         }
     }
+    // impl From<&str> for DocPropTag {
+    //     fn from(value: &str) -> Self {
+    //         if let Some(val) = WellKnownPropTag::from_str(&value[..]) {
+    //             return Self::WellKnown(val);
+    //         }
+    //         // let _parsed = addr::parse_domain_name(str)
+    //         //     .map_err(|_err| DocPropTagParseError::NotDomainName { tag: str.into() })?;
+    //         // Ok(Self::Any(_parsed.as_str().into()))
+    //         Self::Any(value.into())
+    //     }
+    // }
+    // impl From<String> for DocPropTag {
+    //     fn from(value: String) -> Self {
+    //         if let Some(val) = WellKnownPropTag::from_str(&value[..]) {
+    //             return Self::WellKnown(val);
+    //         }
+    //         Self::Any(value.into())
+    //     }
+    // }
+    // impl From<Box<str>> for DocPropTag {
+    //     fn from(value: Box<str>) -> Self {
+    //         if let Some(val) = WellKnownPropTag::from_str(&value[..]) {
+    //             return Self::WellKnown(val);
+    //         }
+    //         Self::Any(value.into())
+    //     }
+    // }
 
     impl std::fmt::Display for DocPropTag {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -290,22 +434,24 @@ mod ser_de {
             impl<'de> Visitor<'de> for TagVisitor {
                 type Value = DocPropTag;
 
-                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                    f.write_str("a valid DocPropTag")
+                fn expecting(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+                    fmt.write_str("a valid DocPropTag")
                 }
 
-                fn visit_str<E>(self, v: &str) -> Result<DocPropTag, E>
+                fn visit_str<E>(self, val: &str) -> Result<DocPropTag, E>
                 where
                     E: serde::de::Error,
                 {
-                    v.parse().map_err(E::custom)
+                    Ok(val.into())
+                    // val.parse().map_err(E::custom)
                 }
 
-                fn visit_borrowed_str<E>(self, v: &'de str) -> Result<DocPropTag, E>
+                fn visit_borrowed_str<E>(self, val: &'de str) -> Result<DocPropTag, E>
                 where
                     E: serde::de::Error,
                 {
-                    v.parse().map_err(E::custom)
+                    Ok(val.into())
+                    // val.parse().map_err(E::custom)
                 }
             }
 
@@ -313,19 +459,85 @@ mod ser_de {
         }
     }
 
-    impl FromStr for DocPropKey {
-        type Err = DocPropTagParseError;
-
-        fn from_str(str: &str) -> Result<Self, Self::Err> {
-            if let Some((tag, id)) = str.split_once(Self::TAG_ID_SEPARATOR) {
-                return Ok(Self::TagAndId {
-                    tag: tag.parse()?,
+    // impl FromStr for DocPropKey {
+    //     type Err = DocPropTagParseError;
+    //
+    //     fn from_str(str: &str) -> Result<Self, Self::Err> {
+    //         if let Some((tag, id)) = str.split_once(Self::TAG_ID_SEPARATOR) {
+    //             return Ok(Self::TagAndId {
+    //                 tag: tag.parse()?,
+    //                 id: id.into(),
+    //             });
+    //         }
+    //         str.parse::<DocPropTag>().map(Self::Tag)
+    //     }
+    // }
+    impl<'a, T> From<T> for DocPropKey
+    where
+        T: Into<Cow<'a, str>>,
+    {
+        fn from(value: T) -> Self {
+            let value = value.into();
+            if let Some((tag, id)) = value.split_once(Self::TAG_ID_SEPARATOR) {
+                return Self::TagAndId {
+                    tag: tag.into(),
                     id: id.into(),
-                });
+                };
             }
-            str.parse::<DocPropTag>().map(Self::Tag)
+            let tag: DocPropTag = value.into();
+            Self::Tag(tag)
         }
     }
+    // impl From<&str> for DocPropKey {
+    //     fn from(value: &str) -> Self {
+    //         if let Some((tag, id)) = value.split_once(Self::TAG_ID_SEPARATOR) {
+    //             return Self::TagAndId {
+    //                 tag: tag.into(),
+    //                 id: id.into(),
+    //             };
+    //         }
+    //         let tag: DocPropTag = value.into();
+    //         Self::Tag(tag)
+    //     }
+    // }
+    //
+    // impl From<String> for DocPropKey {
+    //     fn from(value: String) -> Self {
+    //         if let Some((tag, id)) = value.split_once(Self::TAG_ID_SEPARATOR) {
+    //             return Self::TagAndId {
+    //                 tag: tag.into(),
+    //                 id: id.into(),
+    //             };
+    //         }
+    //         let tag: DocPropTag = value.into();
+    //         Self::Tag(tag)
+    //     }
+    // }
+    // impl From<&Arc<str>> for DocPropKey {
+    //     fn from(value: &Arc<str>) -> Self {
+    //         if let Some((tag, id)) = value.split_once(Self::TAG_ID_SEPARATOR) {
+    //             return Self::TagAndId {
+    //                 tag: tag.into(),
+    //                 id: id.into(),
+    //             };
+    //         }
+    //         let tag: DocPropTag = (&value[..]).into();
+    //         Self::Tag(tag)
+    //     }
+    // }
+    //
+    // impl From<Box<str>> for DocPropKey {
+    //     fn from(value: Box<str>) -> Self {
+    //         if let Some((tag, id)) = value.split_once(Self::TAG_ID_SEPARATOR) {
+    //             return Self::TagAndId {
+    //                 tag: tag.into(),
+    //                 id: id.into(),
+    //             };
+    //         }
+    //         let tag: DocPropTag = value.into();
+    //         Self::Tag(tag)
+    //     }
+    // }
 
     impl std::fmt::Display for DocPropKey {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -360,18 +572,20 @@ mod ser_de {
                     f.write_str("a valid DocPropKey")
                 }
 
-                fn visit_str<E>(self, v: &str) -> Result<DocPropKey, E>
+                fn visit_str<E>(self, val: &str) -> Result<DocPropKey, E>
                 where
                     E: serde::de::Error,
                 {
-                    v.parse().map_err(E::custom)
+                    Ok(val.into())
+                    // val.parse().map_err(E::custom)
                 }
 
-                fn visit_borrowed_str<E>(self, v: &'de str) -> Result<DocPropKey, E>
+                fn visit_borrowed_str<E>(self, val: &'de str) -> Result<DocPropKey, E>
                 where
                     E: serde::de::Error,
                 {
-                    v.parse().map_err(E::custom)
+                    Ok(val.into())
+                    // val.parse().map_err(E::custom)
                 }
             }
 
@@ -379,58 +593,57 @@ mod ser_de {
         }
     }
 
-    /// Custom serializer/deserializer for HashMap<DocPropKeys, DocProp>
-    /// Since JSON object keys must be strings, we serialize as a list of tuples
-    pub(super) mod props_serde {
-        use super::*;
-        use serde::de::{SeqAccess, Visitor};
-        use serde::ser::SerializeSeq;
-        use serde::{Deserializer, Serializer};
-
-        pub fn serialize<S>(
-            props: &HashMap<DocPropKey, DocProp>,
-            serializer: S,
-        ) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let mut seq = serializer.serialize_seq(Some(props.len()))?;
-            for (key, value) in props {
-                seq.serialize_element(&(key, value))?;
-            }
-            seq.end()
-        }
-
-        pub fn deserialize<'de, D>(
-            deserializer: D,
-        ) -> Result<HashMap<DocPropKey, DocProp>, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            struct PropsVisitor;
-
-            impl<'de> Visitor<'de> for PropsVisitor {
-                type Value = HashMap<DocPropKey, DocProp>;
-
-                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    formatter.write_str("a sequence of (DocPropKeys, DocProp) tuples")
-                }
-
-                fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-                where
-                    A: SeqAccess<'de>,
-                {
-                    let mut map = HashMap::new();
-                    while let Some((key, value)) = seq.next_element::<(DocPropKey, DocProp)>()? {
-                        map.insert(key, value);
-                    }
-                    Ok(map)
-                }
-            }
-
-            deserializer.deserialize_seq(PropsVisitor)
-        }
-    }
+    // Custom serializer/deserializer for HashMap<DocPropKeys, DocProp>
+    // pub(super) mod props_serde {
+    //     use super::*;
+    //     use serde::de::{SeqAccess, Visitor};
+    //     use serde::ser::SerializeSeq;
+    //     use serde::{Deserializer, Serializer};
+    //
+    //     pub fn serialize<S>(
+    //         props: &HashMap<DocPropKey, DocProp>,
+    //         serializer: S,
+    //     ) -> Result<S::Ok, S::Error>
+    //     where
+    //         S: Serializer,
+    //     {
+    //         let mut seq = serializer.serialize_seq(Some(props.len()))?;
+    //         for (key, value) in props {
+    //             seq.serialize_element(&(key, value))?;
+    //         }
+    //         seq.end()
+    //     }
+    //
+    //     pub fn deserialize<'de, D>(
+    //         deserializer: D,
+    //     ) -> Result<HashMap<DocPropKey, DocProp>, D::Error>
+    //     where
+    //         D: Deserializer<'de>,
+    //     {
+    //         struct PropsVisitor;
+    //
+    //         impl<'de> Visitor<'de> for PropsVisitor {
+    //             type Value = HashMap<DocPropKey, DocProp>;
+    //
+    //             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+    //                 formatter.write_str("a sequence of (DocPropKeys, DocProp) tuples")
+    //             }
+    //
+    //             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    //             where
+    //                 A: SeqAccess<'de>,
+    //             {
+    //                 let mut map = HashMap::new();
+    //                 while let Some((key, value)) = seq.next_element::<(DocPropKey, DocProp)>()? {
+    //                     map.insert(key, value);
+    //                 }
+    //                 Ok(map)
+    //             }
+    //         }
+    //
+    //         deserializer.deserialize_seq(PropsVisitor)
+    //     }
+    // }
 }
 
 #[cfg(test)]
@@ -449,18 +662,30 @@ mod tests {
         };
         let tag_title = DocPropTag::WellKnown(WellKnownPropTag::TitleGeneric);
         let tag_label = DocPropTag::WellKnown(WellKnownPropTag::LabelGeneric);
-        
-        old.props.insert(tag_title.clone().into(), WellKnownProp::TitleGeneric("Old Title".into()).into());
-        old.props.insert(tag_label.clone().into(), WellKnownProp::LabelGeneric("Label".into()).into());
+
+        old.props.insert(
+            tag_title.clone().into(),
+            WellKnownProp::TitleGeneric("Old Title".into()).into(),
+        );
+        old.props.insert(
+            tag_label.clone().into(),
+            WellKnownProp::LabelGeneric("Label".into()).into(),
+        );
 
         let mut new = old.clone();
         // Update Title
-        new.props.insert(tag_title.clone().into(), WellKnownProp::TitleGeneric("New Title".into()).into());
+        new.props.insert(
+            tag_title.clone().into(),
+            WellKnownProp::TitleGeneric("New Title".into()).into(),
+        );
         // Remove Label
         new.props.remove(&tag_label.clone().into());
         // Add Path
         let tag_path = DocPropTag::WellKnown(WellKnownPropTag::PathGeneric);
-        new.props.insert(tag_path.clone().into(), WellKnownProp::PathGeneric(std::path::PathBuf::from("/tmp")).into());
+        new.props.insert(
+            tag_path.clone().into(),
+            WellKnownProp::PathGeneric(std::path::PathBuf::from("/tmp")).into(),
+        );
 
         let patch = Doc::diff(&old, &new);
 
@@ -473,7 +698,7 @@ mod tests {
         // Check props_remove
         assert_eq!(patch.props_remove.len(), 1);
         assert_eq!(patch.props_remove[0], tag_label.into());
-        
+
         // Test no changes
         let patch_none = Doc::diff(&new, &new);
         assert!(patch_none.is_empty());
