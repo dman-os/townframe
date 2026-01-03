@@ -193,7 +193,7 @@ pub struct RustAttrs {
     pub garde: bool,
     /// If true, emit Patch derive and helpers
     pub patch: bool,
-    /// If true, use WIT types (Uuid, OffsetDateTime) instead of API types (String, Datetime)
+    /// If true, use WIT types (Uuid, Timestamp) instead of API types (String, Datetime)
     pub wit: bool,
 }
 

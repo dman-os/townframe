@@ -21,7 +21,6 @@ wash-runtime.workspace = true
 
 # async
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
-futures.workspace = true
 async-trait.workspace = true
 
 # error

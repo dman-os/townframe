@@ -8,25 +8,24 @@ pub use json::ThroughJson;
 
 pub mod date {
     use super::*;
-    use crate::codecs::sane_iso8601::FORMAT;
 
     pub fn reconcile<R: autosurgeon::Reconciler>(
-        ts: &OffsetDateTime,
+        ts: &Timestamp,
         mut reconciler: R,
     ) -> Result<(), R::Error> {
-        reconciler.timestamp(ts.unix_timestamp())
+        reconciler.timestamp(ts.as_second())
     }
 
     pub fn hydrate<'a, D: autosurgeon::ReadDoc>(
         doc: &D,
         obj: &ObjId,
         prop: autosurgeon::Prop<'a>,
-    ) -> Result<OffsetDateTime, autosurgeon::HydrateError> {
+    ) -> Result<Timestamp, autosurgeon::HydrateError> {
         use automerge::{ScalarValue, Value};
 
         match doc.get(obj, &prop)? {
             Some((Value::Scalar(s), _)) => match s.as_ref() {
-                ScalarValue::Timestamp(ts) => match OffsetDateTime::from_unix_timestamp(*ts) {
+                ScalarValue::Timestamp(ts) => match Timestamp::from_second(*ts) {
                     Ok(dt) => return Ok(dt),
                     Err(err) => {
                         return Err(autosurgeon::HydrateError::unexpected(
@@ -35,7 +34,7 @@ pub mod date {
                         ));
                     }
                 },
-                ScalarValue::Str(val) => OffsetDateTime::parse(&val, &FORMAT).map_err(|err| {
+                ScalarValue::Str(val) => val.parse::<Timestamp>().map_err(|err| {
                     autosurgeon::HydrateError::unexpected(
                         "a valid ISO 8601 timestamp string",
                         format!("error parsing ISO 8601 timestamp '{val}': {err}"),
@@ -125,4 +124,3 @@ pub mod through_str {
         }
     }
 }
-

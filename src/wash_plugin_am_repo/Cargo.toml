@@ -22,7 +22,6 @@ serde_json.workspace = true
 data-encoding.workspace = true
 
 # async
-futures.workspace = true
 async-trait.workspace = true
 tokio-util.workspace = true
 async-channel.workspace = true

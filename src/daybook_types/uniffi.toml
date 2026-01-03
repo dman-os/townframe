@@ -13,7 +13,7 @@ package_name = "org.example.daybook.uniffi.types"
 # lift = "{}"
 # lower = "{}"
 
-[bindings.kotlin.custom_types.OffsetDateTime]
+[bindings.kotlin.custom_types.Timestamp]
 type_name = "Instant"
 imports = ["kotlin.time.Instant"]
 lift = "Instant.fromEpochSeconds({}, 0)"

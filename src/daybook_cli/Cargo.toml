@@ -8,39 +8,51 @@ name = "daybook"
 path = "main.rs"
 
 [dependencies]
-clap = { workspace = true, features = ["derive", "env", "string"] }
-clap_complete.workspace = true
-comfy-table = "7.2"
-
-dotenv-flow.workspace = true
-directories = "6.0.0"
-
+# internal
 utils_rs = { workspace = true, features = ["native"] }
 daybook_core = { workspace = true }
 daybook_types = { workspace = true }
 
-tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time"] }
+# cli
+clap = { workspace = true, features = ["derive", "env", "string"] }
+clap_complete.workspace = true
+comfy-table = "7.2"
+colored = "2"
 
-color-eyre.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
+dotenv-flow.workspace = true
+
+# async 
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time"] }
 
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 
+# encoding
 serde = { workspace = true }
 serde_json.workspace = true
 
+# automerge
 automerge.workspace = true
 autosurgeon = { workspace = true, features = ["uuid"] }
 samod = { workspace = true, features = ["tokio"] }
 
-fuser = { version = "0.16", features = ["abi-7-31"] }
+# parking_lot = "0.12"
+# libc = "0.2"
+# struct-patch = "0.10"
 
-parking_lot = "0.12"
-libc = "0.2"
-struct-patch = "0.10"
+# fs
+directories.workspace = true
+# fuser = { version = "0.16", features = ["abi-7-31"] }
 
 scopeguard.workspace = true
+
+# error
+# FIXME: make this work
+# run into https://github.com/zkat/miette/issues/384
+# and I'm not willing to replace eyre
+# miette = { version = "7.6.0", features = ["fancy"] }
+thiserror.workspace = true
+displaydoc.workspace = true
+color-eyre.workspace = true
 
 [dev-dependencies]
 tempfile = "3.10"

@@ -34,6 +34,8 @@ interface doc {
     }
 
     variant well-known-prop {
+        // created-at(datetime),
+        // updated-at(datetime),
         ref-generic(doc-ref), 
         label-generic(string), 
         pseudo-label(string), 

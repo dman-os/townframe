@@ -72,7 +72,7 @@ pub fn start_tokio_partition_reducer(
                 effect_tx,
                 snapstore: snap_store,
                 entries_since_snapshot: 0,
-                last_snapshot_time: OffsetDateTime::now_utc(),
+                last_snapshot_time: Timestamp::now(),
                 last_snapshotted_entry_id: start_offset.saturating_sub(1),
             };
 
@@ -164,7 +164,7 @@ struct TokioPartitionReducer {
     effect_tx: async_channel::Sender<effects::EffectId>,
     snapstore: Arc<dyn SnapStore>,
     entries_since_snapshot: u64,
-    last_snapshot_time: OffsetDateTime,
+    last_snapshot_time: Timestamp,
     last_snapshotted_entry_id: u64,
 }
 
@@ -216,7 +216,7 @@ impl TokioPartitionReducer {
                 .await
                 .wrap_err("failed to save snapshot")?;
             self.entries_since_snapshot = 0;
-            self.last_snapshot_time = OffsetDateTime::now_utc();
+            self.last_snapshot_time = Timestamp::now();
             self.last_snapshotted_entry_id = entry_id;
         }
         Ok(())

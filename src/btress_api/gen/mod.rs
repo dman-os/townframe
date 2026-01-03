@@ -7,10 +7,8 @@ pub mod user {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct User {
         pub id: Uuid,
-        #[serde(with = "utils_rs::codecs::sane_iso8601")]
-        pub created_at: OffsetDateTime,
-        #[serde(with = "utils_rs::codecs::sane_iso8601")]
-        pub updated_at: OffsetDateTime,
+        pub created_at: Timestamp,
+        pub updated_at: Timestamp,
         pub email: Option<String>,
         pub username: String,
     }

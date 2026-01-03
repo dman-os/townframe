@@ -1,7 +1,7 @@
 [bindings.kotlin]
 package_name = "org.example.daybook.uniffi.core"
 
-[bindings.kotlin.custom_types.OffsetDateTime]
+[bindings.kotlin.custom_types.Timestamp]
 # Name of the type in the Kotlin code
 type_name = "Instant"
 # Classes that need to be imported

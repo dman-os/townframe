@@ -3,8 +3,11 @@
 ## Stack
 
 - [ ] Repos
-  - [ ] CLI support
+  - [ ] Profiles
+  - [x] CLI support
+    - [ ] Make it nice
   - [ ] GUI support
+- [ ] Constrain value shapes for known keys
 - [ ] Plugins
   - [x] Manifest
   - [ ] Commands

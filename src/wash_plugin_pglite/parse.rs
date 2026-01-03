@@ -21,7 +21,7 @@ pub fn parse_wire_response(data: &[u8]) -> Vec<types::ResultRow> {
         warn!("parse_wire_response: received empty data");
         return Vec::new();
     }
-    
+
     debug!("parse_wire_response: parsing {} bytes", data.len());
     let mut buf = BytesMut::from(data);
     let mut columns: Vec<ColumnInfo> = Vec::new();
@@ -46,7 +46,10 @@ pub fn parse_wire_response(data: &[u8]) -> Vec<types::ResultRow> {
                 message_count += 1;
                 if columns.is_empty() {
                     // Try to continue without columns - this shouldn't happen but let's be defensive
-                    warn!("DataRow received before RowDescription (message #{})", message_count);
+                    warn!(
+                        "DataRow received before RowDescription (message #{})",
+                        message_count
+                    );
                     // Don't panic, just skip this row
                     continue;
                 }
@@ -63,29 +66,38 @@ pub fn parse_wire_response(data: &[u8]) -> Vec<types::ResultRow> {
                     Message::CommandComplete(_) => {
                         debug!("Received CommandComplete");
                     }
-                    Message::ParameterStatus(_) | 
-                    Message::NoticeResponse(_) | Message::ParseComplete | 
-                    Message::BindComplete | Message::ParameterDescription(_) => {
+                    Message::ParameterStatus(_)
+                    | Message::NoticeResponse(_)
+                    | Message::ParseComplete
+                    | Message::BindComplete
+                    | Message::ParameterDescription(_) => {
                         // Expected messages, continue
                     }
                     other => {
-                        debug!("Received unexpected message type: {:?}", std::any::type_name_of_val(&other));
+                        debug!(
+                            "Received unexpected message type: {:?}",
+                            std::any::type_name_of_val(&other)
+                        );
                         // Don't panic on unexpected messages, just log and continue
                     }
                 }
-            },
+            }
             Ok(None) => {
                 debug!("No more messages to parse");
                 break;
-            },
+            }
             Err(e) => {
                 debug!("Error parsing message: {:?}", e);
                 break;
-            },
+            }
         }
     }
 
-    debug!("parse_wire_response returning {} rows ({} messages processed)", rows.len(), message_count);
+    debug!(
+        "parse_wire_response returning {} rows ({} messages processed)",
+        rows.len(),
+        message_count
+    );
     rows
 }
 
@@ -288,16 +300,24 @@ fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
                     Err(_) => types::PgValue::Text(String::from_utf8_lossy(bytes).to_string()),
                 }
             }
-        },
+        }
         1114 => {
             // Parse timestamp from text format first (more reliable with pglite)
             if let Ok(s) = std::str::from_utf8(bytes) {
                 // Try PostgreSQL format (space separator) first, then ISO8601
                 // Replace space with 'T' to convert to ISO8601 format
                 let iso_str = s.replace(' ', "T");
-                let datetime_result = PrimitiveDateTime::parse(&iso_str, &time::format_description::well_known::Iso8601::DATE_TIME)
-                    .or_else(|_| PrimitiveDateTime::parse(s, &time::format_description::well_known::Iso8601::DATE_TIME));
-                
+                let datetime_result = PrimitiveDateTime::parse(
+                    &iso_str,
+                    &time::format_description::well_known::Iso8601::DATE_TIME,
+                )
+                .or_else(|_| {
+                    PrimitiveDateTime::parse(
+                        s,
+                        &time::format_description::well_known::Iso8601::DATE_TIME,
+                    )
+                });
+
                 if let Ok(datetime) = datetime_result {
                     types::PgValue::Timestamp(types::Timestamp {
                         date: types::Date::Ymd((
@@ -321,7 +341,8 @@ fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
                                     .expect("invalid base date"),
                                 Time::MIDNIGHT,
                             );
-                            let datetime = base_datetime + time::Duration::microseconds(microseconds);
+                            let datetime =
+                                base_datetime + time::Duration::microseconds(microseconds);
                             types::PgValue::Timestamp(types::Timestamp {
                                 date: types::Date::Ymd((
                                     datetime.date().year(),
@@ -373,7 +394,10 @@ fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
                 // Try parsing with timezone offset
                 // Replace space with 'T' and try ISO8601 format
                 let iso_str = s.replace(' ', "T");
-                if let Ok(datetime) = OffsetDateTime::parse(&iso_str, &time::format_description::well_known::Iso8601::DATE_TIME) {
+                if let Ok(datetime) = OffsetDateTime::parse(
+                    &iso_str,
+                    &time::format_description::well_known::Iso8601::DATE_TIME,
+                ) {
                     let offset_secs = datetime.offset().whole_seconds();
                     // PostgreSQL uses WesternHemisphereSecs for positive offsets (east of UTC)
                     // and EasternHemisphereSecs for negative offsets (west of UTC)
@@ -535,7 +559,11 @@ fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
                             s[plus_idx..].to_string()
                         } else if let Some(minus_idx) = s.rfind('-') {
                             // Check if it's a timezone offset (not just a time separator)
-                            if minus_idx > 2 && s.chars().nth(minus_idx - 1).map_or(false, |c| c.is_ascii_digit()) {
+                            if minus_idx > 2
+                                && s.chars()
+                                    .nth(minus_idx - 1)
+                                    .map_or(false, |c| c.is_ascii_digit())
+                            {
                                 s[minus_idx..].to_string()
                             } else {
                                 "+00:00".to_string()
@@ -589,7 +617,14 @@ fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
             // MACADDR
             if let Ok(mac_bytes) = pg_types::macaddr_from_sql(bytes) {
                 types::PgValue::Macaddr(types::MacAddressEui48 {
-                    bytes: (mac_bytes[0], mac_bytes[1], mac_bytes[2], mac_bytes[3], mac_bytes[4], mac_bytes[5]),
+                    bytes: (
+                        mac_bytes[0],
+                        mac_bytes[1],
+                        mac_bytes[2],
+                        mac_bytes[3],
+                        mac_bytes[4],
+                        mac_bytes[5],
+                    ),
                 })
             } else if let Ok(s) = std::str::from_utf8(bytes) {
                 // Try to parse MAC address string format
@@ -657,7 +692,10 @@ fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
                 let mut points = Vec::new();
                 let mut path_points = path.points();
                 while let Ok(Some(point)) = path_points.next() {
-                    points.push(((point.x().to_bits(), 0i16, 0i8), (point.y().to_bits(), 0i16, 0i8)));
+                    points.push((
+                        (point.x().to_bits(), 0i16, 0i8),
+                        (point.y().to_bits(), 0i16, 0i8),
+                    ));
                 }
                 types::PgValue::Path(points)
             } else if let Ok(s) = std::str::from_utf8(bytes) {
@@ -877,7 +915,7 @@ fn parse_value_by_oid(bytes: &[u8], oid: Oid) -> types::PgValue {
                     return array_value;
                 }
             }
-            
+
             // Not an array, try other parsing
             // Check for common scalar types that might not have been handled
             if let Ok(s) = std::str::from_utf8(bytes) {
@@ -929,7 +967,10 @@ fn parse_point_string(s: &str) -> Option<((u64, i16, i8), (u64, i16, i8))> {
     if s.starts_with('(') && s.ends_with(')') {
         let coords = s[1..s.len() - 1].split(',').collect::<Vec<_>>();
         if coords.len() == 2 {
-            if let (Ok(x), Ok(y)) = (coords[0].trim().parse::<f64>(), coords[1].trim().parse::<f64>()) {
+            if let (Ok(x), Ok(y)) = (
+                coords[0].trim().parse::<f64>(),
+                coords[1].trim().parse::<f64>(),
+            ) {
                 return Some(((x.to_bits(), 0i16, 0i8), (y.to_bits(), 0i16, 0i8)));
             }
         }
@@ -937,7 +978,12 @@ fn parse_point_string(s: &str) -> Option<((u64, i16, i8), (u64, i16, i8))> {
     None
 }
 
-fn parse_box_string(s: &str) -> Option<(((u64, i16, i8), (u64, i16, i8)), ((u64, i16, i8), (u64, i16, i8)))> {
+fn parse_box_string(
+    s: &str,
+) -> Option<(
+    ((u64, i16, i8), (u64, i16, i8)),
+    ((u64, i16, i8), (u64, i16, i8)),
+)> {
     // Parse format: "((x1,y1),(x2,y2))"
     let s = s.trim();
     if s.starts_with("((") && s.ends_with("))") {
@@ -946,7 +992,10 @@ fn parse_box_string(s: &str) -> Option<(((u64, i16, i8), (u64, i16, i8)), ((u64,
         if points.len() == 2 {
             let p1_str = points[0].trim_start_matches('(');
             let p2_str = points[1].trim_end_matches(')');
-            if let (Some(p1), Some(p2)) = (parse_point_string(&format!("({})", p1_str)), parse_point_string(&format!("({})", p2_str))) {
+            if let (Some(p1), Some(p2)) = (
+                parse_point_string(&format!("({})", p1_str)),
+                parse_point_string(&format!("({})", p2_str)),
+            ) {
                 return Some((p1, p2));
             }
         }
@@ -961,7 +1010,10 @@ fn parse_circle_string(s: &str) -> Option<(((u64, i16, i8), (u64, i16, i8)), (u6
         if let Some(comma_idx) = s.rfind(',') {
             let center_str = &s[1..comma_idx];
             let radius_str = &s[comma_idx + 1..s.len() - 1];
-            if let (Some(center), Ok(radius)) = (parse_point_string(center_str), radius_str.trim().parse::<f64>()) {
+            if let (Some(center), Ok(radius)) = (
+                parse_point_string(center_str),
+                radius_str.trim().parse::<f64>(),
+            ) {
                 return Some((center, (radius.to_bits(), 0i16, 0i8)));
             }
         }
@@ -980,11 +1032,11 @@ fn parse_path_string(s: &str) -> Option<Vec<((u64, i16, i8), (u64, i16, i8))>> {
     } else {
         return None;
     };
-    
+
     let mut points = Vec::new();
     let mut current = String::new();
     let mut depth = 0;
-    
+
     for ch in inner.chars() {
         match ch {
             '(' => {
@@ -1009,7 +1061,7 @@ fn parse_path_string(s: &str) -> Option<Vec<((u64, i16, i8), (u64, i16, i8))>> {
             }
         }
     }
-    
+
     if !points.is_empty() {
         Some(points)
     } else {
@@ -1017,7 +1069,12 @@ fn parse_path_string(s: &str) -> Option<Vec<((u64, i16, i8), (u64, i16, i8))>> {
     }
 }
 
-fn parse_line_string(s: &str) -> Option<(((u64, i16, i8), (u64, i16, i8)), ((u64, i16, i8), (u64, i16, i8)))> {
+fn parse_line_string(
+    s: &str,
+) -> Option<(
+    ((u64, i16, i8), (u64, i16, i8)),
+    ((u64, i16, i8), (u64, i16, i8)),
+)> {
     // Parse format: "{A,B,C}" representing Ax + By + C = 0
     // Convert to two points on the line
     let s = s.trim();
@@ -1044,7 +1101,12 @@ fn parse_line_string(s: &str) -> Option<(((u64, i16, i8), (u64, i16, i8)), ((u64
     None
 }
 
-fn parse_lseg_string(s: &str) -> Option<(((u64, i16, i8), (u64, i16, i8)), ((u64, i16, i8), (u64, i16, i8)))> {
+fn parse_lseg_string(
+    s: &str,
+) -> Option<(
+    ((u64, i16, i8), (u64, i16, i8)),
+    ((u64, i16, i8), (u64, i16, i8)),
+)> {
     // Parse format: "[(x1,y1),(x2,y2)]"
     parse_box_string(s)
 }
@@ -1063,7 +1125,7 @@ fn parse_bit_string(s: &str, _is_fixed: bool) -> Option<(u32, Vec<u8>)> {
         let mut bytes = Vec::new();
         let mut current_byte = 0u8;
         let mut bit_pos = 0;
-        
+
         for (i, ch) in bits_str.chars().enumerate() {
             match ch {
                 '0' => {
@@ -1081,7 +1143,7 @@ fn parse_bit_string(s: &str, _is_fixed: bool) -> Option<(u32, Vec<u8>)> {
                 bit_pos = 0;
             }
         }
-        
+
         Some((len as u32, bytes))
     } else {
         None
@@ -1101,7 +1163,10 @@ fn parse_pg_lsn_string(s: &str) -> Option<u64> {
     // Parse format: "0/12345678" -> 0x12345678
     let parts: Vec<&str> = s.split('/').collect();
     if parts.len() == 2 {
-        if let (Ok(_high), Ok(low)) = (u32::from_str_radix(parts[0], 16), u32::from_str_radix(parts[1], 16)) {
+        if let (Ok(_high), Ok(low)) = (
+            u32::from_str_radix(parts[0], 16),
+            u32::from_str_radix(parts[1], 16),
+        ) {
             return Some(low as u64);
         }
     }
@@ -1112,7 +1177,7 @@ fn parse_hstore_string(s: &str) -> Option<Vec<(String, Option<String>)>> {
     // Parse format: "a=>1, b=>2" or "a=>NULL"
     let mut entries = Vec::new();
     let parts: Vec<&str> = s.split(',').collect();
-    
+
     for part in parts {
         let part = part.trim();
         if let Some(arrow_idx) = part.find("=>") {
@@ -1126,7 +1191,7 @@ fn parse_hstore_string(s: &str) -> Option<Vec<(String, Option<String>)>> {
             entries.push((key, value));
         }
     }
-    
+
     if !entries.is_empty() {
         Some(entries)
     } else {
@@ -1136,10 +1201,10 @@ fn parse_hstore_string(s: &str) -> Option<Vec<(String, Option<String>)>> {
 
 fn parse_array_value(array: &pg_types::Array) -> Option<types::PgValue> {
     use fallible_iterator::FallibleIterator;
-    
+
     let element_oid = array.element_type();
     let mut value_iter = array.values();
-    
+
     // Collect elements based on type
     match element_oid {
         16 => {
@@ -1375,7 +1440,7 @@ fn parse_array_value(array: &pg_types::Array) -> Option<types::PgValue> {
             return Some(types::PgValue::TextArray(texts));
         }
     }
-    
+
     None
 }
 
@@ -1386,7 +1451,7 @@ fn parse_tsvector_string(s: &str) -> Option<Vec<types::Lexeme>> {
     let mut in_quotes = false;
     let mut current_pos: Option<u16> = None;
     let mut current_weight: Option<types::LexemeWeight> = None;
-    
+
     for ch in s.chars() {
         match ch {
             '\'' if !in_quotes => {
@@ -1431,7 +1496,7 @@ fn parse_tsvector_string(s: &str) -> Option<Vec<types::Lexeme>> {
             _ => {}
         }
     }
-    
+
     // Add last lexeme
     if !current_word.is_empty() {
         lexemes.push(types::Lexeme {
@@ -1440,7 +1505,7 @@ fn parse_tsvector_string(s: &str) -> Option<Vec<types::Lexeme>> {
             data: current_word,
         });
     }
-    
+
     if !lexemes.is_empty() {
         Some(lexemes)
     } else {

@@ -1,4 +1,7 @@
 use crate::interlude::*;
+
+use crate::drawer::DrawerRepo;
+
 use tokio_util::sync::CancellationToken;
 
 pub mod triage;
@@ -8,7 +11,46 @@ pub struct RtConfig {}
 
 pub struct Rt {
     _config: RtConfig,
+    drawer: Arc<DrawerRepo>,
     _dispatcher_repo: Arc<DispatcherRepo>,
+}
+
+#[derive(Debug)]
+pub enum DispatchArgs {
+    DocInvoke {
+        doc_id: String,
+        heads: ChangeHashSet,
+    },
+    DocProp {
+        doc_id: String,
+        heads: ChangeHashSet,
+    },
+}
+
+impl Rt {
+    pub fn dispatch(
+        &self,
+        routine: Arc<crate::plugs::manifest::RoutineManifest>,
+        args: DispatchArgs,
+    ) -> Res<()> {
+        use crate::plugs::manifest::RoutineManifestDeets;
+        match (&routine.deets, args) {
+            (RoutineManifestDeets::DocInvoke {}, DispatchArgs::DocInvoke { doc_id, heads }) => {}
+            (
+                RoutineManifestDeets::DocProp { working_prop_tag },
+                DispatchArgs::DocProp { doc_id, heads },
+            ) => {}
+            (deets, args) => {
+                return Err(ferr!(
+                    "routine type and args don't match: {deets:?}, {args:?}"
+                ));
+            }
+        }
+        match &routine.r#impl {
+            crate::plugs::manifest::RoutineImpl::Wflow { key } => todo!(),
+        }
+        Ok(())
+    }
 }
 
 #[derive(Hydrate, Reconcile, Serialize, Deserialize)]
@@ -78,7 +120,7 @@ impl DispatcherRepo {
                 .find_doc(&app_doc_id)
                 .await?
                 .expect("doc should have been loaded");
-            acx.change_manager().add_doc(handle)
+            acx.change_manager().add_doc(handle).await?
         };
 
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<

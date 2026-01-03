@@ -93,7 +93,7 @@ impl DrawerRepo {
                 .find_doc(&drawer_doc_id)
                 .await?
                 .expect("doc should have been loaded");
-            acx.change_manager().add_doc(handle)
+            acx.change_manager().add_doc(handle).await?
         };
 
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -391,7 +391,7 @@ impl DrawerRepo {
                     Some(mut entry) if entry.1 == *heads => {
                         let mut doc = (*entry.0).clone();
                         patch.apply(&mut doc);
-                        doc.updated_at = time::OffsetDateTime::now_utc();
+                        doc.updated_at = Timestamp::now();
 
                         let doc = ThroughJson(doc);
                         autosurgeon::reconcile(&mut tx, &doc).wrap_err("error reconciling")?;
@@ -409,7 +409,7 @@ impl DrawerRepo {
                             autosurgeon::hydrate(&tx).wrap_err("error hydrating")?;
                         patch.apply(&mut doc);
 
-                        doc.updated_at = time::OffsetDateTime::now_utc();
+                        doc.updated_at = Timestamp::now();
 
                         autosurgeon::reconcile(&mut tx, &doc).wrap_err("error reconciling")?;
                         tx.commit();
@@ -447,6 +447,7 @@ impl DrawerRepo {
                     .map_err(|err| (ii, err))
             },
         ))
+        // FIXME: futurelock alert
         .buffer_unordered(16);
         let mut errors = HashMap::new();
         while let Some(res) = stream.next().await {
@@ -557,8 +558,8 @@ mod tests {
         let new_doc_id = client_repo
             .add(Doc {
                 id: "client".into(),
-                created_at: OffsetDateTime::now_utc(),
-                updated_at: OffsetDateTime::now_utc(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
                 props: [
                     //
                     (

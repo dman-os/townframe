@@ -11,8 +11,8 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
     // Create and add a document to the drawer
     let new_doc = Doc {
         id: "test-doc-1".to_string(),
-        created_at: OffsetDateTime::now_utc(),
-        updated_at: OffsetDateTime::now_utc(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         props: [
             //
             (

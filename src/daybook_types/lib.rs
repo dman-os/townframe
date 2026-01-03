@@ -27,10 +27,10 @@ macro_rules! custom_type_set {
     () => {
         use crate::interlude::*;
 
-        uniffi::custom_type!(OffsetDateTime, i64, {
+        uniffi::custom_type!(Timestamp, i64, {
             remote,
-            lower: |dt| dt.unix_timestamp(),
-            try_lift: |int| OffsetDateTime::from_unix_timestamp(int)
+            lower: |dt| dt.as_second(),
+            try_lift: |int| Timestamp::from_second(int)
                 .map_err(|err| uniffi::deps::anyhow::anyhow!(err))
         });
 

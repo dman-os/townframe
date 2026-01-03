@@ -6,6 +6,7 @@ pub struct Config {
     pub am: utils_rs::am::Config,
     pub sql: SqlConfig,
     pub _blobs_root: PathBuf,
+    pub cli_config: Arc<crate::config::CliConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,8 +28,13 @@ pub struct SqlCtx {
 }
 
 impl Config {
+    pub async fn is_repo_initialized(&self) -> Res<bool> {
+        Ok(utils_rs::file_exists(&self.cli_config.repo_path).await?
+            && utils_rs::file_exists(&self.cli_config.repo_path.join("samod")).await?)
+        //&& utils_rs::file_exists(&self.cli_config.repo_path.join("sqlite.db")).await?
+    }
     /// Create a new config with platform-specific defaults
-    pub fn new(cli_config: &crate::config::CliConfig) -> Res<Self> {
+    pub fn new(cli_config: Arc<crate::config::CliConfig>) -> Res<Self> {
         let (am, sql, blobs_root) = {
             (
                 utils_rs::am::Config {
@@ -49,6 +55,7 @@ impl Config {
         Ok(Self {
             am,
             sql,
+            cli_config,
             _blobs_root: blobs_root,
         })
     }
@@ -124,7 +131,7 @@ async fn set_init_state(cx: &Ctx, state: &InitState) -> Res<()> {
 }
 
 impl Ctx {
-    pub async fn init(config: Config) -> Result<Arc<Self>, eyre::Report> {
+    pub async fn init(config: Arc<Config>) -> Result<Arc<Self>, eyre::Report> {
         let sql = SqlCtx::new(config.sql.clone()).await?;
         let acx =
             utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
@@ -201,7 +208,11 @@ async fn init_from_globals(cx: &Ctx) -> Res<()> {
         unreachable!();
     }
     for handle in &doc_handles {
-        cx.acx.change_manager().clone().add_doc(handle.clone());
+        cx.acx
+            .change_manager()
+            .clone()
+            .add_doc(handle.clone())
+            .await?;
     }
     if update_state {
         set_init_state(

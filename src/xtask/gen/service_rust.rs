@@ -31,7 +31,7 @@ impl RustGenCtx<'_> {
                 if self.attrs.wit {
                     "Datetime".into()
                 } else {
-                    "OffsetDateTime".into()
+                    "Timestamp".into()
                 }
             }
             Type::Primitives(Primitives::Json) => "serde_json::Value".into(),
@@ -952,11 +952,8 @@ fn record_field(
         // Emit serde codec helper for datetime fields
         if cx.attrs.serde {
             if cx.attrs.wit {
-                // When using WIT types, use Datetime codec that delegates through OffsetDateTime
+                // When using WIT types, use Datetime codec that delegates through Timestamp
                 writeln!(buf, "#[serde(with = \"api_utils_rs::codecs::datetime\")]",)?;
-            } else {
-                // When using native Rust types, use OffsetDateTime codec directly
-                writeln!(buf, "#[serde(with = \"utils_rs::codecs::sane_iso8601\")]",)?;
             }
         }
         // Emit autosurgeon date helper at field-level when the parent record requested autosurgeon

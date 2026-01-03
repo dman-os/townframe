@@ -36,7 +36,8 @@ struct ChangeListener {
 #[cfg(feature = "automerge-repo")]
 pub struct ChangeListenerManager {
     listeners: RwLock<Vec<ChangeListener>>,
-    change_tx: mpsc::UnboundedSender<(DocumentId, Vec<ChangeNotification>)>,
+    change_tx:
+        tokio::sync::Mutex<Option<mpsc::UnboundedSender<(DocumentId, Vec<ChangeNotification>)>>>,
     brokers: DHashMap<DocumentId, Arc<DocChangeBroker>>,
     switchboard_handle: RwLock<Option<JoinHandle<Res<()>>>>,
     cancel_token: CancellationToken,
@@ -79,7 +80,7 @@ impl ChangeListenerManager {
         let cancel_token = CancellationToken::new();
         let out = Self {
             listeners,
-            change_tx,
+            change_tx: Some(change_tx).into(),
             brokers: default(),
             switchboard_handle: RwLock::new(None),
             cancel_token,
@@ -98,6 +99,8 @@ impl ChangeListenerManager {
     pub async fn stop(&self) -> Res<()> {
         self.cancel_token.cancel();
 
+        drop(self.change_tx.lock().await.take());
+
         // Stop all brokers
         for entry in self.brokers.iter() {
             entry.value().cancel_token.cancel();
@@ -110,15 +113,17 @@ impl ChangeListenerManager {
     }
 
     /// Start listening for events on the given document
-    pub fn add_doc(self: &Arc<Self>, handle: samod::DocHandle) -> Arc<DocChangeBroker> {
+    pub async fn add_doc(&self, handle: samod::DocHandle) -> Res<Arc<DocChangeBroker>> {
         if let Some(arc) = self.brokers.get(handle.document_id()) {
-            return arc.clone();
+            return Ok(arc.clone());
         }
-        let this = self.clone();
+        let Some(change_tx) = self.change_tx.lock().await.as_ref().map(|tx| tx.clone()) else {
+            return Err(ferr!("repo is shuting down"));
+        };
 
         let doc_id = handle.document_id().clone();
         let span = tracing::info_span!("doc listener task", ?doc_id);
-        let cancel_token = CancellationToken::new();
+        let cancel_token = self.cancel_token.child_token();
         let cancel_token_task = cancel_token.clone();
         let join_handle = tokio::spawn(
             async move {
@@ -165,9 +170,8 @@ impl ChangeListenerManager {
 
                     // Notify listeners about changes
                     if !all_changes.is_empty() {
-                        if let Err(err) = this
-                            .change_tx
-                            .send((handle.document_id().clone(), all_changes))
+                        if let Err(err) =
+                            change_tx.send((handle.document_id().clone(), all_changes))
                         {
                             warn!("failed to send change notifications: {err}");
                         }
@@ -187,7 +191,7 @@ impl ChangeListenerManager {
         };
         let out = Arc::new(out);
         self.brokers.insert(doc_id, out.clone());
-        out
+        Ok(out)
     }
 
     /// Register a change listener
@@ -215,7 +219,6 @@ impl ChangeListenerManager {
         self: Arc<Self>,
         mut change_rx: mpsc::UnboundedReceiver<(DocumentId, Vec<ChangeNotification>)>,
     ) -> JoinHandle<Res<()>> {
-        let cancel_token = self.cancel_token.clone();
         tokio::spawn(
             async move {
                 // Group notifications by listener
@@ -224,17 +227,7 @@ impl ChangeListenerManager {
                     Vec<ChangeNotification>,
                 > = std::collections::HashMap::new();
                 loop {
-                    let msg = tokio::select! {
-                        biased;
-                        _ = cancel_token.cancelled() => {
-                            break;
-                        }
-                        msg = change_rx.recv() => {
-                            msg
-                        }
-                    };
-
-                    let Some((id, notifications)) = msg else {
+                    let Some((id, notifications)) = change_rx.recv().await else {
                         break;
                     };
 

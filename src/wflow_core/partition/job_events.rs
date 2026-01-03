@@ -6,8 +6,7 @@ use crate::gen::metastore::WflowMeta;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobInitEvent {
     pub job_id: Arc<str>,
-    #[serde(with = "utils_rs::codecs::sane_iso8601")]
-    pub timestamp: OffsetDateTime,
+    pub timestamp: Timestamp,
     pub args_json: Arc<str>,
     pub override_wflow_retry_policy: Option<RetryPolicy>,
     pub wflow: WflowMeta,
@@ -16,14 +15,11 @@ pub struct JobInitEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRunEvent {
     pub job_id: Arc<str>,
-    #[serde(with = "utils_rs::codecs::sane_iso8601")]
-    pub timestamp: OffsetDateTime,
+    pub timestamp: Timestamp,
     pub effect_id: crate::partition::effects::EffectId,
     pub run_id: u64,
-    #[serde(with = "utils_rs::codecs::sane_iso8601")]
-    pub start_at: OffsetDateTime,
-    #[serde(with = "utils_rs::codecs::sane_iso8601")]
-    pub end_at: OffsetDateTime,
+    pub start_at: Timestamp,
+    pub end_at: Timestamp,
     pub result: JobRunResult,
 }
 
@@ -60,10 +56,8 @@ pub enum JobRunWorkerError {
 pub struct JobEffectResult {
     pub step_id: u64,
     pub attempt_id: u64,
-    #[serde(with = "utils_rs::codecs::sane_iso8601")]
-    pub start_at: OffsetDateTime,
-    #[serde(with = "utils_rs::codecs::sane_iso8601")]
-    pub end_at: OffsetDateTime,
+    pub start_at: Timestamp,
+    pub end_at: Timestamp,
     pub deets: JobEffectResultDeets,
 }
 

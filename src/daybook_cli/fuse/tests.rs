@@ -67,8 +67,8 @@ async fn test_mount_and_list_files() -> Res<()> {
     // Create a test document
     let doc = Doc {
         id: Uuid::new_v4().to_string(), // Will be replaced by repo.add()
-        created_at: OffsetDateTime::now_utc(),
-        updated_at: OffsetDateTime::now_utc(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         content: DocContent::Text("Test content".to_string()),
         props: [(
             DocPropKey::WellKnown(WellKnownDocPropKeys::TitleGeneric),
@@ -118,8 +118,8 @@ async fn test_read_file() -> Res<()> {
     // Create a test document
     let doc = Doc {
         id: Uuid::new_v4().to_string(), // Will be replaced by repo.add()
-        created_at: OffsetDateTime::now_utc(),
-        updated_at: OffsetDateTime::now_utc(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         content: DocContent::Text("Test content for reading".to_string()),
         props: [(
             DocPropKey::WellKnown(WellKnownDocPropKeys::TitleGeneric),
@@ -162,8 +162,8 @@ async fn test_write_file() -> Res<()> {
     // Create a test document
     let original_doc = Doc {
         id: Uuid::new_v4().to_string(), // Will be replaced by repo.add()
-        created_at: OffsetDateTime::now_utc(),
-        updated_at: OffsetDateTime::now_utc(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         content: DocContent::Text("Original content".to_string()),
         props: [(
             DocPropKey::WellKnown(WellKnownDocPropKeys::TitleGeneric),
@@ -233,8 +233,8 @@ async fn test_write_invalid_json() -> Res<()> {
     // Create a test document
     let doc = Doc {
         id: Uuid::new_v4().to_string(), // Will be replaced by repo.add()
-        created_at: OffsetDateTime::now_utc(),
-        updated_at: OffsetDateTime::now_utc(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         content: DocContent::Text("Original content".to_string()),
         props: default(),
     };
@@ -313,8 +313,8 @@ async fn test_multiple_files() -> Res<()> {
     for i in 0..5 {
         let doc = Doc {
             id: Uuid::new_v4().to_string(), // Will be replaced by repo.add()
-            created_at: OffsetDateTime::now_utc(),
-            updated_at: OffsetDateTime::now_utc(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             content: DocContent::Text(format!("Content {}", i)),
             props: [(
                 DocPropKey::WellKnown(WellKnownDocPropKeys::TitleGeneric),

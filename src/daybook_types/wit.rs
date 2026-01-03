@@ -22,6 +22,8 @@ pub mod doc {
         ImageMetadata(ImageMetadata),
         Content(DocContent),
         Pending(Pending),
+        // UpdatedAt(Datetime),
+        // CreatedAt(Datetime),
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +112,8 @@ pub mod doc {
                 root_doc::WellKnownProp::Pending(pending) => Self::Pending(Pending {
                     key: pending.key.to_string(),
                 }),
+                // root_doc::WellKnownProp::CreatedAt(timestamp) => Self::CreatedAt(timestamp.into()),
+                // root_doc::WellKnownProp::UpdatedAt(timestamp) => Self::UpdatedAt(timestamp.into()),
             }
         }
     }
@@ -129,6 +133,8 @@ pub mod doc {
                 WellKnownProp::Pending(val) => Self::Pending(crate::doc::Pending {
                     key: val.key.into(),
                 }),
+                // WellKnownProp::CreatedAt(datetime) => Self::CreatedAt(datetime.into()),
+                // WellKnownProp::UpdatedAt(datetime) => Self::CreatedAt(datetime.into()),
             })
         }
     }
@@ -176,18 +182,8 @@ pub mod doc {
         fn try_from(val: Doc) -> Result<Self, Self::Error> {
             Ok(Self {
                 id: val.id,
-                created_at: time::OffsetDateTime::from_unix_timestamp(
-                    val.created_at.seconds as i64,
-                )
-                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
-                .replace_nanosecond(val.created_at.nanoseconds)
-                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH),
-                updated_at: time::OffsetDateTime::from_unix_timestamp(
-                    val.updated_at.seconds as i64,
-                )
-                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
-                .replace_nanosecond(val.updated_at.nanoseconds)
-                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH),
+                created_at: val.created_at.into(),
+                updated_at: val.updated_at.into(),
                 props: val
                     .props
                     .into_iter()

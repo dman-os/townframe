@@ -3,7 +3,7 @@ use tokio_util::sync::CancellationToken;
 
 pub mod manifest;
 
-pub fn system_plugs() -> Vec<manifest::PlugManifest> {
+pub fn system_plugs() -> Vec<Arc<manifest::PlugManifest>> {
     use daybook_types::doc::*;
     use manifest::*;
 
@@ -64,7 +64,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     display_config: default(),
                 },
             ],
-        },
+        }
+        .into(),
         PlugManifest {
             namespace: "daybook".into(),
             name: "wip".into(),
@@ -80,7 +81,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key_tag: WellKnownPropTag::Content.into(),
                             value_schema: schemars::schema_for!(Content),
                         }],
-                    },
+                    }
+                    .into(),
                 ),
             ]
             .into(),
@@ -92,7 +94,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     deets: CommandDeets::DocCommand {
                         routine_name: "pseudo-label".into(),
                     },
-                },
+                }
+                .into(),
             ],
             routines: [
                 //
@@ -105,12 +108,20 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         deets: RoutineManifestDeets::DocProp {
                             working_prop_tag: WellKnownPropTag::PseudoLabel.into(),
                         },
-                        prop_acl: vec![RoutinePropAccess {
-                            tag: WellKnownPropTag::Content.into(),
-                            read: true,
-                            write: false,
-                        }],
-                    },
+                        prop_acl: vec![
+                            RoutinePropAccess {
+                                tag: WellKnownPropTag::Content.into(),
+                                read: true,
+                                write: false,
+                            },
+                            RoutinePropAccess {
+                                tag: WellKnownPropTag::PseudoLabel.into(),
+                                read: true,
+                                write: true,
+                            },
+                        ],
+                    }
+                    .into(),
                 ),
             ]
             .into(),
@@ -124,7 +135,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         component_paths: vec![
                             "../../target/wasm32-wasip2/debug/daybook_wflows.wasm".into(),
                         ],
-                    },
+                    }
+                    .into(),
                 ),
             ]
             .into(),
@@ -134,9 +146,11 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     key_tag: WellKnownPropTag::PseudoLabel.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: default(),
-                },
+                }
+                .into(),
             ],
-        },
+        }
+        .into(),
     ]
 }
 
@@ -220,7 +234,6 @@ impl PlugsRepo {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store = PlugsStore::load(&acx, &app_doc_id).await?;
-        let is_empty = store.manifests.is_empty();
         let store = crate::stores::StoreHandle::new(store, acx.clone(), app_doc_id.clone());
 
         store.mutate_sync(|s| s.rebuild_indices()).await?;
@@ -230,7 +243,7 @@ impl PlugsRepo {
                 .find_doc(&app_doc_id)
                 .await?
                 .expect("doc should have been loaded");
-            acx.change_manager().add_doc(handle)
+            acx.change_manager().add_doc(handle).await?
         };
 
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -260,12 +273,6 @@ impl PlugsRepo {
             let cancel_token = cancel_token.clone();
             async move { repo.handle_notifs(notif_rx, cancel_token).await }
         });
-
-        if is_empty {
-            for plug in system_plugs() {
-                repo.add(plug).await?;
-            }
-        }
 
         Ok(repo)
     }
@@ -350,6 +357,20 @@ impl PlugsRepo {
         Ok(())
     }
 
+    pub async fn ensure_system_plugs(&self) -> Res<()> {
+        let is_empty = self
+            .store
+            .query_sync(|store| store.manifests.is_empty())
+            .await;
+        if is_empty {
+            for plug in system_plugs() {
+                self.add(plug).await?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn get(&self, id: &str) -> Option<Arc<manifest::PlugManifest>> {
         self.store
             .query_sync(|store| store.manifests.get(id).map(|man| Arc::clone(&man.0)))
@@ -407,7 +428,7 @@ impl PlugsRepo {
     ///
     /// This method follows a literate programming approach to clearly document
     /// the validation and reconciliation steps.
-    pub async fn add(&self, manifest: manifest::PlugManifest) -> Res<()> {
+    pub async fn add(&self, manifest: Arc<manifest::PlugManifest>) -> Res<()> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
@@ -428,11 +449,10 @@ impl PlugsRepo {
 
         self.store
             .mutate_sync(move |store| {
-                info!("XXX {manifest:?}");
                 // Update the manifest in the store
                 store
                     .manifests
-                    .insert(plug_id.clone(), ThroughJson(Arc::new(manifest)));
+                    .insert(plug_id.clone(), ThroughJson(manifest));
 
                 // 3. Rebuild indices
                 // Indices are in-memory caches (marked with #[autosurgeon(skip)])
@@ -743,7 +763,7 @@ mod tests {
         let (_acx, repo, _doc_id) = setup_repo().await?;
         let plug = mock_plug("plug1");
 
-        repo.add(plug).await?;
+        repo.add(plug.into()).await?;
 
         let saved = repo.get("@test/plug1").await.unwrap();
         assert_eq!(saved.name, "plug1");
@@ -761,7 +781,7 @@ mod tests {
             value_schema: schemars::schema_for!(String),
             display_config: default(),
         });
-        repo.add(p1).await?;
+        repo.add(p1.into()).await?;
 
         // Try to add second plug with same tag
         let mut p2 = mock_plug("plug2");
@@ -771,7 +791,7 @@ mod tests {
             display_config: default(),
         });
 
-        let res = repo.add(p2).await;
+        let res = repo.add(p2.into()).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Tag clash"));
 
@@ -789,7 +809,7 @@ mod tests {
             value_schema: schemars::schema_for!(String),
             display_config: default(),
         });
-        repo.add(provider).await?;
+        repo.add(provider.into()).await?;
 
         // Add consumer plug that depends on provider
         let mut consumer = mock_plug("consumer");
@@ -800,10 +820,11 @@ mod tests {
                     key_tag: "org.test.shared".into(),
                     value_schema: schemars::schema_for!(String),
                 }],
-            },
+            }
+            .into(),
         );
 
-        repo.add(consumer).await?;
+        repo.add(consumer.into()).await?;
         Ok(())
     }
 
@@ -814,10 +835,10 @@ mod tests {
         let mut consumer = mock_plug("consumer");
         consumer.dependencies.insert(
             "@test/missing".into(),
-            manifest::PlugDependencyManifest { keys: vec![] },
+            manifest::PlugDependencyManifest { keys: vec![] }.into(),
         );
 
-        let res = repo.add(consumer).await;
+        let res = repo.add(consumer.into()).await;
         assert!(res.is_err());
         assert!(res
             .unwrap_err()
@@ -833,13 +854,16 @@ mod tests {
         // Initial version
         let mut p1_v1 = mock_plug("plug1");
         p1_v1.version = "0.1.0".parse().unwrap();
-        p1_v1.commands.push(manifest::CommandManifest {
-            name: "cmd1".into(),
-            desc: "First command".into(),
-            deets: manifest::CommandDeets::DocCommand {
-                routine_name: "routine1".into(),
-            },
-        });
+        p1_v1.commands.push(
+            manifest::CommandManifest {
+                name: "cmd1".into(),
+                desc: "First command".into(),
+                deets: manifest::CommandDeets::DocCommand {
+                    routine_name: "routine1".into(),
+                },
+            }
+            .into(),
+        );
         p1_v1.routines.insert(
             "routine1".into(),
             manifest::RoutineManifest {
@@ -848,16 +872,17 @@ mod tests {
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 prop_acl: vec![],
-            },
+            }
+            .into(),
         );
-        repo.add(p1_v1).await?;
+        repo.add(p1_v1.into()).await?;
 
         // Update version (patch) with command removed -> should fail
         let mut p1_v2 = mock_plug("plug1");
         p1_v2.version = "0.1.1".parse().unwrap();
         // cmd1 is missing
 
-        let res = repo.add(p1_v2).await;
+        let res = repo.add(p1_v2.into()).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Breaking change"));
 
@@ -865,7 +890,7 @@ mod tests {
         let mut p1_v3 = mock_plug("plug1");
         p1_v3.version = "1.0.0".parse().unwrap(); // major bump from 0.1 to 1.0 (in standard semver terms)
 
-        repo.add(p1_v3).await?;
+        repo.add(p1_v3.into()).await?;
         Ok(())
     }
 }

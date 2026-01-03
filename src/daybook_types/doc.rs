@@ -11,8 +11,6 @@ crate::define_enum_and_tag!(
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
     #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
     DocContent {
-        // type CreatedAt OffsetDateTime,
-        // type UpdatedAt OffsetDateTime,
         Text type (String),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -37,8 +35,8 @@ crate::define_enum_and_tag!(
     #[serde(rename_all = "camelCase", untagged)]
     #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
     WellKnownProp {
-        // type CreatedAt OffsetDateTime,
-        // type UpdatedAt OffsetDateTime,
+        // CreatedAt type (OffsetDateTime),
+        // UpdatedAt type (OffsetDateTime),
         RefGeneric type (DocId),
         LabelGeneric type (String),
         PseudoLabel type (String),
@@ -130,10 +128,8 @@ pub type DocId = String;
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct Doc {
     pub id: DocId,
-    #[serde(with = "utils_rs::codecs::sane_iso8601")]
-    pub created_at: time::OffsetDateTime,
-    #[serde(with = "utils_rs::codecs::sane_iso8601")]
-    pub updated_at: time::OffsetDateTime,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     // FIXME: I'm not sure I like this
     pub props: HashMap<DocPropKey, DocProp>,
 }
@@ -656,8 +652,8 @@ mod tests {
     fn test_doc_diff() {
         let mut old = Doc {
             id: "doc1".into(),
-            created_at: time::OffsetDateTime::now_utc(),
-            updated_at: time::OffsetDateTime::now_utc(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             props: HashMap::new(),
         };
         let tag_title = DocPropTag::WellKnown(WellKnownPropTag::TitleGeneric);

@@ -11,6 +11,7 @@ mod binds_guest {
         world: "all-guest",
         imports: { default: async | trappable | tracing },
         exports: { default: async | trappable | tracing },
+
         with: {
             "townframe:daybook/capabilities/doc-token-ro": super::DocTokenRo,
             "townframe:daybook/capabilities/doc-token-rw": super::DocTokenRw,
@@ -112,7 +113,8 @@ mod binds_guest {
                     }
                     wit_doc::WellKnownProp::Pending(val) => {
                         binds_doc::WellKnownProp::Pending(binds_doc::Pending { key: val.key })
-                    }
+                    } // wit_doc::WellKnownProp::CreatedAt(datetime) => binds_doc::WellKnownProp::CreaedAt(),
+                      // wit_doc::WellKnownProp::UpdatedAt(datetime) => todo!(),
                 }),
                 wit_doc::DocProp::Any(val) => Self::Any(val),
             }

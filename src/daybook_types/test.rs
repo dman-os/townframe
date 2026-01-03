@@ -4,7 +4,6 @@ use crate::doc::{
     Blob, Doc, DocContent, DocProp, DocPropKey, ImageMetadata, WellKnownProp, WellKnownPropTag,
 };
 use std::collections::HashMap;
-use time::OffsetDateTime;
 
 fn create_test_doc() -> Doc {
     let mut props = HashMap::new();
@@ -30,8 +29,8 @@ fn create_test_doc() -> Doc {
 
     Doc {
         id: "test-doc-id".to_string(),
-        created_at: OffsetDateTime::now_utc(),
-        updated_at: OffsetDateTime::now_utc(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         props,
     }
 }
@@ -96,8 +95,8 @@ fn test_doc_with_blob_content() -> Res<()> {
 
     let root_doc = Doc {
         id: "blob-doc".to_string(),
-        created_at: OffsetDateTime::now_utc(),
-        updated_at: OffsetDateTime::now_utc(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         props,
     };
 
@@ -142,8 +141,8 @@ fn test_doc_with_all_prop_types() -> Res<()> {
 
     let root_doc = Doc {
         id: "all-props-doc".to_string(),
-        created_at: OffsetDateTime::now_utc(),
-        updated_at: OffsetDateTime::now_utc(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         props,
     };
 

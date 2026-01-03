@@ -100,13 +100,13 @@ pub struct PlugManifest {
     pub props: Vec<PropKeyManifest>,
     // plugin_id: ->
     #[garde(dive)]
-    pub dependencies: HashMap<String, PlugDependencyManifest>,
+    pub dependencies: HashMap<String, Arc<PlugDependencyManifest>>,
     #[garde(dive)]
-    pub routines: HashMap<KeyGeneric, RoutineManifest>,
+    pub routines: HashMap<KeyGeneric, Arc<RoutineManifest>>,
     #[garde(dive)]
-    pub wflow_bundles: HashMap<KeyGeneric, WflowBundleManifest>,
+    pub wflow_bundles: HashMap<KeyGeneric, Arc<WflowBundleManifest>>,
     #[garde(dive)]
-    pub commands: Vec<CommandManifest>,
+    pub commands: Vec<Arc<CommandManifest>>,
     // processors: Vec<PluginProcessorManifest>,
 }
 

@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliConfig {
     pub repo_path: PathBuf,
 }

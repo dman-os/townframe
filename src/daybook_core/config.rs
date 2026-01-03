@@ -1,8 +1,8 @@
 use crate::interlude::*;
 
 use crate::plugs::{manifest::PropKeyDisplayHint, PlugsRepo};
-use tokio_util::sync::CancellationToken;
 use crate::rt::triage::TriageConfig;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Reconcile, Hydrate)]
 pub struct ConfigStore {
@@ -94,7 +94,7 @@ impl ConfigRepo {
                 .find_doc(&app_doc_id)
                 .await?
                 .expect("doc should have been loaded");
-            acx.change_manager().add_doc(handle)
+            acx.change_manager().add_doc(handle).await?
         };
 
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<

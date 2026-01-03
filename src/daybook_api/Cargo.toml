@@ -23,7 +23,6 @@ daybook_types = { workspace = true, features = ["wit"] }
 
 # futures
 async-trait.workspace = true
-futures.workspace = true
 tokio.workspace = true
 
 serde.workspace = true

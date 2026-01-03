@@ -66,12 +66,10 @@ pub mod doc {
     #[cfg_attr(feature = "uniffi", patch(attribute(derive(uniffi::Record))))]
     pub struct Doc {
         pub id: DocId,
-        #[serde(with = "utils_rs::codecs::sane_iso8601")]
         #[autosurgeon(with = "utils_rs::am::codecs::date")]
-        pub created_at: OffsetDateTime,
-        #[serde(with = "utils_rs::codecs::sane_iso8601")]
+        pub created_at: Timestamp,
         #[autosurgeon(with = "utils_rs::am::codecs::date")]
-        pub updated_at: OffsetDateTime,
+        pub updated_at: Timestamp,
         pub content: DocContent,
         pub props: Vec<DocProp>,
     }

@@ -8,6 +8,7 @@ pub mod am;
 pub mod prelude {
     pub use crate::interlude::*;
 
+    #[cfg(feature = "automerge")]
     pub use crate::am::codecs::ThroughJson;
 
     #[cfg(feature = "automerge")]
@@ -17,6 +18,7 @@ pub mod prelude {
     pub use dashmap;
     pub use dotenv_flow;
     pub use educe;
+    pub use futures;
     pub use regex;
     #[cfg(feature = "automerge-repo")]
     pub use samod;
@@ -41,7 +43,8 @@ mod interlude {
     pub use indexmap::{indexmap, IndexMap};
     pub use serde::{Deserialize, Serialize};
     pub use serde_json::json;
-    pub use time::{self, OffsetDateTime};
+    pub type Timestamp = jiff::Timestamp;
+    pub use jiff;
     pub use uuid::{self, Uuid};
 
     pub use crate::expect_tags::*;
@@ -131,7 +134,7 @@ pub fn setup_tracing() -> Res<()> {
     #[cfg(target_arch = "wasm32")]
     let filter: Option<String> = None;
 
-    let filter = filter.unwrap_or_else(|| "info".into());
+    let filter = filter.unwrap_or_else(|| "info,samod_core=warn".into());
 
     use tracing_subscriber::prelude::*;
     let registry = tracing_subscriber::registry()
@@ -437,8 +440,6 @@ pub mod hash {
     }
 }
 
-/*
-
 /// A simpler version of [`tokio::fs::try_exists`] that returns
 /// false on a non-existent file and not just on a broken symlink.
 #[inline(always)]
@@ -450,6 +451,8 @@ pub async fn file_exists(path: &Path) -> Result<bool, std::io::Error> {
         Err(err) => Err(err),
     }
 }
+
+/*
 
 pub async fn find_entry_recursive(from: &Path, name: &str) -> Res<Option<PathBuf>> {
     let mut cur = from;

@@ -63,7 +63,7 @@ impl WflowIngress for PartitionLogIngress {
             args_json: args_json.into(),
             override_wflow_retry_policy: retry_policy,
             wflow: wflow_meta,
-            timestamp: OffsetDateTime::now_utc(),
+            timestamp: Timestamp::now(),
             job_id,
         }))
         .await?;

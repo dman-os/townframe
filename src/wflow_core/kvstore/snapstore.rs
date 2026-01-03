@@ -7,8 +7,7 @@ use crate::snapstore::PartitionSnapshot;
 #[derive(Debug, Serialize, Deserialize)]
 struct SnapshotWithMetadata {
     entry_id: u64,
-    #[serde(with = "utils_rs::codecs::sane_iso8601")]
-    timestamp: OffsetDateTime,
+    timestamp: Timestamp,
     snapshot: PartitionSnapshot,
 }
 
@@ -59,7 +58,7 @@ impl crate::snapstore::SnapStore for AtomicKvSnapStore {
             // Create combined snapshot with metadata
             let snapshot_with_metadata = SnapshotWithMetadata {
                 entry_id,
-                timestamp: OffsetDateTime::now_utc(),
+                timestamp: Timestamp::now(),
                 snapshot: snapshot.clone(),
             };
 

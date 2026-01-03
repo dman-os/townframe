@@ -82,14 +82,14 @@ impl ActiveJobCtx {
 struct ActiveStepCtx {
     attempt_id: u64,
     step_id: u64,
-    start_at: OffsetDateTime,
+    start_at: Timestamp,
 }
 
 enum JobTrap {
     PersistStep {
         step_id: u64,
-        start_at: OffsetDateTime,
-        end_at: OffsetDateTime,
+        start_at: Timestamp,
+        end_at: Timestamp,
         value_json: Arc<str>,
         attempt_id: u64,
     },
@@ -143,7 +143,7 @@ impl host::Host for WashCtx {
         } else {
             0
         };
-        let start_at = OffsetDateTime::now_utc();
+        let start_at = Timestamp::now();
         job.active_step = Some(ActiveStepCtx {
             attempt_id: attempt_id as u64,
             step_id,
@@ -170,7 +170,7 @@ impl host::Host for WashCtx {
         if active_step.step_id != step_id {
             anyhow::bail!("given step_id is not active");
         }
-        let end_at = OffsetDateTime::now_utc();
+        let end_at = Timestamp::now();
         let trap = JobTrap::PersistStep {
             step_id,
             value_json: value_json.into(),

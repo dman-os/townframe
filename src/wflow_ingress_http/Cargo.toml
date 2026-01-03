@@ -24,8 +24,6 @@ macros.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-futures.workspace = true
-
 thiserror.workspace = true
 displaydoc.workspace = true
 parking_lot.workspace = true

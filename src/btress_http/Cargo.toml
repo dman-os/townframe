@@ -14,8 +14,6 @@ wit-bindgen.workspace = true
 utils_rs.workspace = true
 api_utils_rs.workspace = true
 
-futures.workspace = true
-
 
 thiserror.workspace = true
 parking_lot.workspace = true

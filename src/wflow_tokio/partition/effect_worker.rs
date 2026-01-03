@@ -96,11 +96,11 @@ impl TokioEffectWorker {
 
         match deets {
             effects::PartitionEffectDeets::RunJob(deets) => {
-                let start_at = OffsetDateTime::now_utc();
+                let start_at = Timestamp::now();
                 let run_id = deets.run_id;
 
                 let result = self.run_job_effect(job_id.clone()).await;
-                let end_at = OffsetDateTime::now_utc();
+                let end_at = Timestamp::now();
                 self.log
                     .append(&log::PartitionLogEntry::JobEffectResult(
                         job_events::JobRunEvent {

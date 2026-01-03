@@ -415,7 +415,7 @@ impl TablesRepo {
                 .find_doc(&app_doc_id)
                 .await?
                 .expect("doc should have been loaded");
-            acx.change_manager().add_doc(handle)
+            acx.change_manager().add_doc(handle).await?
         };
 
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -497,13 +497,9 @@ impl TablesRepo {
                                     "windows" => {
                                         events.push(TablesEvent::WindowChanged { id: uuid })
                                     }
-                                    "tables" => {
-                                        events.push(TablesEvent::TableChanged { id: uuid })
-                                    }
+                                    "tables" => events.push(TablesEvent::TableChanged { id: uuid }),
                                     "tabs" => events.push(TablesEvent::TabChanged { id: uuid }),
-                                    "panels" => {
-                                        events.push(TablesEvent::PanelChanged { id: uuid })
-                                    }
+                                    "panels" => events.push(TablesEvent::PanelChanged { id: uuid }),
                                     _ => events.push(TablesEvent::ListChanged),
                                 },
                                 _ => events.push(TablesEvent::ListChanged),
@@ -522,13 +518,9 @@ impl TablesRepo {
                                     "windows" => {
                                         events.push(TablesEvent::WindowChanged { id: uuid })
                                     }
-                                    "tables" => {
-                                        events.push(TablesEvent::TableChanged { id: uuid })
-                                    }
+                                    "tables" => events.push(TablesEvent::TableChanged { id: uuid }),
                                     "tabs" => events.push(TablesEvent::TabChanged { id: uuid }),
-                                    "panels" => {
-                                        events.push(TablesEvent::PanelChanged { id: uuid })
-                                    }
+                                    "panels" => events.push(TablesEvent::PanelChanged { id: uuid }),
                                     _ => events.push(TablesEvent::ListChanged),
                                 },
                                 _ => events.push(TablesEvent::ListChanged),

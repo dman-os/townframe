@@ -53,7 +53,7 @@ pub mod wit {
         pub use crate::wit::townframe::api_utils::utils::*;
     }
     use crate::interlude::utoipa;
-    use crate::interlude::OffsetDateTime;
+    use crate::interlude::Timestamp;
     use crate::interlude::*;
 
     use townframe::api_utils::utils::Datetime;
@@ -71,65 +71,99 @@ pub mod wit {
             match self {
                 PgValue::TimestampTz(val) => {
                     let date = match val.timestamp.date {
-                        wasmcloud::postgres::types::Date::PositiveInfinity => time::Date::MAX,
-                        wasmcloud::postgres::types::Date::NegativeInfinity => time::Date::MIN,
+                        wasmcloud::postgres::types::Date::PositiveInfinity => {
+                            jiff::civil::Date::MAX
+                        }
+                        wasmcloud::postgres::types::Date::NegativeInfinity => {
+                            jiff::civil::Date::MIN
+                        }
                         wasmcloud::postgres::types::Date::Ymd((year, month, date)) => {
-                            if month > 12 {
-                                panic!("invalid month: {val:?}")
-                            }
-                            if date > 31 {
-                                panic!("invalid date: {val:?}")
-                            }
-                            match time::Date::from_calendar_date(
-                                year,
-                                match (month as u8).try_into() {
-                                    Ok(val) => val,
-                                    Err(err) => panic!("invalid month: {err} - {val:?}"),
-                                },
-                                date as u8,
-                            ) {
+                            let Ok(year) = year.try_into() else {
+                                panic!("unsupported year value: {year}");
+                            };
+                            let Ok(month) = month.try_into() else {
+                                panic!("unsupported month value: {month}");
+                            };
+                            let Ok(date) = date.try_into() else {
+                                panic!("unsupported date value: {date}");
+                            };
+                            match jiff::civil::Date::new(year, month, date) {
                                 Ok(val) => val,
-                                Err(err) => panic!("invalid date: {err} - {val:?}"),
+                                Err(err) => panic!("unsupported date: {err} - {val:?}"),
                             }
                         }
                     };
-                    if val.timestamp.time.hour > 23
-                        || val.timestamp.time.min > 59
-                        || val.timestamp.time.sec > 59
-                        || val.timestamp.time.micro > 1_000_000
-                    {
-                        panic!("invalid time: {val:?}");
-                    }
-                    let time = match time::Time::from_hms_micro(
-                        val.timestamp.time.hour as u8,
-                        val.timestamp.time.min as u8,
-                        val.timestamp.time.sec as u8,
-                        val.timestamp.time.micro,
-                    ) {
-                        Ok(val) => val,
-                        Err(err) => panic!("invalid time: {err} - {val:?} "),
+                    let wasmcloud::postgres::types::Time {
+                        hour,
+                        min,
+                        sec,
+                        micro,
+                    } = val.timestamp.time;
+                    let Ok(hour) = hour.try_into() else {
+                        panic!("unsupported hour value: {hour}");
                     };
-                    let offset = time::UtcOffset::from_whole_seconds(match val.offset {
+                    let Ok(min) = min.try_into() else {
+                        panic!("unsupported minute value: {min}");
+                    };
+                    let Ok(sec) = sec.try_into() else {
+                        panic!("unsupported second value: {sec}");
+                    };
+                    let Ok(micro) = std::time::Duration::from_micros(micro.into())
+                        .subsec_nanos()
+                        .try_into()
+                    else {
+                        panic!("unsupported microsecond value: {micro}");
+                    };
+                    let time = match jiff::civil::Time::new(hour, min, sec, micro) {
+                        Ok(val) => val,
+                        Err(err) => panic!("unsupported time: {err} - {val:?} "),
+                    };
+                    let offset = match val.offset {
                         wasmcloud::postgres::types::Offset::EasternHemisphereSecs(secs) => secs,
                         wasmcloud::postgres::types::Offset::WesternHemisphereSecs(secs) => -secs,
-                    })
-                    .expect("invalid offset");
-                    OffsetDateTime::new_in_offset(date, time, offset).into()
+                    };
+                    let Ok(offset) = offset.try_into() else {
+                        panic!("unsupported offset value: {offset}");
+                    };
+                    let offset = match jiff::tz::Offset::from_hours(offset) {
+                        Ok(val) => val,
+                        Err(err) => panic!("unsupported offset: {err} - {val:?} "),
+                    };
+                    let tz = match date.to_datetime(time).to_zoned(offset.to_time_zone()) {
+                        Ok(val) => val,
+                        Err(err) => panic!("unsupported timestamptz: {err} - {val:?} "),
+                    };
+                    let ts = tz.timestamp();
+                    ts.into()
                 }
                 val => panic!("was expecting timestamptz, got {val:?}"),
             }
         }
     }
 
-    impl From<OffsetDateTime> for Datetime {
-        fn from(value: OffsetDateTime) -> Self {
-            let seconds = value.unix_timestamp();
+    impl Into<Timestamp> for Datetime {
+        fn into(self) -> Timestamp {
+            match Timestamp::from_second(self.seconds as i64).and_then(|ts| {
+                ts.checked_add(std::time::Duration::from_nanos(self.nanoseconds.into()))
+            }) {
+                Ok(val) => val,
+                Err(err) => panic!("unsupported Datetime: {self:?} - {err:?}"),
+            }
+        }
+    }
+    impl From<Timestamp> for Datetime {
+        fn from(value: Timestamp) -> Self {
+            let seconds = value.as_second();
             if seconds < 0 {
-                panic!("unsupported time: before unix epoch");
+                panic!("unsupported time seconds: {value:?}");
+            }
+            let nanoseconds = value.subsec_nanosecond();
+            if nanoseconds < 0 {
+                panic!("unsupported time nanoseconds: {value:?}");
             }
             Self {
-                seconds: seconds.try_into().unwrap(),
-                nanoseconds: value.nanosecond(),
+                seconds: seconds as u64,
+                nanoseconds: nanoseconds as u32,
             }
         }
     }
@@ -137,7 +171,6 @@ pub mod wit {
     impl utoipa::PartialSchema for Datetime {
         fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
             todo!()
-            // <OffsetDateTime as utoipa::PartialSchema>::schema()
         }
     }
 }

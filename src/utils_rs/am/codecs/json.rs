@@ -214,16 +214,8 @@ where
     }
 
     fn hydrate_timestamp(value: i64) -> Result<Self, HydrateError> {
-        let value = match OffsetDateTime::from_unix_timestamp(value) {
-            Ok(dt) => serde_json::Value::String(
-                dt.format(&crate::codecs::sane_iso8601::FORMAT)
-                    .map_err(|err| {
-                        autosurgeon::HydrateError::unexpected(
-                            "a valid timestamp",
-                            format!("error formatting timestamp: {err}"),
-                        )
-                    })?,
-            ),
+        let value = match Timestamp::from_second(value) {
+            Ok(ts) => serde_json::Value::String(ts.to_string()),
             Err(err) => {
                 return Err(autosurgeon::HydrateError::unexpected(
                     "a valid timestamp",
