@@ -9,14 +9,16 @@ use crate::partition::{state::PartitionWorkingState, PartitionCtx};
 
 pub struct TokioEffectWorkerHandle {
     cancel_token: CancellationToken,
-    join_handle: Option<JoinHandle<Res<()>>>,
+    join_handle: Option<JoinHandle<()>>,
 }
 
 impl TokioEffectWorkerHandle {
-    pub async fn close(mut self) -> Res<()> {
+    pub async fn stop(mut self) -> Res<()> {
+        info!("XXX stopping effect worker");
         self.cancel_token.cancel();
         let join_handle = self.join_handle.take().expect("join_handle already taken");
-        utils_rs::wait_on_handle_with_timeout(join_handle, 5 * 1000).await?
+        utils_rs::wait_on_handle_with_timeout(join_handle, 5 * 1000).await?;
+        Ok(())
     }
 }
 
@@ -70,7 +72,7 @@ pub fn start_tokio_effect_worker(
     }
     .boxed()
     .instrument(span);
-    let join_handle = tokio::spawn(fut);
+    let join_handle = tokio::spawn(async { fut.await.unwrap() });
     TokioEffectWorkerHandle {
         cancel_token,
         join_handle: Some(join_handle),
@@ -97,10 +99,13 @@ impl TokioEffectWorker {
         match deets {
             effects::PartitionEffectDeets::RunJob(deets) => {
                 let start_at = Timestamp::now();
+                let instant = std::time::Instant::now();
                 let run_id = deets.run_id;
 
                 let result = self.run_job_effect(job_id.clone()).await;
-                let end_at = Timestamp::now();
+                let end_at = start_at
+                    .checked_add(instant.elapsed())
+                    .expect("ts overflow");
                 self.log
                     .append(&log::PartitionLogEntry::JobEffectResult(
                         job_events::JobRunEvent {
@@ -115,7 +120,9 @@ impl TokioEffectWorker {
                     ))
                     .await?;
             }
-            effects::PartitionEffectDeets::AbortJob { .. } => todo!(),
+            effects::PartitionEffectDeets::AbortJob { .. } => {
+                // no resources to cleanup
+            }
         }
         Ok(())
     }

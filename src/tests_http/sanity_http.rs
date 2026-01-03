@@ -16,7 +16,7 @@ async fn sanity_get_root_returns_hello() -> Res<()> {
 
         let url = test_cx.wadm_apps["btress"].app_url.clone();
         let url = url.join("/")?;
-        let req = http_client.request(reqwest::Method::GET, dbg!(url.to_string()));
+        let req = http_client.request(reqwest::Method::GET, url.to_string());
 
         let resp = req.send().await.wrap_err("error sending http request")?;
         ensure!(resp.status() == 200, "status was {}", resp.status());

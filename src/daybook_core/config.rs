@@ -7,7 +7,6 @@ use tokio_util::sync::CancellationToken;
 #[derive(Reconcile, Hydrate)]
 pub struct ConfigStore {
     pub triage: TriageConfig,
-    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     pub prop_display: HashMap<String, ThroughJson<PropKeyDisplayHint>>,
 }
 
@@ -83,13 +82,13 @@ impl ConfigRepo {
         acx: AmCtx,
         app_doc_id: DocumentId,
         plug_repo: Arc<PlugsRepo>,
-    ) -> Res<Arc<Self>> {
+    ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store = ConfigStore::load(&acx, &app_doc_id).await?;
         let store = crate::stores::StoreHandle::new(store, acx.clone(), app_doc_id.clone());
 
-        let broker = {
+        let (broker, broker_stop) = {
             let handle = acx
                 .find_doc(&app_doc_id)
                 .await?
@@ -110,25 +109,36 @@ impl ConfigRepo {
         })
         .await?;
 
-        let cancel_token = CancellationToken::new();
+        let main_cancel_token = CancellationToken::new();
         let repo = Self {
             acx: acx.clone(),
             app_doc_id: app_doc_id.clone(),
             store,
             registry: registry.clone(),
             plug_repo,
-            cancel_token: cancel_token.clone(),
+            cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
         };
         let repo = Arc::new(repo);
 
-        let _notif_worker = tokio::spawn({
+        let worker_handle = tokio::spawn({
             let repo = repo.clone();
-            let cancel_token = cancel_token.clone();
-            async move { repo.handle_notifs(notif_rx, cancel_token).await }
+            let cancel_token = main_cancel_token.clone();
+            async move {
+                repo.handle_notifs(notif_rx, cancel_token)
+                    .await
+                    .expect("error handling notifs")
+            }
         });
 
-        Ok(repo)
+        Ok((
+            repo,
+            crate::repos::RepoStopToken {
+                cancel_token: main_cancel_token,
+                worker_handle: Some(worker_handle),
+                broker_stop_tokens: broker_stop.into_iter().collect(),
+            },
+        ))
     }
 
     async fn handle_notifs(

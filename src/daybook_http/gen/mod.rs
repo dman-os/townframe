@@ -28,9 +28,8 @@ pub mod doc {
         Blob,
     }
     impl DocContentKind {
-        pub fn _lift(val:u8) -> DocContentKind {
+        pub fn _lift(val: u8) -> DocContentKind {
             match val {
-
                 0 => DocContentKind::Text,
                 1 => DocContentKind::Blob,
 
@@ -38,7 +37,6 @@ pub mod doc {
             }
         }
     }
-
 
     #[derive(Debug, Clone, utoipa::ToSchema, Serialize, Deserialize, PartialEq)]
     #[serde(rename_all = "camelCase")]
@@ -68,7 +66,6 @@ pub mod doc {
         TitleGeneric(String),
     }
 
-
     #[derive(Debug, Clone, PartialEq, utoipa::ToSchema, Serialize, Deserialize)]
     pub struct DocAddedEvent {
         pub id: DocId,
@@ -89,13 +86,29 @@ pub mod doc {
             pub id: String,
         }
 
-        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, utoipa::ToSchema, Serialize, Deserialize)]
+        #[derive(
+            Debug,
+            Clone,
+            thiserror::Error,
+            displaydoc::Display,
+            utoipa::ToSchema,
+            Serialize,
+            Deserialize,
+        )]
         /// Id occupied: {id}
         pub struct ErrorIdOccupied {
             pub id: String,
         }
 
-        #[derive(Debug, thiserror::Error, displaydoc::Display, utoipa::ToSchema, macros::HttpError, Serialize, Deserialize)]
+        #[derive(
+            Debug,
+            thiserror::Error,
+            displaydoc::Display,
+            utoipa::ToSchema,
+            macros::HttpError,
+            Serialize,
+            Deserialize,
+        )]
         pub enum Error {
             /// Id occupied {0}
             #[http(code(StatusCode::BAD_REQUEST), desc("Id occupied"))]
@@ -108,5 +121,4 @@ pub mod doc {
             Internal(#[from] ErrorInternal),
         }
     }
-
 }

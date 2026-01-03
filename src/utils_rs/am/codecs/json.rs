@@ -481,7 +481,6 @@ mod tests {
     fn on_a_map() -> Res<()> {
         #[derive(Debug, autosurgeon::Hydrate, autosurgeon::Reconcile)]
         struct OnAMap {
-            #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
             pub map: HashMap<String, ThroughJson<Arc<Foo>>>,
         }
 

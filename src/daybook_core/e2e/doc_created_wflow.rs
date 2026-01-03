@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use daybook_types::doc::{
-    Doc, DocContent, DocProp, DocPropKey, DocPropTag, WellKnownProp, WellKnownPropTag,
+    AddDocArgs, DocContent, DocPropKey, DocPropTag, WellKnownProp, WellKnownPropTag,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -9,18 +9,17 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
     let test_cx = crate::e2e::test_cx(utils_rs::function_full!()).await?;
 
     // Create and add a document to the drawer
-    let new_doc = Doc {
-        id: "test-doc-1".to_string(),
-        created_at: Timestamp::now(),
-        updated_at: Timestamp::now(),
+    let new_doc = AddDocArgs {
+        branch_name: "main".into(),
         props: [
             //
             (
                 DocPropKey::from(WellKnownPropTag::Content),
-                DocProp::WellKnown(WellKnownProp::Content(DocContent::Text(
+                WellKnownProp::Content(DocContent::Text(
                     //
                     "Hello, world!".into(),
-                ))),
+                ))
+                .into(),
             ),
         ]
         .into(),
@@ -38,7 +37,7 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
     // Verify the doc has a PseudoLabel tag
     let updated_doc = test_cx
         .drawer_repo
-        .get(&doc_id)
+        .get(&doc_id, "main")
         .await?
         .ok_or_eyre("doc not found")?;
 
@@ -58,7 +57,7 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
     );
 
     // Cleanup
-    test_cx.close().await?;
+    test_cx.stop().await?;
 
     Ok(())
 }

@@ -12,7 +12,7 @@ use utils_rs::prelude::tokio::sync::oneshot;
 use wash_runtime::engine::ctx::Ctx as WashCtx;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
-use wflow_core::gen::metastore::{WasmcloudWflowServiceMeta, WflowMeta, WflowServiceMeta};
+use wflow_core::gen::metastore::{WasmcloudWflowServiceMeta, WflowServiceMeta};
 use wflow_core::metastore::MetdataStore;
 use wflow_core::partition::{job_events, service, state};
 
@@ -341,8 +341,22 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
             anyhow::bail!("wflow_keys is empty: \"{wflow_keys_raw}\"");
         }
         for key in &wflow_keys {
-            if let Some(occpied) = self.metastore.get_wflow(key).await.to_anyhow()? {
-                anyhow::bail!("occupied wflow key: \"{key}\" by {occpied:?}");
+            if let Some(occupied) = self.metastore.get_wflow(key).await.to_anyhow()? {
+                if let WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta { workload_id }) =
+                    &occupied.service
+                {
+                    if workload_id != workload.id() {
+                        anyhow::bail!(
+                            "wflow under key '{key}' in metatstore '{occupied:?}' doesn't match workload id '{}'",
+                            workload.id()
+                        );
+                    }
+                } else {
+                    anyhow::bail!(
+                        "wflow under key '{key}' in metatstore '{occupied:?}' doesn't match workload type for workload '{}'",
+                        workload.id()
+                    );
+                }
             }
         }
         let workload_id: Arc<str> = workload.id().into();
@@ -394,23 +408,8 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
             .context("error pre instantiating service component")?;
 
         for key in &wflow_keys {
-            if let Some(occpied) = self.metastore.get_wflow(key).await.to_anyhow()? {
-                anyhow::bail!("occupied wflow key: \"{key}\" by {occpied:?}");
-            }
-            self.metastore
-                .set_wflow(
-                    &key,
-                    &WflowMeta {
-                        key: key.to_string(),
-                        service: WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta {
-                            workload_id: resolved.id().into(),
-                        }),
-                    },
-                )
-                .await
-                .to_anyhow()?;
-
-            self.active_keys.insert(key.clone(), workload_id.clone());
+            let old = self.active_keys.insert(key.clone(), workload_id.clone());
+            assert!(old.is_none(), "fishy");
         }
         let wflow = WflowWorkload {
             wflow_keys,

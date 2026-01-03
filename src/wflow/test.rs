@@ -8,8 +8,10 @@ mod fails_until_told;
 #[allow(unused)]
 mod keyvalue_plugin;
 
-use crate::{AtomicKvSnapStore, KvStoreLog, KvStoreMetadtaStore};
 use wash_runtime::{host::HostApi, plugin, types, wit::WitInterface};
+use wflow_core::kvstore::log::KvStoreLog;
+use wflow_core::kvstore::metastore::KvStoreMetadtaStore;
+use wflow_core::kvstore::snapstore::AtomicKvSnapStore;
 use wflow_core::metastore;
 use wflow_core::snapstore::SnapStore;
 
@@ -17,7 +19,7 @@ use wflow_core::snapstore::SnapStore;
 pub struct WflowTestContextBuilder {
     temp_dir: tempfile::TempDir,
     metastore: Option<Arc<dyn metastore::MetdataStore>>,
-    log_store: Option<Arc<dyn wflow_core::log::LogStore>>,
+    logstore: Option<Arc<dyn wflow_core::log::LogStore>>,
     snap_store: Option<Arc<dyn SnapStore>>,
     keyvalue_plugin: Option<Arc<keyvalue_plugin::WasiKeyvalue>>,
     initial_workloads: Vec<InitialWorkload>,
@@ -30,7 +32,7 @@ impl WflowTestContextBuilder {
             temp_dir: tokio::task::block_in_place(|| tempfile::tempdir())
                 .expect("failed to create temp dir"),
             metastore: None,
-            log_store: None,
+            logstore: None,
             snap_store: None,
             keyvalue_plugin: None,
             initial_workloads: Vec::new(),
@@ -43,8 +45,8 @@ impl WflowTestContextBuilder {
         self
     }
 
-    pub fn with_log_store(mut self, log_store: Arc<dyn wflow_core::log::LogStore>) -> Self {
-        self.log_store = Some(log_store);
+    pub fn with_logstore(mut self, logstore: Arc<dyn wflow_core::log::LogStore>) -> Self {
+        self.logstore = Some(logstore);
         self
     }
 
@@ -97,12 +99,12 @@ impl WflowTestContextBuilder {
             }
         };
 
-        let log_store = match self.log_store {
+        let logstore = match self.logstore {
             Some(store) => store,
-            None => Arc::new(KvStoreLog::new(new_in_memory_kv_store(), 0)),
+            None => Arc::new(KvStoreLog::new(new_in_memory_kv_store()).await?),
         };
 
-        let partition_log = wflow_tokio::partition::PartitionLogRef::new(log_store.clone());
+        let partition_log = wflow_tokio::partition::PartitionLogRef::new(logstore.clone());
         let ingress = Arc::new(crate::ingress::PartitionLogIngress::new(
             partition_log.clone(),
             metastore.clone(),
@@ -130,7 +132,7 @@ impl WflowTestContextBuilder {
         Ok(WflowTestContext {
             temp_dir,
             metastore,
-            log_store,
+            logstore,
             snapstore,
             partition_log,
             ingress,
@@ -149,7 +151,7 @@ impl WflowTestContextBuilder {
 pub struct WflowTestContext {
     pub temp_dir: tempfile::TempDir,
     pub metastore: Arc<dyn metastore::MetdataStore>,
-    pub log_store: Arc<dyn wflow_core::log::LogStore>,
+    pub logstore: Arc<dyn wflow_core::log::LogStore>,
     pub snapstore: Arc<dyn SnapStore>,
     pub partition_log: wflow_tokio::partition::PartitionLogRef,
     pub ingress: Arc<crate::ingress::PartitionLogIngress>,
@@ -183,7 +185,7 @@ impl WflowTestContext {
 
         let wcx = crate::Ctx {
             metastore: self.metastore.clone(),
-            log_store: self.log_store.clone(),
+            logstore: self.logstore.clone(),
             snapstore: self.snapstore.clone(),
         };
 
@@ -191,8 +193,25 @@ impl WflowTestContext {
         let host = host.start().await.to_eyre()?;
 
         // Register any initial workloads before starting the worker
+        let workload_id = "workload_123";
         for workload in &self.initial_workloads {
+            for key in &workload.wflow_keys {
+                self.metastore
+                    .set_wflow(
+                        key,
+                        &metastore::WflowMeta {
+                            key: key.clone(),
+                            service: metastore::WflowServiceMeta::Wasmcloud(
+                                metastore::WasmcloudWflowServiceMeta {
+                                    workload_id: workload_id.into(),
+                                },
+                            ),
+                        },
+                    )
+                    .await?;
+            }
             register_workload_on_host(
+                workload_id.into(),
                 &host,
                 workload.wasm_path.as_str(),
                 workload.wflow_keys.clone(),
@@ -231,7 +250,23 @@ impl WflowTestContext {
     /// Register a workload from a WASM file
     pub async fn register_workload(&self, wasm_path: &str, wflow_keys: Vec<String>) -> Res<()> {
         let host = self.host()?;
-        register_workload_on_host(host.as_ref(), wasm_path, wflow_keys).await
+        let workload_id = "workload_123";
+        for key in &wflow_keys {
+            self.metastore
+                .set_wflow(
+                    key,
+                    &metastore::WflowMeta {
+                        key: key.clone(),
+                        service: metastore::WflowServiceMeta::Wasmcloud(
+                            metastore::WasmcloudWflowServiceMeta {
+                                workload_id: workload_id.into(),
+                            },
+                        ),
+                    },
+                )
+                .await?;
+        }
+        register_workload_on_host(workload_id.into(), host.as_ref(), wasm_path, wflow_keys).await
     }
 
     /// Schedule a workflow job
@@ -240,7 +275,7 @@ impl WflowTestContext {
         job_id: Arc<str>,
         wflow_key: &str,
         args_json: String,
-    ) -> Res<()> {
+    ) -> Res<u64> {
         use crate::WflowIngress;
         self.ingress
             .add_job(job_id, wflow_key.into(), args_json, None)
@@ -340,7 +375,7 @@ impl WflowTestContext {
 
         let start = Instant::now();
         let timeout_duration = Duration::from_secs(timeout_secs);
-        let mut stream = self.log_store.tail(start_entry_id).await;
+        let mut stream = self.logstore.tail(start_entry_id).await;
 
         loop {
             // Calculate remaining time
@@ -355,15 +390,19 @@ impl WflowTestContext {
 
             // Wait for next entry with timeout
             match tokio::time::timeout(remaining, stream.next()).await {
-                Ok(Some(Ok((entry_id, entry_bytes)))) => {
+                Ok(Some(Ok(wflow_core::log::TailLogEntry {
+                    idx,
+                    val: Some(bytes),
+                }))) => {
                     let log_entry: wflow_core::partition::log::PartitionLogEntry =
-                        serde_json::from_slice(&entry_bytes[..])
-                            .wrap_err("failed to parse log entry")?;
-
-                    if condition(entry_id, &log_entry) {
-                        return Ok((entry_id, log_entry));
+                        serde_json::from_slice(&bytes[..]).wrap_err("failed to parse log entry")?;
+                    if condition(idx, &log_entry) {
+                        return Ok((idx, log_entry));
                     }
                     // Continue waiting
+                }
+                Ok(Some(Ok(_val))) => {
+                    // this is a hole, keep going
                 }
                 Ok(Some(Err(err))) => {
                     return Err(err);
@@ -392,17 +431,22 @@ impl WflowTestContext {
         use tokio::time::Duration;
 
         let mut entries = Vec::new();
-        let mut stream = self.log_store.tail(0).await;
+        let mut stream = self.logstore.tail(0).await;
 
         // Read entries with a timeout to avoid waiting forever
         // If no entry comes for 100ms, we've read all available entries
         loop {
             match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
-                Ok(Some(Ok((entry_id, entry_bytes)))) => {
+                Ok(Some(Ok(wflow_core::log::TailLogEntry {
+                    idx,
+                    val: Some(bytes),
+                }))) => {
                     let log_entry: wflow_core::partition::log::PartitionLogEntry =
-                        serde_json::from_slice(&entry_bytes[..])
-                            .wrap_err("failed to parse log entry")?;
-                    entries.push((entry_id, log_entry));
+                        serde_json::from_slice(&bytes[..]).wrap_err("failed to parse log entry")?;
+                    entries.push((idx, log_entry));
+                }
+                Ok(Some(Ok(_entry))) => {
+                    // this is an entry hole, continue
                 }
                 Ok(Some(Err(err))) => {
                     return Err(err);
@@ -448,9 +492,9 @@ impl WflowTestContext {
     }
 
     /// Cleanup: shutdown all workers
-    pub async fn close(self) -> Res<()> {
+    pub async fn stop(self) -> Res<()> {
         if let Some(worker_handle) = self.worker_handle {
-            worker_handle.close().await?;
+            worker_handle.stop().await?;
         }
         Ok(())
     }
@@ -463,6 +507,7 @@ fn new_in_memory_kv_store() -> Arc<Arc<DHashMap<Arc<[u8]>, Arc<[u8]>>>> {
 }
 
 async fn register_workload_on_host(
+    workload_id: String,
     host: &wash_runtime::host::Host,
     wasm_path: &str,
     wflow_keys: Vec<String>,
@@ -470,7 +515,7 @@ async fn register_workload_on_host(
     let wasm_bytes = tokio::fs::read(wasm_path).await?;
 
     let req = types::WorkloadStartRequest {
-        workload_id: "workload_123".into(),
+        workload_id,
         workload: types::Workload {
             namespace: "test".to_string(),
             name: format!("test-wflows-{}", wflow_keys.join("-")),

@@ -87,6 +87,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 multihash = "0.19.3"
 data-encoding = "2.9"
+bs58 = "0.5.1"
 blake3 = "1.8"
 
 # web
@@ -214,6 +215,9 @@ opt-level = "s"
 strip = "debuginfo"
 panic = "abort"
 
+
+[workspace.lints.clippy]
+clone-on-ref-ptr = "warn"
 
 [[workspace.metadata.leptos]]
 name = "wflow_webui"

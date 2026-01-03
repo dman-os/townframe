@@ -399,7 +399,10 @@ pub enum TablesEvent {
 }
 
 impl TablesRepo {
-    pub async fn load(acx: AmCtx, app_doc_id: DocumentId) -> Res<Arc<Self>> {
+    pub async fn load(
+        acx: AmCtx,
+        app_doc_id: DocumentId,
+    ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store = TablesStore::load(&acx, &app_doc_id).await?;
@@ -410,7 +413,7 @@ impl TablesRepo {
             })
             .await?;
 
-        let broker = {
+        let (broker, broker_stop) = {
             let handle = acx
                 .find_doc(&app_doc_id)
                 .await?
@@ -431,22 +434,33 @@ impl TablesRepo {
         })
         .await?;
 
-        let cancel_token = CancellationToken::new();
+        let main_cancel_token = CancellationToken::new();
         let repo = Self {
             store,
             registry: registry.clone(),
-            cancel_token: cancel_token.clone(),
+            cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
         };
         let repo = Arc::new(repo);
 
-        let _notif_worker = tokio::spawn({
-            let repo = repo.clone();
-            let cancel_token = cancel_token.clone();
-            async move { repo.handle_notifs(notif_rx, cancel_token).await }
+        let worker_handle = tokio::spawn({
+            let repo = Arc::clone(&repo);
+            let cancel_token = main_cancel_token.clone();
+            async move {
+                repo.handle_notifs(notif_rx, cancel_token)
+                    .await
+                    .expect("error handling notifs")
+            }
         });
 
-        Ok(repo)
+        Ok((
+            repo,
+            crate::repos::RepoStopToken {
+                cancel_token: main_cancel_token,
+                worker_handle: Some(worker_handle),
+                broker_stop_tokens: broker_stop.into_iter().collect(),
+            },
+        ))
     }
 
     async fn handle_notifs(

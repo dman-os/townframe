@@ -43,11 +43,26 @@ pub struct AmCtx {
 }
 
 #[cfg(feature = "automerge-repo")]
+pub struct AmCtxStopToken {
+    pub repo: samod::Repo,
+    pub change_manager_stop_token: crate::am::changes::ChangeListenerManagerStopToken,
+}
+
+#[cfg(feature = "automerge-repo")]
+impl AmCtxStopToken {
+    pub async fn stop(self) -> Res<()> {
+        self.change_manager_stop_token.stop().await?;
+        self.repo.stop().await;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "automerge-repo")]
 impl AmCtx {
     pub async fn boot<A: samod::AnnouncePolicy>(
         config: Config,
         announce_policy: Option<A>,
-    ) -> Res<Self> {
+    ) -> Res<(Self, AmCtxStopToken)> {
         let peer_id = samod::PeerId::from_string(config.peer_id);
 
         let repo = samod::Repo::build_tokio().with_peer_id(peer_id.clone());
@@ -76,15 +91,18 @@ impl AmCtx {
             }
         };
 
-        let change_manager = ChangeListenerManager::boot();
+        let (change_manager, change_manager_stop_token) = ChangeListenerManager::boot();
         let out = Self {
-            repo,
+            repo: repo.clone(),
             // peer_id,
             change_manager,
             handle_cache: default(),
         };
 
-        Ok(out)
+        Ok((out, AmCtxStopToken {
+            repo,
+            change_manager_stop_token,
+        }))
     }
 
     pub fn spawn_mpsc_connector(
@@ -422,12 +440,6 @@ impl AmCtx {
 
     pub fn change_manager(&self) -> &Arc<ChangeListenerManager> {
         &self.change_manager
-    }
-
-    pub async fn stop(&self) -> Res<()> {
-        self.change_manager.stop().await?;
-        self.repo.stop().await;
-        Ok(())
     }
 }
 

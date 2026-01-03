@@ -26,11 +26,13 @@ pub mod doc {
         // CreatedAt(Datetime),
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub enum DocProp {
-        WellKnown(WellKnownProp),
-        Any(String), // JSON string
+    pub type DocProp = String;
+
+    pub fn doc_prop_from(value: &root_doc::DocProp) -> DocProp {
+        serde_json::to_string(&value).expect(ERROR_JSON)
+    }
+    pub fn doc_prop_into(value: &str) -> serde_json::Result<root_doc::DocProp> {
+        serde_json::from_str(&value)
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,7 +68,7 @@ pub mod doc {
                 props_set: val
                     .props_set
                     .into_iter()
-                    .map(|(k, v)| (k.to_string(), v.into()))
+                    .map(|(key, val)| (key.to_string(), doc_prop_from(&val)))
                     .collect(),
                 props_remove: val
                     .props_remove
@@ -78,7 +80,7 @@ pub mod doc {
     }
 
     impl TryFrom<DocPatch> for root_doc::DocPatch {
-        type Error = root_doc::DocPropTagParseError;
+        type Error = serde_json::Error;
 
         fn try_from(val: DocPatch) -> Result<Self, Self::Error> {
             Ok(Self {
@@ -86,7 +88,7 @@ pub mod doc {
                 props_set: val
                     .props_set
                     .into_iter()
-                    .map(|(key, val)| Ok((DocPropKey::from(&key), val.try_into()?)))
+                    .map(|(key, val)| Ok((DocPropKey::from(&key), doc_prop_into(&val)?)))
                     .collect::<Result<_, _>>()?,
                 props_remove: val
                     .props_remove
@@ -139,45 +141,29 @@ pub mod doc {
         }
     }
 
-    impl From<root_doc::DocProp> for DocProp {
-        fn from(val: root_doc::DocProp) -> Self {
-            match val {
-                root_doc::DocProp::WellKnown(val) => Self::WellKnown(val.into()),
-                root_doc::DocProp::Any(val) => Self::Any(val.to_string()),
-            }
-        }
-    }
-
-    impl TryFrom<DocProp> for root_doc::DocProp {
-        type Error = root_doc::DocPropTagParseError;
-
-        fn try_from(val: DocProp) -> Result<Self, Self::Error> {
-            Ok(match val {
-                DocProp::WellKnown(val) => Self::WellKnown(val.try_into()?),
-                DocProp::Any(val) => {
-                    Self::Any(serde_json::from_str(&val).unwrap_or(serde_json::Value::String(val)))
-                }
-            })
-        }
-    }
-
     impl From<root_doc::Doc> for Doc {
-        fn from(val: root_doc::Doc) -> Self {
+        fn from(
+            root_doc::Doc {
+                id,
+                created_at,
+                updated_at,
+                props,
+            }: root_doc::Doc,
+        ) -> Self {
             Self {
-                id: val.id,
-                created_at: Datetime::from(val.created_at),
-                updated_at: Datetime::from(val.updated_at),
-                props: val
-                    .props
+                id: id,
+                created_at: Datetime::from(created_at),
+                updated_at: Datetime::from(updated_at),
+                props: props
                     .into_iter()
-                    .map(|(key, val)| (key.to_string(), val.into()))
+                    .map(|(key, val)| (key.to_string(), doc_prop_from(&val)))
                     .collect(),
             }
         }
     }
 
     impl TryFrom<Doc> for root_doc::Doc {
-        type Error = root_doc::DocPropTagParseError;
+        type Error = serde_json::Error;
 
         fn try_from(val: Doc) -> Result<Self, Self::Error> {
             Ok(Self {
@@ -187,13 +173,7 @@ pub mod doc {
                 props: val
                     .props
                     .into_iter()
-                    .map(|(key, val)| {
-                        Ok((
-                            DocPropKey::from(&key),
-                            //.unwrap_or(DocPropKey::Tag(root_doc::DocPropTag::Any(key))),
-                            val.try_into()?,
-                        ))
-                    })
+                    .map(|(key, val)| Ok((DocPropKey::from(&key), doc_prop_into(&val)?)))
                     .collect::<Result<_, _>>()?,
             })
         }

@@ -58,6 +58,7 @@ pub mod app {
 
         use crate::config::ConfigStore;
         use crate::plugs::PlugsStore;
+        use crate::rt::dispatch::DispatchStore;
         use crate::tables::TablesStore;
 
         pub fn version_latest() -> Res<Vec<u8>> {
@@ -69,6 +70,12 @@ pub mod app {
             reconcile_prop(&mut doc, ROOT, TablesStore::PROP, TablesStore::default())?;
             reconcile_prop(&mut doc, ROOT, ConfigStore::PROP, ConfigStore::default())?;
             reconcile_prop(&mut doc, ROOT, PlugsStore::PROP, PlugsStore::default())?;
+            reconcile_prop(
+                &mut doc,
+                ROOT,
+                DispatchStore::PROP,
+                DispatchStore::default(),
+            )?;
             Ok(doc.save_nocompress())
         }
     }

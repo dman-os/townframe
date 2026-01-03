@@ -19,15 +19,16 @@ use wflow_core::snapstore::SnapStore;
 
 pub struct TokioPartitionReducerHandle {
     cancel_token: CancellationToken,
-    join_handle: Option<JoinHandle<Res<()>>>,
+    join_handle: Option<JoinHandle<()>>,
 }
 
 impl TokioPartitionReducerHandle {
-    pub async fn close(mut self) -> Res<()> {
+    pub async fn stop(mut self) -> Res<()> {
         self.cancel_token.cancel();
         // Move out the join_handle to await it
         let join_handle = self.join_handle.take().expect("join_handle already taken");
-        utils_rs::wait_on_handle_with_timeout(join_handle, 5 * 1000).await?
+        utils_rs::wait_on_handle_with_timeout(join_handle, 5 * 1000).await?;
+        Ok(())
     }
 }
 
@@ -82,7 +83,7 @@ pub fn start_tokio_partition_reducer(
             };
             let latest_entry_id_at_start = pcx
                 .log
-                .latest_id()
+                .latest_idx()
                 .await
                 .wrap_err("error getting latest id from log")?;
 
@@ -129,9 +130,11 @@ pub fn start_tokio_partition_reducer(
                             // Stream ended
                             break;
                         };
-                        let (entry_id, entry) = entry?;
-                        worker.reduce(entry_id, entry).await?;
-                        cur_entry_id = entry_id;
+                        let entry = entry?;
+                        if let Some(value) = entry.val {
+                            worker.reduce(entry.idx, value).await?;
+                            cur_entry_id = entry.idx;
+                        };
                     }
                 }
             }
@@ -147,7 +150,7 @@ pub fn start_tokio_partition_reducer(
     }
     .boxed()
     .instrument(span);
-    let join_handle = tokio::spawn(fut);
+    let join_handle = tokio::spawn(async { fut.await.unwrap() });
 
     TokioPartitionReducerHandle {
         cancel_token,

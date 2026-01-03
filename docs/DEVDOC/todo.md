@@ -48,6 +48,8 @@
   - [ ] Deploy
     - [ ] Buy domain
       - [ ] https://daybook.tf
+      - [ ] https://daybook.com
+      - [ ] https://db.tf
 - [ ] PgLite based testing
 - [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
 - [ ] DRY up all the wit bindgen

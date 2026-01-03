@@ -102,7 +102,7 @@ impl Ctx {
 
         let (doc_setup_req_tx, mut doc_setup_req_rx) = mpsc::unbounded_channel::<DocSetupRequest>();
         let announcer_tx = doc_setup_req_tx.clone();
-        let acx = utils_rs::am::AmCtx::boot(
+        let (acx, _acx_stop) = utils_rs::am::AmCtx::boot(
             utils_rs::am::Config {
                 peer_id: "daybook_sync".to_string(),
                 storage: utils_rs::am::StorageConfig::Disk {

@@ -25,7 +25,7 @@ pub trait WflowIngress: Send + Sync {
         wflow_key: &str,
         args_json: String,
         retry_policy: Option<wflow_core::partition::RetryPolicy>,
-    ) -> Res<()>;
+    ) -> Res<u64>;
 }
 
 /// Implementation that appends directly to partition log
@@ -48,7 +48,7 @@ impl WflowIngress for PartitionLogIngress {
         wflow_key: &str,
         args_json: String,
         retry_policy: Option<wflow_core::partition::RetryPolicy>,
-    ) -> Res<()> {
+    ) -> Res<u64> {
         // Get workflow metadata
         let wflow_meta = self
             .metastore
@@ -59,15 +59,16 @@ impl WflowIngress for PartitionLogIngress {
 
         // Append to partition log
         let mut log = self.log.clone();
-        log.append(&PartitionLogEntry::JobInit(JobInitEvent {
-            args_json: args_json.into(),
-            override_wflow_retry_policy: retry_policy,
-            wflow: wflow_meta,
-            timestamp: Timestamp::now(),
-            job_id,
-        }))
-        .await?;
+        let entry_id = log
+            .append(&PartitionLogEntry::JobInit(JobInitEvent {
+                args_json: args_json.into(),
+                override_wflow_retry_policy: retry_policy,
+                wflow: wflow_meta,
+                timestamp: Timestamp::now(),
+                job_id,
+            }))
+            .await?;
 
-        Ok(())
+        Ok(entry_id)
     }
 }

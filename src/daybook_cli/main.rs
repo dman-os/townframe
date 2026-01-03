@@ -16,8 +16,7 @@ use daybook_core::blobs::BlobsRepo;
 use daybook_core::config::ConfigRepo;
 use daybook_core::drawer::DrawerRepo;
 use daybook_core::plugs::{manifest, PlugsRepo};
-use daybook_core::repos::Repo;
-use daybook_core::rt::DispatcherRepo;
+use daybook_core::rt::dispatch::DispatchRepo;
 use daybook_core::tables::TablesRepo;
 
 mod config;
@@ -93,25 +92,32 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         let ctx = context::Ctx::init(conf.clone()).await?;
         let drawer_doc_id = ctx.doc_drawer().document_id();
         let app_doc_id = ctx.doc_app().document_id();
-        let drawer = DrawerRepo::load(ctx.acx.clone(), drawer_doc_id.clone()).await?;
-        let plugs_repo = PlugsRepo::load(ctx.acx.clone(), app_doc_id.clone())
-            .await
-            .wrap_err("error loading plugs repo")?;
-        let conf_repo =
+        let (_drawer, drawer_stop) =
+            DrawerRepo::load(ctx.acx.clone(), drawer_doc_id.clone()).await?;
+        let blobs_repo = BlobsRepo::new(conf._blobs_root.clone()).await?;
+        let (plugs_repo, plugs_stop) =
+            PlugsRepo::load(ctx.acx.clone(), blobs_repo.clone(), app_doc_id.clone())
+                .await
+                .wrap_err("error loading plugs repo")?;
+        let (_conf_repo, conf_stop) =
             ConfigRepo::load(ctx.acx.clone(), app_doc_id.clone(), plugs_repo.clone()).await?;
-        let tables_repo = TablesRepo::load(ctx.acx.clone(), app_doc_id.clone()).await?;
-        let dispatcher_repo = DispatcherRepo::load(ctx.acx.clone(), app_doc_id.clone()).await?;
-        let _blobs_repo = BlobsRepo::new(conf.cli_config.repo_path.clone()).await?;
+        let (_tables_repo, tables_stop) =
+            TablesRepo::load(ctx.acx.clone(), app_doc_id.clone()).await?;
+        let (_dispatc_repo, dispatc_stop) =
+            DispatchRepo::load(ctx.acx.clone(), app_doc_id.clone()).await?;
 
         plugs_repo.ensure_system_plugs().await?;
 
-        drawer.stop();
-        plugs_repo.stop();
-        conf_repo.stop();
-        tables_repo.stop();
-        dispatcher_repo.stop();
+        drawer_stop.stop().await?;
+        plugs_stop.stop().await?;
+        conf_stop.stop().await?;
+        tables_stop.stop().await?;
+        dispatc_stop.stop().await?;
 
-        ctx.acx.stop().await?;
+        if let Some(stop) = ctx.acx_stop.lock().await.take() {
+            stop.stop().await?;
+        }
+        tokio::fs::File::create(conf.cli_config.repo_path.join("db.repo.txt")).await?;
         info!(
             path = ?conf.cli_config.repo_path,
             "repo initialization success"
@@ -131,67 +137,89 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     // initializes the repo
     let ctx = context::Ctx::init(conf).await?;
     let drawer_doc_id = ctx.doc_drawer().document_id().clone();
-    let drawer = DrawerRepo::load(ctx.acx.clone(), drawer_doc_id).await?;
-    scopeguard::defer! {
-        drawer.stop()
-    };
+    let (drawer, drawer_stop) = DrawerRepo::load(ctx.acx.clone(), drawer_doc_id).await?;
 
     match cli.command {
         StaticCommands::Init {} | StaticCommands::Completions { .. } => unreachable!(),
         StaticCommands::Ls => {
-            let doc_ids = drawer.list().await;
+            let doc_entries = drawer.list().await;
 
-            drawer
-                .store()
-                .query_sync(|store| {
-                    debug!(
-                        "DEBUG: store keys: {:?}",
-                        store.map.keys().collect::<Vec<_>>()
-                    );
-                })
-                .await;
             let mut docs = Vec::new();
-            for doc_id in &doc_ids {
-                if let Some(doc) = drawer.get(doc_id).await? {
-                    docs.push((doc_id.clone(), doc));
+            for entry in &doc_entries {
+                let Some(main_branch) = entry.main_branch_name() else {
+                    warn!(doc_id = ?entry.doc_id,"no branches found on doc");
+                    continue;
+                };
+                if let Some(doc) = drawer.get(&entry.doc_id, main_branch).await? {
+                    docs.push((entry.clone(), doc));
                 }
             }
 
             use comfy_table::presets::NOTHING;
             use comfy_table::Table;
+            use daybook_types::doc::{WellKnownProp, WellKnownPropTag};
+
             let mut table = Table::new();
-            table.load_preset(NOTHING).set_header(vec!["ID", "Title"]);
-            for (id, doc) in docs {
+            table
+                .load_preset(NOTHING)
+                .set_header(vec!["ID", "Title", "Branches"]);
+
+            for (entry, doc) in docs {
                 let title = doc
                     .props
-                    .get(&daybook_types::doc::DocPropKey::Tag(
-                        daybook_types::doc::WellKnownPropTag::TitleGeneric.into(),
-                    ))
-                    .and_then(|val| match val {
-                        daybook_types::doc::DocProp::WellKnown(
-                            daybook_types::doc::WellKnownProp::TitleGeneric(str),
-                        ) => Some(str.clone()),
-                        _ => None,
+                    .get(&WellKnownPropTag::TitleGeneric.into())
+                    .and_then(|val| {
+                        match WellKnownProp::from_json(val.clone(), WellKnownPropTag::TitleGeneric)
+                        {
+                            Ok(WellKnownProp::TitleGeneric(str)) => Some(str.clone()),
+                            _ => panic!("tag - prop mismatch"),
+                        }
                     })
                     .unwrap_or_else(|| "<no title>".to_string());
-                table.add_row(vec![id, title]);
+                table.add_row(vec![
+                    entry.doc_id,
+                    title,
+                    entry
+                        .branches
+                        .keys()
+                        .map(|key| key.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ]);
             }
             println!("{table}");
         }
-        StaticCommands::Cat { id } => {
-            let doc = drawer.get(&id).await?;
-            if let Some(doc) = doc {
-                println!("{:#?}", &doc);
-                println!("{}", serde_json::to_string_pretty(&*doc)?);
-            } else {
-                eyre::bail!("Document not found: {id}");
-            }
+        StaticCommands::Cat { id, branch } => {
+            let Some(branches) = drawer.get_doc_branches(&id).await else {
+                error!("document not found: {id}");
+                return Ok(ExitCode::FAILURE);
+            };
+            let branch = match &branch {
+                Some(val) => {
+                    if !branches.branches.contains_key(val) {
+                        error!("branch not found for doc: {id} - {val}");
+                        return Ok(ExitCode::FAILURE);
+                    }
+                    val.as_str()
+                }
+                None => {
+                    let Some(branch) = branches.main_branch_name() else {
+                        error!(doc_id = ?branches.doc_id,"no branches found on doc");
+                        return Ok(ExitCode::FAILURE);
+                    };
+                    branch
+                }
+            };
+            let doc = drawer
+                .get(&id, branch)
+                .await?
+                .expect("document from entry missing");
+            println!("{:#?}", &doc);
+            println!("{}", serde_json::to_string_pretty(&*doc)?);
         }
         StaticCommands::Touch => {
-            let doc = daybook_types::doc::Doc {
-                id: "".into(), // will be assigned by repo
-                created_at: Timestamp::now(),
-                updated_at: Timestamp::now(),
+            let doc = daybook_types::doc::AddDocArgs {
+                branch_name: "main".into(),
                 props: [
                     //
                     (
@@ -202,11 +230,31 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 .into(),
             };
             let id = drawer.add(doc).await?;
-            eprintln!("created document: {id}");
+            info!(id, "created document");
             println!("{id}");
         }
-        StaticCommands::Ed { id } => {
-            let Some((doc, heads)) = drawer.get_with_heads(&id).await? else {
+        StaticCommands::Ed { id, branch } => {
+            let Some(branches) = drawer.get_doc_branches(&id).await else {
+                error!("document not found: {id}");
+                return Ok(ExitCode::FAILURE);
+            };
+            let branch_name = match &branch {
+                Some(val) => {
+                    if branches.branches.contains_key(val) {
+                        error!("branch not found for doc: {id} - {val}");
+                        return Ok(ExitCode::FAILURE);
+                    }
+                    val.as_str()
+                }
+                None => {
+                    let Some(branch) = branches.main_branch_name() else {
+                        error!(doc_id = ?branches.doc_id,"no branches found on doc");
+                        return Ok(ExitCode::FAILURE);
+                    };
+                    branch
+                }
+            };
+            let Some((doc, heads)) = drawer.get_with_heads(&id, branch_name).await? else {
                 eyre::bail!("Document not found: {id}");
             };
 
@@ -236,7 +284,9 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 println!("No changes detected.");
             } else {
                 patch.id = id.clone();
-                drawer.update_at_heads(patch, &heads).await?;
+                drawer
+                    .update_at_heads(patch, "main".into(), Some(heads))
+                    .await?;
                 println!("Updated document: {id}");
             }
 
@@ -244,7 +294,10 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             let _ = std::fs::remove_file(&tmp_path);
         }
     }
-    ctx.acx.stop().await?;
+    drawer_stop.stop().await?;
+    if let Some(stop) = ctx.acx_stop.lock().await.take() {
+        stop.stop().await?;
+    }
 
     Ok(ExitCode::SUCCESS)
 }
@@ -269,23 +322,33 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         return Ok(code);
     }
 
-    let ctx = context::Ctx::init(conf).await?;
+    let ctx = context::Ctx::init(conf.clone()).await?;
+    let blobs_repo = BlobsRepo::new(conf._blobs_root.clone()).await?;
+    let (
+        //
+        (plugs_repo, plugs_stop),
+        (drawer, drawer_stop),
+        (dispatch_repo, dispatch_stop),
+    ) = tokio::try_join!(
+        PlugsRepo::load(
+            ctx.acx.clone(),
+            blobs_repo.clone(),
+            ctx.doc_app().document_id().clone(),
+        ),
+        DrawerRepo::load(ctx.acx.clone(), ctx.doc_drawer().document_id().clone()),
+        DispatchRepo::load(ctx.acx.clone(), ctx.doc_app().document_id().clone())
+    )?;
+
     macro_rules! do_cleanup {
         () => {
-            ctx.acx.stop().await?;
+            drawer_stop.stop().await?;
+            plugs_stop.stop().await?;
+            dispatch_stop.stop().await?;
+            if let Some(stop) = ctx.acx_stop.lock().await.take() {
+                stop.stop().await?;
+            }
         };
     }
-
-    // let drawer_doc_id = ctx.doc_drawer().document_id().clone();
-    // let drawer_repo =
-    //     daybook_core::drawer::DrawerRepo::load(ctx.acx.clone(), drawer_doc_id).await?;
-
-    let plugs_repo = PlugsRepo::load(ctx.acx.clone(), ctx.doc_app().document_id().clone())
-        .await
-        .wrap_err("error loading plugs repo")?;
-    scopeguard::defer! {
-        plugs_repo.stop();
-    };
 
     let plugs = plugs_repo.list_plugs().await;
 
@@ -367,18 +430,24 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             Some((name, sub_matches)) => {
                 info!(?name, "XXX");
                 let details = command_details.remove(name).unwrap();
-                info!(?details, "executing");
-
-                let drawer =
-                    DrawerRepo::load(ctx.acx.clone(), ctx.doc_drawer().document_id().clone())
-                        .await?;
+                let wcx = wflow::Ctx::init(&ctx.sql.db_pool).await?;
+                let (rt, rt_stop) = daybook_core::rt::Rt::boot(
+                    wcx,
+                    drawer.clone(),
+                    plugs_repo.clone(),
+                    dispatch_repo.clone(),
+                    blobs_repo.clone(),
+                )
+                .await?;
                 let ecx = ExecCtx {
-                    cx: ctx.clone(),
-                    drawer,
+                    rt: rt.clone(),
+                    _cx: ctx.clone(),
+                    drawer: drawer.clone(),
                 };
 
                 (details.action)(sub_matches.clone(), ecx).await?;
 
+                rt_stop.stop().await?;
                 do_cleanup!();
                 Ok(ExitCode::SUCCESS)
             }
@@ -420,12 +489,16 @@ enum StaticCommands {
     /// Show details for a specific document
     Cat {
         id: String,
+        #[arg(short, long)]
+        branch: Option<String>,
     },
     /// Create a new document
     Touch,
     /// Edit a document
     Ed {
         id: String,
+        #[arg(short, long)]
+        branch: Option<String>,
     },
     /// Generate shell completions
     Completions {
@@ -463,7 +536,8 @@ impl StaticCliResult {
 }
 
 struct ExecCtx {
-    cx: SharedCtx,
+    _cx: SharedCtx,
+    rt: Arc<daybook_core::rt::Rt>,
     drawer: Arc<DrawerRepo>,
 }
 
@@ -479,7 +553,9 @@ struct ClapReadyCommand {
 }
 
 type CliCommandAction = Box<
-    dyn Fn(clap::ArgMatches, ExecCtx) -> futures::future::BoxFuture<'static, Res<()>> + Send + Sync,
+    dyn FnOnce(clap::ArgMatches, ExecCtx) -> futures::future::BoxFuture<'static, Res<()>>
+        + Send
+        + Sync,
 >;
 
 fn ready_command_clap(
@@ -513,19 +589,53 @@ Routine impl: {routine_impl:?}
                     routine_acl = routine.prop_acl,
                     routine_impl = routine.r#impl,
                 ))
-                .arg(Arg::new("doc-id").required(true));
+                .arg(Arg::new("doc-id").required(true))
+                .arg(Arg::new("branch").short('b'));
 
             Box::new({
-                let com_man = com_man.clone();
+                // let com_man = com_man.clone();
+                let plug_id = plug_id.clone();
+                let routine_name = routine_name.0.clone();
                 move |matches: ArgMatches, ecx: ExecCtx| {
                     async move {
                         let doc_id = matches
                             .get_one::<String>("doc-id")
                             .expect("this shouldn't happen");
+                        let branch = matches.get_one::<String>("branch");
+                        let Some(branches) = ecx.drawer.get_doc_branches(&doc_id).await else {
+                            eyre::bail!("document not found: {doc_id}");
+                        };
+                        let branch_name = match branch {
+                            Some(val) => {
+                                if branches.branches.contains_key(val) {
+                                    eyre::bail!("branch not found for doc: {doc_id} - {val}");
+                                }
+                                val.as_str()
+                            }
+                            None => {
+                                let Some(branch) = branches.main_branch_name() else {
+                                    eyre::bail!("no branches found on doc: {doc_id}");
+                                };
+                                branch
+                            }
+                        };
+                        let heads = branches.branches.get(branch_name).unwrap();
 
-                        let doc = ecx.drawer.get(doc_id).await?;
-
-                        println!("{doc:?}");
+                        let job_id = ecx
+                            .rt
+                            .dispatch(
+                                &plug_id,
+                                &routine_name[..],
+                                daybook_core::rt::DispatchArgs::DocProp {
+                                    doc_id: doc_id.clone(),
+                                    branch_name: branch_name.into(),
+                                    heads: heads.clone(),
+                                    prop_id: None,
+                                },
+                            )
+                            .await?;
+                        let res = ecx.rt.wait_for_dispatch(&job_id, 60).await?;
+                        println!("result: {res:?}");
 
                         Ok(())
                     }

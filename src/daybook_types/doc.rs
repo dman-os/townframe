@@ -9,11 +9,13 @@ crate::define_enum_and_tag!(
     DocContentKind,
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+    #[serde(rename_all = "camelCase", untagged)]
     #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
     DocContent {
         Text type (String),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         Blob struct {
             pub length_octets: u64,
@@ -44,6 +46,7 @@ crate::define_enum_and_tag!(
         PathGeneric type (PathBuf),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         ImageMetadata struct {
             pub mime: MimeType,
@@ -53,6 +56,7 @@ crate::define_enum_and_tag!(
         Content type (DocContent),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         Pending struct {
             pub key: DocPropKey
@@ -104,27 +108,44 @@ impl DocPropKey {
     pub const TAG_ID_SEPARATOR: char = '/';
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", untagged)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub enum DocProp {
-    WellKnown(WellKnownProp),
-    Any(serde_json::Value),
-}
+pub type DocProp = serde_json::Value;
 
-impl<T> From<T> for DocProp
-where
-    T: Into<WellKnownProp>,
-{
-    fn from(value: T) -> Self {
-        Self::WellKnown(value.into())
-    }
-}
+// #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+// #[serde(rename_all = "camelCase", untagged)]
+// #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+// #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+// pub enum DocProp {
+//     WellKnown(WellKnownProp),
+//     Any(serde_json::Value),
+// }
+//
+// impl<T> From<T> for DocProp
+// where
+//     T: Into<WellKnownProp>,
+// {
+//     fn from(value: T) -> Self {
+//         Self::WellKnown(value.into())
+//     }
+// }
 
 pub type DocId = String;
 
+pub type DocUserId = u64;
+pub type PropBlame = HashMap<DocPropKey, DocUserId>;
+
+pub struct UserPath {
+    pub user_pkey: String,
+    pub device_pkey: String,
+    pub plug_id: Option<String>,
+    pub routine: Option<String>,
+}
+
+pub struct Users {
+    pub users: HashMap<String, DocUserId>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct Doc {
     pub id: DocId,
@@ -164,6 +185,15 @@ impl Doc {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AddDocArgs {
+    pub branch_name: String,
+    // pub user_path: String,
+    pub props: HashMap<DocPropKey, DocProp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DocPatch {
     pub id: DocId,
@@ -189,6 +219,7 @@ impl DocPatch {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DocAddedEvent {
     pub id: DocId,
@@ -640,6 +671,50 @@ mod ser_de {
     //         deserializer.deserialize_seq(PropsVisitor)
     //     }
     // }
+    impl From<WellKnownProp> for DocProp {
+        fn from(value: WellKnownProp) -> Self {
+            serde_json::to_value(value).expect(ERROR_JSON)
+        }
+    }
+
+    impl WellKnownProp {
+        pub fn from_json(value: serde_json::Value, tag: WellKnownPropTag) -> Res<Self> {
+            Ok(match tag {
+                WellKnownPropTag::RefGeneric => Self::RefGeneric(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownPropTag::LabelGeneric => Self::LabelGeneric(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownPropTag::PseudoLabel => Self::PseudoLabel(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownPropTag::TitleGeneric => Self::TitleGeneric(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownPropTag::PathGeneric => Self::PathGeneric(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownPropTag::ImageMetadata => Self::ImageMetadata(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownPropTag::Content => Self::Content(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownPropTag::Pending => Self::Pending(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+            })
+        }
+    }
 }
 
 #[cfg(test)]

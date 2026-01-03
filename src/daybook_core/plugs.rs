@@ -3,7 +3,7 @@ use tokio_util::sync::CancellationToken;
 
 pub mod manifest;
 
-pub fn system_plugs() -> Vec<Arc<manifest::PlugManifest>> {
+pub fn system_plugs() -> Vec<manifest::PlugManifest> {
     use daybook_types::doc::*;
     use manifest::*;
 
@@ -64,8 +64,7 @@ pub fn system_plugs() -> Vec<Arc<manifest::PlugManifest>> {
                     display_config: default(),
                 },
             ],
-        }
-        .into(),
+        },
         PlugManifest {
             namespace: "daybook".into(),
             name: "wip".into(),
@@ -104,6 +103,7 @@ pub fn system_plugs() -> Vec<Arc<manifest::PlugManifest>> {
                     RoutineManifest {
                         r#impl: RoutineImpl::Wflow {
                             key: "pseudo-label".into(),
+                            bundle: "daybook_wflows".into(),
                         },
                         deets: RoutineManifestDeets::DocProp {
                             working_prop_tag: WellKnownPropTag::PseudoLabel.into(),
@@ -132,9 +132,17 @@ pub fn system_plugs() -> Vec<Arc<manifest::PlugManifest>> {
                     WflowBundleManifest {
                         keys: vec!["pseudo-label".into()],
                         // FIXME: make this more generic
-                        component_paths: vec![
-                            "../../target/wasm32-wasip2/debug/daybook_wflows.wasm".into(),
-                        ],
+                        component_urls: vec![{
+                            let path = std::path::absolute(
+                                Path::new(env!("CARGO_MANIFEST_DIR"))
+                                    .join("../../target/wasm32-wasip2/debug/daybook_wflows.wasm"),
+                            )
+                            .unwrap();
+
+                            format!("file://{path}", path = path.to_string_lossy())
+                                .parse()
+                                .unwrap()
+                        }],
                     }
                     .into(),
                 ),
@@ -149,14 +157,12 @@ pub fn system_plugs() -> Vec<Arc<manifest::PlugManifest>> {
                 }
                 .into(),
             ],
-        }
-        .into(),
+        },
     ]
 }
 
 #[derive(Default, Reconcile, Hydrate)]
 pub struct PlugsStore {
-    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     pub manifests: HashMap<String, ThroughJson<Arc<manifest::PlugManifest>>>,
 
     /// Index: property tag -> plug id (@ns/name)
@@ -204,6 +210,7 @@ pub mod version_updates {
 pub struct PlugsRepo {
     // drawer_doc_id: DocumentId,
     store: crate::stores::StoreHandle<PlugsStore>,
+    pub blobs: Arc<crate::blobs::BlobsRepo>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub mutation_mutex: tokio::sync::Mutex<()>,
     cancel_token: CancellationToken,
@@ -230,7 +237,11 @@ impl crate::repos::Repo for PlugsRepo {
 }
 
 impl PlugsRepo {
-    pub async fn load(acx: AmCtx, app_doc_id: DocumentId) -> Res<Arc<Self>> {
+    pub async fn load(
+        acx: AmCtx,
+        blobs: Arc<crate::blobs::BlobsRepo>,
+        app_doc_id: DocumentId,
+    ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store = PlugsStore::load(&acx, &app_doc_id).await?;
@@ -238,7 +249,7 @@ impl PlugsRepo {
 
         store.mutate_sync(|s| s.rebuild_indices()).await?;
 
-        let broker = {
+        let (broker, broker_stop) = {
             let handle = acx
                 .find_doc(&app_doc_id)
                 .await?
@@ -258,23 +269,35 @@ impl PlugsRepo {
         })
         .await?;
 
-        let cancel_token = CancellationToken::new();
+        let main_cancel_token = CancellationToken::new();
         let repo = Self {
             store,
+            blobs,
             registry: registry.clone(),
             mutation_mutex: tokio::sync::Mutex::new(()),
-            cancel_token: cancel_token.clone(),
+            cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
         };
         let repo = Arc::new(repo);
 
-        let _notif_worker = tokio::spawn({
-            let repo = repo.clone();
-            let cancel_token = cancel_token.clone();
-            async move { repo.handle_notifs(notif_rx, cancel_token).await }
+        let worker_handle = tokio::spawn({
+            let repo = Arc::clone(&repo);
+            let cancel_token = main_cancel_token.clone();
+            async move {
+                repo.handle_notifs(notif_rx, cancel_token)
+                    .await
+                    .expect("error handling notifs")
+            }
         });
 
-        Ok(repo)
+        Ok((
+            repo,
+            crate::repos::RepoStopToken {
+                cancel_token: main_cancel_token,
+                worker_handle: Some(worker_handle),
+                broker_stop_tokens: broker_stop.into_iter().collect(),
+            },
+        ))
     }
 
     async fn handle_notifs(
@@ -428,7 +451,7 @@ impl PlugsRepo {
     ///
     /// This method follows a literate programming approach to clearly document
     /// the validation and reconciliation steps.
-    pub async fn add(&self, manifest: Arc<manifest::PlugManifest>) -> Res<()> {
+    pub async fn add(&self, manifest: manifest::PlugManifest) -> Res<()> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
@@ -441,6 +464,24 @@ impl PlugsRepo {
         // and compatibility with existing versions of the same plug.
         self.validate_incoming_plug(&manifest).await?;
 
+        // 1.5 Convert file:// URLs to db+blob:// URLs
+        // This ensures that all components are stored in the BlobsRepo for portability.
+        // for bundle in manifest.wflow_bundles.values_mut() {
+        //     let bundle = Arc::make_mut(bundle);
+        //     for url in bundle.component_urls.iter_mut() {
+        //         if url.scheme() == "file" {
+        //             let path = url
+        //                 .to_file_path()
+        //                 .map_err(|_| eyre::eyre!("invalid file path in url: {}", url))?;
+        //             let data = tokio::fs::read(&path).await.wrap_err_with(|| {
+        //                 format!("failed to read component file: {}", path.display())
+        //             })?;
+        //             let hash = self.blobs.put(&data).await?;
+        //             *url = url::Url::parse(&format!("{}:///{}", crate::blobs::BLOB_SCHEME, hash))?;
+        //         }
+        //     }
+        // }
+
         // 2. Perform Automerge reconciliation
         // Once validated, we update the Automerge store.
         // We use the plug's identity (@namespace/name) as the key in the manifests map
@@ -452,7 +493,7 @@ impl PlugsRepo {
                 // Update the manifest in the store
                 store
                     .manifests
-                    .insert(plug_id.clone(), ThroughJson(manifest));
+                    .insert(plug_id.clone(), ThroughJson(Arc::new(manifest)));
 
                 // 3. Rebuild indices
                 // Indices are in-memory caches (marked with #[autosurgeon(skip)])
@@ -494,6 +535,14 @@ impl PlugsRepo {
         // To maintain stability, we don't allow breaking changes (like removing commands
         // or changing their parameters) in minor or patch updates.
         if let Some(old) = &existing {
+            if manifest.version <= old.version {
+                eyre::bail!(
+                    "Version must be greater than existing version (current: {}, incoming: {})",
+                    old.version,
+                    manifest.version
+                );
+            }
+
             let is_major = manifest.version.major > old.version.major
                 || (old.version.major == 0 && manifest.version.minor > old.version.minor);
 
@@ -598,6 +647,25 @@ impl PlugsRepo {
         // -- Internal Routine Integrity --
         // Commands act as triggers for routines. If a command points to a non-existent
         // routine, it will fail at runtime. We catch these early.
+        for (routine_name, routine) in &manifest.routines {
+            let manifest::RoutineImpl::Wflow { bundle, key } = &routine.r#impl;
+            let Some(bundle_manifest) = manifest.wflow_bundles.get(bundle) else {
+                eyre::bail!(
+                    "Invalid routine '{}': wflow bundle '{}' not found in manifest",
+                    routine_name,
+                    bundle
+                );
+            };
+            if !bundle_manifest.keys.contains(key) {
+                eyre::bail!(
+                    "Invalid routine '{}': key '{}' not found in wflow bundle '{}'",
+                    routine_name,
+                    key,
+                    bundle
+                );
+            }
+        }
+
         for cmd in &manifest.commands {
             match &cmd.deets {
                 manifest::CommandDeets::DocCommand { routine_name } => {
@@ -605,6 +673,43 @@ impl PlugsRepo {
                         eyre::bail!(
                             "Invalid command deets: routine '{}' not found in plug",
                             routine_name
+                        );
+                    }
+                }
+            }
+        }
+
+        // -- Component URL Validation --
+        for (bundle_name, bundle) in &manifest.wflow_bundles {
+            for url in &bundle.component_urls {
+                match url.scheme() {
+                    "file" => {
+                        let path = url
+                            .to_file_path()
+                            .map_err(|_| eyre::eyre!("invalid file path in url: {}", url))?;
+                        if !path.exists() {
+                            eyre::bail!(
+                                "Component file not found for bundle '{}': {}",
+                                bundle_name,
+                                path.display()
+                            );
+                        }
+                    }
+                    scheme if scheme == crate::blobs::BLOB_SCHEME => {
+                        let hash = url.path().trim_start_matches('/');
+                        if self.blobs.get_path(hash).await.is_err() {
+                            eyre::bail!(
+                                "Blob not found in BlobsRepo for bundle '{}': {}",
+                                bundle_name,
+                                hash
+                            );
+                        }
+                    }
+                    _ => {
+                        eyre::bail!(
+                            "Unsupported URL scheme for bundle '{}': {}",
+                            bundle_name,
+                            url.scheme()
                         );
                     }
                 }
@@ -725,8 +830,8 @@ fn is_json_schema_compatible(old: &serde_json::Value, new: &serde_json::Value) -
 mod tests {
     use super::*;
 
-    async fn setup_repo() -> Res<(AmCtx, Arc<PlugsRepo>, DocumentId)> {
-        let acx = AmCtx::boot(
+    async fn setup_repo() -> Res<(AmCtx, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
+        let (acx, _acx_stop) = AmCtx::boot(
             utils_rs::am::Config {
                 peer_id: "test".into(),
                 storage: utils_rs::am::StorageConfig::Memory,
@@ -739,8 +844,11 @@ mod tests {
         let handle = acx.add_doc(doc).await?;
         let doc_id = handle.document_id().clone();
 
-        let repo = PlugsRepo::load(acx.clone(), doc_id.clone()).await?;
-        Ok((acx, repo, doc_id))
+        let temp_dir = tempfile::tempdir()?;
+        let blobs = crate::blobs::BlobsRepo::new(temp_dir.path().to_path_buf()).await?;
+
+        let (repo, _repo_stop) = PlugsRepo::load(acx.clone(), blobs, doc_id.clone()).await?;
+        Ok((acx, repo, doc_id, temp_dir))
     }
 
     fn mock_plug(name: &str) -> manifest::PlugManifest {
@@ -760,7 +868,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_add_success() -> Res<()> {
-        let (_acx, repo, _doc_id) = setup_repo().await?;
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
         let plug = mock_plug("plug1");
 
         repo.add(plug.into()).await?;
@@ -772,7 +880,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_tag_clash() -> Res<()> {
-        let (_acx, repo, _doc_id) = setup_repo().await?;
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         // Add first plug with a tag
         let mut p1 = mock_plug("plug1");
@@ -800,7 +908,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_dependency_resolution() -> Res<()> {
-        let (_acx, repo, _doc_id) = setup_repo().await?;
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         // Add provider plug
         let mut provider = mock_plug("provider");
@@ -830,7 +938,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_missing_dependency() -> Res<()> {
-        let (_acx, repo, _doc_id) = setup_repo().await?;
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         let mut consumer = mock_plug("consumer");
         consumer.dependencies.insert(
@@ -849,7 +957,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_version_breaking_change() -> Res<()> {
-        let (_acx, repo, _doc_id) = setup_repo().await?;
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        // Create a temporary file for the component (keep it alive)
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path().join("component.wasm");
+        tokio::fs::write(&temp_path, b"dummy wasm content").await?;
+        let file_url = url::Url::from_file_path(&temp_path).unwrap();
 
         // Initial version
         let mut p1_v1 = mock_plug("plug1");
@@ -869,9 +983,18 @@ mod tests {
             manifest::RoutineManifest {
                 r#impl: manifest::RoutineImpl::Wflow {
                     key: "wflow1".into(),
+                    bundle: "bundle1".into(),
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 prop_acl: vec![],
+            }
+            .into(),
+        );
+        p1_v1.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec!["wflow1".into()],
+                component_urls: vec![file_url],
             }
             .into(),
         );
@@ -891,6 +1014,216 @@ mod tests {
         p1_v3.version = "1.0.0".parse().unwrap(); // major bump from 0.1 to 1.0 (in standard semver terms)
 
         repo.add(p1_v3.into()).await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_plug_version_must_increase() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        // Add initial version
+        let mut p1_v1 = mock_plug("plug1");
+        p1_v1.version = "0.1.0".parse().unwrap();
+        repo.add(p1_v1.into()).await?;
+
+        // Try to add same version -> should fail
+        let mut p1_same = mock_plug("plug1");
+        p1_same.version = "0.1.0".parse().unwrap();
+        let res = repo.add(p1_same.into()).await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Version must be greater"));
+
+        // Try to add lower version -> should fail
+        let mut p1_lower = mock_plug("plug1");
+        p1_lower.version = "0.0.9".parse().unwrap();
+        let res = repo.add(p1_lower.into()).await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Version must be greater"));
+
+        // Add higher version -> should succeed
+        let mut p1_v2 = mock_plug("plug1");
+        p1_v2.version = "0.1.1".parse().unwrap();
+        repo.add(p1_v2.into()).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_plug_bundle_key_validation() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path().join("component.wasm");
+        tokio::fs::write(&temp_path, b"dummy wasm").await?;
+        let file_url = url::Url::from_file_path(&temp_path).unwrap();
+
+        // Create plug with routine referencing non-existent bundle
+        let mut plug = mock_plug("plug1");
+        plug.routines.insert(
+            "routine1".into(),
+            manifest::RoutineManifest {
+                r#impl: manifest::RoutineImpl::Wflow {
+                    key: "wflow1".into(),
+                    bundle: "missing_bundle".into(),
+                },
+                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                prop_acl: vec![],
+            }
+            .into(),
+        );
+        plug.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec!["wflow1".into()],
+                component_urls: vec![file_url.clone()],
+            }
+            .into(),
+        );
+
+        let res = repo.add(plug.into()).await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("wflow bundle 'missing_bundle' not found"));
+
+        // Create plug with routine referencing non-existent key in bundle
+        let mut plug2 = mock_plug("plug2");
+        plug2.routines.insert(
+            "routine1".into(),
+            manifest::RoutineManifest {
+                r#impl: manifest::RoutineImpl::Wflow {
+                    key: "missing_key".into(),
+                    bundle: "bundle1".into(),
+                },
+                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                prop_acl: vec![],
+            }
+            .into(),
+        );
+        plug2.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec!["wflow1".into()],
+                component_urls: vec![file_url],
+            }
+            .into(),
+        );
+
+        let res = repo.add(plug2.into()).await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("key 'missing_key' not found"));
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_plug_component_url_validation() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        // Test with non-existent file URL
+        let mut plug = mock_plug("plug1");
+        plug.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec![],
+                component_urls: vec!["file:///nonexistent/path".parse().unwrap()],
+            }
+            .into(),
+        );
+
+        let res = repo.add(plug.into()).await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Component file not found"));
+
+        // Test with non-existent blob URL
+        let mut plug2 = mock_plug("plug2");
+        plug2.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec![],
+                component_urls: vec![format!("{}:///nonexistent_hash", crate::blobs::BLOB_SCHEME)
+                    .parse()
+                    .unwrap()],
+            }
+            .into(),
+        );
+
+        let res = repo.add(plug2.into()).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("Blob not found"));
+
+        // Test with unsupported scheme
+        let mut plug3 = mock_plug("plug3");
+        plug3.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec![],
+                component_urls: vec!["http://example.com/wasm.wasm".parse().unwrap()],
+            }
+            .into(),
+        );
+
+        let res = repo.add(plug3.into()).await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported URL scheme"));
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_plug_file_to_blob_conversion() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        // Create a temporary file with wasm content (keep it alive)
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path().join("component.wasm");
+        let wasm_content = b"fake wasm binary content";
+        tokio::fs::write(&temp_path, wasm_content).await?;
+        let file_url = url::Url::from_file_path(&temp_path).unwrap();
+
+        // Create plug with file:// URL
+        let mut plug = mock_plug("plug1");
+        plug.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec![],
+                component_urls: vec![file_url],
+            }
+            .into(),
+        );
+
+        // Add plug - should convert file:// to db+blob://
+        repo.add(plug.clone().into()).await?;
+
+        // Retrieve the plug and verify URL was converted
+        let saved = repo.get("@test/plug1").await.unwrap();
+        let bundle = saved.wflow_bundles.get("bundle1").unwrap();
+        assert_eq!(bundle.component_urls.len(), 1);
+        let converted_url = &bundle.component_urls[0];
+        assert_eq!(converted_url.scheme(), crate::blobs::BLOB_SCHEME);
+
+        // Verify the blob exists and contains the correct content
+        let hash = converted_url.path().trim_start_matches('/');
+        let blob_path = repo.blobs.get_path(hash).await?;
+        let blob_content = tokio::fs::read(&blob_path).await?;
+        assert_eq!(blob_content, wasm_content);
+
         Ok(())
     }
 }

@@ -16,6 +16,7 @@ pub struct PropKeyDisplayHintEntry {
 struct ConfigRepoFfi {
     fcx: SharedFfiCtx,
     repo: Arc<ConfigRepo>,
+    stop_token: tokio::sync::Mutex<Option<daybook_core::repos::RepoStopToken>>,
 }
 
 impl daybook_core::repos::Repo for ConfigRepoFfi {
@@ -37,7 +38,7 @@ impl ConfigRepoFfi {
     #[tracing::instrument(err, skip(fcx, plug_repo))]
     async fn load(fcx: SharedFfiCtx, plug_repo: Arc<PlugsRepoFfi>) -> Result<Arc<Self>, FfiError> {
         let fcx = fcx.clone();
-        let repo = fcx
+        let (repo, stop_token) = fcx
             .do_on_rt(ConfigRepo::load(
                 fcx.cx.acx.clone(),
                 fcx.cx.doc_app().document_id().clone(),
@@ -45,7 +46,18 @@ impl ConfigRepoFfi {
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
-        Ok(Arc::new(Self { fcx, repo }))
+        Ok(Arc::new(Self {
+            fcx,
+            repo,
+            stop_token: Some(stop_token).into(),
+        }))
+    }
+
+    async fn stop(&self) -> Result<(), FfiError> {
+        if let Some(token) = self.stop_token.lock().await.take() {
+            token.stop().await?;
+        }
+        Ok(())
     }
 
     #[tracing::instrument(skip(self))]

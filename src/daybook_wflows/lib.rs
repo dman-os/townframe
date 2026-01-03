@@ -68,10 +68,25 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
 
     // Extract text content for LLM
     // Use root types since Doc uses root types (not WIT types)
-    use daybook_types::doc::{DocContent, DocProp, WellKnownProp, WellKnownPropTag};
-    let content_text = match &doc.props.get(&WellKnownPropTag::Content.into()) {
-        Some(DocProp::WellKnown(WellKnownProp::Content(DocContent::Text(text)))) => text.clone(),
-        content => return Err(ferr!("Unsupported content: {content:?}").into()),
+    use daybook_types::doc::{DocContent, WellKnownProp, WellKnownPropTag};
+    let content_text = match doc
+        .props
+        .get(&WellKnownPropTag::Content.into())
+        .map(|val| WellKnownProp::from_json(val.clone(), WellKnownPropTag::Content))
+    {
+        Some(Ok(WellKnownProp::Content(DocContent::Text(text)))) => text,
+        Some(Ok(_)) => unreachable!(),
+        Some(Err(err)) => {
+            return Err(JobErrorX::Terminal(
+                err.wrap_err("unable to parse prop found on doc"),
+            ))
+        }
+        None => {
+            return Err(JobErrorX::Terminal(ferr!(
+                "no {tag} found on doc",
+                tag = WellKnownPropTag::Content.as_str()
+            )))
+        }
     };
 
     // Call the LLM to generate a label
@@ -102,9 +117,13 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
     let new_labels = vec![llm_response.clone()];
 
     cx.effect(|| {
-        let new_prop: daybook_types::wit::doc::DocProp =
-            DocProp::WellKnown(WellKnownProp::PseudoLabel(new_labels.join(","))).into();
-        args.prop_token.update(&new_prop);
+        let new_prop: daybook_types::doc::DocProp =
+            WellKnownProp::PseudoLabel(new_labels.join(",")).into();
+        let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
+        args.prop_token
+            .update(&new_prop)
+            .wrap_err("error updating prop")
+            .map_err(JobErrorX::Terminal)?;
         Ok(Json(()))
     })?;
 

@@ -2,13 +2,14 @@ use crate::interlude::*;
 
 use crate::ffi::{FfiError, SharedFfiCtx};
 
-use daybook_core::drawer::{DrawerEvent, DrawerRepo};
-use daybook_types::doc::{ChangeHashSet, Doc, DocId, DocPatch};
+use daybook_core::drawer::{DocNBranches, DrawerEvent, DrawerRepo, UpdateDocArgs};
+use daybook_types::doc::{AddDocArgs, ChangeHashSet, Doc, DocId, DocPatch};
 
 #[derive(uniffi::Object)]
 struct DrawerRepoFfi {
     fcx: SharedFfiCtx,
     repo: Arc<DrawerRepo>,
+    stop_token: tokio::sync::Mutex<Option<daybook_core::repos::RepoStopToken>>,
 }
 
 impl daybook_core::repos::Repo for DrawerRepoFfi {
@@ -22,12 +23,6 @@ impl daybook_core::repos::Repo for DrawerRepoFfi {
     }
 }
 
-#[derive(uniffi::Record, Debug)]
-struct PatchAndHeads {
-    heads: ChangeHashSet,
-    patch: DocPatch,
-}
-
 crate::uniffi_repo_listeners!(DrawerRepoFfi, DrawerEvent);
 
 #[uniffi::export]
@@ -36,19 +31,30 @@ impl DrawerRepoFfi {
     #[tracing::instrument(err, skip(fcx))]
     async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
         let fcx = fcx.clone();
-        let repo = fcx
+        let (repo, stop_token) = fcx
             .do_on_rt(DrawerRepo::load(
                 fcx.cx.acx.clone(),
                 fcx.cx.doc_drawer().document_id().clone(),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
-        Ok(Arc::new(Self { fcx, repo }))
+        Ok(Arc::new(Self {
+            fcx,
+            repo,
+            stop_token: Some(stop_token).into(),
+        }))
+    }
+
+    async fn stop(&self) -> Result<(), FfiError> {
+        if let Some(token) = self.stop_token.lock().await.take() {
+            token.stop().await?;
+        }
+        Ok(())
     }
 
     // old FFI wrappers for contains/insert/remove removed; use `ffi_get`, `ffi_add`, `ffi_update`, `ffi_del` instead
     #[tracing::instrument(skip(self))]
-    async fn list(self: Arc<Self>) -> Vec<DocId> {
+    async fn list(self: Arc<Self>) -> Vec<DocNBranches> {
         let this = self.clone();
         self.fcx
             .do_on_rt(async move { this.repo.list().await })
@@ -56,13 +62,13 @@ impl DrawerRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn get(self: Arc<Self>, id: DocId) -> Result<Option<Doc>, FfiError> {
+    async fn get(self: Arc<Self>, id: DocId, branch_name: String) -> Result<Option<Doc>, FfiError> {
         let this = self.clone();
         Ok(self
             .fcx
             .do_on_rt(async move {
                 this.repo
-                    .get(&id)
+                    .get(&id, &branch_name)
                     .await
                     .map(|opt| opt.map(|arc| (*arc).clone()))
             })
@@ -70,11 +76,11 @@ impl DrawerRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn add(self: Arc<Self>, doc: Doc) -> Result<DocId, FfiError> {
+    async fn add(self: Arc<Self>, args: AddDocArgs) -> Result<DocId, FfiError> {
         let this = self.clone();
         Ok(self
             .fcx
-            .do_on_rt(async move { this.repo.add(doc).await })
+            .do_on_rt(async move { this.repo.add(args).await })
             .await?)
     }
 
@@ -82,14 +88,15 @@ impl DrawerRepoFfi {
     async fn update(
         self: Arc<Self>,
         patch: DocPatch,
-        heads: ChangeHashSet,
+        branch_name: String,
+        heads: Option<ChangeHashSet>,
     ) -> Result<(), FfiError> {
         let this = self.clone();
         Ok(self
             .fcx
             .do_on_rt(async move {
                 this.repo
-                    .update_at_heads(patch, &heads)
+                    .update_at_heads(patch, branch_name, heads)
                     .await
                     .wrap_err("error applying patch")
             })
@@ -97,13 +104,13 @@ impl DrawerRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn update_batch(self: Arc<Self>, patches: Vec<PatchAndHeads>) -> Result<(), FfiError> {
+    async fn update_batch(self: Arc<Self>, patches: Vec<UpdateDocArgs>) -> Result<(), FfiError> {
         let this = self.clone();
         Ok(self
             .fcx
             .do_on_rt(async move {
                 this.repo
-                    .update_batch(patches.into_iter().map(|p| (p.heads, p.patch)).collect())
+                    .update_batch(patches)
                     .await
                     .wrap_err("error applying patches")
             })

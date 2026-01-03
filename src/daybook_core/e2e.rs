@@ -14,12 +14,22 @@ pub struct DaybookTestContext {
     pub drawer_repo: Arc<DrawerRepo>,
     pub wflow_test_cx: WflowTestContext,
     _doc_changes_worker: DocTriageWorkerHandle,
-    pub _dispatcher_repo: Arc<crate::rt::DispatcherRepo>,
+    pub _dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
+    pub drawer_stop: crate::repos::RepoStopToken,
+    pub plugs_stop: crate::repos::RepoStopToken,
+    pub config_stop: crate::repos::RepoStopToken,
+    pub dispatch_stop: crate::repos::RepoStopToken,
+    pub acx_stop: utils_rs::am::AmCtxStopToken,
 }
 
 impl DaybookTestContext {
-    pub async fn close(self) -> Res<()> {
-        self.wflow_test_cx.close().await?;
+    pub async fn stop(self) -> Res<()> {
+        self.wflow_test_cx.stop().await?;
+        self.drawer_stop.stop().await?;
+        self.plugs_stop.stop().await?;
+        self.config_stop.stop().await?;
+        self.dispatch_stop.stop().await?;
+        self.acx_stop.stop().await?;
         Ok(())
     }
 }
@@ -30,7 +40,7 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
     });
 
     // Initialize AmCtx with memory storage
-    let acx = AmCtx::boot(
+    let (acx, acx_stop) = AmCtx::boot(
         utils_rs::am::Config {
             peer_id: "test".to_string(),
             storage: utils_rs::am::StorageConfig::Memory,
@@ -53,11 +63,15 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
         handle.document_id().clone()
     };
 
-    let drawer_repo = DrawerRepo::load(acx.clone(), drawer_doc_id).await?;
-    let plug_repo = PlugsRepo::load(acx.clone(), app_doc_id.clone()).await?;
-    let config_repo =
+    let temp_dir = tempfile::tempdir()?;
+    let blobs = crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs")).await?;
+
+    let (drawer_repo, drawer_stop) = DrawerRepo::load(acx.clone(), drawer_doc_id).await?;
+    let (plug_repo, plugs_stop) = PlugsRepo::load(acx.clone(), blobs, app_doc_id.clone()).await?;
+    let (config_repo, config_stop) =
         crate::config::ConfigRepo::load(acx.clone(), app_doc_id.clone(), plug_repo.clone()).await?;
-    let dispatcher_repo = crate::rt::DispatcherRepo::load(acx.clone(), app_doc_id).await?;
+    let (dispatch_repo, dispatch_stop) =
+        crate::rt::dispatch::DispatchRepo::load(acx.clone(), app_doc_id).await?;
 
     // Initialize default pseudo-label processor if needed
     let triage_config = config_repo.get_triage_config_sync().await;
@@ -65,10 +79,10 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
     if triage_config.processors.is_empty() {
         use crate::rt::triage::PredicateClause;
         use crate::rt::triage::{CancellationPolicy, Processor};
-        use daybook_types::doc::DocContentKind;
+        use daybook_types::doc::WellKnownPropTag;
 
         let predicate = PredicateClause::And(vec![
-            PredicateClause::IsContentKind(DocContentKind::Text),
+            PredicateClause::HasKey(WellKnownPropTag::Content.into()),
             PredicateClause::Not(Box::new(PredicateClause::HasKey(
                 daybook_types::doc::WellKnownPropTag::PseudoLabel.into(),
             ))),
@@ -85,7 +99,7 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
 
     let daybook_plugin = Arc::new(crate::rt::wash_plugin::DaybookPlugin::new(
         drawer_repo.clone(),
-        dispatcher_repo.clone(),
+        dispatch_repo.clone(),
     ));
     let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {
         ollama_url: utils_rs::get_env_var("OLLAMA_URL")?,
@@ -120,8 +134,13 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
     Ok(DaybookTestContext {
         _acx: acx,
         drawer_repo,
-        _dispatcher_repo: dispatcher_repo,
+        _dispatch_repo: dispatch_repo,
         wflow_test_cx,
         _doc_changes_worker: doc_changes_worker,
+        drawer_stop,
+        plugs_stop,
+        config_stop,
+        dispatch_stop,
+        acx_stop,
     })
 }

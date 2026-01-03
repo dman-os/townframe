@@ -95,18 +95,15 @@ pub struct TokioPartitionWorkerHandle {
 }
 
 impl TokioPartitionWorkerHandle {
-    pub async fn close(mut self) -> Res<()> {
+    pub async fn stop(mut self) -> Res<()> {
+        warn!("XXX stopping partition");
         self.cancel_token.cancel();
         // Close all effect workers first
-        if let Some(effect_workers) = self.effect_workers.take() {
-            for worker in effect_workers {
-                worker.close().await?;
-            }
+        for worker in self.effect_workers.take().unwrap() {
+            worker.stop().await?;
         }
         // Then close the event worker
-        if let Some(reducer) = self.part_reducer.take() {
-            reducer.close().await?;
-        }
+        self.part_reducer.take().unwrap().stop().await?;
         // Drop will cancel again, which is safe (idempotent)
         Ok(())
     }
@@ -114,6 +111,7 @@ impl TokioPartitionWorkerHandle {
 
 impl Drop for TokioPartitionWorkerHandle {
     fn drop(&mut self) {
+        warn!("XXX dropping partition worker");
         self.cancel_token.cancel();
     }
 }

@@ -36,15 +36,16 @@ mod interlude {
         sync::{Arc, LazyLock},
     };
 
+    pub use crate::hash::UuidExt;
     pub use async_trait::async_trait;
     pub use color_eyre::eyre::{
         self as eyre, format_err as ferr, OptionExt as EyreOptExt, Result as Res, WrapErr,
     };
     pub use indexmap::{indexmap, IndexMap};
+    pub use jiff::{self, Timestamp};
     pub use serde::{Deserialize, Serialize};
     pub use serde_json::json;
-    pub type Timestamp = jiff::Timestamp;
-    pub use jiff;
+    pub use url::Url;
     pub use uuid::{self, Uuid};
 
     pub use crate::expect_tags::*;
@@ -126,7 +127,7 @@ pub fn setup_tracing() -> Res<()> {
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
         if std::env::var("RUST_BACKTRACE").is_err() {
-            std::env::set_var("RUST_BACKTRACE", "1");
+            // std::env::set_var("RUST_BACKTRACE", "1");
         }
         std::env::var("RUST_LOG").ok()
     };
@@ -291,6 +292,16 @@ pub mod hash {
     const SHA2_256: u64 = 0x12;
     const BLAKE3: u64 = 0x1e;
 
+    pub trait UuidExt {
+        fn bs58(&self) -> String;
+    }
+
+    impl UuidExt for Uuid {
+        fn bs58(&self) -> String {
+            bs58::encode(self.as_bytes()).into_string()
+        }
+    }
+
     pub fn hash_obj<T: serde::Serialize>(obj: &T) -> String {
         use sha2::Digest;
         let mut hash = sha2::Sha256::new();
@@ -443,6 +454,7 @@ pub mod hash {
 /// A simpler version of [`tokio::fs::try_exists`] that returns
 /// false on a non-existent file and not just on a broken symlink.
 #[inline(always)]
+#[cfg(feature = "native")]
 pub async fn file_exists(path: &Path) -> Result<bool, std::io::Error> {
     match tokio::fs::try_exists(path).await {
         Ok(true) => Ok(true),

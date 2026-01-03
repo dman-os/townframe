@@ -18,7 +18,7 @@ pub fn is_domain_name(value: &str, _context: &()) -> garde::Result {
 #[serde(transparent)]
 #[garde(transparent)]
 #[repr(transparent)]
-pub struct PropTag(#[garde(custom(is_domain_name))] String);
+pub struct PropTag(#[garde(custom(is_domain_name))] pub String);
 
 impl<T> From<T> for PropTag
 where
@@ -51,6 +51,12 @@ impl std::ops::Deref for PropTag {
 pub struct KeyGeneric(
     #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 1024))] pub String,
 );
+
+impl std::borrow::Borrow<str> for KeyGeneric {
+    fn borrow(&self) -> &str {
+        &self[..]
+    }
+}
 
 impl<T> From<T> for KeyGeneric
 where
@@ -192,7 +198,7 @@ pub struct WflowBundleManifest {
     #[garde(dive)]
     pub keys: Vec<KeyGeneric>,
     #[garde(skip)]
-    pub component_paths: Vec<PathBuf>,
+    pub component_urls: Vec<Url>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -210,6 +216,8 @@ pub struct RoutineManifest {
 #[serde(rename_all = "camelCase")]
 pub enum RoutineImpl {
     Wflow {
+        #[garde(dive)]
+        bundle: KeyGeneric,
         #[garde(dive)]
         key: KeyGeneric,
     },

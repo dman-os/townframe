@@ -46,10 +46,11 @@ interface doc {
         pending(pending),
     }
 
-    variant doc-prop {
-        well-known(well-known-prop),
-        any(json), // JSON string
-    }
+    type doc-prop = json;
+    //variant doc-prop {
+    //    well-known(well-known-prop),
+    //    any(json), // JSON string
+    //}
 
     record doc {
         id: doc-id,

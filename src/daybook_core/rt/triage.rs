@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use crate::drawer::{DrawerEvent, DrawerRepo};
-use daybook_types::doc::{Doc, DocContent, DocContentKind, DocId, DocPropKey};
+use daybook_types::doc::{Doc, DocId, DocPropKey};
 
 pub use wflow::{PartitionLogIngress, WflowIngress};
 
@@ -12,7 +12,7 @@ pub struct DocTriageWorkerHandle {
 }
 
 impl DocTriageWorkerHandle {
-    pub async fn close(mut self) -> Res<()> {
+    pub async fn stop(mut self) -> Res<()> {
         self.cancel_token.cancel();
         let join_handle = self.join_handle.take().expect("join_handle already taken");
         utils_rs::wait_on_handle_with_timeout(join_handle, 5 * 1000).await?;
@@ -122,42 +122,49 @@ pub async fn spawn_doc_triage_worker(
                             DrawerEvent::DocDeleted { .. } => {
                                 // TODO: handle doc deletions
                             }
-                            DrawerEvent::DocAdded { id, heads } => {
-                                // Get the doc
-                                let doc = match repo.get_at_heads(id, heads).await {
-                                    Ok(Some(doc)) => doc,
-                                    Ok(None) => {
-                                        warn!(doc_id = ?id, "doc not found at heads");
-                                        continue;
+                            DrawerEvent::DocAdded { id, entry } => {
+                                let mut retry_event = false;
+                                for (branch_name, heads) in &entry.branches {
+                                    // Get the doc
+                                    let doc = match repo.get_at_heads(id, heads).await {
+                                        Ok(Some(doc)) => doc,
+                                        Ok(None) => {
+                                            warn!(?branch_name, doc_id = ?id, "doc not found at heads");
+                                            continue;
+                                        }
+                                        Err(err) => {
+                                            error!(?err, doc_id = ?id, "error getting doc");
+                                            retry_event = true;
+                                            break;
+                                        }
+                                    };
+
+                                    // Convert heads to ChangeHash array
+                                    let doc_heads = Arc::clone(&heads.0);
+
+                                    // Get current config and heads
+                                    let (triage_config, config_heads) = {
+                                        let state = config_state.read().await;
+                                        (state.0.clone(), state.1.clone())
+                                    };
+
+                                    // Call triage with current config
+                                    if let Err(err) = triage(
+                                        &ingress,
+                                        &triage_config,
+                                        &config_heads,
+                                        id,
+                                        &doc_heads,
+                                        &doc,
+                                    )
+                                    .await
+                                    {
+                                        error!(?err, doc_id = ?id, "error in triage");
+                                        retry_event = true;
+                                        break;
                                     }
-                                    Err(err) => {
-                                        error!(?err, doc_id = ?id, "error getting doc");
-                                        retry(event);
-                                        continue;
-                                    }
-                                };
-
-                                // Convert heads to ChangeHash array
-                                let doc_heads = Arc::clone(&heads.0);
-
-                                // Get current config and heads
-                                let (triage_config, config_heads) = {
-                                    let state = config_state.read().await;
-                                    (state.0.clone(), state.1.clone())
-                                };
-
-                                // Call triage with current config
-                                if let Err(err) = triage(
-                                    &ingress,
-                                    &triage_config,
-                                    &config_heads,
-                                    id,
-                                    &doc_heads,
-                                    &doc,
-                                )
-                                .await
-                                {
-                                    error!(?err, doc_id = ?id, "error in triage");
+                                }
+                                if retry_event {
                                     retry(event);
                                     continue;
                                 }
@@ -207,7 +214,6 @@ pub struct Processor {
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq, Default)]
 pub struct TriageConfig {
-    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     pub processors: HashMap<String, Processor>,
 }
 
@@ -257,40 +263,15 @@ pub async fn triage(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PredicateClause {
     HasKey(DocPropKey),
-    IsContentKind(DocContentKind),
     Or(Vec<PredicateClause>),
     And(Vec<PredicateClause>),
     Not(Box<PredicateClause>),
-}
-
-fn content_to_content_kind(content: &DocContent) -> DocContentKind {
-    match content {
-        DocContent::Text(_) => DocContentKind::Text,
-        DocContent::Blob(_) => DocContentKind::Blob,
-    }
 }
 
 impl PredicateClause {
     pub fn matches(&self, doc: &Doc) -> bool {
         match self {
             PredicateClause::HasKey(check_key) => doc.props.keys().any(|key| check_key == key),
-            PredicateClause::IsContentKind(content_kind) => doc
-                .props
-                .get(&DocPropKey::Tag(daybook_types::doc::DocPropTag::WellKnown(
-                    daybook_types::doc::WellKnownPropTag::Content,
-                )))
-                .and_then(|prop| {
-                    if let daybook_types::doc::DocProp::WellKnown(
-                        daybook_types::doc::WellKnownProp::Content(content),
-                    ) = prop
-                    {
-                        Some(content_to_content_kind(content))
-                    } else {
-                        None
-                    }
-                })
-                .map(|kind| kind == *content_kind)
-                .unwrap_or(false),
             PredicateClause::Not(inner) => !inner.matches(doc),
             PredicateClause::Or(clauses) => clauses.iter().any(|clause| clause.matches(doc)),
             PredicateClause::And(clauses) => clauses.iter().all(|clause| clause.matches(doc)),

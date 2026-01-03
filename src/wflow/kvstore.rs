@@ -138,6 +138,9 @@ impl KvStore for SqliteKvStore {
         ))
     }
 
+    // FIXME: this is trigger code 5 database is locked issues
+    // even without waiting for 5 seconds. The cause seems out of
+    // line with other reported errors
     async fn new_cas(&self, key: &[u8]) -> Res<CasGuard> {
         // Take a snapshot of the current value
         let snapshot = self.get(key).await?;

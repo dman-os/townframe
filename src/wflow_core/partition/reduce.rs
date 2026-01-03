@@ -66,8 +66,7 @@ pub fn reduce_job_run_event(
         job_events::JobRunResult::Success { .. }
         | job_events::JobRunResult::WorkerErr(_)
         | job_events::JobRunResult::WflowErr(JobError::Terminal { .. }) => {
-            let job_state = state.active.remove(&job_id).unwrap();
-            state.archive.insert(job_id.clone(), job_state);
+            archive_job(state, &job_id);
         }
         job_events::JobRunResult::WflowErr(JobError::Transient { retry_policy, .. }) => {
             let retry_policy = retry_policy
@@ -96,8 +95,7 @@ pub fn reduce_job_run_event(
 
             match &res.deets {
                 job_events::JobEffectResultDeets::EffectErr(JobError::Terminal { .. }) => {
-                    let job_state = state.active.remove(&job_id).unwrap();
-                    state.archive.insert(job_id.clone(), job_state);
+                    archive_job(state, &job_id);
                 }
                 job_events::JobEffectResultDeets::Success { .. } => effects.push(PartitionEffect {
                     job_id,
@@ -123,6 +121,11 @@ pub fn reduce_job_run_event(
             }
         }
     }
+}
+
+fn archive_job<'a>(state: &'a mut state::PartitionJobsState, job_id: &Arc<str>) {
+    let job_state = state.active.remove(job_id).unwrap();
+    state.archive.insert(job_id.clone(), job_state);
 }
 
 fn get_job_state<'a>(

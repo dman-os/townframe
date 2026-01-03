@@ -16,6 +16,7 @@ pub struct SqlConfig {
 
 pub struct Ctx {
     pub acx: utils_rs::am::AmCtx,
+    pub acx_stop: tokio::sync::Mutex<Option<utils_rs::am::AmCtxStopToken>>,
     pub sql: SqlCtx,
     pub doc_app: tokio::sync::OnceCell<samod::DocHandle>,
     pub doc_drawer: tokio::sync::OnceCell<samod::DocHandle>,
@@ -29,8 +30,7 @@ pub struct SqlCtx {
 
 impl Config {
     pub async fn is_repo_initialized(&self) -> Res<bool> {
-        Ok(utils_rs::file_exists(&self.cli_config.repo_path).await?
-            && utils_rs::file_exists(&self.cli_config.repo_path.join("samod")).await?)
+        Ok(utils_rs::file_exists(&self.cli_config.repo_path.join("db.repo.txt")).await?)
         //&& utils_rs::file_exists(&self.cli_config.repo_path.join("sqlite.db")).await?
     }
     /// Create a new config with platform-specific defaults
@@ -75,12 +75,16 @@ impl SqlCtx {
             }
         }
 
-        let db_pool = sqlx::SqlitePool::connect_with(
-            sqlx::sqlite::SqliteConnectOptions::from_str(&config.database_url)?
-                .create_if_missing(true),
-        )
-        .await
-        .wrap_err("error initializing sqlite db")?;
+        let db_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::from_str(&config.database_url)?
+                    .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                    .busy_timeout(std::time::Duration::from_secs(5))
+                    .create_if_missing(true),
+            )
+            .await
+            .wrap_err("error initializing sqlite db")?;
 
         sqlx::query(
             r#"
@@ -133,13 +137,14 @@ async fn set_init_state(cx: &Ctx, state: &InitState) -> Res<()> {
 impl Ctx {
     pub async fn init(config: Arc<Config>) -> Result<Arc<Self>, eyre::Report> {
         let sql = SqlCtx::new(config.sql.clone()).await?;
-        let acx =
+        let (acx, acx_stop) =
             utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
                 .await?;
         // acx.spawn_ws_connector("ws://0.0.0.0:8090".into());
 
         let cx = Arc::new(Self {
             acx,
+            acx_stop: Some(acx_stop).into(),
             sql,
             doc_app: default(),
             doc_drawer: default(),
@@ -208,11 +213,7 @@ async fn init_from_globals(cx: &Ctx) -> Res<()> {
         unreachable!();
     }
     for handle in &doc_handles {
-        cx.acx
-            .change_manager()
-            .clone()
-            .add_doc(handle.clone())
-            .await?;
+        let _ = cx.acx.change_manager().add_doc(handle.clone()).await?;
     }
     if update_state {
         set_init_state(

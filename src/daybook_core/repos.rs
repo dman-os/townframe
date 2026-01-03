@@ -1,16 +1,38 @@
 use crate::interlude::*;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+pub struct RepoStopToken {
+    pub cancel_token: CancellationToken,
+    pub worker_handle: Option<JoinHandle<()>>,
+    pub broker_stop_tokens: Vec<utils_rs::am::changes::DocChangeBrokerStopToken>,
+}
+
+impl RepoStopToken {
+    pub async fn stop(self) -> Res<()> {
+        self.cancel_token.cancel();
+        if let Some(handle) = self.worker_handle {
+            handle.await?;
+        }
+        for token in self.broker_stop_tokens {
+            token.stop().await?;
+        }
+        Ok(())
+    }
+}
+
 pub trait Repo {
+    /// NOTE:: the [`ListenersRegistry`] wraps the events
+    /// in Arc so don't worry about making this cheap to clone
     type Event: Send + Sync + 'static;
 
-    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry>;
+    fn registry(&self) -> &Arc<ListenersRegistry>;
     fn cancel_token(&self) -> &CancellationToken;
 
     /// Add a listener to the repository.
     ///
     /// Dropping the registration handle will unregister the listener.
-    fn register_listener<F>(&self, listener: F) -> crate::repos::ListenerRegistration
+    fn register_listener<F>(&self, listener: F) -> ListenerRegistration
     where
         F: Fn(Arc<Self::Event>) + Send + Sync + 'static,
     {
@@ -24,10 +46,6 @@ pub trait Repo {
             registry: Arc::downgrade(self.registry()),
             id,
         }
-    }
-
-    fn stop(&self) {
-        self.cancel_token().cancel();
     }
 }
 

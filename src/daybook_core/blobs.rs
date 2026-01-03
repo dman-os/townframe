@@ -5,6 +5,8 @@ pub struct BlobsRepo {
     root: PathBuf,
 }
 
+pub const BLOB_SCHEME: &str = "db+blob";
+
 impl BlobsRepo {
     pub async fn new(root: PathBuf) -> Result<Arc<Self>, eyre::Report> {
         tokio::fs::create_dir_all(&root).await?;

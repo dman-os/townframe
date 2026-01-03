@@ -33,7 +33,7 @@ async fn setup_test_repo() -> Res<(Arc<DrawerRepo>, Handle, tempfile::TempDir)> 
 
     let ctx = crate::context::Ctx::init(config).await?;
     let drawer_doc_id = ctx.doc_drawer().document_id().clone();
-    let repo = DrawerRepo::load(ctx.acx.clone(), drawer_doc_id).await?;
+    let (repo, _repo_stop) = DrawerRepo::load(ctx.acx.clone(), drawer_doc_id).await?;
     let rt_handle = Handle::current();
     Ok((repo, rt_handle, temp_dir))
 }

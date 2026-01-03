@@ -12,6 +12,7 @@ path = "main.rs"
 utils_rs = { workspace = true, features = ["native"] }
 daybook_core = { workspace = true }
 daybook_types = { workspace = true }
+wflow = { workspace = true }
 
 # cli
 clap = { workspace = true, features = ["derive", "env", "string"] }

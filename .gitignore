@@ -26,3 +26,5 @@ captures
 src/samod/
 
 **/*/.terragrunt-cache
+
+play.*

@@ -13,25 +13,56 @@ pub mod kvstore;
 
 pub use ingress::{PartitionLogIngress, WflowIngress};
 pub use kvstore::SqliteKvStore;
-pub use wash_plugin_wflow::WflowPlugin;
-pub use wflow_core::kvstore::log::KvStoreLog;
-pub use wflow_core::kvstore::metastore::KvStoreMetadtaStore;
-pub use wflow_core::kvstore::snapstore::AtomicKvSnapStore;
-pub use wflow_core::kvstore::{CasError, CasGuard, KvStore};
-pub use wflow_core::snapstore::PartitionSnapshot;
+pub use wash_plugin_wflow;
+pub use wflow_core;
+pub use wflow_tokio;
 
 use crate::interlude::*;
 
 use wash_runtime::*;
-use wflow_core::gen::types::PartitionId;
+use wflow_core::{gen::types::PartitionId, kvstore::KvStore};
 
 // pub struct Config {}
 
 #[derive(Clone)]
 pub struct Ctx {
     pub metastore: Arc<dyn wflow_core::metastore::MetdataStore>,
-    pub log_store: Arc<dyn wflow_core::log::LogStore>,
+    pub logstore: Arc<dyn wflow_core::log::LogStore>,
     pub snapstore: Arc<dyn wflow_core::snapstore::SnapStore>,
+}
+
+impl Ctx {
+    pub async fn init(db_pool: &sqlx::Pool<sqlx::Sqlite>) -> Res<Self> {
+        let metastore_kv = Arc::new(SqliteKvStore::new(db_pool.clone(), "wflow_metastore").await?);
+        let logstore_kv = Arc::new(SqliteKvStore::new(db_pool.clone(), "wflow_logstore").await?);
+        let snapstore_kv = Arc::new(SqliteKvStore::new(db_pool.clone(), "wflow_snapstore").await?);
+
+        // Create the stores
+        let metastore = Arc::new(
+            wflow_core::kvstore::metastore::KvStoreMetadtaStore::new(
+                metastore_kv as Arc<dyn KvStore + Send + Sync>,
+                wflow_core::gen::metastore::PartitionsMeta {
+                    version: "0".into(),
+                    partition_count: 1,
+                },
+            )
+            .await?,
+        );
+
+        let logstore = wflow_core::kvstore::log::KvStoreLog::new(
+            logstore_kv.clone() as Arc<dyn KvStore + Send + Sync>
+        )
+        .await?;
+        let logstore = Arc::new(logstore);
+        let snapstore = Arc::new(wflow_core::kvstore::snapstore::AtomicKvSnapStore::new(
+            snapstore_kv,
+        ));
+        Ok(Self {
+            metastore,
+            logstore,
+            snapstore,
+        })
+    }
 }
 
 pub async fn build_wash_host(
@@ -78,7 +109,7 @@ pub async fn start_partition_worker(
     let pcx = wflow_tokio::partition::PartitionCtx::new(
         partition_id,
         wcx.metastore.clone(),
-        wcx.log_store.clone(),
+        wcx.logstore.clone(),
         next_entry_id,
         wflow_plugin,
         Arc::new(wflow_tokio::local_native_host::LocalNativeHost {}),

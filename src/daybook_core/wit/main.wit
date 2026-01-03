@@ -15,6 +15,7 @@ interface drawer {
     
     variant update-doc-error {
         doc-not-found,
+        branch-not-found,
         invalid-key(string),
         invalid-heads(string),
         invalid-patch(string),
@@ -26,7 +27,8 @@ interface drawer {
     ) -> result<doc, get-doc-error>;
     
     update-doc-at-heads: func(
-        heads: heads,
+        branch-name: string,
+        heads: option<heads>,
         patch: doc-patch,
     ) -> result<_, update-doc-error>;
 }

@@ -53,14 +53,14 @@ async fn test_fails_until_told() -> Res<()> {
 
     // Save the stores and keyvalue plugin to share between runs
     // Note: We'll create a new metastore for the second run so we can register
-    // the workload fresh, but we'll reuse log_store and snap_store which contain
+    // the workload fresh, but we'll reuse logstore and snap_store which contain
     // the job state and snapshots
-    let log_store = test_cx.log_store.clone();
+    let logstore = test_cx.logstore.clone();
     let snap_store = test_cx.snapstore.clone();
     let keyvalue_plugin = test_cx.keyvalue_plugin.clone();
 
     // Cleanup first run
-    test_cx.close().await?;
+    test_cx.stop().await?;
 
     // Set the keyvalue flag to true
     keyvalue_plugin
@@ -76,7 +76,7 @@ async fn test_fails_until_told() -> Res<()> {
     let shared_keyvalue = Arc::new(keyvalue_plugin.with_shared_storage());
 
     let test_cx = WflowTestContext::builder()
-        .with_log_store(log_store)
+        .with_logstore(logstore)
         .with_snapstore(snap_store)
         .with_keyvalue_plugin(shared_keyvalue)
         .initial_workloads(vec![InitialWorkload {
@@ -101,7 +101,7 @@ async fn test_fails_until_told() -> Res<()> {
         .await?;
 
     // Cleanup
-    test_cx.close().await?;
+    test_cx.stop().await?;
     tracing::info!("test complete");
 
     Ok(())

@@ -1761,6 +1761,7 @@ dependencies = [
  "tokio",
  "utils_rs",
  "uuid",
+ "wflow",
 ]
 
 [[package]]
@@ -1774,6 +1775,7 @@ dependencies = [
  "automerge",
  "autosurgeon",
  "blake3",
+ "bs58",
  "color-eyre",
  "data-encoding",
  "daybook_types",
@@ -1809,6 +1811,7 @@ dependencies = [
  "wash-runtime",
  "wash_plugin_am_repo",
  "wash_plugin_utils",
+ "wash_plugin_wflow",
  "wasmtime",
  "wflow",
 ]
@@ -7810,6 +7813,7 @@ dependencies = [
  "tracing-futures",
  "tracing-subscriber",
  "tracing-unwrap",
+ "url",
  "uuid",
 ]
 

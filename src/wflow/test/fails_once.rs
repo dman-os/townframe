@@ -1,7 +1,6 @@
 use crate::interlude::*;
 
 use crate::test::WflowTestContext;
-use crate::{AtomicKvSnapStore, KvStore, KvStoreLog, KvStoreMetadtaStore, SqliteKvStore};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_fails_once() -> Res<()> {
@@ -38,7 +37,7 @@ async fn test_fails_once() -> Res<()> {
         .await?;
 
     // Cleanup
-    test_cx.close().await?;
+    test_cx.stop().await?;
     tracing::info!("test complete");
 
     Ok(())
@@ -56,37 +55,13 @@ async fn test_fails_once_sqlite() -> Res<()> {
     .await
     .wrap_err("failed to create in-memory SQLite database")?;
 
-    // Create separate SQLite stores for each component
-    // Wrap in Arc<Arc<>> to match the pattern used by in-memory stores
-    // This is needed because AtomicKvSnapStore::new requires a concrete type S where S: KvStore
-    // and Arc<SqliteKvStore> implements KvStore, so Arc<Arc<SqliteKvStore>> works
-    let metastore_kv = Arc::new(SqliteKvStore::new(db_pool.clone(), "test_metastore").await?);
-    let log_store_kv = Arc::new(SqliteKvStore::new(db_pool.clone(), "test_log_store").await?);
-    let snapstore_kv = Arc::new(SqliteKvStore::new(db_pool.clone(), "test_snapstore").await?);
-
-    // Create the stores
-    let metastore = Arc::new(
-        KvStoreMetadtaStore::new(
-            metastore_kv.clone() as Arc<dyn KvStore + Send + Sync>,
-            wflow_core::gen::metastore::PartitionsMeta {
-                version: "0".into(),
-                partition_count: 1,
-            },
-        )
-        .await?,
-    );
-
-    let log_store = Arc::new(KvStoreLog::new(
-        log_store_kv.clone() as Arc<dyn KvStore + Send + Sync>,
-        0,
-    ));
-    let snapstore = Arc::new(AtomicKvSnapStore::new(snapstore_kv));
+    let cx = crate::Ctx::init(&db_pool).await?;
 
     // Build test context with SQLite stores
     let test_cx = WflowTestContext::builder()
-        .with_metastore(metastore)
-        .with_log_store(log_store)
-        .with_snapstore(snapstore)
+        .with_metastore(cx.metastore)
+        .with_logstore(cx.logstore)
+        .with_snapstore(cx.snapstore)
         .build()
         .await?
         .start()
@@ -121,7 +96,7 @@ async fn test_fails_once_sqlite() -> Res<()> {
         .await?;
 
     // Cleanup
-    test_cx.close().await?;
+    test_cx.stop().await?;
     tracing::info!("test complete");
 
     Ok(())
