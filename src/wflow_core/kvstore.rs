@@ -86,10 +86,10 @@ pub enum CasError {
 }
 
 impl std::fmt::Display for CasError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CasError::StoreError(err) => write!(f, "store error: {err}"),
-            CasError::CasFailed(_) => write!(f, "CAS failed, value was modified"),
+            CasError::StoreError(err) => write!(fmt, "store error: {err}"),
+            CasError::CasFailed(_) => write!(fmt, "CAS failed, value was modified"),
         }
     }
 }
@@ -182,7 +182,7 @@ impl KvStore for Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>> {
                 // Get current value
                 let current = store.get(&key).await?;
                 // Compare with snapshot
-                if current.as_ref().map(|v| v.as_ref()) == snapshot.as_ref().map(|v| v.as_ref()) {
+                if current.as_ref().map(|bytes| bytes.as_ref()) == snapshot.as_ref().map(|bytes| bytes.as_ref()) {
                     // Values match, perform swap
                     store.set(key, value).await?;
                     Ok(Ok(()))

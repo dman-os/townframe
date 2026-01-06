@@ -48,17 +48,11 @@ pub struct Rt {
 pub struct RtStopToken {
     wflow_part_handle: Option<TokioPartitionWorkerHandle>,
 }
-impl Drop for RtStopToken {
-    fn drop(&mut self) {
-        warn!("XXX dropping rt");
-    }
-}
 
 impl RtStopToken {
     pub async fn stop(mut self) -> Res<()> {
         // TODO: use a cancel token to shutdown
         // rt if stop token is dropped
-        info!("XXX stopping rt");
         self.wflow_part_handle.take().unwrap().stop().await?;
         Ok(())
     }

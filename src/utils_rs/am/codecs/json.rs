@@ -462,7 +462,6 @@ mod tests {
         doc.commit();
 
         let raw: ThroughJson<serde_json::Value> = autosurgeon::hydrate(&doc)?;
-        dbg!(raw);
 
         let commited1: ThroughJson<Foo> = autosurgeon::hydrate(&doc)?;
         let commited2: ThroughJson<Foo> =

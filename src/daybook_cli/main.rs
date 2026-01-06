@@ -445,10 +445,13 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
                     drawer: drawer.clone(),
                 };
 
-                (details.action)(sub_matches.clone(), ecx).await?;
+                let res = (details.action)(sub_matches.clone(), ecx).await;
 
                 rt_stop.stop().await?;
                 do_cleanup!();
+
+                res?;
+
                 Ok(ExitCode::SUCCESS)
             }
             _ => {

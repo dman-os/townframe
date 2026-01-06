@@ -36,6 +36,7 @@ mod interlude {
         sync::{Arc, LazyLock},
     };
 
+    #[cfg(feature = "hash")]
     pub use crate::hash::UuidExt;
     pub use async_trait::async_trait;
     pub use color_eyre::eyre::{

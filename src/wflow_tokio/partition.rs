@@ -96,7 +96,6 @@ pub struct TokioPartitionWorkerHandle {
 
 impl TokioPartitionWorkerHandle {
     pub async fn stop(mut self) -> Res<()> {
-        warn!("XXX stopping partition");
         self.cancel_token.cancel();
         // Close all effect workers first
         for worker in self.effect_workers.take().unwrap() {
@@ -111,7 +110,6 @@ impl TokioPartitionWorkerHandle {
 
 impl Drop for TokioPartitionWorkerHandle {
     fn drop(&mut self) {
-        warn!("XXX dropping partition worker");
         self.cancel_token.cancel();
     }
 }

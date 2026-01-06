@@ -14,7 +14,6 @@ pub struct TokioEffectWorkerHandle {
 
 impl TokioEffectWorkerHandle {
     pub async fn stop(mut self) -> Res<()> {
-        info!("XXX stopping effect worker");
         self.cancel_token.cancel();
         let join_handle = self.join_handle.take().expect("join_handle already taken");
         utils_rs::wait_on_handle_with_timeout(join_handle, 5 * 1000).await?;
