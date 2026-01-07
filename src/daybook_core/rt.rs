@@ -33,27 +33,30 @@ use dispatch::{
 // pub struct RtConfig {}
 
 pub struct Rt {
-    // _config: RtConfig,
-    // drawer: Arc<DrawerRepo>,
-    plugs_repo: Arc<PlugsRepo>,
-    wflow_ingress: Arc<dyn wflow::WflowIngress>,
-    dispatch_repo: Arc<dispatch::DispatchRepo>,
-    _wflow_part_state: Arc<PartitionWorkingState>,
-    wcx: wflow::Ctx,
-    _wflow_plugin: Arc<wash_plugin_wflow::WflowPlugin>,
-    wash_host: Arc<WashHost>,
-    blobs_repo: Arc<BlobsRepo>,
+    pub cancel_token: tokio_util::sync::CancellationToken,
+    pub plugs_repo: Arc<PlugsRepo>,
+    pub drawer: Arc<DrawerRepo>,
+    pub wflow_ingress: Arc<dyn wflow::WflowIngress>,
+    pub dispatch_repo: Arc<dispatch::DispatchRepo>,
+    pub acx: AmCtx,
+    pub _wflow_part_state: Arc<PartitionWorkingState>,
+    pub wcx: wflow::Ctx,
+    pub wash_host: Arc<WashHost>,
+    pub blobs_repo: Arc<BlobsRepo>,
 }
 
 pub struct RtStopToken {
     wflow_part_handle: Option<TokioPartitionWorkerHandle>,
+    repo: Arc<Rt>,
 }
 
 impl RtStopToken {
     pub async fn stop(mut self) -> Res<()> {
+        self.repo.cancel_token.cancel();
         // TODO: use a cancel token to shutdown
         // rt if stop token is dropped
         self.wflow_part_handle.take().unwrap().stop().await?;
+        self.repo.wash_host.clone().stop().await.to_eyre()?;
         Ok(())
     }
 }
@@ -76,6 +79,7 @@ pub enum DispatchArgs {
 impl Rt {
     pub async fn boot(
         wcx: wflow::Ctx,
+        acx: AmCtx,
         drawer: Arc<DrawerRepo>,
         plugs_repo: Arc<PlugsRepo>,
         dispatch_repo: Arc<DispatchRepo>,
@@ -141,22 +145,34 @@ impl Rt {
             wcx.metastore.clone(),
         ));
         let (wflow_part_handle, wflow_part_state) =
-            wflow::start_partition_worker(&wcx, Arc::clone(&wflow_plugin), 0).await?;
+            wflow::start_partition_worker(&wcx, wflow_plugin, 0).await?;
+
+        let repo = Arc::new(Self {
+            cancel_token: default(),
+            plugs_repo,
+            drawer,
+            acx,
+            wflow_ingress,
+            dispatch_repo,
+            wcx,
+            wash_host,
+            blobs_repo,
+            _wflow_part_state: wflow_part_state,
+        });
         Ok((
-            Arc::new(Self {
-                plugs_repo,
-                wflow_ingress,
-                dispatch_repo,
-                wcx,
-                _wflow_plugin: wflow_plugin,
-                wash_host,
-                blobs_repo,
-                _wflow_part_state: wflow_part_state,
-            }),
+            repo.clone(),
             RtStopToken {
+                repo,
                 wflow_part_handle: Some(wflow_part_handle),
             },
         ))
+    }
+
+    fn ensure_rt_live(&self) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("rt is shutting down")
+        }
+        Ok(())
     }
 
     pub async fn dispatch(
@@ -165,6 +181,8 @@ impl Rt {
         routine_name: &str,
         args: DispatchArgs,
     ) -> Res<String> {
+        self.ensure_rt_live()?;
+
         let plug_man = self
             .plugs_repo
             .get(plug_id)
@@ -290,6 +308,8 @@ impl Rt {
         dispatch_id: &str,
         timeout_secs: u64,
     ) -> Res<serde_json::Value> {
+        self.ensure_rt_live()?;
+
         use futures::StreamExt;
         use tokio::time::{Duration, Instant};
 
@@ -406,10 +426,11 @@ async fn ensure_bundle_workload_running(
         use wflow::wflow_core::metastore::*;
         match wcx.metastore.get_wflow(key).await? {
             Some(meta) => {
-                if let WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta { workload_id }) =
-                    &meta.service
+                if let WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta {
+                    workload_id: meta_workload_id,
+                }) = &meta.service
                 {
-                    if workload_id != workload_id {
+                    if meta_workload_id != &workload_id {
                         eyre::bail!(
                             "wflow under key '{key}' in metatstore '{meta:?}' doesn't match workload id '{workload_id}'",
                         );

@@ -99,10 +99,13 @@ impl AmCtx {
             handle_cache: default(),
         };
 
-        Ok((out, AmCtxStopToken {
-            repo,
-            change_manager_stop_token,
-        }))
+        Ok((
+            out,
+            AmCtxStopToken {
+                repo,
+                change_manager_stop_token,
+            },
+        ))
     }
 
     pub fn spawn_mpsc_connector(
@@ -166,13 +169,13 @@ impl AmCtx {
         obj_id: automerge::ObjId,
         prop_name: P,
         update: &T,
-    ) -> Res<()>
+    ) -> Res<Option<ChangeHash>>
     where
         T: Hydrate + Reconcile + Send + Sync + 'static,
         P: Into<Prop<'a>> + Send + Sync + 'static,
     {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
-        handle
+        let res = handle
             .with_document(|doc| {
                 doc.transact(|tx| {
                     autosurgeon::reconcile_prop(tx, obj_id, prop_name, update)
@@ -181,7 +184,7 @@ impl AmCtx {
                 })
             })
             .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
-        Ok(())
+        Ok(res.hash)
     }
 
     // FIXME: this actually returns an error on failing to find it
@@ -190,18 +193,22 @@ impl AmCtx {
         doc_id: &DocumentId,
         obj_id: automerge::ObjId,
         path: Vec<Prop<'static>>,
-    ) -> Res<Option<T>> {
+    ) -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         handle.with_document(|doc| {
+            let heads: Arc<[automerge::ChangeHash]> = Arc::from(doc.get_heads());
             // If path is empty and obj_id is root, use hydrate instead of hydrate_path
             if path.is_empty() && obj_id == automerge::ROOT {
                 let value: T = autosurgeon::hydrate(doc).wrap_err("error hydrating")?;
-                eyre::Ok(Some(value))
+                eyre::Ok(Some((value, heads)))
             } else {
-                match autosurgeon::hydrate_path(doc, &obj_id, path) {
-                    Ok(Some(value)) => eyre::Ok(Some(value)),
-                    Ok(None) => Err(ferr!("path not found in document")),
-                    Err(e) => Err(ferr!("error hydrating: {e:?}")),
+                match autosurgeon::hydrate_path(doc, &obj_id, path.clone()) {
+                    Ok(Some(value)) => eyre::Ok(Some((value, heads))),
+                    Ok(None) => eyre::Ok(None),
+                    Err(e) => {
+                        error!(?path, ?obj_id, "error hydrating path: {:?}", e);
+                        Err(ferr!("error hydrating: {e:?}"))
+                    }
                 }
             }
         })
@@ -213,9 +220,9 @@ impl AmCtx {
         obj_id: automerge::ObjId,
         path: Vec<Prop<'static>>,
         value: &T,
-    ) -> Res<()> {
+    ) -> Res<Option<ChangeHash>> {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
-        handle
+        let res = handle
             .with_document(|doc| {
                 doc.transact(|tx| {
                     use automerge::transaction::Transactable;
@@ -291,7 +298,7 @@ impl AmCtx {
                 })
             })
             .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
-        Ok(())
+        Ok(res.hash)
     }
 
     pub async fn reconcile_path_at_heads<T: Reconcile + Send + Sync + 'static>(
@@ -301,10 +308,10 @@ impl AmCtx {
         obj_id: automerge::ObjId,
         path: Vec<Prop<'static>>,
         value: &T,
-    ) -> Res<()> {
+    ) -> Res<Option<ChangeHash>> {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         let heads = heads.to_vec();
-        handle
+        let hash = handle
             .with_document(|doc| {
                 // Start transaction at the specified heads
                 let mut tx = doc.transaction_at(automerge::PatchLog::null(), &heads);
@@ -376,11 +383,11 @@ impl AmCtx {
                     .wrap_err("error reconciling")?;
 
                 // Commit the transaction
-                tx.commit();
-                eyre::Ok(())
+                let (hash, _log) = tx.commit();
+                eyre::Ok(hash)
             })
             .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
-        Ok(())
+        Ok(hash)
     }
 
     pub async fn hydrate_path_at_heads<T: autosurgeon::Hydrate>(
@@ -389,7 +396,7 @@ impl AmCtx {
         heads: &[automerge::ChangeHash],
         obj_id: automerge::ObjId,
         path: Vec<Prop<'static>>,
-    ) -> Result<Option<T>, HydrateAtHeadError> {
+    ) -> Result<Option<(T, Arc<[automerge::ChangeHash]>)>, HydrateAtHeadError> {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         handle.with_document(|doc| {
             let version = match doc.fork_at(heads) {
@@ -398,6 +405,7 @@ impl AmCtx {
                 }
                 val => val.wrap_err("error forking doc at change")?,
             };
+            let heads: Arc<[automerge::ChangeHash]> = Arc::from(version.get_heads());
             // If path is empty and obj_id is root, use hydrate instead of hydrate_path
             let value: Option<T> = if path.is_empty() && obj_id == automerge::ROOT {
                 Some(autosurgeon::hydrate(&version).wrap_err("error hydrating")?)
@@ -410,7 +418,7 @@ impl AmCtx {
                     }
                 }
             };
-            Ok(value)
+            Ok(value.map(|v| (v, heads)))
         })
     }
 
@@ -456,8 +464,9 @@ pub fn parse_commit_heads<S: AsRef<str>>(heads: &[S]) -> Res<Arc<[ChangeHash]>> 
     heads
         .iter()
         .map(|commit| {
-            crate::hash::decode_base58_multibase(commit.as_ref())
-                .and_then(|bytes| bytes.as_slice().try_into().wrap_err("invalid change hash"))
+            let mut buf = [0u8; 32];
+            crate::hash::decode_base58_multibase_onto(commit.as_ref(), &mut buf)?;
+            eyre::Ok(automerge::ChangeHash(buf))
         })
         .collect()
 }
@@ -468,4 +477,35 @@ pub fn serialize_commit_heads(heads: &[ChangeHash]) -> Vec<String> {
         .iter()
         .map(|commit| crate::hash::encode_base58_multibase(commit.0))
         .collect()
+}
+
+#[test]
+fn play() -> Res<()> {
+    use automerge::transaction::Transactable;
+    use automerge::ReadDoc;
+
+    let mut doc = automerge::AutoCommit::new();
+    let map = doc.put_object(automerge::ROOT, "map", automerge::ObjType::Map)?;
+    let obj1 = doc.put_object(map.clone(), "foo", automerge::ObjType::Map)?;
+    doc.put(obj1.clone(), "key1", 1)?;
+    doc.commit();
+    let commit1 = doc.get_heads();
+    doc.put(obj1.clone(), "key2", 2)?;
+    doc.put(obj1.clone(), "key3", 3)?;
+    let obj2 = doc.put_object(map.clone(), "bar", automerge::ObjType::Map)?;
+    doc.put(obj2.clone(), "key1", 1)?;
+    doc.commit();
+    let commit2 = doc.get_heads();
+
+    let patches = doc.diff(&commit1, &commit2);
+
+    let obj1 = doc.put_object(map.clone(), "foo", automerge::ObjType::Map)?;
+    doc.commit();
+    let commit3 = doc.get_heads();
+    let patches = doc.diff(&commit2, &commit3);
+    let json = doc.hydrate(automerge::ROOT, None)?;
+
+    println!("{patches:#?} {json:#?}");
+
+    Ok(())
 }

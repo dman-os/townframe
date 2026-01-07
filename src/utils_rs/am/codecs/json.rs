@@ -5,7 +5,8 @@ use automerge::ObjId;
 use automerge::*;
 use autosurgeon::{Hydrate, HydrateError, Prop, ReadDoc, Reconciler};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(transparent)]
 pub struct ThroughJson<T>(pub T);
 
 impl<T> std::ops::Deref for ThroughJson<T> {

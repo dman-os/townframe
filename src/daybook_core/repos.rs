@@ -38,7 +38,7 @@ pub trait Repo {
     {
         let id = Uuid::new_v4();
         {
-            let mut lock = self.registry().list.lock();
+            let mut lock = self.registry().list.lock().expect(ERROR_MUTEX);
             lock.push((id, ErasedListener::new::<Self::Event>(listener)));
         }
         ListenerRegistration {
@@ -74,28 +74,33 @@ impl ErasedListener {
 }
 
 pub struct ListenersRegistry {
-    // Maintain weak references to listeners to avoid leaks.
     // WARN: sync mutex, take care
-    pub list: parking_lot::Mutex<Vec<(Uuid, ErasedListener)>>,
+    pub list: std::sync::Mutex<Vec<(Uuid, ErasedListener)>>,
 }
 
 impl ListenersRegistry {
     pub fn new() -> Arc<Self> {
         Arc::new(Self { list: default() })
     }
-    pub fn notify(&self, event: impl std::any::Any + Send + Sync + 'static) {
-        let event = Arc::new(event);
-        // Iterate listeners, upgrading Weak refs and pruning dead ones.
-        let lock = self.list.lock();
-        for (_id, listener) in lock.iter() {
-            let ev = event.clone();
-            // Call synchronously; foreign side should hop to main thread as needed.
-            listener.on_event(ev);
+
+    pub fn notify<E, I>(&self, events: I)
+    where
+        E: std::any::Any + Send + Sync + 'static,
+        I: IntoIterator<Item = E>,
+    {
+        let lock = self.list.lock().expect(ERROR_MUTEX);
+        for event in events {
+            let event = Arc::new(event);
+            for (_id, listener) in lock.iter() {
+                let ev = event.clone();
+                // Call synchronously; foreign side should hop to main thread as needed.
+                listener.on_event(ev);
+            }
         }
     }
 
     pub fn dump(&self) {
-        let list = self.list.lock();
+        let list = self.list.lock().expect(ERROR_MUTEX);
         info!("ListenersRegistry: ================================================");
         for (id, _listener) in list.iter() {
             info!("- {id}");
@@ -115,7 +120,7 @@ pub struct ListenerRegistration {
 impl ListenerRegistration {
     fn unregister(&self) {
         if let Some(registry) = self.registry.upgrade() {
-            let mut lock = registry.list.lock();
+            let mut lock = registry.list.lock().expect(ERROR_MUTEX);
             lock.retain(|(lid, _)| *lid != self.id);
         }
     }
@@ -125,7 +130,7 @@ impl Drop for ListenerRegistration {
     fn drop(&mut self) {
         if let Some(registry) = self.registry.upgrade() {
             // Best-effort cleanup
-            let mut lock = registry.list.lock();
+            let mut lock = registry.list.lock().expect(ERROR_MUTEX);
             lock.retain(|(lid, _)| *lid != self.id);
         }
     }

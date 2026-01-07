@@ -264,7 +264,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             // TODO: replace with tempfile crate usage
             let tmp_dir = std::env::temp_dir();
             let tmp_path = tmp_dir.join(format!("daybook-edit-{}.json", id));
-            std::fs::write(&tmp_path, &content)?;
+            tokio::fs::write(&tmp_path, &content).await?;
 
             // Open editor
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
@@ -275,7 +275,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             }
 
             // Read back and compare
-            let new_content = std::fs::read_to_string(&tmp_path)?;
+            let new_content = tokio::fs::read_to_string(&tmp_path).await?;
             let new_doc: daybook_types::doc::Doc = serde_json::from_str(&new_content)
                 .wrap_err("Failed to parse modified document as JSON")?;
 
@@ -291,7 +291,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             }
 
             // Cleanup
-            let _ = std::fs::remove_file(&tmp_path);
+            tokio::fs::remove_file(&tmp_path).await?;
         }
     }
     drawer_stop.stop().await?;
@@ -356,11 +356,11 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     let mut command_details: HashMap<String, ClapReadyCommand> = default();
     for plug_man in plugs.iter() {
         let plug_id: Arc<str> = plug_man.id().into();
-        for com_man in plug_man.commands.iter() {
-            let details = ready_command_clap(plug_id.clone(), plug_man, com_man)?;
+        for (com_name, com_man) in plug_man.commands.iter() {
+            let details = ready_command_clap(plug_id.clone(), plug_man, &com_name.0, com_man)?;
 
             // we check for clash of command names first
-            if let Some(clash) = command_details.remove(&com_man.name[..]) {
+            if let Some(clash) = command_details.remove(&com_name.0[..]) {
                 // we use the fqcn for both clashing items as the command names
                 if let Some(old) = command_details.insert(clash.fqcn.clone(), clash) {
                     panic!("fqcn clash: {}", old.fqcn);
@@ -369,7 +369,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
                     panic!("fqcn clash: {}", old.fqcn);
                 }
             } else {
-                if let Some(old) = command_details.insert(com_man.name.0.clone(), details) {
+                if let Some(old) = command_details.insert(com_name.0.clone(), details) {
                     panic!("fqcn clash: {}", old.fqcn);
                 }
             }
@@ -433,6 +433,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
                 let wcx = wflow::Ctx::init(&ctx.sql.db_pool).await?;
                 let (rt, rt_stop) = daybook_core::rt::Rt::boot(
                     wcx,
+                    ctx.acx.clone(),
                     drawer.clone(),
                     plugs_repo.clone(),
                     dispatch_repo.clone(),
@@ -564,9 +565,10 @@ type CliCommandAction = Box<
 fn ready_command_clap(
     plug_id: Arc<str>,
     plug_man: &Arc<manifest::PlugManifest>,
+    com_name: &str,
     com_man: &Arc<manifest::CommandManifest>,
 ) -> Res<ClapReadyCommand> {
-    let mut clap_cmd = clap::Command::new(com_man.name.0.clone())
+    let mut clap_cmd = clap::Command::new(com_name.to_string())
         .long_about(com_man.desc.clone())
         .before_help(format!("From the {plug_id} plug."))
         .styles(CLAP_STYLE);
@@ -577,7 +579,7 @@ fn ready_command_clap(
                 ferr!(
                     "routine not found '{routine_name}' specified by command \
                             '{cmd_name}' not found",
-                    cmd_name = com_man.name.0
+                    cmd_name = com_name
                 )
             })?;
             clap_cmd = clap_cmd
@@ -650,7 +652,7 @@ Routine impl: {routine_impl:?}
 
     Ok(ClapReadyCommand {
         clap: clap_cmd,
-        fqcn: format!("{plug_id}/{name}", name = &com_man.name[..]),
+        fqcn: format!("{plug_id}/{name}", name = com_name),
         man: com_man.clone(),
         src_plug_id: plug_id.clone(),
         action,

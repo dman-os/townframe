@@ -17,7 +17,6 @@ use tokio_util::sync::CancellationToken;
 pub struct ChangeNotification {
     pub patch: Arc<automerge::Patch>,
     pub heads: Arc<[automerge::ChangeHash]>,
-    // TODO: timestamp
 }
 
 #[cfg(feature = "automerge-repo")]
@@ -173,7 +172,7 @@ impl ChangeListenerManager {
                 };
                 let (new_heads, all_changes) = handle.with_document(|doc| {
                     let patches = doc.diff(&heads, &changes.new_heads[..]);
-                    let new_heads: Arc<[automerge::ChangeHash]> = changes.new_heads.into();
+                    let new_heads: Arc<[automerge::ChangeHash]> = Arc::from(&changes.new_heads[..]);
 
                     let collected_changes = patches
                         .into_iter()
@@ -181,7 +180,7 @@ impl ChangeListenerManager {
                             let patch = Arc::new(patch);
                             ChangeNotification {
                                 patch,
-                                heads: new_heads.clone(),
+                                heads: Arc::clone(&new_heads),
                             }
                         })
                         .collect::<Vec<_>>();
@@ -270,7 +269,8 @@ impl ChangeListenerManager {
                     let mut relevant_notifications = Vec::new();
 
                     for notification in &notifications {
-                        if path_matches(&listener.filter.path, &notification.patch.path[..]) {
+                        if path_prefix_matches(&listener.filter.path, &notification.patch.path[..])
+                        {
                             relevant_notifications.push(notification.clone());
                         }
                     }
@@ -313,7 +313,7 @@ impl Drop for ChangeListenerRegistration {
 
 /// Check if a change path matches a listener path (including subpaths)
 #[cfg(feature = "automerge-repo")]
-pub fn path_matches(
+pub fn path_prefix_matches(
     listener_path: &[Prop<'_>],
     change_path: &[(automerge::ObjId, automerge::Prop)],
 ) -> bool {

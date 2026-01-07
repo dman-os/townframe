@@ -1,12 +1,10 @@
 use crate::interlude::*;
 
 use crate::plugs::{manifest::PropKeyDisplayHint, PlugsRepo};
-use crate::rt::triage::TriageConfig;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Reconcile, Hydrate)]
 pub struct ConfigStore {
-    pub triage: TriageConfig,
     pub prop_display: HashMap<String, ThroughJson<PropKeyDisplayHint>>,
 }
 
@@ -40,7 +38,6 @@ impl Default for ConfigStore {
         );
 
         Self {
-            triage: TriageConfig::default(),
             prop_display: key_configs,
         }
     }
@@ -162,13 +159,9 @@ impl ConfigRepo {
                 }
             };
             // Config changed, notify listeners
-            self.registry.notify(ConfigEvent::Changed);
+            self.registry.notify([ConfigEvent::Changed]);
         }
         Ok(())
-    }
-
-    pub async fn get_triage_config_sync(&self) -> TriageConfig {
-        self.store.query_sync(|store| store.triage.clone()).await
     }
 
     pub async fn get_config_heads(&self) -> Res<Arc<[automerge::ChangeHash]>> {
@@ -179,22 +172,6 @@ impl ConfigRepo {
             .ok_or_eyre("app doc not found")?;
         let heads = handle.with_document(|doc| doc.get_heads());
         Ok(Arc::from(heads))
-    }
-
-    pub async fn add_processor(
-        &self,
-        processor_id: String,
-        processor: crate::rt::triage::Processor,
-    ) -> Res<()> {
-        if self.cancel_token.is_cancelled() {
-            eyre::bail!("repo is stopped");
-        }
-        self.store
-            .mutate_sync(move |store| {
-                store.triage.processors.insert(processor_id, processor);
-            })
-            .await?;
-        Ok(())
     }
 
     pub async fn get_prop_display_hint(&self, key: String) -> Option<PropKeyDisplayHint> {

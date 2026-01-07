@@ -550,7 +550,7 @@ impl TablesRepo {
             }
         }
         for evt in events.drain(..) {
-            self.registry.notify(evt);
+            self.registry.notify([evt]);
         }
         Ok(())
     }
@@ -609,11 +609,12 @@ impl TablesRepo {
 
                 let old = store.windows.insert(id, val);
 
-                self.registry.notify(TablesEvent::WindowChanged { id });
-                self.registry.notify(TablesEvent::ListChanged);
+                self.registry
+                    .notify([TablesEvent::WindowChanged { id }, TablesEvent::ListChanged]);
                 old
             })
             .await
+            .map(|(res, _)| res)
     }
 
     pub async fn list_windows(&self) -> Res<Vec<Window>> {
@@ -636,7 +637,7 @@ impl TablesRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let old = self
+        let (old, _) = self
             .store
             .mutate_sync(|store| {
                 // Get old tab to check for panel changes
@@ -662,16 +663,15 @@ impl TablesRepo {
             .await?;
 
         // Send cascading events using indices (read from indices)
-        self.registry.notify(TablesEvent::TabChanged { id });
+        let mut notifs = vec![TablesEvent::TabChanged { id }];
         if let Some(table_id) = self.find_table_for_tab(id).await {
-            self.registry
-                .notify(TablesEvent::TableChanged { id: table_id });
+            notifs.push(TablesEvent::TableChanged { id: table_id });
         }
         if let Some(window_id) = self.find_window_for_tab(id).await {
-            self.registry
-                .notify(TablesEvent::WindowChanged { id: window_id });
+            notifs.push(TablesEvent::WindowChanged { id: window_id });
         }
-        self.registry.notify(TablesEvent::ListChanged);
+        notifs.push(TablesEvent::ListChanged);
+        self.registry.notify(notifs);
         Ok(old)
     }
 
@@ -695,7 +695,7 @@ impl TablesRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let old = self
+        let (old, _) = self
             .store
             .mutate_sync(|store| {
                 // Get old table to check for tab changes
@@ -743,8 +743,8 @@ impl TablesRepo {
             })
             .await?;
 
-        self.registry.notify(TablesEvent::TableChanged { id });
-        self.registry.notify(TablesEvent::ListChanged);
+        self.registry
+            .notify([TablesEvent::TableChanged { id }, TablesEvent::ListChanged]);
         Ok(old)
     }
 
@@ -752,7 +752,7 @@ impl TablesRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let tables = self
+        let (tables, _) = self
             .store
             .mutate_sync(|store| {
                 let tables: Vec<Table> = store.tables.values().cloned().collect();
@@ -778,25 +778,26 @@ impl TablesRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let old = self
+        let (old, _) = self
             .store
             .mutate_sync(|store| store.panels.insert(id, val))
             .await?;
 
         // Send cascading events using indices (read from indices)
-        self.registry.notify(TablesEvent::PanelChanged { id });
+        self.registry.notify([TablesEvent::PanelChanged { id }]);
         if let Some(tab_id) = self.find_tab_for_panel(id).await {
-            self.registry.notify(TablesEvent::TabChanged { id: tab_id });
+            self.registry
+                .notify([TablesEvent::TabChanged { id: tab_id }]);
             if let Some(table_id) = self.find_table_for_tab(tab_id).await {
                 self.registry
-                    .notify(TablesEvent::TableChanged { id: table_id });
+                    .notify([TablesEvent::TableChanged { id: table_id }]);
             }
             if let Some(window_id) = self.find_window_for_tab(tab_id).await {
                 self.registry
-                    .notify(TablesEvent::WindowChanged { id: window_id });
+                    .notify([TablesEvent::WindowChanged { id: window_id }]);
             }
         }
-        self.registry.notify(TablesEvent::ListChanged);
+        self.registry.notify([TablesEvent::ListChanged]);
         Ok(old)
     }
 
@@ -864,7 +865,7 @@ impl TablesRepo {
             })
             .await?;
 
-        self.registry.notify(TablesEvent::ListChanged);
+        self.registry.notify([TablesEvent::ListChanged]);
         Ok(())
     }
 
@@ -891,7 +892,7 @@ impl TablesRepo {
 
     // Create a new table with a default tab and panel
     pub async fn create_new_table(&self) -> Res<Uuid> {
-        let table_id = self
+        let (table_id, _) = self
             .store
             .mutate_sync(|store| {
                 let table_id = Uuid::new_v4();
@@ -963,8 +964,8 @@ impl TablesRepo {
             .await?;
 
         self.registry
-            .notify(TablesEvent::TableChanged { id: table_id });
-        self.registry.notify(TablesEvent::ListChanged);
+            .notify([TablesEvent::TableChanged { id: table_id }]);
+        self.registry.notify([TablesEvent::ListChanged]);
 
         Ok(table_id)
     }
@@ -972,7 +973,7 @@ impl TablesRepo {
     // Create a new tab for an existing table
     pub async fn create_new_tab(&self, table_id: Uuid) -> Res<Uuid> {
         // Single lock: use try_mutate so we can return errors inside the closure
-        let tab_id = self
+        let (tab_id, _) = self
             .store
             .try_mutate_sync(move |store| {
                 // Get the table window policy (owned) to avoid borrowing across await
@@ -1043,8 +1044,8 @@ impl TablesRepo {
             .await?;
 
         self.registry
-            .notify(TablesEvent::TableChanged { id: table_id });
-        self.registry.notify(TablesEvent::ListChanged);
+            .notify([TablesEvent::TableChanged { id: table_id }]);
+        self.registry.notify([TablesEvent::ListChanged]);
 
         Ok(tab_id)
     }
@@ -1052,7 +1053,7 @@ impl TablesRepo {
     // Remove a tab and its panel
     pub async fn remove_tab(&self, tab_id: Uuid) -> Res<()> {
         // Single lock: read and mutate inside try_mutate to avoid double-lock
-        let table_id = self
+        let (table_id, _) = self
             .store
             .try_mutate_sync(|store| {
                 // Read needed values owned (avoid borrowing across await)
@@ -1131,9 +1132,9 @@ impl TablesRepo {
 
         if let Some(table_id) = table_id {
             self.registry
-                .notify(TablesEvent::TableChanged { id: table_id });
+                .notify([TablesEvent::TableChanged { id: table_id }]);
         }
-        self.registry.notify(TablesEvent::ListChanged);
+        self.registry.notify([TablesEvent::ListChanged]);
 
         Ok(())
     }

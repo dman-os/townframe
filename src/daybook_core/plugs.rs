@@ -19,6 +19,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             routines: default(),
             wflow_bundles: default(),
             commands: default(),
+            processors: default(),
             props: vec![
                 PropKeyManifest {
                     key_tag: WellKnownPropTag::RefGeneric.into(),
@@ -85,17 +86,35 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 ),
             ]
             .into(),
-            commands: vec![
+            commands: [
                 //
-                CommandManifest {
-                    name: "pseudo-label".into(),
-                    desc: "Use LLM to label the document".into(),
-                    deets: CommandDeets::DocCommand {
-                        routine_name: "pseudo-label".into(),
-                    },
-                }
-                .into(),
-            ],
+                (
+                    "pseudo-label".into(),
+                    CommandManifest {
+                        desc: "Use LLM to label the document".into(),
+                        deets: CommandDeets::DocCommand {
+                            routine_name: "pseudo-label".into(),
+                        },
+                    }
+                    .into(),
+                ),
+            ]
+            .into(),
+            processors: [
+                //
+                (
+                    "pseudo-label".into(),
+                    ProcessorManifest {
+                        desc: "Use LLM to label the document".into(),
+                        deets: ProcessorDeets::DocProcessor {
+                            routine_name: "pseudo-label".into(),
+                            predicate: DocPredicateClause::HasTag(WellKnownPropTag::Content.into()),
+                        },
+                    }
+                    .into(),
+                ),
+            ]
+            .into(),
             routines: [
                 //
                 (
@@ -221,9 +240,9 @@ pub struct PlugsRepo {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PlugsEvent {
-    ListChanged,
-    PlugChanged { id: String },
-    PlugDeleted { id: String },
+    ListChanged { commit: ChangeHashSet },
+    PlugChanged { id: String, commit: ChangeHashSet },
+    PlugDeleted { id: String, commit: ChangeHashSet },
 }
 
 impl crate::repos::Repo for PlugsRepo {
@@ -338,45 +357,47 @@ impl PlugsRepo {
     ) -> Res<()> {
         events.clear();
         for notif in notifs {
+            let commit = ChangeHashSet(notif.heads.clone());
             match &notif.patch.action {
                 automerge::PatchAction::PutMap { key, .. } => {
                     if notif.patch.path.len() >= 2 {
                         match &notif.patch.path[1].1 {
                             automerge::Prop::Map(path_key) => match path_key.as_ref() {
-                                "manifests" => {
-                                    events.push(PlugsEvent::PlugChanged { id: key.into() })
-                                }
-                                _ => events.push(PlugsEvent::ListChanged),
+                                "manifests" => events.push(PlugsEvent::PlugChanged {
+                                    id: key.into(),
+                                    commit,
+                                }),
+                                _ => events.push(PlugsEvent::ListChanged { commit }),
                             },
-                            _ => events.push(PlugsEvent::ListChanged),
+                            _ => events.push(PlugsEvent::ListChanged { commit }),
                         }
                     } else {
-                        events.push(PlugsEvent::ListChanged);
+                        events.push(PlugsEvent::ListChanged { commit });
                     }
                 }
                 automerge::PatchAction::DeleteMap { key } => {
                     if notif.patch.path.len() >= 2 {
                         match &notif.patch.path[1].1 {
                             automerge::Prop::Map(path_key) => match path_key.as_ref() {
-                                "manifests" => {
-                                    events.push(PlugsEvent::PlugDeleted { id: key.into() })
-                                }
-                                _ => events.push(PlugsEvent::ListChanged),
+                                "manifests" => events.push(PlugsEvent::PlugDeleted {
+                                    id: key.into(),
+                                    commit,
+                                }),
+                                _ => events.push(PlugsEvent::ListChanged { commit }),
                             },
-                            _ => events.push(PlugsEvent::ListChanged),
+                            _ => events.push(PlugsEvent::ListChanged { commit }),
                         }
                     } else {
-                        events.push(PlugsEvent::ListChanged);
+                        events.push(PlugsEvent::ListChanged { commit });
                     }
                 }
                 _ => {
                     // For other operations, send ListChanged
+                    events.push(PlugsEvent::ListChanged { commit });
                 }
             }
         }
-        for evt in events.drain(..) {
-            self.registry.notify(evt);
-        }
+        self.registry.notify(events.drain(..));
         Ok(())
     }
 
@@ -451,7 +472,7 @@ impl PlugsRepo {
     ///
     /// This method follows a literate programming approach to clearly document
     /// the validation and reconciliation steps.
-    pub async fn add(&self, manifest: manifest::PlugManifest) -> Res<()> {
+    pub async fn add(&self, mut manifest: manifest::PlugManifest) -> Res<()> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
@@ -466,21 +487,24 @@ impl PlugsRepo {
 
         // 1.5 Convert file:// URLs to db+blob:// URLs
         // This ensures that all components are stored in the BlobsRepo for portability.
-        // for bundle in manifest.wflow_bundles.values_mut() {
-        //     let bundle = Arc::make_mut(bundle);
-        //     for url in bundle.component_urls.iter_mut() {
-        //         if url.scheme() == "file" {
-        //             let path = url
-        //                 .to_file_path()
-        //                 .map_err(|_| eyre::eyre!("invalid file path in url: {}", url))?;
-        //             let data = tokio::fs::read(&path).await.wrap_err_with(|| {
-        //                 format!("failed to read component file: {}", path.display())
-        //             })?;
-        //             let hash = self.blobs.put(&data).await?;
-        //             *url = url::Url::parse(&format!("{}:///{}", crate::blobs::BLOB_SCHEME, hash))?;
-        //         }
-        //     }
-        // }
+        if !cfg!(debug_assertions) {
+            for bundle in manifest.wflow_bundles.values_mut() {
+                let bundle = Arc::make_mut(bundle);
+                for url in bundle.component_urls.iter_mut() {
+                    if url.scheme() == "file" {
+                        let path = url
+                            .to_file_path()
+                            .map_err(|_| eyre::eyre!("invalid file path in url: {}", url))?;
+                        let data = tokio::fs::read(&path).await.wrap_err_with(|| {
+                            format!("failed to read component file: {}", path.display())
+                        })?;
+                        let hash = self.blobs.put(&data).await?;
+                        *url =
+                            url::Url::parse(&format!("{}:///{}", crate::blobs::BLOB_SCHEME, hash))?;
+                    }
+                }
+            }
+        }
 
         // 2. Perform Automerge reconciliation
         // Once validated, we update the Automerge store.
@@ -488,7 +512,8 @@ impl PlugsRepo {
         // to simplify lookups and ensure uniqueness.
         let plug_id = manifest.id();
 
-        self.store
+        let (_, commit) = self
+            .store
             .mutate_sync(move |store| {
                 // Update the manifest in the store
                 store
@@ -503,8 +528,10 @@ impl PlugsRepo {
             })
             .await?;
 
+        let commit = ChangeHashSet(commit.into_iter().collect());
+
         // Notify listeners that the plug list or a specific plug has changed
-        self.registry.notify(PlugsEvent::ListChanged);
+        self.registry.notify([PlugsEvent::ListChanged { commit }]);
 
         Ok(())
     }
@@ -549,16 +576,16 @@ impl PlugsRepo {
             if !is_major {
                 // In non-major updates, we must ensure existing commands are preserved
                 // to avoid breaking integrations or automated workflows.
-                for old_cmd in &old.commands {
-                    let new_cmd = manifest.commands.iter().find(|c| c.name == old_cmd.name);
+                for (old_cmd_name, old_cmd) in &old.commands {
+                    let new_cmd = manifest.commands.get(old_cmd_name);
                     if let Some(new_cmd) = new_cmd {
                         // Deets define the routine and parameters; changing them breaks callers.
                         // FIXME: we need a better comparison for CommandDeets if it's complex
                         if format!("{:?}", new_cmd.deets) != format!("{:?}", old_cmd.deets) {
-                            eyre::bail!("Breaking change: command '{}' deets cannot change in non-major version update", old_cmd.name);
+                            eyre::bail!("Breaking change: command '{}' deets cannot change in non-major version update", old_cmd_name);
                         }
                     } else {
-                        eyre::bail!("Breaking change: command '{}' cannot be removed in non-major version update", old_cmd.name);
+                        eyre::bail!("Breaking change: command '{}' cannot be removed in non-major version update", old_cmd_name);
                     }
                 }
             }
@@ -666,13 +693,14 @@ impl PlugsRepo {
             }
         }
 
-        for cmd in &manifest.commands {
+        for (cmd_name, cmd) in &manifest.commands {
             match &cmd.deets {
                 manifest::CommandDeets::DocCommand { routine_name } => {
                     if !manifest.routines.contains_key(routine_name) {
                         eyre::bail!(
-                            "Invalid command deets: routine '{}' not found in plug",
-                            routine_name
+                            "Invalid command deets: routine '{}' not found in plug (command='{}')",
+                            routine_name,
+                            cmd_name
                         );
                     }
                 }
@@ -862,7 +890,8 @@ mod tests {
             dependencies: default(),
             routines: default(),
             wflow_bundles: default(),
-            commands: vec![],
+            commands: default(),
+            processors: default(),
         }
     }
 
@@ -968,9 +997,9 @@ mod tests {
         // Initial version
         let mut p1_v1 = mock_plug("plug1");
         p1_v1.version = "0.1.0".parse().unwrap();
-        p1_v1.commands.push(
+        p1_v1.commands.insert(
+            "cmd1".into(),
             manifest::CommandManifest {
-                name: "cmd1".into(),
                 desc: "First command".into(),
                 deets: manifest::CommandDeets::DocCommand {
                     routine_name: "routine1".into(),

@@ -19,6 +19,7 @@ schemars = ["dep:schemars"]
 # encoding
 serde.workspace = true
 serde_json.workspace = true
+serde_with.workspace = true
 struct-patch.workspace = true
 schemars = { version = "1", features = ["uuid1"], optional = true }
 

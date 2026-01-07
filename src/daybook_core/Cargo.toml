@@ -43,7 +43,6 @@ tracing-unwrap.workspace = true
 # ds
 once_cell.workspace = true
 time.workspace = true
-parking_lot.workspace = true
 url.workspace = true
 garde.workspace = true
 struct-patch.workspace = true

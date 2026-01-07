@@ -122,3 +122,4 @@
   - I.e. codebase should require low-effort maintaince
 - No walled garden
   - Easily find new uses for their vault
+- Long term recoverability and usability of these documents is very important

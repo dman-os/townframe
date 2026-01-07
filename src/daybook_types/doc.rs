@@ -106,6 +106,13 @@ impl From<DocPropTag> for DocPropKey {
 
 impl DocPropKey {
     pub const TAG_ID_SEPARATOR: char = '/';
+
+    pub fn tag(&self) -> &DocPropTag {
+        match self {
+            Self::Tag(tag) => tag,
+            Self::TagAndId { tag, .. } => tag,
+        }
+    }
 }
 
 pub type DocProp = serde_json::Value;
@@ -152,6 +159,7 @@ pub struct Doc {
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     // FIXME: I'm not sure I like this
+    // FIXME: consider flattening
     pub props: HashMap<DocPropKey, DocProp>,
 }
 
@@ -227,7 +235,7 @@ pub struct DocAddedEvent {
 }
 
 #[cfg(feature = "automerge")]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ChangeHashSet(pub Arc<[automerge::ChangeHash]>);
 
 #[cfg(feature = "automerge")]
@@ -713,6 +721,91 @@ mod ser_de {
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
             })
+        }
+    }
+
+    struct EfficientChangeHash(automerge::ChangeHash);
+
+    impl Serialize for EfficientChangeHash {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            if serializer.is_human_readable() {
+                utils_rs::hash::encode_base58_multibase(&self.0 .0).serialize(serializer)
+            } else {
+                serializer.serialize_bytes(&self.0 .0)
+            }
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for EfficientChangeHash {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            if deserializer.is_human_readable() {
+                let str = String::deserialize(deserializer)?;
+                let mut buf = [0u8; 32];
+                utils_rs::hash::decode_base58_multibase_onto(&str, &mut buf)
+                    .map_err(serde::de::Error::custom)?;
+                Ok(Self(automerge::ChangeHash(buf)))
+            } else {
+                struct MyVisitor;
+                impl<'de> serde::de::Visitor<'de> for MyVisitor {
+                    type Value = [u8; 32];
+
+                    fn expecting(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+                        fmt.write_str("a 32 length byte string")
+                    }
+
+                    fn visit_bytes<E>(self, val: &[u8]) -> Result<Self::Value, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        if val.len() != 32 {
+                            return Err(serde::de::Error::invalid_length(
+                                val.len(),
+                                &"32 length byte array",
+                            ));
+                        }
+                        let mut buf = [0u8; 32];
+                        buf.copy_from_slice(val);
+                        Ok(buf)
+                    }
+                }
+                deserializer
+                    .deserialize_str(MyVisitor)
+                    .map(|buf| Self(automerge::ChangeHash(buf)))
+                //deserializer.deserialize_bytes(&self.0 .0)
+            }
+        }
+    }
+
+    impl Serialize for ChangeHashSet {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            use serde::ser::SerializeSeq;
+            let mut seq = serializer.serialize_seq(Some(self.len()))?;
+            for hash in &self.0[..] {
+                seq.serialize_element(&EfficientChangeHash(hash.clone()))?;
+            }
+            seq.end()
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for ChangeHashSet {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            // FIXME: optimze for non-human readable formats
+            let set = <Vec<String>>::deserialize(deserializer)?;
+            Ok(Self(
+                utils_rs::am::parse_commit_heads(&set).map_err(serde::de::Error::custom)?,
+            ))
         }
     }
 }

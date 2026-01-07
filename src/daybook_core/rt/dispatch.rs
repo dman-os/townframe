@@ -2,13 +2,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::interlude::*;
 
-#[derive(Hydrate, Reconcile, Serialize, Deserialize)]
+#[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug)]
 pub struct ActiveDispatch {
     pub deets: ActiveDispatchDeets,
     pub args: ActiveDispatchArgs,
 }
 
-#[derive(Hydrate, Reconcile, Serialize, Deserialize)]
+#[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug)]
 pub enum ActiveDispatchDeets {
     Wflow {
         entry_id: u64,
@@ -19,12 +19,12 @@ pub enum ActiveDispatchDeets {
     },
 }
 
-#[derive(Hydrate, Reconcile, Serialize, Deserialize)]
+#[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug)]
 pub enum ActiveDispatchArgs {
     PropRoutine(PropRoutineArgs),
 }
 
-#[derive(Hydrate, Reconcile, Serialize, Deserialize)]
+#[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug)]
 pub struct PropRoutineArgs {
     pub doc_id: daybook_types::doc::DocId,
     pub branch_name: String,
@@ -205,15 +205,13 @@ impl DispatchRepo {
                 }
             }
         }
-        for evt in events.drain(..) {
-            self.registry.notify(evt);
-        }
+        self.registry.notify(events.drain(..));
         Ok(())
     }
 
     pub async fn get(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
         self.store
-            .query_sync(|store| store.active_dispatches.get(id).cloned())
+            .query_sync(|store| store.active_dispatches.get(id).map(Arc::clone))
             .await
     }
 
@@ -221,13 +219,14 @@ impl DispatchRepo {
         self.store
             .query_sync(|store| {
                 let disp_id = store.wflow_to_dispatch.get(job_id)?;
-                store.active_dispatches.get(disp_id).cloned()
+                store.active_dispatches.get(disp_id).map(Arc::clone)
             })
             .await
     }
 
     pub async fn add(&self, id: String, dispatch: Arc<ActiveDispatch>) -> Res<()> {
-        let old = self
+        debug!(?id, "adding dispatch to repo");
+        let (old, commit) = self
             .store
             .mutate_sync(|store| {
                 match &dispatch.deets {
@@ -241,14 +240,17 @@ impl DispatchRepo {
                 store.active_dispatches.insert(id, dispatch)
             })
             .await?;
+        debug!(?commit, "dispatch added to repo");
         assert!(old.is_none(), "fishy");
         Ok(())
     }
 
     pub async fn remove(&self, id: &str) -> Res<Option<Arc<ActiveDispatch>>> {
-        self.store
+        let (old, _hash) = self
+            .store
             .mutate_sync(|store| store.active_dispatches.remove(id))
-            .await
+            .await?;
+        Ok(old)
     }
 
     pub async fn list(&self) -> Vec<(String, Arc<ActiveDispatch>)> {
@@ -257,7 +259,7 @@ impl DispatchRepo {
                 store
                     .active_dispatches
                     .iter()
-                    .map(|(key, item)| (key.clone(), Arc::clone(item)))
+                    .map(|(key, item)| (key.clone(), Arc::clone(&item)))
                     .collect()
             })
             .await

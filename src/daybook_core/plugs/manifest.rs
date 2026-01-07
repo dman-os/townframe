@@ -112,8 +112,9 @@ pub struct PlugManifest {
     #[garde(dive)]
     pub wflow_bundles: HashMap<KeyGeneric, Arc<WflowBundleManifest>>,
     #[garde(dive)]
-    pub commands: Vec<Arc<CommandManifest>>,
-    // processors: Vec<PluginProcessorManifest>,
+    pub commands: HashMap<KeyGeneric, Arc<CommandManifest>>,
+    #[garde(dive)]
+    pub processors: HashMap<KeyGeneric, Arc<ProcessorManifest>>,
 }
 
 impl PlugManifest {
@@ -228,15 +229,14 @@ pub enum RoutineImpl {
 pub enum RoutineManifestDeets {
     /// Routine that can be invoked on a document with rw access on whole doc
     DocInvoke {},
-    /// Routine that is invoked when a pending prop is in a doc with ro access
+    /// Routine that is invoked when with ro access
     /// to doc but rw access on prop.
     DocProp {
         #[garde(dive)]
         working_prop_tag: PropTag,
     },
-    // DocCollator {},
-    // PredicateToDocProp {},
-    // InvokeOnPredicate {},
+    // DocCollator { predicate },
+    // DocPropCollator { predicate },
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -257,8 +257,6 @@ pub struct RoutinePropAccess {
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandManifest {
-    #[garde(dive)]
-    pub name: KeyGeneric,
     #[garde(length(min = 1))]
     pub desc: String,
 
@@ -271,14 +269,51 @@ pub struct CommandManifest {
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum CommandDeets {
-    // NOTE: behavior differs depending on the routine
-    //  - if a DocInvoke, it's invoked
-    //  - If a DocProp routine, the prop is added with pending payload
-    //  - if InvokeOnPredicate, we re-check for predicates and run on matches
-    //  - if PredicateToDocProp, we check predicates and add props
-    //  - if DocCollator, we just run collator
     DocCommand {
         #[garde(dive)]
         routine_name: KeyGeneric,
     },
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessorManifest {
+    #[garde(length(min = 1))]
+    pub desc: String,
+    #[garde(dive)]
+    pub deets: ProcessorDeets,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum ProcessorDeets {
+    /// Tests `predicate` whenever a doc changes and
+    DocProcessor {
+        #[garde(dive)]
+        predicate: DocPredicateClause,
+        #[garde(dive)]
+        routine_name: KeyGeneric,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum DocPredicateClause {
+    HasTag(#[garde(dive)] PropTag),
+    Or(#[garde(dive)] Vec<DocPredicateClause>),
+    And(#[garde(dive)] Vec<DocPredicateClause>),
+    Not(#[garde(dive)] Box<DocPredicateClause>),
+}
+
+impl DocPredicateClause {
+    pub fn matches(&self, doc: &daybook_types::doc::Doc) -> bool {
+        match self {
+            DocPredicateClause::HasTag(tag) => {
+                doc.props.keys().any(|key| key.tag().to_string() == tag.0)
+            }
+            DocPredicateClause::Or(clauses) => clauses.iter().any(|c| c.matches(doc)),
+            DocPredicateClause::And(clauses) => clauses.iter().all(|c| c.matches(doc)),
+            DocPredicateClause::Not(clause) => !clause.matches(doc),
+        }
+    }
 }

@@ -7,35 +7,19 @@
   - [x] CLI support
     - [ ] Make it nice
   - [ ] GUI support
-- [ ] Constrain value shapes for known keys
 - [ ] Plugins
   - [x] Manifest
   - [ ] Commands
     - [x] `daybook x command`
   - [ ] Rt
-    - [ ] Wflow preparation
+    - [x] Wflow preparation
     - [ ] Predicates
   - [ ] Handlers
   - [ ] Processors
-  - [ ] OCI (8 hrs)
-- [ ] Cleanup for public alpha (16 hrs)
-- [ ] daybook_server (1 week)
+  - [ ] OCI
+- [ ] daybook_server
   - [ ] Decide on wrpc vs json
-- [ ] Overhaul bottom bar (8 hrs)
-- [ ] Receipt parsing (8 hrs)
-- [ ] Local inference
-- [ ] wflow
-  - [ ] Non-wasm impl
-    - [ ] Catch panics
-  - [x] in-memory smoke
-  - [ ] Ingress workload
-  - [ ] Durablity
-  - [x] Snapshots
-  - [ ] Use flatbuffers instead of JSON
-  - [ ] web UI
-  - [ ] Service for wflow_tokio
-- [ ] pauperfuse (48 hrs)
-- [ ] CI/CD (48 hrs)
+- [ ] CI/CD
   - [ ] Publish
     - [ ] Docker image
     - [ ] WASM OCI
@@ -45,11 +29,38 @@
       - [ ] to Flathub
     - [ ] Windows.exe
       - [ ] to Scoop.sh
-  - [ ] Deploy
-    - [ ] Buy domain
-      - [ ] https://daybook.tf
-      - [ ] https://daybook.com
-      - [ ] https://db.tf
+- [ ] Overhaul bottom bar
+- [ ] Constrain value shapes for known keys at drawer
+- [ ] Receipt parsing
+- [ ] Pending jobs
+
+- [ ] Cleanup for public pre-alpha
+
+- [ ] daybook_cli
+    - [ ] `daybook pset docId propKey value`
+    - [ ] `daybook pget docId propKey`
+- [ ] Cancellation and shutdown
+  - [ ] Kotlin repo's should call close
+  - [ ] Assert samod fsyncs reliably
+  - [ ] Notification handling
+    - [ ] How to avoid missing triage work?
+- [ ] Local inference
+- [ ] wflow
+  - [ ] Non-wasm impl
+    - [ ] Catch panics
+  - [x] in-memory smoke
+  - [ ] Ingress workload [server]
+  - [ ] Durablity
+  - [x] Snapshots
+  - [ ] Use flatbuffers instead of JSON
+  - [ ] web UI
+  - [ ] Service for wflow_tokio [LOST]
+- [ ] pauperfuse
+- [ ] Deploy
+  - [ ] Buy domain
+    - [ ] https://daybook.tf
+    - [ ] https://daybook.com
+    - [ ] https://db.tf
 - [ ] PgLite based testing
 - [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
 - [ ] DRY up all the wit bindgen
@@ -62,7 +73,7 @@
     - [ ] Replace tokio with wstd or wit_bindgen::block_on
   - [ ] Wasi 0.3
     - [ ] wRPC everything??
-- [ ] Replace time with jiff??
+- [x] Replace time with jiff??
 - [ ] Pipeline editor web app
 - [ ] wrpc + iroh
 - [ ] Magic wand
@@ -76,9 +87,11 @@
 - [ ] PgLite
   - [ ] Get parametrized queries to work
   - [ ] It should accept engine from outside
-- [ ] Finish autosurgeon::Patch
-  - [ ] Fork with context generic programming
-  - [ ] autosurgeon doens't respect serde attribs like untagged and camelCase
+- [ ] autosurgeon
+  - [ ] Finish autosurgeon::Patch
+  - [ ] autosurgeon does't respect serde attribs like untagged and camelCase
+    - [ ] Fork with context generic programming?
+    - So I've implemented ThroughJson as a solution for this
 - [ ] Lints and pre-commit hooks
   - [ ] Triple X comment detector
 - [ ] UI tests

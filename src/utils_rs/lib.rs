@@ -60,11 +60,13 @@ mod interlude {
 
 use crate::interlude::*;
 
+// the hope is to ban unwrap and use these for the common
+// unwrap cases
 mod expect_tags {
-    pub const ERROR_TOKIO: &str = "tokio error";
-    pub const ERROR_CHANNEL: &str = "channel error";
-    pub const ERROR_JSON: &str = "json error";
+    pub const ERROR_CHANNEL: &str = "channel error: closed?";
+    pub const ERROR_JSON: &str = "json error: oom?";
     pub const ERROR_UTF8: &str = "utf8 error";
+    pub const ERROR_MUTEX: &str = "poisioned mutex";
 }
 
 #[inline]
@@ -397,11 +399,19 @@ pub mod hash {
 
     pub fn decode_base58_multibase(source: &str) -> eyre::Result<Vec<u8>> {
         let mut buf = vec![];
+        decode_base58_multibase_onto(source, &mut buf)?;
+        Ok(buf)
+    }
+
+    pub fn decode_base58_multibase_onto(
+        source: &str,
+        buf: impl bs58::decode::DecodeTarget,
+    ) -> eyre::Result<usize> {
         match (
             &source[0..1],
-            bs58::decode(source[1..].as_bytes()).onto(&mut buf),
+            bs58::decode(source[1..].as_bytes()).onto(buf),
         ) {
-            ("z", Ok(_count)) => Ok(buf),
+            ("z", Ok(count)) => Ok(count),
             (prefix, Ok(_)) => Err(eyre::format_err!(
                 "unexpected multibase prefix for base58bitcoin multibase: {prefix}"
             )),
