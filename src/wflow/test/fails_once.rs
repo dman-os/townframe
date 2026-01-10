@@ -4,7 +4,7 @@ use crate::test::WflowTestContext;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_fails_once() -> Res<()> {
-    utils_rs::testing::setup_tracing().unwrap();
+    utils_rs::testing::setup_tracing_once();
 
     let test_cx = WflowTestContext::builder().build().await?.start().await?;
 
@@ -45,17 +45,10 @@ async fn test_fails_once() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_fails_once_sqlite() -> Res<()> {
-    utils_rs::testing::setup_tracing().unwrap();
+    utils_rs::testing::setup_tracing_once();
 
-    // Create an in-memory SQLite database
-    use std::str::FromStr;
-    let db_pool = sqlx::SqlitePool::connect_with(
-        sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")?.create_if_missing(true),
-    )
-    .await
-    .wrap_err("failed to create in-memory SQLite database")?;
-
-    let cx = crate::Ctx::init(&db_pool).await?;
+    // Build Ctx with SQLite stores
+    let cx = crate::Ctx::init("sqlite::memory:").await?;
 
     // Build test context with SQLite stores
     let test_cx = WflowTestContext::builder()

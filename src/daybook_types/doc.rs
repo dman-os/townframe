@@ -137,14 +137,14 @@ pub type DocProp = serde_json::Value;
 
 pub type DocId = String;
 
-pub type DocUserId = u64;
+pub type DocUserId = automerge::ActorId;
 pub type PropBlame = HashMap<DocPropKey, DocUserId>;
 
 pub struct UserPath {
-    pub user_pkey: String,
-    pub device_pkey: String,
-    pub plug_id: Option<String>,
-    pub routine: Option<String>,
+    pub string: String,
+    pub device_pkey_idx: u8,
+    pub plug_id_start_idx: Option<u8>,
+    pub routine_name_start_idx: Option<u8>,
 }
 
 pub struct Users {

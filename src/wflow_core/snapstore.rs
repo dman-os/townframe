@@ -5,11 +5,18 @@ use crate::partition::state::PartitionJobsState;
 use std::collections::HashMap;
 
 /// Snapshot data including both jobs state and effects state
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PartitionSnapshot {
     pub jobs: PartitionJobsState,
     #[serde(with = "effect_map_serde")]
     pub effects: HashMap<EffectId, PartitionEffect>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PartitionSnapshotRef<'a, 'b> {
+    pub jobs: &'a PartitionJobsState,
+    #[serde(with = "effect_map_serde")]
+    pub effects: &'b HashMap<EffectId, PartitionEffect>,
 }
 
 mod effect_map_serde {
@@ -66,6 +73,15 @@ mod effect_map_serde {
 /// instead of replaying the entire log from the beginning.
 #[async_trait]
 pub trait SnapStore: Send + Sync {
+    type Snapshot;
+
+    fn prepare_snapshot(
+        &self,
+        partition_id: u64,
+        entry_id: u64,
+        snapshot: PartitionSnapshotRef,
+    ) -> Res<Self::Snapshot>;
+
     /// Save a snapshot of the partition state.
     ///
     /// The snapshot should include the entry ID up to which the state is valid,
@@ -76,7 +92,7 @@ pub trait SnapStore: Send + Sync {
         &self,
         partition_id: u64,
         entry_id: u64,
-        snapshot: &PartitionSnapshot,
+        snapshot: Self::Snapshot,
     ) -> Res<()>;
 
     /// Load the latest snapshot for the given partition.

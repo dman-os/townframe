@@ -16,19 +16,29 @@ use std::str::FromStr;
 #[derive(Default, Debug, Reconcile, Hydrate)]
 pub struct DrawerStore {
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    pub map: HashMap<Uuid, DocEntry>,
-    // WARN: field ordering is imporant here, we want reconciliation
-    // to create changes on the map before the atomic map so that changes
-    // to the atmoic map will be always observed after the corresponding
-    // map change
-    // FIXME: use bs58 repr for uuids for efficency
-    pub atomic_map: HashMap<DocId, Uuid>,
+    pub map: HashMap<DocId, DocEntry>,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PropBlame {
+    heads: ChangeHashSet,
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DocEntry {
     pub branches: HashMap<String, ChangeHashSet>,
+    // techincally, we can recover this information
+    // from the doc but we mantain it here for quick access
+    // FIXME: consider lazily recreating this on load instead
+    // of mantaining it in the automerge store
+    pub prop_blames: HashMap<String, PropBlame>,
+    // WARN: field ordering is imporant here, we want reconciliation
+    // to create changes on the map before the atomic map so that changes
+    // to the atmoic version increment will be always observed after the
+    // other fields
+    pub version: Uuid,
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate)]
@@ -86,22 +96,22 @@ pub struct HeadDiff {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum DrawerEvent {
     ListChanged {
-        drawer_commit: ChangeHashSet,
+        drawer_heads: ChangeHashSet,
     },
     DocAdded {
         id: DocId,
         entry: DocEntry,
-        drawer_commit: ChangeHashSet,
+        drawer_heads: ChangeHashSet,
     },
     DocUpdated {
         id: DocId,
         branches_diffs: HashMap<String, HeadDiff>,
-        drawer_commit: ChangeHashSet,
+        drawer_heads: ChangeHashSet,
     },
     DocDeleted {
         id: DocId,
         entry: DocEntry, // old_heads: ChangeHashSet,
-        drawer_commit: ChangeHashSet,
+        drawer_heads: ChangeHashSet,
     },
 }
 
@@ -140,7 +150,6 @@ pub struct UpdateDocBatchErr {
 pub enum DrawerUpdate {}
 
 impl DrawerRepo {
-    const ERROR_INCONSISTENT: &str = "inconsistent drawer state";
     const ERROR_SCHEMA: &str = "schema violation";
 
     pub async fn load(
@@ -227,11 +236,11 @@ impl DrawerRepo {
                             self.events_for_patch(&notif.patch, &notif.heads, &mut events).await?;
                         }
                         if !events.is_empty() {
-                            let drawer_commit = ChangeHashSet(last_heads.expect("notifs not empty"));
+                            let drawer_heads = ChangeHashSet(last_heads.expect("notifs not empty"));
                             self.registry.notify(
                                 events
                                     .drain(..)
-                                    .chain(std::iter::once(DrawerEvent::ListChanged { drawer_commit })),
+                                    .chain(std::iter::once(DrawerEvent::ListChanged { drawer_heads })),
                             );
                         }
                     }
@@ -247,14 +256,15 @@ impl DrawerRepo {
             let mut last_heads = None;
             for notif in notifs {
                 last_heads = Some(notif.heads.clone());
-                self.events_for_patch(&notif.patch, &notif.heads, &mut events).await?;
+                self.events_for_patch(&notif.patch, &notif.heads, &mut events)
+                    .await?;
             }
             if !events.is_empty() {
-                let drawer_commit = ChangeHashSet(last_heads.expect("notifs not empty"));
+                let drawer_heads = ChangeHashSet(last_heads.expect("notifs not empty"));
                 self.registry.notify(
                     events
                         .drain(..)
-                        .chain(std::iter::once(DrawerEvent::ListChanged { drawer_commit })),
+                        .chain(std::iter::once(DrawerEvent::ListChanged { drawer_heads })),
                 );
             }
         }
@@ -268,149 +278,115 @@ impl DrawerRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<DrawerEvent>,
     ) -> Res<()> {
-        if utils_rs::am::changes::path_prefix_matches(
-            &[DrawerStore::PROP.into(), "atomic_map".into()],
+        if !utils_rs::am::changes::path_prefix_matches(
+            &[DrawerStore::PROP.into(), "map".into()],
             &patch.path,
         ) {
-            if patch.path.len() == 2 {
-                panic!("whole atomic_map was replaced, unsupported!");
-            }
-            let Some((map_obj, automerge::Prop::Map(doc_id))) = patch.path.get(2) else {
-                panic!("unexpected drawer structure")
-            };
-            let drawer_commit = ChangeHashSet(patch_heads.clone());
-            match &patch.action {
-                automerge::PatchAction::DeleteMap { .. } if *map_obj == patch.obj => {
-                    let (old_entry, _) = self
-                        .store
-                        .mutate_sync(|store| {
-                            let atomic_id = store.atomic_map.remove(doc_id)?;
-                            Some(
-                                store
-                                    .map
-                                    .remove(&atomic_id)
-                                    .expect(Self::ERROR_INCONSISTENT),
-                            )
+            return Ok(());
+        }
+
+        let drawer_heads = ChangeHashSet(patch_heads.clone());
+
+        match &patch.action {
+            automerge::PatchAction::PutMap {
+                value: (_val, obj_id),
+                key,
+                ..
+            } if patch.path.len() == 3 && key == "version" => {
+                let Some((_obj, automerge::Prop::Map(doc_id))) = patch.path.get(2) else {
+                    return Ok(());
+                };
+                let Some(change_hash) = self
+                    .drawer_am_handle
+                    .with_document(|am_doc| am_doc.hash_for_opid(obj_id))
+                else {
+                    eyre::bail!("patch not recognized by document");
+                };
+
+                let (new_entry, _) = self
+                    .acx
+                    .hydrate_path_at_heads::<DocEntry>(
+                        &self.drawer_doc_id,
+                        &[change_hash],
+                        automerge::ROOT,
+                        vec![
+                            DrawerStore::PROP.into(),
+                            "map".into(),
+                            autosurgeon::Prop::Key(doc_id.clone().into()),
+                        ],
+                    )
+                    .await
+                    .expect("error hydrating doc entry")
+                    .expect(Self::ERROR_SCHEMA);
+
+                let new_entry_copy = new_entry.clone();
+
+                let (old_entry, _) = self
+                    .store
+                    .mutate_sync(|store| store.map.insert(doc_id.clone(), new_entry_copy))
+                    .await?;
+
+                if let Some(old_entry) = old_entry {
+                    let mut branches_diffs: HashMap<_, _> = old_entry
+                        .branches
+                        .into_iter()
+                        .filter_map(|(key, old_hash)| match new_entry.branches.get(&key) {
+                            Some(new_hash) if *new_hash == old_hash => None,
+                            Some(new_hash) => Some((
+                                key,
+                                HeadDiff {
+                                    from: Some(old_hash),
+                                    to: Some(new_hash.clone()),
+                                },
+                            )),
+                            None => Some((
+                                key,
+                                HeadDiff {
+                                    from: Some(old_hash),
+                                    to: None,
+                                },
+                            )),
                         })
-                        .await?;
-                    if let Some(old_entry) = old_entry {
-                        out.push(DrawerEvent::DocDeleted {
-                            id: doc_id.clone(),
-                            entry: old_entry,
-                            drawer_commit,
-                        });
-                    } else {
-                        warn!(?doc_id, "delete on unknown drawer entry");
-                    }
-                }
-                automerge::PatchAction::PutMap {
-                    value: (_val, _obj_id),
-                    conflict: true,
-                    key: _,
-                } if *map_obj == patch.obj => {
-                    // TODO: two atomic maps are conflicting, we'll need to load
-                    // both entries and create a new entry that contains the bran
-                    todo!("conflict on doc_id")
-                }
-                automerge::PatchAction::PutMap {
-                    value: (val, obj_id),
-                    key,
-                    ..
-                } if *map_obj == patch.obj => {
-                    debug_assert_eq!(key, doc_id);
-
-                    let atomic_id_str = val.clone().into_string().expect(Self::ERROR_SCHEMA);
-
-                    let Some(change_hash) = self
-                        .drawer_am_handle
-                        .with_document(|am_doc| am_doc.hash_for_opid(obj_id))
-                    else {
-                        eyre::bail!("patch not recognized by document");
-                    };
-
-                    let atomic_id: Uuid = atomic_id_str.parse().expect(Self::ERROR_SCHEMA);
-
-                    let (new_entry, _) = self
-                        .acx
-                        .hydrate_path_at_heads::<DocEntry>(
-                            &self.drawer_doc_id,
-                            &[change_hash],
-                            obj_id.clone(),
-                            vec![
-                                DrawerStore::PROP.into(),
-                                "atomic_map".into(),
-                                autosurgeon::Prop::Key(atomic_id_str.into()),
-                            ],
-                        )
-                        .await
-                        .expect("error hydrating doc entry")
-                        .expect(Self::ERROR_SCHEMA);
-
-                    let new_entry_copy = new_entry.clone();
-
-                    let (old_entry, _) = self
-                        .store
-                        .mutate_sync({
-                            |store| {
-                                let old = store.map.insert(atomic_id.clone(), new_entry_copy);
-                                assert!(old.is_none(), "fishy");
-                                let old_atmoic_id =
-                                    store.atomic_map.insert(doc_id.clone(), atomic_id)?;
-                                store.map.remove(&old_atmoic_id)
-                            }
-                        })
-                        .await?;
-
-                    if let Some(old_entry) = old_entry {
-                        let mut branch_diffs: HashMap<_, _> = old_entry
-                            .branches
-                            .into_iter()
-                            .filter_map(|(key, old_hash)| match new_entry.branches.get(&key) {
-                                Some(new_hash) if *new_hash == old_hash => None,
-                                Some(new_hash) => Some((
-                                    key,
-                                    HeadDiff {
-                                        from: Some(old_hash),
-                                        to: Some(new_hash.clone()),
-                                    },
-                                )),
-                                None => Some((
-                                    key,
-                                    HeadDiff {
-                                        from: Some(old_hash),
-                                        to: None,
-                                    },
-                                )),
-                            })
-                            .collect();
-                        for (key, val) in &new_entry.branches {
-                            if !branch_diffs.contains_key(key) {
-                                branch_diffs.insert(
-                                    key.clone(),
-                                    HeadDiff {
-                                        from: None,
-                                        to: Some(val.clone()),
-                                    },
-                                );
-                            }
+                        .collect();
+                    for (key, val) in &new_entry.branches {
+                        if !branches_diffs.contains_key(key) {
+                            branches_diffs.insert(
+                                key.clone(),
+                                HeadDiff {
+                                    from: None,
+                                    to: Some(val.clone()),
+                                },
+                            );
                         }
-                        out.push(DrawerEvent::DocUpdated {
-                            id: doc_id.clone(),
-                            branches_diffs: branch_diffs,
-                            drawer_commit,
-                        })
-                    } else {
-                        out.push(DrawerEvent::DocAdded {
-                            id: doc_id.clone(),
-                            entry: new_entry,
-                            drawer_commit,
-                        })
                     }
-                }
-                _ => {
-                    panic!("unexpected drawer patch {patch:?}")
+                    out.push(DrawerEvent::DocUpdated {
+                        id: doc_id.into(),
+                        branches_diffs,
+                        drawer_heads,
+                    })
+                } else {
+                    out.push(DrawerEvent::DocAdded {
+                        id: doc_id.into(),
+                        entry: new_entry,
+                        drawer_heads,
+                    })
                 }
             }
+            automerge::PatchAction::DeleteMap { key, .. } if patch.path.len() == 2 => {
+                let doc_id = DocId::from(key.clone());
+                let (old_entry, _) = self
+                    .store
+                    .mutate_sync(|store| store.map.remove(&doc_id))
+                    .await?;
+                if let Some(old_entry) = old_entry {
+                    out.push(DrawerEvent::DocDeleted {
+                        id: doc_id,
+                        entry: old_entry,
+                        drawer_heads,
+                    });
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -421,14 +397,11 @@ impl DrawerRepo {
         self.store
             .query_sync(|store| {
                 store
-                    .atomic_map
+                    .map
                     .iter()
-                    .map(|(doc_id, atomic_id)| {
-                        let entry = store.map.get(atomic_id).expect(Self::ERROR_INCONSISTENT);
-                        DocNBranches {
-                            doc_id: doc_id.clone(),
-                            branches: entry.branches.clone(),
-                        }
+                    .map(|(doc_id, entry)| DocNBranches {
+                        doc_id: doc_id.clone(),
+                        branches: entry.branches.clone(),
                     })
                     .collect()
             })
@@ -471,6 +444,8 @@ impl DrawerRepo {
             props: args.props,
         };
 
+        let prop_keys = new_doc.props.keys().cloned().collect::<Vec<_>>();
+
         let (new_doc, heads) = handle.with_document(move |doc_am| {
             let doc = doc_am
                 .transact(move |tx| {
@@ -489,20 +464,30 @@ impl DrawerRepo {
         let new_doc = Arc::new(new_doc);
         let heads = ChangeHashSet(heads.into());
         let entry = DocEntry {
+            prop_blames: prop_keys
+                .into_iter()
+                .map(|key| {
+                    (
+                        key.to_string(),
+                        PropBlame {
+                            heads: heads.clone(),
+                        },
+                    )
+                })
+                .collect(),
             branches: [(args.branch_name, heads.clone())].into(),
+            version: Uuid::new_v4(),
         };
 
         // store id in drawer AM
-        let (_, drawer_commit) = self.store
+        let (_, drawer_heads) = self
+            .store
             .mutate_sync(|store| {
-                let atomic_id = Uuid::new_v4();
-                let old = store.map.insert(atomic_id.clone(), entry.clone());
-                assert!(old.is_none(), "fishy");
-                let old = store.atomic_map.insert(new_doc.id.clone(), atomic_id);
+                let old = store.map.insert(new_doc.id.clone(), entry.clone());
                 assert!(old.is_none(), "fishy");
             })
             .await?;
-        let drawer_commit = ChangeHashSet(drawer_commit.into_iter().collect());
+        let drawer_heads = ChangeHashSet(drawer_heads.into_iter().collect());
 
         // cache the handle under the doc's Uuid id
         let out_id = new_doc.id.clone();
@@ -513,11 +498,9 @@ impl DrawerRepo {
             DrawerEvent::DocAdded {
                 id: out_id.clone(),
                 entry,
-                drawer_commit: drawer_commit.clone(),
+                drawer_heads: drawer_heads.clone(),
             },
-            DrawerEvent::ListChanged {
-                drawer_commit,
-            },
+            DrawerEvent::ListChanged { drawer_heads },
         ]);
         Ok(out_id)
     }
@@ -529,7 +512,7 @@ impl DrawerRepo {
                 // Not in cache: check if the drawer actually lists this id
                 if !(self
                     .store
-                    .query_sync(|store| store.atomic_map.contains_key(id))
+                    .query_sync(|store| store.map.contains_key(id))
                     .await)
                 {
                     return Ok(None);
@@ -555,12 +538,9 @@ impl DrawerRepo {
     pub async fn get_doc_branches(&self, doc_id: &DocId) -> Option<DocNBranches> {
         self.store
             .query_sync(|store| {
-                store.atomic_map.get(doc_id).map(|atomic_id| {
-                    let entry = store.map.get(atomic_id).expect(Self::ERROR_INCONSISTENT);
-                    DocNBranches {
-                        doc_id: doc_id.clone(),
-                        branches: entry.branches.clone(),
-                    }
+                store.map.get(doc_id).map(|entry| DocNBranches {
+                    doc_id: doc_id.clone(),
+                    branches: entry.branches.clone(),
                 })
             })
             .await
@@ -576,9 +556,8 @@ impl DrawerRepo {
             .store
             .query_sync(|store| {
                 store
-                    .atomic_map
+                    .map
                     .get(id)
-                    .map(|atomic_id| store.map.get(atomic_id).expect(Self::ERROR_INCONSISTENT))
                     .and_then(|entry| entry.branches.get(branch_name))
                     .map(|latest_heads| latest_heads == heads)
                     .unwrap_or_default()
@@ -603,9 +582,8 @@ impl DrawerRepo {
             .store
             .query_sync(|store| {
                 store
-                    .atomic_map
+                    .map
                     .get(doc_id)
-                    .map(|atomic_id| store.map.get(atomic_id).expect(Self::ERROR_INCONSISTENT))
                     .and_then(|entry| entry.branches.get(branch_name).cloned())
             })
             .await
@@ -663,9 +641,8 @@ impl DrawerRepo {
                 .store
                 .query_sync(|store| {
                     store
-                        .atomic_map
+                        .map
                         .get(&patch.id)
-                        .map(|atomic_id| store.map.get(atomic_id).expect(Self::ERROR_INCONSISTENT))
                         .and_then(|entry| entry.branches.get(&branch_name).cloned())
                 })
                 .await
@@ -676,6 +653,7 @@ impl DrawerRepo {
         };
 
         let id = patch.id.clone();
+        let prop_keys = patch.props_set.keys().cloned().collect::<Vec<_>>();
         let new_heads = handle.with_document(|am_doc| {
             let mut tx = am_doc.transaction_at(automerge::PatchLog::null(), &heads);
 
@@ -720,17 +698,24 @@ impl DrawerRepo {
 
         self.store
             .mutate_sync(|store| {
-                let atomic_id = store
-                    .atomic_map
-                    .get(&id)
+                let entry = store
+                    .map
+                    .get_mut(&id)
                     .expect("doc handle found but no entry in store");
-                let mut old_entry = store.map.remove(atomic_id).expect(Self::ERROR_INCONSISTENT);
-                let _old_heads = old_entry.branches.insert(branch_name, new_heads);
 
-                let atomic_id = Uuid::new_v4();
-                let old = store.map.insert(atomic_id.clone(), old_entry);
-                assert!(old.is_none(), "fishy");
-                store.atomic_map.insert(id, atomic_id);
+                for key in patch.props_remove {
+                    entry.prop_blames.remove(&key.to_string());
+                }
+                for key in prop_keys {
+                    entry.prop_blames.insert(
+                        key.to_string(),
+                        PropBlame {
+                            heads: new_heads.clone(),
+                        },
+                    );
+                }
+                entry.branches.insert(branch_name, new_heads);
+                entry.version = Uuid::new_v4();
             })
             .await?;
 
@@ -767,26 +752,16 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let (existed, drawer_commit) = self
+        let (existed, drawer_heads) = self
             .store
-            .mutate_sync(|store| {
-                store
-                    .atomic_map
-                    .remove(id)
-                    .map(|atomic_id| {
-                        store
-                            .map
-                            .remove(&atomic_id)
-                            .expect(Self::ERROR_INCONSISTENT)
-                    })
-                    .is_some()
-            })
+            .mutate_sync(|store| store.map.remove(id).is_some())
             .await?;
-        let drawer_commit = ChangeHashSet(drawer_commit.into_iter().collect());
+        let drawer_heads = ChangeHashSet(drawer_heads.into_iter().collect());
         self.cache.remove(id);
         self.handles.remove(id);
         if existed {
-            self.registry.notify([DrawerEvent::ListChanged { drawer_commit }]);
+            self.registry
+                .notify([DrawerEvent::ListChanged { drawer_heads }]);
         }
         Ok(existed)
     }
@@ -829,7 +804,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn smoke() -> Res<()> {
-        utils_rs::testing::setup_tracing()?;
+        utils_rs::testing::setup_tracing_once();
         let (client_acx, client_acx_stop) = AmCtx::boot(
             utils_rs::am::Config {
                 peer_id: "client".into(),

@@ -6,6 +6,7 @@ edition.workspace = true
 [features]
 default = ["serde"]
 serde = []
+test-harness = []
 
 [lib]
 path = "lib.rs"
@@ -28,4 +29,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 displaydoc.workspace = true
 parking_lot.workspace = true
+
+[dev-dependencies]
+loom = "0.7.2"
 

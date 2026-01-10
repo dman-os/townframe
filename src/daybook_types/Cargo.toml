@@ -10,7 +10,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
 default = ["automerge", "uniffi", "wit"]
-automerge = ["dep:autosurgeon", "dep:automerge", "utils_rs/automerge", "utils_rs/hash"]
+automerge = ["dep:autosurgeon", "dep:automerge", "utils_rs/automerge"]
 uniffi = ["dep:uniffi", "dep:uuid"]
 wit = ["dep:wit-bindgen"]
 schemars = ["dep:schemars"]

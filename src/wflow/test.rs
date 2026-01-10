@@ -11,7 +11,7 @@ mod keyvalue_plugin;
 use wash_runtime::{host::HostApi, plugin, types, wit::WitInterface};
 use wflow_core::kvstore::log::KvStoreLog;
 use wflow_core::kvstore::metastore::KvStoreMetadtaStore;
-use wflow_core::kvstore::snapstore::AtomicKvSnapStore;
+use wflow_core::kvstore::snapstore::KvSnapStore;
 use wflow_core::metastore;
 use wflow_core::snapstore::SnapStore;
 
@@ -20,7 +20,7 @@ pub struct WflowTestContextBuilder {
     temp_dir: tempfile::TempDir,
     metastore: Option<Arc<dyn metastore::MetdataStore>>,
     logstore: Option<Arc<dyn wflow_core::log::LogStore>>,
-    snap_store: Option<Arc<dyn SnapStore>>,
+    snap_store: Option<Arc<dyn SnapStore<Snapshot = Arc<[u8]>>>>,
     keyvalue_plugin: Option<Arc<keyvalue_plugin::WasiKeyvalue>>,
     initial_workloads: Vec<InitialWorkload>,
     plugins: Vec<Arc<dyn plugin::HostPlugin>>,
@@ -50,7 +50,7 @@ impl WflowTestContextBuilder {
         self
     }
 
-    pub fn with_snapstore(mut self, snap_store: Arc<dyn SnapStore>) -> Self {
+    pub fn with_snapstore(mut self, snap_store: Arc<dyn SnapStore<Snapshot = Arc<[u8]>>>) -> Self {
         self.snap_store = Some(snap_store);
         self
     }
@@ -112,7 +112,7 @@ impl WflowTestContextBuilder {
 
         let snapstore = match self.snap_store {
             Some(store) => store,
-            None => Arc::new(AtomicKvSnapStore::new(new_in_memory_kv_store())),
+            None => Arc::new(KvSnapStore::new(new_in_memory_kv_store())),
         };
 
         let keyvalue_plugin = self
@@ -152,7 +152,7 @@ pub struct WflowTestContext {
     pub temp_dir: tempfile::TempDir,
     pub metastore: Arc<dyn metastore::MetdataStore>,
     pub logstore: Arc<dyn wflow_core::log::LogStore>,
-    pub snapstore: Arc<dyn SnapStore>,
+    pub snapstore: Arc<dyn SnapStore<Snapshot = Arc<[u8]>>>,
     pub partition_log: wflow_tokio::partition::PartitionLogRef,
     pub ingress: Arc<crate::ingress::PartitionLogIngress>,
     pub keyvalue_plugin: Arc<keyvalue_plugin::WasiKeyvalue>,
@@ -375,7 +375,7 @@ impl WflowTestContext {
 
         let start = Instant::now();
         let timeout_duration = Duration::from_secs(timeout_secs);
-        let mut stream = self.logstore.tail(start_entry_id).await;
+        let mut stream = self.partition_log.tail(start_entry_id);
 
         loop {
             // Calculate remaining time
@@ -390,14 +390,9 @@ impl WflowTestContext {
 
             // Wait for next entry with timeout
             match tokio::time::timeout(remaining, stream.next()).await {
-                Ok(Some(Ok(wflow_core::log::TailLogEntry {
-                    idx,
-                    val: Some(bytes),
-                }))) => {
-                    let log_entry: wflow_core::partition::log::PartitionLogEntry =
-                        serde_json::from_slice(&bytes[..]).wrap_err("failed to parse log entry")?;
-                    if condition(idx, &log_entry) {
-                        return Ok((idx, log_entry));
+                Ok(Some(Ok((idx, Some(entry))))) => {
+                    if condition(idx, &entry) {
+                        return Ok((idx, entry));
                     }
                     // Continue waiting
                 }
@@ -408,9 +403,7 @@ impl WflowTestContext {
                     return Err(err);
                 }
                 Ok(None) => {
-                    // Stream ended, wait a bit and retry
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
+                    return Err(ferr!("unexpected partition log closure"));
                 }
                 Err(_) => {
                     // Timeout reached
@@ -431,19 +424,14 @@ impl WflowTestContext {
         use tokio::time::Duration;
 
         let mut entries = Vec::new();
-        let mut stream = self.logstore.tail(0).await;
+        let mut stream = self.partition_log.tail(0);
 
         // Read entries with a timeout to avoid waiting forever
         // If no entry comes for 100ms, we've read all available entries
         loop {
             match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
-                Ok(Some(Ok(wflow_core::log::TailLogEntry {
-                    idx,
-                    val: Some(bytes),
-                }))) => {
-                    let log_entry: wflow_core::partition::log::PartitionLogEntry =
-                        serde_json::from_slice(&bytes[..]).wrap_err("failed to parse log entry")?;
-                    entries.push((idx, log_entry));
+                Ok(Some(Ok((idx, Some(entry))))) => {
+                    entries.push((idx, entry));
                 }
                 Ok(Some(Ok(_entry))) => {
                     // this is an entry hole, continue

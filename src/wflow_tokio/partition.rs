@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use wflow_core::{
     log, metastore,
-    partition::{effects, service},
+    partition::{effects, log::PartitionLogEntry, service},
     r#gen::types::PartitionId,
 };
 
@@ -77,14 +77,31 @@ impl PartitionLogRef {
         }
     }
     #[tracing::instrument(skip(self))]
-    pub async fn append(
-        &mut self,
-        entry: &wflow_core::partition::log::PartitionLogEntry,
-    ) -> Res<u64> {
+    pub async fn append(&mut self, entry: &PartitionLogEntry) -> Res<u64> {
         self.buffer.clear();
         debug!("appending");
         serde_json::to_writer(&mut self.buffer, entry).expect(ERROR_JSON);
         self.log.append(&self.buffer).await
+    }
+
+    pub fn tail(
+        &'_ self,
+        offset: u64,
+    ) -> futures::stream::BoxStream<'_, Res<(u64, Option<PartitionLogEntry>)>> {
+        use futures::stream::*;
+        self.log
+            .tail(offset)
+            .map(|entry| {
+                entry.map(|entry| {
+                    (
+                        entry.idx,
+                        entry
+                            .val
+                            .map(|bytes| serde_json::from_slice(&bytes).expect(ERROR_JSON)),
+                    )
+                })
+            })
+            .boxed()
     }
 }
 
@@ -117,7 +134,7 @@ impl Drop for TokioPartitionWorkerHandle {
 pub async fn start_tokio_worker(
     pcx: PartitionCtx,
     working_state: Arc<state::PartitionWorkingState>,
-    snap_store: Arc<dyn SnapStore>,
+    snap_store: Arc<dyn SnapStore<Snapshot = Arc<[u8]>>>,
 ) -> TokioPartitionWorkerHandle {
     let cancel_token = CancellationToken::new();
     let mut effect_workers = vec![];

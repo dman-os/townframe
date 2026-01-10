@@ -117,15 +117,7 @@ pub type DHashMapMutRef<'a, K, V> = dashmap::mapref::one::RefMut<'a, K, V>;
 
 pub use cheapstr::CHeapStr;
 
-// Ensure that the `tracing` stack is only initialised once using `once_cell`
-// isn't required in cargo-nextest since each test runs in a new process
-pub fn setup_tracing_once() {
-    static TRACING: std::sync::Once = std::sync::Once::new();
-    TRACING.call_once(|| {
-        setup_tracing().expect("setup tracing error");
-    });
-}
-
+// FIXME: why this take 7ms on debug builds?
 pub fn setup_tracing() -> Res<()> {
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
@@ -147,7 +139,8 @@ pub fn setup_tracing() -> Res<()> {
             tracing_subscriber::fmt::layer()
                 .compact()
                 .with_writer(std::io::stderr)
-                .with_timer(tracing_subscriber::fmt::time::time()),
+                //.with_timer(tracing_subscriber::fmt::time::time()),
+                .with_timer(tracing_subscriber::fmt::time::uptime()),
         )
         .with(tracing_error::ErrorLayer::default());
 
@@ -286,7 +279,6 @@ mod cheapstr {
     }
 }
 
-#[cfg(feature = "hash")]
 pub mod hash {
     use super::*;
 
@@ -305,6 +297,7 @@ pub mod hash {
         }
     }
 
+    #[cfg(feature = "hash")]
     pub fn hash_obj<T: serde::Serialize>(obj: &T) -> String {
         use sha2::Digest;
         let mut hash = sha2::Sha256::new();
@@ -316,10 +309,12 @@ pub mod hash {
         encode_base32_multibase(hash.to_bytes())
     }
 
+    #[cfg(feature = "hash")]
     pub fn hash_str(string: &str) -> String {
         hash_bytes(string.as_bytes())
     }
 
+    #[cfg(feature = "hash")]
     pub fn hash_bytes(bytes: &[u8]) -> String {
         use sha2::Digest;
         let mut hash = sha2::Sha256::new();
@@ -331,6 +326,7 @@ pub mod hash {
         encode_base32_multibase(hash.to_bytes())
     }
 
+    #[cfg(feature = "hash")]
     pub fn blake3_hash_bytes(bytes: &[u8]) -> String {
         let hash = blake3::hash(bytes);
         let hash =
@@ -338,6 +334,7 @@ pub mod hash {
         encode_base32_multibase(hash.to_bytes())
     }
 
+    #[cfg(feature = "hash")]
     pub async fn blake3_hash_reader<T: tokio::io::AsyncRead>(reader: T) -> Res<String> {
         use tokio::io::*;
         let mut hasher = blake3::Hasher::new();
@@ -360,6 +357,7 @@ pub mod hash {
         Ok(encode_base32_multibase(hash.to_bytes()))
     }
 
+    #[cfg(feature = "hash")]
     pub async fn hash_reader<T: tokio::io::AsyncRead>(reader: T) -> Res<String> {
         use sha2::Digest;
         use tokio::io::*;
@@ -421,12 +419,14 @@ pub mod hash {
         }
     }
 
+    #[cfg(feature = "hash")]
     pub fn encode_base32_multibase<T: AsRef<[u8]>>(source: T) -> String {
         let mut base32 = data_encoding::BASE32_NOPAD.encode(source.as_ref());
         base32.make_ascii_lowercase();
         format!("b{base32}")
     }
 
+    #[cfg(feature = "hash")]
     // Consider z-base32 https://en.wikipedia.org/wiki/Base32#z-base-32
     pub fn decode_base32_multibase(source: &str) -> eyre::Result<Vec<u8>> {
         match (
@@ -633,7 +633,7 @@ pub async fn backoff(last_backoff_ms: u64, max_ms: u64) -> u64 {
 pub enum WaitOnHandleError {
     /// task error: {0:?}
     JoinError(#[from] tokio::task::JoinError),
-    /// task was aborted after {0:?} due to timeout
+    /// task was aborted due to timeout
     Timeout(#[from] tokio::time::error::Elapsed),
 }
 

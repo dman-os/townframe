@@ -203,7 +203,7 @@ macro_rules! table_tests {
                                     // TODO: consider disabling tracing by default?
                                     let enable_tracing = enable_tracing.unwrap_or(true);
                                     if enable_tracing {
-                                        $crate::setup_tracing_once();
+                                        $crate::testing::setup_tracing_once();
                                     }
                                     let multi_thread: Option<bool> = $crate::optional_expr!($($multi_thread)?);
                                     let multi_thread = multi_thread.unwrap_or(false);

@@ -224,10 +224,12 @@ pub enum RoutineImpl {
     },
 }
 
+// FIXME: this is poorly designed
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum RoutineManifestDeets {
     /// Routine that can be invoked on a document with rw access on whole doc
+    /// FIXME: remove this branch?
     DocInvoke {},
     /// Routine that is invoked when with ro access
     /// to doc but rw access on prop.
@@ -294,26 +296,25 @@ pub enum ProcessorDeets {
         #[garde(dive)]
         routine_name: KeyGeneric,
     },
+    // PropProcessor {}
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum DocPredicateClause {
     HasTag(#[garde(dive)] PropTag),
-    Or(#[garde(dive)] Vec<DocPredicateClause>),
-    And(#[garde(dive)] Vec<DocPredicateClause>),
-    Not(#[garde(dive)] Box<DocPredicateClause>),
+    Or(#[garde(dive)] Vec<Self>),
+    And(#[garde(dive)] Vec<Self>),
+    Not(#[garde(dive)] Box<Self>),
 }
 
 impl DocPredicateClause {
     pub fn matches(&self, doc: &daybook_types::doc::Doc) -> bool {
         match self {
-            DocPredicateClause::HasTag(tag) => {
-                doc.props.keys().any(|key| key.tag().to_string() == tag.0)
-            }
-            DocPredicateClause::Or(clauses) => clauses.iter().any(|c| c.matches(doc)),
-            DocPredicateClause::And(clauses) => clauses.iter().all(|c| c.matches(doc)),
-            DocPredicateClause::Not(clause) => !clause.matches(doc),
+            Self::HasTag(tag) => doc.props.keys().any(|key| key.tag().to_string() == tag.0),
+            Self::Or(clauses) => clauses.iter().any(|c| c.matches(doc)),
+            Self::And(clauses) => clauses.iter().all(|c| c.matches(doc)),
+            Self::Not(clause) => !clause.matches(doc),
         }
     }
 }

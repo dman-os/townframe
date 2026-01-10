@@ -928,7 +928,7 @@ mod tests {
     }
 
     async fn setup_pglite() -> Res<(PgliteHandle, tempfile::TempDir)> {
-        utils_rs::testing::setup_tracing()?;
+        utils_rs::testing::setup_tracing_once();
         let temp = tempfile::tempdir()?;
         let config = Config::with_paths(temp.path().join("runtime"), temp.path().join("data"));
         let engine = create_engine()?;
@@ -1947,7 +1947,6 @@ mod tests {
         ];
 
         for (sql, params, expected_rows) in test_cases {
-            info!(?sql, "XXX");
             let actual_rows = handle.query(sql, &params).await?;
             // Verify row count matches
             assert_eq!(

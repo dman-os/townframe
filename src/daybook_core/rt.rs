@@ -30,33 +30,41 @@ use dispatch::{
     ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchRepo, PropRoutineArgs,
 };
 
-// pub struct RtConfig {}
+pub struct RtConfig {
+    pub device_id: String,
+}
 
 pub struct Rt {
+    pub config: RtConfig,
     pub cancel_token: tokio_util::sync::CancellationToken,
     pub plugs_repo: Arc<PlugsRepo>,
     pub drawer: Arc<DrawerRepo>,
     pub wflow_ingress: Arc<dyn wflow::WflowIngress>,
     pub dispatch_repo: Arc<dispatch::DispatchRepo>,
     pub acx: AmCtx,
-    pub _wflow_part_state: Arc<PartitionWorkingState>,
+    pub wflow_part_state: Arc<PartitionWorkingState>,
     pub wcx: wflow::Ctx,
     pub wash_host: Arc<WashHost>,
     pub blobs_repo: Arc<BlobsRepo>,
+    local_wflow_part_id: String,
 }
 
 pub struct RtStopToken {
     wflow_part_handle: Option<TokioPartitionWorkerHandle>,
-    repo: Arc<Rt>,
+    rt: Arc<Rt>,
+    partition_watcher: tokio::task::JoinHandle<()>,
+    doc_changes_worker: triage::DocTriageWorkerHandle,
 }
 
 impl RtStopToken {
     pub async fn stop(mut self) -> Res<()> {
-        self.repo.cancel_token.cancel();
+        self.rt.cancel_token.cancel();
         // TODO: use a cancel token to shutdown
         // rt if stop token is dropped
         self.wflow_part_handle.take().unwrap().stop().await?;
-        self.repo.wash_host.clone().stop().await.to_eyre()?;
+        self.rt.wash_host.clone().stop().await.to_eyre()?;
+        self.doc_changes_worker.stop().await?;
+        utils_rs::wait_on_handle_with_timeout(self.partition_watcher, 5 * 1000).await?;
         Ok(())
     }
 }
@@ -78,6 +86,8 @@ pub enum DispatchArgs {
 
 impl Rt {
     pub async fn boot(
+        config: RtConfig,
+        app_doc_id: DocumentId,
         wcx: wflow::Ctx,
         acx: AmCtx,
         drawer: Arc<DrawerRepo>,
@@ -139,15 +149,19 @@ impl Rt {
             .to_eyre()
             .wrap_err("error starting wash host")?;
 
+        let part_idx = 0;
+        let (wflow_part_handle, wflow_part_state) =
+            wflow::start_partition_worker(&wcx, wflow_plugin, part_idx).await?;
         let part_log = PartitionLogRef::new(Arc::clone(&wcx.logstore));
         let wflow_ingress = Arc::new(wflow::ingress::PartitionLogIngress::new(
             part_log,
             wcx.metastore.clone(),
         ));
-        let (wflow_part_handle, wflow_part_state) =
-            wflow::start_partition_worker(&wcx, wflow_plugin, 0).await?;
+        let local_wflow_part_id = format!("{}/{part_idx}", config.device_id);
 
-        let repo = Arc::new(Self {
+        let rt = Arc::new(Self {
+            config,
+            local_wflow_part_id,
             cancel_token: default(),
             plugs_repo,
             drawer,
@@ -157,20 +171,124 @@ impl Rt {
             wcx,
             wash_host,
             blobs_repo,
-            _wflow_part_state: wflow_part_state,
+            wflow_part_state,
         });
+
+        // Start the DocTriageWorker to automatically queue jobs when docs are added
+        let doc_changes_worker =
+            crate::rt::triage::spawn_doc_triage_worker(rt.clone(), app_doc_id).await?;
+
+        let partition_watcher = tokio::spawn({
+            let repo = rt.clone();
+            async move { repo.keep_up_with_partition().await.unwrap_or_log() }
+        });
+
         Ok((
-            repo.clone(),
+            rt.clone(),
             RtStopToken {
-                repo,
+                rt,
+                partition_watcher,
+                doc_changes_worker,
                 wflow_part_handle: Some(wflow_part_handle),
             },
         ))
     }
 
+    async fn keep_up_with_partition(&self) -> Res<()> {
+        use futures::StreamExt;
+
+        // let dispatch = self
+        //     .dispatch_repo
+        //     .get(dispatch_id)
+        //     .await
+        //     .ok_or_else(|| ferr!("dispatch not found under {dispatch_id}"))?;
+        //
+        // match &dispatch.deets {
+        //     ActiveDispatchDeets::Wflow {
+        //         entry_id,
+        //         wflow_job_id,
+        //         ..
+        //     } => {}
+        // }
+        let part_log = PartitionLogRef::new(Arc::clone(&self.wcx.logstore));
+        let last_seen_idx = self
+            .dispatch_repo
+            .get_wflow_part_frontier(&self.local_wflow_part_id)
+            .await
+            .unwrap_or(0);
+        let mut stream = part_log.tail(last_seen_idx);
+
+        loop {
+            let entry = tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => {
+                    break;
+                }
+                entry = stream.next() => {
+                    entry
+                }
+            };
+            let Some(entry) = entry else {
+                warn!("log stream closed");
+                // Stream ended
+                break;
+            };
+            let (idx, entry) = entry?;
+            if let Some(entry) = entry {
+                self.handle_wflow_entry(idx, entry).await?;
+            };
+            self.dispatch_repo
+                .set_wflow_part_frontier(self.local_wflow_part_id.clone(), idx)
+                .await?;
+        }
+        Ok(())
+    }
+
     fn ensure_rt_live(&self) -> Res<()> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("rt is shutting down")
+        }
+        Ok(())
+    }
+    #[tracing::instrument(skip(self, entry))]
+    async fn handle_wflow_entry(&self, entry_id: u64, entry: PartitionLogEntry) -> Res<()> {
+        let PartitionLogEntry::JobEffectResult(event) = entry else {
+            return Ok(());
+        };
+        let Some((dispatch_id, _)) = event.job_id.rsplit_once('-') else {
+            return Ok(());
+        };
+        let Some(_dispatch) = self.dispatch_repo.get(dispatch_id).await else {
+            return Ok(());
+        };
+        let is_done = match &event.result {
+            JobRunResult::Success { value_json } => {
+                info!(?value_json, "success on dispatch wflow");
+                true
+            }
+            JobRunResult::WorkerErr(err) => {
+                error!(?err, "worker error on dispatch wflow");
+                true
+            }
+            JobRunResult::WflowErr(JobError::Terminal { error_json }) => {
+                error!(?error_json, "terminal error on dispatch wflow");
+                true
+            }
+            JobRunResult::WflowErr(JobError::Transient {
+                error_json,
+                retry_policy: None,
+            })
+            | JobRunResult::WflowErr(JobError::Transient {
+                error_json,
+                retry_policy: Some(RetryPolicy::Immediate),
+            }) => {
+                warn!("transient error on dispatch wflow: {error_json:?}");
+                false
+            }
+            JobRunResult::StepEffect(..) => false,
+        };
+        if is_done {
+            self.dispatch_repo.remove(dispatch_id.into()).await?;
         }
         Ok(())
     }
@@ -195,10 +313,6 @@ impl Rt {
 
         use crate::plugs::manifest::RoutineManifestDeets;
         let (dispatch_id, args) = match (&routine_man.deets, args) {
-            (RoutineManifestDeets::DocInvoke {}, DispatchArgs::DocInvoke { .. }) => {
-                todo!();
-                // ActiveDispatchDeets::PropRoutine{}
-            }
             (
                 RoutineManifestDeets::DocProp { working_prop_tag },
                 DispatchArgs::DocProp {
@@ -284,6 +398,7 @@ impl Rt {
                         format!("error scheduling job for {plug_id}/{routine_name}")
                     })?;
                 ActiveDispatchDeets::Wflow {
+                    wflow_partition_id: self.local_wflow_part_id.clone(),
                     entry_id,
                     plug_id: plug_id.into(),
                     bundle_name: bundle_name.0.clone(),
@@ -301,115 +416,44 @@ impl Rt {
         Ok(dispatch_id)
     }
 
+    pub async fn cancel_dispatch(&self, _dispatch_id: &str) -> Res<()> {
+        todo!()
+    }
+
     /// Wait until a log entry matches the provided condition
     /// The callback receives (entry_id, log_entry) and should return true when the condition is met
-    pub async fn wait_for_dispatch(
+    pub async fn wait_for_dispatch_end(
         &self,
         dispatch_id: &str,
-        timeout_secs: u64,
-    ) -> Res<serde_json::Value> {
+        timeout: std::time::Duration,
+    ) -> Res<()> {
         self.ensure_rt_live()?;
 
-        use futures::StreamExt;
-        use tokio::time::{Duration, Instant};
+        use crate::repos::Repo;
 
-        let dispatch = self
-            .dispatch_repo
-            .get(dispatch_id)
-            .await
-            .ok_or_else(|| ferr!("dispatch not found under {dispatch_id}"))?;
-
-        match &dispatch.deets {
-            ActiveDispatchDeets::Wflow {
-                entry_id,
-                wflow_job_id,
-                ..
-            } => {
-                // FIXME: this shuold be a method on the PartitionLogRef
-                let start = Instant::now();
-                let timeout_duration = Duration::from_secs(timeout_secs);
-                let mut stream = self.wcx.logstore.tail(*entry_id).await;
-
-                loop {
-                    // Calculate remaining time
-                    let elapsed = start.elapsed();
-                    let remaining = timeout_duration.saturating_sub(elapsed);
-                    if remaining.is_zero() {
-                        return Err(ferr!(
-                            "timeout waiting for log entry condition after {} seconds",
-                            timeout_secs
-                        ));
-                    }
-
-                    // Wait for next entry with timeout
-                    match tokio::time::timeout(remaining, stream.next()).await {
-                        Ok(Some(Ok(wflow::wflow_core::log::TailLogEntry {
-                            idx: _,
-                            val: Some(bytes),
-                        }))) => {
-                            // FIXME: hide this impl detail
-                            let log_entry: PartitionLogEntry =
-                                serde_json::from_slice(&bytes[..])
-                                    .wrap_err("failed to parse log entry")?;
-                            // info!(?log_entry, wflow_job_id, "XXX");
-                            let PartitionLogEntry::JobEffectResult(event) = log_entry else {
-                                continue;
-                            };
-
-                            if &event.job_id[..] == wflow_job_id {
-                                match &event.result {
-                                    JobRunResult::Success { value_json } => {
-                                        self.dispatch_repo.remove(dispatch_id).await?;
-                                        return Ok(serde_json::from_str(&value_json[..])
-                                            .expect(ERROR_JSON));
-                                    }
-                                    JobRunResult::WorkerErr(err) => {
-                                        self.dispatch_repo.remove(dispatch_id).await?;
-                                        return Err(ferr!(
-                                            "worker error on dispatch wflow: {err:?}"
-                                        ));
-                                    }
-                                    JobRunResult::WflowErr(JobError::Terminal { error_json }) => {
-                                        self.dispatch_repo.remove(dispatch_id).await?;
-                                        return Err(ferr!(
-                                            "terminal error on dispatch wflow: {error_json:?}"
-                                        ));
-                                    }
-                                    JobRunResult::WflowErr(JobError::Transient {
-                                        error_json,
-                                        retry_policy: None,
-                                    })
-                                    | JobRunResult::WflowErr(JobError::Transient {
-                                        error_json,
-                                        retry_policy: Some(RetryPolicy::Immediate),
-                                    }) => {
-                                        warn!("transient error on dispatch wflow: {error_json:?}");
-                                    }
-                                    JobRunResult::StepEffect(..) => {}
-                                }
-                            }
-                        }
-                        Ok(Some(Ok(_val))) => {
-                            // this is a hole, keep going
-                        }
-                        Ok(Some(Err(err))) => {
-                            return Err(err).wrap_err("log stream error waiting on dispatch wflow");
-                        }
-                        Ok(None) => {
-                            // Stream ended, wait a bit and retry
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            continue;
-                        }
-                        Err(_) => {
-                            // Timeout reached
-                            return Err(ferr!(
-                                "timeout waiting for log entry condition after {timeout_secs} seconds",
-                            ));
-                        }
+        let (notif_tx, mut notif_rx) = tokio::sync::watch::channel(());
+        let _listener_handle = self.dispatch_repo.register_listener({
+            let dispatch_id = dispatch_id.to_string();
+            move |msg| match &*msg {
+                dispatch::DispatchEvent::DispatchDeleted { id, .. } => {
+                    if *id == dispatch_id {
+                        notif_tx.send(()).expect(ERROR_CHANNEL)
                     }
                 }
+                _ => {}
             }
-        }
+        });
+
+        // check if the dispatch exists first
+        let Some(_dispatch) = self.dispatch_repo.get(dispatch_id).await else {
+            return Ok(());
+        };
+
+        let _event = tokio::time::timeout(timeout, notif_rx.changed())
+            .await?
+            .expect(ERROR_CHANNEL);
+
+        Ok(())
     }
 }
 

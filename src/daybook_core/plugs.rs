@@ -8,7 +8,6 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
     use manifest::*;
 
     vec![
-        //
         PlugManifest {
             namespace: "daybook".into(),
             name: "core".into(),
@@ -77,46 +76,22 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 (
                     "@daybook/core@v0.0.1".into(),
                     PlugDependencyManifest {
-                        keys: vec![PropKeyDependencyManifest {
-                            key_tag: WellKnownPropTag::Content.into(),
-                            value_schema: schemars::schema_for!(Content),
-                        }],
-                    }
-                    .into(),
-                ),
-            ]
-            .into(),
-            commands: [
-                //
-                (
-                    "pseudo-label".into(),
-                    CommandManifest {
-                        desc: "Use LLM to label the document".into(),
-                        deets: CommandDeets::DocCommand {
-                            routine_name: "pseudo-label".into(),
-                        },
-                    }
-                    .into(),
-                ),
-            ]
-            .into(),
-            processors: [
-                //
-                (
-                    "pseudo-label".into(),
-                    ProcessorManifest {
-                        desc: "Use LLM to label the document".into(),
-                        deets: ProcessorDeets::DocProcessor {
-                            routine_name: "pseudo-label".into(),
-                            predicate: DocPredicateClause::HasTag(WellKnownPropTag::Content.into()),
-                        },
+                        keys: vec![
+                            PropKeyDependencyManifest {
+                                key_tag: WellKnownPropTag::Content.into(),
+                                value_schema: schemars::schema_for!(Content),
+                            },
+                            PropKeyDependencyManifest {
+                                key_tag: WellKnownPropTag::LabelGeneric.into(),
+                                value_schema: schemars::schema_for!(String),
+                            },
+                        ],
                     }
                     .into(),
                 ),
             ]
             .into(),
             routines: [
-                //
                 (
                     "pseudo-label".into(),
                     RoutineManifest {
@@ -142,6 +117,75 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     }
                     .into(),
                 ),
+                #[cfg(debug_assertions)]
+                (
+                    "test-label".into(),
+                    RoutineManifest {
+                        r#impl: RoutineImpl::Wflow {
+                            key: "test-label".into(),
+                            bundle: "daybook_wflows".into(),
+                        },
+                        deets: RoutineManifestDeets::DocProp {
+                            working_prop_tag: WellKnownPropTag::LabelGeneric.into(),
+                        },
+                        prop_acl: vec![RoutinePropAccess {
+                            tag: WellKnownPropTag::LabelGeneric.into(),
+                            read: true,
+                            write: true,
+                        }],
+                    }
+                    .into(),
+                ),
+            ]
+            .into(),
+            commands: [
+                (
+                    "pseudo-label".into(),
+                    CommandManifest {
+                        desc: "Use LLM to label the document".into(),
+                        deets: CommandDeets::DocCommand {
+                            routine_name: "pseudo-label".into(),
+                        },
+                    }
+                    .into(),
+                ),
+                #[cfg(debug_assertions)]
+                (
+                    "test-label".into(),
+                    CommandManifest {
+                        desc: "Add a test LabelGeneric for testing".into(),
+                        deets: CommandDeets::DocCommand {
+                            routine_name: "test-label".into(),
+                        },
+                    }
+                    .into(),
+                ),
+            ]
+            .into(),
+            processors: [
+                (
+                    "pseudo-label".into(),
+                    ProcessorManifest {
+                        desc: "Use LLM to label the document content".into(),
+                        deets: ProcessorDeets::DocProcessor {
+                            routine_name: "pseudo-label".into(),
+                            predicate: DocPredicateClause::HasTag(WellKnownPropTag::Content.into()),
+                        },
+                    }
+                    .into(),
+                ),
+                #[cfg(debug_assertions)]
+                (
+                    "test-label".into(),
+                    ProcessorManifest {
+                        desc: "Add a test LabelGeneric for testing".into(),
+                        deets: ProcessorDeets::DocProcessor {
+                            routine_name: "test-label".into(),
+                            predicate: DocPredicateClause::Or(default()),
+                        },
+                    }
+                    .into(),
+                ),
             ]
             .into(),
             wflow_bundles: [
@@ -149,7 +193,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 (
                     "daybook_wflows".into(),
                     WflowBundleManifest {
-                        keys: vec!["pseudo-label".into()],
+                        keys: vec!["pseudo-label".into(), "test-label".into()],
                         // FIXME: make this more generic
                         component_urls: vec![{
                             let path = std::path::absolute(
@@ -240,9 +284,9 @@ pub struct PlugsRepo {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PlugsEvent {
-    ListChanged { commit: ChangeHashSet },
-    PlugChanged { id: String, commit: ChangeHashSet },
-    PlugDeleted { id: String, commit: ChangeHashSet },
+    ListChanged { heads: ChangeHashSet },
+    PlugChanged { id: String, heads: ChangeHashSet },
+    PlugDeleted { id: String, heads: ChangeHashSet },
 }
 
 impl crate::repos::Repo for PlugsRepo {
@@ -357,7 +401,7 @@ impl PlugsRepo {
     ) -> Res<()> {
         events.clear();
         for notif in notifs {
-            let commit = ChangeHashSet(notif.heads.clone());
+            let heads = ChangeHashSet(notif.heads.clone());
             match &notif.patch.action {
                 automerge::PatchAction::PutMap { key, .. } => {
                     if notif.patch.path.len() >= 2 {
@@ -365,14 +409,14 @@ impl PlugsRepo {
                             automerge::Prop::Map(path_key) => match path_key.as_ref() {
                                 "manifests" => events.push(PlugsEvent::PlugChanged {
                                     id: key.into(),
-                                    commit,
+                                    heads,
                                 }),
-                                _ => events.push(PlugsEvent::ListChanged { commit }),
+                                _ => events.push(PlugsEvent::ListChanged { heads }),
                             },
-                            _ => events.push(PlugsEvent::ListChanged { commit }),
+                            _ => events.push(PlugsEvent::ListChanged { heads }),
                         }
                     } else {
-                        events.push(PlugsEvent::ListChanged { commit });
+                        events.push(PlugsEvent::ListChanged { heads });
                     }
                 }
                 automerge::PatchAction::DeleteMap { key } => {
@@ -381,19 +425,19 @@ impl PlugsRepo {
                             automerge::Prop::Map(path_key) => match path_key.as_ref() {
                                 "manifests" => events.push(PlugsEvent::PlugDeleted {
                                     id: key.into(),
-                                    commit,
+                                    heads,
                                 }),
-                                _ => events.push(PlugsEvent::ListChanged { commit }),
+                                _ => events.push(PlugsEvent::ListChanged { heads }),
                             },
-                            _ => events.push(PlugsEvent::ListChanged { commit }),
+                            _ => events.push(PlugsEvent::ListChanged { heads }),
                         }
                     } else {
-                        events.push(PlugsEvent::ListChanged { commit });
+                        events.push(PlugsEvent::ListChanged { heads });
                     }
                 }
                 _ => {
                     // For other operations, send ListChanged
-                    events.push(PlugsEvent::ListChanged { commit });
+                    events.push(PlugsEvent::ListChanged { heads });
                 }
             }
         }
@@ -512,7 +556,7 @@ impl PlugsRepo {
         // to simplify lookups and ensure uniqueness.
         let plug_id = manifest.id();
 
-        let (_, commit) = self
+        let (_, hash) = self
             .store
             .mutate_sync(move |store| {
                 // Update the manifest in the store
@@ -528,10 +572,10 @@ impl PlugsRepo {
             })
             .await?;
 
-        let commit = ChangeHashSet(commit.into_iter().collect());
+        let heads = ChangeHashSet(hash.into_iter().collect());
 
         // Notify listeners that the plug list or a specific plug has changed
-        self.registry.notify([PlugsEvent::ListChanged { commit }]);
+        self.registry.notify([PlugsEvent::ListChanged { heads }]);
 
         Ok(())
     }
@@ -762,7 +806,7 @@ impl PlugsRepo {
         for (routine_name, routine) in &manifest.routines {
             for access in &routine.prop_acl {
                 if !available_tags.contains(&access.tag.to_string()) {
-                    eyre::bail!("Invalid ACL in routine '{}': tag '{}' is neither declared nor depended on by this plug", routine_name, access.tag);
+                    eyre::bail!("Invalid ACL in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}", routine_name, access.tag);
                 }
             }
 

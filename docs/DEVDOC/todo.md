@@ -36,6 +36,8 @@
 
 - [ ] Cleanup for public pre-alpha
 
+
+- [ ] File lock on repo
 - [ ] daybook_cli
     - [ ] `daybook pset docId propKey value`
     - [ ] `daybook pget docId propKey`

@@ -4,27 +4,100 @@ use utils_rs::am::AmCtx;
 
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
-use crate::rt::triage::DocTriageWorkerHandle;
 
 mod doc_created_wflow;
 
 pub struct DaybookTestContext {
     pub _acx: AmCtx,
     pub drawer_repo: Arc<DrawerRepo>,
-    pub wflow_test_cx: DaybookWflowTestContext,
-    _doc_changes_worker: DocTriageWorkerHandle,
-    pub _dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
+    pub dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
     pub drawer_stop: crate::repos::RepoStopToken,
     pub plugs_stop: crate::repos::RepoStopToken,
     pub config_stop: crate::repos::RepoStopToken,
     pub dispatch_stop: crate::repos::RepoStopToken,
     pub acx_stop: utils_rs::am::AmCtxStopToken,
     pub rt_stop: crate::rt::RtStopToken,
+    pub rt: Arc<crate::rt::Rt>,
 }
 
 impl DaybookTestContext {
+    /// Wait until there are no active jobs, with a timeout
+    pub async fn wait_until_no_active_jobs(&self, timeout_secs: u64) -> Res<()> {
+        use tokio::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let timeout_duration = Duration::from_secs(timeout_secs);
+        let mut change_rx = self.rt.wflow_part_state.change_receiver();
+
+        // Get initial counts without holding a lock
+        let mut counts = *change_rx.borrow();
+        if counts.active == 0 && counts.archive > 0 {
+            // No active jobs, we're done
+            tracing::info!(
+                "done, {} active jobs, {} archived jobs",
+                counts.active,
+                counts.archive
+            );
+            return Ok(());
+        }
+
+        loop {
+            // Calculate remaining time
+            let elapsed = start.elapsed();
+            let remaining = timeout_duration.saturating_sub(elapsed);
+            if remaining.is_zero() {
+                return Err(ferr!(
+                    "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
+                    timeout_secs,
+                    elapsed,
+                    counts.active
+                ));
+            }
+
+            tracing::debug!(
+                "Waiting for count change or timeout (active jobs: {}, remaining: {:?})",
+                counts.active,
+                remaining
+            );
+
+            // Wait for the next count change or timeout
+            match tokio::time::timeout(remaining, change_rx.changed()).await {
+                Ok(Ok(())) => {
+                    // Counts changed, update our local copy
+                    counts = *change_rx.borrow();
+                    if counts.active == 0 && counts.archive > 0 {
+                        // No active jobs, we're done
+                        tracing::info!(
+                            "done, {} active jobs, {} archived jobs",
+                            counts.active,
+                            counts.archive
+                        );
+                        return Ok(());
+                    }
+                    // Continue waiting
+                    tracing::debug!("Counts changed, rechecking active jobs");
+                    continue;
+                }
+                Ok(Err(_)) => {
+                    // Channel closed, worker might be shutting down
+                    return Err(ferr!("worker state channel closed"));
+                }
+                Err(_) => {
+                    // Timeout reached
+                    let final_elapsed = start.elapsed();
+                    let final_counts = self.rt.wflow_part_state.get_job_counts().await;
+                    return Err(ferr!(
+                        "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
+                        timeout_secs,
+                        final_elapsed,
+                        final_counts.active
+                    ));
+                }
+            }
+        }
+    }
+
     pub async fn stop(self) -> Res<()> {
-        self.wflow_test_cx.stop().await?;
         self.drawer_stop.stop().await?;
         self.plugs_stop.stop().await?;
         self.config_stop.stop().await?;
@@ -36,10 +109,9 @@ impl DaybookTestContext {
 }
 
 pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
-    use automerge::transaction::Transactable;
     tokio::task::block_in_place(|| {
         utils_rs::testing::load_envs_once();
-        utils_rs::testing::setup_tracing().ok();
+        utils_rs::testing::setup_tracing_once();
     });
 
     // Initialize AmCtx with memory storage
@@ -80,13 +152,14 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
     plug_repo.ensure_system_plugs().await?;
 
     let db_path = temp_dir.path().join("wflow.db");
-    let db_pool =
-        sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=rwc", db_path.display())).await?;
-    sqlx::query("PRAGMA journal_mode=WAL")
-        .execute(&db_pool)
-        .await?;
-    let wcx = wflow::Ctx::init(&db_pool).await?;
+    let wflow_db_url = format!("sqlite:{}?mode=rwc", db_path.display());
+
+    let wcx = wflow::Ctx::init(&wflow_db_url).await?;
     let (rt, rt_stop) = crate::rt::Rt::boot(
+        crate::rt::RtConfig {
+            device_id: "test_01".into(),
+        },
+        app_doc_id,
         wcx,
         acx.clone(),
         drawer_repo.clone(),
@@ -96,20 +169,11 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
     )
     .await?;
 
-    // Start the DocTriageWorker to automatically queue jobs when docs are added
-    let doc_changes_worker =
-        crate::rt::triage::spawn_doc_triage_worker(rt.clone(), app_doc_id).await?;
-
     Ok(DaybookTestContext {
         _acx: acx,
         drawer_repo,
-        _dispatch_repo: dispatch_repo,
-        wflow_test_cx: DaybookWflowTestContext {
-            _wcx: rt.wcx.clone(),
-            _wash_host: rt.wash_host.clone(),
-            _ingress: rt.wflow_ingress.clone(),
-        },
-        _doc_changes_worker: doc_changes_worker,
+        rt,
+        dispatch_repo,
         drawer_stop,
         plugs_stop,
         config_stop,
@@ -117,21 +181,4 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
         acx_stop,
         rt_stop,
     })
-}
-
-pub struct DaybookWflowTestContext {
-    pub _wcx: wflow::Ctx,
-    pub _wash_host: Arc<wash_runtime::host::Host>,
-    pub _ingress: Arc<dyn wflow::WflowIngress>,
-}
-
-impl DaybookWflowTestContext {
-    pub async fn stop(self) -> Res<()> {
-        Ok(())
-    }
-
-    pub async fn wait_until_no_active_jobs(&self, _timeout_secs: u64) -> Res<()> {
-        // FIXME: implement this properly if needed
-        Ok(())
-    }
 }

@@ -76,7 +76,7 @@ impl SqlCtx {
         }
 
         let db_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
+            // .max_connections(1)
             .connect_with(
                 sqlx::sqlite::SqliteConnectOptions::from_str(&config.database_url)?
                     .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)

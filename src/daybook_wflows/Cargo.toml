@@ -11,7 +11,7 @@ path = "lib.rs"
 utils_rs = { workspace = true }
 api_utils_rs.workspace = true
 wflow_sdk.workspace = true
-daybook_types = { workspace = true, features = ["wit"] }
+daybook_types = { workspace = true, features = ["wit", "automerge"] }
 
 # genai = "0.4.1"
 # llm = "1.3.4"

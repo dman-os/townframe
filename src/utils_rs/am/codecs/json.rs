@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn smoke() -> Res<()> {
-        crate::testing::setup_tracing()?;
+        crate::testing::setup_tracing_once();
         let mut doc = automerge::AutoCommit::new();
 
         let val = test_val();
@@ -484,7 +484,7 @@ mod tests {
             pub map: HashMap<String, ThroughJson<Arc<Foo>>>,
         }
 
-        crate::testing::setup_tracing()?;
+        crate::testing::setup_tracing_once();
         let mut doc = automerge::AutoCommit::new();
 
         let mut val = {

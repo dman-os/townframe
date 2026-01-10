@@ -1,5 +1,6 @@
 ---
 source: src/wflow/test.rs
+assertion_line: 466
 expression: log_snapshot
 ---
 - - 1

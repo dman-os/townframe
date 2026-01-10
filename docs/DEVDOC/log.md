@@ -1,4 +1,41 @@
-# dev-log
+# duck-log
+
+## 2026-01-12 | one dollar
+
+here's an ambitious grounding goal/question, can you offer a service tier that starts at 1$?
+
+## 2026-01-10 | dispatch system
+
+This is taking way too long but I do have a working prototype for the plugin runtime very similar to what was described a few entries back.
+It allows me to invoke routines on documents manually or when the documents themselves change in a reactive manner.
+The latter case does have murky semantics we need to figure out.
+
+First issue is that execution state lives in a separate dispatch repo in addition to the wflow state.
+This state is partially backed by automerge but still, I'm wondering how well this will clear cut semantics to avoid duplicate/clashing work playing out on different devices.
+
+Some more decisions:
+- Put wflow processors in a different branch and merge when they succeed.
+  - I expect most processors will use their own keys for state so should be merge conflict free...mostly.
+  - What happens if we dispatch the same processor twice in a row after observing changes?
+    - Let's cancel the job on the rt for the old one.
+    - Clean up the branch if any state was written there.
+    - Where to put the state for (doc_id, processor)? Triage worker state methinks.
+      - Listen on dispatch repo to clean this up.
+- We need to reliably clean up after routines are done/discarded.
+  - Tail the wflow log to find rejections.
+    - We need the dispatcher to reliably depend on wflow.
+      - Let's attach wflow partition ids to dispatches?
+  - What hapends to outputs?
+    - All routines are doc based so the output is in the buffer/doc?
+    - What about errors?
+    - How do routines call other routines and get results? Should they?
+
+The biggest question is what is the execution location of the processors and routines. 
+We want to execute them globally once but should we be storing their state in automerge and synchronizing?
+That seems like it'll be a lot of garbage state for automerge.
+And this state will need to share the automerge doc with the the drawer which shouldn't have to deal with that much garbage.
+We need a solid scheme to avoid clobbering and make sure any conflicting state resolves in a determinstic manner.
+
 
 ## 2025-12-27 | plugin-system
 
@@ -352,6 +389,12 @@ Concerns:
     - Crux provide a nice abstraction here but maybe too much abstraction?
       - I think I'll wait on them to make some progress and see how that shakes out
 
+### 2025-09-18 | Wasmcloud
+
+After long delays due to some tooling bugs, I was able to complete the wasmcloud based API system.
+Overengineering crap but I do like the result.
+Even though I feel like wasm is an important part of the vision, I can't help but feel this is loosing focus.
+
 ## 2025-07-26
 
 Spent the day trying to get it to start on desktop.
@@ -367,3 +410,19 @@ I have to downscope fast.
 ## 2025-05-31 | daybook
 
 I need to make this happen ASAP. Everything depends on it.
+
+### 2025-03-05 | Proc macros
+
+Spent today porting glue code from the aggy codebase.
+Cleaned up some of the boilerplates due to new proc macros.
+I had an LLM write it for me.
+Well, it certainly helped anyways.
+Next time, I'll have to setup the db stuff.
+Can't wait to start on actual feature work lol.
+
+### 2025-03-04 | Ramping up
+
+Trying to get the show on the road.
+This is a full stack project in the traditional sense.
+I'll need to write a web app, backend API and possibly a mobile app.
+I'll be starting out with Granary which seems doable.

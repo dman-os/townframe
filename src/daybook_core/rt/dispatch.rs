@@ -11,6 +11,7 @@ pub struct ActiveDispatch {
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug)]
 pub enum ActiveDispatchDeets {
     Wflow {
+        wflow_partition_id: String,
         entry_id: u64,
         plug_id: String,
         bundle_name: String,
@@ -36,6 +37,8 @@ pub struct PropRoutineArgs {
 pub struct DispatchStore {
     pub active_dispatches: HashMap<String, Arc<ActiveDispatch>>,
     pub wflow_to_dispatch: HashMap<String, String>,
+    // FUXME: this seems like a bad use of automerge?
+    pub wflow_partition_frontier: HashMap<String, u64>,
 }
 
 #[async_trait]
@@ -49,15 +52,17 @@ pub struct DispatchRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
+    dispatch_am_handle: samod::DocHandle,
 }
 
 // Granular event enum for specific changes
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum DispatchEvent {
-    ListChanged,
-    DispatchChanged { id: String },
-    DispatchDeleted { id: String },
+    ListChanged { heads: ChangeHashSet },
+    DispatchAdded { id: String, heads: ChangeHashSet },
+    DispatchUpdated { id: String, heads: ChangeHashSet },
+    DispatchDeleted { id: String, heads: ChangeHashSet },
 }
 
 impl crate::repos::Repo for DispatchRepo {
@@ -80,12 +85,14 @@ impl DispatchRepo {
         let store = DispatchStore::load(&acx, &app_doc_id).await?;
         let store = crate::stores::StoreHandle::new(store, acx.clone(), app_doc_id.clone());
 
+        let dispatch_am_handle = acx
+            .find_doc(&app_doc_id)
+            .await?
+            .expect("doc should have been loaded");
         let (broker, broker_stop) = {
-            let handle = acx
-                .find_doc(&app_doc_id)
+            acx.change_manager()
+                .add_doc(dispatch_am_handle.clone())
                 .await?
-                .expect("doc should have been loaded");
-            acx.change_manager().add_doc(handle).await?
         };
 
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -106,6 +113,7 @@ impl DispatchRepo {
             registry: Arc::clone(&registry),
             cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
+            dispatch_am_handle,
         };
         let repo = Arc::new(repo);
 
@@ -136,15 +144,25 @@ impl DispatchRepo {
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
-        // FIXME: this code doesn't seem right and has missing features
-
         let mut events = vec![];
         loop {
             let notifs = tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
                     while let Ok(notifs) = notif_rx.try_recv() {
-                        self.process_notifs(notifs, &mut events).await?;
+                        let mut last_heads = None;
+                        for notif in notifs {
+                            last_heads = Some(notif.heads.clone());
+                            self.events_for_patch(&notif.patch, &notif.heads, &mut events).await?;
+                        }
+                        if !events.is_empty() {
+                            let heads = ChangeHashSet(last_heads.expect("notifs not empty"));
+                            self.registry.notify(
+                                events
+                                    .drain(..)
+                                    .chain(std::iter::once(DispatchEvent::ListChanged { heads })),
+                            );
+                        }
                     }
                     break;
                 }
@@ -155,64 +173,111 @@ impl DispatchRepo {
                     }
                 }
             };
-            self.process_notifs(notifs, &mut events).await?;
+            let mut last_heads = None;
+            for notif in notifs {
+                last_heads = Some(notif.heads.clone());
+                self.events_for_patch(&notif.patch, &notif.heads, &mut events)
+                    .await?;
+            }
+            if !events.is_empty() {
+                let heads = ChangeHashSet(last_heads.expect("notifs not empty"));
+                self.registry.notify(
+                    events
+                        .drain(..)
+                        .chain(std::iter::once(DispatchEvent::ListChanged { heads })),
+                );
+            }
         }
         Ok(())
     }
 
-    async fn process_notifs(
+    async fn events_for_patch(
         &self,
-        notifs: Vec<utils_rs::am::changes::ChangeNotification>,
-        events: &mut Vec<DispatchEvent>,
+        patch: &automerge::Patch,
+        patch_heads: &Arc<[automerge::ChangeHash]>,
+        out: &mut Vec<DispatchEvent>,
     ) -> Res<()> {
-        events.clear();
-        for notif in notifs {
-            match &notif.patch.action {
-                automerge::PatchAction::PutMap { key, .. } => {
-                    // Check if this is a specific item change
-                    // Determine which type of item changed based on path
-                    if notif.patch.path.len() >= 2 {
-                        match &notif.patch.path[1].1 {
-                            automerge::Prop::Map(path_key) => match path_key.as_ref() {
-                                "active_dispatches" => {
-                                    events.push(DispatchEvent::DispatchChanged { id: key.into() })
-                                }
-                                _ => events.push(DispatchEvent::ListChanged),
-                            },
-                            _ => events.push(DispatchEvent::ListChanged),
-                        }
-                    } else {
-                        events.push(DispatchEvent::ListChanged);
-                    }
-                }
-                automerge::PatchAction::DeleteMap { key } => {
-                    if notif.patch.path.len() >= 2 {
-                        match &notif.patch.path[1].1 {
-                            automerge::Prop::Map(path_key) => match path_key.as_ref() {
-                                "active_dispatches" => {
-                                    events.push(DispatchEvent::DispatchDeleted { id: key.into() })
-                                }
-                                _ => events.push(DispatchEvent::ListChanged),
-                            },
-                            _ => events.push(DispatchEvent::ListChanged),
-                        }
-                    } else {
-                        events.push(DispatchEvent::ListChanged);
-                    }
-                }
-                _ => {
-                    // For other operations, send ListChanged
-                }
-            }
+        if !utils_rs::am::changes::path_prefix_matches(
+            &[DispatchStore::PROP.into(), "active_dispatches".into()],
+            &patch.path,
+        ) {
+            return Ok(());
         }
-        self.registry.notify(events.drain(..));
+
+        let dispatch_heads = ChangeHashSet(patch_heads.clone());
+
+        match &patch.action {
+            automerge::PatchAction::PutMap { key, .. } if patch.path.len() == 2 => {
+                let exists = self
+                    .store
+                    .query_sync(|store| store.active_dispatches.contains_key(key))
+                    .await;
+
+                out.push(if exists {
+                    DispatchEvent::DispatchAdded {
+                        id: key.clone(),
+                        heads: dispatch_heads,
+                    }
+                } else {
+                    DispatchEvent::DispatchUpdated {
+                        id: key.clone(),
+                        heads: dispatch_heads,
+                    }
+                });
+            }
+            automerge::PatchAction::DeleteMap { key, .. } if patch.path.len() == 2 => {
+                out.push(DispatchEvent::DispatchDeleted {
+                    id: key.clone(),
+                    heads: dispatch_heads,
+                });
+            }
+            _ => {}
+        }
         Ok(())
+    }
+
+    pub async fn diff_events(
+        &self,
+        from: ChangeHashSet,
+        to: Option<ChangeHashSet>,
+    ) -> Res<Vec<DispatchEvent>> {
+        let (patches, heads) = self.dispatch_am_handle.with_document(|am_doc| {
+            let heads = if let Some(ref to_set) = to {
+                to_set.clone()
+            } else {
+                ChangeHashSet(am_doc.get_heads().into())
+            };
+            let patches = am_doc.diff(&from, &heads);
+            (patches, heads)
+        });
+        let heads = heads.0;
+        let mut events = vec![];
+        for patch in patches {
+            self.events_for_patch(&patch, &heads, &mut events).await?;
+        }
+        Ok(events)
     }
 
     pub async fn get(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
         self.store
             .query_sync(|store| store.active_dispatches.get(id).map(Arc::clone))
             .await
+    }
+
+    pub async fn get_wflow_part_frontier(&self, wflow_part_id: &str) -> Option<u64> {
+        self.store
+            .query_sync(|store| store.wflow_partition_frontier.get(wflow_part_id).cloned())
+            .await
+    }
+    pub async fn set_wflow_part_frontier(&self, wflow_part_id: String, frontier: u64) -> Res<()> {
+        self.store
+            .mutate_sync(|store| {
+                store
+                    .wflow_partition_frontier
+                    .insert(wflow_part_id, frontier);
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn get_by_wflow_job(&self, job_id: &str) -> Option<Arc<ActiveDispatch>> {
@@ -226,7 +291,7 @@ impl DispatchRepo {
 
     pub async fn add(&self, id: String, dispatch: Arc<ActiveDispatch>) -> Res<()> {
         debug!(?id, "adding dispatch to repo");
-        let (old, commit) = self
+        let (old, hash) = self
             .store
             .mutate_sync(|store| {
                 match &dispatch.deets {
@@ -237,19 +302,34 @@ impl DispatchRepo {
                         assert!(old.is_none(), "fishy");
                     }
                 }
-                store.active_dispatches.insert(id, dispatch)
+                store.active_dispatches.insert(id.clone(), dispatch)
             })
             .await?;
-        debug!(?commit, "dispatch added to repo");
         assert!(old.is_none(), "fishy");
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([
+            DispatchEvent::DispatchAdded {
+                id,
+                heads: heads.clone(),
+            },
+            DispatchEvent::ListChanged { heads },
+        ]);
         Ok(())
     }
 
-    pub async fn remove(&self, id: &str) -> Res<Option<Arc<ActiveDispatch>>> {
-        let (old, _hash) = self
+    pub async fn remove(&self, id: String) -> Res<Option<Arc<ActiveDispatch>>> {
+        let (old, hash) = self
             .store
-            .mutate_sync(|store| store.active_dispatches.remove(id))
+            .mutate_sync(|store| store.active_dispatches.remove(&id))
             .await?;
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([
+            DispatchEvent::DispatchDeleted {
+                id,
+                heads: heads.clone(),
+            },
+            DispatchEvent::ListChanged { heads },
+        ]);
         Ok(old)
     }
 

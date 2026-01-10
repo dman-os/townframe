@@ -2,7 +2,7 @@
 source: src/wflow/test.rs
 expression: log_snapshot
 ---
-- - 0
+- - 1
   - JobInit:
       job_id: test-fails-once-sqlite-1
       timestamp: "[timestamp]"
@@ -11,22 +11,22 @@ expression: log_snapshot
       wflow:
         key: fails_once
         service:
-          Wasmcloud:
+          wasmcloud:
             workload_id: workload_123
-- - 1
+- - 2
   - JobPartitionEffects:
-      source_entry_id: 0
+      source_entry_id: 1
       effects:
         - job_id: test-fails-once-sqlite-1
           deets:
             RunJob:
               run_id: 0
-- - 2
+- - 3
   - JobEffectResult:
       job_id: test-fails-once-sqlite-1
       timestamp: "[timestamp]"
       effect_id:
-        entry_id: 1
+        entry_id: 2
         effect_idx: 0
       run_id: 0
       start_at: "[timestamp]"
@@ -36,20 +36,20 @@ expression: log_snapshot
           Transient:
             error_json: "{\"msg\":\"first run, woohoo!\\n\\[location]\"}"
             retry_policy: ~
-- - 3
+- - 4
   - JobPartitionEffects:
-      source_entry_id: 2
+      source_entry_id: 3
       effects:
         - job_id: test-fails-once-sqlite-1
           deets:
             RunJob:
               run_id: 1
-- - 4
+- - 5
   - JobEffectResult:
       job_id: test-fails-once-sqlite-1
       timestamp: "[timestamp]"
       effect_id:
-        entry_id: 3
+        entry_id: 4
         effect_idx: 0
       run_id: 1
       start_at: "[timestamp]"
@@ -63,20 +63,20 @@ expression: log_snapshot
           deets:
             Success:
               value_json: "null"
-- - 5
+- - 6
   - JobPartitionEffects:
-      source_entry_id: 4
+      source_entry_id: 5
       effects:
         - job_id: test-fails-once-sqlite-1
           deets:
             RunJob:
               run_id: 2
-- - 6
+- - 7
   - JobEffectResult:
       job_id: test-fails-once-sqlite-1
       timestamp: "[timestamp]"
       effect_id:
-        entry_id: 5
+        entry_id: 6
         effect_idx: 0
       run_id: 2
       start_at: "[timestamp]"

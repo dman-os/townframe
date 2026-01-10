@@ -13,10 +13,11 @@
 
 - Compose Multiplatform
   - Best for both Android and Desktop?
-  - Can't wait till a Rust solution is viable :)
+  - Can't wait till a pure Rust solution is viable :)
 - Custom wash runtime
   - Locally for plugin execution
   - And also through wasmcloud for server features
+    - This might be pre-mature? Do we need to roll our own hosts?
 - SQlite or PGLite?
 - Durable execution
   - Homebrew

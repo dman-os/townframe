@@ -52,6 +52,7 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
         wflow_sdk::route_wflows!(args, {
             "pseudo-label" => |cx, _args: serde_json::Value| pseudo_labeler(cx),
+            "test-label" => |cx, _args: serde_json::Value| test_labeler(cx),
         })
     }
 }
@@ -119,6 +120,28 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
     cx.effect(|| {
         let new_prop: daybook_types::doc::DocProp =
             WellKnownProp::PseudoLabel(new_labels.join(",")).into();
+        let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
+        args.prop_token
+            .update(&new_prop)
+            .wrap_err("error updating prop")
+            .map_err(JobErrorX::Terminal)?;
+        Ok(Json(()))
+    })?;
+
+    Ok(())
+}
+
+fn test_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
+    use crate::wit::townframe::daybook::prop_routine;
+    let args = prop_routine::get_args();
+
+    // Extract text content for LLM
+    // Use root types since Doc uses root types (not WIT types)
+    use daybook_types::doc::WellKnownProp;
+
+    cx.effect(|| {
+        let new_prop: daybook_types::doc::DocProp =
+            WellKnownProp::LabelGeneric("test_label".into()).into();
         let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
         args.prop_token
             .update(&new_prop)

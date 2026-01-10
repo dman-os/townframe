@@ -12,7 +12,7 @@ pub mod ingress;
 pub mod kvstore;
 
 pub use ingress::{PartitionLogIngress, WflowIngress};
-pub use kvstore::SqliteKvStore;
+pub use kvstore::{SqliteKvFactory, SqliteKvStore};
 pub use wash_plugin_wflow;
 pub use wflow_core;
 pub use wflow_tokio;
@@ -28,14 +28,15 @@ use wflow_core::{gen::types::PartitionId, kvstore::KvStore};
 pub struct Ctx {
     pub metastore: Arc<dyn wflow_core::metastore::MetdataStore>,
     pub logstore: Arc<dyn wflow_core::log::LogStore>,
-    pub snapstore: Arc<dyn wflow_core::snapstore::SnapStore>,
+    pub snapstore: Arc<dyn wflow_core::snapstore::SnapStore<Snapshot = Arc<[u8]>>>,
 }
 
 impl Ctx {
-    pub async fn init(db_pool: &sqlx::Pool<sqlx::Sqlite>) -> Res<Self> {
-        let metastore_kv = Arc::new(SqliteKvStore::new(db_pool.clone(), "wflow_metastore").await?);
-        let logstore_kv = Arc::new(SqliteKvStore::new(db_pool.clone(), "wflow_logstore").await?);
-        let snapstore_kv = Arc::new(SqliteKvStore::new(db_pool.clone(), "wflow_snapstore").await?);
+    pub async fn init(db_url: &str) -> Res<Self> {
+        let factory = SqliteKvFactory::boot(db_url).await?;
+        let metastore_kv = Arc::new(factory.open_store("wflow_metastore").await?);
+        let logstore_kv = Arc::new(factory.open_store("wflow_logstore").await?);
+        let snapstore_kv = Arc::new(factory.open_store("wflow_snapstore").await?);
 
         // Create the stores
         let metastore = Arc::new(
@@ -54,7 +55,7 @@ impl Ctx {
         )
         .await?;
         let logstore = Arc::new(logstore);
-        let snapstore = Arc::new(wflow_core::kvstore::snapstore::AtomicKvSnapStore::new(
+        let snapstore = Arc::new(wflow_core::kvstore::snapstore::KvSnapStore::new(
             snapstore_kv,
         ));
         Ok(Self {

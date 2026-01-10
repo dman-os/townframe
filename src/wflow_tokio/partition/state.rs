@@ -56,6 +56,27 @@ impl PartitionWorkingState {
         self.jobs.write().await
     }
 
+    /// Get current job counts without holding a lock
+    pub async fn get_job_counts(&self) -> JobCounts {
+        let jobs = self.jobs.read().await;
+        JobCounts {
+            active: jobs.active.len(),
+            archive: jobs.archive.len(),
+        }
+    }
+
+    /// Notify listeners of count changes (call this after updating state)
+    /// FIXME: probably best to ensure this gets called using type system
+    pub fn notify_counts_changed(&self, counts: JobCounts) {
+        // Ignore errors - receivers may have been dropped
+        let _ = self.change_tx.send(counts);
+    }
+
+    /// Get a receiver for count change notifications
+    pub fn change_receiver(&self) -> tokio::sync::watch::Receiver<JobCounts> {
+        self.change_rx.clone()
+    }
+
     /// Get a read lock on effects state
     pub async fn read_effects(
         &self,
@@ -70,26 +91,6 @@ impl PartitionWorkingState {
     ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<effects::EffectId, effects::PartitionEffect>>
     {
         self.effects.write().await
-    }
-
-    /// Get current job counts without holding a lock
-    pub async fn get_job_counts(&self) -> JobCounts {
-        let jobs = self.jobs.read().await;
-        JobCounts {
-            active: jobs.active.len(),
-            archive: jobs.archive.len(),
-        }
-    }
-
-    /// Notify listeners of count changes (call this after updating state)
-    pub fn notify_counts_changed(&self, counts: JobCounts) {
-        // Ignore errors - receivers may have been dropped
-        let _ = self.change_tx.send(counts);
-    }
-
-    /// Get a receiver for count change notifications
-    pub fn change_receiver(&self) -> tokio::sync::watch::Receiver<JobCounts> {
-        self.change_rx.clone()
     }
 }
 

@@ -12,6 +12,6 @@ pub struct TailLogEntry {
 #[async_trait]
 pub trait LogStore: Send + Sync {
     async fn append(&self, entry: &[u8]) -> Res<u64>;
-    async fn tail(&self, offset: u64) -> BoxStream<Res<TailLogEntry>>;
+    fn tail(&'_ self, offset: u64) -> BoxStream<'_, Res<TailLogEntry>>;
     async fn latest_idx(&self) -> Res<u64>;
 }

@@ -19,7 +19,7 @@ macro_rules! integration_table_tests {
             #[tokio::test]
             async fn $name() -> $crate::interlude::eyre::Result<()> {
                 use utils_rs::prelude::*;
-                utils_rs::testing::setup_tracing()?;
+                utils_rs::testing::setup_tracing_once();
                 let mut test_cx = $cx_fn(utils_rs::function_full!()).await?;
                 {
                     let http_client = reqwest::Client::new();

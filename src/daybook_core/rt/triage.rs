@@ -2,6 +2,7 @@ use crate::interlude::*;
 
 use crate::drawer::DrawerEvent;
 use crate::plugs::PlugsEvent;
+use crate::rt::dispatch::DispatchEvent;
 use crate::rt::{DispatchArgs, Rt};
 use daybook_types::doc::{Doc, DocId};
 
@@ -11,13 +12,17 @@ use crate::plugs::manifest::{
 pub use wflow::{PartitionLogIngress, WflowIngress};
 
 #[derive(Default, Debug, Reconcile, Hydrate, Serialize, Deserialize)]
-pub struct DocTriageStateStore {
-    pub drawer_commit: Option<ChangeHashSet>,
-    pub plug_commit: Option<ChangeHashSet>,
+pub struct DocTriageWorkerStateStore {
+    pub drawer_heads: Option<ChangeHashSet>,
+    pub plug_heads: Option<ChangeHashSet>,
+    pub dispatch_heads: Option<ChangeHashSet>,
+
+    pub dispatch_to_job: HashMap<String, (DocId, String, String)>,
+    pub job_to_dispatch: HashMap<String, String>,
 }
 
 #[async_trait]
-impl crate::stores::Store for DocTriageStateStore {
+impl crate::stores::Store for DocTriageWorkerStateStore {
     const PROP: &str = "triage";
 }
 
@@ -52,12 +57,14 @@ pub async fn spawn_doc_triage_worker(
     use crate::repos::Repo;
     use crate::stores::Store;
 
-    let store = DocTriageStateStore::load(&rt.acx, &app_doc_id).await?;
+    let store = DocTriageWorkerStateStore::load(&rt.acx, &app_doc_id).await?;
     let store = crate::stores::StoreHandle::new(store, rt.acx.clone(), app_doc_id.clone());
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<Arc<DrawerEvent>>();
     let (plug_event_tx, mut plug_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<Arc<PlugsEvent>>();
+    let (dispatch_event_tx, mut dispatch_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Arc<DispatchEvent>>();
 
     let listener = rt.drawer.register_listener({
         let event_tx = event_tx.clone();
@@ -71,13 +78,34 @@ pub async fn spawn_doc_triage_worker(
         }
     });
 
+    let dispatch_listener = rt.dispatch_repo.register_listener({
+        let dispatch_event_tx = dispatch_event_tx.clone();
+        move |event| {
+            dispatch_event_tx.send(event).expect(ERROR_CHANNEL);
+        }
+    });
+
     // Catch up on missed events
-    let initial_drawer_commit = store.query_sync(|s| s.drawer_commit.clone()).await;
-    if let Some(heads) = initial_drawer_commit {
+    let (initial_drawer_heads, initial_dispatch_heads) = store
+        .query_sync(|s| (s.drawer_heads.clone(), s.dispatch_heads.clone()))
+        .await;
+
+    if let Some(heads) = initial_drawer_heads {
         if !heads.0.is_empty() {
             let events = rt.drawer.diff_events(heads, None).await?;
             for event in events {
                 event_tx.send(Arc::new(event).into()).expect(ERROR_CHANNEL);
+            }
+        }
+    }
+
+    if let Some(heads) = initial_dispatch_heads {
+        if !heads.0.is_empty() {
+            let events = rt.dispatch_repo.diff_events(heads, None).await?;
+            for event in events {
+                dispatch_event_tx
+                    .send(Arc::new(event).into())
+                    .expect(ERROR_CHANNEL);
             }
         }
     }
@@ -89,6 +117,7 @@ pub async fn spawn_doc_triage_worker(
             // NOTE: we don't want to drop the listeners before we're done
             let _listener = listener;
             let _plug_listener = plug_listener;
+            let _dispatch_listener = dispatch_listener;
 
             let mut worker = DocTriageWorker {
                 store,
@@ -100,7 +129,7 @@ pub async fn spawn_doc_triage_worker(
             loop {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
-                        info!("DocTriageWorker cancelled");
+                        debug!("DocTriageWorker cancelled");
                         break;
                     }
                     event = plug_event_rx.recv() => {
@@ -114,6 +143,12 @@ pub async fn spawn_doc_triage_worker(
                             break;
                         };
                         worker.handle_drawer_event(event).await?;
+                    }
+                    event = dispatch_event_rx.recv() => {
+                        let Some(event) = event else {
+                            break;
+                        };
+                        worker.handle_dispatch_event(event).await?;
                     }
                 }
             }
@@ -139,7 +174,7 @@ struct PreparedProcessor {
 
 struct DocTriageWorker {
     rt: Arc<Rt>,
-    store: crate::stores::StoreHandle<DocTriageStateStore>,
+    store: crate::stores::StoreHandle<DocTriageWorkerStateStore>,
     cached_processors: Vec<PreparedProcessor>,
 }
 
@@ -178,39 +213,64 @@ impl DocTriageWorker {
     }
 
     async fn handle_plugs_event(&mut self, event: Arc<PlugsEvent>) -> Res<()> {
-        let commit = match &*event {
-            PlugsEvent::ListChanged { commit } => commit.clone(),
-            PlugsEvent::PlugChanged { commit, .. } => commit.clone(),
-            PlugsEvent::PlugDeleted { commit, .. } => commit.clone(),
+        let heads = match &*event {
+            PlugsEvent::ListChanged { heads } => heads.clone(),
+            PlugsEvent::PlugChanged { heads, .. } => heads.clone(),
+            PlugsEvent::PlugDeleted { heads, .. } => heads.clone(),
         };
         self.store
             .mutate_sync(|s| {
-                s.plug_commit = Some(commit);
+                s.plug_heads = Some(heads);
             })
             .await?;
         self.refresh_processors().await?;
         Ok(())
     }
 
+    async fn handle_dispatch_event(&mut self, event: Arc<DispatchEvent>) -> Res<()> {
+        let heads = match &*event {
+            DispatchEvent::DispatchAdded { heads, .. } => heads.clone(),
+            DispatchEvent::ListChanged { heads } => heads.clone(),
+            DispatchEvent::DispatchUpdated { heads, .. } => heads.clone(),
+            DispatchEvent::DispatchDeleted { id, heads } => {
+                self.store
+                    .mutate_sync(|s| {
+                        if let Some(job) = s.dispatch_to_job.remove(id) {
+                            let job_key = format!("{}:{}:{}", job.0, job.1, job.2);
+                            s.job_to_dispatch.remove(&job_key);
+                        }
+                    })
+                    .await?;
+                heads.clone()
+            }
+        };
+        self.store
+            .mutate_sync(|s| {
+                s.dispatch_heads = Some(heads);
+            })
+            .await?;
+        Ok(())
+    }
+
     #[tracing::instrument(skip(self))]
     async fn handle_drawer_event(&mut self, event: Arc<DrawerEvent>) -> Res<()> {
         match &*event {
-            DrawerEvent::ListChanged { drawer_commit } => {
+            DrawerEvent::ListChanged { drawer_heads } => {
                 self.store
                     .mutate_sync(|s| {
-                        s.drawer_commit = Some(drawer_commit.clone());
+                        s.drawer_heads = Some(drawer_heads.clone());
                     })
                     .await?;
             }
             DrawerEvent::DocUpdated {
                 id,
-                drawer_commit,
+                drawer_heads,
                 branches_diffs,
             } => {
                 // For updates, we only care about branches that actually changed
                 for (branch_name, diff) in branches_diffs {
                     if let Some(heads) = &diff.to {
-                        // Use get_if_latest to avoid work on stale commits
+                        // Use get_if_latest to avoid work on stale headss
                         if let Some(doc) =
                             self.rt.drawer.get_if_latest(id, branch_name, heads).await?
                         {
@@ -218,28 +278,28 @@ impl DocTriageWorker {
                                 .await
                                 .wrap_err("error triaging doc")?;
                         } else {
-                            debug!(?id, ?branch_name, "skipping triage for stale commit");
+                            debug!(?id, ?branch_name, "skipping triage for stale heads");
                         }
                     }
                 }
 
                 self.store
                     .mutate_sync(|s| {
-                        s.drawer_commit = Some(drawer_commit.clone());
+                        s.drawer_heads = Some(drawer_heads.clone());
                     })
                     .await?;
             }
-            DrawerEvent::DocDeleted { drawer_commit, .. } => {
+            DrawerEvent::DocDeleted { drawer_heads, .. } => {
                 self.store
                     .mutate_sync(|s| {
-                        s.drawer_commit = Some(drawer_commit.clone());
+                        s.drawer_heads = Some(drawer_heads.clone());
                     })
                     .await?;
             }
             DrawerEvent::DocAdded {
                 id,
                 entry,
-                drawer_commit,
+                drawer_heads,
             } => {
                 for (branch_name, heads) in &entry.branches {
                     // Use get_if_latest even for added docs, although they're usually latest
@@ -251,7 +311,7 @@ impl DocTriageWorker {
                 }
                 self.store
                     .mutate_sync(|s| {
-                        s.drawer_commit = Some(drawer_commit.clone());
+                        s.drawer_heads = Some(drawer_heads.clone());
                     })
                     .await?;
             }
@@ -296,8 +356,39 @@ impl DocTriageWorker {
                     },
                 };
 
-                self.rt
+                let job_key = format!(
+                    "{}:{}:{}",
+                    doc_id, processor.plug_id, processor.routine_name.0
+                );
+
+                // Check if already in-flight
+                let old_dispatch = self
+                    .store
+                    .query_sync(|s| s.job_to_dispatch.get(&job_key).cloned())
+                    .await;
+                if let Some(dispatch_id) = old_dispatch {
+                    info!(?dispatch_id, "cancelling inflight job");
+                    self.rt.cancel_dispatch(&dispatch_id).await?;
+                }
+
+                let dispatch_id = self
+                    .rt
                     .dispatch(&processor.plug_id, &processor.routine_name.0, args)
+                    .await?;
+
+                // Track mapping
+                self.store
+                    .mutate_sync(|s| {
+                        s.job_to_dispatch.insert(job_key, dispatch_id.clone());
+                        s.dispatch_to_job.insert(
+                            dispatch_id,
+                            (
+                                doc_id.clone(),
+                                processor.plug_id.clone(),
+                                processor.routine_name.0.clone(),
+                            ),
+                        );
+                    })
                     .await?;
             }
         }
@@ -335,13 +426,13 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         // Check if a dispatch was created
-        let dispatches = ctx._dispatch_repo.list().await;
+        let dispatches = ctx.dispatch_repo.list().await;
         info!(?dispatches, "current dispatches");
         // There should be a dispatch for pseudo-label
         assert!(dispatches.iter().any(|(_, d)| {
             match &d.deets {
                 crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } => {
-                    wflow_key == "pseudo-label"
+                    wflow_key == "test-label"
                 }
             }
         }));

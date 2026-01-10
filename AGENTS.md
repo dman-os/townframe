@@ -11,7 +11,7 @@
 - Prefer `cargo clippy --all-targets --all-features -p myCrate` over `cargo check`.
 - When working with rust, in addition to `cargo clippy`, small tests can be used to validate ideas.
 - Do not use the cargo integration tests features.
-  - I.e. avoid making tests in root::tests.
+  - I.e. avoid making tests in crate_root::tests.
 - DHashMaps shouldn't not be used for sync across tasks/threads. 
   - They easily deadlock if modified across multiple tasks.
   - They're only a good fit for single modifier situation where a normal HashMap won't due to do async problems.

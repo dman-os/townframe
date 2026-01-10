@@ -4,7 +4,7 @@ use crate::test::{InitialWorkload, WflowTestContext};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_fails_until_told() -> Res<()> {
-    utils_rs::testing::setup_tracing().unwrap();
+    utils_rs::testing::setup_tracing_once();
 
     // First run: job will fail transiently
     let test_cx = WflowTestContext::builder()

@@ -12,7 +12,7 @@ test-harness = ["wasmtime", "insta", "tempfile"]
 
 [dependencies]
 # internal
-wflow_core.workspace = true
+wflow_core = { workspace = true, features = ["test-harness"] }
 wflow_tokio.workspace = true
 wash_plugin_wflow.workspace = true
 utils_rs.workspace = true

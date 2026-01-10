@@ -29,7 +29,7 @@ async fn test_pseudo_labeler_workflow() -> Res<()> {
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;
 
     // Wait for the workflow to complete
-    test_cx.wflow_test_cx.wait_until_no_active_jobs(90).await?;
+    test_cx.wait_until_no_active_jobs(90).await?;
 
     // Give a small delay to ensure document updates are propagated
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;

@@ -197,3 +197,133 @@ impl KvStore for Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>> {
         Ok(CasGuard::new(current_cb, swap_cb))
     }
 }
+
+#[cfg(any(test, feature = "test-harness"))]
+pub mod tests {
+    use super::*;
+
+    pub async fn test_kv_store_impl(store: Arc<dyn KvStore + Send + Sync>) -> Res<()> {
+        let key1: Arc<[u8]> = b"key1".to_vec().into();
+        let val1: Arc<[u8]> = b"value1".to_vec().into();
+        let val2: Arc<[u8]> = b"value2".to_vec().into();
+
+        // Test basic set/get
+        store.set(key1.clone(), val1.clone()).await?;
+        assert_eq!(store.get(&key1).await?, Some(val1.clone()));
+
+        // Test overwrite
+        store.set(key1.clone(), val2.clone()).await?;
+        assert_eq!(store.get(&key1).await?, Some(val2.clone()));
+
+        // Test del
+        store.del(&key1).await?;
+        assert_eq!(store.get(&key1).await?, None);
+
+        // Test increment
+        let counter_key: Arc<[u8]> = b"counter".to_vec().into();
+        assert_eq!(store.increment(&counter_key, 5).await?, 5);
+        assert_eq!(store.increment(&counter_key, 10).await?, 15);
+        assert_eq!(store.increment(&counter_key, -3).await?, 12);
+
+        // Test CAS
+        let cas_key: Arc<[u8]> = b"cas_key".to_vec().into();
+        let cas_val1: Arc<[u8]> = b"cas_val1".to_vec().into();
+        let cas_val2: Arc<[u8]> = b"cas_val2".to_vec().into();
+        let cas_val3: Arc<[u8]> = b"cas_val3".to_vec().into();
+
+        // Initial CAS (from None)
+        let cas = store.new_cas(&cas_key).await?;
+        assert_eq!(cas.current(), None);
+        cas.swap(cas_val1.clone()).await??;
+        assert_eq!(store.get(&cas_key).await?, Some(cas_val1.clone()));
+
+        // Successful swap
+        let cas = store.new_cas(&cas_key).await?;
+        assert_eq!(cas.current(), Some(cas_val1.clone()));
+        cas.swap(cas_val2.clone()).await??;
+        assert_eq!(store.get(&cas_key).await?, Some(cas_val2.clone()));
+
+        // Failed swap (concurrent modification)
+        let cas_guard = store.new_cas(&cas_key).await?;
+        // modify the value before the swap
+        store.set(cas_key.clone(), cas_val3.clone()).await?;
+
+        match cas_guard.swap(cas_val1.clone()).await? {
+            Err(CasError::CasFailed(new_guard)) => {
+                // Should return new guard with latest value
+                assert_eq!(new_guard.current(), Some(cas_val3.clone()));
+            }
+            _ => panic!("Expected CasFailed error"),
+        }
+
+        Ok(())
+    }
+
+    pub async fn test_kv_store_concurrency(store: Arc<dyn KvStore + Send + Sync>) -> Res<()> {
+        let counter_key: Arc<[u8]> = b"concurrent_counter".to_vec().into();
+        let num_tasks = 10;
+        let increments_per_task = 20;
+
+        let mut tasks = Vec::new();
+        for _ in 0..num_tasks {
+            let store = store.clone();
+            let key = counter_key.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..increments_per_task {
+                    store.increment(&key, 1).await.unwrap();
+                }
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let final_val = store.get(&counter_key).await?.unwrap();
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&final_val);
+        let final_count = i64::from_le_bytes(buf);
+
+        assert_eq!(final_count, (num_tasks * increments_per_task) as i64);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_dhashmap_kvstore() -> Res<()> {
+        let store: Arc<DHashMap<Arc<[u8]>, Arc<[u8]>>> = Arc::new(DHashMap::default());
+        let store_dyn: Arc<dyn KvStore + Send + Sync> = Arc::new(store);
+        test_kv_store_impl(store_dyn.clone()).await?;
+        test_kv_store_concurrency(store_dyn).await
+    }
+
+    #[test]
+    fn test_kv_store_concurrency_loom() {
+        use loom::thread;
+        use futures::executor::block_on;
+
+        loom::model(|| {
+            let store: Arc<DHashMap<Arc<[u8]>, Arc<[u8]>>> = Arc::new(DHashMap::default());
+            let key: Arc<[u8]> = b"loom_counter".to_vec().into();
+            
+            let threads: Vec<_> = (0..2).map(|_| {
+                let store = store.clone();
+                let key = key.clone();
+                thread::spawn(move || {
+                    block_on(async {
+                        let _ = store.increment(&key, 1).await;
+                    });
+                })
+            }).collect();
+
+            for t in threads {
+                let _ = t.join();
+            }
+
+            let final_val = block_on(store.get(&key)).unwrap().unwrap();
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&final_val);
+            let final_count = i64::from_le_bytes(buf);
+            assert_eq!(final_count, 2);
+        });
+    }
+}

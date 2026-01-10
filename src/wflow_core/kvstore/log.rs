@@ -82,7 +82,7 @@ impl LogStore for KvStoreLog {
     // and commit, `tail`s from other instances might observe it as
     // a crash hole.
     // - Use a CAS to fix it
-    async fn tail(&self, offset: u64) -> BoxStream<Res<TailLogEntry>> {
+    fn tail(&'_ self, offset: u64) -> BoxStream<'_, Res<TailLogEntry>> {
         futures::stream::unfold(offset, |offset| {
             let kv_store = self.kv_store.clone();
             let mut latest_id_rx = self.local_commited_idx_rx.clone();

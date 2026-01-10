@@ -459,7 +459,6 @@ pub enum HydrateAtHeadError {
     Other(#[from] eyre::Report),
 }
 
-#[cfg(feature = "hash")]
 pub fn parse_commit_heads<S: AsRef<str>>(heads: &[S]) -> Res<Arc<[ChangeHash]>> {
     heads
         .iter()
@@ -471,7 +470,6 @@ pub fn parse_commit_heads<S: AsRef<str>>(heads: &[S]) -> Res<Arc<[ChangeHash]>> 
         .collect()
 }
 
-#[cfg(feature = "hash")]
 pub fn serialize_commit_heads(heads: &[ChangeHash]) -> Vec<String> {
     heads
         .iter()
