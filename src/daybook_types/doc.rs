@@ -140,11 +140,58 @@ pub type DocId = String;
 pub type DocUserId = automerge::ActorId;
 pub type PropBlame = HashMap<DocPropKey, DocUserId>;
 
-pub struct UserPath {
-    pub string: String,
-    pub device_pkey_idx: u8,
-    pub plug_id_start_idx: Option<u8>,
-    pub routine_name_start_idx: Option<u8>,
+pub type UserPath = std::path::PathBuf;
+pub type BranchPath = std::path::PathBuf;
+
+pub mod user_path {
+    use super::*;
+
+    pub fn new(device: &str, plug: Option<&str>, routine: Option<&str>) -> UserPath {
+        let mut path = PathBuf::from("/");
+        path.push(device);
+        if let Some(p) = plug {
+            path.push(p);
+            if let Some(r) = routine {
+                path.push(r);
+            }
+        }
+        path
+    }
+
+    pub fn to_actor_id(path: &UserPath) -> automerge::ActorId {
+        let path_str = path.to_string_lossy();
+        let hash = blake3::hash(path_str.as_bytes());
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(hash.as_bytes());
+        automerge::ActorId::from(bytes)
+    }
+
+    pub fn device(path: &UserPath) -> &str {
+        path.components()
+            .nth(1)
+            .and_then(|c| c.as_os_str().to_str())
+            .unwrap_or("")
+    }
+
+    pub fn plug(path: &UserPath) -> Option<&str> {
+        path.components()
+            .nth(2)
+            .and_then(|c| c.as_os_str().to_str())
+    }
+
+    pub fn routine(path: &UserPath) -> Option<&str> {
+        path.components()
+            .nth(3)
+            .and_then(|c| c.as_os_str().to_str())
+    }
+
+    pub fn parse(s: &str) -> Res<UserPath> {
+        let path = PathBuf::from(s);
+        if !path.as_path().has_root() {
+            eyre::bail!("UserPath must start with /");
+        }
+        Ok(path)
+    }
 }
 
 pub struct Users {
@@ -188,17 +235,17 @@ impl Doc {
             id: new.id.clone(),
             props_set,
             props_remove,
+            user_path: None,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AddDocArgs {
-    pub branch_name: String,
-    // pub user_path: String,
+    pub branch_path: BranchPath,
     pub props: HashMap<DocPropKey, DocProp>,
+    pub user_path: Option<UserPath>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +256,8 @@ pub struct DocPatch {
     pub props_set: HashMap<DocPropKey, DocProp>,
     /// Props to remove (by key)
     pub props_remove: Vec<DocPropKey>,
+    /// Optional user path for recording in drawer
+    pub user_path: Option<UserPath>,
 }
 
 impl DocPatch {

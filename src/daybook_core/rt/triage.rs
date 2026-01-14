@@ -16,6 +16,7 @@ pub struct DocTriageWorkerStateStore {
     pub drawer_heads: Option<ChangeHashSet>,
     pub plug_heads: Option<ChangeHashSet>,
     pub dispatch_heads: Option<ChangeHashSet>,
+    pub config_heads: Option<ChangeHashSet>,
 
     pub dispatch_to_job: HashMap<String, (DocId, String, String)>,
     pub job_to_dispatch: HashMap<String, String>,
@@ -58,11 +59,18 @@ pub async fn spawn_doc_triage_worker(
     use crate::stores::Store;
 
     let store = DocTriageWorkerStateStore::load(&rt.acx, &app_doc_id).await?;
-    let store = crate::stores::StoreHandle::new(store, rt.acx.clone(), app_doc_id.clone());
+    let store = crate::stores::StoreHandle::new(
+        store,
+        rt.acx.clone(),
+        app_doc_id.clone(),
+        rt.local_actor_id.clone(),
+    );
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<Arc<DrawerEvent>>();
     let (plug_event_tx, mut plug_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<Arc<PlugsEvent>>();
+    let (config_event_tx, mut config_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Arc<crate::config::ConfigEvent>>();
     let (dispatch_event_tx, mut dispatch_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<Arc<DispatchEvent>>();
 
@@ -78,6 +86,13 @@ pub async fn spawn_doc_triage_worker(
         }
     });
 
+    let config_listener = rt.config_repo.register_listener({
+        let config_event_tx = config_event_tx.clone();
+        move |event| {
+            config_event_tx.send(event).expect(ERROR_CHANNEL);
+        }
+    });
+
     let dispatch_listener = rt.dispatch_repo.register_listener({
         let dispatch_event_tx = dispatch_event_tx.clone();
         move |event| {
@@ -86,28 +101,54 @@ pub async fn spawn_doc_triage_worker(
     });
 
     // Catch up on missed events
-    let (initial_drawer_heads, initial_dispatch_heads) = store
-        .query_sync(|s| (s.drawer_heads.clone(), s.dispatch_heads.clone()))
+    let (initial_drawer_heads, initial_dispatch_heads, initial_plug_heads, initial_config_heads) = store
+        .query_sync(|s| {
+            (
+                s.drawer_heads.clone(),
+                s.dispatch_heads.clone(),
+                s.plug_heads.clone(),
+                s.config_heads.clone(),
+            )
+        })
         .await;
 
-    if let Some(heads) = initial_drawer_heads {
-        if !heads.0.is_empty() {
-            let events = rt.drawer.diff_events(heads, None).await?;
-            for event in events {
-                event_tx.send(Arc::new(event).into()).expect(ERROR_CHANNEL);
-            }
-        }
+    // Use empty heads if None to catch up from beginning
+    let empty_heads = ChangeHashSet(vec![].into());
+
+    let events = rt
+        .drawer
+        .diff_events(initial_drawer_heads.unwrap_or(empty_heads.clone()), None)
+        .await?;
+    for event in events {
+        event_tx.send(Arc::new(event).into()).expect(ERROR_CHANNEL);
     }
 
-    if let Some(heads) = initial_dispatch_heads {
-        if !heads.0.is_empty() {
-            let events = rt.dispatch_repo.diff_events(heads, None).await?;
-            for event in events {
-                dispatch_event_tx
-                    .send(Arc::new(event).into())
-                    .expect(ERROR_CHANNEL);
-            }
-        }
+    let events = rt
+        .dispatch_repo
+        .diff_events(initial_dispatch_heads.unwrap_or(empty_heads.clone()), None)
+        .await?;
+    for event in events {
+        dispatch_event_tx
+            .send(Arc::new(event).into())
+            .expect(ERROR_CHANNEL);
+    }
+
+    let events = rt
+        .plugs_repo
+        .diff_events(initial_plug_heads.unwrap_or(empty_heads.clone()), None)
+        .await?;
+    for event in events {
+        plug_event_tx.send(Arc::new(event).into()).expect(ERROR_CHANNEL);
+    }
+
+    let events = rt
+        .config_repo
+        .diff_events(initial_config_heads.unwrap_or(empty_heads), None)
+        .await?;
+    for event in events {
+        config_event_tx
+            .send(Arc::new(event).into())
+            .expect(ERROR_CHANNEL);
     }
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -117,6 +158,7 @@ pub async fn spawn_doc_triage_worker(
             // NOTE: we don't want to drop the listeners before we're done
             let _listener = listener;
             let _plug_listener = plug_listener;
+            let _config_listener = config_listener;
             let _dispatch_listener = dispatch_listener;
 
             let mut worker = DocTriageWorker {
@@ -137,6 +179,12 @@ pub async fn spawn_doc_triage_worker(
                             break;
                         };
                         worker.handle_plugs_event(event).await?;
+                    }
+                    event = config_event_rx.recv() => {
+                        let Some(event) = event else {
+                            break;
+                        };
+                        worker.handle_config_event(event).await?;
                     }
                     event = event_rx.recv() => {
                         let Some(event) = event else {
@@ -215,6 +263,7 @@ impl DocTriageWorker {
     async fn handle_plugs_event(&mut self, event: Arc<PlugsEvent>) -> Res<()> {
         let heads = match &*event {
             PlugsEvent::ListChanged { heads } => heads.clone(),
+            PlugsEvent::PlugAdded { heads, .. } => heads.clone(),
             PlugsEvent::PlugChanged { heads, .. } => heads.clone(),
             PlugsEvent::PlugDeleted { heads, .. } => heads.clone(),
         };
@@ -224,6 +273,19 @@ impl DocTriageWorker {
             })
             .await?;
         self.refresh_processors().await?;
+        Ok(())
+    }
+
+    async fn handle_config_event(&mut self, event: Arc<crate::config::ConfigEvent>) -> Res<()> {
+        let heads = match &*event {
+            crate::config::ConfigEvent::Changed { heads } => heads.clone(),
+        };
+        self.store
+            .mutate_sync(|s| {
+                s.config_heads = Some(heads);
+            })
+            .await?;
+        // Potentially refresh some state based on config changes
         Ok(())
     }
 
@@ -265,20 +327,25 @@ impl DocTriageWorker {
             DrawerEvent::DocUpdated {
                 id,
                 drawer_heads,
-                branches_diffs,
+                diff,
+                ..
             } => {
                 // For updates, we only care about branches that actually changed
-                for (branch_name, diff) in branches_diffs {
-                    if let Some(heads) = &diff.to {
+                for (branch_path, branch_diff) in &diff.branches {
+                    // Skip temporary staging branches
+                    if branch_path.to_string_lossy().starts_with("/tmp/") {
+                        continue;
+                    }
+                    if let Some(heads) = &branch_diff.to {
                         // Use get_if_latest to avoid work on stale headss
                         if let Some(doc) =
-                            self.rt.drawer.get_if_latest(id, branch_name, heads).await?
+                            self.rt.drawer.get_if_latest(id, branch_path, heads).await?
                         {
-                            self.triage(id, heads, &doc, branch_name.clone())
+                            self.triage(id, heads, &doc, branch_path.clone())
                                 .await
                                 .wrap_err("error triaging doc")?;
                         } else {
-                            debug!(?id, ?branch_name, "skipping triage for stale heads");
+                            debug!(?id, ?branch_path, "skipping triage for stale heads");
                         }
                     }
                 }
@@ -302,9 +369,14 @@ impl DocTriageWorker {
                 drawer_heads,
             } => {
                 for (branch_name, heads) in &entry.branches {
+                    let branch_path = daybook_types::doc::BranchPath::from(branch_name.as_str());
+                    // Skip temporary staging branches
+                    if branch_path.to_string_lossy().starts_with("/tmp/") {
+                        continue;
+                    }
                     // Use get_if_latest even for added docs, although they're usually latest
-                    if let Some(doc) = self.rt.drawer.get_if_latest(id, branch_name, heads).await? {
-                        self.triage(id, heads, &doc, branch_name.clone())
+                    if let Some(doc) = self.rt.drawer.get_if_latest(id, &branch_path, heads).await? {
+                        self.triage(id, heads, &doc, branch_path)
                             .await
                             .wrap_err("error triaging doc")?;
                     }
@@ -325,7 +397,7 @@ impl DocTriageWorker {
         doc_id: &DocId,
         doc_heads: &ChangeHashSet,
         doc: &Doc,
-        branch_name: String,
+        branch_path: daybook_types::doc::BranchPath,
     ) -> Res<()> {
         debug!(
             processor_count = self.cached_processors.len(),
@@ -345,12 +417,12 @@ impl DocTriageWorker {
                 let args = match &processor.routine_deets {
                     RoutineManifestDeets::DocInvoke {} => DispatchArgs::DocInvoke {
                         doc_id: doc_id.clone(),
-                        branch_name: branch_name.clone(),
+                        branch_path: branch_path.clone(),
                         heads: doc_heads.clone(),
                     },
                     RoutineManifestDeets::DocProp { .. } => DispatchArgs::DocProp {
                         doc_id: doc_id.clone(),
-                        branch_name: branch_name.clone(),
+                        branch_path: branch_path.clone(),
                         heads: doc_heads.clone(),
                         prop_id: None,
                     },
@@ -410,7 +482,7 @@ mod tests {
         let _doc_id = ctx
             .drawer_repo
             .add(AddDocArgs {
-                branch_name: "main".into(),
+                branch_path: daybook_types::doc::BranchPath::from("main"),
                 props: [(
                     WellKnownPropTag::Content.into(),
                     daybook_types::doc::WellKnownProp::Content(DocContent::Text(
@@ -419,23 +491,31 @@ mod tests {
                     .into(),
                 )]
                 .into(),
+                user_path: None,
             })
             .await?;
 
         // Wait a bit for triage to run and dispatch
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let mut found = false;
+        for _ in 0..50 {
+            let dispatches = ctx.dispatch_repo.list().await;
+            if dispatches.iter().any(|(_, d)| {
+                match &d.deets {
+                    crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } => {
+                        wflow_key == "test-label"
+                    }
+                }
+            }) {
+                found = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
 
         // Check if a dispatch was created
         let dispatches = ctx.dispatch_repo.list().await;
         info!(?dispatches, "current dispatches");
-        // There should be a dispatch for pseudo-label
-        assert!(dispatches.iter().any(|(_, d)| {
-            match &d.deets {
-                crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } => {
-                    wflow_key == "test-label"
-                }
-            }
-        }));
+        assert!(found, "test-label dispatch not found in {:?}", dispatches);
 
         ctx.stop().await?;
         Ok(())

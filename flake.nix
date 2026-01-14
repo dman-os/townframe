@@ -31,7 +31,7 @@
           }
         ).androidsdk);
 
-        rustVersion = "2025-09-01";
+        rustVersion = "2026-01-01";
         rustChannel = pkgs.rust-bin.nightly.${rustVersion}.default.override {
           extensions = [ "rust-src" ];
           targets = [ 
@@ -131,7 +131,9 @@
             # trivy
             
             tokio-console
+            cargo-udeps
             infisical
+
             rustChannel
           ];
 

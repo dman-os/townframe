@@ -7,9 +7,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.FfiException
-import org.example.daybook.uniffi.MetaTableKeyConfigEntry
 import org.example.daybook.uniffi.core.ListenerRegistration
-import org.example.daybook.uniffi.core.MetaTableKeyConfig
+import org.example.daybook.uniffi.core.PropKeyDisplayHint
 
 data class ConfigError(val message: String, val exception: FfiException)
 
@@ -21,7 +20,7 @@ class ConfigViewModel(
     val error = _error.asStateFlow()
     
     // Meta table key configs
-    private val _metaTableKeyConfigs = MutableStateFlow<Map<String, MetaTableKeyConfig>>(emptyMap())
+    private val _metaTableKeyConfigs = MutableStateFlow<Map<String, PropKeyDisplayHint>>(emptyMap())
     val metaTableKeyConfigs = _metaTableKeyConfigs.asStateFlow()
     
     // Registration handle to auto-unregister

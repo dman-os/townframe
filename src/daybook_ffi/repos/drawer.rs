@@ -35,6 +35,7 @@ impl DrawerRepoFfi {
             .do_on_rt(DrawerRepo::load(
                 fcx.cx.acx.clone(),
                 fcx.cx.doc_drawer().document_id().clone(),
+                fcx.cx.local_actor_id.clone(),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
@@ -62,13 +63,14 @@ impl DrawerRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn get(self: Arc<Self>, id: DocId, branch_name: String) -> Result<Option<Doc>, FfiError> {
+    async fn get(self: Arc<Self>, id: DocId, branch_path: String) -> Result<Option<Doc>, FfiError> {
         let this = self.clone();
+        let branch_path = daybook_types::doc::BranchPath::from(branch_path);
         Ok(self
             .fcx
             .do_on_rt(async move {
                 this.repo
-                    .get(&id, &branch_name)
+                    .get(&id, &branch_path)
                     .await
                     .map(|opt| opt.map(|arc| (*arc).clone()))
             })
@@ -88,15 +90,16 @@ impl DrawerRepoFfi {
     async fn update(
         self: Arc<Self>,
         patch: DocPatch,
-        branch_name: String,
+        branch_path: String,
         heads: Option<ChangeHashSet>,
     ) -> Result<(), FfiError> {
         let this = self.clone();
+        let branch_path = daybook_types::doc::BranchPath::from(branch_path);
         Ok(self
             .fcx
             .do_on_rt(async move {
                 this.repo
-                    .update_at_heads(patch, branch_name, heads)
+                    .update_at_heads(patch, branch_path, heads)
                     .await
                     .wrap_err("error applying patch")
             })

@@ -7,6 +7,7 @@ pub mod am;
 
 pub mod prelude {
     pub use crate::interlude::*;
+    pub use crate::expect_tags::*;
 
     #[cfg(feature = "automerge")]
     pub use crate::am::codecs::ThroughJson;
@@ -62,11 +63,12 @@ use crate::interlude::*;
 
 // the hope is to ban unwrap and use these for the common
 // unwrap cases
-mod expect_tags {
+pub mod expect_tags {
     pub const ERROR_CHANNEL: &str = "channel error: closed?";
     pub const ERROR_JSON: &str = "json error: oom?";
     pub const ERROR_UTF8: &str = "utf8 error";
     pub const ERROR_MUTEX: &str = "poisioned mutex";
+    pub const ERROR_INVALID_PATCH: &str = "invalid patch: hydration failed";
 }
 
 #[inline]
@@ -282,9 +284,12 @@ mod cheapstr {
 pub mod hash {
     use super::*;
 
+    #[cfg(feature = "hash")]
     use std::io::Write;
 
+    #[cfg(feature = "hash")]
     const SHA2_256: u64 = 0x12;
+    #[cfg(feature = "hash")]
     const BLAKE3: u64 = 0x1e;
 
     pub trait UuidExt {

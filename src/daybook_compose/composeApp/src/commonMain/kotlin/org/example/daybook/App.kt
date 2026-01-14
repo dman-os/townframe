@@ -112,6 +112,7 @@ data class AppContainer(
     val ffiCtx: FfiCtx, 
     val drawerRepo: DrawerRepoFfi, 
     val tablesRepo: TablesRepoFfi,
+    val plugsRepo: org.example.daybook.uniffi.PlugsRepoFfi,
     val configRepo: ConfigRepoFfi,
     val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi
 )
@@ -430,7 +431,8 @@ fun App(
         val fcx = FfiCtx.forFfi()
         val drawerRepo = DrawerRepoFfi.load(fcx = fcx)
         val tablesRepo = TablesRepoFfi.load(fcx = fcx)
-        val configRepo = ConfigRepoFfi.load(fcx = fcx)
+        val plugsRepo = org.example.daybook.uniffi.PlugsRepoFfi.load(fcx = fcx)
+        val configRepo = ConfigRepoFfi.load(fcx = fcx, plugRepo = plugsRepo)
         val blobsRepo = org.example.daybook.uniffi.BlobsRepoFfi.load(fcx = fcx)
         
         // Initialize first-time data if needed
@@ -442,6 +444,7 @@ fun App(
                 ffiCtx = fcx, 
                 drawerRepo = drawerRepo, 
                 tablesRepo = tablesRepo,
+                plugsRepo = plugsRepo,
                 configRepo = configRepo,
                 blobsRepo = blobsRepo
             )
@@ -469,6 +472,7 @@ fun App(
                     onDispose {
                         appContainer.drawerRepo.close()
                         appContainer.tablesRepo.close()
+                        appContainer.plugsRepo.close()
                         appContainer.configRepo.close()
                         appContainer.ffiCtx.close()
                     }

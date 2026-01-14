@@ -17,6 +17,7 @@ mod sidebar_layout {
 pub struct Window {
     #[key]
     pub id: Uuid,
+    pub version: Uuid,
     pub title: String,
     pub tabs: Vec<Uuid>,
     pub selected_table: Option<Uuid>,
@@ -166,6 +167,7 @@ pub enum WindowLayoutOrientation {
 pub struct Table {
     #[key]
     pub id: Uuid,
+    pub version: Uuid,
     pub title: String,
     pub tabs: Vec<Uuid>,
     pub window: TableWindow,
@@ -189,6 +191,7 @@ pub enum TableWindow {
 pub struct Tab {
     #[key]
     pub id: Uuid,
+    pub version: Uuid,
     pub title: String,
     pub panels: Vec<Uuid>,
     pub selected_panel: Option<Uuid>,
@@ -201,6 +204,7 @@ pub struct Tab {
 pub struct Panel {
     #[key]
     pub id: Uuid,
+    pub version: Uuid,
     pub title: String,
 }
 
@@ -251,6 +255,7 @@ impl TablesStore {
         // Create window
         let window = Window {
             id: window_id,
+            version: Uuid::nil(),
             title: "Main Window".to_string(),
             tabs: vec![tab_id],
             selected_table: Some(table_id),
@@ -265,6 +270,7 @@ impl TablesStore {
         // Create table
         let table = Table {
             id: table_id,
+            version: Uuid::nil(),
             title: "Main Table".to_string(),
             tabs: vec![tab_id],
             window: TableWindow::Specific { id: window_id },
@@ -275,6 +281,7 @@ impl TablesStore {
         // Create tab
         let tab = Tab {
             id: tab_id,
+            version: Uuid::nil(),
             title: "Main Tab".to_string(),
             panels: vec![panel_id],
             selected_panel: Some(panel_id),
@@ -284,6 +291,7 @@ impl TablesStore {
         // Create panel
         let panel = Panel {
             id: panel_id,
+            version: Uuid::nil(),
             title: "Main Panel".to_string(),
         };
         self.panels.insert(panel_id, panel);
@@ -371,8 +379,12 @@ impl TablesStore {
 }
 
 pub struct TablesRepo {
+    pub acx: AmCtx,
+    pub app_doc_id: DocumentId,
+    pub app_am_handle: samod::DocHandle,
     store: crate::stores::StoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
+    pub local_actor_id: automerge::ActorId,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
 }
@@ -391,35 +403,44 @@ impl crate::repos::Repo for TablesRepo {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum TablesEvent {
-    ListChanged,
-    WindowChanged { id: Uuid },
-    TabChanged { id: Uuid },
-    PanelChanged { id: Uuid },
-    TableChanged { id: Uuid },
+    ListChanged { heads: ChangeHashSet },
+    WindowAdded { id: Uuid, heads: ChangeHashSet },
+    WindowChanged { id: Uuid, heads: ChangeHashSet },
+    TabAdded { id: Uuid, heads: ChangeHashSet },
+    TabChanged { id: Uuid, heads: ChangeHashSet },
+    PanelAdded { id: Uuid, heads: ChangeHashSet },
+    PanelChanged { id: Uuid, heads: ChangeHashSet },
+    TableAdded { id: Uuid, heads: ChangeHashSet },
+    TableChanged { id: Uuid, heads: ChangeHashSet },
 }
 
 impl TablesRepo {
     pub async fn load(
         acx: AmCtx,
         app_doc_id: DocumentId,
+        local_actor_id: automerge::ActorId,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
 
-        let store = TablesStore::load(&acx, &app_doc_id).await?;
-        let store = crate::stores::StoreHandle::new(store, acx.clone(), app_doc_id.clone());
+        let store_val = TablesStore::load(&acx, &app_doc_id).await?;
+        let store = crate::stores::StoreHandle::new(
+            store_val,
+            acx.clone(),
+            app_doc_id.clone(),
+            local_actor_id.clone(),
+        );
         store
             .mutate_sync(|store| {
                 store.rebuild_indices();
             })
             .await?;
 
-        let (broker, broker_stop) = {
-            let handle = acx
-                .find_doc(&app_doc_id)
-                .await?
-                .expect("doc should have been loaded");
-            acx.change_manager().add_doc(handle).await?
-        };
+        let app_am_handle = acx
+            .find_doc(&app_doc_id)
+            .await?
+            .ok_or_eyre("unable to find app doc in am")?;
+
+        let (broker, broker_stop) = acx.change_manager().add_doc(app_am_handle.clone()).await?;
 
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
             Vec<utils_rs::am::changes::ChangeNotification>,
@@ -436,8 +457,12 @@ impl TablesRepo {
 
         let main_cancel_token = CancellationToken::new();
         let repo = Self {
+            acx,
+            app_doc_id,
+            app_am_handle,
             store,
             registry: registry.clone(),
+            local_actor_id,
             cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
         };
@@ -470,15 +495,11 @@ impl TablesRepo {
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
-        // FIXME: this code doesn't seem right and has missing features
         let mut events = vec![];
         loop {
             let notifs = tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
-                    while let Ok(notifs) = notif_rx.try_recv() {
-                        self.process_notifs(notifs, &mut events).await?;
-                    }
                     break;
                 }
                 msg = notif_rx.recv() => {
@@ -488,69 +509,217 @@ impl TablesRepo {
                     }
                 }
             };
-            self.process_notifs(notifs, &mut events).await?;
+
+            events.clear();
+            for notif in notifs {
+                // 1. Extract ActorId from the patch using the new utils_rs::am helper.
+                if let Some(actor_id) = utils_rs::am::get_actor_id_from_patch(&notif.patch) {
+                    // 2. Skip if it matches self.local_actor_id.
+                    if actor_id == self.local_actor_id {
+                        continue;
+                    }
+                }
+
+                // 3. Call events_for_patch (pure-ish).
+                self.events_for_patch(&notif.patch, &notif.heads, &mut events)
+                    .await?;
+            }
+
+            for event in &events {
+                match &event {
+                    TablesEvent::WindowAdded { id, heads }
+                    | TablesEvent::WindowChanged { id, heads } => {
+                        let (new_window, _) = self
+                            .acx
+                            .hydrate_path_at_heads::<Window>(
+                                &self.app_doc_id,
+                                &heads.0,
+                                automerge::ROOT,
+                                vec![
+                                    TablesStore::PROP.into(),
+                                    "windows".into(),
+                                    autosurgeon::Prop::Key(id.to_string().into()),
+                                ],
+                            )
+                            .await?
+                            .expect(ERROR_INVALID_PATCH);
+                        self.store
+                            .mutate_sync(|store| {
+                                store.windows.insert(*id, new_window);
+                                store.rebuild_indices();
+                            })
+                            .await?;
+                    }
+                    TablesEvent::TabAdded { id, heads } | TablesEvent::TabChanged { id, heads } => {
+                        let (new_tab, _) = self
+                            .acx
+                            .hydrate_path_at_heads::<Tab>(
+                                &self.app_doc_id,
+                                &heads.0,
+                                automerge::ROOT,
+                                vec![
+                                    TablesStore::PROP.into(),
+                                    "tabs".into(),
+                                    autosurgeon::Prop::Key(id.to_string().into()),
+                                ],
+                            )
+                            .await?
+                            .expect(ERROR_INVALID_PATCH);
+                        self.store
+                            .mutate_sync(|store| {
+                                store.tabs.insert(*id, new_tab);
+                                store.rebuild_indices();
+                            })
+                            .await?;
+                    }
+                    TablesEvent::PanelAdded { id, heads }
+                    | TablesEvent::PanelChanged { id, heads } => {
+                        let (new_panel, _) = self
+                            .acx
+                            .hydrate_path_at_heads::<Panel>(
+                                &self.app_doc_id,
+                                &heads.0,
+                                automerge::ROOT,
+                                vec![
+                                    TablesStore::PROP.into(),
+                                    "panels".into(),
+                                    autosurgeon::Prop::Key(id.to_string().into()),
+                                ],
+                            )
+                            .await?
+                            .expect(ERROR_INVALID_PATCH);
+                        self.store
+                            .mutate_sync(|store| {
+                                store.panels.insert(*id, new_panel);
+                                store.rebuild_indices();
+                            })
+                            .await?;
+                    }
+                    TablesEvent::TableAdded { id, heads }
+                    | TablesEvent::TableChanged { id, heads } => {
+                        let (new_table, _) = self
+                            .acx
+                            .hydrate_path_at_heads::<Table>(
+                                &self.app_doc_id,
+                                &heads.0,
+                                automerge::ROOT,
+                                vec![
+                                    TablesStore::PROP.into(),
+                                    "tables".into(),
+                                    autosurgeon::Prop::Key(id.to_string().into()),
+                                ],
+                            )
+                            .await?
+                            .expect(ERROR_INVALID_PATCH);
+                        self.store
+                            .mutate_sync(|store| {
+                                store.tables.insert(*id, new_table);
+                                store.rebuild_indices();
+                            })
+                            .await?;
+                    }
+                    TablesEvent::ListChanged { .. } => {}
+                }
+            }
+            for evt in events.drain(..) {
+                self.registry.notify([evt]);
+            }
         }
         Ok(())
     }
 
-    async fn process_notifs(
+    pub async fn diff_events(
         &self,
-        notifs: Vec<utils_rs::am::changes::ChangeNotification>,
-        events: &mut Vec<TablesEvent>,
+        from: ChangeHashSet,
+        to: Option<ChangeHashSet>,
+    ) -> Res<Vec<TablesEvent>> {
+        let (patches, heads) = self.app_am_handle.with_document(|am_doc| {
+            let heads = if let Some(ref to_set) = to {
+                to_set.clone()
+            } else {
+                ChangeHashSet(am_doc.get_heads().into())
+            };
+            let patches = am_doc
+                .diff_obj(&automerge::ROOT, &from, &heads, true)
+                .wrap_err("diff_obj failed")?;
+            eyre::Ok((patches, heads))
+        })?;
+        let heads = heads.0;
+        let mut events = vec![];
+        for patch in patches {
+            self.events_for_patch(&patch, &heads, &mut events).await?;
+        }
+        Ok(events)
+    }
+
+    async fn events_for_patch(
+        &self,
+        patch: &automerge::Patch,
+        patch_heads: &Arc<[automerge::ChangeHash]>,
+        out: &mut Vec<TablesEvent>,
     ) -> Res<()> {
-        events.clear();
-        for notif in notifs {
-            match &notif.patch.action {
-                automerge::PatchAction::PutMap { key, .. } => {
-                    // Check if this is a specific item change
-                    if let Ok(uuid) = Uuid::parse_str(key) {
-                        // Determine which type of item changed based on path
-                        if notif.patch.path.len() >= 2 {
-                            match &notif.patch.path[1].1 {
-                                automerge::Prop::Map(path_key) => match path_key.as_ref() {
-                                    "windows" => {
-                                        events.push(TablesEvent::WindowChanged { id: uuid })
-                                    }
-                                    "tables" => events.push(TablesEvent::TableChanged { id: uuid }),
-                                    "tabs" => events.push(TablesEvent::TabChanged { id: uuid }),
-                                    "panels" => events.push(TablesEvent::PanelChanged { id: uuid }),
-                                    _ => events.push(TablesEvent::ListChanged),
-                                },
-                                _ => events.push(TablesEvent::ListChanged),
-                            }
-                        } else {
-                            events.push(TablesEvent::ListChanged);
-                        }
-                    }
-                }
-                automerge::PatchAction::DeleteMap { key } => {
-                    // Handle deletions
-                    if let Ok(uuid) = Uuid::parse_str(key) {
-                        if notif.patch.path.len() >= 2 {
-                            match &notif.patch.path[1].1 {
-                                automerge::Prop::Map(path_key) => match path_key.as_ref() {
-                                    "windows" => {
-                                        events.push(TablesEvent::WindowChanged { id: uuid })
-                                    }
-                                    "tables" => events.push(TablesEvent::TableChanged { id: uuid }),
-                                    "tabs" => events.push(TablesEvent::TabChanged { id: uuid }),
-                                    "panels" => events.push(TablesEvent::PanelChanged { id: uuid }),
-                                    _ => events.push(TablesEvent::ListChanged),
-                                },
-                                _ => events.push(TablesEvent::ListChanged),
-                            }
-                        } else {
-                            events.push(TablesEvent::ListChanged);
-                        }
-                    }
-                }
-                _ => {
-                    // For other operations, send ListChanged
+        let heads = ChangeHashSet(patch_heads.clone());
+        match &patch.action {
+            automerge::PatchAction::PutMap {
+                key,
+                value: (val, _),
+                ..
+            } if patch.path.len() == 3 && key == "version" => {
+                let Some((_obj, automerge::Prop::Map(collection))) = patch.path.get(1) else {
+                    return Ok(());
+                };
+                let Some((_obj, automerge::Prop::Map(item_id_str))) = patch.path.get(2) else {
+                    return Ok(());
+                };
+                let Ok(item_id) = Uuid::parse_str(item_id_str) else {
+                    return Ok(());
+                };
+
+                let version_bytes = match val {
+                    automerge::Value::Scalar(s) => match &**s {
+                        automerge::ScalarValue::Bytes(b) => b,
+                        _ => return Ok(()),
+                    },
+                    _ => return Ok(()),
+                };
+                let version = Uuid::from_slice(version_bytes)?;
+
+                match collection.as_ref() {
+                    "windows" => out.push(if version.is_nil() {
+                        TablesEvent::WindowAdded { id: item_id, heads }
+                    } else {
+                        TablesEvent::WindowChanged { id: item_id, heads }
+                    }),
+                    "tables" => out.push(if version.is_nil() {
+                        TablesEvent::TableAdded { id: item_id, heads }
+                    } else {
+                        TablesEvent::TableChanged { id: item_id, heads }
+                    }),
+                    "tabs" => out.push(if version.is_nil() {
+                        TablesEvent::TabAdded { id: item_id, heads }
+                    } else {
+                        TablesEvent::TabChanged { id: item_id, heads }
+                    }),
+                    "panels" => out.push(if version.is_nil() {
+                        TablesEvent::PanelAdded { id: item_id, heads }
+                    } else {
+                        TablesEvent::PanelChanged { id: item_id, heads }
+                    }),
+                    _ => out.push(TablesEvent::ListChanged { heads }),
                 }
             }
-        }
-        for evt in events.drain(..) {
-            self.registry.notify([evt]);
+            automerge::PatchAction::DeleteMap { .. } if patch.path.len() == 2 => {
+                match &patch.path[1].1 {
+                    automerge::Prop::Map(path_key) => match path_key.as_ref() {
+                        "windows" | "tables" | "tabs" | "panels" => {
+                            out.push(TablesEvent::ListChanged { heads });
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -584,12 +753,14 @@ impl TablesRepo {
             .await
     }
 
-    pub async fn set_window(&self, id: Uuid, val: Window) -> Res<Option<Window>> {
+    pub async fn set_window(&self, id: Uuid, mut val: Window) -> Res<Option<Window>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        self.store
+        let (old, hash) = self
+            .store
             .mutate_sync(|store| {
+                val.version = Uuid::new_v4();
                 let old_window = store.windows.get(&id).cloned();
                 let old_tabs = old_window
                     .as_ref()
@@ -607,14 +778,19 @@ impl TablesRepo {
                     }
                 }
 
-                let old = store.windows.insert(id, val);
-
-                self.registry
-                    .notify([TablesEvent::WindowChanged { id }, TablesEvent::ListChanged]);
-                old
+                store.windows.insert(id, val)
             })
-            .await
-            .map(|(res, _)| res)
+            .await?;
+
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([
+            TablesEvent::WindowChanged {
+                id,
+                heads: heads.clone(),
+            },
+            TablesEvent::ListChanged { heads },
+        ]);
+        Ok(old)
     }
 
     pub async fn list_windows(&self) -> Res<Vec<Window>> {
@@ -633,13 +809,14 @@ impl TablesRepo {
         Ok(out)
     }
 
-    pub async fn set_tab(&self, id: Uuid, val: Tab) -> Res<Option<Tab>> {
+    pub async fn set_tab(&self, id: Uuid, mut val: Tab) -> Res<Option<Tab>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let (old, _) = self
+        let (old, hash) = self
             .store
             .mutate_sync(|store| {
+                val.version = Uuid::new_v4();
                 // Get old tab to check for panel changes
                 let old_tab = store.tabs.get(&id).cloned();
                 let old_panels = old_tab
@@ -662,15 +839,25 @@ impl TablesRepo {
             })
             .await?;
 
+        let heads = ChangeHashSet(hash.into_iter().collect());
         // Send cascading events using indices (read from indices)
-        let mut notifs = vec![TablesEvent::TabChanged { id }];
+        let mut notifs = vec![TablesEvent::TabChanged {
+            id,
+            heads: heads.clone(),
+        }];
         if let Some(table_id) = self.find_table_for_tab(id).await {
-            notifs.push(TablesEvent::TableChanged { id: table_id });
+            notifs.push(TablesEvent::TableChanged {
+                id: table_id,
+                heads: heads.clone(),
+            });
         }
         if let Some(window_id) = self.find_window_for_tab(id).await {
-            notifs.push(TablesEvent::WindowChanged { id: window_id });
+            notifs.push(TablesEvent::WindowChanged {
+                id: window_id,
+                heads: heads.clone(),
+            });
         }
-        notifs.push(TablesEvent::ListChanged);
+        notifs.push(TablesEvent::ListChanged { heads });
         self.registry.notify(notifs);
         Ok(old)
     }
@@ -691,13 +878,14 @@ impl TablesRepo {
         Ok(out)
     }
 
-    pub async fn set_table(&self, id: Uuid, val: Table) -> Res<Option<Table>> {
+    pub async fn set_table(&self, id: Uuid, mut val: Table) -> Res<Option<Table>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let (old, _) = self
+        let (old, hash) = self
             .store
             .mutate_sync(|store| {
+                val.version = Uuid::new_v4();
                 // Get old table to check for tab changes
                 let old_table = store.tables.get(&id).cloned();
                 let old_tabs = old_table
@@ -724,6 +912,7 @@ impl TablesRepo {
                     let panel_id = Uuid::new_v4();
                     let tab = Tab {
                         id: tab_id,
+                        version: Uuid::nil(),
                         title: "New Tab".to_string(),
                         panels: vec![panel_id],
                         selected_panel: Some(panel_id),
@@ -731,6 +920,7 @@ impl TablesRepo {
                     store.tabs.insert(tab_id, tab);
                     let panel = Panel {
                         id: panel_id,
+                        version: Uuid::nil(),
                         title: "New Panel".to_string(),
                     };
                     store.panels.insert(panel_id, panel);
@@ -743,8 +933,14 @@ impl TablesRepo {
             })
             .await?;
 
-        self.registry
-            .notify([TablesEvent::TableChanged { id }, TablesEvent::ListChanged]);
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([
+            TablesEvent::TableChanged {
+                id,
+                heads: heads.clone(),
+            },
+            TablesEvent::ListChanged { heads },
+        ]);
         Ok(old)
     }
 
@@ -774,30 +970,43 @@ impl TablesRepo {
             .await
     }
 
-    pub async fn set_panel(&self, id: Uuid, val: Panel) -> Res<Option<Panel>> {
+    pub async fn set_panel(&self, id: Uuid, mut val: Panel) -> Res<Option<Panel>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let (old, _) = self
+        let (old, hash) = self
             .store
-            .mutate_sync(|store| store.panels.insert(id, val))
+            .mutate_sync(|store| {
+                val.version = Uuid::new_v4();
+                store.panels.insert(id, val)
+            })
             .await?;
 
+        let heads = ChangeHashSet(hash.into_iter().collect());
         // Send cascading events using indices (read from indices)
-        self.registry.notify([TablesEvent::PanelChanged { id }]);
+        self.registry.notify([TablesEvent::PanelChanged {
+            id,
+            heads: heads.clone(),
+        }]);
         if let Some(tab_id) = self.find_tab_for_panel(id).await {
-            self.registry
-                .notify([TablesEvent::TabChanged { id: tab_id }]);
+            self.registry.notify([TablesEvent::TabChanged {
+                id: tab_id,
+                heads: heads.clone(),
+            }]);
             if let Some(table_id) = self.find_table_for_tab(tab_id).await {
-                self.registry
-                    .notify([TablesEvent::TableChanged { id: table_id }]);
+                self.registry.notify([TablesEvent::TableChanged {
+                    id: table_id,
+                    heads: heads.clone(),
+                }]);
             }
             if let Some(window_id) = self.find_window_for_tab(tab_id).await {
-                self.registry
-                    .notify([TablesEvent::WindowChanged { id: window_id }]);
+                self.registry.notify([TablesEvent::WindowChanged {
+                    id: window_id,
+                    heads: heads.clone(),
+                }]);
             }
         }
-        self.registry.notify([TablesEvent::ListChanged]);
+        self.registry.notify([TablesEvent::ListChanged { heads }]);
         Ok(old)
     }
 
@@ -814,7 +1023,8 @@ impl TablesRepo {
             eyre::bail!("repo is stopped");
         }
         // Move patches into the closure to avoid cloning non-cloneable patch types
-        self.store
+        let (_, hash) = self
+            .store
             .mutate_sync(move |store| {
                 // Apply tab updates
                 if let Some(tab_updates) = patches.tab_updates {
@@ -822,6 +1032,7 @@ impl TablesRepo {
                         if let Some(id) = tab_patch.id {
                             if let Some(tab) = store.tabs.get_mut(&id) {
                                 tab.apply(tab_patch);
+                                tab.version = Uuid::new_v4();
                             }
                         }
                     }
@@ -833,6 +1044,7 @@ impl TablesRepo {
                         if let Some(id) = window_patch.id {
                             if let Some(window) = store.windows.get_mut(&id) {
                                 window.apply(window_patch);
+                                window.version = Uuid::new_v4();
                             }
                         }
                     }
@@ -844,6 +1056,7 @@ impl TablesRepo {
                         if let Some(id) = panel_patch.id {
                             if let Some(panel) = store.panels.get_mut(&id) {
                                 panel.apply(panel_patch);
+                                panel.version = Uuid::new_v4();
                             }
                         }
                     }
@@ -855,6 +1068,7 @@ impl TablesRepo {
                         if let Some(id) = table_patch.id {
                             if let Some(table) = store.tables.get_mut(&id) {
                                 table.apply(table_patch);
+                                table.version = Uuid::new_v4();
                             }
                         }
                     }
@@ -865,7 +1079,8 @@ impl TablesRepo {
             })
             .await?;
 
-        self.registry.notify([TablesEvent::ListChanged]);
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([TablesEvent::ListChanged { heads }]);
         Ok(())
     }
 
@@ -892,14 +1107,14 @@ impl TablesRepo {
 
     // Create a new table with a default tab and panel
     pub async fn create_new_table(&self) -> Res<Uuid> {
-        let (table_id, _) = self
+        let (table_id, hash) = self
             .store
             .mutate_sync(|store| {
                 let table_id = Uuid::new_v4();
                 let tab_id = Uuid::new_v4();
                 let panel_id = Uuid::new_v4();
 
-                // Find or create a window for this table
+                // Create window
                 let window_id = if let Some((&id, _)) = store.windows.iter().next() {
                     id
                 } else {
@@ -907,6 +1122,7 @@ impl TablesRepo {
                     let new_window_id = Uuid::new_v4();
                     let window = Window {
                         id: new_window_id,
+                        version: Uuid::nil(),
                         title: "Main Window".to_string(),
                         tabs: vec![tab_id],
                         selected_table: Some(table_id),
@@ -923,6 +1139,7 @@ impl TablesRepo {
                 // Create table
                 let table = Table {
                     id: table_id,
+                    version: Uuid::nil(),
                     title: format!("Table {}", store.tables.len() + 1),
                     tabs: vec![tab_id],
                     window: TableWindow::Specific { id: window_id },
@@ -933,6 +1150,7 @@ impl TablesRepo {
                 // Create tab
                 let tab = Tab {
                     id: tab_id,
+                    version: Uuid::nil(),
                     title: format!("Tab {}", store.tabs.len() + 1),
                     panels: vec![panel_id],
                     selected_panel: Some(panel_id),
@@ -942,6 +1160,7 @@ impl TablesRepo {
                 // Create panel
                 let panel = Panel {
                     id: panel_id,
+                    version: Uuid::nil(),
                     title: format!("Panel {}", store.panels.len() + 1),
                 };
                 store.panels.insert(panel_id, panel);
@@ -963,9 +1182,14 @@ impl TablesRepo {
             })
             .await?;
 
-        self.registry
-            .notify([TablesEvent::TableChanged { id: table_id }]);
-        self.registry.notify([TablesEvent::ListChanged]);
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([
+            TablesEvent::TableChanged {
+                id: table_id,
+                heads: heads.clone(),
+            },
+            TablesEvent::ListChanged { heads },
+        ]);
 
         Ok(table_id)
     }
@@ -973,7 +1197,7 @@ impl TablesRepo {
     // Create a new tab for an existing table
     pub async fn create_new_tab(&self, table_id: Uuid) -> Res<Uuid> {
         // Single lock: use try_mutate so we can return errors inside the closure
-        let (tab_id, _) = self
+        let (tab_id, hash) = self
             .store
             .try_mutate_sync(move |store| {
                 // Get the table window policy (owned) to avoid borrowing across await
@@ -991,6 +1215,7 @@ impl TablesRepo {
                             let new_window_id = Uuid::new_v4();
                             let window = Window {
                                 id: new_window_id,
+                                version: Uuid::nil(),
                                 title: "Main Window".to_string(),
                                 tabs: vec![],
                                 selected_table: Some(table_id),
@@ -1012,6 +1237,7 @@ impl TablesRepo {
                 // Create tab and panel
                 let tab = Tab {
                     id: tab_id,
+                    version: Uuid::nil(),
                     title: format!("Tab {}", store.tabs.len() + 1),
                     panels: vec![panel_id],
                     selected_panel: Some(panel_id),
@@ -1019,6 +1245,7 @@ impl TablesRepo {
                 store.tabs.insert(tab_id, tab);
                 let panel = Panel {
                     id: panel_id,
+                    version: Uuid::nil(),
                     title: format!("Panel {}", store.panels.len() + 1),
                 };
                 store.panels.insert(panel_id, panel);
@@ -1043,9 +1270,14 @@ impl TablesRepo {
             })
             .await?;
 
-        self.registry
-            .notify([TablesEvent::TableChanged { id: table_id }]);
-        self.registry.notify([TablesEvent::ListChanged]);
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([
+            TablesEvent::TableChanged {
+                id: table_id,
+                heads: heads.clone(),
+            },
+            TablesEvent::ListChanged { heads },
+        ]);
 
         Ok(tab_id)
     }
@@ -1053,7 +1285,7 @@ impl TablesRepo {
     // Remove a tab and its panel
     pub async fn remove_tab(&self, tab_id: Uuid) -> Res<()> {
         // Single lock: read and mutate inside try_mutate to avoid double-lock
-        let (table_id, _) = self
+        let (table_id, hash) = self
             .store
             .try_mutate_sync(|store| {
                 // Read needed values owned (avoid borrowing across await)
@@ -1089,6 +1321,7 @@ impl TablesRepo {
                             let new_panel_id = Uuid::new_v4();
                             let tab = Tab {
                                 id: new_tab_id,
+                                version: Uuid::nil(),
                                 title: "New Tab".to_string(),
                                 panels: vec![new_panel_id],
                                 selected_panel: Some(new_panel_id),
@@ -1096,6 +1329,7 @@ impl TablesRepo {
                             store.tabs.insert(new_tab_id, tab);
                             let panel = Panel {
                                 id: new_panel_id,
+                                version: Uuid::nil(),
                                 title: "New Panel".to_string(),
                             };
                             store.panels.insert(new_panel_id, panel);
@@ -1130,11 +1364,14 @@ impl TablesRepo {
             })
             .await?;
 
+        let heads = ChangeHashSet(hash.into_iter().collect());
         if let Some(table_id) = table_id {
-            self.registry
-                .notify([TablesEvent::TableChanged { id: table_id }]);
+            self.registry.notify([TablesEvent::TableChanged {
+                id: table_id,
+                heads: heads.clone(),
+            }]);
         }
-        self.registry.notify([TablesEvent::ListChanged]);
+        self.registry.notify([TablesEvent::ListChanged { heads }]);
 
         Ok(())
     }

@@ -63,6 +63,7 @@ interface doc {
         id: doc-id,
         props-set: list<tuple<string, doc-prop>>,
         props-remove: list<string>,
+        user-path: option<string>,
     }
 
     record doc-added-event {

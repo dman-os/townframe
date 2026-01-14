@@ -34,6 +34,7 @@ impl PlugsRepoFfi {
                 fcx.cx.acx.clone(),
                 fcx.cx.blobs.clone(),
                 fcx.cx.doc_app().document_id().clone(),
+                fcx.cx.local_actor_id.clone(),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;

@@ -43,6 +43,7 @@ impl ConfigRepoFfi {
                 fcx.cx.acx.clone(),
                 fcx.cx.doc_app().document_id().clone(),
                 plug_repo.repo.clone(),
+                daybook_types::doc::UserPath::from(fcx.cx.local_user_path.clone()),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;

@@ -56,6 +56,11 @@ impl AmCtxStopToken {
         Ok(())
     }
 }
+#[cfg(feature = "automerge-repo")]
+pub struct RepoConnection {
+    pub peer_info: samod::PeerInfo,
+    pub join_handle: tokio::task::JoinHandle<()>,
+}
 
 #[cfg(feature = "automerge-repo")]
 impl AmCtx {
@@ -108,27 +113,38 @@ impl AmCtx {
         ))
     }
 
-    pub fn spawn_mpsc_connector(
+    pub async fn spawn_connection_mpsc(
         &self,
         rx_from_peer: futures::channel::mpsc::UnboundedReceiver<Vec<u8>>,
         tx_to_peer: futures::channel::mpsc::UnboundedSender<Vec<u8>>,
         direction: samod::ConnDirection,
-    ) {
+    ) -> Res<RepoConnection> {
         use futures::StreamExt;
         let repo = self.repo.clone();
-        tokio::spawn(
+        let conn = tokio::task::block_in_place(|| {
+            repo.connect(
+                rx_from_peer.map(Ok::<_, std::convert::Infallible>),
+                tx_to_peer,
+                direction,
+            )
+        })
+        .wrap_err("failed to establish connection")?;
+        let peer_info = conn
+            .handshake_complete()
+            .await
+            .map_err(|err| ferr!("failed on handshake: {err:?}"))?;
+        let join_handle = tokio::spawn(
             async move {
-                let fin_reason = repo
-                    .connect(
-                        rx_from_peer.map(Ok::<_, std::convert::Infallible>),
-                        tx_to_peer,
-                        direction,
-                    )
-                    .await;
+                let fin_reason = conn.finished().await;
                 info!(?fin_reason, "sync server connector task finished");
             }
             .instrument(tracing::info_span!("mpsc sync server connector task")),
         );
+
+        Ok(RepoConnection {
+            peer_info,
+            join_handle,
+        })
     }
     /// Maintains connection to the sync server
     pub fn spawn_ws_connector(&self, addr: std::borrow::Cow<'static, str>) {
@@ -147,9 +163,8 @@ impl AmCtx {
                                 error!(?resp, "bad response connecting to server");
                                 continue;
                             }
-                            let fin = repo
-                                .connect_tungstenite(conn, samod::ConnDirection::Outgoing)
-                                .await;
+                            let fin =
+                                repo.connect_tungstenite(conn, samod::ConnDirection::Outgoing);
                             warn!(?fin, "connection closed");
                         }
                         Err(err) => {
@@ -174,9 +189,28 @@ impl AmCtx {
         T: Hydrate + Reconcile + Send + Sync + 'static,
         P: Into<Prop<'a>> + Send + Sync + 'static,
     {
+        self.reconcile_prop_with_actor(doc_id, obj_id, prop_name, update, None)
+            .await
+    }
+
+    pub async fn reconcile_prop_with_actor<'a, T, P>(
+        &self,
+        doc_id: &DocumentId,
+        obj_id: automerge::ObjId,
+        prop_name: P,
+        update: &T,
+        actor_id: Option<automerge::ActorId>,
+    ) -> Res<Option<ChangeHash>>
+    where
+        T: Hydrate + Reconcile + Send + Sync + 'static,
+        P: Into<Prop<'a>> + Send + Sync + 'static,
+    {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         let res = handle
             .with_document(|doc| {
+                if let Some(actor) = &actor_id {
+                    doc.set_actor(actor.clone());
+                }
                 doc.transact(|tx| {
                     autosurgeon::reconcile_prop(tx, obj_id, prop_name, update)
                         .wrap_err("error reconciling")?;
@@ -221,9 +255,24 @@ impl AmCtx {
         path: Vec<Prop<'static>>,
         value: &T,
     ) -> Res<Option<ChangeHash>> {
+        self.reconcile_path_with_actor(doc_id, obj_id, path, value, None)
+            .await
+    }
+
+    pub async fn reconcile_path_with_actor<T: Reconcile + Send + Sync + 'static>(
+        &self,
+        doc_id: &DocumentId,
+        obj_id: automerge::ObjId,
+        path: Vec<Prop<'static>>,
+        value: &T,
+        actor_id: Option<automerge::ActorId>,
+    ) -> Res<Option<ChangeHash>> {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         let res = handle
             .with_document(|doc| {
+                if let Some(actor) = &actor_id {
+                    doc.set_actor(actor.clone());
+                }
                 doc.transact(|tx| {
                     use automerge::transaction::Transactable;
                     use automerge::ReadDoc;
@@ -309,10 +358,26 @@ impl AmCtx {
         path: Vec<Prop<'static>>,
         value: &T,
     ) -> Res<Option<ChangeHash>> {
+        self.reconcile_path_at_heads_with_actor(doc_id, heads, obj_id, path, value, None)
+            .await
+    }
+
+    pub async fn reconcile_path_at_heads_with_actor<T: Reconcile + Send + Sync + 'static>(
+        &self,
+        doc_id: &DocumentId,
+        heads: &[automerge::ChangeHash],
+        obj_id: automerge::ObjId,
+        path: Vec<Prop<'static>>,
+        value: &T,
+        actor_id: Option<automerge::ActorId>,
+    ) -> Res<Option<ChangeHash>> {
         let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         let heads = heads.to_vec();
         let hash = handle
             .with_document(|doc| {
+                if let Some(actor) = &actor_id {
+                    doc.set_actor(actor.clone());
+                }
                 // Start transaction at the specified heads
                 let mut tx = doc.transaction_at(automerge::PatchLog::null(), &heads);
 
@@ -475,6 +540,14 @@ pub fn serialize_commit_heads(heads: &[ChangeHash]) -> Vec<String> {
         .iter()
         .map(|commit| crate::hash::encode_base58_multibase(commit.0))
         .collect()
+}
+
+pub fn get_actor_id_from_patch(patch: &automerge::Patch) -> Option<automerge::ActorId> {
+    if let automerge::ObjId::Id(_, actor_id, _) = &patch.obj {
+        Some(actor_id.clone())
+    } else {
+        None
+    }
 }
 
 #[test]

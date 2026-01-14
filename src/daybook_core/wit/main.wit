@@ -51,6 +51,10 @@ interface capabilities {
         update: func(patch: doc-patch) -> result<_, update-doc-error>;
     }
 
+    resource prop-token-ro {
+        get: func() -> doc-prop;
+    }
+
     resource prop-token-rw {
         get: func() -> doc-prop;
         update: func(patch: doc-prop) -> result<_, update-doc-error>;
@@ -60,15 +64,15 @@ interface capabilities {
 interface prop-routine {
     use townframe:daybook-types/doc.{doc-id};
     use types.{heads};
-    use capabilities.{doc-token-ro, prop-token-rw};
+    use capabilities.{prop-token-ro, prop-token-rw};
 
     record prop-routine-args {
         doc-id: doc-id,
         heads: heads,
         prop-key: string,
 
-        doc-token: doc-token-ro,
-        prop-token: prop-token-rw,
+        rw-prop-tokens: list<tuple<string, prop-token-rw>>,
+        ro-prop-tokens: list<tuple<string, prop-token-ro>>,
     }
 
     /// Aquire args for prop-routine-args.

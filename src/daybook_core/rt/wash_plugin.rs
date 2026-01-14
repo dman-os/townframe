@@ -15,6 +15,7 @@ mod binds_guest {
         with: {
             "townframe:daybook/capabilities/doc-token-ro": super::DocTokenRo,
             "townframe:daybook/capabilities/doc-token-rw": super::DocTokenRw,
+            "townframe:daybook/capabilities/prop-token-ro": super::PropTokenRo,
             "townframe:daybook/capabilities/prop-token-rw": super::PropTokenRw,
         }
     });
@@ -179,12 +180,12 @@ impl DaybookPlugin {
 
     async fn patch_doc(
         &self,
-        branch_name: String,
+        branch_path: daybook_types::doc::BranchPath,
         heads: Option<ChangeHashSet>,
         patch: root_doc::DocPatch,
     ) -> Result<(), crate::drawer::UpdateDocErr> {
         self.drawer_repo
-            .update_at_heads(patch, branch_name, heads)
+            .update_at_heads(patch, branch_path, heads)
             .await
     }
 }
@@ -295,7 +296,7 @@ impl drawer::Host for WashCtx {
 
     async fn update_doc_at_heads(
         &mut self,
-        branch_name: String,
+        branch_path: String,
         heads: Option<drawer::Heads>,
         patch: drawer::DocPatch,
     ) -> wasmtime::Result<Result<(), drawer::UpdateDocError>> {
@@ -318,6 +319,7 @@ impl drawer::Host for WashCtx {
                 .map(|(key, prop)| (key, prop.into()))
                 .collect(),
             props_remove: patch.props_remove,
+            user_path: None,
         };
         let patch: daybook_types::doc::DocPatch =
             patch.try_into().map_err(|err: serde_json::Error| {
@@ -325,7 +327,7 @@ impl drawer::Host for WashCtx {
             })?;
 
         let plugin = DaybookPlugin::from_ctx(self);
-        match plugin.patch_doc(branch_name, heads, patch).await {
+        match plugin.patch_doc(daybook_types::doc::BranchPath::from(branch_path), heads, patch).await {
             Ok(_) => Ok(Ok(())),
             Err(crate::drawer::UpdateDocErr::DocNotFound { .. }) => {
                 Ok(Err(drawer::UpdateDocError::DocNotFound))
@@ -386,7 +388,7 @@ impl capabilities::HostDocTokenRo for WashCtx {
 
 pub struct DocTokenRw {
     doc_id: DocId,
-    branch_name: String,
+    branch_path: daybook_types::doc::BranchPath,
     heads: ChangeHashSet,
 }
 
@@ -436,13 +438,14 @@ impl capabilities::HostDocTokenRw for WashCtx {
                 .map(|(key, prop)| (key, prop.into()))
                 .collect(),
             props_remove: patch.props_remove,
+            user_path: None,
         };
         let patch: daybook_types::doc::DocPatch =
             patch.try_into().map_err(|err: serde_json::Error| {
                 drawer::UpdateDocError::InvalidPatch(err.to_string())
             })?;
         match plugin
-            .patch_doc(token.branch_name.clone(), Some(token.heads.clone()), patch)
+            .patch_doc(token.branch_path.clone(), Some(token.heads.clone()), patch)
             .await
         {
             Ok(_) => Ok(Ok(())),
@@ -468,11 +471,61 @@ impl capabilities::HostDocTokenRw for WashCtx {
     }
 }
 
-pub struct PropTokenRw {
+pub struct PropTokenRo {
     doc_id: DocId,
-    branch_name: String,
     heads: ChangeHashSet,
     prop_key: daybook_types::doc::DocPropKey,
+}
+
+impl capabilities::HostPropTokenRo for WashCtx {
+    async fn get(
+        &mut self,
+        handle: wasmtime::component::Resource<capabilities::PropTokenRo>,
+    ) -> wasmtime::Result<bindgen_doc::DocProp> {
+        let plugin = DaybookPlugin::from_ctx(self);
+        let token = self
+            .table
+            .get(&handle)
+            .context("error locating token")
+            .to_anyhow()?;
+        match plugin
+            .get_doc(&token.doc_id, &token.heads)
+            .await
+            .to_anyhow()?
+        {
+            Some(doc) => {
+                let Some(prop) = doc.props.get(&token.prop_key) else {
+                    // FIXME: either the context should terminal error this
+                    // or communicate with the wflow engine
+                    todo!("")
+                };
+                let prop = wit_doc::doc_prop_from(prop);
+                Ok(prop)
+            }
+            // FIXME: either the context should terminal error this
+            // or communicate with the wflow engine
+            None => todo!(),
+        }
+    }
+
+    async fn drop(
+        &mut self,
+        rep: wasmtime::component::Resource<capabilities::PropTokenRo>,
+    ) -> wasmtime::Result<()> {
+        self.table.delete(rep)?;
+        Ok(())
+    }
+}
+
+pub struct PropTokenRw {
+    doc_id: DocId,
+    branch_path: daybook_types::doc::BranchPath,
+    #[allow(dead_code)]
+    target_branch_path: daybook_types::doc::BranchPath,
+    heads: ChangeHashSet,
+    prop_key: daybook_types::doc::DocPropKey,
+    #[allow(dead_code)]
+    prop_acl: Vec<crate::plugs::manifest::RoutinePropAccess>,
 }
 
 impl capabilities::HostPropTokenRw for WashCtx {
@@ -526,8 +579,9 @@ impl capabilities::HostPropTokenRw for WashCtx {
                     id: token.doc_id.clone(),
                     props_set: HashMap::from([(token.prop_key.clone(), prop)]),
                     props_remove: default(),
+                    user_path: None,
                 },
-                token.branch_name.clone(),
+                token.branch_path.clone(),
                 Some(token.heads.clone()),
             )
             .await
@@ -561,6 +615,7 @@ impl prop_routine::Host for WashCtx {
     async fn get_args(&mut self) -> wasmtime::Result<prop_routine::PropRoutineArgs> {
         use crate::rt::*;
         use anyhow::Context;
+        use daybook_types::doc::DocPropKey;
 
         let wflow_plugin = wflow::wash_plugin_wflow::WflowPlugin::try_from_ctx(self)
             .context("only wflows are supported as prop-routine")?;
@@ -579,26 +634,48 @@ impl prop_routine::Host for WashCtx {
             doc_id,
             heads,
             prop_key,
-            branch_name,
+            branch_path: target_branch_path,
+            staging_branch_path,
+            prop_acl,
         }) = &dispatch.args;
-        // else {
-        //     anyhow::bail!("job is not a prop routine: {job_id}");
-        // };
+        
+        // Use staging branch path from dispatch (already set when job was created)
+        let staging_branch_path = staging_branch_path.clone();
+        
+        // Create tokens based on ACL
+        let mut rw_prop_tokens: Vec<(String, wasmtime::component::Resource<capabilities::PropTokenRw>)> = Vec::new();
+        let mut ro_prop_tokens: Vec<(String, wasmtime::component::Resource<capabilities::PropTokenRo>)> = Vec::new();
+        
+        for access in prop_acl {
+            let prop_key = DocPropKey::Tag(daybook_types::doc::DocPropTag::from(access.tag.0.clone()));
+            let prop_key_str = prop_key.to_string();
+            
+            if access.write {
+                let token = self.table.push(PropTokenRw {
+                    doc_id: doc_id.clone(),
+                    heads: heads.clone(),
+                    branch_path: staging_branch_path.clone(),
+                    target_branch_path: target_branch_path.clone(),
+                    prop_key: prop_key.clone(),
+                    prop_acl: prop_acl.clone(),
+                })?;
+                rw_prop_tokens.push((prop_key_str, token));
+            } else if access.read {
+                let token = self.table.push(PropTokenRo {
+                    doc_id: doc_id.clone(),
+                    heads: heads.clone(),
+                    prop_key: prop_key.clone(),
+                })?;
+                ro_prop_tokens.push((prop_key_str, token));
+            }
+        }
+        
         Ok(prop_routine::PropRoutineArgs {
             doc_id: doc_id.clone(),
             heads: utils_rs::am::serialize_commit_heads(heads.as_ref()),
             prop_key: prop_key.clone(),
-
-            doc_token: self.table.push(DocTokenRo {
-                doc_id: doc_id.clone(),
-                heads: heads.clone(),
-            })?,
-            prop_token: self.table.push(PropTokenRw {
-                doc_id: doc_id.clone(),
-                heads: heads.clone(),
-                branch_name: branch_name.clone(),
-                prop_key: DocPropKey::from(prop_key.as_str()),
-            })?,
+            rw_prop_tokens,
+            ro_prop_tokens,
         })
     }
 }

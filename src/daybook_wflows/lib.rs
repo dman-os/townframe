@@ -33,6 +33,7 @@ mod wit {
             "townframe:daybook-types/doc": daybook_types::wit::doc,
 
             "townframe:daybook/types": generate,
+            "townframe:daybook/drawer": generate,
             "townframe:daybook/capabilities": generate,
             "townframe:daybook/prop-routine": generate,
         }
@@ -59,10 +60,27 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
 
 fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::prop_routine;
+    use crate::wit::townframe::daybook::drawer;
 
     let args = prop_routine::get_args();
 
-    let doc = args.doc_token.get();
+    // Find the working prop token (the one with write access matching prop_key)
+    let working_prop_token = args
+        .rw_prop_tokens
+        .iter()
+        .find(|(key, _)| key == &args.prop_key)
+        .map(|(_, token)| token)
+        .ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "working prop key '{}' not found in rw_prop_tokens",
+                args.prop_key
+            ))
+        })?;
+
+    // Get doc using drawer interface
+    let doc = drawer::get_doc_at_heads(&args.doc_id, &args.heads)
+        .map_err(|err| JobErrorX::Terminal(ferr!("error getting doc: {err:?}")))?;
+    
     let doc: daybook_types::doc::Doc = doc
         .try_into()
         .map_err(|err| JobErrorX::Terminal(ferr!("failure on doc parsing: {err:?}")))?;
@@ -121,7 +139,7 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
         let new_prop: daybook_types::doc::DocProp =
             WellKnownProp::PseudoLabel(new_labels.join(",")).into();
         let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
-        args.prop_token
+        working_prop_token
             .update(&new_prop)
             .wrap_err("error updating prop")
             .map_err(JobErrorX::Terminal)?;
@@ -135,6 +153,19 @@ fn test_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::prop_routine;
     let args = prop_routine::get_args();
 
+    // Find the working prop token (the one with write access matching prop_key)
+    let working_prop_token = args
+        .rw_prop_tokens
+        .iter()
+        .find(|(key, _)| key == &args.prop_key)
+        .map(|(_, token)| token)
+        .ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "working prop key '{}' not found in rw_prop_tokens",
+                args.prop_key
+            ))
+        })?;
+
     // Extract text content for LLM
     // Use root types since Doc uses root types (not WIT types)
     use daybook_types::doc::WellKnownProp;
@@ -143,7 +174,7 @@ fn test_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
         let new_prop: daybook_types::doc::DocProp =
             WellKnownProp::LabelGeneric("test_label".into()).into();
         let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
-        args.prop_token
+        working_prop_token
             .update(&new_prop)
             .wrap_err("error updating prop")
             .map_err(JobErrorX::Terminal)?;

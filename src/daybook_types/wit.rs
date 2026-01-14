@@ -5,6 +5,7 @@ pub mod doc {
     use api_utils_rs::wit::townframe::api_utils::utils::Datetime;
     pub use root_doc::{
         Blob, DocContent, DocContentKind, DocId, DocPropKey, ImageMetadata, MimeType, Multihash,
+        UserPath,
     };
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +52,7 @@ pub mod doc {
         pub id: DocId,
         pub props_set: Vec<(String, DocProp)>,
         pub props_remove: Vec<String>,
+        pub user_path: Option<String>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +77,7 @@ pub mod doc {
                     .into_iter()
                     .map(|k| k.to_string())
                     .collect(),
+                user_path: val.user_path.map(|p| p.to_string_lossy().to_string()),
             }
         }
     }
@@ -95,6 +98,7 @@ pub mod doc {
                     .into_iter()
                     .map(|key| DocPropKey::from(&key))
                     .collect(),
+                user_path: val.user_path.map(|s| root_doc::UserPath::from(s)),
             })
         }
     }

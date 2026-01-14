@@ -181,7 +181,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         desc: "Add a test LabelGeneric for testing".into(),
                         deets: ProcessorDeets::DocProcessor {
                             routine_name: "test-label".into(),
-                            predicate: DocPredicateClause::Or(default()),
+                            predicate: DocPredicateClause::HasTag(WellKnownPropTag::Content.into()),
                         },
                     }
                     .into(),
@@ -224,9 +224,15 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
     ]
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionedPlug {
+    pub version: Uuid,
+    pub payload: Arc<manifest::PlugManifest>,
+}
+
 #[derive(Default, Reconcile, Hydrate)]
 pub struct PlugsStore {
-    pub manifests: HashMap<String, ThroughJson<Arc<manifest::PlugManifest>>>,
+    pub manifests: HashMap<String, ThroughJson<VersionedPlug>>,
 
     /// Index: property tag -> plug id (@ns/name)
     #[autosurgeon(with = "utils_rs::am::codecs::skip")]
@@ -237,8 +243,8 @@ impl PlugsStore {
     pub fn rebuild_indices(&mut self) {
         self.tag_to_plug.clear();
 
-        for (plug_id, manifest) in &self.manifests {
-            for prop in &manifest.props {
+        for (plug_id, versioned) in &self.manifests {
+            for prop in &versioned.payload.props {
                 self.tag_to_plug
                     .insert(prop.key_tag.to_string(), plug_id.clone());
             }
@@ -271,11 +277,14 @@ pub mod version_updates {
 }
 
 pub struct PlugsRepo {
-    // drawer_doc_id: DocumentId,
+    pub acx: AmCtx,
+    pub app_doc_id: DocumentId,
+    pub app_am_handle: samod::DocHandle,
     store: crate::stores::StoreHandle<PlugsStore>,
     pub blobs: Arc<crate::blobs::BlobsRepo>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub mutation_mutex: tokio::sync::Mutex<()>,
+    pub local_actor_id: automerge::ActorId,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
 }
@@ -285,6 +294,7 @@ pub struct PlugsRepo {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PlugsEvent {
     ListChanged { heads: ChangeHashSet },
+    PlugAdded { id: String, heads: ChangeHashSet },
     PlugChanged { id: String, heads: ChangeHashSet },
     PlugDeleted { id: String, heads: ChangeHashSet },
 }
@@ -304,21 +314,26 @@ impl PlugsRepo {
         acx: AmCtx,
         blobs: Arc<crate::blobs::BlobsRepo>,
         app_doc_id: DocumentId,
+        local_actor_id: automerge::ActorId,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
 
-        let store = PlugsStore::load(&acx, &app_doc_id).await?;
-        let store = crate::stores::StoreHandle::new(store, acx.clone(), app_doc_id.clone());
+        let store_val = PlugsStore::load(&acx, &app_doc_id).await?;
+        let store = crate::stores::StoreHandle::new(
+            store_val,
+            acx.clone(),
+            app_doc_id.clone(),
+            local_actor_id.clone(),
+        );
 
         store.mutate_sync(|s| s.rebuild_indices()).await?;
 
-        let (broker, broker_stop) = {
-            let handle = acx
-                .find_doc(&app_doc_id)
-                .await?
-                .expect("doc should have been loaded");
-            acx.change_manager().add_doc(handle).await?
-        };
+        let app_am_handle = acx
+            .find_doc(&app_doc_id)
+            .await?
+            .ok_or_eyre("unable to find app doc in am")?;
+
+        let (broker, broker_stop) = acx.change_manager().add_doc(app_am_handle.clone()).await?;
 
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
             Vec<utils_rs::am::changes::ChangeNotification>,
@@ -334,8 +349,12 @@ impl PlugsRepo {
 
         let main_cancel_token = CancellationToken::new();
         let repo = Self {
+            acx: acx.clone(),
+            app_doc_id: app_doc_id.clone(),
+            app_am_handle,
             store,
             blobs,
+            local_actor_id,
             registry: registry.clone(),
             mutation_mutex: tokio::sync::Mutex::new(()),
             cancel_token: main_cancel_token.child_token(),
@@ -370,16 +389,11 @@ impl PlugsRepo {
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
-        // FIXME: this code doesn't seem right and has missing features
-
         let mut events = vec![];
         loop {
             let notifs = tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
-                    while let Ok(notifs) = notif_rx.try_recv() {
-                        self.process_notifs(notifs, &mut events).await?;
-                    }
                     break;
                 }
                 msg = notif_rx.recv() => {
@@ -389,59 +403,145 @@ impl PlugsRepo {
                     }
                 }
             };
-            self.process_notifs(notifs, &mut events).await?;
+
+            events.clear();
+            for notif in notifs {
+                // 1. Extract ActorId from the patch using the new utils_rs::am helper.
+                if let Some(actor_id) = utils_rs::am::get_actor_id_from_patch(&notif.patch) {
+                    // 2. Skip if it matches self.local_actor_id.
+                    if actor_id == self.local_actor_id {
+                        debug!("process_notifs: skipping local change for plug");
+                        continue;
+                    }
+                }
+
+                // 3. Call events_for_patch (pure-ish).
+                self.events_for_patch(&notif.patch, &notif.heads, &mut events)
+                    .await?;
+            }
+
+            for event in &events {
+                match event {
+                    PlugsEvent::PlugAdded { id, heads } | PlugsEvent::PlugChanged { id, heads } => {
+                        let (new_versioned, _) = self
+                            .acx
+                            .hydrate_path_at_heads::<ThroughJson<VersionedPlug>>(
+                                &self.app_doc_id,
+                                &heads.0,
+                                automerge::ROOT,
+                                vec![
+                                    "manifests".into(),
+                                    autosurgeon::Prop::Key(id.clone().into()),
+                                ],
+                            )
+                            .await?
+                            .expect(ERROR_INVALID_PATCH);
+                        let new_versioned = new_versioned.0;
+
+                        self.store
+                            .mutate_sync(|store| {
+                                store
+                                    .manifests
+                                    .insert(id.clone(), ThroughJson(new_versioned));
+                                store.rebuild_indices();
+                            })
+                            .await?;
+                    }
+                    PlugsEvent::PlugDeleted { id, .. } => {
+                        self.store
+                            .mutate_sync(|store| {
+                                store.manifests.remove(id);
+                                store.rebuild_indices();
+                            })
+                            .await?;
+                    }
+                    PlugsEvent::ListChanged { .. } => {}
+                }
+            }
+            self.registry.notify(events.drain(..));
         }
         Ok(())
     }
 
-    async fn process_notifs(
+    pub async fn diff_events(
         &self,
-        notifs: Vec<utils_rs::am::changes::ChangeNotification>,
-        events: &mut Vec<PlugsEvent>,
+        from: ChangeHashSet,
+        to: Option<ChangeHashSet>,
+    ) -> Res<Vec<PlugsEvent>> {
+        let (patches, heads) = self.app_am_handle.with_document(|am_doc| {
+            let heads = if let Some(ref to_set) = to {
+                to_set.clone()
+            } else {
+                ChangeHashSet(am_doc.get_heads().into())
+            };
+            let patches = am_doc
+                .diff_obj(&automerge::ROOT, &from, &heads, true)
+                .wrap_err("diff_obj failed")?;
+            eyre::Ok((patches, heads))
+        })?;
+        let heads = heads.0;
+        let mut events = vec![];
+        for patch in patches {
+            self.events_for_patch(&patch, &heads, &mut events).await?;
+        }
+        Ok(events)
+    }
+
+    async fn events_for_patch(
+        &self,
+        patch: &automerge::Patch,
+        patch_heads: &Arc<[automerge::ChangeHash]>,
+        out: &mut Vec<PlugsEvent>,
     ) -> Res<()> {
-        events.clear();
-        for notif in notifs {
-            let heads = ChangeHashSet(notif.heads.clone());
-            match &notif.patch.action {
-                automerge::PatchAction::PutMap { key, .. } => {
-                    if notif.patch.path.len() >= 2 {
-                        match &notif.patch.path[1].1 {
-                            automerge::Prop::Map(path_key) => match path_key.as_ref() {
-                                "manifests" => events.push(PlugsEvent::PlugChanged {
-                                    id: key.into(),
-                                    heads,
-                                }),
-                                _ => events.push(PlugsEvent::ListChanged { heads }),
-                            },
-                            _ => events.push(PlugsEvent::ListChanged { heads }),
-                        }
+        let heads = ChangeHashSet(patch_heads.clone());
+        match &patch.action {
+            automerge::PatchAction::PutMap {
+                key,
+                value: (val, _),
+                ..
+            } if patch.path.len() == 3
+                && patch.path[1].1 == automerge::Prop::Map("manifests".into()) =>
+            {
+                if key == "version" {
+                    let Some((_obj, automerge::Prop::Map(plug_id))) = patch.path.get(2) else {
+                        return Ok(());
+                    };
+
+                    let version_bytes = match val {
+                        automerge::Value::Scalar(s) => match &**s {
+                            automerge::ScalarValue::Bytes(b) => b,
+                            _ => return Ok(()),
+                        },
+                        _ => return Ok(()),
+                    };
+                    let version = Uuid::from_slice(version_bytes)?;
+
+                    if version.is_nil() {
+                        out.push(PlugsEvent::PlugAdded {
+                            id: plug_id.clone(),
+                            heads,
+                        });
                     } else {
-                        events.push(PlugsEvent::ListChanged { heads });
+                        out.push(PlugsEvent::PlugChanged {
+                            id: plug_id.clone(),
+                            heads,
+                        });
                     }
-                }
-                automerge::PatchAction::DeleteMap { key } => {
-                    if notif.patch.path.len() >= 2 {
-                        match &notif.patch.path[1].1 {
-                            automerge::Prop::Map(path_key) => match path_key.as_ref() {
-                                "manifests" => events.push(PlugsEvent::PlugDeleted {
-                                    id: key.into(),
-                                    heads,
-                                }),
-                                _ => events.push(PlugsEvent::ListChanged { heads }),
-                            },
-                            _ => events.push(PlugsEvent::ListChanged { heads }),
-                        }
-                    } else {
-                        events.push(PlugsEvent::ListChanged { heads });
-                    }
-                }
-                _ => {
-                    // For other operations, send ListChanged
-                    events.push(PlugsEvent::ListChanged { heads });
                 }
             }
+            automerge::PatchAction::DeleteMap { key }
+                if patch.path.len() == 2
+                    && patch.path[1].1 == automerge::Prop::Map("manifests".into()) =>
+            {
+                out.push(PlugsEvent::PlugDeleted {
+                    id: key.clone(),
+                    heads,
+                });
+            }
+            _ => {
+                out.push(PlugsEvent::ListChanged { heads });
+            }
         }
-        self.registry.notify(events.drain(..));
         Ok(())
     }
 
@@ -461,7 +561,7 @@ impl PlugsRepo {
 
     pub async fn get(&self, id: &str) -> Option<Arc<manifest::PlugManifest>> {
         self.store
-            .query_sync(|store| store.manifests.get(id).map(|man| Arc::clone(&man.0)))
+            .query_sync(|store| store.manifests.get(id).map(|man| Arc::clone(&man.payload)))
             .await
     }
 
@@ -471,10 +571,11 @@ impl PlugsRepo {
                 let Some(plug_id) = store.tag_to_plug.get(prop_tag) else {
                     return None;
                 };
-                let Some(manifest) = store.manifests.get(plug_id) else {
+                let Some(versioned) = store.manifests.get(plug_id) else {
                     panic!("plug specified by tag '{prop_tag}' not found");
                 };
-                let Some(hint) = manifest
+                let Some(hint) = versioned
+                    .payload
                     .props
                     .iter()
                     .find(|prop: &&manifest::PropKeyManifest| &prop.key_tag[..] == prop_tag)
@@ -494,8 +595,9 @@ impl PlugsRepo {
                 store
                     .manifests
                     .values()
-                    .map(|manifest| {
-                        manifest
+                    .map(|versioned| {
+                        versioned
+                            .payload
                             .props
                             .iter()
                             .map(|prop| (prop.key_tag.to_string(), prop.display_config.clone()))
@@ -508,7 +610,13 @@ impl PlugsRepo {
 
     pub async fn list_plugs(&self) -> Vec<Arc<manifest::PlugManifest>> {
         self.store
-            .query_sync(|store| store.manifests.values().map(|man| man.0.clone()).collect())
+            .query_sync(|store| {
+                store
+                    .manifests
+                    .values()
+                    .map(|man| man.payload.clone())
+                    .collect()
+            })
             .await
     }
 
@@ -531,7 +639,7 @@ impl PlugsRepo {
 
         // 1.5 Convert file:// URLs to db+blob:// URLs
         // This ensures that all components are stored in the BlobsRepo for portability.
-        if !cfg!(debug_assertions) {
+        if true {
             for bundle in manifest.wflow_bundles.values_mut() {
                 let bundle = Arc::make_mut(bundle);
                 for url in bundle.component_urls.iter_mut() {
@@ -559,10 +667,22 @@ impl PlugsRepo {
         let (_, hash) = self
             .store
             .mutate_sync(move |store| {
+                let manifest = manifest;
+                let is_update = store.manifests.contains_key(&plug_id);
+
+                let versioned = VersionedPlug {
+                    version: if is_update {
+                        Uuid::new_v4()
+                    } else {
+                        Uuid::nil()
+                    },
+                    payload: Arc::new(manifest),
+                };
+
                 // Update the manifest in the store
                 store
                     .manifests
-                    .insert(plug_id.clone(), ThroughJson(Arc::new(manifest)));
+                    .insert(plug_id.clone(), ThroughJson(versioned));
 
                 // 3. Rebuild indices
                 // Indices are in-memory caches (marked with #[autosurgeon(skip)])
@@ -903,6 +1023,7 @@ mod tests {
     use super::*;
 
     async fn setup_repo() -> Res<(AmCtx, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
+        let local_actor_id = automerge::ActorId::random();
         let (acx, _acx_stop) = AmCtx::boot(
             utils_rs::am::Config {
                 peer_id: "test".into(),
@@ -919,7 +1040,8 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let blobs = crate::blobs::BlobsRepo::new(temp_dir.path().to_path_buf()).await?;
 
-        let (repo, _repo_stop) = PlugsRepo::load(acx.clone(), blobs, doc_id.clone()).await?;
+        let (repo, _repo_stop) =
+            PlugsRepo::load(acx.clone(), blobs, doc_id.clone(), local_actor_id).await?;
         Ok((acx, repo, doc_id, temp_dir))
     }
 

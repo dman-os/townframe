@@ -1,3 +1,4 @@
+use crate::config::ConfigRepo;
 use crate::interlude::*;
 
 use crate::blobs::BlobsRepo;
@@ -39,6 +40,7 @@ pub struct Rt {
     pub cancel_token: tokio_util::sync::CancellationToken,
     pub plugs_repo: Arc<PlugsRepo>,
     pub drawer: Arc<DrawerRepo>,
+    pub config_repo: Arc<ConfigRepo>,
     pub wflow_ingress: Arc<dyn wflow::WflowIngress>,
     pub dispatch_repo: Arc<dispatch::DispatchRepo>,
     pub acx: AmCtx,
@@ -46,6 +48,7 @@ pub struct Rt {
     pub wcx: wflow::Ctx,
     pub wash_host: Arc<WashHost>,
     pub blobs_repo: Arc<BlobsRepo>,
+    pub local_actor_id: automerge::ActorId,
     local_wflow_part_id: String,
 }
 
@@ -73,12 +76,12 @@ impl RtStopToken {
 pub enum DispatchArgs {
     DocInvoke {
         doc_id: String,
-        branch_name: String,
+        branch_path: daybook_types::doc::BranchPath,
         heads: ChangeHashSet,
     },
     DocProp {
         doc_id: String,
-        branch_name: String,
+        branch_path: daybook_types::doc::BranchPath,
         heads: ChangeHashSet,
         prop_id: Option<String>,
     },
@@ -94,6 +97,8 @@ impl Rt {
         plugs_repo: Arc<PlugsRepo>,
         dispatch_repo: Arc<DispatchRepo>,
         blobs_repo: Arc<BlobsRepo>,
+        config_repo: Arc<ConfigRepo>,
+        local_actor_id: automerge::ActorId,
     ) -> Res<(Arc<Self>, RtStopToken)> {
         let wflow_plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new(Arc::clone(
             &wcx.metastore,
@@ -171,7 +176,9 @@ impl Rt {
             wcx,
             wash_host,
             blobs_repo,
+            config_repo,
             wflow_part_state,
+            local_actor_id,
         });
 
         // Start the DocTriageWorker to automatically queue jobs when docs are added
@@ -258,9 +265,16 @@ impl Rt {
         let Some((dispatch_id, _)) = event.job_id.rsplit_once('-') else {
             return Ok(());
         };
-        let Some(_dispatch) = self.dispatch_repo.get(dispatch_id).await else {
+        let Some(dispatch) = self.dispatch_repo.get(dispatch_id).await else {
             return Ok(());
         };
+        
+        // Get staging branch path from dispatch
+        let ActiveDispatchArgs::PropRoutine(PropRoutineArgs {
+            staging_branch_path,
+            ..
+        }) = &dispatch.args;
+        
         let is_done = match &event.result {
             JobRunResult::Success { value_json } => {
                 info!(?value_json, "success on dispatch wflow");
@@ -288,6 +302,59 @@ impl Rt {
             JobRunResult::StepEffect(..) => false,
         };
         if is_done {
+            // Handle staging branch cleanup based on success/failure
+            let ActiveDispatchArgs::PropRoutine(PropRoutineArgs {
+                doc_id,
+                branch_path: target_branch_path,
+                ..
+            }) = &dispatch.args;
+            
+            let is_success = matches!(
+                &event.result,
+                JobRunResult::Success { .. }
+            );
+            
+            if is_success {
+                // Merge staging branch into target branch
+                info!(
+                    ?doc_id,
+                    ?staging_branch_path,
+                    ?target_branch_path,
+                    "merging staging branch into target"
+                );
+                self.drawer
+                    .merge_from_branch(
+                        doc_id,
+                        target_branch_path,
+                        &staging_branch_path,
+                        None,
+                    )
+                    .await
+                    .wrap_err("error merging staging branch")?;
+                
+                // Delete the staging branch after successful merge
+                info!(
+                    ?doc_id,
+                    ?staging_branch_path,
+                    "deleting staging branch after successful merge"
+                );
+                self.drawer
+                    .delete_branch(doc_id, &staging_branch_path, None)
+                    .await
+                    .wrap_err("error deleting staging branch after merge")?;
+            } else {
+                // Delete staging branch on failure
+                info!(
+                    ?doc_id,
+                    ?staging_branch_path,
+                    "deleting staging branch due to failure"
+                );
+                self.drawer
+                    .delete_branch(doc_id, &staging_branch_path, None)
+                    .await
+                    .wrap_err("error deleting staging branch")?;
+            }
+            
             self.dispatch_repo.remove(dispatch_id.into()).await?;
         }
         Ok(())
@@ -312,13 +379,13 @@ impl Rt {
             .ok_or_else(|| ferr!("routine not found in plug manifest: {plug_id}/{routine_name}"))?;
 
         use crate::plugs::manifest::RoutineManifestDeets;
-        let (dispatch_id, args) = match (&routine_man.deets, args) {
+        let (dispatch_id, mut args) = match (&routine_man.deets, args) {
             (
                 RoutineManifestDeets::DocProp { working_prop_tag },
                 DispatchArgs::DocProp {
                     doc_id,
                     heads,
-                    branch_name,
+                    branch_path,
                     prop_id,
                 },
             ) => {
@@ -344,9 +411,11 @@ impl Rt {
                     dispatch_id,
                     ActiveDispatchArgs::PropRoutine(PropRoutineArgs {
                         doc_id,
-                        branch_name,
+                        branch_path,
                         heads,
                         prop_key,
+                        prop_acl: routine_man.prop_acl.clone(),
+                        staging_branch_path: daybook_types::doc::BranchPath::from("/tmp/placeholder"), // Will be set when job is created
                     }),
                 )
             }
@@ -384,6 +453,12 @@ impl Rt {
 
                 // let fqk = format!("{workload_id}/{key}");
                 let job_id = format!("{dispatch_id}-{id}", id = Uuid::new_v4().bs58());
+                let staging_branch_path = daybook_types::doc::BranchPath::from(format!("/tmp/{}", job_id));
+                
+                // Update args with staging branch path
+                let ActiveDispatchArgs::PropRoutine(ref mut prop_args) = args;
+                prop_args.staging_branch_path = staging_branch_path.clone();
+                
                 let entry_id = self
                     .wflow_ingress
                     .add_job(

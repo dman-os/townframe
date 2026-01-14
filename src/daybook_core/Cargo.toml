@@ -48,7 +48,6 @@ garde.workspace = true
 struct-patch.workspace = true
 data-encoding.workspace = true
 bs58.workspace = true
-blake3.workspace = true
 semver = "1"
 addr.workspace = true
 

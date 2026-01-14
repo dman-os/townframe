@@ -11,6 +11,7 @@ pub struct DaybookTestContext {
     pub _acx: AmCtx,
     pub drawer_repo: Arc<DrawerRepo>,
     pub dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
+    pub config_repo: Arc<crate::config::ConfigRepo>,
     pub drawer_stop: crate::repos::RepoStopToken,
     pub plugs_stop: crate::repos::RepoStopToken,
     pub config_stop: crate::repos::RepoStopToken,
@@ -18,6 +19,7 @@ pub struct DaybookTestContext {
     pub acx_stop: utils_rs::am::AmCtxStopToken,
     pub rt_stop: crate::rt::RtStopToken,
     pub rt: Arc<crate::rt::Rt>,
+    pub _temp_dir: tempfile::TempDir,
 }
 
 impl DaybookTestContext {
@@ -98,12 +100,12 @@ impl DaybookTestContext {
     }
 
     pub async fn stop(self) -> Res<()> {
+        self.rt_stop.stop().await?;
         self.drawer_stop.stop().await?;
         self.plugs_stop.stop().await?;
         self.config_stop.stop().await?;
         self.dispatch_stop.stop().await?;
         self.acx_stop.stop().await?;
-        self.rt_stop.stop().await?;
         Ok(())
     }
 }
@@ -138,16 +140,35 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
         handle.document_id().clone()
     };
 
+    // Load config first to get local identity
+    let local_user_path = daybook_types::doc::UserPath::from("/test-user");
+    let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
+
     let temp_dir = tempfile::tempdir()?;
     let blobs = crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs")).await?;
 
-    let (drawer_repo, drawer_stop) = DrawerRepo::load(acx.clone(), drawer_doc_id).await?;
-    let (plug_repo, plugs_stop) =
-        PlugsRepo::load(acx.clone(), blobs.clone(), app_doc_id.clone()).await?;
-    let (_config_repo, config_stop) =
-        crate::config::ConfigRepo::load(acx.clone(), app_doc_id.clone(), plug_repo.clone()).await?;
-    let (dispatch_repo, dispatch_stop) =
-        crate::rt::dispatch::DispatchRepo::load(acx.clone(), app_doc_id.clone()).await?;
+    let (drawer_repo, drawer_stop) =
+        DrawerRepo::load(acx.clone(), drawer_doc_id, local_actor_id.clone()).await?;
+    let (plug_repo, plugs_stop) = PlugsRepo::load(
+        acx.clone(),
+        Arc::clone(&blobs),
+        app_doc_id.clone(),
+        local_actor_id.clone(),
+    )
+    .await?;
+    let (config_repo, config_stop) = crate::config::ConfigRepo::load(
+        acx.clone(),
+        app_doc_id.clone(),
+        Arc::clone(&plug_repo),
+        local_user_path.clone(),
+    )
+    .await?;
+    let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
+        acx.clone(),
+        app_doc_id.clone(),
+        local_actor_id.clone(),
+    )
+    .await?;
 
     plug_repo.ensure_system_plugs().await?;
 
@@ -162,10 +183,12 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
         app_doc_id,
         wcx,
         acx.clone(),
-        drawer_repo.clone(),
-        plug_repo.clone(),
-        dispatch_repo.clone(),
-        blobs.clone(),
+        Arc::clone(&drawer_repo),
+        Arc::clone(&plug_repo),
+        Arc::clone(&dispatch_repo),
+        Arc::clone(&blobs),
+        Arc::clone(&config_repo),
+        local_actor_id,
     )
     .await?;
 
@@ -174,11 +197,13 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
         drawer_repo,
         rt,
         dispatch_repo,
+        config_repo,
         drawer_stop,
         plugs_stop,
         config_stop,
         dispatch_stop,
         acx_stop,
         rt_stop,
+        _temp_dir: temp_dir,
     })
 }

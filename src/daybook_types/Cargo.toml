@@ -46,4 +46,6 @@ uuid = { workspace = true, optional = true }
 wit-bindgen = { workspace = true, optional = true }
 
 pastey.workspace = true
+# os
 addr.workspace = true
+blake3.workspace = true

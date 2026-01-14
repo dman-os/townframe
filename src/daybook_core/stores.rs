@@ -8,8 +8,13 @@ pub trait Store: Hydrate + Reconcile + Send + Sync + 'static {
     const PROP: &'static str;
 
     // async fn flush(&mut self, args: &mut Self::FlushArgs) -> Res<()> {
-    async fn flush(&mut self, acx: &mut AmCtx, doc_id: &DocumentId) -> Res<Option<automerge::ChangeHash>> {
-        acx.reconcile_prop(doc_id, automerge::ROOT, Self::PROP, self)
+    async fn flush(
+        &mut self,
+        acx: &mut AmCtx,
+        doc_id: &DocumentId,
+        actor_id: Option<automerge::ActorId>,
+    ) -> Res<Option<automerge::ChangeHash>> {
+        acx.reconcile_prop_with_actor(doc_id, automerge::ROOT, Self::PROP, self, actor_id)
             .await
     }
 
@@ -47,12 +52,16 @@ struct Inner<S> {
     store: S,
     acx: AmCtx,
     doc_id: DocumentId,
+    local_actor_id: automerge::ActorId,
     // flush_args: S::FlushArgs,
 }
 
 impl<S: Store> Inner<S> {
     async fn flush(&mut self) -> Res<Option<automerge::ChangeHash>> {
-        self.store.flush(&mut self.acx, &self.doc_id).await
+        let actor_id = self.local_actor_id.clone();
+        self.store
+            .flush(&mut self.acx, &self.doc_id, Some(actor_id))
+            .await
     }
 }
 
@@ -76,9 +85,15 @@ where
         //flush_args: S::FlushArgs,
         acx: AmCtx,
         doc_id: DocumentId,
+        local_actor_id: automerge::ActorId,
     ) -> Self {
         Self {
-            inner: Arc::new(tokio::sync::RwLock::new(Inner { store, acx, doc_id })),
+            inner: Arc::new(tokio::sync::RwLock::new(Inner {
+                store,
+                acx,
+                doc_id,
+                local_actor_id,
+            })),
         }
     }
 
@@ -143,4 +158,5 @@ where
         let hash = guard.flush().await?;
         Ok((res, hash))
     }
+
 }

@@ -1,4 +1,5 @@
 use crate::interlude::*;
+pub use daybook_core::app::SqlCtx;
 
 /// Configuration for the daybook core storage systems
 #[derive(Debug, Clone)]
@@ -20,13 +21,11 @@ pub struct Ctx {
     pub sql: SqlCtx,
     pub doc_app: tokio::sync::OnceCell<samod::DocHandle>,
     pub doc_drawer: tokio::sync::OnceCell<samod::DocHandle>,
+    pub local_actor_id: automerge::ActorId,
+    pub local_user_path: String,
 }
 
 pub type SharedCtx = Arc<Ctx>;
-
-pub struct SqlCtx {
-    pub db_pool: sqlx::SqlitePool,
-}
 
 impl Config {
     pub async fn is_repo_initialized(&self) -> Res<bool> {
@@ -61,95 +60,41 @@ impl Config {
     }
 }
 
-impl SqlCtx {
-    pub async fn new(config: SqlConfig) -> Res<Self> {
-        use std::str::FromStr;
-
-        if !config.database_url.starts_with("sqlite::memory:") {
-            if let Some(path) = config.database_url.strip_prefix("sqlite://") {
-                if let Some(parent) = std::path::Path::new(path).parent() {
-                    std::fs::create_dir_all(parent).wrap_err_with(|| {
-                        format!("Failed to create database directory: {}", parent.display())
-                    })?;
-                }
-            }
-        }
-
-        let db_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            // .max_connections(1)
-            .connect_with(
-                sqlx::sqlite::SqliteConnectOptions::from_str(&config.database_url)?
-                    .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-                    .busy_timeout(std::time::Duration::from_secs(5))
-                    .create_if_missing(true),
-            )
-            .await
-            .wrap_err("error initializing sqlite db")?;
-
-        sqlx::query(
-            r#"
-                CREATE TABLE IF NOT EXISTS kvstore (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )
-                "#,
-        )
-        .execute(&db_pool)
-        .await?;
-
-        Ok(Self { db_pool })
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-enum InitState {
-    None,
-    Created {
-        doc_id_app: samod::DocumentId,
-        doc_id_drawer: samod::DocumentId,
-    },
-}
-
-const INIT_STATE_KEY: &str = "init_state";
-
-async fn get_init_state(cx: &Ctx) -> Res<InitState> {
-    let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-        .bind(INIT_STATE_KEY)
-        .fetch_optional(&cx.sql.db_pool)
-        .await?;
-    let state = match rec {
-        Some(json) => serde_json::from_str::<InitState>(&json)?,
-        None => InitState::None,
-    };
-    Ok(state)
-}
-
-async fn set_init_state(cx: &Ctx, state: &InitState) -> Res<()> {
-    let json = serde_json::to_string(state)?;
-    sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-        .bind(INIT_STATE_KEY)
-        .bind(&json)
-        .execute(&cx.sql.db_pool)
-        .await?;
-    Ok(())
-}
-
 impl Ctx {
     pub async fn init(config: Arc<Config>) -> Result<Arc<Self>, eyre::Report> {
-        let sql = SqlCtx::new(config.sql.clone()).await?;
+        let sql = SqlCtx::new(&config.sql.database_url).await?;
+
+        // Load local identity from SQL
+        let local_user_path = daybook_core::app::get_local_user_path(&sql.db_pool).await?;
+        let local_user_path = match local_user_path {
+            Some(path) => path,
+            None => {
+                let path = "/default-device".to_string();
+                daybook_core::app::set_local_user_path(&sql.db_pool, &path).await?;
+                path
+            }
+        };
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&daybook_types::doc::UserPath::from(local_user_path.clone()));
+
         let (acx, acx_stop) =
             utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
                 .await?;
         // acx.spawn_ws_connector("ws://0.0.0.0:8090".into());
 
+        let doc_app = tokio::sync::OnceCell::new();
+        let doc_drawer = tokio::sync::OnceCell::new();
+
+        daybook_core::app::init_from_globals(&acx, &sql.db_pool, &doc_app, &doc_drawer).await?;
+
         let cx = Arc::new(Self {
             acx,
             acx_stop: Some(acx_stop).into(),
             sql,
-            doc_app: default(),
-            doc_drawer: default(),
+            doc_app,
+            doc_drawer,
+            local_actor_id,
+            local_user_path,
         });
-        init_from_globals(&cx).await?;
         Ok(cx)
     }
 
@@ -160,76 +105,4 @@ impl Ctx {
     pub fn doc_drawer(&self) -> &samod::DocHandle {
         self.doc_drawer.get().expect("ctx was not initialized")
     }
-}
-
-async fn init_from_globals(cx: &Ctx) -> Res<()> {
-    let init_state = get_init_state(cx).await?;
-    let (handle_app, handle_drawer) = if let InitState::Created {
-        doc_id_app,
-        doc_id_drawer,
-    } = init_state
-    {
-        let (handle_app, handle_drawer) = tokio::try_join!(
-            cx.acx.find_doc(&doc_id_app),
-            cx.acx.find_doc(&doc_id_drawer)
-        )?;
-        if handle_app.is_none() {
-            warn!("doc not found locally for stored doc_id_app; creating new local document");
-        }
-        if handle_drawer.is_none() {
-            warn!("doc not found locally for stored doc_id_drawer; creating new local document");
-        }
-        (handle_app, handle_drawer)
-    } else {
-        (None, None)
-    };
-
-    let mut doc_handles = vec![];
-    let mut update_state = false;
-    for (handle, latest_fn) in [
-        (
-            handle_app,
-            daybook_core::app::version_updates::version_latest as fn() -> Res<Vec<u8>>,
-        ),
-        (
-            handle_drawer,
-            daybook_core::drawer::version_updates::version_latest,
-        ),
-    ] {
-        let handle = match handle {
-            Some(handle) => handle,
-            None => {
-                update_state = true;
-                let doc = latest_fn()?;
-                let doc =
-                    automerge::Automerge::load(&doc).wrap_err("error loading version_latest")?;
-                let handle = cx.acx.add_doc(doc).await?;
-                handle
-            }
-        };
-        doc_handles.push(handle)
-    }
-    if doc_handles.len() != 2 {
-        unreachable!();
-    }
-    for handle in &doc_handles {
-        let _ = cx.acx.change_manager().add_doc(handle.clone()).await?;
-    }
-    if update_state {
-        set_init_state(
-            cx,
-            &InitState::Created {
-                doc_id_app: doc_handles[0].document_id().clone(),
-                doc_id_drawer: doc_handles[1].document_id().clone(),
-            },
-        )
-        .await?;
-    }
-    let (Ok(()), Ok(())) = (
-        cx.doc_drawer.set(doc_handles.pop().unwrap_or_log()),
-        cx.doc_app.set(doc_handles.pop().unwrap_or_log()),
-    ) else {
-        eyre::bail!("double ctx initialization");
-    };
-    Ok(())
 }

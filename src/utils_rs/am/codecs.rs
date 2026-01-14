@@ -124,3 +124,43 @@ pub mod through_str {
         }
     }
 }
+
+pub mod path {
+    use super::*;
+    use std::path::PathBuf;
+
+    pub fn reconcile<R: Reconciler>(
+        path: &PathBuf,
+        mut reconciler: R,
+    ) -> Result<(), R::Error> {
+        reconciler.str(&path.to_string_lossy())
+    }
+
+    pub fn hydrate<'a, D: ReadDoc>(
+        doc: &D,
+        obj: &ObjId,
+        prop: autosurgeon::Prop<'a>,
+    ) -> Result<PathBuf, HydrateError> {
+        use automerge::{ScalarValue, Value};
+        let string = match doc.get(obj, &prop)? {
+            Some((Value::Scalar(s), _)) => {
+                match s.as_ref() {
+                    ScalarValue::Str(s) => s.to_string(),
+                    _ => {
+                        return Err(autosurgeon::HydrateError::unexpected(
+                            "a string",
+                            format!("unexpected scalar type: {:?}", s),
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(autosurgeon::HydrateError::unexpected(
+                    "a scalar value",
+                    "value is not a scalar".to_string(),
+                ));
+            }
+        };
+        Ok(PathBuf::from(string))
+    }
+}

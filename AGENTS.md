@@ -18,3 +18,5 @@
 - Do not adress TODOs or FIXMEs unless told to do so.
 - Prefer to preserve comments unless they are progress comments written by an agent. 
 - Don't be lazy with solutions.
+- Use RUST_LOG_TEST env var for controlling log levels during testing.
+- `printf` and experimental debugging is always quicker than coming up with premature hypothesis.

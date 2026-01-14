@@ -7,7 +7,7 @@ members = [
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
-  "./src/daybook_sync",
+  # "./src/daybook_sync",
   "./src/daybook_types",
   "./src/daybook_wflows/",
   "./src/macros",
@@ -15,7 +15,7 @@ members = [
   "./src/test_wflows",
   "./src/utils_rs",
   "./src/wash_plugin_am_repo/",
-  "./src/wash_plugin_pglite/",
+  # "./src/wash_plugin_pglite/",
   "./src/wash_plugin_utils/",
   "./src/wash_plugin_wflow/",
   "./src/wflow/",
@@ -152,11 +152,11 @@ gloo = { version = "0.11.0", default-features = false }
 wit-bindgen = "0.48.1"
 
 # sync
-automerge = "0.7"
+automerge = "0.7.3"
 # autosurgeon = "0.9"
 autosurgeon = { path = "src/autosurgeon/autosurgeon" }
 automerge-test = "0.6"
-samod = { version = "0.5.0" }
+samod = { version = "0.7.1" }
 # samod = { path = "src/samod/samod" }
 async-channel = "2.5.0"
 

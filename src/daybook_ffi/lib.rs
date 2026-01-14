@@ -14,21 +14,19 @@ mod interlude {
 }
 
 use crate::interlude::*;
+pub use daybook_core::app::SqlCtx;
 
 uniffi::setup_scaffolding!();
 
-mod am;
 mod ffi;
-mod globals;
 mod macros;
 mod repos;
-mod sql;
 
 /// Configuration for the daybook core storage systems
 #[derive(Debug, Clone)]
 pub struct Config {
     pub am: utils_rs::am::Config,
-    pub sql: sql::Config,
+    pub sql: daybook_core::app::SqlConfig,
     pub blobs_root: PathBuf,
 }
 
@@ -55,7 +53,7 @@ impl Config {
                     },
                     peer_id: "daybook_client".to_string(),
                 },
-                sql::Config {
+                daybook_core::app::SqlConfig {
                     database_url: {
                         let db_path = app_dir.join("sqlite.db");
                         format!("sqlite://{}", db_path.display())
@@ -77,7 +75,7 @@ impl Config {
                     },
                     peer_id: "daybook_client".to_string(),
                 },
-                sql::Config {
+                daybook_core::app::SqlConfig {
                     database_url: {
                         let db_path = dirs.data_dir().join("sqlite.db");
                         format!("sqlite://{}", db_path.display())
@@ -99,18 +97,34 @@ struct Ctx {
     acx: utils_rs::am::AmCtx,
     acx_stop: tokio::sync::Mutex<Option<utils_rs::am::AmCtxStopToken>>,
     // rt: tokio::runtime::Handle,
-    sql: sql::SqlCtx,
+    sql: SqlCtx,
     blobs: Arc<daybook_core::blobs::BlobsRepo>,
 
     doc_app: tokio::sync::OnceCell<::samod::DocHandle>,
     doc_drawer: tokio::sync::OnceCell<::samod::DocHandle>,
+
+    local_actor_id: automerge::ActorId,
+    local_user_path: String,
 }
 
 type SharedCtx = Arc<Ctx>;
 
 impl Ctx {
     async fn init(config: Config) -> Result<Arc<Self>, eyre::Report> {
-        let sql = sql::SqlCtx::new(config.sql.clone()).await?;
+        let sql = SqlCtx::new(&config.sql.database_url).await?;
+
+        // Load local identity from SQL
+        let local_user_path = daybook_core::app::get_local_user_path(&sql.db_pool).await?;
+        let local_user_path = match local_user_path {
+            Some(path) => path,
+            None => {
+                let path = "/default-device".to_string();
+                daybook_core::app::set_local_user_path(&sql.db_pool, &path).await?;
+                path
+            }
+        };
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&daybook_types::doc::UserPath::from(local_user_path.clone()));
+
         let (acx, acx_stop) =
             utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
                 .await?;
@@ -118,18 +132,23 @@ impl Ctx {
 
         let blobs = daybook_core::blobs::BlobsRepo::new(config.blobs_root.clone()).await?;
 
-        let cx = Arc::new(Self {
+        let doc_app = tokio::sync::OnceCell::new();
+        let doc_drawer = tokio::sync::OnceCell::new();
+
+        daybook_core::app::init_from_globals(&acx, &sql.db_pool, &doc_app, &doc_drawer).await?;
+
+        let cx = Arc::new(Ctx {
             config,
             acx,
             acx_stop: Some(acx_stop).into(),
-            // rt: tokio::runtime::Handle::current(),
             sql,
             blobs,
-            doc_app: default(),
-            doc_drawer: default(),
+            doc_app,
+            doc_drawer,
+            local_actor_id,
+            local_user_path,
         });
-        // Initialize automerge document from globals/kv and start sync worker lazily.
-        am::init_from_globals(&cx).await?;
+
         Ok(cx)
     }
 
