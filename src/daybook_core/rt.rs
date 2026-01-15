@@ -65,40 +65,65 @@ pub struct RtStopToken {
 impl RtStopToken {
     pub async fn stop(mut self) -> Res<()> {
         self.rt.cancel_token.cancel();
-        
+
         // Stop triage worker first to prevent new dispatches from being created
         if let Some(worker) = self.doc_changes_worker.take() {
-            if let Err(e) = worker.stop().await {
-                warn!(?e, "error stopping doc_changes_worker during shutdown - continuing");
+            if let Err(err) = worker.stop().await {
+                warn!(
+                    ?err,
+                    "error stopping doc_changes_worker during shutdown - continuing"
+                );
             }
         }
-        
+
         // Wait for all active dispatches to complete
-        let active_dispatches: Vec<String> = self.rt.dispatch_repo.list().await.iter().map(|(id, _)| id.clone()).collect();
+        let active_dispatches: Vec<String> = self
+            .rt
+            .dispatch_repo
+            .list()
+            .await
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
         if !active_dispatches.is_empty() {
-            info!(count = active_dispatches.len(), "waiting for active dispatches to complete");
+            info!(
+                count = active_dispatches.len(),
+                "waiting for active dispatches to complete"
+            );
             for dispatch_id in active_dispatches {
-                let _ = self.rt.wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(30)).await;
+                let _ = self
+                    .rt
+                    .wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(30))
+                    .await;
             }
         }
-        
+
         // Stop wflow partition worker
         if let Some(handle) = self.wflow_part_handle.take() {
-            if let Err(e) = handle.stop().await {
-                warn!(?e, "error stopping wflow_part_handle during shutdown - continuing");
+            if let Err(err) = handle.stop().await {
+                warn!(
+                    ?err,
+                    "error stopping wflow_part_handle during shutdown - continuing"
+                );
             }
         }
-        
-        if let Err(e) = self.rt.wash_host.clone().stop().await.to_eyre() {
-            warn!(?e, "error stopping wash_host during shutdown - continuing");
+
+        if let Err(err) = Arc::clone(&self.rt.wash_host).stop().await.to_eyre() {
+            warn!(
+                ?err,
+                "error stopping wash_host during shutdown - continuing"
+            );
         }
-        
+
         if let Some(watcher) = self.partition_watcher.take() {
-            if let Err(e) = utils_rs::wait_on_handle_with_timeout(watcher, 10 * 1000).await {
-                warn!(?e, "error waiting for partition_watcher during shutdown - continuing");
+            if let Err(err) = utils_rs::wait_on_handle_with_timeout(watcher, 10 * 1000).await {
+                warn!(
+                    ?err,
+                    "error waiting for partition_watcher during shutdown - continuing"
+                );
             }
         }
-        
+
         Ok(())
     }
 }
@@ -119,6 +144,7 @@ pub enum DispatchArgs {
 }
 
 impl Rt {
+    #[allow(clippy::too_many_arguments)]
     pub async fn boot(
         config: RtConfig,
         app_doc_id: DocumentId,
@@ -146,9 +172,15 @@ impl Rt {
         })
         .wrap_err("error creating utils plugin")?;
 
-        let wash_host =
-            wflow::build_wash_host(vec![wflow_plugin.clone(), daybook_plugin.clone(), utils_plugin.clone()])
-                .await?;
+        let wash_host = wflow::build_wash_host(vec![
+            #[allow(clippy::clone_on_ref_ptr)]
+            wflow_plugin.clone(),
+            #[allow(clippy::clone_on_ref_ptr)]
+            daybook_plugin.clone(),
+            #[allow(clippy::clone_on_ref_ptr)]
+            utils_plugin.clone(),
+        ])
+        .await?;
 
         let wash_host = wash_host
             .start()
@@ -182,18 +214,18 @@ impl Rt {
                 &blobs_repo,
                 plug_id,
                 bundle_name,
-                &bundle_man,
+                bundle_man,
             )
             .await?;
         }
 
         let part_idx = 0;
         let (wflow_part_handle, wflow_part_state) =
-            wflow::start_partition_worker(&wcx, wflow_plugin.clone(), part_idx).await?;
+            wflow::start_partition_worker(&wcx, Arc::clone(&wflow_plugin), part_idx).await?;
         let part_log = PartitionLogRef::new(Arc::clone(&wcx.logstore));
         let wflow_ingress = Arc::new(wflow::ingress::PartitionLogIngress::new(
             part_log,
-            wcx.metastore.clone(),
+            Arc::clone(&wcx.metastore),
         ));
         let local_wflow_part_id = format!("{}/{part_idx}", config.device_id);
 
@@ -219,15 +251,15 @@ impl Rt {
 
         // Start the DocTriageWorker to automatically queue jobs when docs are added
         let doc_changes_worker =
-            crate::rt::triage::spawn_doc_triage_worker(rt.clone(), app_doc_id).await?;
+            crate::rt::triage::spawn_doc_triage_worker(Arc::clone(&rt), app_doc_id).await?;
 
         let partition_watcher = tokio::spawn({
-            let repo = rt.clone();
+            let repo = Arc::clone(&rt);
             async move { repo.keep_up_with_partition().await.unwrap_or_log() }
         });
 
         Ok((
-            rt.clone(),
+            Arc::clone(&rt),
             RtStopToken {
                 rt,
                 partition_watcher: Some(partition_watcher),
@@ -304,13 +336,13 @@ impl Rt {
         let Some(dispatch) = self.dispatch_repo.get(dispatch_id).await else {
             return Ok(());
         };
-        
+
         // Get staging branch path from dispatch
         let ActiveDispatchArgs::PropRoutine(PropRoutineArgs {
             staging_branch_path,
             ..
         }) = &dispatch.args;
-        
+
         let is_done = match &event.result {
             JobRunResult::Success { value_json } => {
                 info!(?value_json, "success on dispatch wflow");
@@ -344,12 +376,9 @@ impl Rt {
                 branch_path: target_branch_path,
                 ..
             }) = &dispatch.args;
-            
-            let is_success = matches!(
-                &event.result,
-                JobRunResult::Success { .. }
-            );
-            
+
+            let is_success = matches!(&event.result, JobRunResult::Success { .. });
+
             if is_success {
                 // Merge staging branch into target branch
                 info!(
@@ -359,15 +388,10 @@ impl Rt {
                     "merging staging branch into target"
                 );
                 self.drawer
-                    .merge_from_branch(
-                        doc_id,
-                        target_branch_path,
-                        &staging_branch_path,
-                        None,
-                    )
+                    .merge_from_branch(doc_id, target_branch_path, staging_branch_path, None)
                     .await
                     .wrap_err("error merging staging branch")?;
-                
+
                 // Delete the staging branch after successful merge
                 info!(
                     ?doc_id,
@@ -375,7 +399,7 @@ impl Rt {
                     "deleting staging branch after successful merge"
                 );
                 self.drawer
-                    .delete_branch(doc_id, &staging_branch_path, None)
+                    .delete_branch(doc_id, staging_branch_path, None)
                     .await
                     .wrap_err("error deleting staging branch after merge")?;
             } else {
@@ -386,11 +410,11 @@ impl Rt {
                     "deleting staging branch due to failure"
                 );
                 self.drawer
-                    .delete_branch(doc_id, &staging_branch_path, None)
+                    .delete_branch(doc_id, staging_branch_path, None)
                     .await
                     .wrap_err("error deleting staging branch")?;
             }
-            
+
             self.dispatch_repo.remove(dispatch_id.into()).await?;
         }
         Ok(())
@@ -411,7 +435,7 @@ impl Rt {
             .ok_or_else(|| ferr!("plug not found in repo: {plug_id}/{routine_name}"))?;
         let routine_man = plug_man
             .routines
-            .get(&routine_name[..])
+            .get(routine_name)
             .ok_or_else(|| ferr!("routine not found in plug manifest: {plug_id}/{routine_name}"))?;
 
         use crate::plugs::manifest::RoutineManifestDeets;
@@ -440,7 +464,7 @@ impl Rt {
                     plug_id.hash(&mut hasher);
                     routine_name.hash(&mut hasher);
                     let hash = hasher.finish();
-                    utils_rs::hash::encode_base58_multibase(&hash.to_le_bytes())
+                    utils_rs::hash::encode_base58_multibase(hash.to_le_bytes())
                 };
                 let dispatch_id = format!("{plug_id}/{routine_name}-{dispatch_id}");
                 (
@@ -451,7 +475,9 @@ impl Rt {
                         heads,
                         prop_key,
                         prop_acl: routine_man.prop_acl.clone(),
-                        staging_branch_path: daybook_types::doc::BranchPath::from("/tmp/placeholder"), // Will be set when job is created
+                        staging_branch_path: daybook_types::doc::BranchPath::from(
+                            "/tmp/placeholder",
+                        ), // Will be set when job is created
                     }),
                 )
             }
@@ -483,18 +509,19 @@ impl Rt {
                     &self.blobs_repo,
                     plug_id.into(),
                     bundle_name.0.clone(),
-                    &bundle_man,
+                    bundle_man,
                 )
                 .await?;
 
                 // let fqk = format!("{workload_id}/{key}");
                 let job_id = format!("{dispatch_id}-{id}", id = Uuid::new_v4().bs58());
-                let staging_branch_path = daybook_types::doc::BranchPath::from(format!("/tmp/{}", job_id));
-                
+                let staging_branch_path =
+                    daybook_types::doc::BranchPath::from(format!("/tmp/{}", job_id));
+
                 // Update args with staging branch path
                 let ActiveDispatchArgs::PropRoutine(ref mut prop_args) = args;
                 prop_args.staging_branch_path = staging_branch_path.clone();
-                
+
                 let entry_id = self
                     .wflow_ingress
                     .add_job(
@@ -545,13 +572,12 @@ impl Rt {
         let (notif_tx, mut notif_rx) = tokio::sync::watch::channel(());
         let _listener_handle = self.dispatch_repo.register_listener({
             let dispatch_id = dispatch_id.to_string();
-            move |msg| match &*msg {
-                dispatch::DispatchEvent::DispatchDeleted { id, .. } => {
+            move |msg| {
+                if let dispatch::DispatchEvent::DispatchDeleted { id, .. } = &*msg {
                     if *id == dispatch_id {
                         notif_tx.send(()).expect(ERROR_CHANNEL)
                     }
                 }
-                _ => {}
             }
         });
 
@@ -560,7 +586,7 @@ impl Rt {
             return Ok(());
         };
 
-        let _event = tokio::time::timeout(timeout, notif_rx.changed())
+        tokio::time::timeout(timeout, notif_rx.changed())
             .await?
             .expect(ERROR_CHANNEL);
 
@@ -633,7 +659,7 @@ async fn ensure_bundle_workload_running(
             wash_host,
             blobs_repo,
             workload_id.clone(),
-            plug_id.into(),
+            plug_id,
             bundle_name,
             bundle_man,
         )

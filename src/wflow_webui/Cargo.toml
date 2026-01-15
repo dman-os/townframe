@@ -3,6 +3,9 @@ name = "wflow_webui"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "wflow_webui"
 path = "main.rs"

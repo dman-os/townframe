@@ -26,10 +26,16 @@ pub struct WflowTestContextBuilder {
     plugins: Vec<Arc<dyn plugin::HostPlugin>>,
 }
 
+impl Default for WflowTestContextBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WflowTestContextBuilder {
     pub fn new() -> Self {
         Self {
-            temp_dir: tokio::task::block_in_place(|| tempfile::tempdir())
+            temp_dir: tokio::task::block_in_place(tempfile::tempdir)
                 .expect("failed to create temp dir"),
             metastore: None,
             logstore: None,
@@ -104,10 +110,10 @@ impl WflowTestContextBuilder {
             None => Arc::new(KvStoreLog::new(new_in_memory_kv_store()).await?),
         };
 
-        let partition_log = wflow_tokio::partition::PartitionLogRef::new(logstore.clone());
+        let partition_log = wflow_tokio::partition::PartitionLogRef::new(Arc::clone(&logstore));
         let ingress = Arc::new(crate::ingress::PartitionLogIngress::new(
-            partition_log.clone(),
-            metastore.clone(),
+            Arc::clone(&partition_log),
+            Arc::clone(&metastore),
         ));
 
         let snapstore = match self.snap_store {
@@ -119,13 +125,13 @@ impl WflowTestContextBuilder {
             .keyvalue_plugin
             .unwrap_or_else(|| Arc::new(keyvalue_plugin::WasiKeyvalue::new()));
 
-        let wflow_plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new(metastore.clone()));
-        let runtime_config_plugin = plugin::wasi_config::WasiConfig::default();
+        let wflow_plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new(Arc::clone(&metastore)));
+        let runtime_config_plugin = plugin::wasi_config::DynamicConfig::default();
 
         self.plugins.extend_from_slice(&[
-            wflow_plugin.clone(),
+            Arc::clone(&wflow_plugin),
             Arc::new(runtime_config_plugin),
-            keyvalue_plugin.clone(),
+            Arc::clone(&keyvalue_plugin),
         ]);
 
         let host = crate::build_wash_host(self.plugins).await?;
@@ -184,9 +190,9 @@ impl WflowTestContext {
         }
 
         let wcx = crate::Ctx {
-            metastore: self.metastore.clone(),
-            logstore: self.logstore.clone(),
-            snapstore: self.snapstore.clone(),
+            metastore: Arc::clone(&self.metastore),
+            logstore: Arc::clone(&self.logstore),
+            snapstore: Arc::clone(&self.snapstore),
             factory: None,
         };
 
@@ -223,7 +229,7 @@ impl WflowTestContext {
         self.host = Some(host);
 
         let (worker_handle, working_state) =
-            crate::start_partition_worker(&wcx, self.wflow_plugin.clone(), 0).await?;
+            crate::start_partition_worker(&wcx, Arc::clone(&self.wflow_plugin), 0).await?;
 
         self.worker_handle = Some(worker_handle);
         self.working_state = Some(working_state);
@@ -279,7 +285,7 @@ impl WflowTestContext {
     ) -> Res<u64> {
         use crate::WflowIngress;
         self.ingress
-            .add_job(job_id, wflow_key.into(), args_json, None)
+            .add_job(job_id, wflow_key, args_json, None)
             .await
     }
 
@@ -489,6 +495,7 @@ impl WflowTestContext {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn new_in_memory_kv_store() -> Arc<Arc<DHashMap<Arc<[u8]>, Arc<[u8]>>>> {
     let kv: DHashMap<Arc<[u8]>, Arc<[u8]>> = default();
     let kv = Arc::new(kv);

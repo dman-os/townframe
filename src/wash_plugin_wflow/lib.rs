@@ -6,10 +6,11 @@ use crate::interlude::*;
 
 use std::collections::HashSet;
 use std::sync::atomic::AtomicU64;
+use std::sync::RwLock;
 
 use anyhow::Context;
 use utils_rs::prelude::tokio::sync::oneshot;
-use wash_runtime::engine::ctx::Ctx as WashCtx;
+use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
 use wflow_core::gen::metastore::{WasmcloudWflowServiceMeta, WflowServiceMeta};
@@ -54,7 +55,7 @@ struct ActiveJobCtx {
     #[educe(Debug(ignore))]
     trap_tx: tokio::sync::Mutex<Option<oneshot::Sender<JobTrap>>>,
     cur_step: AtomicU64,
-    active_step: Option<ActiveStepCtx>,
+    active_step: std::sync::Mutex<Option<ActiveStepCtx>>,
     journal: state::JobState,
 }
 
@@ -69,7 +70,7 @@ impl ActiveJobCtx {
         let Some(trap_tx) = trap_tx else {
             anyhow::bail!("run has already trapped");
         };
-        if let Err(_) = trap_tx.send(trap) {
+        if trap_tx.send(trap).is_err() {
             anyhow::bail!("run has been abandoned");
         }
         // Block forever since the run invocation will be dropped
@@ -96,16 +97,23 @@ enum JobTrap {
     RunComplete(Result<String, types::JobError>),
 }
 
-impl host::Host for WashCtx {
+impl host::Host for SharedWashCtx {
     async fn next_step(
         &mut self,
         job_id: partition_host::JobId,
     ) -> wasmtime::Result<Result<host::StepState, String>> {
         let plugin = WflowPlugin::from_ctx(self);
-        let Some(mut job) = plugin.active_jobs.get_mut(job_id.as_str()) else {
+        let Some(job) = plugin
+            .active_jobs
+            .read()
+            .expect(ERROR_MUTEX)
+            .get(job_id.as_str())
+            .cloned()
+        else {
             anyhow::bail!("job not active");
         };
-        if job.active_step.is_some() {
+        let mut active_step = job.active_step.lock().expect(ERROR_MUTEX);
+        if active_step.is_some() {
             // TODO: should be possible to implement this
             anyhow::bail!("concurrent steps not allowed");
         }
@@ -144,7 +152,7 @@ impl host::Host for WashCtx {
             0
         };
         let start_at = Timestamp::now();
-        job.active_step = Some(ActiveStepCtx {
+        active_step.replace(ActiveStepCtx {
             attempt_id: attempt_id as u64,
             step_id,
             start_at,
@@ -161,22 +169,31 @@ impl host::Host for WashCtx {
         value_json: String,
     ) -> wasmtime::Result<Result<(), String>> {
         let plugin = WflowPlugin::from_ctx(self);
-        let Some(mut job) = plugin.active_jobs.get_mut(job_id.as_str()) else {
+        let Some(job) = plugin
+            .active_jobs
+            .read()
+            .expect(ERROR_MUTEX)
+            .get(job_id.as_str())
+            .cloned()
+        else {
             anyhow::bail!("job not active");
         };
-        let Some(active_step) = job.active_step.take() else {
-            anyhow::bail!("step not active");
-        };
-        if active_step.step_id != step_id {
-            anyhow::bail!("given step_id is not active");
-        }
-        let end_at = Timestamp::now();
-        let trap = JobTrap::PersistStep {
-            step_id,
-            value_json: value_json.into(),
-            attempt_id: active_step.attempt_id,
-            start_at: active_step.start_at,
-            end_at,
+        let trap = {
+            let mut active_step = job.active_step.lock().expect(ERROR_MUTEX);
+            let Some(active_step) = active_step.take() else {
+                anyhow::bail!("step not active");
+            };
+            if active_step.step_id != step_id {
+                anyhow::bail!("given step_id is not active");
+            }
+            let end_at = Timestamp::now();
+            JobTrap::PersistStep {
+                step_id,
+                value_json: value_json.into(),
+                attempt_id: active_step.attempt_id,
+                start_at: active_step.start_at,
+                end_at,
+            }
         };
 
         job.cur_step
@@ -191,13 +208,13 @@ impl host::Host for WashCtx {
         // Set trap and block forever - the run invocation will be dropped
         job.set_trap_and_block_forever(trap)
             .await
-            .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))?;
+            .map_err(|err| wasmtime::Error::msg(format!("{err:?}")))?;
 
         unreachable!()
     }
 }
 
-impl partition_host::Host for WashCtx {
+impl partition_host::Host for SharedWashCtx {
     async fn add_job(
         &mut self,
         _id: partition_host::PartitionId,
@@ -207,7 +224,7 @@ impl partition_host::Host for WashCtx {
     }
 }
 
-impl metastore::Host for WashCtx {
+impl metastore::Host for SharedWashCtx {
     async fn get_wflow(&mut self, key: String) -> wasmtime::Result<Option<metastore::WflowMeta>> {
         let plugin = WflowPlugin::from_ctx(self);
         let meta = plugin.metastore.get_wflow(&key).await.to_anyhow()?;
@@ -238,11 +255,11 @@ pub struct WflowPlugin {
     pending_workloads: DHashMap<Arc<str>, HashSet<Arc<str>>>,
 
     // workload_id -> workload
-    active_workloads: DHashMap<Arc<str>, Arc<WflowWorkload>>,
+    active_workloads: RwLock<HashMap<Arc<str>, Arc<WflowWorkload>>>,
     // wflow key -> workload_id
     active_keys: DHashMap<Arc<str>, Arc<str>>,
     // job id ->
-    active_jobs: DHashMap<Arc<str>, ActiveJobCtx>,
+    active_jobs: RwLock<HashMap<Arc<str>, Arc<ActiveJobCtx>>>,
     // ctx id -> job id
     active_contexts: DHashMap<Arc<str>, Arc<str>>,
 
@@ -263,20 +280,20 @@ impl WflowPlugin {
 
     const ID: &str = "townframe:wflow";
 
-    pub fn try_from_ctx(wcx: &WashCtx) -> Option<Arc<Self>> {
-        wcx.get_plugin::<Self>(Self::ID)
+    pub fn try_from_ctx(wcx: &SharedWashCtx) -> Option<Arc<Self>> {
+        wcx.active_ctx.get_plugin::<Self>(Self::ID)
     }
 
-    fn from_ctx(wcx: &WashCtx) -> Arc<Self> {
-        let Some(this) = wcx.get_plugin::<Self>(Self::ID) else {
+    fn from_ctx(wcx: &SharedWashCtx) -> Arc<Self> {
+        let Some(this) = wcx.active_ctx.get_plugin::<Self>(Self::ID) else {
             panic!("plugin not on ctx");
         };
         this
     }
 
-    pub fn job_id_of_ctx(&self, wcx: &WashCtx) -> Option<Arc<str>> {
+    pub fn job_id_of_ctx(&self, wcx: &SharedWashCtx) -> Option<Arc<str>> {
         self.active_contexts
-            .get(&wcx.id[..])
+            .get(&wcx.active_ctx.id[..])
             .map(|val| val.value().clone())
     }
 }
@@ -288,7 +305,7 @@ struct WflowWorkload {
     resolved_handle: wash_runtime::engine::workload::ResolvedWorkload,
     component_id: String,
     #[educe(Debug(ignore))]
-    instance_pre: binds_service::ServicePre<WashCtx>,
+    instance_pre: binds_service::ServicePre<SharedWashCtx>,
 }
 
 #[async_trait]
@@ -307,7 +324,6 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
                 //
                 WitInterface::from("townframe:wflow/host,partition-host,metadata-store"),
             ]),
-            ..default()
         }
     }
 
@@ -373,19 +389,19 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
         for iface in world.imports {
             if iface.namespace == "townframe" && iface.package == "wflow" {
                 if iface.interfaces.contains("host") {
-                    host::add_to_linker::<_, wasmtime::component::HasSelf<WashCtx>>(
+                    host::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         component.linker(),
                         |ctx| ctx,
                     )?;
                 }
                 if iface.interfaces.contains("partition-host") {
-                    partition_host::add_to_linker::<_, wasmtime::component::HasSelf<WashCtx>>(
+                    partition_host::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         component.linker(),
                         |ctx| ctx,
                     )?;
                 }
                 if iface.interfaces.contains("metadata-store") {
-                    metastore::add_to_linker::<_, wasmtime::component::HasSelf<WashCtx>>(
+                    metastore::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         component.linker(),
                         |ctx| ctx,
                     )?;
@@ -418,7 +434,10 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
             component_id: component_id.into(),
         };
         let wflow = Arc::new(wflow);
-        self.active_workloads.insert(workload_id, wflow);
+        self.active_workloads
+            .write()
+            .expect(ERROR_MUTEX)
+            .insert(workload_id, wflow);
         Ok(())
     }
 
@@ -427,7 +446,12 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
         workload_id: &str,
         _interfaces: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
-        if let Some((_, wflow)) = self.active_workloads.remove(workload_id) {
+        if let Some(wflow) = self
+            .active_workloads
+            .write()
+            .expect(ERROR_MUTEX)
+            .remove(workload_id)
+        {
             for key in &wflow.wflow_keys {
                 self.active_keys.remove(key);
             }
@@ -450,7 +474,13 @@ impl service::WflowServiceHost for WflowPlugin {
         journal: state::JobState,
         args: &Self::ExtraArgs,
     ) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
-        let Some(workload) = self.active_workloads.get(&args.workload_id[..]) else {
+        let Some(workload) = self
+            .active_workloads
+            .read()
+            .expect(ERROR_MUTEX)
+            .get(&args.workload_id[..])
+            .cloned()
+        else {
             return Err(job_events::JobRunResult::WorkerErr(
                 job_events::JobRunWorkerError::WflowNotFound,
             ));
@@ -476,28 +506,32 @@ impl service::WflowServiceHost for WflowPlugin {
             args_json: journal.init_args_json.to_string(),
         };
 
-        let ctx_id: Arc<str> = store.data().id.clone().into();
+        let ctx_id: Arc<str> = store.data().active_ctx.id.clone().into();
         let fut = instance
             .townframe_wflow_bundle()
             .call_run(&mut store, &bundle_args);
 
         let (trap_tx, trap_rx) = oneshot::channel();
         let trap_tx = tokio::sync::Mutex::new(Some(trap_tx));
-        let _old = self.active_jobs.insert(
+        let _old = self.active_jobs.write().expect(ERROR_MUTEX).insert(
             job_id.clone(),
             ActiveJobCtx {
                 trap_tx,
                 journal,
                 cur_step: default(),
-                active_step: None,
-            },
+                active_step: None.into(),
+            }
+            .into(),
         );
         assert!(_old.is_none(), "fishy");
 
         self.active_contexts.insert(ctx_id.clone(), job_id.clone());
         scopeguard::defer! {
             let _ = self.active_contexts.remove(&ctx_id);
-            let _ = self.active_jobs.remove(&job_id);
+            let _ = self.active_jobs
+                .write()
+                .expect(ERROR_MUTEX)
+                .remove(&job_id);
         }
 
         // TODO: timeout
@@ -514,7 +548,8 @@ impl service::WflowServiceHost for WflowPlugin {
             }
         };
         // FIXME: unite type hierarichies
-        let res = match trap {
+
+        match trap {
             JobTrap::RunComplete(Err(err)) => match err {
                 types::JobError::Transient(err) => Err(job_events::JobError::Transient {
                     error_json: err.error_json.into(),
@@ -548,7 +583,6 @@ impl service::WflowServiceHost for WflowPlugin {
             JobTrap::RunComplete(Ok(value_json)) => Ok(job_events::JobRunResult::Success {
                 value_json: value_json.into(),
             }),
-        };
-        res
+        }
     }
 }

@@ -52,7 +52,7 @@ impl WflowIngress for PartitionLogIngress {
         // Get workflow metadata
         let wflow_meta = self
             .metastore
-            .get_wflow(&wflow_key)
+            .get_wflow(wflow_key)
             .await
             .wrap_err("error getting workflow metadata")?
             .ok_or_eyre(format!("workflow not found: {wflow_key}"))?;

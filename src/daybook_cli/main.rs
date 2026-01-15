@@ -93,7 +93,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         let drawer_doc_id = ctx.doc_drawer().document_id();
         let app_doc_id = ctx.doc_app().document_id();
 
-        let local_user_path = ctx.local_user_path.clone();
+        let _local_user_path = ctx.local_user_path.clone();
 
         let (_drawer, drawer_stop) = DrawerRepo::load(
             ctx.acx.clone(),
@@ -193,10 +193,10 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 let title = doc
                     .props
                     .get(&WellKnownPropTag::TitleGeneric.into())
-                    .and_then(|val| {
+                    .map(|val| {
                         match WellKnownProp::from_json(val.clone(), WellKnownPropTag::TitleGeneric)
                         {
-                            Ok(WellKnownProp::TitleGeneric(str)) => Some(str.clone()),
+                            Ok(WellKnownProp::TitleGeneric(str)) => str.clone(),
                             _ => panic!("tag - prop mismatch"),
                         }
                     })
@@ -253,7 +253,9 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     ),
                 ]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(ctx.local_user_path.clone())),
+                user_path: Some(daybook_types::doc::UserPath::from(
+                    ctx.local_user_path.clone(),
+                )),
             };
             let id = drawer.add(doc).await?;
             info!(id, "created document");
@@ -305,7 +307,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             let new_doc: daybook_types::doc::Doc = serde_json::from_str(&new_content)
                 .wrap_err("Failed to parse modified document as JSON")?;
 
-            let mut patch = daybook_types::doc::Doc::diff(&*doc, &new_doc);
+            let mut patch = daybook_types::doc::Doc::diff(&doc, &new_doc);
             if patch.is_empty() {
                 println!("No changes detected.");
             } else {
@@ -422,11 +424,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     let mut exec_cmd = clap::Command::new("exec")
         .visible_alias("x")
         .styles(CLAP_STYLE)
-        .subcommands(
-            command_details
-                .iter()
-                .map(|(_name, details)| details.clap.clone()),
-        );
+        .subcommands(command_details.values().map(|details| details.clap.clone()));
 
     root_cmd = root_cmd.subcommand(exec_cmd.clone());
 
@@ -655,7 +653,7 @@ Routine impl: {routine_impl:?}
                             .get_one::<String>("doc-id")
                             .expect("this shouldn't happen");
                         let branch = matches.get_one::<String>("branch");
-                        let Some(branches) = ecx.drawer.get_doc_branches(&doc_id).await else {
+                        let Some(branches) = ecx.drawer.get_doc_branches(doc_id).await else {
                             eyre::bail!("document not found: {doc_id}");
                         };
                         let branch_path = match branch {
@@ -672,7 +670,10 @@ Routine impl: {routine_impl:?}
                                 branch
                             }
                         };
-                        let heads = branches.branches.get(&branch_path.to_string_lossy().to_string()).unwrap();
+                        let heads = branches
+                            .branches
+                            .get(&branch_path.to_string_lossy().to_string())
+                            .unwrap();
 
                         let job_id = ecx
                             .rt
@@ -716,7 +717,7 @@ mod lazy {
     use crate::config::CliConfig;
     use crate::context::*;
 
-    const RT: OnceLock<Res<Arc<tokio::runtime::Runtime>>> = OnceLock::new();
+    static RT: OnceLock<Res<Arc<tokio::runtime::Runtime>>> = OnceLock::new();
 
     pub fn rt() -> Arc<tokio::runtime::Runtime> {
         match RT.get_or_init(|| {
@@ -731,7 +732,7 @@ mod lazy {
     }
 
     pub async fn cli_config() -> Res<Arc<CliConfig>> {
-        const CONFIG: tokio::sync::OnceCell<Arc<CliConfig>> = tokio::sync::OnceCell::const_new();
+        static CONFIG: tokio::sync::OnceCell<Arc<CliConfig>> = tokio::sync::OnceCell::const_new();
         match CONFIG
             .get_or_try_init(|| async {
                 let conf = CliConfig::source().await?;
@@ -748,7 +749,7 @@ mod lazy {
     }
 
     pub async fn config() -> Res<Arc<Config>> {
-        const CONFIG: tokio::sync::OnceCell<Arc<Config>> = tokio::sync::OnceCell::const_new();
+        static CONFIG: tokio::sync::OnceCell<Arc<Config>> = tokio::sync::OnceCell::const_new();
         match CONFIG
             .get_or_try_init(|| async {
                 let cli_config = cli_config().await?;

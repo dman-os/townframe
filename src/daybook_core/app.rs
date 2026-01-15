@@ -211,4 +211,3 @@ pub async fn init_from_globals(
     };
     Ok(())
 }
-

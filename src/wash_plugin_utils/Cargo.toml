@@ -3,6 +3,9 @@ name = "wash_plugin_utils"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 default = []
 

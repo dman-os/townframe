@@ -217,8 +217,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     key_tag: WellKnownPropTag::PseudoLabel.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: default(),
-                }
-                .into(),
+                },
             ],
         },
     ]
@@ -326,7 +325,7 @@ impl PlugsRepo {
             local_actor_id.clone(),
         );
 
-        store.mutate_sync(|s| s.rebuild_indices()).await?;
+        store.mutate_sync(|store| store.rebuild_indices()).await?;
 
         let app_am_handle = acx
             .find_doc(&app_doc_id)
@@ -355,7 +354,7 @@ impl PlugsRepo {
             store,
             blobs,
             local_actor_id,
-            registry: registry.clone(),
+            registry: Arc::clone(&registry),
             mutation_mutex: tokio::sync::Mutex::new(()),
             cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
@@ -383,7 +382,7 @@ impl PlugsRepo {
     }
 
     async fn handle_notifs(
-        self: &Self,
+        &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
             Vec<utils_rs::am::changes::ChangeNotification>,
         >,
@@ -493,7 +492,7 @@ impl PlugsRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<PlugsEvent>,
     ) -> Res<()> {
-        let heads = ChangeHashSet(patch_heads.clone());
+        let heads = ChangeHashSet(Arc::clone(patch_heads));
         match &patch.action {
             automerge::PatchAction::PutMap {
                 key,
@@ -508,8 +507,8 @@ impl PlugsRepo {
                     };
 
                     let version_bytes = match val {
-                        automerge::Value::Scalar(s) => match &**s {
-                            automerge::ScalarValue::Bytes(b) => b,
+                        automerge::Value::Scalar(scalar) => match &**scalar {
+                            automerge::ScalarValue::Bytes(bytes) => bytes,
                             _ => return Ok(()),
                         },
                         _ => return Ok(()),
@@ -568,9 +567,7 @@ impl PlugsRepo {
     pub async fn get_display_hint(&self, prop_tag: &str) -> Option<manifest::PropKeyDisplayHint> {
         self.store
             .query_sync(|store| {
-                let Some(plug_id) = store.tag_to_plug.get(prop_tag) else {
-                    return None;
-                };
+                let plug_id = store.tag_to_plug.get(prop_tag)?;
                 let Some(versioned) = store.manifests.get(plug_id) else {
                     panic!("plug specified by tag '{prop_tag}' not found");
                 };
@@ -595,14 +592,13 @@ impl PlugsRepo {
                 store
                     .manifests
                     .values()
-                    .map(|versioned| {
+                    .flat_map(|versioned| {
                         versioned
                             .payload
                             .props
                             .iter()
                             .map(|prop| (prop.key_tag.to_string(), prop.display_config.clone()))
                     })
-                    .flatten()
                     .collect()
             })
             .await
@@ -614,7 +610,7 @@ impl PlugsRepo {
                 store
                     .manifests
                     .values()
-                    .map(|man| man.payload.clone())
+                    .map(|man| Arc::clone(&man.payload))
                     .collect()
             })
             .await
@@ -717,7 +713,7 @@ impl PlugsRepo {
         // defined in the manifest structs.
         manifest
             .validate()
-            .map_err(|e| eyre::eyre!("validation error: {e}"))?;
+            .map_err(|err| eyre::eyre!("validation error: {err}"))?;
 
         let plug_id = manifest.id();
         let existing = self.get(&plug_id).await;
@@ -759,7 +755,7 @@ impl PlugsRepo {
                 if let Some(new_prop) = manifest
                     .props
                     .iter()
-                    .find(|p| p.key_tag == old_prop.key_tag)
+                    .find(|prop| prop.key_tag == old_prop.key_tag)
                 {
                     if !is_schema_compatible(&old_prop.value_schema, &new_prop.value_schema) {
                         eyre::bail!(
@@ -801,7 +797,7 @@ impl PlugsRepo {
         for (dep_id_full, dep_manifest) in &manifest.dependencies {
             let dep_base_id = if dep_id_full.starts_with('@') {
                 // For strings like "@ns/name@1.2.3", we want "@ns/name"
-                let parts: Vec<&str> = dep_id_full[1..].split('@').collect();
+                let parts: Vec<&str> = dep_id_full.strip_prefix('@').unwrap().split('@').collect();
                 format!("@{}", parts[0])
             } else {
                 dep_id_full
@@ -819,7 +815,7 @@ impl PlugsRepo {
                 let provider_prop = provider
                     .props
                     .iter()
-                    .find(|p| p.key_tag == key_dep.key_tag)
+                    .find(|prop| prop.key_tag == key_dep.key_tag)
                     .ok_or_eyre(format!(
                         "Dependency error: plug '{}' does not define tag '{}'",
                         dep_base_id, key_dep.key_tag
@@ -915,7 +911,7 @@ impl PlugsRepo {
         let mut available_tags: HashSet<String> = manifest
             .props
             .iter()
-            .map(|p| p.key_tag.to_string())
+            .map(|prop| prop.key_tag.to_string())
             .collect();
         for dep in manifest.dependencies.values() {
             for key in &dep.keys {
@@ -978,8 +974,12 @@ fn is_json_schema_compatible(old: &serde_json::Value, new: &serde_json::Value) -
 
             // If it's an object, check properties
             if old_obj.get("type") == Some(&serde_json::json!("object")) {
-                let old_props = old_obj.get("properties").and_then(|v| v.as_object());
-                let new_props = new_obj.get("properties").and_then(|v| v.as_object());
+                let old_props = old_obj
+                    .get("properties")
+                    .and_then(|value| value.as_object());
+                let new_props = new_obj
+                    .get("properties")
+                    .and_then(|value| value.as_object());
 
                 if let (Some(old_props), Some(new_props)) = (old_props, new_props) {
                     // All properties in old must be present and compatible in new
@@ -996,11 +996,12 @@ fn is_json_schema_compatible(old: &serde_json::Value, new: &serde_json::Value) -
                 }
 
                 // Check required fields: new cannot require something that was not required in old
-                let old_required = old_obj.get("required").and_then(|v| v.as_array());
-                let new_required = new_obj.get("required").and_then(|v| v.as_array());
+                let old_required = old_obj.get("required").and_then(|value| value.as_array());
+                let new_required = new_obj.get("required").and_then(|value| value.as_array());
                 if let Some(new_req) = new_required {
-                    let old_req_set: HashSet<_> =
-                        old_required.map(|a| a.iter().collect()).unwrap_or_default();
+                    let old_req_set: HashSet<_> = old_required
+                        .map(|array| array.iter().collect())
+                        .unwrap_or_default();
                     for req in new_req {
                         if !old_req_set.contains(req) {
                             // New required field -> breaking change
@@ -1066,7 +1067,7 @@ mod tests {
         let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
         let plug = mock_plug("plug1");
 
-        repo.add(plug.into()).await?;
+        repo.add(plug).await?;
 
         let saved = repo.get("@test/plug1").await.unwrap();
         assert_eq!(saved.name, "plug1");
@@ -1084,7 +1085,7 @@ mod tests {
             value_schema: schemars::schema_for!(String),
             display_config: default(),
         });
-        repo.add(p1.into()).await?;
+        repo.add(p1).await?;
 
         // Try to add second plug with same tag
         let mut p2 = mock_plug("plug2");
@@ -1094,7 +1095,7 @@ mod tests {
             display_config: default(),
         });
 
-        let res = repo.add(p2.into()).await;
+        let res = repo.add(p2).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Tag clash"));
 
@@ -1112,7 +1113,7 @@ mod tests {
             value_schema: schemars::schema_for!(String),
             display_config: default(),
         });
-        repo.add(provider.into()).await?;
+        repo.add(provider).await?;
 
         // Add consumer plug that depends on provider
         let mut consumer = mock_plug("consumer");
@@ -1127,7 +1128,7 @@ mod tests {
             .into(),
         );
 
-        repo.add(consumer.into()).await?;
+        repo.add(consumer).await?;
         Ok(())
     }
 
@@ -1141,7 +1142,7 @@ mod tests {
             manifest::PlugDependencyManifest { keys: vec![] }.into(),
         );
 
-        let res = repo.add(consumer.into()).await;
+        let res = repo.add(consumer).await;
         assert!(res.is_err());
         assert!(res
             .unwrap_err()
@@ -1193,14 +1194,14 @@ mod tests {
             }
             .into(),
         );
-        repo.add(p1_v1.into()).await?;
+        repo.add(p1_v1).await?;
 
         // Update version (patch) with command removed -> should fail
         let mut p1_v2 = mock_plug("plug1");
         p1_v2.version = "0.1.1".parse().unwrap();
         // cmd1 is missing
 
-        let res = repo.add(p1_v2.into()).await;
+        let res = repo.add(p1_v2).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Breaking change"));
 
@@ -1208,7 +1209,7 @@ mod tests {
         let mut p1_v3 = mock_plug("plug1");
         p1_v3.version = "1.0.0".parse().unwrap(); // major bump from 0.1 to 1.0 (in standard semver terms)
 
-        repo.add(p1_v3.into()).await?;
+        repo.add(p1_v3).await?;
         Ok(())
     }
 
@@ -1219,12 +1220,12 @@ mod tests {
         // Add initial version
         let mut p1_v1 = mock_plug("plug1");
         p1_v1.version = "0.1.0".parse().unwrap();
-        repo.add(p1_v1.into()).await?;
+        repo.add(p1_v1).await?;
 
         // Try to add same version -> should fail
         let mut p1_same = mock_plug("plug1");
         p1_same.version = "0.1.0".parse().unwrap();
-        let res = repo.add(p1_same.into()).await;
+        let res = repo.add(p1_same).await;
         assert!(res.is_err());
         assert!(res
             .unwrap_err()
@@ -1234,7 +1235,7 @@ mod tests {
         // Try to add lower version -> should fail
         let mut p1_lower = mock_plug("plug1");
         p1_lower.version = "0.0.9".parse().unwrap();
-        let res = repo.add(p1_lower.into()).await;
+        let res = repo.add(p1_lower).await;
         assert!(res.is_err());
         assert!(res
             .unwrap_err()
@@ -1244,7 +1245,7 @@ mod tests {
         // Add higher version -> should succeed
         let mut p1_v2 = mock_plug("plug1");
         p1_v2.version = "0.1.1".parse().unwrap();
-        repo.add(p1_v2.into()).await?;
+        repo.add(p1_v2).await?;
 
         Ok(())
     }
@@ -1281,7 +1282,7 @@ mod tests {
             .into(),
         );
 
-        let res = repo.add(plug.into()).await;
+        let res = repo.add(plug).await;
         assert!(res.is_err());
         assert!(res
             .unwrap_err()
@@ -1311,7 +1312,7 @@ mod tests {
             .into(),
         );
 
-        let res = repo.add(plug2.into()).await;
+        let res = repo.add(plug2).await;
         assert!(res.is_err());
         assert!(res
             .unwrap_err()
@@ -1336,7 +1337,7 @@ mod tests {
             .into(),
         );
 
-        let res = repo.add(plug.into()).await;
+        let res = repo.add(plug).await;
         assert!(res.is_err());
         assert!(res
             .unwrap_err()
@@ -1356,7 +1357,7 @@ mod tests {
             .into(),
         );
 
-        let res = repo.add(plug2.into()).await;
+        let res = repo.add(plug2).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Blob not found"));
 
@@ -1371,7 +1372,7 @@ mod tests {
             .into(),
         );
 
-        let res = repo.add(plug3.into()).await;
+        let res = repo.add(plug3).await;
         assert!(res.is_err());
         assert!(res
             .unwrap_err()
@@ -1404,7 +1405,7 @@ mod tests {
         );
 
         // Add plug - should convert file:// to db+blob://
-        repo.add(plug.clone().into()).await?;
+        repo.add(plug.clone()).await?;
 
         // Retrieve the plug and verify URL was converted
         let saved = repo.get("@test/plug1").await.unwrap();

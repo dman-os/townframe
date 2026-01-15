@@ -59,8 +59,8 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
 }
 
 fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
-    use crate::wit::townframe::daybook::prop_routine;
     use crate::wit::townframe::daybook::drawer;
+    use crate::wit::townframe::daybook::prop_routine;
 
     let args = prop_routine::get_args();
 
@@ -80,7 +80,7 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
     // Get doc using drawer interface
     let doc = drawer::get_doc_at_heads(&args.doc_id, &args.heads)
         .map_err(|err| JobErrorX::Terminal(ferr!("error getting doc: {err:?}")))?;
-    
+
     let doc: daybook_types::doc::Doc = doc
         .try_into()
         .map_err(|err| JobErrorX::Terminal(ferr!("failure on doc parsing: {err:?}")))?;
@@ -133,7 +133,7 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
         }
     })?;
 
-    let new_labels = vec![llm_response.clone()];
+    let new_labels = [llm_response.clone()];
 
     cx.effect(|| {
         let new_prop: daybook_types::doc::DocProp =

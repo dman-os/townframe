@@ -3,6 +3,9 @@ name = "daybook_types"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 name = "daybook_types"
 path = "lib.rs"

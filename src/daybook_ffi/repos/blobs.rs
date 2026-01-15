@@ -21,23 +21,21 @@ impl BlobsRepoFfi {
     #[tracing::instrument(err, skip(self, data))]
     pub async fn put(&self, data: Vec<u8>) -> Result<String, FfiError> {
         let this = self.repo.clone();
-        Ok(self
-            .fcx
+        self.fcx
             .do_on_rt(async move { this.put(&data).await.map_err(FfiError::from) })
-            .await?)
+            .await
     }
 
     #[tracing::instrument(err, skip(self))]
     pub async fn get_path(&self, hash: String) -> Result<String, FfiError> {
         let this = self.repo.clone();
-        Ok(self
-            .fcx
+        self.fcx
             .do_on_rt(async move {
                 this.get_path(&hash)
                     .await
-                    .map(|p| p.to_string_lossy().to_string())
+                    .map(|path| path.to_string_lossy().to_string())
                     .map_err(FfiError::from)
             })
-            .await?)
+            .await
     }
 }

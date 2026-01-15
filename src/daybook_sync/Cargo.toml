@@ -3,6 +3,9 @@ name = "daybook_sync"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "daybook_sync"
 path = "main.rs"

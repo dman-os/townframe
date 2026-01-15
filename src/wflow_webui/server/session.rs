@@ -32,7 +32,7 @@ impl CookieJar {
         if let Some(cookie) = self.old_jar.get(name) {
             return Some(cookie.clone());
         }
-        self.new_jar.read().await.get(name).map(|c| c.clone())
+        self.new_jar.read().await.get(name).cloned()
     }
 
     async fn signed(self: Arc<Self>) -> SignedCookieJar {

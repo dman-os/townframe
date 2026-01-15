@@ -33,7 +33,7 @@ pub mod doc {
         serde_json::to_string(&value).expect(ERROR_JSON)
     }
     pub fn doc_prop_into(value: &str) -> serde_json::Result<root_doc::DocProp> {
-        serde_json::from_str(&value)
+        serde_json::from_str(value)
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,9 +75,9 @@ pub mod doc {
                 props_remove: val
                     .props_remove
                     .into_iter()
-                    .map(|k| k.to_string())
+                    .map(|key| key.to_string())
                     .collect(),
-                user_path: val.user_path.map(|p| p.to_string_lossy().to_string()),
+                user_path: val.user_path.map(|path| path.to_string_lossy().to_string()),
             }
         }
     }
@@ -98,7 +98,7 @@ pub mod doc {
                     .into_iter()
                     .map(|key| DocPropKey::from(&key))
                     .collect(),
-                user_path: val.user_path.map(|s| root_doc::UserPath::from(s)),
+                user_path: val.user_path.map(root_doc::UserPath::from),
             })
         }
     }
@@ -155,7 +155,7 @@ pub mod doc {
             }: root_doc::Doc,
         ) -> Self {
             Self {
-                id: id,
+                id,
                 created_at: Datetime::from(created_at),
                 updated_at: Datetime::from(updated_at),
                 props: props

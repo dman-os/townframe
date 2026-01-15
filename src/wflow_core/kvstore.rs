@@ -34,6 +34,7 @@ pub trait KvStore {
 /// This is a type-erased guard that uses dynamic dispatch to work with any store implementation.
 pub struct CasGuard {
     current_cb: Arc<dyn Fn() -> Option<Arc<[u8]>> + Send + Sync>,
+    #[allow(clippy::type_complexity)]
     swap_cb: Arc<
         dyn Fn(Arc<[u8]>) -> futures::future::BoxFuture<'static, Res<Result<(), CasError>>>
             + Send
@@ -42,8 +43,8 @@ pub struct CasGuard {
 }
 
 impl std::fmt::Debug for CasGuard {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CasGuard").finish_non_exhaustive()
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("CasGuard").finish_non_exhaustive()
     }
 }
 
@@ -112,7 +113,7 @@ impl From<eyre::Report> for CasError {
 #[async_trait]
 impl KvStore for Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>> {
     async fn get(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
-        Ok(DHashMap::get(self, key).map(|v| v.value().clone()))
+        Ok(DHashMap::get(self, key).map(|val| val.value().clone()))
     }
     async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>) -> Res<Option<Arc<[u8]>>> {
         Ok(self.insert(key, value))
@@ -290,6 +291,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_dhashmap_kvstore() -> Res<()> {
+        #[allow(clippy::type_complexity)]
         let store: Arc<DHashMap<Arc<[u8]>, Arc<[u8]>>> = Arc::new(DHashMap::default());
         let store_dyn: Arc<dyn KvStore + Send + Sync> = Arc::new(store);
         test_kv_store_impl(store_dyn.clone()).await?;
@@ -298,22 +300,25 @@ pub mod tests {
 
     #[test]
     fn test_kv_store_concurrency_loom() {
-        use loom::thread;
         use futures::executor::block_on;
+        use loom::thread;
 
         loom::model(|| {
+            #[allow(clippy::type_complexity)]
             let store: Arc<DHashMap<Arc<[u8]>, Arc<[u8]>>> = Arc::new(DHashMap::default());
             let key: Arc<[u8]> = b"loom_counter".to_vec().into();
-            
-            let threads: Vec<_> = (0..2).map(|_| {
-                let store = store.clone();
-                let key = key.clone();
-                thread::spawn(move || {
-                    block_on(async {
-                        let _ = store.increment(&key, 1).await;
-                    });
+
+            let threads: Vec<_> = (0..2)
+                .map(|_| {
+                    let store = store.clone();
+                    let key = key.clone();
+                    thread::spawn(move || {
+                        block_on(async {
+                            let _ = store.increment(&key, 1).await;
+                        });
+                    })
                 })
-            }).collect();
+                .collect();
 
             for t in threads {
                 let _ = t.join();

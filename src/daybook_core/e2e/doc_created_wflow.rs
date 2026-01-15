@@ -1,9 +1,9 @@
 use crate::interlude::*;
 
+use crate::rt::dispatch::PropRoutineArgs;
 use daybook_types::doc::{
     AddDocArgs, DocContent, DocPropKey, DocPropTag, WellKnownProp, WellKnownPropTag,
 };
-use crate::rt::dispatch::PropRoutineArgs;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_labeler_workflow() -> Res<()> {
@@ -48,12 +48,12 @@ async fn test_labeler_workflow() -> Res<()> {
     }
 
     let dispatch_id = dispatch_id.ok_or_eyre("test-label dispatch not found")?;
-    
+
     // Wait for the dispatch to complete
-    test_cx.rt.wait_for_dispatch_end(
-        &dispatch_id,
-        std::time::Duration::from_secs(90),
-    ).await?;
+    test_cx
+        .rt
+        .wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(90))
+        .await?;
 
     // Give a small delay to ensure document updates are propagated
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -94,12 +94,10 @@ async fn test_staging_branch_workflow() -> Res<()> {
     // Create and add a document to the drawer
     let new_doc = AddDocArgs {
         branch_path: daybook_types::doc::BranchPath::from("main"),
-        props: [
-            (
-                DocPropKey::from(WellKnownPropTag::Content),
-                WellKnownProp::Content(DocContent::Text("Test staging branch".into())).into(),
-            ),
-        ]
+        props: [(
+            DocPropKey::from(WellKnownPropTag::Content),
+            WellKnownProp::Content(DocContent::Text("Test staging branch".into())).into(),
+        )]
         .into(),
         user_path: None,
     };
@@ -110,7 +108,7 @@ async fn test_staging_branch_workflow() -> Res<()> {
     // Wait for the dispatch to be created
     let mut dispatch_id: Option<String> = None;
     let mut staging_branch_path: Option<daybook_types::doc::BranchPath> = None;
-    
+
     for _ in 0..300 {
         let dispatches = test_cx.dispatch_repo.list().await;
         if let Some((id, dispatch)) = dispatches.iter().find(|(_, d)| {
@@ -146,7 +144,7 @@ async fn test_staging_branch_workflow() -> Res<()> {
     if let Some(branches) = branches {
         let staging_branch_str = staging_branch.to_string_lossy().to_string();
         let staging_exists = branches.branches.contains_key(&staging_branch_str);
-        
+
         if staging_exists {
             // If staging branch exists, verify we can read from it
             if let Some(staging_doc) = test_cx.drawer_repo.get(&doc_id, &staging_branch).await? {
@@ -159,10 +157,10 @@ async fn test_staging_branch_workflow() -> Res<()> {
     }
 
     // Wait for the dispatch to complete
-    test_cx.rt.wait_for_dispatch_end(
-        &dispatch_id,
-        std::time::Duration::from_secs(90),
-    ).await?;
+    test_cx
+        .rt
+        .wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(90))
+        .await?;
 
     // Give a small delay to ensure document updates are propagated
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -172,7 +170,7 @@ async fn test_staging_branch_workflow() -> Res<()> {
     if let Some(branches) = final_branches {
         let staging_branch_str = staging_branch.to_string_lossy().to_string();
         let staging_still_exists = branches.branches.contains_key(&staging_branch_str);
-        
+
         assert!(
             !staging_still_exists,
             "staging branch should be cleaned up after workflow completion. Branches: {:?}",

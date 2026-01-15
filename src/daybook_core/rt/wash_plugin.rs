@@ -121,11 +121,7 @@ mod binds_guest {
                 id: value.id,
                 created_at: value.created_at.into(),
                 updated_at: value.updated_at.into(),
-                props: value
-                    .props
-                    .into_iter()
-                    .map(|(key, val)| (key, val.into()))
-                    .collect(),
+                props: value.props.into_iter().collect(),
             }
         }
     }
@@ -139,7 +135,7 @@ use binds_guest::townframe::daybook_types::doc as bindgen_doc;
 use daybook_types::doc::ChangeHashSet;
 use daybook_types::doc::DocId;
 use daybook_types::wit::doc as wit_doc;
-use wash_runtime::engine::ctx::Ctx as WashCtx;
+use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
 pub struct DaybookPlugin {
@@ -160,8 +156,8 @@ impl DaybookPlugin {
 
     pub const ID: &str = "townframe:daybook";
 
-    fn from_ctx(wcx: &WashCtx) -> Arc<Self> {
-        let Some(this) = wcx.get_plugin::<Self>(Self::ID) else {
+    fn from_ctx(wcx: &SharedWashCtx) -> Arc<Self> {
+        let Some(this) = wcx.active_ctx.get_plugin::<Self>(Self::ID) else {
             panic!("plugin not on ctx");
         };
         this
@@ -202,7 +198,6 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
             imports: std::collections::HashSet::from([WitInterface::from(
                 "townframe:daybook/drawer,capabilities,prop-routine",
             )]),
-            ..default()
         }
     }
 
@@ -227,19 +222,19 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
         for iface in world.imports {
             if iface.namespace == "townframe" && iface.package == "daybook" {
                 if iface.interfaces.contains("drawer") {
-                    drawer::add_to_linker::<_, wasmtime::component::HasSelf<WashCtx>>(
+                    drawer::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         component.linker(),
                         |ctx| ctx,
                     )?;
                 }
                 if iface.interfaces.contains("capabilities") {
-                    capabilities::add_to_linker::<_, wasmtime::component::HasSelf<WashCtx>>(
+                    capabilities::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         component.linker(),
                         |ctx| ctx,
                     )?;
                 }
                 if iface.interfaces.contains("prop-routine") {
-                    prop_routine::add_to_linker::<_, wasmtime::component::HasSelf<WashCtx>>(
+                    prop_routine::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         component.linker(),
                         |ctx| ctx,
                     )?;
@@ -270,7 +265,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
     }
 }
 
-impl drawer::Host for WashCtx {
+impl drawer::Host for SharedWashCtx {
     async fn get_doc_at_heads(
         &mut self,
         doc_id: drawer::DocId,
@@ -313,11 +308,7 @@ impl drawer::Host for WashCtx {
         };
         let patch = wit_doc::DocPatch {
             id: patch.id,
-            props_set: patch
-                .props_set
-                .into_iter()
-                .map(|(key, prop)| (key, prop.into()))
-                .collect(),
+            props_set: patch.props_set.into_iter().collect(),
             props_remove: patch.props_remove,
             user_path: None,
         };
@@ -327,7 +318,14 @@ impl drawer::Host for WashCtx {
             })?;
 
         let plugin = DaybookPlugin::from_ctx(self);
-        match plugin.patch_doc(daybook_types::doc::BranchPath::from(branch_path), heads, patch).await {
+        match plugin
+            .patch_doc(
+                daybook_types::doc::BranchPath::from(branch_path),
+                heads,
+                patch,
+            )
+            .await
+        {
             Ok(_) => Ok(Ok(())),
             Err(crate::drawer::UpdateDocErr::DocNotFound { .. }) => {
                 Ok(Err(drawer::UpdateDocError::DocNotFound))
@@ -336,7 +334,7 @@ impl drawer::Host for WashCtx {
                 Ok(Err(drawer::UpdateDocError::BranchNotFound))
             }
             Err(crate::drawer::UpdateDocErr::InvalidKey {
-                inner: root_doc::DocPropTagParseError::NotDomainName { tag },
+                inner: root_doc::DocPropTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(drawer::UpdateDocError::InvalidKey(tag))),
             Err(crate::drawer::UpdateDocErr::Other { inner }) => {
                 Err(anyhow::anyhow!("unexepcted error: {inner}"))
@@ -350,7 +348,7 @@ pub struct DocTokenRo {
     heads: ChangeHashSet,
 }
 
-impl capabilities::HostDocTokenRo for WashCtx {
+impl capabilities::HostDocTokenRo for SharedWashCtx {
     async fn get(
         &mut self,
         handle: wasmtime::component::Resource<capabilities::DocTokenRo>,
@@ -392,7 +390,7 @@ pub struct DocTokenRw {
     heads: ChangeHashSet,
 }
 
-impl capabilities::HostDocTokenRw for WashCtx {
+impl capabilities::HostDocTokenRw for SharedWashCtx {
     async fn get(
         &mut self,
         handle: wasmtime::component::Resource<capabilities::DocTokenRw>,
@@ -432,11 +430,7 @@ impl capabilities::HostDocTokenRw for WashCtx {
             .to_anyhow()?;
         let patch = wit_doc::DocPatch {
             id: patch.id,
-            props_set: patch
-                .props_set
-                .into_iter()
-                .map(|(key, prop)| (key, prop.into()))
-                .collect(),
+            props_set: patch.props_set.into_iter().collect(),
             props_remove: patch.props_remove,
             user_path: None,
         };
@@ -454,7 +448,7 @@ impl capabilities::HostDocTokenRw for WashCtx {
             Err(crate::drawer::UpdateDocErr::DocNotFound { .. }) => todo!(),
             Err(crate::drawer::UpdateDocErr::BranchNotFound { .. }) => todo!(),
             Err(crate::drawer::UpdateDocErr::InvalidKey {
-                inner: root_doc::DocPropTagParseError::NotDomainName { tag },
+                inner: root_doc::DocPropTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(capabilities::UpdateDocError::InvalidKey(tag))),
             Err(crate::drawer::UpdateDocErr::Other { inner }) => {
                 Err(anyhow::anyhow!("unexepcted error: {inner}"))
@@ -477,7 +471,7 @@ pub struct PropTokenRo {
     prop_key: daybook_types::doc::DocPropKey,
 }
 
-impl capabilities::HostPropTokenRo for WashCtx {
+impl capabilities::HostPropTokenRo for SharedWashCtx {
     async fn get(
         &mut self,
         handle: wasmtime::component::Resource<capabilities::PropTokenRo>,
@@ -528,7 +522,7 @@ pub struct PropTokenRw {
     prop_acl: Vec<crate::plugs::manifest::RoutinePropAccess>,
 }
 
-impl capabilities::HostPropTokenRw for WashCtx {
+impl capabilities::HostPropTokenRw for SharedWashCtx {
     async fn get(
         &mut self,
         handle: wasmtime::component::Resource<capabilities::PropTokenRw>,
@@ -592,7 +586,7 @@ impl capabilities::HostPropTokenRw for WashCtx {
             Err(crate::drawer::UpdateDocErr::DocNotFound { .. }) => todo!(),
             Err(crate::drawer::UpdateDocErr::BranchNotFound { .. }) => todo!(),
             Err(crate::drawer::UpdateDocErr::InvalidKey {
-                inner: root_doc::DocPropTagParseError::NotDomainName { tag },
+                inner: root_doc::DocPropTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(capabilities::UpdateDocError::InvalidKey(tag))),
             Err(crate::drawer::UpdateDocErr::Other { inner }) => {
                 Err(anyhow::anyhow!("unexepcted error: {inner}"))
@@ -609,9 +603,9 @@ impl capabilities::HostPropTokenRw for WashCtx {
     }
 }
 
-impl capabilities::Host for WashCtx {}
+impl capabilities::Host for SharedWashCtx {}
 
-impl prop_routine::Host for WashCtx {
+impl prop_routine::Host for SharedWashCtx {
     async fn get_args(&mut self) -> wasmtime::Result<prop_routine::PropRoutineArgs> {
         use crate::rt::*;
         use anyhow::Context;
@@ -638,18 +632,25 @@ impl prop_routine::Host for WashCtx {
             staging_branch_path,
             prop_acl,
         }) = &dispatch.args;
-        
+
         // Use staging branch path from dispatch (already set when job was created)
         let staging_branch_path = staging_branch_path.clone();
-        
+
         // Create tokens based on ACL
-        let mut rw_prop_tokens: Vec<(String, wasmtime::component::Resource<capabilities::PropTokenRw>)> = Vec::new();
-        let mut ro_prop_tokens: Vec<(String, wasmtime::component::Resource<capabilities::PropTokenRo>)> = Vec::new();
-        
+        let mut rw_prop_tokens: Vec<(
+            String,
+            wasmtime::component::Resource<capabilities::PropTokenRw>,
+        )> = Vec::new();
+        let mut ro_prop_tokens: Vec<(
+            String,
+            wasmtime::component::Resource<capabilities::PropTokenRo>,
+        )> = Vec::new();
+
         for access in prop_acl {
-            let prop_key = DocPropKey::Tag(daybook_types::doc::DocPropTag::from(access.tag.0.clone()));
+            let prop_key =
+                DocPropKey::Tag(daybook_types::doc::DocPropTag::from(access.tag.0.clone()));
             let prop_key_str = prop_key.to_string();
-            
+
             if access.write {
                 let token = self.table.push(PropTokenRw {
                     doc_id: doc_id.clone(),
@@ -669,7 +670,7 @@ impl prop_routine::Host for WashCtx {
                 ro_prop_tokens.push((prop_key_str, token));
             }
         }
-        
+
         Ok(prop_routine::PropRoutineArgs {
             doc_id: doc_id.clone(),
             heads: utils_rs::am::serialize_commit_heads(heads.as_ref()),

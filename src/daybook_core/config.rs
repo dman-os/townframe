@@ -115,16 +115,13 @@ impl ConfigRepo {
         store
             .mutate_sync(move |store| {
                 store.version = Uuid::new_v4();
-                if !store.users.contains_key(&actor_id_str) {
-                    store.users.insert(
-                        actor_id_str,
-                        UserMeta {
-                            user_path: current_path,
-                            seen_at: Timestamp::now(),
-                        }
-                        .into(),
-                    );
-                }
+                store.users.entry(actor_id_str).or_insert_with(|| {
+                    UserMeta {
+                        user_path: current_path,
+                        seen_at: Timestamp::now(),
+                    }
+                    .into()
+                });
             })
             .await?;
 
@@ -154,7 +151,7 @@ impl ConfigRepo {
             app_doc_id: app_doc_id.clone(),
             app_am_handle,
             store,
-            registry: registry.clone(),
+            registry: Arc::clone(&registry),
             plug_repo,
             local_user_path,
             local_actor_id,
@@ -164,7 +161,7 @@ impl ConfigRepo {
         let repo = Arc::new(repo);
 
         let worker_handle = tokio::spawn({
-            let repo = repo.clone();
+            let repo = Arc::clone(&repo);
             let cancel_token = main_cancel_token.clone();
             async move {
                 repo.handle_notifs(notif_rx, cancel_token)
@@ -184,7 +181,7 @@ impl ConfigRepo {
     }
 
     async fn handle_notifs(
-        self: &Self,
+        &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
             Vec<utils_rs::am::changes::ChangeNotification>,
         >,
@@ -208,29 +205,36 @@ impl ConfigRepo {
             events.clear();
             let mut last_heads = None;
             for notif in notifs {
-                last_heads = Some(notif.heads.clone());
+                last_heads = Some(ChangeHashSet(Arc::clone(&notif.heads)));
                 if let Some(actor_id) = utils_rs::am::get_actor_id_from_patch(&notif.patch) {
                     if actor_id == self.local_actor_id {
                         continue;
                     }
                 }
-                self.events_for_patch(&notif.patch, &notif.heads, &mut events).await?;
+                self.events_for_patch(&notif.patch, &notif.heads, &mut events)
+                    .await?;
             }
 
             if !events.is_empty() {
                 let heads = last_heads.expect("events not empty");
-                let (new_store, _) = self.acx.hydrate_path_at_heads::<ConfigStore>(
-                    &self.app_doc_id,
-                    &heads,
-                    automerge::ROOT,
-                    vec![ConfigStore::PROP.into()],
-                ).await?.expect(ERROR_INVALID_PATCH);
+                let (new_store, _) = self
+                    .acx
+                    .hydrate_path_at_heads::<ConfigStore>(
+                        &self.app_doc_id,
+                        &heads,
+                        automerge::ROOT,
+                        vec![ConfigStore::PROP.into()],
+                    )
+                    .await?
+                    .expect(ERROR_INVALID_PATCH);
 
-                self.store.mutate_sync(|store| {
-                    store.version = new_store.version;
-                    store.prop_display = new_store.prop_display;
-                    store.users = new_store.users;
-                }).await?;
+                self.store
+                    .mutate_sync(|store| {
+                        store.version = new_store.version;
+                        store.prop_display = new_store.prop_display;
+                        store.users = new_store.users;
+                    })
+                    .await?;
 
                 self.registry.notify(events.drain(..));
             }
@@ -268,22 +272,21 @@ impl ConfigRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<ConfigEvent>,
     ) -> Res<()> {
-        if !utils_rs::am::changes::path_prefix_matches(
-            &[ConfigStore::PROP.into()],
-            &patch.path,
-        ) {
+        if !utils_rs::am::changes::path_prefix_matches(&[ConfigStore::PROP.into()], &patch.path) {
             return Ok(());
         }
 
-        let heads = ChangeHashSet(patch_heads.clone());
+        let heads = ChangeHashSet(Arc::clone(patch_heads));
 
         match &patch.action {
-            automerge::PatchAction::PutMap { key, .. } if patch.path.len() == 1 && key == "version" => {
+            automerge::PatchAction::PutMap { key, .. }
+                if patch.path.len() == 1 && key == "version" =>
+            {
                 out.push(ConfigEvent::Changed { heads });
             }
             // For other changes inside the config, also notify
             _ if patch.path.len() > 1 => {
-                 out.push(ConfigEvent::Changed { heads });
+                out.push(ConfigEvent::Changed { heads });
             }
             _ => {}
         }
@@ -354,18 +357,20 @@ impl ConfigRepo {
         self.local_actor_id.clone()
     }
 
-    pub async fn get_actor_user_path(&self, actor_id: &automerge::ActorId) -> Option<daybook_types::doc::UserPath> {
+    pub async fn get_actor_user_path(
+        &self,
+        actor_id: &automerge::ActorId,
+    ) -> Option<daybook_types::doc::UserPath> {
         let actor_id_str = actor_id.to_string();
         self.store
             .query_sync(move |store| {
                 store
                     .users
                     .get(&actor_id_str)
-                    .map(|d| d.0.user_path.clone())
+                    .map(|doc| doc.0.user_path.clone())
             })
             .await
     }
-
 }
 
 pub mod version_updates {

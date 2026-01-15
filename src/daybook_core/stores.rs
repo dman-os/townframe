@@ -35,7 +35,8 @@ pub trait Store: Hydrate + Reconcile + Send + Sync + 'static {
         F: Fn(Vec<utils_rs::am::changes::ChangeNotification>) + Send + Sync + 'static,
     {
         path.insert(0, Self::PROP.into());
-        let ticket = acx.change_manager()
+        let ticket = acx
+            .change_manager()
             .add_listener(
                 utils_rs::am::changes::ChangeFilter {
                     path,
@@ -71,7 +72,7 @@ pub struct StoreHandle<S: Store> {
 impl<T: Store> Clone for StoreHandle<T> {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            inner: Arc::clone(&self.inner),
         }
     }
 }
@@ -158,5 +159,4 @@ where
         let hash = guard.flush().await?;
         Ok((res, hash))
     }
-
 }

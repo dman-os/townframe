@@ -10,9 +10,9 @@ fn main() {
     if args.len() >= 2 && args[1] == "generate" {
         // Find the --out-dir argument to locate the output directory
         let mut out_dir: Option<String> = None;
-        for (i, arg) in args.iter().enumerate() {
-            if arg == "--out-dir" && i + 1 < args.len() {
-                out_dir = Some(args[i + 1].clone());
+        for (idx, arg) in args.iter().enumerate() {
+            if arg == "--out-dir" && idx + 1 < args.len() {
+                out_dir = Some(args[idx + 1].clone());
                 break;
             }
         }

@@ -162,7 +162,7 @@ impl DispatchRepo {
     }
 
     async fn handle_notifs(
-        self: &Self,
+        &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
             Vec<utils_rs::am::changes::ChangeNotification>,
         >,
@@ -187,7 +187,7 @@ impl DispatchRepo {
             let mut last_heads = None;
 
             for notif in notifs {
-                last_heads = Some(notif.heads.clone());
+                last_heads = Some(ChangeHashSet(Arc::clone(&notif.heads)));
 
                 // 1. Extract ActorId from the patch using the new utils_rs::am helper.
                 if let Some(actor_id) = utils_rs::am::get_actor_id_from_patch(&notif.patch) {
@@ -241,7 +241,7 @@ impl DispatchRepo {
             }
 
             if !events.is_empty() {
-                let heads = ChangeHashSet(last_heads.expect("notifs not empty"));
+                let heads = last_heads.expect("notifs not empty");
                 self.registry.notify(
                     events
                         .drain(..)
@@ -265,7 +265,7 @@ impl DispatchRepo {
             return Ok(());
         }
 
-        let dispatch_heads = ChangeHashSet(patch_heads.clone());
+        let dispatch_heads = ChangeHashSet(Arc::clone(patch_heads));
 
         match &patch.action {
             automerge::PatchAction::PutMap {
@@ -278,8 +278,8 @@ impl DispatchRepo {
                 };
 
                 let version_bytes = match val {
-                    automerge::Value::Scalar(s) => match &**s {
-                        automerge::ScalarValue::Bytes(b) => b,
+                    automerge::Value::Scalar(scalar) => match &**scalar {
+                        automerge::ScalarValue::Bytes(bytes) => bytes,
                         _ => return Ok(()),
                     },
                     _ => return Ok(()),
@@ -339,7 +339,7 @@ impl DispatchRepo {
                 store
                     .active_dispatches
                     .get(id)
-                    .map(|v| Arc::clone(&v.payload))
+                    .map(|versioned| Arc::clone(&versioned.payload))
             })
             .await
     }
@@ -367,7 +367,7 @@ impl DispatchRepo {
                 store
                     .active_dispatches
                     .get(disp_id)
-                    .map(|v| Arc::clone(&v.payload))
+                    .map(|versioned| Arc::clone(&versioned.payload))
             })
             .await
     }
@@ -385,7 +385,7 @@ impl DispatchRepo {
                     } else {
                         Uuid::nil()
                     },
-                    payload: dispatch.clone(),
+                    payload: Arc::clone(&dispatch),
                 };
 
                 match &dispatch.deets {

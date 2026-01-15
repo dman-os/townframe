@@ -3,6 +3,9 @@ name = "xtask"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "xtask"
 path = "main.rs"

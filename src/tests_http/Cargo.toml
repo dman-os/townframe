@@ -3,6 +3,9 @@ name = "tests_http"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 path = "lib.rs"
 

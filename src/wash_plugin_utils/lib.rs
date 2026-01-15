@@ -5,7 +5,7 @@ mod interlude {
 
 use crate::interlude::*;
 
-use wash_runtime::engine::ctx::Ctx as WashCtx;
+use wash_runtime::engine::ctx::{Ctx as WashCtx, SharedCtx as SharedWashCtx};
 use wash_runtime::wit::{WitInterface, WitWorld};
 
 mod binds_guest {
@@ -71,7 +71,6 @@ impl wash_runtime::plugin::HostPlugin for UtilsPlugin {
             imports: std::collections::HashSet::from([WitInterface::from(
                 "townframe:utils/types,llm-chat",
             )]),
-            ..default()
         }
     }
 
@@ -86,10 +85,12 @@ impl wash_runtime::plugin::HostPlugin for UtilsPlugin {
     ) -> anyhow::Result<()> {
         // Validate that we can handle the requested interfaces
         for iface in &interface_configs {
-            if iface.namespace == "townframe" && iface.package == "utils" {
-                if !iface.interfaces.contains("types") && !iface.interfaces.contains("llm-chat") {
-                    anyhow::bail!("unsupported utils interface: {iface:?}");
-                }
+            if iface.namespace == "townframe"
+                && iface.package == "utils"
+                && !iface.interfaces.contains("types")
+                && !iface.interfaces.contains("llm-chat")
+            {
+                anyhow::bail!("unsupported utils interface: {iface:?}");
             }
         }
         Ok(())
@@ -104,13 +105,13 @@ impl wash_runtime::plugin::HostPlugin for UtilsPlugin {
         for iface in world.imports {
             if iface.namespace == "townframe" && iface.package == "utils" {
                 if iface.interfaces.contains("types") {
-                    types::add_to_linker::<_, wasmtime::component::HasSelf<WashCtx>>(
+                    types::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         component.linker(),
                         |ctx| ctx,
                     )?;
                 }
                 if iface.interfaces.contains("llm-chat") {
-                    llm_chat::add_to_linker::<_, wasmtime::component::HasSelf<WashCtx>>(
+                    llm_chat::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         component.linker(),
                         |ctx| ctx,
                     )?;
@@ -141,7 +142,7 @@ impl wash_runtime::plugin::HostPlugin for UtilsPlugin {
     }
 }
 
-impl types::Host for WashCtx {
+impl types::Host for SharedWashCtx {
     async fn noop(
         &mut self,
         _inc: (
@@ -157,17 +158,15 @@ impl types::Host for WashCtx {
     }
 }
 
-impl llm_chat::Host for WashCtx {
+impl llm_chat::Host for SharedWashCtx {
     async fn respond(
         &mut self,
         request: llm_chat::Request,
     ) -> wasmtime::Result<Result<llm_chat::Response, wasmtime::component::__internal::String>> {
-        let plugin = UtilsPlugin::from_ctx(self);
+        let plugin = UtilsPlugin::from_ctx(&self.active_ctx);
 
         // Extract message text from request.input
-        let message_text = match request.input {
-            llm_chat::RequestInput::Text(text) => text,
-        };
+        let llm_chat::RequestInput::Text(message_text) = request.input;
 
         // Call Ollama
         use ollama_rs::generation::completion::request::GenerationRequest;

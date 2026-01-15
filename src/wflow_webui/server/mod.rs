@@ -24,7 +24,7 @@ impl std::ops::Deref for SharedServerCtx {
     type Target = ServerCtx;
 
     fn deref(&self) -> &Self::Target {
-        &*self.0
+        &self.0
     }
 }
 

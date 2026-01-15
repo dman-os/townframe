@@ -101,16 +101,17 @@ pub async fn spawn_doc_triage_worker(
     });
 
     // Catch up on missed events
-    let (initial_drawer_heads, initial_dispatch_heads, initial_plug_heads, initial_config_heads) = store
-        .query_sync(|s| {
-            (
-                s.drawer_heads.clone(),
-                s.dispatch_heads.clone(),
-                s.plug_heads.clone(),
-                s.config_heads.clone(),
-            )
-        })
-        .await;
+    let (initial_drawer_heads, initial_dispatch_heads, initial_plug_heads, initial_config_heads) =
+        store
+            .query_sync(|store| {
+                (
+                    store.drawer_heads.clone(),
+                    store.dispatch_heads.clone(),
+                    store.plug_heads.clone(),
+                    store.config_heads.clone(),
+                )
+            })
+            .await;
 
     // Use empty heads if None to catch up from beginning
     let empty_heads = ChangeHashSet(vec![].into());
@@ -120,7 +121,7 @@ pub async fn spawn_doc_triage_worker(
         .diff_events(initial_drawer_heads.unwrap_or(empty_heads.clone()), None)
         .await?;
     for event in events {
-        event_tx.send(Arc::new(event).into()).expect(ERROR_CHANNEL);
+        event_tx.send(Arc::new(event)).expect(ERROR_CHANNEL);
     }
 
     let events = rt
@@ -129,7 +130,7 @@ pub async fn spawn_doc_triage_worker(
         .await?;
     for event in events {
         dispatch_event_tx
-            .send(Arc::new(event).into())
+            .send(Arc::new(event))
             .expect(ERROR_CHANNEL);
     }
 
@@ -138,7 +139,7 @@ pub async fn spawn_doc_triage_worker(
         .diff_events(initial_plug_heads.unwrap_or(empty_heads.clone()), None)
         .await?;
     for event in events {
-        plug_event_tx.send(Arc::new(event).into()).expect(ERROR_CHANNEL);
+        plug_event_tx.send(Arc::new(event)).expect(ERROR_CHANNEL);
     }
 
     let events = rt
@@ -146,9 +147,7 @@ pub async fn spawn_doc_triage_worker(
         .diff_events(initial_config_heads.unwrap_or(empty_heads), None)
         .await?;
     for event in events {
-        config_event_tx
-            .send(Arc::new(event).into())
-            .expect(ERROR_CHANNEL);
+        config_event_tx.send(Arc::new(event)).expect(ERROR_CHANNEL);
     }
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -269,8 +268,8 @@ impl DocTriageWorker {
             PlugsEvent::PlugDeleted { heads, .. } => heads.clone(),
         };
         self.store
-            .mutate_sync(|s| {
-                s.plug_heads = Some(heads);
+            .mutate_sync(|store| {
+                store.plug_heads = Some(heads);
             })
             .await?;
         self.refresh_processors().await?;
@@ -282,8 +281,8 @@ impl DocTriageWorker {
             crate::config::ConfigEvent::Changed { heads } => heads.clone(),
         };
         self.store
-            .mutate_sync(|s| {
-                s.config_heads = Some(heads);
+            .mutate_sync(|store| {
+                store.config_heads = Some(heads);
             })
             .await?;
         // Potentially refresh some state based on config changes
@@ -297,10 +296,10 @@ impl DocTriageWorker {
             DispatchEvent::DispatchUpdated { heads, .. } => heads.clone(),
             DispatchEvent::DispatchDeleted { id, heads } => {
                 self.store
-                    .mutate_sync(|s| {
-                        if let Some(job) = s.dispatch_to_job.remove(id) {
+                    .mutate_sync(|store| {
+                        if let Some(job) = store.dispatch_to_job.remove(id) {
                             let job_key = format!("{}:{}:{}", job.0, job.1, job.2);
-                            s.job_to_dispatch.remove(&job_key);
+                            store.job_to_dispatch.remove(&job_key);
                         }
                     })
                     .await?;
@@ -308,8 +307,8 @@ impl DocTriageWorker {
             }
         };
         self.store
-            .mutate_sync(|s| {
-                s.dispatch_heads = Some(heads);
+            .mutate_sync(|store| {
+                store.dispatch_heads = Some(heads);
             })
             .await?;
         Ok(())
@@ -320,8 +319,8 @@ impl DocTriageWorker {
         match &*event {
             DrawerEvent::ListChanged { drawer_heads } => {
                 self.store
-                    .mutate_sync(|s| {
-                        s.drawer_heads = Some(drawer_heads.clone());
+                    .mutate_sync(|store| {
+                        store.drawer_heads = Some(drawer_heads.clone());
                     })
                     .await?;
             }
@@ -352,15 +351,15 @@ impl DocTriageWorker {
                 }
 
                 self.store
-                    .mutate_sync(|s| {
-                        s.drawer_heads = Some(drawer_heads.clone());
+                    .mutate_sync(|store| {
+                        store.drawer_heads = Some(drawer_heads.clone());
                     })
                     .await?;
             }
             DrawerEvent::DocDeleted { drawer_heads, .. } => {
                 self.store
-                    .mutate_sync(|s| {
-                        s.drawer_heads = Some(drawer_heads.clone());
+                    .mutate_sync(|store| {
+                        store.drawer_heads = Some(drawer_heads.clone());
                     })
                     .await?;
             }
@@ -376,15 +375,20 @@ impl DocTriageWorker {
                         continue;
                     }
                     // Use get_if_latest even for added docs, although they're usually latest
-                    if let Some(doc) = self.rt.drawer.get_if_latest(id, &branch_path, heads).await? {
+                    if let Some(doc) = self
+                        .rt
+                        .drawer
+                        .get_if_latest(id, &branch_path, heads)
+                        .await?
+                    {
                         self.triage(id, heads, &doc, branch_path)
                             .await
                             .wrap_err("error triaging doc")?;
                     }
                 }
                 self.store
-                    .mutate_sync(|s| {
-                        s.drawer_heads = Some(drawer_heads.clone());
+                    .mutate_sync(|store| {
+                        store.drawer_heads = Some(drawer_heads.clone());
                     })
                     .await?;
             }
@@ -437,7 +441,7 @@ impl DocTriageWorker {
                 // Check if already in-flight
                 let old_dispatch = self
                     .store
-                    .query_sync(|s| s.job_to_dispatch.get(&job_key).cloned())
+                    .query_sync(|store| store.job_to_dispatch.get(&job_key).cloned())
                     .await;
                 if let Some(dispatch_id) = old_dispatch {
                     info!(?dispatch_id, "cancelling inflight job");
@@ -451,9 +455,9 @@ impl DocTriageWorker {
 
                 // Track mapping
                 self.store
-                    .mutate_sync(|s| {
-                        s.job_to_dispatch.insert(job_key, dispatch_id.clone());
-                        s.dispatch_to_job.insert(
+                    .mutate_sync(|store| {
+                        store.job_to_dispatch.insert(job_key, dispatch_id.clone());
+                        store.dispatch_to_job.insert(
                             dispatch_id,
                             (
                                 doc_id.clone(),
@@ -514,12 +518,11 @@ mod tests {
         }
 
         let dispatch_id = dispatch_id.ok_or_eyre("test-label dispatch not found")?;
-        
+
         // Wait for the dispatch to complete
-        ctx.rt.wait_for_dispatch_end(
-            &dispatch_id,
-            std::time::Duration::from_secs(90),
-        ).await?;
+        ctx.rt
+            .wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(90))
+            .await?;
 
         ctx.stop().await?;
         Ok(())

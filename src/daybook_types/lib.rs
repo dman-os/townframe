@@ -23,6 +23,7 @@ uniffi::setup_scaffolding!();
 custom_type_set!();
 
 #[macro_export]
+#[allow(clippy::crate_in_macro_def)]
 macro_rules! custom_type_set {
     () => {
         use crate::interlude::*;
@@ -70,6 +71,7 @@ macro_rules! custom_type_set {
     };
 }
 #[macro_export]
+#[allow(clippy::crate_in_macro_def)]
 macro_rules! define_enum_and_tag {
     (@item
         $(#[$attr:meta])*
@@ -172,9 +174,10 @@ macro_rules! define_enum_and_tag {
                 }
             }
 
-            pub fn from_str(s: &str) -> Option<Self> {
+            #[allow(clippy::should_implement_trait)]
+            pub fn from_str(input: &str) -> Option<Self> {
                 $(
-                    if s.eq_ignore_ascii_case(concat!(
+                    if input.eq_ignore_ascii_case(concat!(
                         $reverse_domain_name,
                         pastey::paste! {
                             stringify!([<$key:lower>])
@@ -188,14 +191,14 @@ macro_rules! define_enum_and_tag {
         }
 
         impl std::fmt::Display for $tag_ty_name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}", self.as_str())
+            fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(fmt, "{}", self.as_str())
             }
         }
 
-        impl Into<String> for $tag_ty_name {
-            fn into(self) -> String {
-                self.as_str().into()
+        impl From<$tag_ty_name> for String {
+            fn from(tag: $tag_ty_name) -> Self {
+                tag.as_str().into()
             }
         }
 
@@ -218,15 +221,15 @@ macro_rules! define_enum_and_tag {
                 impl<'de> serde::de::Visitor<'de> for Visitor {
                     type Value = $tag_ty_name;
 
-                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                        f.write_str(stringify!($ty_name))
+                    fn expecting(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        fmt.write_str(stringify!($ty_name))
                     }
 
-                    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+                    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
                     where
                         E: serde::de::Error,
                     {
-                        $tag_ty_name::from_str(v).ok_or_else(|| E::unknown_variant(v, $tag_ty_name::ALL_STR))
+                        $tag_ty_name::from_str(value).ok_or_else(|| E::unknown_variant(value, $tag_ty_name::ALL_STR))
                     }
                 }
 

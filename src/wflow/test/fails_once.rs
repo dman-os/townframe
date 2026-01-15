@@ -23,7 +23,7 @@ async fn test_fails_once() -> Res<()> {
     }))?;
 
     test_cx
-        .schedule_job(job_id.clone(), "fails_once", args_json.clone())
+        .schedule_job(Arc::clone(&job_id), "fails_once", args_json.clone())
         .await?;
 
     // Wait until there are no active jobs (job completed or archived)
@@ -75,7 +75,7 @@ async fn test_fails_once_sqlite() -> Res<()> {
     }))?;
 
     test_cx
-        .schedule_job(job_id.clone(), "fails_once", args_json.clone())
+        .schedule_job(Arc::clone(&job_id), "fails_once", args_json.clone())
         .await?;
 
     // Wait until there are no active jobs (job completed or archived)

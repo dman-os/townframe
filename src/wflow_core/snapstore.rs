@@ -32,9 +32,9 @@ mod effect_map_serde {
         S: Serializer,
     {
         let mut map_serializer = serializer.serialize_map(Some(map.len()))?;
-        for (k, v) in map {
-            let key = format!("{}_{}", k.entry_id, k.effect_idx);
-            map_serializer.serialize_entry(&key, v)?;
+        for (key_item, val) in map {
+            let key = format!("{}_{}", key_item.entry_id, key_item.effect_idx);
+            map_serializer.serialize_entry(&key, val)?;
         }
         map_serializer.end()
     }

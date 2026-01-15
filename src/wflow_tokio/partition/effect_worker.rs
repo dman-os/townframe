@@ -110,7 +110,7 @@ impl TokioEffectWorker {
                         job_events::JobRunEvent {
                             job_id,
                             effect_id,
-                            timestamp: end_at.clone(),
+                            timestamp: end_at,
                             run_id,
                             start_at,
                             end_at,

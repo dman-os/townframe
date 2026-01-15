@@ -7,7 +7,6 @@ pub mod am;
 
 pub mod prelude {
     pub use crate::interlude::*;
-    pub use crate::expect_tags::*;
 
     #[cfg(feature = "automerge")]
     pub use crate::am::codecs::ThroughJson;
@@ -269,14 +268,14 @@ mod cheapstr {
     }
 
     impl std::fmt::Display for CHeapStr {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            self.string.fmt(f)
+        fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.string.fmt(fmt)
         }
     }
 
     impl std::fmt::Debug for CHeapStr {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            self.string.fmt(f)
+        fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.string.fmt(fmt)
         }
     }
 }
@@ -412,7 +411,7 @@ pub mod hash {
     ) -> eyre::Result<usize> {
         match (
             &source[0..1],
-            bs58::decode(source[1..].as_bytes()).onto(buf),
+            bs58::decode(&source.as_bytes()[1..]).onto(buf),
         ) {
             ("z", Ok(count)) => Ok(count),
             (prefix, Ok(_)) => Err(eyre::format_err!(
@@ -646,11 +645,16 @@ pub async fn wait_on_handle_with_timeout<T>(
     mut join_handle: tokio::task::JoinHandle<T>,
     timeout_ms: u64,
 ) -> Result<T, WaitOnHandleError> {
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), &mut join_handle).await {
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms),
+        &mut join_handle,
+    )
+    .await
+    {
         Ok(res) => Ok(res?),
-        Err(e) => {
+        Err(err) => {
             join_handle.abort();
-            Err(e.into())
+            Err(err.into())
         }
     }
 }

@@ -3,6 +3,9 @@ name = "wflow_tokio"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 default = ["serde"]
 serde = []

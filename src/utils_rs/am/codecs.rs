@@ -24,15 +24,13 @@ pub mod date {
         use automerge::{ScalarValue, Value};
 
         match doc.get(obj, &prop)? {
-            Some((Value::Scalar(s), _)) => match s.as_ref() {
+            Some((Value::Scalar(scalar), _)) => match scalar.as_ref() {
                 ScalarValue::Timestamp(ts) => match Timestamp::from_second(*ts) {
-                    Ok(dt) => return Ok(dt),
-                    Err(err) => {
-                        return Err(autosurgeon::HydrateError::unexpected(
-                            "a valid timestamp",
-                            format!("error converting timestamp: {err}"),
-                        ));
-                    }
+                    Ok(dt) => Ok(dt),
+                    Err(err) => Err(autosurgeon::HydrateError::unexpected(
+                        "a valid timestamp",
+                        format!("error converting timestamp: {err}"),
+                    )),
                 },
                 ScalarValue::Str(val) => val.parse::<Timestamp>().map_err(|err| {
                     autosurgeon::HydrateError::unexpected(
@@ -40,19 +38,15 @@ pub mod date {
                         format!("error parsing ISO 8601 timestamp '{val}': {err}"),
                     )
                 }),
-                _ => {
-                    return Err(autosurgeon::HydrateError::unexpected(
-                        "a string or timestamp",
-                        format!("unexpected scalar type: {:?}", s),
-                    ));
-                }
+                _ => Err(autosurgeon::HydrateError::unexpected(
+                    "a string or timestamp",
+                    format!("unexpected scalar type: {:?}", scalar),
+                )),
             },
-            _ => {
-                return Err(autosurgeon::HydrateError::unexpected(
-                    "a scalar value",
-                    "value is not a scalar".to_string(),
-                ));
-            }
+            _ => Err(autosurgeon::HydrateError::unexpected(
+                "a scalar value",
+                "value is not a scalar".to_string(),
+            )),
         }
     }
 }
@@ -95,15 +89,15 @@ pub mod through_str {
     ) -> Result<T, HydrateError> {
         use automerge::{ScalarValue, Value};
         let string = match doc.get(obj, &prop)? {
-            Some((Value::Scalar(s), _)) => {
-                match s.as_ref() {
+            Some((Value::Scalar(scalar), _)) => {
+                match scalar.as_ref() {
                     // If stored as a string (new format), use it directly
-                    ScalarValue::Str(s) => s.to_string(),
+                    ScalarValue::Str(str_val) => str_val.to_string(),
                     // If stored as a timestamp (old format), convert to ISO 8601
                     _ => {
                         return Err(autosurgeon::HydrateError::unexpected(
                             "a string",
-                            format!("unexpected scalar type: {:?}", s),
+                            format!("unexpected scalar type: {:?}", scalar),
                         ));
                     }
                 }
@@ -119,7 +113,7 @@ pub mod through_str {
             Ok(val) => Ok(val),
             Err(_err) => Err(autosurgeon::HydrateError::unexpected(
                 format!("a string repr of {}", std::any::type_name::<T>()),
-                format!("failure parsing string"),
+                "failure parsing string".to_string(),
             )),
         }
     }
@@ -130,10 +124,10 @@ pub mod path {
     use std::path::PathBuf;
 
     pub fn reconcile<R: Reconciler>(
-        path: &PathBuf,
+        path: &std::path::Path,
         mut reconciler: R,
     ) -> Result<(), R::Error> {
-        reconciler.str(&path.to_string_lossy())
+        reconciler.str(path.to_string_lossy())
     }
 
     pub fn hydrate<'a, D: ReadDoc>(
@@ -143,17 +137,15 @@ pub mod path {
     ) -> Result<PathBuf, HydrateError> {
         use automerge::{ScalarValue, Value};
         let string = match doc.get(obj, &prop)? {
-            Some((Value::Scalar(s), _)) => {
-                match s.as_ref() {
-                    ScalarValue::Str(s) => s.to_string(),
-                    _ => {
-                        return Err(autosurgeon::HydrateError::unexpected(
-                            "a string",
-                            format!("unexpected scalar type: {:?}", s),
-                        ));
-                    }
+            Some((Value::Scalar(scalar), _)) => match scalar.as_ref() {
+                ScalarValue::Str(str_val) => str_val.to_string(),
+                _ => {
+                    return Err(autosurgeon::HydrateError::unexpected(
+                        "a string",
+                        format!("unexpected scalar type: {:?}", scalar),
+                    ));
                 }
-            }
+            },
             _ => {
                 return Err(autosurgeon::HydrateError::unexpected(
                     "a scalar value",

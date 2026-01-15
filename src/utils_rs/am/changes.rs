@@ -33,10 +33,12 @@ struct ChangeListener {
 }
 
 #[cfg(feature = "automerge-repo")]
+type ChangeTx = mpsc::UnboundedSender<(DocumentId, Vec<ChangeNotification>)>;
+
+#[cfg(feature = "automerge-repo")]
 pub struct ChangeListenerManager {
     listeners: RwLock<Vec<ChangeListener>>,
-    change_tx:
-        tokio::sync::Mutex<Option<mpsc::UnboundedSender<(DocumentId, Vec<ChangeNotification>)>>>,
+    change_tx: tokio::sync::Mutex<Option<ChangeTx>>,
     brokers: DHashMap<DocumentId, Arc<DocChangeBroker>>,
     cancel_token: CancellationToken,
 }
@@ -93,16 +95,14 @@ impl DocChangeBroker {
     pub fn filter(&self) -> DocIdFilter {
         DocIdFilter {
             doc_id: self.doc_id.clone(),
-            _seal: (),
         }
     }
 }
 
 #[cfg(feature = "automerge-repo")]
+#[non_exhaustive]
 pub struct DocIdFilter {
     pub doc_id: DocumentId,
-    // forces one to have broker before adding a listener
-    _seal: (),
 }
 
 #[cfg(feature = "automerge-repo")]
@@ -120,10 +120,10 @@ impl ChangeListenerManager {
         let out = Arc::new(out);
 
         // Start the change notification worker
-        let handle = out.clone().spawn_switchboard(change_rx);
+        let handle = Arc::clone(&out).spawn_switchboard(change_rx);
 
         (
-            out.clone(),
+            Arc::clone(&out),
             ChangeListenerManagerStopToken {
                 cancel_token: main_cancel_token,
                 switchboard_handle: Some(handle),
@@ -213,7 +213,7 @@ impl ChangeListenerManager {
             cancel_token: main_cancel_token,
         };
         let out = Arc::new(out);
-        self.brokers.insert(doc_id, out.clone());
+        self.brokers.insert(doc_id, Arc::clone(&out));
         Ok((out, Some(stop_token)))
     }
 
@@ -305,7 +305,7 @@ impl Drop for ChangeListenerRegistration {
             let id = self.id;
             tokio::spawn(async move {
                 let mut listeners = manager.listeners.write().await;
-                listeners.retain(|l| l.id != id);
+                listeners.retain(|listener| listener.id != id);
             });
         }
     }
@@ -321,8 +321,8 @@ pub fn path_prefix_matches(
         return false;
     }
 
-    for (i, listener_prop) in listener_path.iter().enumerate() {
-        if !prop_matches(listener_prop, &change_path[i].1) {
+    for (idx, listener_prop) in listener_path.iter().enumerate() {
+        if !prop_matches(listener_prop, &change_path[idx].1) {
             return false;
         }
     }

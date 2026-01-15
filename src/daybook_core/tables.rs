@@ -461,7 +461,7 @@ impl TablesRepo {
             app_doc_id,
             app_am_handle,
             store,
-            registry: registry.clone(),
+            registry: Arc::clone(&registry),
             local_actor_id,
             cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
@@ -489,7 +489,7 @@ impl TablesRepo {
     }
 
     async fn handle_notifs(
-        self: &Self,
+        &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
             Vec<utils_rs::am::changes::ChangeNotification>,
         >,
@@ -658,7 +658,7 @@ impl TablesRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<TablesEvent>,
     ) -> Res<()> {
-        let heads = ChangeHashSet(patch_heads.clone());
+        let heads = ChangeHashSet(Arc::clone(patch_heads));
         match &patch.action {
             automerge::PatchAction::PutMap {
                 key,
@@ -676,8 +676,8 @@ impl TablesRepo {
                 };
 
                 let version_bytes = match val {
-                    automerge::Value::Scalar(s) => match &**s {
-                        automerge::ScalarValue::Bytes(b) => b,
+                    automerge::Value::Scalar(scalar) => match &**scalar {
+                        automerge::ScalarValue::Bytes(bytes) => bytes,
                         _ => return Ok(()),
                     },
                     _ => return Ok(()),
@@ -709,14 +709,13 @@ impl TablesRepo {
                 }
             }
             automerge::PatchAction::DeleteMap { .. } if patch.path.len() == 2 => {
-                match &patch.path[1].1 {
-                    automerge::Prop::Map(path_key) => match path_key.as_ref() {
+                if let automerge::Prop::Map(path_key) = &patch.path[1].1 {
+                    match path_key.as_ref() {
                         "windows" | "tables" | "tabs" | "panels" => {
                             out.push(TablesEvent::ListChanged { heads });
                         }
                         _ => {}
-                    },
-                    _ => {}
+                    }
                 }
             }
             _ => {}
@@ -764,7 +763,7 @@ impl TablesRepo {
                 let old_window = store.windows.get(&id).cloned();
                 let old_tabs = old_window
                     .as_ref()
-                    .map(|w| w.tabs.clone())
+                    .map(|window| window.tabs.clone())
                     .unwrap_or_default();
 
                 for tab_id in &old_tabs {
@@ -821,7 +820,7 @@ impl TablesRepo {
                 let old_tab = store.tabs.get(&id).cloned();
                 let old_panels = old_tab
                     .as_ref()
-                    .map(|t| t.panels.clone())
+                    .map(|table| table.panels.clone())
                     .unwrap_or_default();
 
                 // Update panel-to-tab index for changed panels
@@ -890,7 +889,7 @@ impl TablesRepo {
                 let old_table = store.tables.get(&id).cloned();
                 let old_tabs = old_table
                     .as_ref()
-                    .map(|t| t.tabs.clone())
+                    .map(|table| table.tabs.clone())
                     .unwrap_or_default();
 
                 // Update tab-to-table index for changed tabs
@@ -1099,7 +1098,7 @@ impl TablesRepo {
                 }
 
                 // If no selected table found, return the first table
-                store.tables.iter().next().map(|(_, t)| t.clone())
+                store.tables.iter().next().map(|(_, table)| table.clone())
             })
             .await;
         Ok(out)
@@ -1204,7 +1203,7 @@ impl TablesRepo {
                 let table_window = store
                     .tables
                     .get(&table_id)
-                    .map(|t| t.window.clone())
+                    .map(|table| table.window.clone())
                     .ok_or_eyre("Table not found")?;
                 let window_id = match table_window {
                     TableWindow::Specific { id } => id,
@@ -1292,7 +1291,7 @@ impl TablesRepo {
                 let panel_ids = store
                     .tabs
                     .get(&tab_id)
-                    .map(|t| t.panels.clone())
+                    .map(|table| table.panels.clone())
                     .ok_or_eyre("Tab not found")?;
                 let table_id = store.tab_to_table.get(&tab_id).copied();
                 let window_id = store.tab_to_window.get(&tab_id).copied();

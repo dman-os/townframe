@@ -109,9 +109,9 @@ pub const DEFAULT_TAG: Tag = Tag {
 
 pub fn axum_path_parameter_list(path: &str) -> Vec<String> {
     path.split('/')
-        .filter(|s| !s.is_empty())
-        .filter(|s| &s[0..1] == ":")
-        .map(|s| s[1..].to_string())
+        .filter(|segment| !segment.is_empty())
+        .filter(|segment| &segment[0..1] == ":")
+        .map(|segment| segment[1..].to_string())
         .collect()
 }
 

@@ -30,8 +30,8 @@ where
 }
 
 impl std::fmt::Display for PropTag {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(fmt, "{}", self.0)
     }
 }
 
@@ -68,8 +68,8 @@ where
 }
 
 impl std::fmt::Display for KeyGeneric {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(fmt, "{}", self.0)
     }
 }
 
@@ -312,8 +312,8 @@ impl DocPredicateClause {
     pub fn matches(&self, doc: &daybook_types::doc::Doc) -> bool {
         match self {
             Self::HasTag(tag) => doc.props.keys().any(|key| key.tag().to_string() == tag.0),
-            Self::Or(clauses) => clauses.iter().any(|c| c.matches(doc)),
-            Self::And(clauses) => clauses.iter().all(|c| c.matches(doc)),
+            Self::Or(clauses) => clauses.iter().any(|clause| clause.matches(doc)),
+            Self::And(clauses) => clauses.iter().all(|clause| clause.matches(doc)),
             Self::Not(clause) => !clause.matches(doc),
         }
     }

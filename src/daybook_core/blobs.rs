@@ -74,7 +74,7 @@ mod tests {
         // Check filesystem
         let mut entries = tokio::fs::read_dir(temp.path()).await?;
         let mut count = 0;
-        while let Some(_) = entries.next_entry().await? {
+        while entries.next_entry().await?.is_some() {
             count += 1;
         }
         assert_eq!(count, 1, "Should only have one file for duplicate data");

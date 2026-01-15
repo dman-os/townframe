@@ -3,6 +3,9 @@ name = "pauperfuse"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 name = "pauperfuse"
 path = "lib.rs"

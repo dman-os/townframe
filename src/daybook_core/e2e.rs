@@ -11,7 +11,7 @@ pub struct DaybookTestContext {
     pub _acx: AmCtx,
     pub drawer_repo: Arc<DrawerRepo>,
     pub dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
-    pub config_repo: Arc<crate::config::ConfigRepo>,
+    pub _config_repo: Arc<crate::config::ConfigRepo>,
     pub drawer_stop: crate::repos::RepoStopToken,
     pub plugs_stop: crate::repos::RepoStopToken,
     pub config_stop: crate::repos::RepoStopToken,
@@ -24,7 +24,7 @@ pub struct DaybookTestContext {
 
 impl DaybookTestContext {
     /// Wait until there are no active jobs, with a timeout
-    pub async fn wait_until_no_active_jobs(&self, timeout_secs: u64) -> Res<()> {
+    pub async fn _wait_until_no_active_jobs(&self, timeout_secs: u64) -> Res<()> {
         use tokio::time::{Duration, Instant};
 
         let start = Instant::now();
@@ -200,7 +200,7 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
         drawer_repo,
         rt,
         dispatch_repo,
-        config_repo,
+        _config_repo: config_repo,
         drawer_stop,
         plugs_stop,
         config_stop,

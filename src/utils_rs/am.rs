@@ -239,9 +239,9 @@ impl AmCtx {
                 match autosurgeon::hydrate_path(doc, &obj_id, path.clone()) {
                     Ok(Some(value)) => eyre::Ok(Some((value, heads))),
                     Ok(None) => eyre::Ok(None),
-                    Err(e) => {
-                        error!(?path, ?obj_id, "error hydrating path: {:?}", e);
-                        Err(ferr!("error hydrating: {e:?}"))
+                    Err(err) => {
+                        error!(?path, ?obj_id, "error hydrating path: {:?}", err);
+                        Err(ferr!("error hydrating: {err:?}"))
                     }
                 }
             }
@@ -310,10 +310,10 @@ impl AmCtx {
                             },
                             Prop::Index(idx) => {
                                 let idx_usize = *idx as usize;
-                                let len = tx.length(&current_obj) as usize;
+                                let len = tx.length(&current_obj);
                                 if idx_usize >= len {
-                                    for i in len..=idx_usize {
-                                        tx.insert(&current_obj, i, automerge::ScalarValue::Null)
+                                    for idx in len..=idx_usize {
+                                        tx.insert(&current_obj, idx, automerge::ScalarValue::Null)
                                             .wrap_err("error extending sequence")?;
                                     }
                                 }
@@ -341,7 +341,7 @@ impl AmCtx {
                     }
 
                     // Reconcile at the final prop using reconcile_prop
-                    autosurgeon::reconcile_prop(tx, current_obj, final_prop, &value)
+                    autosurgeon::reconcile_prop(tx, current_obj, final_prop, value)
                         .wrap_err("error reconciling")?;
                     eyre::Ok(())
                 })
@@ -413,10 +413,10 @@ impl AmCtx {
                         },
                         Prop::Index(idx) => {
                             let idx_usize = *idx as usize;
-                            let len = tx.length(&current_obj) as usize;
+                            let len = tx.length(&current_obj);
                             if idx_usize >= len {
-                                for i in len..=idx_usize {
-                                    tx.insert(&current_obj, i, automerge::ScalarValue::Null)
+                                for idx in len..=idx_usize {
+                                    tx.insert(&current_obj, idx, automerge::ScalarValue::Null)
                                         .wrap_err("error extending sequence")?;
                                 }
                             }
@@ -444,7 +444,7 @@ impl AmCtx {
                 }
 
                 // Reconcile at the final prop using reconcile_prop
-                autosurgeon::reconcile_prop(&mut tx, current_obj, final_prop, &value)
+                autosurgeon::reconcile_prop(&mut tx, current_obj, final_prop, value)
                     .wrap_err("error reconciling")?;
 
                 // Commit the transaction
@@ -476,14 +476,14 @@ impl AmCtx {
                 Some(autosurgeon::hydrate(&version).wrap_err("error hydrating")?)
             } else {
                 match autosurgeon::hydrate_path(&version, &obj_id, path) {
-                    Ok(Some(v)) => Some(v),
+                    Ok(Some(val)) => Some(val),
                     Ok(None) => None,
-                    Err(e) => {
-                        return Err(HydrateAtHeadError::Other(ferr!("error hydrating: {e:?}")))
+                    Err(err) => {
+                        return Err(HydrateAtHeadError::Other(ferr!("error hydrating: {err:?}")))
                     }
                 }
             };
-            Ok(value.map(|v| (v, heads)))
+            Ok(value.map(|item| (item, heads)))
         })
     }
 
@@ -568,9 +568,9 @@ fn play() -> Res<()> {
     doc.commit();
     let commit2 = doc.get_heads();
 
-    let patches = doc.diff(&commit1, &commit2);
+    let _patches = doc.diff(&commit1, &commit2);
 
-    let obj1 = doc.put_object(map.clone(), "foo", automerge::ObjType::Map)?;
+    let _obj1 = doc.put_object(map.clone(), "foo", automerge::ObjType::Map)?;
     doc.commit();
     let commit3 = doc.get_heads();
     let patches = doc.diff(&commit2, &commit3);

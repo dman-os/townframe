@@ -141,13 +141,13 @@ pub mod wit {
         }
     }
 
-    impl Into<Timestamp> for Datetime {
-        fn into(self) -> Timestamp {
-            match Timestamp::from_second(self.seconds as i64).and_then(|ts| {
-                ts.checked_add(std::time::Duration::from_nanos(self.nanoseconds.into()))
+    impl From<Datetime> for Timestamp {
+        fn from(value: Datetime) -> Timestamp {
+            match Timestamp::from_second(value.seconds as i64).and_then(|ts| {
+                ts.checked_add(std::time::Duration::from_nanos(value.nanoseconds.into()))
             }) {
                 Ok(val) => val,
-                Err(err) => panic!("unsupported Datetime: {self:?} - {err:?}"),
+                Err(err) => panic!("unsupported Datetime: {value:?} - {err:?}"),
             }
         }
     }

@@ -46,7 +46,7 @@ fn test_root_to_wit_conversion() {
     let content_prop = wit_doc
         .props
         .iter()
-        .find(|(k, _)| k == &WellKnownPropTag::Content.to_string());
+        .find(|(key, _)| key == &WellKnownPropTag::Content.to_string());
     assert!(content_prop.is_some());
 
     assert_eq!(wit_doc.props.len(), root_doc.props.len());

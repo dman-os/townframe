@@ -14,7 +14,7 @@ mod binds_guest {
     });
 }
 
-use wash_runtime::engine::ctx::Ctx as WashCtx;
+use wash_runtime::engine::ctx::{Ctx as WashCtx, SharedCtx as SharedWashCtx};
 use wash_runtime::wit::{WitInterface, WitWorld};
 
 // The bindgen macro generates types based on the WIT package structure
@@ -54,7 +54,6 @@ impl wash_runtime::plugin::HostPlugin for AmRepoPlugin {
             imports: std::collections::HashSet::from([WitInterface::from(
                 "townframe:am-repo/repo",
             )]),
-            ..default()
         }
     }
 
@@ -77,13 +76,14 @@ impl wash_runtime::plugin::HostPlugin for AmRepoPlugin {
     ) -> anyhow::Result<()> {
         let world = component.world();
         for iface in world.imports {
-            if iface.namespace == "townframe" && iface.package == "am-repo" {
-                if iface.interfaces.contains("repo") {
-                    repo::add_to_linker::<_, wasmtime::component::HasSelf<WashCtx>>(
-                        component.linker(),
-                        |ctx| ctx,
-                    )?;
-                }
+            if iface.namespace == "townframe"
+                && iface.package == "am-repo"
+                && iface.interfaces.contains("repo")
+            {
+                repo::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                    component.linker(),
+                    |ctx| ctx,
+                )?;
             }
         }
         Ok(())
@@ -110,7 +110,7 @@ impl wash_runtime::plugin::HostPlugin for AmRepoPlugin {
     }
 }
 
-impl repo::Host for WashCtx {
+impl repo::Host for SharedWashCtx {
     async fn reconcile_path(
         &mut self,
         doc_id: repo::DocId,
@@ -118,12 +118,12 @@ impl repo::Host for WashCtx {
         path: Vec<repo::PathProp>,
         json: repo::Json,
     ) -> wasmtime::Result<Result<(), repo::ReconcileError>> {
-        let plugin = AmRepoPlugin::from_ctx(self);
+        let plugin = AmRepoPlugin::from_ctx(&self.active_ctx);
 
         // Convert WIT types to Rust types
         let doc_id_rust: samod::DocumentId = doc_id
             .parse()
-            .map_err(|e| wasmtime::Error::msg(format!("invalid doc-id: {e}")))?;
+            .map_err(|err| wasmtime::Error::msg(format!("invalid doc-id: {err}")))?;
 
         let obj_id_rust = match obj_id {
             repo::ObjId::Root => automerge::ObjId::Root,
@@ -134,14 +134,14 @@ impl repo::Host for WashCtx {
 
         let path_rust: Vec<autosurgeon::Prop<'static>> = path
             .into_iter()
-            .map(|p| match p {
+            .map(|prop| match prop {
                 repo::PathProp::Key(key) => autosurgeon::Prop::Key(key.into()),
                 repo::PathProp::Index(idx) => autosurgeon::Prop::Index(idx as u32),
             })
             .collect();
 
         let json_value: serde_json::Value = serde_json::from_str(&json)
-            .map_err(|e| wasmtime::Error::msg(format!("invalid json: {e}")))?;
+            .map_err(|err| wasmtime::Error::msg(format!("invalid json: {err}")))?;
 
         plugin
             .am_ctx
@@ -166,12 +166,12 @@ impl repo::Host for WashCtx {
         path: Vec<repo::PathProp>,
         json: repo::Json,
     ) -> wasmtime::Result<Result<(), repo::ReconcileError>> {
-        let plugin = AmRepoPlugin::from_ctx(self);
+        let plugin = AmRepoPlugin::from_ctx(&self.active_ctx);
 
         // Convert WIT types to Rust types
         let doc_id_rust: samod::DocumentId = doc_id
             .parse()
-            .map_err(|e| wasmtime::Error::msg(format!("invalid doc-id: {e}")))?;
+            .map_err(|err| wasmtime::Error::msg(format!("invalid doc-id: {err}")))?;
 
         let heads = match utils_rs::am::parse_commit_heads(&heads) {
             Ok(val) => val,
@@ -187,14 +187,14 @@ impl repo::Host for WashCtx {
 
         let path_rust: Vec<autosurgeon::Prop<'static>> = path
             .into_iter()
-            .map(|p| match p {
+            .map(|prop| match prop {
                 repo::PathProp::Key(key) => autosurgeon::Prop::Key(key.into()),
                 repo::PathProp::Index(idx) => autosurgeon::Prop::Index(idx as u32),
             })
             .collect();
 
         let json_value: serde_json::Value = serde_json::from_str(&json)
-            .map_err(|e| wasmtime::Error::msg(format!("invalid json: {e}")))?;
+            .map_err(|err| wasmtime::Error::msg(format!("invalid json: {err}")))?;
 
         plugin
             .am_ctx
@@ -219,12 +219,12 @@ impl repo::Host for WashCtx {
         obj_id: repo::ObjId,
         path: Vec<repo::PathProp>,
     ) -> wasmtime::Result<Result<repo::Json, repo::HydrateAtHeadError>> {
-        let plugin = AmRepoPlugin::from_ctx(self);
+        let plugin = AmRepoPlugin::from_ctx(&self.active_ctx);
 
         // Convert WIT types to Rust types
         let doc_id_rust: samod::DocumentId = doc_id
             .parse()
-            .map_err(|e| wasmtime::Error::msg(format!("invalid doc-id: {e}")))?;
+            .map_err(|err| wasmtime::Error::msg(format!("invalid doc-id: {err}")))?;
 
         let heads = match utils_rs::am::parse_commit_heads(&heads) {
             Ok(val) => val,
@@ -246,7 +246,7 @@ impl repo::Host for WashCtx {
         // Convert path from Vec<PathProp> to Vec<autosurgeon::Prop>
         let path_rust: Vec<autosurgeon::Prop<'static>> = path
             .into_iter()
-            .map(|p| match p {
+            .map(|prop| match prop {
                 repo::PathProp::Key(key) => autosurgeon::Prop::Key(key.into()),
                 repo::PathProp::Index(idx) => autosurgeon::Prop::Index(idx as u32),
             })
@@ -263,8 +263,9 @@ impl repo::Host for WashCtx {
             .await
         {
             Ok(Some(json_wrapper)) => {
-                let json_str = serde_json::to_string(&json_wrapper.0)
-                    .map_err(|e| wasmtime::Error::msg(format!("error serializing to json: {e}")))?;
+                let json_str = serde_json::to_string(&json_wrapper.0).map_err(|err| {
+                    wasmtime::Error::msg(format!("error serializing to json: {err}"))
+                })?;
                 Ok(Ok(json_str))
             }
             Ok(None) => Ok(Err(repo::HydrateAtHeadError::PathNotFound)),

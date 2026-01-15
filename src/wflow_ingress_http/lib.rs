@@ -56,7 +56,7 @@ use wit::wasi::http::types::{Headers, OutgoingBody, OutgoingResponse};
 
 impl HttpIncomingGuest for Component {
     #[allow(async_fn_in_trait)]
-    fn handle(wasi_req: IncomingRequest, res_handle: ResponseOutparam) -> () {
+    fn handle(wasi_req: IncomingRequest, res_handle: ResponseOutparam) {
         utils_rs::setup_tracing().expect("error setting up tracing");
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -81,7 +81,7 @@ async fn handle_http(wasi_req: IncomingRequest, out_param: ResponseOutparam) -> 
     let wasi_res = OutgoingResponse::new({
         let headers = Headers::new();
         for (name, value) in axum_res.headers() {
-            headers.append(&name.to_string(), &Vec::from(value.as_bytes()))?;
+            headers.append(name.as_ref(), &Vec::from(value.as_bytes()))?;
         }
         headers
     });

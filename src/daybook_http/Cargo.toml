@@ -3,6 +3,9 @@ name = "daybook_http"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 default = ["utoipa", "serde"]
 serde = []

@@ -3,6 +3,9 @@ name = "api_utils_rs"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 path = "lib.rs"
 

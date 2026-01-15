@@ -27,7 +27,6 @@ pub mod metastore {
         pub version: String,
         pub partition_count: u64,
     }
-
 }
 pub mod types {
     use super::*;
@@ -35,5 +34,4 @@ pub mod types {
     pub type JobId = String;
 
     pub type PartitionId = u64;
-
 }

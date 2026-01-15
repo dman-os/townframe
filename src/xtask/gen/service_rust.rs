@@ -168,12 +168,12 @@ fn feature_module_schema_only(
 
         for id in schema_types {
             writeln!(buf)?;
-            let mut exp = ExportedTypesAppender {
+            let exp = ExportedTypesAppender {
                 into: Arc::new(DHashMap::default()),
                 wit_prefix: None,
                 rust_prefix: None,
             };
-            schema_type(cx, buf, &mut exp, *id)?;
+            schema_type(cx, buf, &exp, *id)?;
         }
     }
     writeln!(buf, "}}")?;
@@ -214,7 +214,7 @@ pub const TAG: api::Tag = api::Tag {{
         }
 
         {
-            let mut exp = ExportedTypesAppender {
+            let exp = ExportedTypesAppender {
                 into: exp_root.clone(),
                 wit_prefix: Some(format!(
                     "{wit_module}/{tag}",
@@ -224,7 +224,7 @@ pub const TAG: api::Tag = api::Tag {{
             };
             for id in schema_types {
                 writeln!(buf)?;
-                schema_type(cx, buf, &mut exp, *id)?;
+                schema_type(cx, buf, &exp, *id)?;
             }
         }
         {
@@ -950,11 +950,9 @@ fn record_field(
         .expect("unregistered field type")
     {
         // Emit serde codec helper for datetime fields
-        if cx.attrs.serde {
-            if cx.attrs.wit {
-                // When using WIT types, use Datetime codec that delegates through Timestamp
-                writeln!(buf, "#[serde(with = \"api_utils_rs::codecs::datetime\")]",)?;
-            }
+        if cx.attrs.serde && cx.attrs.wit {
+            // When using WIT types, use Datetime codec that delegates through Timestamp
+            writeln!(buf, "#[serde(with = \"api_utils_rs::codecs::datetime\")]",)?;
         }
         // Emit autosurgeon date helper at field-level when the parent record requested autosurgeon
         if cx.attrs.automerge {

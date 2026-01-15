@@ -8,11 +8,11 @@ await-holding-invalid-types = [
   { path = "dashmap::mapref::multiple::RefMutMulti", reason = "potentially deadlocks" },
   { path = "tokio::sync::Mutex", reason = "potential futurelock" }
 ]
-disallowed-names = [
-  "a","b","c","d","e",
-  "f","g","h","i","j",
-  "k","l","m","n","o",
-  "p","q","r","s","t",
-  "u","v","w","x","y",
-  "z", "..", "_"
-]
+# disallowed-names = [
+#   "a","b","c","d","e",
+#   "f","g","h","i","j",
+#   "k","l","m","n","o",
+#   "p","q","r","s","t",
+#   "u","v","w","x","y",
+#   "z", "..", "_"
+# ]

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::interlude::*;
 
 use http::{Method, StatusCode};
@@ -343,7 +345,7 @@ pub enum VariantVariantType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, bon::Builder)]
 #[builder(on(CHeapStr, into))]
-struct Alias {
+pub struct Alias {
     #[builder(start_fn)]
     name: CHeapStr,
     #[builder(start_fn)]
@@ -440,8 +442,8 @@ pub struct Feature {
 }
 
 #[derive(bon::Builder)]
-#[builder(on(String, into))]
-#[builder(on(CHeapStr, into))]
+#[allow(clippy::duplicated_attributes)]
+#[builder(on(String, into), on(CHeapStr, into))]
 pub struct EndpointType {
     #[builder(start_fn)]
     id: CHeapStr,
@@ -530,8 +532,8 @@ pub enum OutputType {
 }
 
 #[derive(bon::Builder)]
-#[builder(on(String, into))]
-#[builder(on(CHeapStr, into))]
+#[allow(clippy::duplicated_attributes)]
+#[builder(on(String, into), on(CHeapStr, into))]
 pub struct ErrorType {
     #[builder(field)]
     variants: IndexMap<CHeapStr, ErrorVariant>,

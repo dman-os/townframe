@@ -3,6 +3,9 @@ name = "daybook_ffi"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [[bin]]
 # This can be whatever name makes sense for your project, but the rest of this tutorial assumes uniffi-bindgen.
 name = "uniffi-bindgen"

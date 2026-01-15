@@ -74,7 +74,8 @@ pub async fn exchange_code_for_tokens_core(
 ) -> Res<Oauth2TokenResponse> {
     // Load PKCE verifier
     let verifier = session.kv_get("oauth2:code_verifier").await?;
-    let verifier: Option<Oauth2GrantState> = verifier.and_then(|s| serde_json::from_str(&s).ok());
+    let verifier: Option<Oauth2GrantState> =
+        verifier.and_then(|str_val| serde_json::from_str(&str_val).ok());
     let Some(verifier) = verifier else {
         return Err(ferr!("missing code verifier"));
     };

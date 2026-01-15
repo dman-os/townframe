@@ -18,7 +18,7 @@ pub struct SqlConfig {
 pub struct Ctx {
     pub acx: utils_rs::am::AmCtx,
     pub acx_stop: tokio::sync::Mutex<Option<utils_rs::am::AmCtxStopToken>>,
-    pub sql: SqlCtx,
+    pub _sql: SqlCtx,
     pub doc_app: tokio::sync::OnceCell<samod::DocHandle>,
     pub doc_drawer: tokio::sync::OnceCell<samod::DocHandle>,
     pub local_actor_id: automerge::ActorId,
@@ -74,7 +74,9 @@ impl Ctx {
                 path
             }
         };
-        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&daybook_types::doc::UserPath::from(local_user_path.clone()));
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(
+            &daybook_types::doc::UserPath::from(local_user_path.clone()),
+        );
 
         let (acx, acx_stop) =
             utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
@@ -89,7 +91,7 @@ impl Ctx {
         let cx = Arc::new(Self {
             acx,
             acx_stop: Some(acx_stop).into(),
-            sql,
+            _sql: sql,
             doc_app,
             doc_drawer,
             local_actor_id,

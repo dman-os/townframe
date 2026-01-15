@@ -3,6 +3,9 @@ name = "granary_web"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "granary_web"
 path = "main.rs"

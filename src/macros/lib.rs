@@ -8,7 +8,7 @@ pub fn http_error_derive(input: TokenStream) -> TokenStream {
     let name = &input.ident;
 
     let variants = match &input.data {
-        Data::Enum(e) => &e.variants,
+        Data::Enum(enm) => &enm.variants,
         _ => {
             return syn::Error::new_spanned(name, "HttpError can only be derived for enums")
                 .to_compile_error()
@@ -22,7 +22,11 @@ pub fn http_error_derive(input: TokenStream) -> TokenStream {
     // let mut desc_arms = Vec::new();
     for variant in variants {
         let variant_ident = &variant.ident;
-        let Some(attr) = variant.attrs.iter().find(|a| a.path().is_ident("http")) else {
+        let Some(attr) = variant
+            .attrs
+            .iter()
+            .find(|attr| attr.path().is_ident("http"))
+        else {
             return syn::Error::new_spanned(variant, "Missing #[http(...)] attribute")
                 .to_compile_error()
                 .into();

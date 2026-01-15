@@ -95,9 +95,9 @@ impl Config {
 struct Ctx {
     config: Config,
     acx: utils_rs::am::AmCtx,
-    acx_stop: tokio::sync::Mutex<Option<utils_rs::am::AmCtxStopToken>>,
+    _acx_stop: tokio::sync::Mutex<Option<utils_rs::am::AmCtxStopToken>>,
     // rt: tokio::runtime::Handle,
-    sql: SqlCtx,
+    _sql: SqlCtx,
     blobs: Arc<daybook_core::blobs::BlobsRepo>,
 
     doc_app: tokio::sync::OnceCell<::samod::DocHandle>,
@@ -123,7 +123,9 @@ impl Ctx {
                 path
             }
         };
-        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&daybook_types::doc::UserPath::from(local_user_path.clone()));
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(
+            &daybook_types::doc::UserPath::from(local_user_path.clone()),
+        );
 
         let (acx, acx_stop) =
             utils_rs::am::AmCtx::boot(config.am.clone(), Option::<samod::AlwaysAnnounce>::None)
@@ -140,8 +142,8 @@ impl Ctx {
         let cx = Arc::new(Ctx {
             config,
             acx,
-            acx_stop: Some(acx_stop).into(),
-            sql,
+            _acx_stop: Some(acx_stop).into(),
+            _sql: sql,
             blobs,
             doc_app,
             doc_drawer,

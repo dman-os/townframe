@@ -41,11 +41,7 @@ impl TypeReg {
     }
 }
 
-pub(crate) fn feature_file(
-    reg: &TypeReg,
-    buf: &mut impl Write,
-    feature: &Feature,
-) -> Res<()> {
+pub(crate) fn feature_file(reg: &TypeReg, buf: &mut impl Write, feature: &Feature) -> Res<()> {
     feature_file_with_schema_types(reg, buf, feature, &feature.schema_types)
 }
 

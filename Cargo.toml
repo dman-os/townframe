@@ -23,7 +23,7 @@ members = [
   "./src/wflow_ingress_http/",
   "./src/wflow_sdk",
   "./src/wflow_tokio/",
-  "./src/wflow_webui/",
+  # "./src/wflow_webui/",
   "./src/xtask",
 ]
 exclude = [
@@ -217,8 +217,8 @@ strip = "debuginfo"
 panic = "abort"
 
 
-[workspace.lints.clippy]
-clone-on-ref-ptr = "warn"
+[workspace.lints]
+clippy.clone_on_ref_ptr = "warn"
 
 [[workspace.metadata.leptos]]
 name = "wflow_webui"

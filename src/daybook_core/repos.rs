@@ -92,7 +92,7 @@ impl ListenersRegistry {
         for event in events {
             let event = Arc::new(event);
             for (_id, listener) in lock.iter() {
-                let ev = event.clone();
+                let ev = Arc::clone(&event);
                 // Call synchronously; foreign side should hop to main thread as needed.
                 listener.on_event(ev);
             }

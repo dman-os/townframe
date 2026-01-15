@@ -81,7 +81,7 @@ impl From<WellKnownPropTag> for DocPropTag {
 #[derive(Debug, thiserror::Error, displaydoc::Display, PartialEq)]
 pub enum DocPropTagParseError {
     /// A valid key must consist of a reverse domain name notation
-    NotDomainName { tag: String },
+    NotDomainName { _tag: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -149,10 +149,10 @@ pub mod user_path {
     pub fn new(device: &str, plug: Option<&str>, routine: Option<&str>) -> UserPath {
         let mut path = PathBuf::from("/");
         path.push(device);
-        if let Some(p) = plug {
-            path.push(p);
-            if let Some(r) = routine {
-                path.push(r);
+        if let Some(plug) = plug {
+            path.push(plug);
+            if let Some(routine) = routine {
+                path.push(routine);
             }
         }
         path
@@ -169,24 +169,24 @@ pub mod user_path {
     pub fn device(path: &UserPath) -> &str {
         path.components()
             .nth(1)
-            .and_then(|c| c.as_os_str().to_str())
+            .and_then(|component| component.as_os_str().to_str())
             .unwrap_or("")
     }
 
     pub fn plug(path: &UserPath) -> Option<&str> {
         path.components()
             .nth(2)
-            .and_then(|c| c.as_os_str().to_str())
+            .and_then(|component| component.as_os_str().to_str())
     }
 
     pub fn routine(path: &UserPath) -> Option<&str> {
         path.components()
             .nth(3)
-            .and_then(|c| c.as_os_str().to_str())
+            .and_then(|component| component.as_os_str().to_str())
     }
 
-    pub fn parse(s: &str) -> Res<UserPath> {
-        let path = PathBuf::from(s);
+    pub fn parse(input: &str) -> Res<UserPath> {
+        let path = PathBuf::from(input);
         if !path.as_path().has_root() {
             eyre::bail!("UserPath must start with /");
         }
@@ -321,20 +321,7 @@ mod ord {
 
     impl PartialOrd for DocPropTag {
         fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-            match (self, other) {
-                (DocPropTag::WellKnown(one), DocPropTag::WellKnown(two)) => {
-                    one.as_str().partial_cmp(two.as_str())
-                }
-                (DocPropTag::WellKnown(one), DocPropTag::Any(two)) => {
-                    one.as_str().partial_cmp(two.as_str())
-                }
-                (DocPropTag::Any(one), DocPropTag::WellKnown(two)) => {
-                    one.as_str().partial_cmp(two.as_str())
-                }
-                (DocPropTag::Any(two), DocPropTag::Any(one)) => {
-                    one.as_str().partial_cmp(two.as_str())
-                }
-            }
+            Some(self.cmp(other))
         }
     }
 
@@ -357,37 +344,7 @@ mod ord {
 
     impl PartialOrd for DocPropKey {
         fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-            match (self, other) {
-                (DocPropKey::Tag(one), DocPropKey::Tag(two)) => one.partial_cmp(two),
-                (DocPropKey::Tag(one), DocPropKey::TagAndId { tag: two, .. }) => {
-                    match one.partial_cmp(two) {
-                        // id always comes afer none ided keys
-                        Some(std::cmp::Ordering::Equal) => Some(std::cmp::Ordering::Less),
-                        ord => ord,
-                    }
-                }
-                (DocPropKey::TagAndId { tag: one, .. }, DocPropKey::Tag(two)) => {
-                    match one.partial_cmp(two) {
-                        // id always comes afer none ided keys
-                        Some(std::cmp::Ordering::Equal) => Some(std::cmp::Ordering::Greater),
-                        ord => ord,
-                    }
-                }
-                (
-                    DocPropKey::TagAndId {
-                        tag: one,
-                        id: id_one,
-                    },
-                    DocPropKey::TagAndId {
-                        tag: two,
-                        id: id_two,
-                    },
-                ) => match one.partial_cmp(two) {
-                    // id always comes afer none ided keys
-                    Some(std::cmp::Ordering::Equal) => id_one.partial_cmp(id_two),
-                    ord => ord,
-                },
-            }
+            Some(self.cmp(other))
         }
     }
 
@@ -491,10 +448,10 @@ mod ser_de {
     // }
 
     impl std::fmt::Display for DocPropTag {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
-                DocPropTag::WellKnown(val) => write!(f, "{val}"),
-                DocPropTag::Any(val) => write!(f, "{val}"),
+                DocPropTag::WellKnown(val) => write!(fmt, "{val}"),
+                DocPropTag::Any(val) => write!(fmt, "{val}"),
             }
         }
     }
@@ -624,11 +581,11 @@ mod ser_de {
     // }
 
     impl std::fmt::Display for DocPropKey {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
-                DocPropKey::Tag(val) => write!(f, "{val}"),
+                DocPropKey::Tag(val) => write!(fmt, "{val}"),
                 DocPropKey::TagAndId { tag, id } => {
-                    write!(f, "{tag}{sep}{id}", sep = Self::TAG_ID_SEPARATOR)
+                    write!(fmt, "{tag}{sep}{id}", sep = Self::TAG_ID_SEPARATOR)
                 }
             }
         }
@@ -652,8 +609,8 @@ mod ser_de {
             impl<'de> Visitor<'de> for KeyVisitor {
                 type Value = DocPropKey;
 
-                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                    f.write_str("a valid DocPropKey")
+                fn expecting(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+                    fmt.write_str("a valid DocPropKey")
                 }
 
                 fn visit_str<E>(self, val: &str) -> Result<DocPropKey, E>
@@ -781,7 +738,7 @@ mod ser_de {
             S: serde::Serializer,
         {
             if serializer.is_human_readable() {
-                utils_rs::hash::encode_base58_multibase(&self.0 .0).serialize(serializer)
+                utils_rs::hash::encode_base58_multibase(self.0 .0).serialize(serializer)
             } else {
                 serializer.serialize_bytes(&self.0 .0)
             }
@@ -839,7 +796,7 @@ mod ser_de {
             use serde::ser::SerializeSeq;
             let mut seq = serializer.serialize_seq(Some(self.len()))?;
             for hash in &self.0[..] {
-                seq.serialize_element(&EfficientChangeHash(hash.clone()))?;
+                seq.serialize_element(&EfficientChangeHash(*hash))?;
             }
             seq.end()
         }

@@ -58,7 +58,10 @@ impl DocNBranches {
         if self.branches.contains_key("main") {
             Some(daybook_types::doc::BranchPath::from("main"))
         } else {
-            self.branches.keys().next().map(|k| daybook_types::doc::BranchPath::from(k.as_str()))
+            self.branches
+                .keys()
+                .next()
+                .map(|key| daybook_types::doc::BranchPath::from(key.as_str()))
         }
     }
 }
@@ -381,7 +384,7 @@ impl DrawerRepo {
     }
 
     async fn handle_notifs(
-        self: &Self,
+        &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<ChangeNotification>>,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -404,7 +407,7 @@ impl DrawerRepo {
             let mut last_heads = None;
 
             for notif in notifs {
-                last_heads = Some(notif.heads.clone());
+                last_heads = Some(ChangeHashSet(Arc::clone(&notif.heads)));
 
                 // 1. Extract ActorId from the patch using the new utils_rs::am helper.
                 if let Some(actor_id) = utils_rs::am::get_actor_id_from_patch(&notif.patch) {
@@ -444,7 +447,7 @@ impl DrawerRepo {
             }
 
             if !events.is_empty() {
-                let drawer_heads = ChangeHashSet(last_heads.expect("notifs not empty"));
+                let drawer_heads = last_heads.expect("notifs not empty");
 
                 self.update_current_heads(drawer_heads.clone());
 
@@ -471,7 +474,7 @@ impl DrawerRepo {
             return Ok(());
         }
 
-        let drawer_heads = ChangeHashSet(patch_heads.clone());
+        let drawer_heads = ChangeHashSet(Arc::clone(patch_heads));
 
         match &patch.action {
             automerge::PatchAction::PutMap {
@@ -485,8 +488,8 @@ impl DrawerRepo {
                 let doc_id = DocId::from(doc_id_str.clone());
 
                 let version_bytes = match val {
-                    automerge::Value::Scalar(s) => match &**s {
-                        automerge::ScalarValue::Bytes(b) => b,
+                    automerge::Value::Scalar(scalar) => match &**scalar {
+                        automerge::ScalarValue::Bytes(bytes) => bytes,
                         _ => return Ok(()),
                     },
                     _ => return Ok(()),
@@ -498,7 +501,7 @@ impl DrawerRepo {
                     .acx
                     .hydrate_path_at_heads::<DocEntry>(
                         &self.drawer_doc_id,
-                        &patch_heads,
+                        patch_heads,
                         automerge::ROOT,
                         vec![
                             DrawerStore::PROP.into(),
@@ -695,8 +698,7 @@ impl DrawerRepo {
                 crate::config::UserMeta {
                     user_path,
                     seen_at: Timestamp::now(),
-                }
-                .into(),
+                },
             );
         }
         let entry = DocEntry {
@@ -711,7 +713,11 @@ impl DrawerRepo {
                     )
                 })
                 .collect(),
-            branches: [(args.branch_path.to_string_lossy().to_string(), heads.clone())].into(),
+            branches: [(
+                args.branch_path.to_string_lossy().to_string(),
+                heads.clone(),
+            )]
+            .into(),
             users,
             version: Uuid::nil(),
             previous_version_heads: None,
@@ -768,7 +774,11 @@ impl DrawerRepo {
         }
     }
 
-    pub async fn get(&self, id: &DocId, branch_path: &daybook_types::doc::BranchPath) -> Res<Option<Arc<Doc>>> {
+    pub async fn get(
+        &self,
+        id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+    ) -> Res<Option<Arc<Doc>>> {
         self.get_with_heads(id, branch_path)
             .await
             .map(|opt| opt.map(|(doc, _)| doc))
@@ -797,7 +807,11 @@ impl DrawerRepo {
                 store
                     .map
                     .get(id)
-                    .and_then(|entry| entry.branches.get(&branch_path.to_string_lossy().to_string()))
+                    .and_then(|entry| {
+                        entry
+                            .branches
+                            .get(&branch_path.to_string_lossy().to_string())
+                    })
                     .map(|latest_heads| latest_heads == heads)
                     .unwrap_or_default()
             })
@@ -820,17 +834,19 @@ impl DrawerRepo {
         let Some(latest_heads) = self
             .store
             .query_sync(|store| {
-                store
-                    .map
-                    .get(doc_id)
-                    .and_then(|entry| entry.branches.get(&branch_path.to_string_lossy().to_string()).cloned())
+                store.map.get(doc_id).and_then(|entry| {
+                    entry
+                        .branches
+                        .get(&branch_path.to_string_lossy().to_string())
+                        .cloned()
+                })
             })
             .await
         else {
             return Ok(None);
         };
         let doc = self.get_at_heads(doc_id, &latest_heads).await?;
-        Ok(doc.map(|d| (d, latest_heads)))
+        Ok(doc.map(|document| (document, latest_heads)))
     }
 
     pub async fn get_at_heads(&self, id: &DocId, heads: &ChangeHashSet) -> Res<Option<Arc<Doc>>> {
@@ -844,7 +860,7 @@ impl DrawerRepo {
         };
         let (doc, heads) = handle.with_document(move |am_doc| {
             let version = am_doc
-                .fork_at(&heads)
+                .fork_at(heads)
                 .wrap_err("error forking doc at heads")?;
             // Hydrate as automerge Doc, then convert to root Doc
             let doc: ThroughJson<Doc> =
@@ -852,11 +868,14 @@ impl DrawerRepo {
             eyre::Ok((doc.0, heads))
         })?;
         let doc: Arc<Doc> = Arc::new(doc);
-        self.cache.insert(id.clone(), (doc.clone(), heads.clone()));
+        self.cache.insert(id.clone(), (Arc::clone(&doc), heads.clone()));
         Ok(Some(doc))
     }
 
-    async fn get_actor_id_for_branch(&self, _branch_path: &daybook_types::doc::BranchPath) -> Res<automerge::ActorId> {
+    async fn get_actor_id_for_branch(
+        &self,
+        _branch_path: &daybook_types::doc::BranchPath,
+    ) -> Res<automerge::ActorId> {
         Ok(automerge::ActorId::random())
     }
 
@@ -887,15 +906,21 @@ impl DrawerRepo {
             None => match self
                 .store
                 .query_sync(|store| {
-                    store
-                        .map
-                        .get(&patch.id)
-                        .and_then(|entry| entry.branches.get(&branch_path.to_string_lossy().to_string()).cloned())
+                    store.map.get(&patch.id).and_then(|entry| {
+                        entry
+                            .branches
+                            .get(&branch_path.to_string_lossy().to_string())
+                            .cloned()
+                    })
                 })
                 .await
             {
                 Some(val) => val,
-                None => return Err(UpdateDocErr::BranchNotFound { name: branch_path.to_string_lossy().to_string() }),
+                None => {
+                    return Err(UpdateDocErr::BranchNotFound {
+                        name: branch_path.to_string_lossy().to_string(),
+                    })
+                }
             },
         };
 
@@ -921,14 +946,14 @@ impl DrawerRepo {
                     &mut tx,
                     &props_obj,
                     key_str.as_str(),
-                    &ThroughJson(value.clone()),
+                    ThroughJson(value.clone()),
                 )
-                .map_err(|e| ferr!("error reconciling prop {}: {:?}", key, e))?;
+                .map_err(|err| ferr!("error reconciling prop {}: {:?}", key, err))?;
             }
             for key in &patch.props_remove {
                 let key_str = key.to_string();
                 tx.delete(&props_obj, key_str.as_str())
-                    .map_err(|e| ferr!("error deleting prop {}: {:?}", key, e))?;
+                    .map_err(|err| ferr!("error deleting prop {}: {:?}", key, err))?;
             }
 
             if tx.pending_ops() > 0 {
@@ -944,7 +969,8 @@ impl DrawerRepo {
             eyre::Ok(new_heads)
         })?;
 
-        let (_, drawer_heads) = self.store
+        let (_, drawer_heads) = self
+            .store
             .mutate_sync(|store| {
                 let entry = store
                     .map
@@ -962,7 +988,9 @@ impl DrawerRepo {
                         },
                     );
                 }
-                entry.branches.insert(branch_path.to_string_lossy().to_string(), new_heads);
+                entry
+                    .branches
+                    .insert(branch_path.to_string_lossy().to_string(), new_heads);
                 entry.version = Uuid::new_v4();
                 entry.previous_version_heads = Some(current_heads);
                 if let Some(user_path) = patch.user_path {
@@ -971,8 +999,7 @@ impl DrawerRepo {
                         crate::config::UserMeta {
                             user_path,
                             seen_at: Timestamp::now(),
-                        }
-                        .into(),
+                        },
                     );
                 }
             })
@@ -1032,10 +1059,12 @@ impl DrawerRepo {
         let to_heads = self
             .store
             .query_sync(|store| {
-                store
-                    .map
-                    .get(id)
-                    .and_then(|entry| entry.branches.get(&to_branch.to_string_lossy().to_string()).cloned())
+                store.map.get(id).and_then(|entry| {
+                    entry
+                        .branches
+                        .get(&to_branch.to_string_lossy().to_string())
+                        .cloned()
+                })
             })
             .await
             .ok_or_eyre(format!("branch not found: {:?}", to_branch))?;
@@ -1048,7 +1077,7 @@ impl DrawerRepo {
 
             let mut am_from = am_doc
                 .fork_at(&from_heads.0)
-                .map_err(|e| ferr!("error forking am_from: {e}"))?;
+                .map_err(|err| ferr!("error forking am_from: {err}"))?;
 
             let mut patch_log = automerge::PatchLog::active();
 
@@ -1062,7 +1091,9 @@ impl DrawerRepo {
             let new_heads = ChangeHashSet(new_heads_vec.clone().into());
 
             // Merge the result back into the main document handle
-            am_doc.merge(&mut am_to).wrap_err("error merging back to am_doc")?;
+            am_doc
+                .merge(&mut am_to)
+                .wrap_err("error merging back to am_doc")?;
 
             let mut modified_props = HashSet::new();
             let mut deleted_props = HashSet::new();
@@ -1088,7 +1119,8 @@ impl DrawerRepo {
         })?;
 
         let current_heads = self.current_heads();
-        let (_, drawer_heads) = self.store
+        let (_, drawer_heads) = self
+            .store
             .mutate_sync(|store| {
                 let entry = store.map.get_mut(id).expect("doc entry disappeared");
                 for prop_name in deleted_props {
@@ -1102,7 +1134,9 @@ impl DrawerRepo {
                         },
                     );
                 }
-                entry.branches.insert(to_branch.to_string_lossy().to_string(), new_heads);
+                entry
+                    .branches
+                    .insert(to_branch.to_string_lossy().to_string(), new_heads);
                 entry.version = Uuid::new_v4();
                 entry.previous_version_heads = Some(current_heads);
                 if let Some(user_path) = user_path {
@@ -1111,8 +1145,7 @@ impl DrawerRepo {
                         crate::config::UserMeta {
                             user_path,
                             seen_at: Timestamp::now(),
-                        }
-                        .into(),
+                        },
                     );
                 }
             })
@@ -1135,10 +1168,12 @@ impl DrawerRepo {
         let from_heads = self
             .store
             .query_sync(|store| {
-                store
-                    .map
-                    .get(id)
-                    .and_then(|entry| entry.branches.get(&from_branch.to_string_lossy().to_string()).cloned())
+                store.map.get(id).and_then(|entry| {
+                    entry
+                        .branches
+                        .get(&from_branch.to_string_lossy().to_string())
+                        .cloned()
+                })
             })
             .await
             .ok_or_eyre(format!("from_branch not found: {:?}", from_branch))?;
@@ -1160,7 +1195,10 @@ impl DrawerRepo {
                 let Some(entry) = store.map.get_mut(id) else {
                     return false;
                 };
-                let existed = entry.branches.remove(&branch_path.to_string_lossy().to_string()).is_some();
+                let existed = entry
+                    .branches
+                    .remove(&branch_path.to_string_lossy().to_string())
+                    .is_some();
                 if existed {
                     entry.version = Uuid::new_v4();
                     entry.previous_version_heads = Some(current_heads);
@@ -1170,8 +1208,7 @@ impl DrawerRepo {
                             crate::config::UserMeta {
                                 user_path,
                                 seen_at: Timestamp::now(),
-                            }
-                            .into(),
+                            },
                         );
                     }
                 }
@@ -1265,9 +1302,12 @@ mod tests {
         )
         .await?;
 
-        crate::tincans::connect_repos(&client_acx.repo(), &server_acx.repo());
-        client_acx.repo().when_connected("server".into()).await?;
-        server_acx.repo().when_connected("client".into()).await?;
+        #[allow(deprecated)]
+        {
+            crate::tincans::connect_repos(client_acx.repo(), server_acx.repo());
+            client_acx.repo().when_connected("server".into()).await?;
+            server_acx.repo().when_connected("client".into()).await?;
+        }
 
         let drawer_doc_id = {
             let doc = automerge::Automerge::load(&version_updates::version_latest()?)?;
@@ -1403,7 +1443,11 @@ mod tests {
                     .get(&doc_id)
                     .unwrap()
                     .branches
-                    .get(&daybook_types::doc::BranchPath::from("main").to_string_lossy().to_string())
+                    .get(
+                        &daybook_types::doc::BranchPath::from("main")
+                            .to_string_lossy()
+                            .to_string(),
+                    )
                     .cloned()
                     .unwrap()
             })
@@ -1450,19 +1494,32 @@ mod tests {
 
         // 5. Merge branch-a to main
         println!("Merging branch-a to main...");
-        repo.merge_from_branch(&doc_id, &daybook_types::doc::BranchPath::from("main"), &daybook_types::doc::BranchPath::from("branch-a"), None)
-            .await?;
+        repo.merge_from_branch(
+            &doc_id,
+            &daybook_types::doc::BranchPath::from("main"),
+            &daybook_types::doc::BranchPath::from("branch-a"),
+            None,
+        )
+        .await?;
         println!("Branch-a merged.");
 
         // 6. Merge branch-b to main
         println!("Merging branch-b to main...");
-        repo.merge_from_branch(&doc_id, &daybook_types::doc::BranchPath::from("main"), &daybook_types::doc::BranchPath::from("branch-b"), None)
-            .await?;
+        repo.merge_from_branch(
+            &doc_id,
+            &daybook_types::doc::BranchPath::from("main"),
+            &daybook_types::doc::BranchPath::from("branch-b"),
+            None,
+        )
+        .await?;
         println!("Branch-b merged.");
 
         // 7. Assertions
         println!("Checking assertions...");
-        let merged_doc = repo.get(&doc_id, &daybook_types::doc::BranchPath::from("main")).await?.unwrap();
+        let merged_doc = repo
+            .get(&doc_id, &daybook_types::doc::BranchPath::from("main"))
+            .await?
+            .unwrap();
         assert_eq!(
             merged_doc.props.get(&prop_title).unwrap(),
             &serde_json::Value::from(WellKnownProp::TitleGeneric("Title A".into()))
@@ -1482,14 +1539,33 @@ mod tests {
 
         // 8. Delete branch-a
         println!("Deleting branch-a...");
-        assert!(repo.delete_branch(&doc_id, &daybook_types::doc::BranchPath::from("branch-a"), None).await?);
+        assert!(
+            repo.delete_branch(
+                &doc_id,
+                &daybook_types::doc::BranchPath::from("branch-a"),
+                None
+            )
+            .await?
+        );
         let entry = repo
             .store
             .query_sync(|s| s.map.get(&doc_id).cloned().unwrap())
             .await;
-        assert!(!entry.branches.contains_key(&daybook_types::doc::BranchPath::from("branch-a").to_string_lossy().to_string()));
-        assert!(entry.branches.contains_key(&daybook_types::doc::BranchPath::from("branch-b").to_string_lossy().to_string()));
-        assert!(entry.branches.contains_key(&daybook_types::doc::BranchPath::from("main").to_string_lossy().to_string()));
+        assert!(!entry.branches.contains_key(
+            &daybook_types::doc::BranchPath::from("branch-a")
+                .to_string_lossy()
+                .to_string()
+        ));
+        assert!(entry.branches.contains_key(
+            &daybook_types::doc::BranchPath::from("branch-b")
+                .to_string_lossy()
+                .to_string()
+        ));
+        assert!(entry.branches.contains_key(
+            &daybook_types::doc::BranchPath::from("main")
+                .to_string_lossy()
+                .to_string()
+        ));
 
         println!("Test finished successfully!");
         acx_stop.stop().await?;
@@ -1519,13 +1595,17 @@ mod tests {
         assert_ne!(doc_to.get_actor(), doc_from.get_actor());
 
         // 3. Make a change on doc_to
-        doc_to.transact(|tx| tx.put(ROOT, "key_to", "val_to")).unwrap();
+        doc_to
+            .transact(|tx| tx.put(ROOT, "key_to", "val_to"))
+            .unwrap();
 
         // 4. Set a specific actor ID on doc_from to simulate a conflict if we used the same one
         // (Though Automerge forks already have unique ones, we might have manually set them)
         let random_actor = ActorId::random();
         doc_from.set_actor(random_actor.clone());
-        doc_from.transact(|tx| tx.put(ROOT, "key_from", "val_from")).unwrap();
+        doc_from
+            .transact(|tx| tx.put(ROOT, "key_from", "val_from"))
+            .unwrap();
 
         // 5. Merge doc_from into doc_to
         doc_to.merge(&mut doc_from).unwrap();
@@ -1533,11 +1613,23 @@ mod tests {
         // 6. Confirm merge worked
         // confirm merge worked
         assert_eq!(
-            doc_to.get(ROOT, "key_from").unwrap().unwrap().0.to_str().unwrap(),
+            doc_to
+                .get(ROOT, "key_from")
+                .unwrap()
+                .unwrap()
+                .0
+                .to_str()
+                .unwrap(),
             "val_from"
         );
         assert_eq!(
-            doc_to.get(ROOT, "key_to").unwrap().unwrap().0.to_str().unwrap(),
+            doc_to
+                .get(ROOT, "key_to")
+                .unwrap()
+                .unwrap()
+                .0
+                .to_str()
+                .unwrap(),
             "val_to"
         );
 
@@ -1547,30 +1639,37 @@ mod tests {
         let mut doc_source = doc1.fork_at(&base_heads).unwrap();
         let random_actor_2 = ActorId::random();
         doc_source.set_actor(random_actor_2.clone());
-        
+
         // Merge without changes on doc_source
         doc_target.merge(&mut doc_source).unwrap();
-        
+
         // Check all changes in doc_target
         for change in doc_target.get_changes(&[]) {
-            assert_ne!(change.actor_id(), &random_actor_2, "Random actor ID should NOT show up in changes if no ops were made with it");
+            assert_ne!(
+                change.actor_id(),
+                &random_actor_2,
+                "Random actor ID should NOT show up in changes if no ops were made with it"
+            );
         }
 
         // 8. Confirm that using the SAME actor ID on both forks causes merge issues
         // (This is why we use random actor IDs in our implementation)
         let mut doc_a = doc1.fork_at(&base_heads).unwrap();
         let mut doc_b = doc1.fork_at(&base_heads).unwrap();
-        
+
         let shared_actor = ActorId::random();
         doc_a.set_actor(shared_actor.clone());
         doc_b.set_actor(shared_actor.clone());
-        
+
         doc_a.transact(|tx| tx.put(ROOT, "key_a", "val_a")).unwrap();
         doc_b.transact(|tx| tx.put(ROOT, "key_b", "val_b")).unwrap();
-        
+
         // Merging doc_b into doc_a when they share an actor ID and have diverged
         // results in an error because of sequence number conflict.
         let res = doc_a.merge(&mut doc_b);
-        assert!(res.is_err(), "Merge should fail when sharing actor ID and sequence numbers");
+        assert!(
+            res.is_err(),
+            "Merge should fail when sharing actor ID and sequence numbers"
+        );
     }
 }

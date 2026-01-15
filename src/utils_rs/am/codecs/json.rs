@@ -62,16 +62,16 @@ pub fn reconcile_value<R: Reconciler>(
             // Delete any extra items
             let old_len = seq.len()?;
             if old_len > val.len() {
-                for i in (val.len()..old_len).rev() {
-                    seq.delete(i)?;
+                for idx in (val.len()..old_len).rev() {
+                    seq.delete(idx)?;
                 }
             }
             // Set or insert items
             for (idx, item) in val.iter().enumerate() {
                 if idx < old_len {
-                    seq.set(idx, &ThroughJson(item))?;
+                    seq.set(idx, ThroughJson(item))?;
                 } else {
-                    seq.insert(idx, &ThroughJson(item))?;
+                    seq.insert(idx, ThroughJson(item))?;
                 }
             }
             Ok(())
@@ -91,7 +91,7 @@ pub fn reconcile_value<R: Reconciler>(
             }
             // Put or update entries
             for (key, value) in val {
-                map_reconciler.put(key, &ThroughJson(value))?;
+                map_reconciler.put(key, ThroughJson(value))?;
             }
             Ok(())
         }
@@ -191,7 +191,7 @@ where
     }
 
     fn hydrate_counter(value: i64) -> Result<Self, HydrateError> {
-        let value = serde_json::Value::Number((i64::from(value)).into());
+        let value = serde_json::Value::Number(value.into());
         let value = from_value(value)?;
         Ok(Self(value))
     }
@@ -237,8 +237,8 @@ where
     fn hydrate_map<D: ReadDoc>(doc: &D, obj: &automerge::ObjId) -> Result<Self, HydrateError> {
         let value = {
             let mut map = serde_json::Map::new();
-            for item in doc.map_range(&obj, ..) {
-                let value = hydrate_value(doc, &obj, autosurgeon::Prop::Key(item.key.clone()))?;
+            for item in doc.map_range(obj, ..) {
+                let value = hydrate_value(doc, obj, autosurgeon::Prop::Key(item.key.clone()))?;
                 map.insert(item.key.to_string(), value);
             }
             serde_json::Value::Object(map)
@@ -250,8 +250,8 @@ where
     fn hydrate_seq<D: ReadDoc>(doc: &D, obj: &automerge::ObjId) -> Result<Self, HydrateError> {
         let value = {
             let mut arr = Vec::new();
-            for ii in 0..doc.length(&obj) {
-                let value = hydrate_value(doc, &obj, autosurgeon::Prop::Index(ii as u32))?;
+            for ii in 0..doc.length(obj) {
+                let value = hydrate_value(doc, obj, autosurgeon::Prop::Index(ii as u32))?;
                 arr.push(value);
             }
             serde_json::Value::Array(arr)
@@ -462,7 +462,7 @@ mod tests {
         autosurgeon::reconcile_prop(&mut doc, automerge::ROOT, "normal", val.clone())?;
         doc.commit();
 
-        let raw: ThroughJson<serde_json::Value> = autosurgeon::hydrate(&doc)?;
+        let _raw: ThroughJson<serde_json::Value> = autosurgeon::hydrate(&doc)?;
 
         let commited1: ThroughJson<Foo> = autosurgeon::hydrate(&doc)?;
         let commited2: ThroughJson<Foo> =

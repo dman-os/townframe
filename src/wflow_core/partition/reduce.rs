@@ -123,7 +123,7 @@ pub fn reduce_job_run_event(
     }
 }
 
-fn archive_job<'a>(state: &'a mut state::PartitionJobsState, job_id: &Arc<str>) {
+fn archive_job(state: &mut state::PartitionJobsState, job_id: &Arc<str>) {
     let job_state = state.active.remove(job_id).unwrap();
     state.archive.insert(job_id.clone(), job_state);
 }

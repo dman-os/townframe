@@ -24,7 +24,7 @@ async fn test_fails_until_told() -> Res<()> {
     }))?;
 
     test_cx
-        .schedule_job(job_id.clone(), "fails_until_told", args_json.clone())
+        .schedule_job(Arc::clone(&job_id), "fails_until_told", args_json.clone())
         .await?;
 
     // Wait until we see a job run that fails with "waiting for flag to be set"
@@ -55,9 +55,9 @@ async fn test_fails_until_told() -> Res<()> {
     // Note: We'll create a new metastore for the second run so we can register
     // the workload fresh, but we'll reuse logstore and snap_store which contain
     // the job state and snapshots
-    let logstore = test_cx.logstore.clone();
-    let snap_store = test_cx.snapstore.clone();
-    let keyvalue_plugin = test_cx.keyvalue_plugin.clone();
+    let logstore = Arc::clone(&test_cx.logstore);
+    let snap_store = Arc::clone(&test_cx.snapstore);
+    let keyvalue_plugin = Arc::clone(&test_cx.keyvalue_plugin);
 
     // Cleanup first run
     test_cx.stop().await?;

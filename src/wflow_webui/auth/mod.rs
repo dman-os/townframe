@@ -88,7 +88,7 @@ pub fn RedirectOauth() -> impl IntoView {
         if let Some(st) = query().get("state") {
             let decoded = percent_encoding::percent_decode_str(&st)
                 .decode_utf8()
-                .map(|c| c.to_string())
+                .map(|chr| chr.to_string())
                 .unwrap_or_else(|_| "/".to_string());
             decoded
         } else {
@@ -178,7 +178,7 @@ pub fn SignUpPage() -> impl IntoView {
     let action = ServerAction::<SignUp>::new();
     let value = action.value();
     // check if the server has returned an error
-    let has_error = move || value.with(|val| matches!(val, Some(Err(_))));
+    let _has_error = move || value.with(|val| matches!(val, Some(Err(_))));
     view! {
         <div class="flex flex-col items-center justify-center min-h-svh">
             <div class="flex flex-col w-full max-w-sm gap-6">
