@@ -170,6 +170,7 @@ pub async fn spawn_doc_triage_worker(
 
             loop {
                 tokio::select! {
+                    biased;
                     _ = cancel_token.cancelled() => {
                         debug!("DocTriageWorker cancelled");
                         break;
@@ -476,9 +477,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_triage_worker_smoke() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("triage_smoke").await?;
 
-        // Add a doc that should trigger the pseudo-label processor
+        // Add a doc that should trigger the test-label processor
         let _doc_id = ctx
             .drawer_repo
             .add(AddDocArgs {
@@ -495,27 +497,29 @@ mod tests {
             })
             .await?;
 
-        // Wait a bit for triage to run and dispatch
-        let mut found = false;
-        for _ in 0..50 {
+        // Wait for the dispatch to be created
+        let mut dispatch_id: Option<String> = None;
+        for _ in 0..300 {
             let dispatches = ctx.dispatch_repo.list().await;
-            if dispatches.iter().any(|(_, d)| {
-                match &d.deets {
-                    crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } => {
-                        wflow_key == "test-label"
-                    }
-                }
+            if let Some((id, _d)) = dispatches.iter().find(|(_, d)| {
+                matches!(
+                    &d.deets,
+                    crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } if wflow_key == "test-label"
+                )
             }) {
-                found = true;
+                dispatch_id = Some(id.clone());
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        // Check if a dispatch was created
-        let dispatches = ctx.dispatch_repo.list().await;
-        info!(?dispatches, "current dispatches");
-        assert!(found, "test-label dispatch not found in {:?}", dispatches);
+        let dispatch_id = dispatch_id.ok_or_eyre("test-label dispatch not found")?;
+        
+        // Wait for the dispatch to complete
+        ctx.rt.wait_for_dispatch_end(
+            &dispatch_id,
+            std::time::Duration::from_secs(90),
+        ).await?;
 
         ctx.stop().await?;
         Ok(())

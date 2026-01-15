@@ -3,9 +3,11 @@ use crate::interlude::*;
 use daybook_types::doc::{
     AddDocArgs, DocContent, DocPropKey, DocPropTag, WellKnownProp, WellKnownPropTag,
 };
+use crate::rt::dispatch::PropRoutineArgs;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_labeler_workflow() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let test_cx = crate::e2e::test_cx(utils_rs::function_full!()).await?;
 
     // Create and add a document to the drawer
@@ -29,11 +31,32 @@ async fn test_labeler_workflow() -> Res<()> {
     // Add the document - DocTriageWorker will automatically queue the workflow job
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;
 
-    // Wait for the workflow to complete
-    test_cx.wait_until_no_active_jobs(90).await?;
+    // Find the test-label dispatch and wait for it to complete
+    let mut dispatch_id: Option<String> = None;
+    for _ in 0..300 {
+        let dispatches = test_cx.dispatch_repo.list().await;
+        if let Some((id, _d)) = dispatches.iter().find(|(_, d)| {
+            matches!(
+                &d.deets,
+                crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } if wflow_key == "test-label"
+            )
+        }) {
+            dispatch_id = Some(id.clone());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let dispatch_id = dispatch_id.ok_or_eyre("test-label dispatch not found")?;
+    
+    // Wait for the dispatch to complete
+    test_cx.rt.wait_for_dispatch_end(
+        &dispatch_id,
+        std::time::Duration::from_secs(90),
+    ).await?;
 
     // Give a small delay to ensure document updates are propagated
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Verify the doc has a LabelGeneric tag from test-labeler
     let updated_doc = test_cx
@@ -65,6 +88,7 @@ async fn test_labeler_workflow() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_staging_branch_workflow() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let test_cx = crate::e2e::test_cx(utils_rs::function_full!()).await?;
 
     // Create and add a document to the drawer
@@ -83,13 +107,13 @@ async fn test_staging_branch_workflow() -> Res<()> {
     // Add the document - DocTriageWorker will automatically queue the workflow job
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;
 
-    // Wait a bit for the dispatch to be created and workflow to start
-    let mut dispatch_found = false;
+    // Wait for the dispatch to be created
+    let mut dispatch_id: Option<String> = None;
     let mut staging_branch_path: Option<daybook_types::doc::BranchPath> = None;
     
-    for _ in 0..50 {
+    for _ in 0..300 {
         let dispatches = test_cx.dispatch_repo.list().await;
-        if let Some((_, dispatch)) = dispatches.iter().find(|(_, d)| {
+        if let Some((id, dispatch)) = dispatches.iter().find(|(_, d)| {
             matches!(
                 &d.args,
                 crate::rt::dispatch::ActiveDispatchArgs::PropRoutine(_)
@@ -98,16 +122,19 @@ async fn test_staging_branch_workflow() -> Res<()> {
                 crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } if wflow_key == "test-label"
             )
         }) {
-            dispatch_found = true;
-            let crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_job_id, .. } = &dispatch.deets;
-            staging_branch_path = Some(daybook_types::doc::BranchPath::from(format!("/tmp/{}", wflow_job_id)));
+            dispatch_id = Some(id.clone());
+            let crate::rt::dispatch::ActiveDispatchArgs::PropRoutine(PropRoutineArgs {
+                staging_branch_path: path,
+                ..
+            }) = &dispatch.args;
+            staging_branch_path = Some(path.clone());
             info!(?staging_branch_path, "found staging branch path");
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    assert!(dispatch_found, "dispatch should be created");
+    let dispatch_id = dispatch_id.ok_or_eyre("test-label dispatch should be created")?;
     let staging_branch = staging_branch_path.expect("staging branch path should be set");
 
     // Wait a bit for the workflow to make modifications to the staging branch
@@ -131,8 +158,11 @@ async fn test_staging_branch_workflow() -> Res<()> {
         }
     }
 
-    // Wait for the workflow to complete
-    test_cx.wait_until_no_active_jobs(90).await?;
+    // Wait for the dispatch to complete
+    test_cx.rt.wait_for_dispatch_end(
+        &dispatch_id,
+        std::time::Duration::from_secs(90),
+    ).await?;
 
     // Give a small delay to ensure document updates are propagated
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;

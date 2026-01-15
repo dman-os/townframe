@@ -116,10 +116,14 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
         utils_rs::testing::setup_tracing_once();
     });
 
+    // Generate unique IDs for this test to ensure complete isolation across parallel test runs
+    let device_id = format!("test_{}", uuid::Uuid::new_v4().simple());
+    let peer_id = format!("test_{}", uuid::Uuid::new_v4().simple());
+
     // Initialize AmCtx with memory storage
     let (acx, acx_stop) = AmCtx::boot(
         utils_rs::am::Config {
-            peer_id: "test".to_string(),
+            peer_id,
             storage: utils_rs::am::StorageConfig::Memory,
         },
         Option::<samod::AlwaysAnnounce>::None,
@@ -175,13 +179,12 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
     let db_path = temp_dir.path().join("wflow.db");
     let wflow_db_url = format!("sqlite:{}?mode=rwc", db_path.display());
 
-    let wcx = wflow::Ctx::init(&wflow_db_url).await?;
     let (rt, rt_stop) = crate::rt::Rt::boot(
         crate::rt::RtConfig {
-            device_id: "test_01".into(),
+            device_id: device_id.clone(),
         },
         app_doc_id,
-        wcx,
+        wflow_db_url,
         acx.clone(),
         Arc::clone(&drawer_repo),
         Arc::clone(&plug_repo),

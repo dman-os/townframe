@@ -4,6 +4,8 @@ use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
 use wflow_core::kvstore::*;
 
+use utils_rs::expect_tags::ERROR_CHANNEL;
+
 enum KvMsg {
     BootTable {
         table: Arc<str>,
@@ -47,7 +49,7 @@ enum KvMsg {
 
 #[derive(Clone)]
 pub struct SqliteKvFactory {
-    sender: mpsc::Sender<KvMsg>,
+    sender: mpsc::UnboundedSender<KvMsg>,
 }
 
 impl SqliteKvFactory {
@@ -55,11 +57,14 @@ impl SqliteKvFactory {
         let opts = sqlx::sqlite::SqliteConnectOptions::from_str(db_url)?
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-        let db_pool = sqlx::SqlitePool::connect_with(opts).await?;
-        let (tx, rx) = mpsc::channel(100);
+        let db_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_with(opts)
+            .await?;
+        // Use unbounded channel since the worker is single-threaded and processes messages sequentially
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let worker = SqliteKvWorker { db_pool };
         tokio::spawn(async move {
-            worker.run(rx).await.unwrap_or_log();
+            worker.run(&mut rx).await.unwrap_or_log();
         });
         Ok(Self { sender: tx })
     }
@@ -72,9 +77,8 @@ impl SqliteKvFactory {
                 table: table.clone(),
                 resp: tx,
             })
-            .await
             .map_err(|_| ferr!("factory gone"))?;
-        rx.await.map_err(|_| ferr!("factory gone"))??;
+        rx.await.wrap_err(ERROR_CHANNEL)??;
 
         Ok(SqliteKvStore {
             table_name: table,
@@ -87,7 +91,13 @@ impl SqliteKvFactory {
 #[derive(Clone)]
 pub struct SqliteKvStore {
     table_name: Arc<str>,
-    sender: mpsc::Sender<KvMsg>,
+    sender: mpsc::UnboundedSender<KvMsg>,
+}
+
+impl Drop for SqliteKvStore {
+    fn drop(&mut self) {
+        trace!(?self.table_name, "SqliteKvStore dropped");
+    }
 }
 
 impl SqliteKvStore {
@@ -111,10 +121,9 @@ impl SqliteKvStore {
                         snapshot_version: version,
                         resp: tx,
                     })
-                    .await
                     .map_err(|_| ferr!("worker gone"))?;
 
-                match rx.await.map_err(|_| ferr!("worker gone"))?? {
+                match rx.await.wrap_err(ERROR_CHANNEL)?? {
                     Ok(()) => Ok(Ok(())),
                     Err((new_v, new_ver)) => {
                         let new_guard = store.make_cas_guard(key, new_v, new_ver);
@@ -132,15 +141,30 @@ struct SqliteKvWorker {
     db_pool: sqlx::SqlitePool,
 }
 
+
 impl SqliteKvWorker {
-    async fn run(&self, mut rx: mpsc::Receiver<KvMsg>) -> Res<()> {
-        while let Some(msg) = rx.recv().await {
+    #[tracing::instrument(skip(self, rx), err, ret)]
+    async fn run(&self, rx: &mut mpsc::UnboundedReceiver<KvMsg>) -> Res<()> {
+        loop {
+            let msg = match rx.recv().await {
+                Some(msg) => msg,
+                None => break,
+            };
+            
             match msg {
                 KvMsg::BootTable { table, resp } => {
-                    let _ = resp.send(self.handle_boot(&table).await);
+                    let result = self.handle_boot(&table).await
+                        .inspect_err(|e| error!(?e, ?table, "handle_boot failed"));
+                    resp.send(result)
+                        .inspect_err(|e| error!(?e, ?table, "caller dropped before receiving BootTable response"))
+                        .ok();
                 }
                 KvMsg::Get { table, key, resp } => {
-                    let _ = resp.send(self.handle_get(&table, &key).await);
+                    let result = self.handle_get(&table, &key).await
+                        .inspect_err(|e| error!(?e, ?table, "handle_get failed"));
+                    resp.send(result)
+                        .inspect_err(|e| error!(?e, ?table, "caller dropped before receiving Get response"))
+                        .ok();
                 }
                 KvMsg::Set {
                     table,
@@ -148,10 +172,18 @@ impl SqliteKvWorker {
                     value,
                     resp,
                 } => {
-                    let _ = resp.send(self.handle_set(&table, key, value).await);
+                    let result = self.handle_set(&table, key, value).await
+                        .inspect_err(|e| error!(?e, ?table, "handle_set failed"));
+                    resp.send(result)
+                        .inspect_err(|e| error!(?e, ?table, "caller dropped before receiving Set response"))
+                        .ok();
                 }
                 KvMsg::Del { table, key, resp } => {
-                    let _ = resp.send(self.handle_del(&table, &key).await);
+                    let result = self.handle_del(&table, &key).await
+                        .inspect_err(|e| error!(?e, ?table, "handle_del failed"));
+                    resp.send(result)
+                        .inspect_err(|e| error!(?e, ?table, "caller dropped before receiving Del response"))
+                        .ok();
                 }
                 KvMsg::Increment {
                     table,
@@ -159,10 +191,18 @@ impl SqliteKvWorker {
                     delta,
                     resp,
                 } => {
-                    let _ = resp.send(self.handle_increment(&table, &key, delta).await);
+                    let result = self.handle_increment(&table, &key, delta).await
+                        .inspect_err(|e| error!(?e, ?table, "handle_increment failed"));
+                    resp.send(result)
+                        .inspect_err(|e| error!(?e, ?table, "caller dropped before receiving Increment response"))
+                        .ok();
                 }
                 KvMsg::NewCas { table, key, resp } => {
-                    let _ = resp.send(self.handle_new_cas(&table, &key).await);
+                    let result = self.handle_new_cas(&table, &key).await
+                        .inspect_err(|e| error!(?e, ?table, "handle_new_cas failed"));
+                    resp.send(result)
+                        .inspect_err(|e| error!(?e, ?table, "caller dropped before receiving NewCas response"))
+                        .ok();
                 }
                 KvMsg::Swap {
                     table,
@@ -171,10 +211,11 @@ impl SqliteKvWorker {
                     snapshot_version,
                     resp,
                 } => {
-                    let _ = resp.send(
-                        self.handle_swap(&table, key, value, snapshot_version)
-                            .await,
-                    );
+                    let result = self.handle_swap(&table, key, value, snapshot_version).await
+                        .inspect_err(|e| error!(?e, ?table, "handle_swap failed"));
+                    resp.send(result)
+                        .inspect_err(|e| error!(?e, ?table, "caller dropped before receiving Swap response"))
+                        .ok();
                 }
             }
         }
@@ -388,9 +429,8 @@ impl KvStore for SqliteKvStore {
                 key: key.to_vec(),
                 resp: tx,
             })
-            .await
             .map_err(|_| ferr!("worker gone"))?;
-        rx.await.map_err(|_| ferr!("worker gone"))?
+        rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
     async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>) -> Res<Option<Arc<[u8]>>> {
@@ -402,9 +442,8 @@ impl KvStore for SqliteKvStore {
                 value,
                 resp: tx,
             })
-            .await
             .map_err(|_| ferr!("worker gone"))?;
-        rx.await.map_err(|_| ferr!("worker gone"))?
+        rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
     async fn del(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
@@ -415,9 +454,8 @@ impl KvStore for SqliteKvStore {
                 key: key.to_vec(),
                 resp: tx,
             })
-            .await
             .map_err(|_| ferr!("worker gone"))?;
-        rx.await.map_err(|_| ferr!("worker gone"))?
+        rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
     async fn increment(&self, key: &[u8], delta: i64) -> Res<i64> {
@@ -429,9 +467,8 @@ impl KvStore for SqliteKvStore {
                 delta,
                 resp: tx,
             })
-            .await
             .map_err(|_| ferr!("worker gone"))?;
-        rx.await.map_err(|_| ferr!("worker gone"))?
+        rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
     async fn new_cas(&self, key: &[u8]) -> Res<CasGuard> {
@@ -442,9 +479,8 @@ impl KvStore for SqliteKvStore {
                 key: key.to_vec(),
                 resp: tx,
             })
-            .await
             .map_err(|_| ferr!("worker gone"))?;
-        let (snapshot_value, snapshot_version) = rx.await.map_err(|_| ferr!("worker gone"))??;
+        let (snapshot_value, snapshot_version) = rx.await.wrap_err(ERROR_CHANNEL)??;
 
         let key: Arc<[u8]> = key.into();
         Ok(self.make_cas_guard(key, snapshot_value, snapshot_version))

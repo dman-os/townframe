@@ -643,8 +643,20 @@ pub enum WaitOnHandleError {
 }
 
 pub async fn wait_on_handle_with_timeout<T>(
-    join_handle: tokio::task::JoinHandle<T>,
+    mut join_handle: tokio::task::JoinHandle<T>,
     timeout_ms: u64,
 ) -> Result<T, WaitOnHandleError> {
-    Ok(tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), join_handle).await??)
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), &mut join_handle).await {
+        Ok(res) => Ok(res?),
+        Err(e) => {
+            join_handle.abort();
+            Err(e.into())
+        }
+    }
+}
+
+pub async fn wait_on_handle<T>(
+    join_handle: tokio::task::JoinHandle<T>,
+) -> Result<T, tokio::task::JoinError> {
+    join_handle.await
 }

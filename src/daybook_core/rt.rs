@@ -47,6 +47,9 @@ pub struct Rt {
     pub wflow_part_state: Arc<PartitionWorkingState>,
     pub wcx: wflow::Ctx,
     pub wash_host: Arc<WashHost>,
+    pub wflow_plugin: Arc<wash_plugin_wflow::WflowPlugin>,
+    pub daybook_plugin: Arc<wash_plugin::DaybookPlugin>,
+    pub utils_plugin: Arc<wash_plugin_utils::UtilsPlugin>,
     pub blobs_repo: Arc<BlobsRepo>,
     pub local_actor_id: automerge::ActorId,
     local_wflow_part_id: String,
@@ -55,19 +58,47 @@ pub struct Rt {
 pub struct RtStopToken {
     wflow_part_handle: Option<TokioPartitionWorkerHandle>,
     rt: Arc<Rt>,
-    partition_watcher: tokio::task::JoinHandle<()>,
-    doc_changes_worker: triage::DocTriageWorkerHandle,
+    partition_watcher: Option<tokio::task::JoinHandle<()>>,
+    doc_changes_worker: Option<triage::DocTriageWorkerHandle>,
 }
 
 impl RtStopToken {
     pub async fn stop(mut self) -> Res<()> {
         self.rt.cancel_token.cancel();
-        // TODO: use a cancel token to shutdown
-        // rt if stop token is dropped
-        self.wflow_part_handle.take().unwrap().stop().await?;
-        self.rt.wash_host.clone().stop().await.to_eyre()?;
-        self.doc_changes_worker.stop().await?;
-        utils_rs::wait_on_handle_with_timeout(self.partition_watcher, 5 * 1000).await?;
+        
+        // Stop triage worker first to prevent new dispatches from being created
+        if let Some(worker) = self.doc_changes_worker.take() {
+            if let Err(e) = worker.stop().await {
+                warn!(?e, "error stopping doc_changes_worker during shutdown - continuing");
+            }
+        }
+        
+        // Wait for all active dispatches to complete
+        let active_dispatches: Vec<String> = self.rt.dispatch_repo.list().await.iter().map(|(id, _)| id.clone()).collect();
+        if !active_dispatches.is_empty() {
+            info!(count = active_dispatches.len(), "waiting for active dispatches to complete");
+            for dispatch_id in active_dispatches {
+                let _ = self.rt.wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(30)).await;
+            }
+        }
+        
+        // Stop wflow partition worker
+        if let Some(handle) = self.wflow_part_handle.take() {
+            if let Err(e) = handle.stop().await {
+                warn!(?e, "error stopping wflow_part_handle during shutdown - continuing");
+            }
+        }
+        
+        if let Err(e) = self.rt.wash_host.clone().stop().await.to_eyre() {
+            warn!(?e, "error stopping wash_host during shutdown - continuing");
+        }
+        
+        if let Some(watcher) = self.partition_watcher.take() {
+            if let Err(e) = utils_rs::wait_on_handle_with_timeout(watcher, 10 * 1000).await {
+                warn!(?e, "error waiting for partition_watcher during shutdown - continuing");
+            }
+        }
+        
         Ok(())
     }
 }
@@ -91,7 +122,7 @@ impl Rt {
     pub async fn boot(
         config: RtConfig,
         app_doc_id: DocumentId,
-        wcx: wflow::Ctx,
+        wflow_db_url: String,
         acx: AmCtx,
         drawer: Arc<DrawerRepo>,
         plugs_repo: Arc<PlugsRepo>,
@@ -100,6 +131,8 @@ impl Rt {
         config_repo: Arc<ConfigRepo>,
         local_actor_id: automerge::ActorId,
     ) -> Res<(Arc<Self>, RtStopToken)> {
+        let wcx = wflow::Ctx::init(&wflow_db_url).await?;
+
         let wflow_plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new(Arc::clone(
             &wcx.metastore,
         )));
@@ -114,8 +147,14 @@ impl Rt {
         .wrap_err("error creating utils plugin")?;
 
         let wash_host =
-            wflow::build_wash_host(vec![wflow_plugin.clone(), daybook_plugin, utils_plugin])
+            wflow::build_wash_host(vec![wflow_plugin.clone(), daybook_plugin.clone(), utils_plugin.clone()])
                 .await?;
+
+        let wash_host = wash_host
+            .start()
+            .await
+            .to_eyre()
+            .wrap_err("error starting wash host")?;
 
         let mut bundles_to_load: HashSet<(String, String)> = default();
         for (_dispatch_id, dispach) in dispatch_repo.list().await {
@@ -148,15 +187,9 @@ impl Rt {
             .await?;
         }
 
-        let wash_host = wash_host
-            .start()
-            .await
-            .to_eyre()
-            .wrap_err("error starting wash host")?;
-
         let part_idx = 0;
         let (wflow_part_handle, wflow_part_state) =
-            wflow::start_partition_worker(&wcx, wflow_plugin, part_idx).await?;
+            wflow::start_partition_worker(&wcx, wflow_plugin.clone(), part_idx).await?;
         let part_log = PartitionLogRef::new(Arc::clone(&wcx.logstore));
         let wflow_ingress = Arc::new(wflow::ingress::PartitionLogIngress::new(
             part_log,
@@ -175,6 +208,9 @@ impl Rt {
             dispatch_repo,
             wcx,
             wash_host,
+            wflow_plugin,
+            daybook_plugin,
+            utils_plugin,
             blobs_repo,
             config_repo,
             wflow_part_state,
@@ -194,8 +230,8 @@ impl Rt {
             rt.clone(),
             RtStopToken {
                 rt,
-                partition_watcher,
-                doc_changes_worker,
+                partition_watcher: Some(partition_watcher),
+                doc_changes_worker: Some(doc_changes_worker),
                 wflow_part_handle: Some(wflow_part_handle),
             },
         ))

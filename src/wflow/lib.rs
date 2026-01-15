@@ -29,6 +29,7 @@ pub struct Ctx {
     pub metastore: Arc<dyn wflow_core::metastore::MetdataStore>,
     pub logstore: Arc<dyn wflow_core::log::LogStore>,
     pub snapstore: Arc<dyn wflow_core::snapstore::SnapStore<Snapshot = Arc<[u8]>>>,
+    pub factory: Option<SqliteKvFactory>,
 }
 
 impl Ctx {
@@ -62,6 +63,7 @@ impl Ctx {
             metastore,
             logstore,
             snapstore,
+            factory: Some(factory),
         })
     }
 }
@@ -69,6 +71,8 @@ impl Ctx {
 pub async fn build_wash_host(
     plugins: Vec<Arc<dyn plugin::HostPlugin>>,
 ) -> Res<wash_runtime::host::Host> {
+    // Create a unique engine instance for each wash host to ensure complete isolation
+    // This prevents conflicts when tests run in parallel
     let engine = engine::Engine::builder().build().to_eyre()?;
 
     let mut host = host::HostBuilder::new().with_engine(engine);

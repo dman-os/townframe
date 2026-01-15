@@ -473,13 +473,12 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             Some((name, sub_matches)) => {
                 info!(?name, "XXX");
                 let details = command_details.remove(name).unwrap();
-                let wcx = wflow::Ctx::init(&conf.sql.database_url).await?;
                 let (rt, rt_stop) = daybook_core::rt::Rt::boot(
                     daybook_core::rt::RtConfig {
                         device_id: "main_TODO_XXX".into(),
                     },
                     ctx.doc_app().document_id().clone(),
-                    wcx,
+                    conf.sql.database_url.clone(),
                     ctx.acx.clone(),
                     Arc::clone(&drawer),
                     Arc::clone(&plugs_repo),

@@ -187,6 +187,7 @@ impl WflowTestContext {
             metastore: self.metastore.clone(),
             logstore: self.logstore.clone(),
             snapstore: self.snapstore.clone(),
+            factory: None,
         };
 
         let host = self.pending_host.take().expect("bad builder");
