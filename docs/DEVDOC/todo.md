@@ -1,5 +1,18 @@
 # TODO
 
+- Immediate proveout
+  - [ ] Plugins/extensability
+    - [ ] Registry
+      - [ ] OCI based
+    - [x] Un-previlaged processors should go in their own branch
+  - [ ] Chatbot
+  - [ ] Generated UI
+  - [ ] FUSE
+  - [ ] Programmability
+    - Dynamic processors, defined in document?
+      - I could just describe to the LLM what the document is to do and it could write it
+  - [ ] Granary
+
 ## Stack
 
 - [ ] Repos
@@ -7,16 +20,6 @@
   - [x] CLI support
     - [ ] Make it nice
   - [ ] GUI support
-- [ ] Plugins
-  - [x] Manifest
-  - [ ] Commands
-    - [x] `daybook x command`
-  - [ ] Rt
-    - [x] Wflow preparation
-    - [ ] Predicates
-  - [ ] Handlers
-  - [ ] Processors
-  - [ ] OCI
 - [ ] daybook_server
   - [ ] Decide on wrpc vs json
 - [ ] CI/CD
@@ -36,7 +39,16 @@
 
 - [ ] Cleanup for public pre-alpha
 
-
+- [ ] Plugins
+  - [x] Manifest
+  - [ ] Commands
+    - [x] `daybook x command`
+  - [ ] Rt
+    - [x] Wflow preparation
+    - [x] Predicates
+  - [ ] Handlers
+  - [x] Processors
+  - [ ] OCI
 - [ ] File lock on repo
 - [ ] daybook_cli
     - [ ] `daybook pset docId propKey value`
@@ -62,7 +74,7 @@
   - [ ] Buy domain
     - [ ] https://daybook.tf
     - [ ] https://daybook.com
-    - [ ] https://db.tf
+    - [ ] https://mother.db.tf
 - [ ] PgLite based testing
 - [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
 - [ ] DRY up all the wit bindgen

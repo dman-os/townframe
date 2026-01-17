@@ -7733,10 +7733,12 @@ version = "0.1.0"
 dependencies = [
  "bon",
  "clap",
+ "data-encoding",
  "dotenv-flow",
  "heck",
  "http",
  "indenter",
+ "ollama-rs",
  "tokio",
  "utils_rs",
 ]

@@ -18,22 +18,12 @@
   - Locally for plugin execution
   - And also through wasmcloud for server features
     - This might be pre-mature? Do we need to roll our own hosts?
+      - Their wrpc support is not yet implemented.
 - SQlite or PGLite?
 - Durable execution
   - Homebrew
 
 ### Features
-
-- Immediate proveout
-  - [ ] Plugins/extensability
-    - [ ] Registry
-      - [ ] OCI based
-    - [ ] Un-previlaged processors should go in their own branch
-  - [ ] Chatbot
-  - [ ] Dynamic UI
-  - [ ] FUSE
-  - [ ] Programmability
-  - [ ] Granary
 
 - Daybook
   - Core

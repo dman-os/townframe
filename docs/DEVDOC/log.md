@@ -1,5 +1,177 @@
 # duck-log
 
+## 2026-01-17 | dynamic plugs
+
+In the current system, code execution on documents and definining new schemas and so on is determined by plugs.
+I'd love to be able to quickly make these things in app.
+Instead of a rigid query based system, that'd go far.
+And vibe coding does make it accessible.
+
+My decision to go with a non web tech are a hinderance here but embedding a browser is always an option. 
+Projects like https://json-render.dev/ are encouraging, I'm not the only one thinking of generated UI after all.
+
+Blockers:
+- I'd like every user code to run in WASM
+  - Boundary costs
+- UI tech
+  - WASM boundary cost again
+
+Usecase?
+We could focus all collators on this I guess.
+A system like obsidian datacore where, ime, a lot of the value was when I wrote JS and not with the QL in place.
+Admittedly, I had the rich html and markdown canvas beneath it.
+
+## 2026-01-17 | software as art
+
+I've been muling over what's unfolding in this repo, the ambitious irrationalities, the perfectionism bullshit, the political undertones...a lot of elements that makes me pause before I really commit to the bit.
+And commit to the bit undersells it since this, after all, is intended to be open source software project.
+Open source, a big stupid thing that many of my peers have cast our hearts to in a stupor of collective meaningfinding.
+A fucking mirage. 
+Endless tablespoons of horsedung.
+Your bog standard political movement really.
+
+Anyways, this is not the place for critiquing opensource culture but it's definitely a question one should ask before commiting.
+And this is what I've been pondering when I recently went to find out why it's been a minute since I've seen my favorite internet philosopher.
+CJ The X has a lot of things to charm the audience but a highlight is how well he's concentrated and collected his love of art.
+A love that's stark in how well it's examined, how well the limitaitons and the faults are understood.
+He's a philosopher, I suppose, and of the video essayist variant so examination is a big requirement.
+But it does make one envious.
+For if I'm to dedicate my most to something, I'd love to love it to such a degree, warts and all, no misgivings.
+
+Now, there's a lot in here that's wanton of love but a big part of it is the fact that it's to be opensource software.
+I haven't done opensource and some part of really doesn't want to.
+It seems like a shit deal.
+A shit deal only a mother could love.
+A thing you do entirely out of love.
+There doesn't seem to be a lot of money in opensource and I'm not some engineer on an Alphabet payroll. 
+I'm fucking unemployed.
+
+Besides those opensource projects bankrolled by trillion dollar companies that are entirely defined by how much they guardedly control the computers of our lives -- yeah, besides those -- most seem to be either abandoned or are dead lamp away from being abandoned.
+Underpaid and always on call for an ungrateful audience for some bullshit they started on a whim decades ago, god bless those old white dudes but what a shit fucking deal.
+
+This doesn't cover all of open source ofcourse.
+There are many that were written recreationally.
+Someone having fun trying to solve some problem that one July.
+I'd love to daily drive the realized vision herein but oh, I couldn't just have a fun weekend project the idiot that I am.
+No, the scope is has already eclipsed the horizon for recreational.
+
+Can I sell it?
+Make it proprietary?
+No.
+Why would anyone buy this?
+It's literally designed to be unbuyable.
+
+So what then? Just abandon it like they all do? It makes so much sense. So many other opporutunities calling. Reasonability an arm stretch away. Just forget it dude.
+
+That's when I came back to CJ The X's thoughts and positions.
+He has a project he's been working on for years now.
+Not a swan song exactly but something he's teased about and stated to have taken over his life (citations bitch).
+I think it's been 3 years at ago at this point and who knows, 3 more for all I know.
+
+Why is it taking him long? 
+Can't say. 
+Doubt it's perfectionism.
+He's released a lot of work already and his close examinations of the sin of perfectionism...it can't be.
+This is an affliction of many artists that have already released estabilished works, a big, pre-announced project taking forever.
+It taking over their career, drowning them in expectation, head of line blocking and all.
+
+Now, there's little in that situation to compare with opensource work and this project in particular.
+In fact, it's a simple difference that struck me to write this down.
+Take over their career until their death or not, art objects, unlike fucking software, will have an actual done date.
+Not a release date, a done date!
+They can just put it down one day, with its flaws and all, and that's it! 
+They never look at it again for the rest of their lives and it'll still be there. hardly losing any value.
+An art object all the same.
+Others can appreciate it even.
+
+Software?
+Big pile of software especially?
+It fucking rots.
+It falls apart.
+Imperfections? You'll have to withstand every day of your use until you don't.
+Or, even more tragic, someone else has to.
+
+Is there a way to practice software as an art form?
+A method of closing chapters that doesn't signal "here be dragons"?
+Howw?
+
+Maybe I was quick to cast rocks at the abandoned and barely abandoned projects.
+Maybe it wasn't abandoned, but done?
+Light mantainance viable dude?
+Maybe LLMs can be told to light mantain it for eternity, no developer required.
+
+Nothing wrong with recinding your commitment later on anyways. 
+That one guy in hacker news screeding about how "open source developer don't owe you shit".
+
+Ofcourse, finding replacement mantainers is the best solution.
+Building it around a community.
+The open-source dream.
+Someone will fork it if they need it or something.
+Jumping the gun.
+
+I'm going around in circles.
+
+## 2026-01-17 | mltools
+
+ML stack. This is going to be difficult. I have no idea what I'm doing.
+
+What do we want? Let's lay that out:
+
+- Machine learning methods to analyze, summarize, process and use documents.
+- It should run wherever it can.
+  - Some ML tasks can be done on a mobile.
+    - Embedding
+    - OCR
+    - STT
+    - Segmenting
+  - Some can be done on a desktop.
+    - Each device ought to support higher quality impls of tasks of lower devices.
+    - Opt-in for server tasks.
+      - Emphasis on opt-in.
+    - Small LLM.
+  - Some must done on at a server.
+    - Large LLM.
+    - Image editing.
+  - Some we must pay for to token providers
+    - Agent LLM
+    - SOTA LLM.
+    - LLM voice chat?
+- We need to have some measure of difficulty or quality on every task to allow or require uptiering the machine for a better model.
+  - This implies delayed analysis as per our offline constraint.
+
+Hard realities:
+- Local LLMs are not ready.
+- ML OPs is not self-hosting friendly.
+  - Rent-a-GPU is not cheap.
+  - Tuning requires a lot of expertise of which I lack.
+- High degree of batching is a must on the cost analysis.
+
+Decisions:
+- First class support for API providers.
+  - Bring your own keys support.
+- Starting set:
+  - Small LLM.
+    - Gemma-series
+    - CPU gemma3 is very slow on image
+      - Research cost-effective GPU providers
+  - OCR
+    - Phone: PaddleOCRv5 on ONNX
+    - Server: PaddleOCR-VL
+  - Embedding
+    - sentence-transformers on Phone??
+    - text-embedding-3 on Server.
+  - STT:
+    - paraqueet on server.
+    - kyrutai for SSTT on server.
+  - Segmenting:
+    - What's that model from Meta? SegmentAnything?
+- Single rust crate that has pluggable backends for each location
+  - How to ship python + onnxruntime?
+    - PyO3?
+    - Just use candle?
+      - Model wrapper python libraries are too useful
+        - Encode expertise that would take time to translate
+
 ## 2026-01-12 | one dollar
 
 here's an ambitious grounding goal/question, can you offer a service tier that starts at 1$?
@@ -55,7 +227,7 @@ Not sure what to think about that.
 
 ## 2025-12-25 | plugin system
 
-Wait a minute, if I make `content` itself a `Doc`...essentially make all details of a `Doc` a `prop`, I can use prop predicates to properly ACL doc access by user code.
+Wait a minute, if I make `content` itself a `Doc` `prop`...essentially make all details of a `Doc` a `prop`, I can use prop predicates to properly ACL doc access by user code.
 I.e. any routine must define what props it can read and write up front.
 Since prop keys are namespaced by reverse domain notation, this shouldn't lead to issues with clashes across plugins.
 

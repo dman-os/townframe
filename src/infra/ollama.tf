@@ -12,16 +12,20 @@ resource "helm_release" "ollama" {
 
   repository = "https://helm.otwld.com/"
   chart = "ollama"
-  version = "1.32.0"
+  version = "1.37.0"
 
   values = [
     yamlencode({
       ollama = {
         models = {
           pull = [
-            "gemma3"
+            "gemma3",
           ]
         }
+      }
+      persistentVolume = {
+        enabled = true
+        size = "20Gi"
       }
     })
   ]
