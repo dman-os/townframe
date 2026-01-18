@@ -10,13 +10,13 @@ Either from scratch as is foolishly done here or by customizing an existing plat
 
 Specifically, daybook design is informed by tech I find shiny, gaps I see in the current landscape for such solutions and my personal politics.
 
-1. Shiny tech
+- Shiny tech
   - Everything that is and around LLMs.
   - Uses Automerge for an offline and local-first experience
     - With futue expectations around collaborative grounding
   - Uses Compose Multiplatform for a performant experience on Android
   - Tries to leverage WASM as a plugin system. 
-2. Gaps
+- Gaps
   - Emacs/Vim
     - State of the art editing experience
     - Pre-mobile tech
@@ -27,7 +27,7 @@ Specifically, daybook design is informed by tech I find shiny, gaps I see in the
     - Design is excellent and the performance acceptable on mobile
     - The plugins seem insecure
     - Collaboration is secondary?
-3. Politics
+- Politics
   - I'm an adblock person.
 
 Right now, it's in the early experimentation phase trying to prove out tech foundations.
