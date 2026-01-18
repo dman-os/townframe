@@ -37,12 +37,11 @@ async fn main_main() -> Res<()> {
             tokio::try_join!(
                 async {
                     let generation_request =
-                        GenerationRequest::new("gemma3".into(), "Extract the text.")
-                        .images(
-                            vec![Image::from_base64(data_encoding::BASE64.encode(
+                        GenerationRequest::new("gemma3".into(), "Extract the text.").images(vec![
+                            Image::from_base64(data_encoding::BASE64.encode(
                                 &tokio::fs::read("/tmp/photo_2025-12-25_22-56-09.jpg").await?,
-                            ))],
-                        );
+                            )),
+                        ]);
 
                     let ollama = ollama_rs::Ollama::new("http://localhost", 11434);
                     let ollama_response = ollama.generate(generation_request).await?;
@@ -51,12 +50,11 @@ async fn main_main() -> Res<()> {
                 },
                 async {
                     let generation_request =
-                        GenerationRequest::new("gemma3".into(), "Extract the text.")
-                        .images(
-                            vec![Image::from_base64(data_encoding::BASE64.encode(
+                        GenerationRequest::new("gemma3".into(), "Extract the text.").images(vec![
+                            Image::from_base64(data_encoding::BASE64.encode(
                                 &tokio::fs::read("/tmp/photo_2025-12-26_00-05-33.jpg").await?,
-                            ))],
-                        );
+                            )),
+                        ]);
 
                     let ollama = ollama_rs::Ollama::new("http://localhost", 11434);
                     let ollama_response = ollama.generate(generation_request).await?;
@@ -65,12 +63,11 @@ async fn main_main() -> Res<()> {
                 },
                 async {
                     let generation_request =
-                        GenerationRequest::new("gemma3".into(), "Extract the text.")
-                        .images(
-                            vec![Image::from_base64(data_encoding::BASE64.encode(
+                        GenerationRequest::new("gemma3".into(), "Extract the text.").images(vec![
+                            Image::from_base64(data_encoding::BASE64.encode(
                                 &tokio::fs::read("/tmp/photo_2025-12-26_17-22-49.jpg").await?,
-                            ))],
-                        );
+                            )),
+                        ]);
 
                     let ollama = ollama_rs::Ollama::new("http://localhost", 11434);
                     let ollama_response = ollama.generate(generation_request).await?;

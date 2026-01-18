@@ -172,30 +172,15 @@ class TablesViewModel(
             // Ensure UI updates happen on main thread
             viewModelScope.launch {
                 when (event) {
-                    is TablesEvent.ListChanged -> {
-                        // Full refresh when list structure changes
-                        refreshTables()
-                    }
-
-                    is TablesEvent.WindowChanged -> {
-                        // Targeted refresh for specific window
-                        updateWindow(event.id)
-                    }
-
-                    is TablesEvent.TabChanged -> {
-                        // Targeted refresh for specific tab
-                        updateTab(event.id)
-                    }
-
-                    is TablesEvent.PanelChanged -> {
-                        // Targeted refresh for specific panel
-                        updatePanel(event.id)
-                    }
-
-                    is TablesEvent.TableChanged -> {
-                        // Targeted refresh for specific table
-                        updateTable(event.id)
-                    }
+                    is TablesEvent.ListChanged -> refreshTables()
+                    is TablesEvent.WindowAdded -> refreshTables()
+                    is TablesEvent.WindowChanged -> updateWindow(event.id)
+                    is TablesEvent.TabAdded -> refreshTables()
+                    is TablesEvent.TabChanged -> updateTab(event.id)
+                    is TablesEvent.PanelAdded -> refreshTables()
+                    is TablesEvent.PanelChanged -> updatePanel(event.id)
+                    is TablesEvent.TableAdded -> refreshTables()
+                    is TablesEvent.TableChanged -> updateTable(event.id)
                 }
             }
         }

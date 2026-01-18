@@ -78,7 +78,7 @@ impl ConfigRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn set_meta_table_key_config(
+    async fn set_prop_display_hint(
         &self,
         key: String,
         config: PropKeyDisplayHint,

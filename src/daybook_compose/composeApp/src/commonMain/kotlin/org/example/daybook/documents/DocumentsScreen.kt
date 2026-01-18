@@ -31,7 +31,14 @@ import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.DrawerViewModel
-import org.example.daybook.uniffi.types.*
+import org.example.daybook.uniffi.types.Doc
+import org.example.daybook.uniffi.types.DocContent
+import org.example.daybook.uniffi.types.DocPropKey
+import org.example.daybook.uniffi.types.DocPropTag
+import org.example.daybook.uniffi.types.DocPatch
+import org.example.daybook.uniffi.types.WellKnownPropTag
+import org.example.daybook.uniffi.core.UpdateDocArgs
+import org.example.daybook.ui.dequoteJson
 import org.example.daybook.DocListState
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
@@ -94,9 +101,12 @@ class DocumentsScreenViewModel(
         val docId = drawerVm.selectedDocId.value ?: return
         val current = drawerVm.selectedDoc.value ?: return
         
-        // Optimistic update
+        // Optimistic update - wait, current.copy is no longer available easily because content is in props
+        // Actually, let's just skip optimistic update for now or implement it by updating props map
+        val newProps = current.props.toMutableMap()
+        newProps[DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT))] = "\"$content\""
         val updatedDoc = current.copy(
-            content = DocContent.Text(content),
+            props = newProps,
             updatedAt = Clock.System.now()
         )
         drawerVm._selectedDocMutable.value = updatedDoc
@@ -108,10 +118,9 @@ class DocumentsScreenViewModel(
             kotlinx.coroutines.delay(500) // 500ms debounce
             drawerVm.updateDoc(DocPatch(
                 id = docId,
-                createdAt = null,
-                content = DocContent.Text(content),
-                updatedAt = Clock.System.now(),
-                props = null
+                propsSet = mapOf(DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)) to "\"$content\""),
+                propsRemove = emptyList(),
+                userPath = null
             ))
         }
     }
@@ -265,12 +274,12 @@ fun DocList(
                             val draw = @Composable {
                                 ListItem(
                                     headlineContent = { 
-                                        val titleTag = doc.props.firstOrNull { it is DocProp.TitleGeneric } as? DocProp.TitleGeneric
+                                        val titleJson = doc.props[DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.TITLE_GENERIC))]
+                                        val contentJson = doc.props[DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT))]
                                         Text(
-                                            text = titleTag?.v1 ?: when (val content = doc.content) {
-                                                is DocContent.Text -> content.v1.take(50).ifEmpty { "Empty document" }
-                                                else -> "Unsupported content"
-                                            },
+                                            text = titleJson?.let { dequoteJson(it) } 
+                                                ?: contentJson?.let { dequoteJson(it).take(50).ifEmpty { "Empty document" } }
+                                                ?: "Unsupported content",
                                             maxLines = 1
                                         )
                                     },

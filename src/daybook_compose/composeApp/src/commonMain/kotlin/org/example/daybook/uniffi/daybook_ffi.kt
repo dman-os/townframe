@@ -42,8 +42,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.example.daybook.uniffi.core.ConfigEvent
+import org.example.daybook.uniffi.core.DocNBranches
 import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeConfigEvent
+import org.example.daybook.uniffi.core.FfiConverterTypeDocNBranches
 import org.example.daybook.uniffi.core.FfiConverterTypeDrawerEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeListenerRegistration
 import org.example.daybook.uniffi.core.FfiConverterTypePanel
@@ -53,6 +55,7 @@ import org.example.daybook.uniffi.core.FfiConverterTypeTab
 import org.example.daybook.uniffi.core.FfiConverterTypeTable
 import org.example.daybook.uniffi.core.FfiConverterTypeTablesEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeTablesPatches
+import org.example.daybook.uniffi.core.FfiConverterTypeUpdateDocArgs
 import org.example.daybook.uniffi.core.FfiConverterTypeWindow
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.uniffi.core.Panel
@@ -62,12 +65,16 @@ import org.example.daybook.uniffi.core.Tab
 import org.example.daybook.uniffi.core.Table
 import org.example.daybook.uniffi.core.TablesEvent
 import org.example.daybook.uniffi.core.TablesPatches
+import org.example.daybook.uniffi.core.UpdateDocArgs
 import org.example.daybook.uniffi.core.Window
+import org.example.daybook.uniffi.types.AddDocArgs
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.DocPatch
+import org.example.daybook.uniffi.types.FfiConverterTypeAddDocArgs
 import org.example.daybook.uniffi.types.FfiConverterTypeDoc
 import org.example.daybook.uniffi.types.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferConfigEvent
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocNBranches
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDrawerEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferListenerRegistration
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferPanel
@@ -77,7 +84,9 @@ import org.example.daybook.uniffi.core.RustBuffer as RustBufferTab
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTable
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesPatches
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferUpdateDocArgs
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferWindow
+import org.example.daybook.uniffi.types.RustBuffer as RustBufferAddDocArgs
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferDoc
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferDocPatch
 
@@ -951,6 +960,12 @@ internal open class UniffiVTableCallbackInterfaceTablesEventListener(
 
 
 
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -978,7 +993,9 @@ fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_prop_display_hint(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints(
 ): Short
-fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_meta_table_key_config(
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_prop_display_hint(
+): Short
+fun uniffi_daybook_ffi_checksum_method_configrepoffi_stop(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event(
 ): Short
@@ -992,17 +1009,19 @@ fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_list(
 ): Short
+fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_stop(
+): Short
 fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch(
-): Short
-fun uniffi_daybook_ffi_checksum_method_ffictx_blobs(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_ffierror_message(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_plugseventlistener_on_plugs_event(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener(
+): Short
+fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event(
 ): Short
@@ -1039,6 +1058,8 @@ fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_tab(
 fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_table(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_window(
+): Short
+fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_stop(
 ): Short
 fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch(
 ): Short
@@ -1139,7 +1160,9 @@ fun uniffi_daybook_ffi_fn_method_configrepoffi_get_prop_display_hint(`ptr`: Poin
 ): Long
 fun uniffi_daybook_ffi_fn_method_configrepoffi_list_display_hints(`ptr`: Pointer,
 ): Long
-fun uniffi_daybook_ffi_fn_method_configrepoffi_set_meta_table_key_config(`ptr`: Pointer,`key`: RustBuffer.ByValue,`config`: RustBufferPropKeyDisplayHint.ByValue,
+fun uniffi_daybook_ffi_fn_method_configrepoffi_set_prop_display_hint(`ptr`: Pointer,`key`: RustBuffer.ByValue,`config`: RustBufferPropKeyDisplayHint.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_method_configrepoffi_stop(`ptr`: Pointer,
 ): Long
 fun uniffi_daybook_ffi_fn_clone_drawereventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
@@ -1155,17 +1178,19 @@ fun uniffi_daybook_ffi_fn_free_drawerrepoffi(`ptr`: Pointer,uniffi_out_err: Unif
 ): Unit
 fun uniffi_daybook_ffi_fn_constructor_drawerrepoffi_load(`fcx`: Pointer,
 ): Long
-fun uniffi_daybook_ffi_fn_method_drawerrepoffi_add(`ptr`: Pointer,`doc`: RustBufferDoc.ByValue,
+fun uniffi_daybook_ffi_fn_method_drawerrepoffi_add(`ptr`: Pointer,`args`: RustBufferAddDocArgs.ByValue,
 ): Long
 fun uniffi_daybook_ffi_fn_method_drawerrepoffi_del(`ptr`: Pointer,`id`: RustBuffer.ByValue,
 ): Long
 fun uniffi_daybook_ffi_fn_method_drawerrepoffi_ffi_register_listener(`ptr`: Pointer,`listener`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
-fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get(`ptr`: Pointer,`id`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get(`ptr`: Pointer,`id`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,
 ): Long
 fun uniffi_daybook_ffi_fn_method_drawerrepoffi_list(`ptr`: Pointer,
 ): Long
-fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update(`ptr`: Pointer,`patch`: RustBufferDocPatch.ByValue,`heads`: RustBuffer.ByValue,
+fun uniffi_daybook_ffi_fn_method_drawerrepoffi_stop(`ptr`: Pointer,
+): Long
+fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update(`ptr`: Pointer,`patch`: RustBufferDocPatch.ByValue,`branchPath`: RustBuffer.ByValue,`heads`: RustBuffer.ByValue,
 ): Long
 fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update_batch(`ptr`: Pointer,`patches`: RustBuffer.ByValue,
 ): Long
@@ -1175,8 +1200,6 @@ fun uniffi_daybook_ffi_fn_free_ffictx(`ptr`: Pointer,uniffi_out_err: UniffiRustC
 ): Unit
 fun uniffi_daybook_ffi_fn_constructor_ffictx_for_ffi(
 ): Long
-fun uniffi_daybook_ffi_fn_method_ffictx_blobs(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-): Pointer
 fun uniffi_daybook_ffi_fn_clone_ffierror(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
 fun uniffi_daybook_ffi_fn_free_ffierror(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -1199,6 +1222,8 @@ fun uniffi_daybook_ffi_fn_constructor_plugsrepoffi_load(`fcx`: Pointer,
 ): Long
 fun uniffi_daybook_ffi_fn_method_plugsrepoffi_ffi_register_listener(`ptr`: Pointer,`listener`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
+fun uniffi_daybook_ffi_fn_method_plugsrepoffi_stop(`ptr`: Pointer,
+): Long
 fun uniffi_daybook_ffi_fn_clone_tableseventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
 fun uniffi_daybook_ffi_fn_free_tableseventlistener(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -1246,6 +1271,8 @@ fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_tab(`ptr`: Pointer,`id`: Rust
 fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_table(`ptr`: Pointer,`id`: RustBuffer.ByValue,`table`: RustBufferTable.ByValue,
 ): Long
 fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_window(`ptr`: Pointer,`id`: RustBuffer.ByValue,`window`: RustBufferWindow.ByValue,
+): Long
+fun uniffi_daybook_ffi_fn_method_tablesrepoffi_stop(`ptr`: Pointer,
 ): Long
 fun uniffi_daybook_ffi_fn_method_tablesrepoffi_update_batch(`ptr`: Pointer,`patches`: RustBufferTablesPatches.ByValue,
 ): Long
@@ -1393,13 +1420,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints() != 65522.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_meta_table_key_config() != 19238.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_prop_display_hint() != 33641.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_stop() != 64489.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event() != 441.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_add() != 46112.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_add() != 30380.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_del() != 21112.toShort()) {
@@ -1408,19 +1438,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_ffi_register_listener() != 23247.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get() != 4149.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get() != 63350.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_list() != 16795.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_list() != 13984.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update() != 13505.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_stop() != 12483.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch() != 63518.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update() != 11570.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_ffictx_blobs() != 64625.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch() != 34921.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_ffierror_message() != 19212.toShort()) {
@@ -1430,6 +1460,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener() != 36037.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop() != 6019.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event() != 42965.toShort()) {
@@ -1484,6 +1517,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_window() != 7688.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_stop() != 61690.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch() != 50638.toShort()) {
@@ -2505,7 +2541,9 @@ public interface ConfigRepoFfiInterface {
     
     suspend fun `listDisplayHints`(): Map<kotlin.String, PropKeyDisplayHint>
     
-    suspend fun `setMetaTableKeyConfig`(`key`: kotlin.String, `config`: PropKeyDisplayHint)
+    suspend fun `setPropDisplayHint`(`key`: kotlin.String, `config`: PropKeyDisplayHint)
+    
+    suspend fun `stop`()
     
     companion object
 }
@@ -2647,12 +2685,34 @@ open class ConfigRepoFfi: Disposable, AutoCloseable, ConfigRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setMetaTableKeyConfig`(`key`: kotlin.String, `config`: PropKeyDisplayHint) {
+    override suspend fun `setPropDisplayHint`(`key`: kotlin.String, `config`: PropKeyDisplayHint) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_meta_table_key_config(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_set_prop_display_hint(
                 thisPtr,
                 FfiConverterString.lower(`key`),FfiConverterTypePropKeyDisplayHint.lower(`config`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_configrepoffi_stop(
+                thisPtr,
+                
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
@@ -3090,19 +3150,21 @@ public object FfiConverterTypeDrawerEventListener: FfiConverter<DrawerEventListe
 
 public interface DrawerRepoFfiInterface {
     
-    suspend fun `add`(`doc`: Doc): kotlin.String
+    suspend fun `add`(`args`: AddDocArgs): kotlin.String
     
     suspend fun `del`(`id`: kotlin.String): kotlin.Boolean
     
     fun `ffiRegisterListener`(`listener`: DrawerEventListener): ListenerRegistration
     
-    suspend fun `get`(`id`: kotlin.String): Doc?
+    suspend fun `get`(`id`: kotlin.String, `branchPath`: kotlin.String): Doc?
     
-    suspend fun `list`(): List<kotlin.String>
+    suspend fun `list`(): List<DocNBranches>
     
-    suspend fun `update`(`patch`: DocPatch, `heads`: ChangeHashSet)
+    suspend fun `stop`()
     
-    suspend fun `updateBatch`(`patches`: List<PatchAndHeads>)
+    suspend fun `update`(`patch`: DocPatch, `branchPath`: kotlin.String, `heads`: ChangeHashSet?)
+    
+    suspend fun `updateBatch`(`patches`: List<UpdateDocArgs>)
     
     companion object
 }
@@ -3192,12 +3254,12 @@ open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `add`(`doc`: Doc) : kotlin.String {
+    override suspend fun `add`(`args`: AddDocArgs) : kotlin.String {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_add(
                 thisPtr,
-                FfiConverterTypeDoc.lower(`doc`),
+                FfiConverterTypeAddDocArgs.lower(`args`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -3246,12 +3308,12 @@ open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `get`(`id`: kotlin.String) : Doc? {
+    override suspend fun `get`(`id`: kotlin.String, `branchPath`: kotlin.String) : Doc? {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_get(
                 thisPtr,
-                FfiConverterString.lower(`id`),
+                FfiConverterString.lower(`id`),FfiConverterString.lower(`branchPath`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -3266,7 +3328,7 @@ open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
 
     
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `list`() : List<kotlin.String> {
+    override suspend fun `list`() : List<DocNBranches> {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_list(
@@ -3278,7 +3340,7 @@ open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
         { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterSequenceString.lift(it) },
+        { FfiConverterSequenceTypeDocNBranches.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
@@ -3287,12 +3349,12 @@ open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `update`(`patch`: DocPatch, `heads`: ChangeHashSet) {
+    override suspend fun `stop`() {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_update(
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_stop(
                 thisPtr,
-                FfiConverterTypeDocPatch.lower(`patch`),FfiConverterTypeChangeHashSet.lower(`heads`),
+                
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
@@ -3309,12 +3371,34 @@ open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `updateBatch`(`patches`: List<PatchAndHeads>) {
+    override suspend fun `update`(`patch`: DocPatch, `branchPath`: kotlin.String, `heads`: ChangeHashSet?) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_update(
+                thisPtr,
+                FfiConverterTypeDocPatch.lower(`patch`),FfiConverterString.lower(`branchPath`),FfiConverterOptionalTypeChangeHashSet.lower(`heads`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `updateBatch`(`patches`: List<UpdateDocArgs>) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_drawerrepoffi_update_batch(
                 thisPtr,
-                FfiConverterSequenceTypePatchAndHeads.lower(`patches`),
+                FfiConverterSequenceTypeUpdateDocArgs.lower(`patches`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
@@ -3482,8 +3566,6 @@ public object FfiConverterTypeDrawerRepoFfi: FfiConverter<DrawerRepoFfi, Pointer
 
 public interface FfiCtxInterface {
     
-    fun `blobs`(): BlobsRepoFfi
-    
     companion object
 }
 
@@ -3568,18 +3650,6 @@ open class FfiCtx: Disposable, AutoCloseable, FfiCtxInterface
             UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_clone_ffictx(pointer!!, status)
         }
     }
-
-    override fun `blobs`(): BlobsRepoFfi {
-            return FfiConverterTypeBlobsRepoFfi.lift(
-    callWithPointer {
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_ffictx_blobs(
-        it, _status)
-}
-    }
-    )
-    }
-    
 
     
 
@@ -4253,6 +4323,8 @@ public interface PlugsRepoFfiInterface {
     
     fun `ffiRegisterListener`(`listener`: PlugsEventListener): ListenerRegistration
     
+    suspend fun `stop`()
+    
     companion object
 }
 
@@ -4349,6 +4421,28 @@ open class PlugsRepoFfi: Disposable, AutoCloseable, PlugsRepoFfiInterface
     )
     }
     
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_plugsrepoffi_stop(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
 
     
 
@@ -4808,6 +4902,8 @@ public interface TablesRepoFfiInterface {
     
     suspend fun `setWindow`(`id`: Uuid, `window`: Window): Window?
     
+    suspend fun `stop`()
+    
     suspend fun `updateBatch`(`patches`: TablesPatches)
     
     companion object
@@ -5245,6 +5341,28 @@ open class TablesRepoFfi: Disposable, AutoCloseable, TablesRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_daybook_ffi_fn_method_tablesrepoffi_stop(
+                thisPtr,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `updateBatch`(`patches`: TablesPatches) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
@@ -5314,38 +5432,6 @@ public object FfiConverterTypeTablesRepoFfi: FfiConverter<TablesRepoFfi, Pointer
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(Pointer.nativeValue(lower(value)))
-    }
-}
-
-
-
-data class PatchAndHeads (
-    var `heads`: ChangeHashSet, 
-    var `patch`: DocPatch
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypePatchAndHeads: FfiConverterRustBuffer<PatchAndHeads> {
-    override fun read(buf: ByteBuffer): PatchAndHeads {
-        return PatchAndHeads(
-            FfiConverterTypeChangeHashSet.read(buf),
-            FfiConverterTypeDocPatch.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: PatchAndHeads) = (
-            FfiConverterTypeChangeHashSet.allocationSize(value.`heads`) +
-            FfiConverterTypeDocPatch.allocationSize(value.`patch`)
-    )
-
-    override fun write(value: PatchAndHeads, buf: ByteBuffer) {
-            FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
-            FfiConverterTypeDocPatch.write(value.`patch`, buf)
     }
 }
 
@@ -5579,6 +5665,38 @@ public object FfiConverterOptionalTypeDoc: FfiConverterRustBuffer<Doc?> {
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeChangeHashSet: FfiConverterRustBuffer<ChangeHashSet?> {
+    override fun read(buf: ByteBuffer): ChangeHashSet? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeChangeHashSet.read(buf)
+    }
+
+    override fun allocationSize(value: ChangeHashSet?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeChangeHashSet.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ChangeHashSet?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeChangeHashSet.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
@@ -5597,6 +5715,34 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeDocNBranches: FfiConverterRustBuffer<List<DocNBranches>> {
+    override fun read(buf: ByteBuffer): List<DocNBranches> {
+        val len = buf.getInt()
+        return List<DocNBranches>(len) {
+            FfiConverterTypeDocNBranches.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<DocNBranches>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeDocNBranches.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<DocNBranches>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeDocNBranches.write(it, buf)
         }
     }
 }
@@ -5691,6 +5837,34 @@ public object FfiConverterSequenceTypeTable: FfiConverterRustBuffer<List<Table>>
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeUpdateDocArgs: FfiConverterRustBuffer<List<UpdateDocArgs>> {
+    override fun read(buf: ByteBuffer): List<UpdateDocArgs> {
+        val len = buf.getInt()
+        return List<UpdateDocArgs>(len) {
+            FfiConverterTypeUpdateDocArgs.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<UpdateDocArgs>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeUpdateDocArgs.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<UpdateDocArgs>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeUpdateDocArgs.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeWindow: FfiConverterRustBuffer<List<Window>> {
     override fun read(buf: ByteBuffer): List<Window> {
         val len = buf.getInt()
@@ -5709,34 +5883,6 @@ public object FfiConverterSequenceTypeWindow: FfiConverterRustBuffer<List<Window
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWindow.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypePatchAndHeads: FfiConverterRustBuffer<List<PatchAndHeads>> {
-    override fun read(buf: ByteBuffer): List<PatchAndHeads> {
-        val len = buf.getInt()
-        return List<PatchAndHeads>(len) {
-            FfiConverterTypePatchAndHeads.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<PatchAndHeads>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypePatchAndHeads.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<PatchAndHeads>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypePatchAndHeads.write(it, buf)
         }
     }
 }
@@ -5802,48 +5948,6 @@ public typealias FfiConverterTypeJson = FfiConverterString
 
 
 
-
-
-/**
- * Typealias from the type name used in the UDL file to the custom type.  This
- * is needed because the UDL type name is used in function/method signatures.
- * It's also what we have an external type that references a custom type.
- */
-public typealias OffsetDateTime = Instant
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeOffsetDateTime: FfiConverter<OffsetDateTime, Long> {
-    override fun lift(value: Long): OffsetDateTime {
-        val builtinValue = FfiConverterLong.lift(value)
-        return Instant.fromEpochSeconds(builtinValue, 0)
-    }
-
-    override fun lower(value: OffsetDateTime): Long {
-        val builtinValue = value.epochSeconds
-        return FfiConverterLong.lower(builtinValue)
-    }
-
-    override fun read(buf: ByteBuffer): OffsetDateTime {
-        val builtinValue = FfiConverterLong.read(buf)
-        return Instant.fromEpochSeconds(builtinValue, 0)
-    }
-
-    override fun allocationSize(value: OffsetDateTime): ULong {
-        val builtinValue = value.epochSeconds
-        return FfiConverterLong.allocationSize(builtinValue)
-    }
-
-    override fun write(value: OffsetDateTime, buf: ByteBuffer) {
-        val builtinValue = value.epochSeconds
-        FfiConverterLong.write(builtinValue, buf)
-    }
-}
-
-
-
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -5851,6 +5955,48 @@ public object FfiConverterTypeOffsetDateTime: FfiConverter<OffsetDateTime, Long>
  */
 public typealias PathBuf = kotlin.String
 public typealias FfiConverterTypePathBuf = FfiConverterString
+
+
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the custom type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias Timestamp = Instant
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTimestamp: FfiConverter<Timestamp, Long> {
+    override fun lift(value: Long): Timestamp {
+        val builtinValue = FfiConverterLong.lift(value)
+        return Instant.fromEpochSeconds(builtinValue, 0)
+    }
+
+    override fun lower(value: Timestamp): Long {
+        val builtinValue = value.epochSeconds
+        return FfiConverterLong.lower(builtinValue)
+    }
+
+    override fun read(buf: ByteBuffer): Timestamp {
+        val builtinValue = FfiConverterLong.read(buf)
+        return Instant.fromEpochSeconds(builtinValue, 0)
+    }
+
+    override fun allocationSize(value: Timestamp): ULong {
+        val builtinValue = value.epochSeconds
+        return FfiConverterLong.allocationSize(builtinValue)
+    }
+
+    override fun write(value: Timestamp, buf: ByteBuffer) {
+        val builtinValue = value.epochSeconds
+        FfiConverterLong.write(builtinValue, buf)
+    }
+}
 
 
 
@@ -5893,6 +6039,12 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+
+
+
+
+
+
 
 
 

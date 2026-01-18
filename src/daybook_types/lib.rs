@@ -157,7 +157,7 @@ macro_rules! define_enum_and_tag {
             ];
 
             pub const ALL_STR: &[&str] = &[
-                $(concat!($reverse_domain_name, stringify!($key:lower)),)*
+                $(concat!($reverse_domain_name, pastey::paste! { stringify!([<$key:lower>]) }),)*
             ];
 
             pub fn as_str(&self) -> &'static str {

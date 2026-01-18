@@ -59,17 +59,17 @@ class ConfigViewModel(
     private fun loadAllSettings() {
         viewModelScope.launch {
             try {
-                val configs = configRepo.getMetaTableKeyConfigs()
-                _metaTableKeyConfigs.value = configs.associate { it.key to it.config }
+                val configs = configRepo.listDisplayHints()
+                _metaTableKeyConfigs.value = configs
             } catch (e: FfiException) {
                 _error.value = ConfigError("Failed to load settings: ${e.message}", e)
             }
         }
     }
     
-    suspend fun setMetaTableKeyConfig(key: String, config: MetaTableKeyConfig) {
+    suspend fun setPropDisplayHint(key: String, config: PropKeyDisplayHint) {
         try {
-            configRepo.setMetaTableKeyConfig(key, config)
+            configRepo.setPropDisplayHint(key, config)
             // Reload to get updated configs
             loadAllSettings()
         } catch (e: FfiException) {

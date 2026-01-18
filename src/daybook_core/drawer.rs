@@ -868,7 +868,8 @@ impl DrawerRepo {
             eyre::Ok((doc.0, heads))
         })?;
         let doc: Arc<Doc> = Arc::new(doc);
-        self.cache.insert(id.clone(), (Arc::clone(&doc), heads.clone()));
+        self.cache
+            .insert(id.clone(), (Arc::clone(&doc), heads.clone()));
         Ok(Some(doc))
     }
 

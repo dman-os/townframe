@@ -2,76 +2,80 @@
 
 Experimental.
 
-Repo guide:
+## Daybook
 
-- `./src/daybook_core/`: Rust core for daybook.
+Daybook is an experiental attempt to build to build a "notes app" heavily informed by my (dman-os) tastes and capabilites.
+I think tools like these tend to be highly personal to each person and I recommend everyone try to build one for themselves.
+Either from scratch as is foolishly done here or by customizing an existing platform like Obsidian, Emacs, Notion and soforth
 
-  - `./src/daybook_compose/`: Compose multplatform app for daybook.
+Specifically, daybook design is informed by tech I find shiny, gaps I see in the current landscape for such solutions and my personal politics.
 
-    - Confirmed to run on desktop and android.
+1. Shiny tech
+  - Everything that is and around LLMs.
+  - Uses Automerge for an offline and local-first experience
+    - With futue expectations around collaborative grounding
+  - Uses Compose Multiplatform for a performant experience on Android
+  - Tries to leverage WASM as a plugin system. 
+2. Gaps
+  - Emacs/Vim
+    - State of the art editing experience
+    - Pre-mobile tech
+  - Notion 
+    - Excellent design 
+    - Questionable performance on Android
+  - Obsidian 
+    - Design is excellent and the performance acceptable on mobile
+    - The plugins seem insecure
+    - Collaboration is secondary?
+3. Politics
+  - I'm an adblock person.
 
-  - Uses automerge (through [`samod`](https://lib.rs/samod)) and SQLite (through [`sqlx`](https://lib.rs/sqlx)) for storage.
+Right now, it's in the early experimentation phase trying to prove out tech foundations.
+There are zero features implemented.
 
-  - `./src/daybook_ffi/`: [uniffi](https://lib.rs/uniffi) based bindigns for kotlin.
+### Prior art | Giant shoulders
 
-      - Use ghjk task `gen-ffi-dayb` to re-generate the bindings and build the library.
+- [Patchwork](https://www.inkandswitch.com/patchwork)
+  - The lab's entire corpus really.
+- [Obsidian](https://obsidian.md/)
+  - The right senseblities.
+    - File first
+    - Easy portability with minimal lock-in
+- [Notion](https://www.notion.so/)
+  - Great usablitiy that's accessible.
+  - Collaboration is
+- [Org mode](https://orgmode.org/)
+  - Excellent power user design.
+    - Unix senseblities.
+- [Anytype](https://anytype.io/)
+  - Encrypted offline-first with sync/collaboration
+- TODO: mention more
 
-  - `./src/daybook_sync/`: Automerge sync server for daybook.
+### Points of research and experimentation
 
-  - `./src/daybook_wflows/`: wflows for daybook.
+More details can be found in the [design docs](./docs/DEVDOC/design.md) but actively undecided questions include:
 
-- `./src/btress_api/`: Supporting WASI API for all apps.
+#### ~~Local~~ Privacy friendly machine learning use
 
-  - `./src/btress_http/`: Http wrapper for `btress_api` that runs on wasmcloud.
+If I want to, I ought to be able to self-host for me for me and mine.
 
-- `./src/tests_http/`: E2e tests for the APIs through http.
+#### Mobile first design
 
-- `./src/api_utils_rs/`: Utilities for writing WASI APIs.
+I and many others just won't use it unless it's easily usable on the go.
 
-- `./src/utils_rs/`: General purpose utilities.
+#### Long term sustainablity
 
-- `./src/macros/`: Proc-macro utilities.
+How to become sustainable without relying on VC money and its strings.
 
-- `./src/xtask/`: General purpose scripts.
+#### Long term use
 
-  - Includes the `cargo x gen` command used to do codegen.
+How can I have the whole or parts of the system convincingly useful even on my deathbed.
 
-    - Is source of truth for the interfaces for the WASI apis and handles all the boilerplate.
+Using local-first design where the server is optional is a big help here.
 
-- `./src/granary_web/`: Web app for granary (haitus).
+#### Extensible document store/design
 
-- `./src/wflow/`: the top level crate for wflow.
+A lot of solutions here rely on webtech to support maximum programmability.
+How to adapt that while previous constraints hold?
 
-  - `./src/wflow_core/`: the core types and logic.
- 
-  - `./src/wflow_tokio/`: tokio implementation for the wflow engine.
-
-  - `./src/wflow_webui/`: web ui for wflow.
-
-  - `./src/wflow_sdk/`: sdk for writing wflows.
-
-  - `./src/wflow_ingress_http/`: http api for wflows.
-
-
-- `./ghjk.ts`: [`ghjk`](https://github.com/metatypedev/ghjk) file.
-
-  - Contans a lot of necessary scripts accessible through `ghjk x`.
-
-  - Provisions a bunch of development tools.
-
-- `./flake.nix`: Nix flake with:
-
-  - Provisions a bunch of development toolchains and libraries.
-
-- `./tools/compose.yml`: docker compose file for supporting services.
-
-  - `profiles` are used to group services together and operate on the groups.
-
-  - Ghjk tasks like `compose-up` and `compose-logs` take profile names.
-
-
-## Notes
-
-- Avoid adding dependencies if possible
-- Always audit LLM code in an editor with an IDE present.
-  - Assume you'll need to slightly improve every result.
+One early intiution is that we shouldn't adapt a single document format like markdown as a default and allow generic documents.

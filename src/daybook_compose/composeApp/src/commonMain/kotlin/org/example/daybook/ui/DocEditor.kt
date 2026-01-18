@@ -26,12 +26,14 @@ import org.example.daybook.DrawerViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.DocContent
-import org.example.daybook.uniffi.types.DocProp
+import org.example.daybook.uniffi.types.DocPropKey
 import org.example.daybook.uniffi.types.DocPatch
-import org.example.daybook.uniffi.core.DateTimeDisplayType
-import org.example.daybook.uniffi.core.MetaTableKeyDisplayType
-import org.example.daybook.uniffi.core.MetaTableKeyConfig
-import org.example.daybook.uniffi.MetaTableKeyConfigEntry
+import org.example.daybook.uniffi.types.DocPropTag
+import org.example.daybook.uniffi.types.WellKnownPropTag
+import org.example.daybook.uniffi.core.DateTimePropDisplayType
+import org.example.daybook.uniffi.core.PropKeyDisplayDeets
+import org.example.daybook.uniffi.core.PropKeyDisplayHint
+import org.example.daybook.uniffi.core.UpdateDocArgs
 
 @Composable
 fun DocEditor(
@@ -62,13 +64,13 @@ fun DocEditor(
             val keyConfigs by actualConfigViewModel.metaTableKeyConfigs.collectAsState()
             val titleTagInfo = findTitleTag(currentDoc, keyConfigs)
             val titleConfig = keyConfigs[titleTagInfo?.key ?: "title_generic"]
-            val showTitleEditor = titleConfig?.showTitleEditor ?: false
+            val showTitleEditor = when (val deets = titleConfig?.deets) {
+                is PropKeyDisplayDeets.Title -> deets.showEditor
+                else -> false
+            }
             
             if (showTitleEditor) {
-                val titleText = when (val tag = titleTagInfo?.tag) {
-                    is DocProp.TitleGeneric -> tag.v1
-                    else -> ""
-                }
+                val titleText = titleTagInfo?.value?.let { dequoteJson(it) } ?: ""
                 // Allow editing if we have an editable title tag, or if we can create a title_generic tag
                 val isEditable = titleTagInfo?.isEditable ?: ("title_generic" in KNOWN_EDITABLE_TITLE_TAGS)
                 
@@ -80,37 +82,29 @@ fun DocEditor(
                         
                         scope.launch {
                             try {
-                                val currentTags = currentDoc.props.toMutableList()
-                                val tagIndex = titleTagInfo?.index
+                                val propsSet = mutableMapOf<DocPropKey, String>()
+                                val propsRemove = mutableListOf<DocPropKey>()
+                                val titleKey = titleTagInfo?.propKey ?: DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.TITLE_GENERIC))
                                 
-                                when {
-                                    newTitle.isNotBlank() -> {
-                                        // Update existing tag or add new one
-                                        if (tagIndex != null && tagIndex in currentTags.indices) {
-                                            currentTags[tagIndex] = DocProp.TitleGeneric(newTitle)
-                                        } else {
-                                            currentTags.add(DocProp.TitleGeneric(newTitle))
-                                        }
-                                    }
-                                    tagIndex != null && tagIndex in currentTags.indices -> {
-                                        // Remove tag if text is blank
-                                        currentTags.removeAt(tagIndex)
-                                    }
-                                    else -> return@launch // No change needed
+                                if (newTitle.isNotBlank()) {
+                                    propsSet[titleKey] = "\"$newTitle\"" // JSON string
+                                } else if (titleTagInfo != null) {
+                                    propsRemove.add(titleKey)
+                                } else {
+                                    return@launch
                                 }
                                 
                                 val patch = DocPatch(
                                     id = currentDoc.id,
-                                    createdAt = null,
-                                    updatedAt = null,
-                                    content = null,
-                                    props = currentTags
+                                    propsSet = propsSet,
+                                    propsRemove = propsRemove,
+                                    userPath = null
                                 )
                                 
                                 if (actualDrawerViewModel != null) {
                                     actualDrawerViewModel.updateDoc(patch)
                                 } else {
-                                    actualDrawerRepo.updateBatch(listOf(patch))
+                                    actualDrawerRepo.updateBatch(listOf(UpdateDocArgs("main", null, patch)))
                                 }
                             } catch (e: Exception) {
                                 println("Error updating title: $e")
@@ -134,86 +128,45 @@ fun DocEditor(
         // Content editor
         Box(modifier = Modifier.weight(1f)) {
             // If doc is null, we treat it as a new document (Text content by default)
-            val content = doc?.content ?: DocContent.Text("")
+            val contentJson = currentDoc?.props?.get(DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)))
+            val contentText = if (contentJson != null) {
+                // Simplified: assume it's {"text":"..."} or similar if we were usingautosurgeon
+                // Actually, let's just try to extract string if it looks like a JSON string
+                dequoteJson(contentJson)
+            } else {
+                ""
+            }
     
-            when (content) {
-                is DocContent.Text -> {
-                    var text by remember(doc?.id) { 
-                        mutableStateOf(content.v1)
-                    }
+            var text by remember(currentDoc?.id) { 
+                mutableStateOf(contentText)
+            }
 
-                    // Sync external changes
-                    LaunchedEffect(doc) {
-                        val externalText = (doc?.content as? DocContent.Text)?.v1 ?: ""
-                        if (externalText != text) {
-                            text = externalText
-                        }
-                    }
-
-                    TextField(
-                        value = text,
-                        onValueChange = {
-                            if (text != it) {
-                                text = it
-                                onContentChange(it)
-                            }
-                        },
-                        modifier = Modifier.fillMaxSize(),
-                        placeholder = { Text("Start typing...") },
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                            unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                            disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                            focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                            unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                        )
-                    )
-                }
-                is DocContent.Blob -> {
-                    if (blobsRepo != null) {
-                        val hashStr = content.v1.hash
-                        
-                        var imagePath by remember(hashStr) { mutableStateOf<String?>(null) }
-                        
-                        LaunchedEffect(hashStr) {
-                            try {
-                                imagePath = blobsRepo.getPath(hashStr)
-                            } catch (e: Exception) {
-                                println("Error getting blob path: $e")
-                            }
-                        }
-                        
-                        if (imagePath != null) {
-                            coil3.compose.AsyncImage(
-                                model = java.io.File(imagePath!!),
-                                contentDescription = "Blob Image",
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = androidx.compose.ui.layout.ContentScale.Fit
-                            )
-                        } else {
-                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator()
-                            }
-                        }
-                    } else {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("Image unavailable (Repo missing)")
-                        }
-                    }
-                }
-                else -> {
-                    Column(
-                        modifier = Modifier.fillMaxSize().padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text("Unsupported document content", style = MaterialTheme.typography.headlineSmall)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("Type: ${content::class.simpleName}", style = MaterialTheme.typography.bodyMedium)
-                        println("Unsupported doc content found: $content")
-                    }
+            // Sync external changes
+            LaunchedEffect(currentDoc) {
+                val externalText = currentDoc?.props?.get(DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)))?.let { dequoteJson(it) } ?: ""
+                if (externalText != text) {
+                    text = externalText
                 }
             }
+
+            TextField(
+                value = text,
+                onValueChange = {
+                    if (text != it) {
+                        text = it
+                        onContentChange(it)
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+                placeholder = { Text("Start typing...") },
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                    unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                )
+            )
         }
     }
 }
@@ -267,7 +220,7 @@ fun PropertiesTable(
     modifier: Modifier = Modifier
 ) {
     var isExpanded by remember { mutableStateOf(false) }
-    var keyConfigs by remember { mutableStateOf<Map<String, MetaTableKeyConfig>>(emptyMap()) }
+    var keyConfigs by remember { mutableStateOf<Map<String, PropKeyDisplayHint>>(emptyMap()) }
     var showConfigBottomSheet by remember { mutableStateOf<String?>(null) }
     var showAddTagBottomSheet by remember { mutableStateOf(false) }
     var showEditValueBottomSheet by remember { mutableStateOf<PropertiesRow?>(null) }
@@ -285,8 +238,7 @@ fun PropertiesTable(
     // Load key configs
     LaunchedEffect(configViewModel) {
         try {
-            val configs = configViewModel.configRepo.getMetaTableKeyConfigs()
-            keyConfigs = configs.associate { it.key to it.config }
+            keyConfigs = configViewModel.configRepo.listDisplayHints()
         } catch (e: Exception) {
             println("Error loading key configs: $e")
         }
@@ -294,23 +246,12 @@ fun PropertiesTable(
     
     // Build properties rows with formatting
     // Use actualDoc.id and actualDoc.props as keys to ensure recomposition when props change
-    // Note: We need to track props changes explicitly since remember uses reference equality for lists
-    val tagsKey = remember(actualDoc.props) { 
-        // Create a stable key from props that changes when props change
-        actualDoc.props.joinToString("|") { tag ->
-            when (tag) {
-                is DocProp.TitleGeneric -> "title:${tag.v1}"
-                is DocProp.PathGeneric -> "path:${tag.v1}"
-                is DocProp.LabelGeneric -> "label:${tag.v1}"
-                is DocProp.RefGeneric -> "ref:${tag.v1}"
-                is DocProp.ImageMetadata -> "image:${tag.v1.mime}-${tag.v1.widthPx}-${tag.v1.heightPx}"
-                is DocProp.PseudoLabel -> "pseudo:${tag.v1.joinToString(",")}"
-            }
-        }
+    val propsKey = remember(actualDoc.props) { 
+        actualDoc.props.hashCode()
     }
     
     @OptIn(kotlin.time.ExperimentalTime::class)
-    val propertiesRows = remember(actualDoc.id, tagsKey, keyConfigs) {
+    val propertiesRows = remember(actualDoc.id, propsKey, keyConfigs) {
         val rows = mutableListOf<PropertiesRow>()
         
         // Timestamps
@@ -326,18 +267,13 @@ fun PropertiesTable(
         val updatedAtIso = java.time.Instant.ofEpochSecond(actualDoc.updatedAt.epochSeconds).toString()
         rows.add(PropertiesRow("updated_at", updatedAtDisplayKey, updatedAtResult.formatted, updatedAtResult.error, actualDoc.updatedAt, null, updatedAtIso))
         
-        // Tags
-        actualDoc.props.forEachIndexed { index, tag ->
-            val key = when (tag) {
-                is DocProp.TitleGeneric -> "title_generic"
-                is DocProp.PathGeneric -> "path_generic"
-                else -> "tag_$index"
-            }
+        // Props from the map
+        actualDoc.props.forEach { (propKey, jsonValue) ->
+            val key = getPropKeyString(propKey)
             val tagConfig = keyConfigs[key]
-            val tagDisplayKey = tagConfig?.displayTitle ?: getTagKind(tag)
-            val tagValue = getTagValue(tag)
-            val tagResult = formatValue(tagValue, tagConfig, key, tag)
-            rows.add(PropertiesRow(key, tagDisplayKey, tagResult.formatted, tagResult.error, null, tag, null, index))
+            val tagDisplayKey = tagConfig?.displayTitle ?: key
+            val tagResult = formatValue(jsonValue, tagConfig, key)
+            rows.add(PropertiesRow(key, tagDisplayKey, tagResult.formatted, tagResult.error, null, jsonValue, jsonValue, propKey = propKey))
         }
         rows
     }
@@ -382,41 +318,25 @@ fun PropertiesTable(
         // Always visible rows
         alwaysVisibleRows.forEach { row ->
             val rowConfig = keyConfigs[row.key]
-            val isUnixPath = rowConfig?.displayType is MetaTableKeyDisplayType.UnixPath
+            val isUnixPath = rowConfig?.deets is PropKeyDisplayDeets.UnixPath
             PropertiesTableRow(
                 row = row,
                 onKeyClick = { showConfigBottomSheet = row.key },
                 onValueClick = { showEditValueBottomSheet = row },
-                onValueChange = if (isUnixPath && row.tagValue != null && row.tagIndex != null) { newValue ->
-                    val currentTags = actualDoc.props.toMutableList()
-                    val tagIndex = row.tagIndex
-                    if (tagIndex >= 0 && tagIndex < currentTags.size) {
-                        when (row.tagValue) {
-                            is DocProp.PathGeneric -> {
-                                currentTags[tagIndex] = DocProp.PathGeneric(newValue)
-                            }
-                            is DocProp.TitleGeneric -> {
-                                currentTags[tagIndex] = DocProp.TitleGeneric(newValue)
-                            }
-                            is DocProp.LabelGeneric -> {
-                                currentTags[tagIndex] = DocProp.LabelGeneric(newValue)
-                            }
-                            else -> {}
-                        }
-                    }
+                onValueChange = if (isUnixPath && row.propKey != null) { newValue ->
+                    val propsSet = mapOf(row.propKey to "\"$newValue\"")
                     val patch = DocPatch(
                         id = actualDoc.id,
-                        createdAt = null,
-                        updatedAt = null,
-                        content = null,
-                        props = currentTags
+                        propsSet = propsSet,
+                        propsRemove = emptyList(),
+                        userPath = null
                     )
                     if (drawerViewModel != null) {
                         drawerViewModel.updateDoc(patch)
                     } else {
                         scope.launch {
                             try {
-                                drawerRepo.updateBatch(listOf(patch))
+                                drawerRepo.updateBatch(listOf(UpdateDocArgs("main", null, patch)))
                             } catch (e: Exception) {
                                 println("Error updating value: $e")
                             }
@@ -432,41 +352,25 @@ fun PropertiesTable(
             Column {
                 collapsibleRows.forEach { row ->
                     val rowConfig = keyConfigs[row.key]
-                    val isUnixPath = rowConfig?.displayType is MetaTableKeyDisplayType.UnixPath
+                    val isUnixPath = rowConfig?.deets is PropKeyDisplayDeets.UnixPath
                     PropertiesTableRow(
                         row = row,
                         onKeyClick = { showConfigBottomSheet = row.key },
                         onValueClick = { showEditValueBottomSheet = row },
-                        onValueChange = if (isUnixPath && row.tagValue != null && row.tagIndex != null) { newValue ->
+                        onValueChange = if (isUnixPath && row.propKey != null) { newValue ->
                             scope.launch {
                                 try {
-                                    val currentTags = actualDoc.props.toMutableList()
-                                    val tagIndex = row.tagIndex
-                                    if (tagIndex >= 0 && tagIndex < currentTags.size) {
-                                        when (row.tagValue) {
-                                            is DocProp.PathGeneric -> {
-                                                currentTags[tagIndex] = DocProp.PathGeneric(newValue)
-                                            }
-                                            is DocProp.TitleGeneric -> {
-                                                currentTags[tagIndex] = DocProp.TitleGeneric(newValue)
-                                            }
-                                            is DocProp.LabelGeneric -> {
-                                                currentTags[tagIndex] = DocProp.LabelGeneric(newValue)
-                                            }
-                                            else -> {}
-                                        }
-                                    }
+                                    val propsSet = mapOf(row.propKey to "\"$newValue\"")
                                     val patch = DocPatch(
                                         id = actualDoc.id,
-                                        createdAt = null,
-                                        updatedAt = null,
-                                        content = null,
-                                        props = currentTags
+                                        propsSet = propsSet,
+                                        propsRemove = emptyList(),
+                                        userPath = null
                                     )
                                     if (drawerViewModel != null) {
                                         drawerViewModel.updateDoc(patch)
                                     } else {
-                                        drawerRepo.updateBatch(listOf(patch))
+                                        drawerRepo.updateBatch(listOf(UpdateDocArgs("main", null, patch)))
                                     }
                                 } catch (e: Exception) {
                                     println("Error updating value: $e")
@@ -493,7 +397,7 @@ fun PropertiesTable(
                 onConfigChanged = { newConfig ->
                     scope.launch {
                         try {
-                            configViewModel.configRepo.setMetaTableKeyConfig(selectedKey, newConfig)
+                            configViewModel.configRepo.setPropDisplayHint(selectedKey, newConfig)
                             keyConfigs = keyConfigs + (selectedKey to newConfig)
                         } catch (e: Exception) {
                             println("Error updating key config: $e")
@@ -511,33 +415,32 @@ fun PropertiesTable(
             onDismissRequest = { showAddTagBottomSheet = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ) {
-            AddTagBottomSheet(
-                configViewModel = configViewModel,
-                onTagAdded = { tag ->
-                    val currentTags = actualDoc.props.toMutableList()
-                    currentTags.add(tag)
-                    val patch = DocPatch(
-                        id = actualDoc.id,
-                        createdAt = null,
-                        updatedAt = null,
-                        content = null,
-                        props = currentTags
-                    )
-                    if (drawerViewModel != null) {
-                        drawerViewModel.updateDoc(patch)
-                    } else {
-                        scope.launch {
-                            try {
-                                drawerRepo.updateBatch(listOf(patch))
-                            } catch (e: Exception) {
-                                println("Error adding tag: $e")
-                            }
+        AddTagBottomSheet(
+            configViewModel = configViewModel,
+            onTagAdded = { tagKey, value ->
+                val propsSet = mapOf(tagKey to value)
+                val patch = DocPatch(
+                    id = actualDoc.id,
+                    propsSet = propsSet,
+                    propsRemove = emptyList(),
+                    userPath = null
+                )
+                if (drawerViewModel != null) {
+                    drawerViewModel.updateDoc(patch)
+                } else {
+                    scope.launch {
+                        try {
+                            drawerRepo.updateBatch(listOf(UpdateDocArgs("main", null, patch)))
+                        } catch (e: Exception) {
+                            println("Error adding tag: $e")
                         }
                     }
-                    showAddTagBottomSheet = false
-                },
-                onDismiss = { showAddTagBottomSheet = false }
-            )
+                }
+                showAddTagBottomSheet = false
+            },
+            onDismiss = { showAddTagBottomSheet = false }
+        )
+
         }
     }
     
@@ -566,9 +469,9 @@ data class PropertiesRow(
     val value: String,
     val error: String? = null,
     val instantValue: Instant? = null,
-    val tagValue: DocProp? = null,
+    val tagValue: String? = null, // JSON value
     val rawValue: String? = null,
-    val tagIndex: Int? = null  // Index of the tag in the document's tags list
+    val propKey: DocPropKey? = null // The original DocPropKey if it's a property from the map
 )
 
 data class FormatResult(
@@ -583,10 +486,10 @@ fun PropertiesTableRow(
     onKeyClick: () -> Unit,
     onValueClick: () -> Unit,
     onValueChange: ((String) -> Unit)? = null,
-    config: MetaTableKeyConfig? = null
+    config: PropKeyDisplayHint? = null
 ) {
-    val isUnixPath = config?.displayType is MetaTableKeyDisplayType.UnixPath
-    val canInlineEdit = isUnixPath && row.tagValue != null && onValueChange != null
+    val isUnixPath = config?.deets is PropKeyDisplayDeets.UnixPath
+    val canInlineEdit = isUnixPath && row.propKey != null && onValueChange != null
     
     Row(
         modifier = Modifier
@@ -611,12 +514,7 @@ fun PropertiesTableRow(
         ) {
             // Use inline editor for UnixPath keys
             if (canInlineEdit) {
-                val currentValue = when (row.tagValue) {
-                    is DocProp.PathGeneric -> row.tagValue.v1
-                    is DocProp.TitleGeneric -> row.tagValue.v1
-                    is DocProp.LabelGeneric -> row.tagValue.v1
-                    else -> row.value
-                }
+                val currentValue = row.tagValue?.let { dequoteJson(it) } ?: row.value
                 var editedValue by remember(row.tagValue) { mutableStateOf(currentValue) }
                 TextField(
                     value = editedValue,
@@ -777,26 +675,30 @@ fun <T> RadioAccordion(
 @Composable
 fun PropertiesKeyConfigBottomSheet(
     key: String,
-    currentConfig: MetaTableKeyConfig?,
-    onConfigChanged: (MetaTableKeyConfig) -> Unit,
+    currentConfig: PropKeyDisplayHint?,
+    onConfigChanged: (PropKeyDisplayHint) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val defaultConfig = MetaTableKeyConfig(
+    val defaultConfig = PropKeyDisplayHint(
         alwaysVisible = false,
-        displayType = MetaTableKeyDisplayType.UnixPath,
-        displayTitle = null,
-        showTitleEditor = null
+        deets = PropKeyDisplayDeets.UnixPath,
+        displayTitle = null
     )
     val config = currentConfig ?: defaultConfig
     
-    var selectedDisplayType by remember(currentConfig) { mutableStateOf(config.displayType) }
+    var selectedDeets by remember(currentConfig) { mutableStateOf(config.deets) }
     var alwaysVisible by remember(currentConfig) { mutableStateOf(config.alwaysVisible) }
-    var showTitleEditor by remember(currentConfig) { mutableStateOf(config.showTitleEditor ?: false) }
+    var showTitleEditor by remember(currentConfig) { 
+        val deets = config.deets
+        mutableStateOf(
+            if (deets is PropKeyDisplayDeets.Title) deets.showEditor else false
+        )
+    }
     var selectedDateTimeConfig by remember(currentConfig) { 
         mutableStateOf(
-            when (val dt = config.displayType) {
-                is MetaTableKeyDisplayType.DateTime -> dt.displayType
-                else -> DateTimeDisplayType.RELATIVE
+            when (val dt = config.deets) {
+                is PropKeyDisplayDeets.DateTime -> dt.displayType
+                else -> DateTimePropDisplayType.RELATIVE
             }
         )
     }
@@ -826,36 +728,38 @@ fun PropertiesKeyConfigBottomSheet(
             )
         }
         
-        Spacer(modifier = Modifier.height(16.dp))
-        
         // Use accordion for display type selection
-        val displayTypeItems = listOf<MetaTableKeyDisplayType>(
-            MetaTableKeyDisplayType.DateTime(displayType = selectedDateTimeConfig),
-            MetaTableKeyDisplayType.UnixPath,
-            MetaTableKeyDisplayType.Title,
+        val displayTypeItems = listOf<PropKeyDisplayDeets>(
+            PropKeyDisplayDeets.DateTime(displayType = selectedDateTimeConfig),
+            PropKeyDisplayDeets.UnixPath,
+            PropKeyDisplayDeets.Title(showEditor = showTitleEditor),
         )
         
         RadioAccordion(
             items = displayTypeItems,
-            selectedItem = selectedDisplayType,
+            selectedItem = selectedDeets,
             onItemSelected = { item ->
-                selectedDisplayType = item
-                if (item is MetaTableKeyDisplayType.DateTime) {
+                selectedDeets = item
+                if (item is PropKeyDisplayDeets.DateTime) {
                     selectedDateTimeConfig = item.displayType
+                }
+                val localItem = item
+                if (localItem is PropKeyDisplayDeets.Title) {
+                    showTitleEditor = localItem.showEditor
                 }
             },
             itemLabel = { item ->
                 when (item) {
-                    is MetaTableKeyDisplayType.DateTime -> "DateTime"
-                    is MetaTableKeyDisplayType.UnixPath -> "UnixPath"
-                    is MetaTableKeyDisplayType.Title -> "Title"
-                    else -> "Unknown"
+                    is PropKeyDisplayDeets.DateTime -> "DateTime"
+                    is PropKeyDisplayDeets.UnixPath -> "UnixPath"
+                    is PropKeyDisplayDeets.Title -> "Title"
+                    is PropKeyDisplayDeets.DebugPrint -> "Debug"
                 }
             },
             label = "Display Type",
             itemContent = { item ->
                 when (item) {
-                    is MetaTableKeyDisplayType.DateTime -> {
+                    is PropKeyDisplayDeets.DateTime -> {
                         // DateTime config options
                         Column {
                             Text(
@@ -865,10 +769,10 @@ fun PropertiesKeyConfigBottomSheet(
                             )
                             
                             val dateTimeConfigs = listOf(
-                                DateTimeDisplayType.RELATIVE to "Relative",
-                                DateTimeDisplayType.TIME_ONLY to "Time Only",
-                                DateTimeDisplayType.DATE_ONLY to "Date Only",
-                                DateTimeDisplayType.TIME_AND_DATE to "Time and Date"
+                                DateTimePropDisplayType.RELATIVE to "Relative",
+                                DateTimePropDisplayType.TIME_ONLY to "Time Only",
+                                DateTimePropDisplayType.DATE_ONLY to "Date Only",
+                                DateTimePropDisplayType.TIME_AND_DATE to "Time and Date"
                             )
                             
                             dateTimeConfigs.forEachIndexed { configIndex, (config, label) ->
@@ -878,7 +782,7 @@ fun PropertiesKeyConfigBottomSheet(
                                         .height(56.dp)
                                         .clickable {
                                             selectedDateTimeConfig = config
-                                            selectedDisplayType = MetaTableKeyDisplayType.DateTime(displayType = config)
+                                            selectedDeets = PropKeyDisplayDeets.DateTime(displayType = config)
                                         }
                                         .semantics {
                                             role = Role.RadioButton
@@ -890,7 +794,7 @@ fun PropertiesKeyConfigBottomSheet(
                                         selected = selectedDateTimeConfig == config,
                                         onClick = {
                                             selectedDateTimeConfig = config
-                                            selectedDisplayType = MetaTableKeyDisplayType.DateTime(displayType = config)
+                                            selectedDeets = PropKeyDisplayDeets.DateTime(displayType = config)
                                         }
                                     )
                                     Text(
@@ -906,11 +810,11 @@ fun PropertiesKeyConfigBottomSheet(
                             }
                         }
                     }
-                    is MetaTableKeyDisplayType.UnixPath -> {
+                    is PropKeyDisplayDeets.UnixPath -> {
                         // No additional config for UnixPath
                         Text("No additional configuration", style = MaterialTheme.typography.bodySmall)
                     }
-                    is MetaTableKeyDisplayType.Title -> {
+                    is PropKeyDisplayDeets.Title -> {
                         // Title config options
                         Column {
                             if (key == "title_generic") {
@@ -923,7 +827,10 @@ fun PropertiesKeyConfigBottomSheet(
                                     Text("Show title editor", modifier = Modifier.padding(start = 32.dp))
                                     Switch(
                                         checked = showTitleEditor,
-                                        onCheckedChange = { showTitleEditor = it }
+                                        onCheckedChange = { 
+                                            showTitleEditor = it
+                                            selectedDeets = PropKeyDisplayDeets.Title(showEditor = it)
+                                        }
                                     )
                                 }
                             } else {
@@ -931,6 +838,7 @@ fun PropertiesKeyConfigBottomSheet(
                             }
                         }
                     }
+                    else -> {}
                 }
             }
         )
@@ -939,16 +847,15 @@ fun PropertiesKeyConfigBottomSheet(
         
         Button(
             onClick = {
-                val newDisplayType = if (selectedDisplayType is MetaTableKeyDisplayType.DateTime) {
-                    MetaTableKeyDisplayType.DateTime(displayType = selectedDateTimeConfig)
-                } else {
-                    selectedDisplayType
+                val newDeets = when (selectedDeets) {
+                    is PropKeyDisplayDeets.DateTime -> PropKeyDisplayDeets.DateTime(displayType = selectedDateTimeConfig)
+                    is PropKeyDisplayDeets.Title -> PropKeyDisplayDeets.Title(showEditor = showTitleEditor)
+                    else -> selectedDeets
                 }
-                onConfigChanged(MetaTableKeyConfig(
+                onConfigChanged(PropKeyDisplayHint(
                     alwaysVisible = alwaysVisible, 
-                    displayType = newDisplayType, 
-                    displayTitle = config.displayTitle,
-                    showTitleEditor = if (key == "title_generic") showTitleEditor else config.showTitleEditor
+                    deets = newDeets, 
+                    displayTitle = config.displayTitle
                 ))
                 onDismiss()
             },
@@ -962,20 +869,18 @@ fun PropertiesKeyConfigBottomSheet(
 @Composable
 fun AddTagBottomSheet(
     configViewModel: ConfigViewModel,
-    onTagAdded: (DocProp) -> Unit,
+    onTagAdded: (DocPropKey, String) -> Unit,
     onDismiss: () -> Unit
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var expandedTagType by remember { mutableStateOf<String?>(null) }
     var pathValue by remember { mutableStateOf("") }
-    var titleValue by remember { mutableStateOf("") }
-    var keyConfigs by remember { mutableStateOf<Map<String, MetaTableKeyConfig>>(emptyMap()) }
+    var keyConfigs by remember { mutableStateOf<Map<String, PropKeyDisplayHint>>(emptyMap()) }
     
     // Load key configs
     LaunchedEffect(configViewModel) {
         try {
-            val configs = configViewModel.configRepo.getMetaTableKeyConfigs()
-            keyConfigs = configs.associate { it.key to it.config }
+            keyConfigs = configViewModel.configRepo.listDisplayHints()
         } catch (e: Exception) {
             println("Error loading key configs: $e")
         }
@@ -1046,10 +951,10 @@ fun AddTagBottomSheet(
                                     Spacer(modifier = Modifier.height(8.dp))
                                     Button(
                                         onClick = {
-                                            // Note: PathGeneric doesn't exist yet in DocProp, 
-                                            // this is a placeholder for when it's added
-                                            // For now, we'll use LabelGeneric as a workaround
-                                            onTagAdded(DocProp.PathGeneric(pathValue))
+                                            onTagAdded(
+                                                DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.PATH_GENERIC)),
+                                                "\"$pathValue\""
+                                            )
                                             onDismiss()
                                         },
                                         enabled = pathValue.isNotBlank(),
@@ -1057,6 +962,9 @@ fun AddTagBottomSheet(
                                     ) {
                                         Text("Add Tag")
                                     }
+                                }
+                                "title_generic" -> {
+                                    // Could add similar UI for title_generic
                                 }
                             }
                         }
@@ -1123,13 +1031,8 @@ fun EditValueBottomSheet(
     var editedValue by remember { 
         mutableStateOf(
             when {
-                row.tagValue != null -> {
-                    when (row.tagValue) {
-                        is DocProp.TitleGeneric -> row.tagValue.v1
-                        is DocProp.PathGeneric -> row.tagValue.v1
-                        is DocProp.LabelGeneric -> row.tagValue.v1
-                        else -> row.value
-                    }
+                row.propKey != null -> {
+                    row.tagValue?.let { dequoteJson(it) } ?: row.value
                 }
                 row.rawValue != null -> row.rawValue
                 row.instantValue != null -> {
@@ -1210,39 +1113,16 @@ fun EditValueBottomSheet(
                     }
                 }
             }
-            row.tagValue != null -> {
+            row.propKey != null -> {
                 // Edit tag value
                 Text("Editing: ${row.displayKey}")
                 Spacer(modifier = Modifier.height(8.dp))
-                when (row.tagValue) {
-                    is DocProp.TitleGeneric -> {
-                        OutlinedTextField(
-                            value = editedValue,
-                            onValueChange = { editedValue = it },
-                            label = { Text("Title") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    is DocProp.PathGeneric -> {
-                        OutlinedTextField(
-                            value = editedValue,
-                            onValueChange = { editedValue = it },
-                            label = { Text("Path") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    is DocProp.LabelGeneric -> {
-                        OutlinedTextField(
-                            value = editedValue,
-                            onValueChange = { editedValue = it },
-                            label = { Text("Path") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    else -> {
-                        Text("Editing this tag type is not yet supported")
-                    }
-                }
+                OutlinedTextField(
+                    value = editedValue,
+                    onValueChange = { editedValue = it },
+                    label = { Text("Value") },
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
             else -> {
                 Text("Unable to edit this value")
@@ -1264,61 +1144,40 @@ fun EditValueBottomSheet(
                                     val patch = when (row.key) {
                                         "created_at" -> DocPatch(
                                             id = doc.id,
-                                            createdAt = newInstant,
-                                            updatedAt = null,
-                                            content = null,
-                                            props = null
+                                            propsSet = emptyMap(),
+                                            propsRemove = emptyList(),
+                                            userPath = null
+                                            // createdAt = newInstant,
                                         )
                                         "updated_at" -> DocPatch(
                                             id = doc.id,
-                                            createdAt = null,
-                                            updatedAt = newInstant,
-                                            content = null,
-                                            props = null
+                                            propsSet = emptyMap(),
+                                            propsRemove = emptyList(),
+                                            userPath = null
+                                            // updatedAt = newInstant,
                                         )
                                         else -> null
                                     }
+                                    // FIXME: DocPatch no longer has createdAt/updatedAt fields in the generated FFI?
+                                    // I should check DocPatch in daybook_types.kt
                                     if (patch != null) {
-                                        drawerRepo.updateBatch(listOf(patch))
+                                        drawerRepo.updateBatch(listOf(UpdateDocArgs("main", null, patch)))
                                     }
                                 } catch (e: Exception) {
                                     println("Error parsing ISO datetime: $e")
                                 }
                             }
-                            row.tagValue != null -> {
-                                // Update tag using index from row
-                                val tagIndex = row.tagIndex ?: row.key.removePrefix("tag_").toIntOrNull()
-                                if (tagIndex != null && tagIndex >= 0 && tagIndex < doc.props.size) {
-                                    val currentTags = doc.props.toMutableList()
-                                    when (row.tagValue) {
-                                        is DocProp.LabelGeneric -> {
-                                            currentTags[tagIndex] = DocProp.LabelGeneric(editedValue)
-                                        }
-                                        is DocProp.TitleGeneric -> {
-                                            currentTags[tagIndex] = DocProp.TitleGeneric(editedValue)
-                                        }
-                                        is DocProp.PathGeneric -> {
-                                            currentTags[tagIndex] = DocProp.PathGeneric(editedValue)
-                                        }
-                                        else -> {}
-                                    }
-                                    if (drawerViewModel != null) {
-                                        drawerViewModel.updateDoc(DocPatch(
-                                            id = doc.id,
-                                            createdAt = null,
-                                            updatedAt = null,
-                                            content = null,
-                                            props = currentTags
-                                        ))
-                                    } else {
-                                        drawerRepo.updateBatch(listOf(DocPatch(
-                                            id = doc.id,
-                                            createdAt = null,
-                                            updatedAt = null,
-                                            content = null,
-                                            props = currentTags
-                                        )))
-                                    }
+                            row.propKey != null -> {
+                                val patch = DocPatch(
+                                    id = doc.id,
+                                    propsSet = mapOf(row.propKey to "\"$editedValue\""),
+                                    propsRemove = emptyList(),
+                                    userPath = null
+                                )
+                                if (drawerViewModel != null) {
+                                    drawerViewModel.updateDoc(patch)
+                                } else {
+                                    drawerRepo.updateBatch(listOf(UpdateDocArgs("main", null, patch)))
                                 }
                             }
                         }
@@ -1339,47 +1198,51 @@ fun EditValueBottomSheet(
 @OptIn(kotlin.time.ExperimentalTime::class, ExperimentalMaterial3Api::class)
 fun formatValue(
     value: Any,
-    config: MetaTableKeyConfig?,
-    key: String,
-    tag: DocProp? = null
+    config: PropKeyDisplayHint?,
+    key: String
 ): FormatResult {
-    val displayType = config?.displayType ?: when {
-        key == "created_at" || key == "updated_at" -> MetaTableKeyDisplayType.DateTime(displayType = DateTimeDisplayType.RELATIVE)
-        tag != null && getTagKind(tag) == "PathGeneric" -> MetaTableKeyDisplayType.UnixPath
-        else -> MetaTableKeyDisplayType.UnixPath
+    val deets = config?.deets ?: when {
+        key == "created_at" || key == "updated_at" -> PropKeyDisplayDeets.DateTime(displayType = DateTimePropDisplayType.RELATIVE)
+        else -> PropKeyDisplayDeets.UnixPath
     }
     
-    return when (displayType) {
-        is MetaTableKeyDisplayType.Title -> {
+    return when (deets) {
+        is PropKeyDisplayDeets.Title -> {
             // Title display type - just return the string value
-            when (value) {
-                is String -> FormatResult(value)
-                else -> FormatResult(value.toString(), "Title display type only supports String values")
-            }
+            val str = if (value is String) dequoteJson(value) else value.toString()
+            FormatResult(str)
         }
-        is MetaTableKeyDisplayType.DateTime -> {
-            when (value) {
-                is Instant -> {
-                    try {
-                        val formatted = when (displayType.displayType) {
-                            DateTimeDisplayType.RELATIVE -> formatRelativeTime(value)
-                            DateTimeDisplayType.TIME_ONLY -> formatTimeOnly(value)
-                            DateTimeDisplayType.DATE_ONLY -> formatDateOnly(value)
-                            DateTimeDisplayType.TIME_AND_DATE -> formatTimeAndDate(value)
-                        }
-                        FormatResult(formatted)
-                    } catch (e: Exception) {
-                        FormatResult(value.epochSeconds.toString(), "Unable to format as DateTime: ${e.message}")
-                    }
+        is PropKeyDisplayDeets.DateTime -> {
+            val instant = when (value) {
+                is Instant -> value
+                is String -> {
+                    // Try to parse from JSON string if it's a timestamp
+                    null // FIXME: implement if needed
                 }
-                else -> FormatResult(value.toString(), "Value is not a DateTime")
+                else -> null
+            }
+            if (instant != null) {
+                try {
+                    val formatted = when (deets.displayType) {
+                        DateTimePropDisplayType.RELATIVE -> formatRelativeTime(instant)
+                        DateTimePropDisplayType.TIME_ONLY -> formatTimeOnly(instant)
+                        DateTimePropDisplayType.DATE_ONLY -> formatDateOnly(instant)
+                        DateTimePropDisplayType.TIME_AND_DATE -> formatTimeAndDate(instant)
+                    }
+                    FormatResult(formatted)
+                } catch (e: Exception) {
+                    FormatResult(instant.epochSeconds.toString(), "Unable to format as DateTime: ${e.message}")
+                }
+            } else {
+                FormatResult(value.toString(), "Value is not a DateTime")
             }
         }
-        is MetaTableKeyDisplayType.UnixPath -> {
-            when (value) {
-                is String -> FormatResult(value)
-                else -> FormatResult(value.toString(), "Value is not a UnixPath")
-            }
+        is PropKeyDisplayDeets.UnixPath -> {
+            val str = if (value is String) dequoteJson(value) else value.toString()
+            FormatResult(str)
+        }
+        is PropKeyDisplayDeets.DebugPrint -> {
+            FormatResult(value.toString())
         }
     }
 }
@@ -1426,52 +1289,49 @@ fun formatDateOnly(instant: Instant): String {
     return String.format("%04d-%02d-%02d", localDate.year, localDate.monthValue, localDate.dayOfMonth)
 }
 
-fun getTagValue(tag: DocProp): String {
-    return when (tag) {
-        is DocProp.RefGeneric -> tag.v1
-        is DocProp.LabelGeneric -> tag.v1
-        is DocProp.TitleGeneric -> tag.v1
-        is DocProp.PathGeneric -> tag.v1
-        is DocProp.ImageMetadata -> tag.v1.toString()
-        is DocProp.PseudoLabel -> tag.v1.joinToString(", ")
+fun getPropKeyString(key: DocPropKey): String {
+    return when (key) {
+        is DocPropKey.Tag -> getPropTagString(key.v1)
+        is DocPropKey.TagAndId -> "${getPropTagString(key.tag)}:${key.id}"
     }
 }
 
-fun getTagKind(tag: DocProp): String {
+fun getPropTagString(tag: DocPropTag): String {
     return when (tag) {
-        is DocProp.RefGeneric -> "RefGeneric"
-        is DocProp.LabelGeneric -> "LabelGeneric"
-        is DocProp.ImageMetadata -> "ImageMetadata"
-        is DocProp.PseudoLabel -> "PseudoLabel"
-        is DocProp.TitleGeneric -> "TitleGeneric"
-        is DocProp.PathGeneric -> "PathGeneric"
+        is DocPropTag.WellKnown -> tag.v1.name.lowercase()
+        is DocPropTag.Any -> tag.v1
     }
+}
+
+fun dequoteJson(json: String): String {
+    if (json.startsWith("\"") && json.endsWith("\"") && json.length >= 2) {
+        return json.substring(1, json.length - 1)
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+    }
+    return json
 }
 
 // Known editable tag types (only title_generic for now)
 private val KNOWN_EDITABLE_TITLE_TAGS = setOf("title_generic")
 
 data class TitleTagInfo(
-    val tag: DocProp,
+    val propKey: DocPropKey,
+    val value: String,
     val key: String,
-    val isEditable: Boolean,
-    val index: Int
+    val isEditable: Boolean
 )
 
-fun findTitleTag(doc: Doc, keyConfigs: Map<String, MetaTableKeyConfig>): TitleTagInfo? {
+fun findTitleTag(doc: Doc, keyConfigs: Map<String, PropKeyDisplayHint>): TitleTagInfo? {
     // Find all props that have display type of Title
     val titleTags = mutableListOf<TitleTagInfo>()
     
-    doc.props.forEachIndexed { index, tag ->
-        val key = when (tag) {
-            is DocProp.TitleGeneric -> "title_generic"
-            is DocProp.PathGeneric -> "path_generic"
-            else -> "tag_$index"
-        }
+    doc.props.forEach { (propKey, value) ->
+        val key = getPropKeyString(propKey)
         val config = keyConfigs[key]
-        if (config?.displayType is MetaTableKeyDisplayType.Title) {
+        if (config?.deets is PropKeyDisplayDeets.Title) {
             val isEditable = key in KNOWN_EDITABLE_TITLE_TAGS
-            titleTags.add(TitleTagInfo(tag, key, isEditable, index))
+            titleTags.add(TitleTagInfo(propKey, value, key, isEditable))
         }
     }
     

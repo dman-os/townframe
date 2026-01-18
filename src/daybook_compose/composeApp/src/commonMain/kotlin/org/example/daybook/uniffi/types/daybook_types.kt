@@ -1103,6 +1103,42 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 
 
 
+data class AddDocArgs (
+    var `branchPath`: PathBuf, 
+    var `props`: Map<DocPropKey, Json>, 
+    var `userPath`: PathBuf?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAddDocArgs: FfiConverterRustBuffer<AddDocArgs> {
+    override fun read(buf: ByteBuffer): AddDocArgs {
+        return AddDocArgs(
+            FfiConverterTypePathBuf.read(buf),
+            FfiConverterMapTypeDocPropKeyTypeJson.read(buf),
+            FfiConverterOptionalTypePathBuf.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AddDocArgs) = (
+            FfiConverterTypePathBuf.allocationSize(value.`branchPath`) +
+            FfiConverterMapTypeDocPropKeyTypeJson.allocationSize(value.`props`) +
+            FfiConverterOptionalTypePathBuf.allocationSize(value.`userPath`)
+    )
+
+    override fun write(value: AddDocArgs, buf: ByteBuffer) {
+            FfiConverterTypePathBuf.write(value.`branchPath`, buf)
+            FfiConverterMapTypeDocPropKeyTypeJson.write(value.`props`, buf)
+            FfiConverterOptionalTypePathBuf.write(value.`userPath`, buf)
+    }
+}
+
+
+
 data class Blob (
     var `lengthOctets`: kotlin.ULong, 
     var `hash`: kotlin.String
@@ -1137,9 +1173,9 @@ public object FfiConverterTypeBlob: FfiConverterRustBuffer<Blob> {
 
 data class Doc (
     var `id`: kotlin.String, 
-    var `createdAt`: OffsetDateTime, 
-    var `updatedAt`: OffsetDateTime, 
-    var `props`: Map<DocPropKey, DocProp>
+    var `createdAt`: Timestamp, 
+    var `updatedAt`: Timestamp, 
+    var `props`: Map<DocPropKey, Json>
 ) {
     
     companion object
@@ -1152,24 +1188,24 @@ public object FfiConverterTypeDoc: FfiConverterRustBuffer<Doc> {
     override fun read(buf: ByteBuffer): Doc {
         return Doc(
             FfiConverterString.read(buf),
-            FfiConverterTypeOffsetDateTime.read(buf),
-            FfiConverterTypeOffsetDateTime.read(buf),
-            FfiConverterMapTypeDocPropKeyTypeDocProp.read(buf),
+            FfiConverterTypeTimestamp.read(buf),
+            FfiConverterTypeTimestamp.read(buf),
+            FfiConverterMapTypeDocPropKeyTypeJson.read(buf),
         )
     }
 
     override fun allocationSize(value: Doc) = (
             FfiConverterString.allocationSize(value.`id`) +
-            FfiConverterTypeOffsetDateTime.allocationSize(value.`createdAt`) +
-            FfiConverterTypeOffsetDateTime.allocationSize(value.`updatedAt`) +
-            FfiConverterMapTypeDocPropKeyTypeDocProp.allocationSize(value.`props`)
+            FfiConverterTypeTimestamp.allocationSize(value.`createdAt`) +
+            FfiConverterTypeTimestamp.allocationSize(value.`updatedAt`) +
+            FfiConverterMapTypeDocPropKeyTypeJson.allocationSize(value.`props`)
     )
 
     override fun write(value: Doc, buf: ByteBuffer) {
             FfiConverterString.write(value.`id`, buf)
-            FfiConverterTypeOffsetDateTime.write(value.`createdAt`, buf)
-            FfiConverterTypeOffsetDateTime.write(value.`updatedAt`, buf)
-            FfiConverterMapTypeDocPropKeyTypeDocProp.write(value.`props`, buf)
+            FfiConverterTypeTimestamp.write(value.`createdAt`, buf)
+            FfiConverterTypeTimestamp.write(value.`updatedAt`, buf)
+            FfiConverterMapTypeDocPropKeyTypeJson.write(value.`props`, buf)
     }
 }
 
@@ -1212,11 +1248,15 @@ data class DocPatch (
     /**
      * Props to set (insert or update)
      */
-    var `propsSet`: Map<DocPropKey, DocProp>, 
+    var `propsSet`: Map<DocPropKey, Json>, 
     /**
      * Props to remove (by key)
      */
-    var `propsRemove`: List<DocPropKey>
+    var `propsRemove`: List<DocPropKey>, 
+    /**
+     * Optional user path for recording in drawer
+     */
+    var `userPath`: PathBuf?
 ) {
     
     companion object
@@ -1229,21 +1269,24 @@ public object FfiConverterTypeDocPatch: FfiConverterRustBuffer<DocPatch> {
     override fun read(buf: ByteBuffer): DocPatch {
         return DocPatch(
             FfiConverterString.read(buf),
-            FfiConverterMapTypeDocPropKeyTypeDocProp.read(buf),
+            FfiConverterMapTypeDocPropKeyTypeJson.read(buf),
             FfiConverterSequenceTypeDocPropKey.read(buf),
+            FfiConverterOptionalTypePathBuf.read(buf),
         )
     }
 
     override fun allocationSize(value: DocPatch) = (
             FfiConverterString.allocationSize(value.`id`) +
-            FfiConverterMapTypeDocPropKeyTypeDocProp.allocationSize(value.`propsSet`) +
-            FfiConverterSequenceTypeDocPropKey.allocationSize(value.`propsRemove`)
+            FfiConverterMapTypeDocPropKeyTypeJson.allocationSize(value.`propsSet`) +
+            FfiConverterSequenceTypeDocPropKey.allocationSize(value.`propsRemove`) +
+            FfiConverterOptionalTypePathBuf.allocationSize(value.`userPath`)
     )
 
     override fun write(value: DocPatch, buf: ByteBuffer) {
             FfiConverterString.write(value.`id`, buf)
-            FfiConverterMapTypeDocPropKeyTypeDocProp.write(value.`propsSet`, buf)
+            FfiConverterMapTypeDocPropKeyTypeJson.write(value.`propsSet`, buf)
             FfiConverterSequenceTypeDocPropKey.write(value.`propsRemove`, buf)
+            FfiConverterOptionalTypePathBuf.write(value.`userPath`, buf)
     }
 }
 
@@ -1406,76 +1449,6 @@ public object FfiConverterTypeDocContentKind: FfiConverterRustBuffer<DocContentK
 
     override fun write(value: DocContentKind, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-sealed class DocProp {
-    
-    data class WellKnown(
-        val v1: WellKnownProp) : DocProp() {
-        companion object
-    }
-    
-    data class Any(
-        val v1: Json) : DocProp() {
-        companion object
-    }
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDocProp : FfiConverterRustBuffer<DocProp>{
-    override fun read(buf: ByteBuffer): DocProp {
-        return when(buf.getInt()) {
-            1 -> DocProp.WellKnown(
-                FfiConverterTypeWellKnownProp.read(buf),
-                )
-            2 -> DocProp.Any(
-                FfiConverterTypeJson.read(buf),
-                )
-            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
-        }
-    }
-
-    override fun allocationSize(value: DocProp) = when(value) {
-        is DocProp.WellKnown -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeWellKnownProp.allocationSize(value.v1)
-            )
-        }
-        is DocProp.Any -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeJson.allocationSize(value.v1)
-            )
-        }
-    }
-
-    override fun write(value: DocProp, buf: ByteBuffer) {
-        when(value) {
-            is DocProp.WellKnown -> {
-                buf.putInt(1)
-                FfiConverterTypeWellKnownProp.write(value.v1, buf)
-                Unit
-            }
-            is DocProp.Any -> {
-                buf.putInt(2)
-                FfiConverterTypeJson.write(value.v1, buf)
-                Unit
-            }
-        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 
@@ -1857,6 +1830,38 @@ public object FfiConverterTypeWellKnownPropTag: FfiConverterRustBuffer<WellKnown
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypePathBuf: FfiConverterRustBuffer<PathBuf?> {
+    override fun read(buf: ByteBuffer): PathBuf? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypePathBuf.read(buf)
+    }
+
+    override fun allocationSize(value: PathBuf?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypePathBuf.allocationSize(value)
+        }
+    }
+
+    override fun write(value: PathBuf?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypePathBuf.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
@@ -1913,35 +1918,35 @@ public object FfiConverterSequenceTypeDocPropKey: FfiConverterRustBuffer<List<Do
 /**
  * @suppress
  */
-public object FfiConverterMapTypeDocPropKeyTypeDocProp: FfiConverterRustBuffer<Map<DocPropKey, DocProp>> {
-    override fun read(buf: ByteBuffer): Map<DocPropKey, DocProp> {
+public object FfiConverterMapTypeDocPropKeyTypeJson: FfiConverterRustBuffer<Map<DocPropKey, Json>> {
+    override fun read(buf: ByteBuffer): Map<DocPropKey, Json> {
         val len = buf.getInt()
-        return buildMap<DocPropKey, DocProp>(len) {
+        return buildMap<DocPropKey, Json>(len) {
             repeat(len) {
                 val k = FfiConverterTypeDocPropKey.read(buf)
-                val v = FfiConverterTypeDocProp.read(buf)
+                val v = FfiConverterTypeJson.read(buf)
                 this[k] = v
             }
         }
     }
 
-    override fun allocationSize(value: Map<DocPropKey, DocProp>): ULong {
+    override fun allocationSize(value: Map<DocPropKey, Json>): ULong {
         val spaceForMapSize = 4UL
         val spaceForChildren = value.map { (k, v) ->
             FfiConverterTypeDocPropKey.allocationSize(k) +
-            FfiConverterTypeDocProp.allocationSize(v)
+            FfiConverterTypeJson.allocationSize(v)
         }.sum()
         return spaceForMapSize + spaceForChildren
     }
 
-    override fun write(value: Map<DocPropKey, DocProp>, buf: ByteBuffer) {
+    override fun write(value: Map<DocPropKey, Json>, buf: ByteBuffer) {
         buf.putInt(value.size)
         // The parens on `(k, v)` here ensure we're calling the right method,
         // which is important for compatibility with older android devices.
         // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
         value.forEach { (k, v) ->
             FfiConverterTypeDocPropKey.write(k, buf)
-            FfiConverterTypeDocProp.write(v, buf)
+            FfiConverterTypeJson.write(v, buf)
         }
     }
 }
@@ -1968,48 +1973,6 @@ public typealias FfiConverterTypeJson = FfiConverterString
 
 
 
-
-
-/**
- * Typealias from the type name used in the UDL file to the custom type.  This
- * is needed because the UDL type name is used in function/method signatures.
- * It's also what we have an external type that references a custom type.
- */
-public typealias OffsetDateTime = Instant
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeOffsetDateTime: FfiConverter<OffsetDateTime, Long> {
-    override fun lift(value: Long): OffsetDateTime {
-        val builtinValue = FfiConverterLong.lift(value)
-        return Instant.fromEpochSeconds(builtinValue, 0)
-    }
-
-    override fun lower(value: OffsetDateTime): Long {
-        val builtinValue = value.epochSeconds
-        return FfiConverterLong.lower(builtinValue)
-    }
-
-    override fun read(buf: ByteBuffer): OffsetDateTime {
-        val builtinValue = FfiConverterLong.read(buf)
-        return Instant.fromEpochSeconds(builtinValue, 0)
-    }
-
-    override fun allocationSize(value: OffsetDateTime): ULong {
-        val builtinValue = value.epochSeconds
-        return FfiConverterLong.allocationSize(builtinValue)
-    }
-
-    override fun write(value: OffsetDateTime, buf: ByteBuffer) {
-        val builtinValue = value.epochSeconds
-        FfiConverterLong.write(builtinValue, buf)
-    }
-}
-
-
-
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -2017,6 +1980,48 @@ public object FfiConverterTypeOffsetDateTime: FfiConverter<OffsetDateTime, Long>
  */
 public typealias PathBuf = kotlin.String
 public typealias FfiConverterTypePathBuf = FfiConverterString
+
+
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the custom type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias Timestamp = Instant
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTimestamp: FfiConverter<Timestamp, Long> {
+    override fun lift(value: Long): Timestamp {
+        val builtinValue = FfiConverterLong.lift(value)
+        return Instant.fromEpochSeconds(builtinValue, 0)
+    }
+
+    override fun lower(value: Timestamp): Long {
+        val builtinValue = value.epochSeconds
+        return FfiConverterLong.lower(builtinValue)
+    }
+
+    override fun read(buf: ByteBuffer): Timestamp {
+        val builtinValue = FfiConverterLong.read(buf)
+        return Instant.fromEpochSeconds(builtinValue, 0)
+    }
+
+    override fun allocationSize(value: Timestamp): ULong {
+        val builtinValue = value.epochSeconds
+        return FfiConverterLong.allocationSize(builtinValue)
+    }
+
+    override fun write(value: Timestamp, buf: ByteBuffer) {
+        val builtinValue = value.epochSeconds
+        FfiConverterLong.write(builtinValue, buf)
+    }
+}
 
 
 

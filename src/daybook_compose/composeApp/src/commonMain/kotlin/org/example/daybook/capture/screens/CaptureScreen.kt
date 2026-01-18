@@ -4,10 +4,13 @@ package org.example.daybook.capture.screens
 
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.DocContent
-import org.example.daybook.uniffi.types.DocBlob
-import org.example.daybook.uniffi.types.DocProp
+import org.example.daybook.uniffi.types.DocPropKey
+import org.example.daybook.uniffi.types.DocPropTag
 import org.example.daybook.uniffi.types.DocPatch
-import org.example.daybook.uniffi.types.ImageMeta
+import org.example.daybook.uniffi.types.ImageMetadataProp
+import org.example.daybook.uniffi.types.WellKnownPropTag
+import org.example.daybook.uniffi.types.AddDocArgs
+import org.example.daybook.uniffi.core.UpdateDocArgs
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -101,29 +104,17 @@ class CaptureScreenViewModel(
             try {
                 val hashStr = blobsRepo.put(bytes)
                 
-                // Create Doc
-                val newDoc = Doc(
-                    id = "",
-                    createdAt = Clock.System.now(),
-                    updatedAt = Clock.System.now(),
-                    content = DocContent.Blob(
-                        DocBlob(
-                            lengthOctets = bytes.size.toULong(),
-                            hash = hashStr
-                        )
+                // Create AddDocArgs
+                val args = AddDocArgs(
+                    branchPath = "main",
+                    props = mapOf(
+                        DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)) to "{\"blob\":{\"length_octets\":${bytes.size},\"hash\":\"$hashStr\"}}",
+                        DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.IMAGE_METADATA)) to "{\"mime\":\"image/jpeg\",\"width_px\":0,\"height_px\":0}"
                     ),
-                    props = listOf(
-                        DocProp.ImageMetadata(
-                            ImageMeta(
-                                mime = "image/jpeg",
-                                widthPx = 0uL,
-                                heightPx = 0uL
-                            )
-                        )
-                    )
+                    userPath = null
                 )
                 
-                drawerRepo.add(newDoc)
+                drawerRepo.add(args)
                 _message.value = "Photo saved successfully"
             } catch (e: FfiException) {
                 println("Error saving image: $e")
@@ -143,34 +134,30 @@ class CaptureScreenViewModel(
                 if (isCreatingDoc) return@launch
                 isCreatingDoc = true
                 // Create new doc
-                val newDoc = Doc(
-                    id = "", // Rust will generate the ID
-                    createdAt = Clock.System.now(),
-                    updatedAt = Clock.System.now(),
-                    content = DocContent.Text(content),
-                    props = listOf()
+                val args = AddDocArgs(
+                    branchPath = "main",
+                    props = mapOf(
+                        DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)) to "\"$content\""
+                    ),
+                    userPath = null
                 )
-                val returnedId = drawerRepo.add(newDoc)
+                val returnedId = drawerRepo.add(args)
                 _currentDocId.value = returnedId
-                _currentDoc.value = newDoc.copy(id = returnedId)
+                // We'll let the listener refresh the current doc
             } else {
                 // Update existing doc
                 val current = _currentDoc.value
                 if (current != null) {
-                    // Optimistically update local state to avoid lag
-                    val updatedDoc = current.copy(
-                        content = DocContent.Text(content),
-                        updatedAt = Clock.System.now()
-                    )
-                    _currentDoc.value = updatedDoc
-                    
-                    drawerRepo.updateBatch(listOf(DocPatch(
+                    val patch = DocPatch(
                         id = docId,
-                        createdAt = null,
-                        content = DocContent.Text(content),
-                        updatedAt = Clock.System.now(),
-                        props = null
-                    )))
+                        propsSet = mapOf(
+                            DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)) to "\"$content\""
+                        ),
+                        propsRemove = emptyList(),
+                        userPath = null
+                    )
+                    
+                    drawerRepo.updateBatch(listOf(UpdateDocArgs("main", null, patch)))
                 }
             }
         }
@@ -178,7 +165,7 @@ class CaptureScreenViewModel(
 
     fun loadDoc(id: String) {
         viewModelScope.launch {
-            val doc = drawerRepo.get(id)
+            val doc = drawerRepo.get(id, "main")
             _currentDocId.value = id
             _currentDoc.value = doc
         }
@@ -195,7 +182,8 @@ class CaptureScreenViewModel(
         override fun onDrawerEvent(event: DrawerEvent) {
             viewModelScope.launch {
                 when (event) {
-                    DrawerEvent.ListChanged -> refreshDocs()
+                    is DrawerEvent.ListChanged -> refreshDocs()
+                    is DrawerEvent.DocAdded -> refreshDocs()
                     is DrawerEvent.DocUpdated -> {
                         if (event.id == _currentDocId.value) {
                             loadDoc(event.id)
@@ -240,10 +228,10 @@ class CaptureScreenViewModel(
     private suspend fun refreshDocs() {
         _docsList.value = DocsListState.Loading
         try {
-            val ids = drawerRepo.list()
-            val docs = ids.mapNotNull { idStr ->
+            val branches = drawerRepo.list()
+            val docs = branches.mapNotNull { b ->
                 try {
-                    drawerRepo.get(idStr)
+                    drawerRepo.get(b.docId, "main")
                 } catch (e: FfiException) {
                     null
                 }

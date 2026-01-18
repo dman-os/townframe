@@ -34,6 +34,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
+import org.example.daybook.uniffi.types.DocPatch
+import org.example.daybook.uniffi.types.FfiConverterTypeDocPatch
+import org.example.daybook.uniffi.types.RustBuffer as RustBufferDocPatch
 
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
@@ -774,6 +777,7 @@ internal interface UniffiLib : Library {
             val lib = loadIndirect<UniffiLib>(componentName)
             // No need to check the contract version and checksums, since 
             // we already did that with `IntegrityCheckingUniffiLib` above.
+            org.example.daybook.uniffi.types.uniffiEnsureInitialized()
             // Loading of library with integrity check done.
             lib
         }
@@ -1445,8 +1449,153 @@ public object FfiConverterTypeListenerRegistration: FfiConverter<ListenerRegistr
 
 
 
+data class DocEntry (
+    var `branches`: Map<kotlin.String, ChangeHashSet>, 
+    var `propBlames`: Map<kotlin.String, PropBlame>, 
+    var `users`: Map<kotlin.String, UserMeta>, 
+    var `version`: Uuid, 
+    var `previousVersionHeads`: ChangeHashSet?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDocEntry: FfiConverterRustBuffer<DocEntry> {
+    override fun read(buf: ByteBuffer): DocEntry {
+        return DocEntry(
+            FfiConverterMapStringTypeChangeHashSet.read(buf),
+            FfiConverterMapStringTypePropBlame.read(buf),
+            FfiConverterMapStringTypeUserMeta.read(buf),
+            FfiConverterTypeUuid.read(buf),
+            FfiConverterOptionalTypeChangeHashSet.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DocEntry) = (
+            FfiConverterMapStringTypeChangeHashSet.allocationSize(value.`branches`) +
+            FfiConverterMapStringTypePropBlame.allocationSize(value.`propBlames`) +
+            FfiConverterMapStringTypeUserMeta.allocationSize(value.`users`) +
+            FfiConverterTypeUuid.allocationSize(value.`version`) +
+            FfiConverterOptionalTypeChangeHashSet.allocationSize(value.`previousVersionHeads`)
+    )
+
+    override fun write(value: DocEntry, buf: ByteBuffer) {
+            FfiConverterMapStringTypeChangeHashSet.write(value.`branches`, buf)
+            FfiConverterMapStringTypePropBlame.write(value.`propBlames`, buf)
+            FfiConverterMapStringTypeUserMeta.write(value.`users`, buf)
+            FfiConverterTypeUuid.write(value.`version`, buf)
+            FfiConverterOptionalTypeChangeHashSet.write(value.`previousVersionHeads`, buf)
+    }
+}
+
+
+
+data class DocEntryDiff (
+    var `branches`: Map<PathBuf, HeadDiff>, 
+    var `propBlames`: Map<kotlin.String, PropBlameDiff>, 
+    var `users`: Map<kotlin.String, UserMetaDiff>
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDocEntryDiff: FfiConverterRustBuffer<DocEntryDiff> {
+    override fun read(buf: ByteBuffer): DocEntryDiff {
+        return DocEntryDiff(
+            FfiConverterMapTypePathBufTypeHeadDiff.read(buf),
+            FfiConverterMapStringTypePropBlameDiff.read(buf),
+            FfiConverterMapStringTypeUserMetaDiff.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DocEntryDiff) = (
+            FfiConverterMapTypePathBufTypeHeadDiff.allocationSize(value.`branches`) +
+            FfiConverterMapStringTypePropBlameDiff.allocationSize(value.`propBlames`) +
+            FfiConverterMapStringTypeUserMetaDiff.allocationSize(value.`users`)
+    )
+
+    override fun write(value: DocEntryDiff, buf: ByteBuffer) {
+            FfiConverterMapTypePathBufTypeHeadDiff.write(value.`branches`, buf)
+            FfiConverterMapStringTypePropBlameDiff.write(value.`propBlames`, buf)
+            FfiConverterMapStringTypeUserMetaDiff.write(value.`users`, buf)
+    }
+}
+
+
+
+data class DocNBranches (
+    var `docId`: kotlin.String, 
+    var `branches`: Map<kotlin.String, ChangeHashSet>
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDocNBranches: FfiConverterRustBuffer<DocNBranches> {
+    override fun read(buf: ByteBuffer): DocNBranches {
+        return DocNBranches(
+            FfiConverterString.read(buf),
+            FfiConverterMapStringTypeChangeHashSet.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DocNBranches) = (
+            FfiConverterString.allocationSize(value.`docId`) +
+            FfiConverterMapStringTypeChangeHashSet.allocationSize(value.`branches`)
+    )
+
+    override fun write(value: DocNBranches, buf: ByteBuffer) {
+            FfiConverterString.write(value.`docId`, buf)
+            FfiConverterMapStringTypeChangeHashSet.write(value.`branches`, buf)
+    }
+}
+
+
+
+data class HeadDiff (
+    var `from`: ChangeHashSet?, 
+    var `to`: ChangeHashSet?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeHeadDiff: FfiConverterRustBuffer<HeadDiff> {
+    override fun read(buf: ByteBuffer): HeadDiff {
+        return HeadDiff(
+            FfiConverterOptionalTypeChangeHashSet.read(buf),
+            FfiConverterOptionalTypeChangeHashSet.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: HeadDiff) = (
+            FfiConverterOptionalTypeChangeHashSet.allocationSize(value.`from`) +
+            FfiConverterOptionalTypeChangeHashSet.allocationSize(value.`to`)
+    )
+
+    override fun write(value: HeadDiff, buf: ByteBuffer) {
+            FfiConverterOptionalTypeChangeHashSet.write(value.`from`, buf)
+            FfiConverterOptionalTypeChangeHashSet.write(value.`to`, buf)
+    }
+}
+
+
+
 data class Panel (
     var `id`: Uuid, 
+    var `version`: Uuid, 
     var `title`: kotlin.String
 ) {
     
@@ -1460,17 +1609,20 @@ public object FfiConverterTypePanel: FfiConverterRustBuffer<Panel> {
     override fun read(buf: ByteBuffer): Panel {
         return Panel(
             FfiConverterTypeUuid.read(buf),
+            FfiConverterTypeUuid.read(buf),
             FfiConverterString.read(buf),
         )
     }
 
     override fun allocationSize(value: Panel) = (
             FfiConverterTypeUuid.allocationSize(value.`id`) +
+            FfiConverterTypeUuid.allocationSize(value.`version`) +
             FfiConverterString.allocationSize(value.`title`)
     )
 
     override fun write(value: Panel, buf: ByteBuffer) {
             FfiConverterTypeUuid.write(value.`id`, buf)
+            FfiConverterTypeUuid.write(value.`version`, buf)
             FfiConverterString.write(value.`title`, buf)
     }
 }
@@ -1479,6 +1631,7 @@ public object FfiConverterTypePanel: FfiConverterRustBuffer<Panel> {
 
 data class PanelPatch (
     var `id`: Uuid?, 
+    var `version`: Uuid?, 
     var `title`: kotlin.String?
 ) {
     
@@ -1492,18 +1645,81 @@ public object FfiConverterTypePanelPatch: FfiConverterRustBuffer<PanelPatch> {
     override fun read(buf: ByteBuffer): PanelPatch {
         return PanelPatch(
             FfiConverterOptionalTypeUuid.read(buf),
+            FfiConverterOptionalTypeUuid.read(buf),
             FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: PanelPatch) = (
             FfiConverterOptionalTypeUuid.allocationSize(value.`id`) +
+            FfiConverterOptionalTypeUuid.allocationSize(value.`version`) +
             FfiConverterOptionalString.allocationSize(value.`title`)
     )
 
     override fun write(value: PanelPatch, buf: ByteBuffer) {
             FfiConverterOptionalTypeUuid.write(value.`id`, buf)
+            FfiConverterOptionalTypeUuid.write(value.`version`, buf)
             FfiConverterOptionalString.write(value.`title`, buf)
+    }
+}
+
+
+
+data class PropBlame (
+    var `heads`: ChangeHashSet
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePropBlame: FfiConverterRustBuffer<PropBlame> {
+    override fun read(buf: ByteBuffer): PropBlame {
+        return PropBlame(
+            FfiConverterTypeChangeHashSet.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PropBlame) = (
+            FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+    )
+
+    override fun write(value: PropBlame, buf: ByteBuffer) {
+            FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+    }
+}
+
+
+
+data class PropBlameDiff (
+    var `from`: PropBlame?, 
+    var `to`: PropBlame?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePropBlameDiff: FfiConverterRustBuffer<PropBlameDiff> {
+    override fun read(buf: ByteBuffer): PropBlameDiff {
+        return PropBlameDiff(
+            FfiConverterOptionalTypePropBlame.read(buf),
+            FfiConverterOptionalTypePropBlame.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PropBlameDiff) = (
+            FfiConverterOptionalTypePropBlame.allocationSize(value.`from`) +
+            FfiConverterOptionalTypePropBlame.allocationSize(value.`to`)
+    )
+
+    override fun write(value: PropBlameDiff, buf: ByteBuffer) {
+            FfiConverterOptionalTypePropBlame.write(value.`from`, buf)
+            FfiConverterOptionalTypePropBlame.write(value.`to`, buf)
     }
 }
 
@@ -1547,6 +1763,7 @@ public object FfiConverterTypePropKeyDisplayHint: FfiConverterRustBuffer<PropKey
 
 data class Tab (
     var `id`: Uuid, 
+    var `version`: Uuid, 
     var `title`: kotlin.String, 
     var `panels`: List<Uuid>, 
     var `selectedPanel`: Uuid?
@@ -1562,6 +1779,7 @@ public object FfiConverterTypeTab: FfiConverterRustBuffer<Tab> {
     override fun read(buf: ByteBuffer): Tab {
         return Tab(
             FfiConverterTypeUuid.read(buf),
+            FfiConverterTypeUuid.read(buf),
             FfiConverterString.read(buf),
             FfiConverterSequenceTypeUuid.read(buf),
             FfiConverterOptionalTypeUuid.read(buf),
@@ -1570,6 +1788,7 @@ public object FfiConverterTypeTab: FfiConverterRustBuffer<Tab> {
 
     override fun allocationSize(value: Tab) = (
             FfiConverterTypeUuid.allocationSize(value.`id`) +
+            FfiConverterTypeUuid.allocationSize(value.`version`) +
             FfiConverterString.allocationSize(value.`title`) +
             FfiConverterSequenceTypeUuid.allocationSize(value.`panels`) +
             FfiConverterOptionalTypeUuid.allocationSize(value.`selectedPanel`)
@@ -1577,6 +1796,7 @@ public object FfiConverterTypeTab: FfiConverterRustBuffer<Tab> {
 
     override fun write(value: Tab, buf: ByteBuffer) {
             FfiConverterTypeUuid.write(value.`id`, buf)
+            FfiConverterTypeUuid.write(value.`version`, buf)
             FfiConverterString.write(value.`title`, buf)
             FfiConverterSequenceTypeUuid.write(value.`panels`, buf)
             FfiConverterOptionalTypeUuid.write(value.`selectedPanel`, buf)
@@ -1587,6 +1807,7 @@ public object FfiConverterTypeTab: FfiConverterRustBuffer<Tab> {
 
 data class TabPatch (
     var `id`: Uuid?, 
+    var `version`: Uuid?, 
     var `title`: kotlin.String?, 
     var `panels`: List<Uuid>?, 
     var `selectedPanel`: Uuid??
@@ -1602,6 +1823,7 @@ public object FfiConverterTypeTabPatch: FfiConverterRustBuffer<TabPatch> {
     override fun read(buf: ByteBuffer): TabPatch {
         return TabPatch(
             FfiConverterOptionalTypeUuid.read(buf),
+            FfiConverterOptionalTypeUuid.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalSequenceTypeUuid.read(buf),
             FfiConverterOptionalOptionalTypeUuid.read(buf),
@@ -1610,6 +1832,7 @@ public object FfiConverterTypeTabPatch: FfiConverterRustBuffer<TabPatch> {
 
     override fun allocationSize(value: TabPatch) = (
             FfiConverterOptionalTypeUuid.allocationSize(value.`id`) +
+            FfiConverterOptionalTypeUuid.allocationSize(value.`version`) +
             FfiConverterOptionalString.allocationSize(value.`title`) +
             FfiConverterOptionalSequenceTypeUuid.allocationSize(value.`panels`) +
             FfiConverterOptionalOptionalTypeUuid.allocationSize(value.`selectedPanel`)
@@ -1617,6 +1840,7 @@ public object FfiConverterTypeTabPatch: FfiConverterRustBuffer<TabPatch> {
 
     override fun write(value: TabPatch, buf: ByteBuffer) {
             FfiConverterOptionalTypeUuid.write(value.`id`, buf)
+            FfiConverterOptionalTypeUuid.write(value.`version`, buf)
             FfiConverterOptionalString.write(value.`title`, buf)
             FfiConverterOptionalSequenceTypeUuid.write(value.`panels`, buf)
             FfiConverterOptionalOptionalTypeUuid.write(value.`selectedPanel`, buf)
@@ -1627,6 +1851,7 @@ public object FfiConverterTypeTabPatch: FfiConverterRustBuffer<TabPatch> {
 
 data class Table (
     var `id`: Uuid, 
+    var `version`: Uuid, 
     var `title`: kotlin.String, 
     var `tabs`: List<Uuid>, 
     var `window`: TableWindow, 
@@ -1643,6 +1868,7 @@ public object FfiConverterTypeTable: FfiConverterRustBuffer<Table> {
     override fun read(buf: ByteBuffer): Table {
         return Table(
             FfiConverterTypeUuid.read(buf),
+            FfiConverterTypeUuid.read(buf),
             FfiConverterString.read(buf),
             FfiConverterSequenceTypeUuid.read(buf),
             FfiConverterTypeTableWindow.read(buf),
@@ -1652,6 +1878,7 @@ public object FfiConverterTypeTable: FfiConverterRustBuffer<Table> {
 
     override fun allocationSize(value: Table) = (
             FfiConverterTypeUuid.allocationSize(value.`id`) +
+            FfiConverterTypeUuid.allocationSize(value.`version`) +
             FfiConverterString.allocationSize(value.`title`) +
             FfiConverterSequenceTypeUuid.allocationSize(value.`tabs`) +
             FfiConverterTypeTableWindow.allocationSize(value.`window`) +
@@ -1660,6 +1887,7 @@ public object FfiConverterTypeTable: FfiConverterRustBuffer<Table> {
 
     override fun write(value: Table, buf: ByteBuffer) {
             FfiConverterTypeUuid.write(value.`id`, buf)
+            FfiConverterTypeUuid.write(value.`version`, buf)
             FfiConverterString.write(value.`title`, buf)
             FfiConverterSequenceTypeUuid.write(value.`tabs`, buf)
             FfiConverterTypeTableWindow.write(value.`window`, buf)
@@ -1671,6 +1899,7 @@ public object FfiConverterTypeTable: FfiConverterRustBuffer<Table> {
 
 data class TablePatch (
     var `id`: Uuid?, 
+    var `version`: Uuid?, 
     var `title`: kotlin.String?, 
     var `tabs`: List<Uuid>?, 
     var `window`: TableWindow?, 
@@ -1687,6 +1916,7 @@ public object FfiConverterTypeTablePatch: FfiConverterRustBuffer<TablePatch> {
     override fun read(buf: ByteBuffer): TablePatch {
         return TablePatch(
             FfiConverterOptionalTypeUuid.read(buf),
+            FfiConverterOptionalTypeUuid.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalSequenceTypeUuid.read(buf),
             FfiConverterOptionalTypeTableWindow.read(buf),
@@ -1696,6 +1926,7 @@ public object FfiConverterTypeTablePatch: FfiConverterRustBuffer<TablePatch> {
 
     override fun allocationSize(value: TablePatch) = (
             FfiConverterOptionalTypeUuid.allocationSize(value.`id`) +
+            FfiConverterOptionalTypeUuid.allocationSize(value.`version`) +
             FfiConverterOptionalString.allocationSize(value.`title`) +
             FfiConverterOptionalSequenceTypeUuid.allocationSize(value.`tabs`) +
             FfiConverterOptionalTypeTableWindow.allocationSize(value.`window`) +
@@ -1704,6 +1935,7 @@ public object FfiConverterTypeTablePatch: FfiConverterRustBuffer<TablePatch> {
 
     override fun write(value: TablePatch, buf: ByteBuffer) {
             FfiConverterOptionalTypeUuid.write(value.`id`, buf)
+            FfiConverterOptionalTypeUuid.write(value.`version`, buf)
             FfiConverterOptionalString.write(value.`title`, buf)
             FfiConverterOptionalSequenceTypeUuid.write(value.`tabs`, buf)
             FfiConverterOptionalTypeTableWindow.write(value.`window`, buf)
@@ -1753,8 +1985,109 @@ public object FfiConverterTypeTablesPatches: FfiConverterRustBuffer<TablesPatche
 
 
 
+data class UpdateDocArgs (
+    var `branchPath`: PathBuf, 
+    var `heads`: ChangeHashSet?, 
+    var `patch`: DocPatch
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUpdateDocArgs: FfiConverterRustBuffer<UpdateDocArgs> {
+    override fun read(buf: ByteBuffer): UpdateDocArgs {
+        return UpdateDocArgs(
+            FfiConverterTypePathBuf.read(buf),
+            FfiConverterOptionalTypeChangeHashSet.read(buf),
+            FfiConverterTypeDocPatch.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UpdateDocArgs) = (
+            FfiConverterTypePathBuf.allocationSize(value.`branchPath`) +
+            FfiConverterOptionalTypeChangeHashSet.allocationSize(value.`heads`) +
+            FfiConverterTypeDocPatch.allocationSize(value.`patch`)
+    )
+
+    override fun write(value: UpdateDocArgs, buf: ByteBuffer) {
+            FfiConverterTypePathBuf.write(value.`branchPath`, buf)
+            FfiConverterOptionalTypeChangeHashSet.write(value.`heads`, buf)
+            FfiConverterTypeDocPatch.write(value.`patch`, buf)
+    }
+}
+
+
+
+data class UserMeta (
+    var `userPath`: PathBuf, 
+    var `seenAt`: Timestamp
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUserMeta: FfiConverterRustBuffer<UserMeta> {
+    override fun read(buf: ByteBuffer): UserMeta {
+        return UserMeta(
+            FfiConverterTypePathBuf.read(buf),
+            FfiConverterTypeTimestamp.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UserMeta) = (
+            FfiConverterTypePathBuf.allocationSize(value.`userPath`) +
+            FfiConverterTypeTimestamp.allocationSize(value.`seenAt`)
+    )
+
+    override fun write(value: UserMeta, buf: ByteBuffer) {
+            FfiConverterTypePathBuf.write(value.`userPath`, buf)
+            FfiConverterTypeTimestamp.write(value.`seenAt`, buf)
+    }
+}
+
+
+
+data class UserMetaDiff (
+    var `from`: UserMeta?, 
+    var `to`: UserMeta?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUserMetaDiff: FfiConverterRustBuffer<UserMetaDiff> {
+    override fun read(buf: ByteBuffer): UserMetaDiff {
+        return UserMetaDiff(
+            FfiConverterOptionalTypeUserMeta.read(buf),
+            FfiConverterOptionalTypeUserMeta.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UserMetaDiff) = (
+            FfiConverterOptionalTypeUserMeta.allocationSize(value.`from`) +
+            FfiConverterOptionalTypeUserMeta.allocationSize(value.`to`)
+    )
+
+    override fun write(value: UserMetaDiff, buf: ByteBuffer) {
+            FfiConverterOptionalTypeUserMeta.write(value.`from`, buf)
+            FfiConverterOptionalTypeUserMeta.write(value.`to`, buf)
+    }
+}
+
+
+
 data class Window (
     var `id`: Uuid, 
+    var `version`: Uuid, 
     var `title`: kotlin.String, 
     var `tabs`: List<Uuid>, 
     var `selectedTable`: Uuid?, 
@@ -1773,6 +2106,7 @@ public object FfiConverterTypeWindow: FfiConverterRustBuffer<Window> {
     override fun read(buf: ByteBuffer): Window {
         return Window(
             FfiConverterTypeUuid.read(buf),
+            FfiConverterTypeUuid.read(buf),
             FfiConverterString.read(buf),
             FfiConverterSequenceTypeUuid.read(buf),
             FfiConverterOptionalTypeUuid.read(buf),
@@ -1784,6 +2118,7 @@ public object FfiConverterTypeWindow: FfiConverterRustBuffer<Window> {
 
     override fun allocationSize(value: Window) = (
             FfiConverterTypeUuid.allocationSize(value.`id`) +
+            FfiConverterTypeUuid.allocationSize(value.`version`) +
             FfiConverterString.allocationSize(value.`title`) +
             FfiConverterSequenceTypeUuid.allocationSize(value.`tabs`) +
             FfiConverterOptionalTypeUuid.allocationSize(value.`selectedTable`) +
@@ -1794,6 +2129,7 @@ public object FfiConverterTypeWindow: FfiConverterRustBuffer<Window> {
 
     override fun write(value: Window, buf: ByteBuffer) {
             FfiConverterTypeUuid.write(value.`id`, buf)
+            FfiConverterTypeUuid.write(value.`version`, buf)
             FfiConverterString.write(value.`title`, buf)
             FfiConverterSequenceTypeUuid.write(value.`tabs`, buf)
             FfiConverterOptionalTypeUuid.write(value.`selectedTable`, buf)
@@ -2007,6 +2343,7 @@ public object FfiConverterTypeWindowLayoutSidebar: FfiConverterRustBuffer<Window
 
 data class WindowPatch (
     var `id`: Uuid?, 
+    var `version`: Uuid?, 
     var `title`: kotlin.String?, 
     var `tabs`: List<Uuid>?, 
     var `selectedTable`: Uuid??, 
@@ -2025,6 +2362,7 @@ public object FfiConverterTypeWindowPatch: FfiConverterRustBuffer<WindowPatch> {
     override fun read(buf: ByteBuffer): WindowPatch {
         return WindowPatch(
             FfiConverterOptionalTypeUuid.read(buf),
+            FfiConverterOptionalTypeUuid.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalSequenceTypeUuid.read(buf),
             FfiConverterOptionalOptionalTypeUuid.read(buf),
@@ -2036,6 +2374,7 @@ public object FfiConverterTypeWindowPatch: FfiConverterRustBuffer<WindowPatch> {
 
     override fun allocationSize(value: WindowPatch) = (
             FfiConverterOptionalTypeUuid.allocationSize(value.`id`) +
+            FfiConverterOptionalTypeUuid.allocationSize(value.`version`) +
             FfiConverterOptionalString.allocationSize(value.`title`) +
             FfiConverterOptionalSequenceTypeUuid.allocationSize(value.`tabs`) +
             FfiConverterOptionalOptionalTypeUuid.allocationSize(value.`selectedTable`) +
@@ -2046,6 +2385,7 @@ public object FfiConverterTypeWindowPatch: FfiConverterRustBuffer<WindowPatch> {
 
     override fun write(value: WindowPatch, buf: ByteBuffer) {
             FfiConverterOptionalTypeUuid.write(value.`id`, buf)
+            FfiConverterOptionalTypeUuid.write(value.`version`, buf)
             FfiConverterOptionalString.write(value.`title`, buf)
             FfiConverterOptionalSequenceTypeUuid.write(value.`tabs`, buf)
             FfiConverterOptionalOptionalTypeUuid.write(value.`selectedTable`, buf)
@@ -2088,28 +2428,49 @@ public object FfiConverterTypeCaptureMode: FfiConverterRustBuffer<CaptureMode> {
 
 
 
-
-enum class ConfigEvent {
+sealed class ConfigEvent {
     
-    CHANGED;
+    data class Changed(
+        val `heads`: ChangeHashSet) : ConfigEvent() {
+        companion object
+    }
+    
+
+    
     companion object
 }
-
 
 /**
  * @suppress
  */
-public object FfiConverterTypeConfigEvent: FfiConverterRustBuffer<ConfigEvent> {
-    override fun read(buf: ByteBuffer) = try {
-        ConfigEvent.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+public object FfiConverterTypeConfigEvent : FfiConverterRustBuffer<ConfigEvent>{
+    override fun read(buf: ByteBuffer): ConfigEvent {
+        return when(buf.getInt()) {
+            1 -> ConfigEvent.Changed(
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
     }
 
-    override fun allocationSize(value: ConfigEvent) = 4UL
+    override fun allocationSize(value: ConfigEvent) = when(value) {
+        is ConfigEvent.Changed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+            )
+        }
+    }
 
     override fun write(value: ConfigEvent, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
+        when(value) {
+            is ConfigEvent.Changed -> {
+                buf.putInt(1)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 
@@ -2149,18 +2510,28 @@ public object FfiConverterTypeDateTimePropDisplayType: FfiConverterRustBuffer<Da
 
 
 
-sealed class DispatcherEvent {
+sealed class DispatchEvent {
     
-    object ListChanged : DispatcherEvent()
+    data class ListChanged(
+        val `heads`: ChangeHashSet) : DispatchEvent() {
+        companion object
+    }
     
+    data class DispatchAdded(
+        val `id`: kotlin.String, 
+        val `heads`: ChangeHashSet) : DispatchEvent() {
+        companion object
+    }
     
-    data class DispatchChanged(
-        val `id`: kotlin.String) : DispatcherEvent() {
+    data class DispatchUpdated(
+        val `id`: kotlin.String, 
+        val `heads`: ChangeHashSet) : DispatchEvent() {
         companion object
     }
     
     data class DispatchDeleted(
-        val `id`: kotlin.String) : DispatcherEvent() {
+        val `id`: kotlin.String, 
+        val `heads`: ChangeHashSet) : DispatchEvent() {
         companion object
     }
     
@@ -2172,57 +2543,85 @@ sealed class DispatcherEvent {
 /**
  * @suppress
  */
-public object FfiConverterTypeDispatcherEvent : FfiConverterRustBuffer<DispatcherEvent>{
-    override fun read(buf: ByteBuffer): DispatcherEvent {
+public object FfiConverterTypeDispatchEvent : FfiConverterRustBuffer<DispatchEvent>{
+    override fun read(buf: ByteBuffer): DispatchEvent {
         return when(buf.getInt()) {
-            1 -> DispatcherEvent.ListChanged
-            2 -> DispatcherEvent.DispatchChanged(
-                FfiConverterString.read(buf),
+            1 -> DispatchEvent.ListChanged(
+                FfiConverterTypeChangeHashSet.read(buf),
                 )
-            3 -> DispatcherEvent.DispatchDeleted(
+            2 -> DispatchEvent.DispatchAdded(
                 FfiConverterString.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            3 -> DispatchEvent.DispatchUpdated(
+                FfiConverterString.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            4 -> DispatchEvent.DispatchDeleted(
+                FfiConverterString.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
 
-    override fun allocationSize(value: DispatcherEvent) = when(value) {
-        is DispatcherEvent.ListChanged -> {
+    override fun allocationSize(value: DispatchEvent) = when(value) {
+        is DispatchEvent.ListChanged -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
-        is DispatcherEvent.DispatchChanged -> {
+        is DispatchEvent.DispatchAdded -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
-        is DispatcherEvent.DispatchDeleted -> {
+        is DispatchEvent.DispatchUpdated -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+            )
+        }
+        is DispatchEvent.DispatchDeleted -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
     }
 
-    override fun write(value: DispatcherEvent, buf: ByteBuffer) {
+    override fun write(value: DispatchEvent, buf: ByteBuffer) {
         when(value) {
-            is DispatcherEvent.ListChanged -> {
+            is DispatchEvent.ListChanged -> {
                 buf.putInt(1)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
-            is DispatcherEvent.DispatchChanged -> {
+            is DispatchEvent.DispatchAdded -> {
                 buf.putInt(2)
                 FfiConverterString.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
-            is DispatcherEvent.DispatchDeleted -> {
+            is DispatchEvent.DispatchUpdated -> {
                 buf.putInt(3)
                 FfiConverterString.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                Unit
+            }
+            is DispatchEvent.DispatchDeleted -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -2235,25 +2634,30 @@ public object FfiConverterTypeDispatcherEvent : FfiConverterRustBuffer<Dispatche
 
 sealed class DrawerEvent {
     
-    object ListChanged : DrawerEvent()
-    
+    data class ListChanged(
+        val `drawerHeads`: ChangeHashSet) : DrawerEvent() {
+        companion object
+    }
     
     data class DocAdded(
         val `id`: kotlin.String, 
-        val `heads`: ChangeHashSet) : DrawerEvent() {
+        val `entry`: DocEntry, 
+        val `drawerHeads`: ChangeHashSet) : DrawerEvent() {
         companion object
     }
     
     data class DocUpdated(
         val `id`: kotlin.String, 
-        val `newHeads`: ChangeHashSet, 
-        val `oldHeads`: ChangeHashSet) : DrawerEvent() {
+        val `entry`: DocEntry, 
+        val `diff`: DocEntryDiff, 
+        val `drawerHeads`: ChangeHashSet) : DrawerEvent() {
         companion object
     }
     
     data class DocDeleted(
         val `id`: kotlin.String, 
-        val `oldHeads`: ChangeHashSet) : DrawerEvent() {
+        val `entry`: DocEntry, 
+        val `drawerHeads`: ChangeHashSet) : DrawerEvent() {
         companion object
     }
     
@@ -2268,18 +2672,23 @@ sealed class DrawerEvent {
 public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
     override fun read(buf: ByteBuffer): DrawerEvent {
         return when(buf.getInt()) {
-            1 -> DrawerEvent.ListChanged
+            1 -> DrawerEvent.ListChanged(
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
             2 -> DrawerEvent.DocAdded(
                 FfiConverterString.read(buf),
+                FfiConverterTypeDocEntry.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
             3 -> DrawerEvent.DocUpdated(
                 FfiConverterString.read(buf),
-                FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterTypeDocEntry.read(buf),
+                FfiConverterTypeDocEntryDiff.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
             4 -> DrawerEvent.DocDeleted(
                 FfiConverterString.read(buf),
+                FfiConverterTypeDocEntry.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -2291,6 +2700,7 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`drawerHeads`)
             )
         }
         is DrawerEvent.DocAdded -> {
@@ -2298,7 +2708,8 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
-                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+                + FfiConverterTypeDocEntry.allocationSize(value.`entry`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`drawerHeads`)
             )
         }
         is DrawerEvent.DocUpdated -> {
@@ -2306,8 +2717,9 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
-                + FfiConverterTypeChangeHashSet.allocationSize(value.`newHeads`)
-                + FfiConverterTypeChangeHashSet.allocationSize(value.`oldHeads`)
+                + FfiConverterTypeDocEntry.allocationSize(value.`entry`)
+                + FfiConverterTypeDocEntryDiff.allocationSize(value.`diff`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`drawerHeads`)
             )
         }
         is DrawerEvent.DocDeleted -> {
@@ -2315,7 +2727,8 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
-                + FfiConverterTypeChangeHashSet.allocationSize(value.`oldHeads`)
+                + FfiConverterTypeDocEntry.allocationSize(value.`entry`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`drawerHeads`)
             )
         }
     }
@@ -2324,25 +2737,29 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
         when(value) {
             is DrawerEvent.ListChanged -> {
                 buf.putInt(1)
+                FfiConverterTypeChangeHashSet.write(value.`drawerHeads`, buf)
                 Unit
             }
             is DrawerEvent.DocAdded -> {
                 buf.putInt(2)
                 FfiConverterString.write(value.`id`, buf)
-                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                FfiConverterTypeDocEntry.write(value.`entry`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`drawerHeads`, buf)
                 Unit
             }
             is DrawerEvent.DocUpdated -> {
                 buf.putInt(3)
                 FfiConverterString.write(value.`id`, buf)
-                FfiConverterTypeChangeHashSet.write(value.`newHeads`, buf)
-                FfiConverterTypeChangeHashSet.write(value.`oldHeads`, buf)
+                FfiConverterTypeDocEntry.write(value.`entry`, buf)
+                FfiConverterTypeDocEntryDiff.write(value.`diff`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`drawerHeads`, buf)
                 Unit
             }
             is DrawerEvent.DocDeleted -> {
                 buf.putInt(4)
                 FfiConverterString.write(value.`id`, buf)
-                FfiConverterTypeChangeHashSet.write(value.`oldHeads`, buf)
+                FfiConverterTypeDocEntry.write(value.`entry`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`drawerHeads`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -2355,16 +2772,26 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
 
 sealed class PlugsEvent {
     
-    object ListChanged : PlugsEvent()
+    data class ListChanged(
+        val `heads`: ChangeHashSet) : PlugsEvent() {
+        companion object
+    }
     
+    data class PlugAdded(
+        val `id`: kotlin.String, 
+        val `heads`: ChangeHashSet) : PlugsEvent() {
+        companion object
+    }
     
     data class PlugChanged(
-        val `id`: kotlin.String) : PlugsEvent() {
+        val `id`: kotlin.String, 
+        val `heads`: ChangeHashSet) : PlugsEvent() {
         companion object
     }
     
     data class PlugDeleted(
-        val `id`: kotlin.String) : PlugsEvent() {
+        val `id`: kotlin.String, 
+        val `heads`: ChangeHashSet) : PlugsEvent() {
         companion object
     }
     
@@ -2379,12 +2806,20 @@ sealed class PlugsEvent {
 public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
     override fun read(buf: ByteBuffer): PlugsEvent {
         return when(buf.getInt()) {
-            1 -> PlugsEvent.ListChanged
-            2 -> PlugsEvent.PlugChanged(
-                FfiConverterString.read(buf),
+            1 -> PlugsEvent.ListChanged(
+                FfiConverterTypeChangeHashSet.read(buf),
                 )
-            3 -> PlugsEvent.PlugDeleted(
+            2 -> PlugsEvent.PlugAdded(
                 FfiConverterString.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            3 -> PlugsEvent.PlugChanged(
+                FfiConverterString.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            4 -> PlugsEvent.PlugDeleted(
+                FfiConverterString.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -2395,6 +2830,15 @@ public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+            )
+        }
+        is PlugsEvent.PlugAdded -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
         is PlugsEvent.PlugChanged -> {
@@ -2402,6 +2846,7 @@ public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
         is PlugsEvent.PlugDeleted -> {
@@ -2409,6 +2854,7 @@ public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
     }
@@ -2417,16 +2863,25 @@ public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
         when(value) {
             is PlugsEvent.ListChanged -> {
                 buf.putInt(1)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                Unit
+            }
+            is PlugsEvent.PlugAdded -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
             is PlugsEvent.PlugChanged -> {
-                buf.putInt(2)
+                buf.putInt(3)
                 FfiConverterString.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
             is PlugsEvent.PlugDeleted -> {
-                buf.putInt(3)
+                buf.putInt(4)
                 FfiConverterString.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -2601,26 +3056,56 @@ public object FfiConverterTypeTableWindow : FfiConverterRustBuffer<TableWindow>{
 
 sealed class TablesEvent {
     
-    object ListChanged : TablesEvent()
+    data class ListChanged(
+        val `heads`: ChangeHashSet) : TablesEvent() {
+        companion object
+    }
     
+    data class WindowAdded(
+        val `id`: Uuid, 
+        val `heads`: ChangeHashSet) : TablesEvent() {
+        companion object
+    }
     
     data class WindowChanged(
-        val `id`: Uuid) : TablesEvent() {
+        val `id`: Uuid, 
+        val `heads`: ChangeHashSet) : TablesEvent() {
+        companion object
+    }
+    
+    data class TabAdded(
+        val `id`: Uuid, 
+        val `heads`: ChangeHashSet) : TablesEvent() {
         companion object
     }
     
     data class TabChanged(
-        val `id`: Uuid) : TablesEvent() {
+        val `id`: Uuid, 
+        val `heads`: ChangeHashSet) : TablesEvent() {
+        companion object
+    }
+    
+    data class PanelAdded(
+        val `id`: Uuid, 
+        val `heads`: ChangeHashSet) : TablesEvent() {
         companion object
     }
     
     data class PanelChanged(
-        val `id`: Uuid) : TablesEvent() {
+        val `id`: Uuid, 
+        val `heads`: ChangeHashSet) : TablesEvent() {
+        companion object
+    }
+    
+    data class TableAdded(
+        val `id`: Uuid, 
+        val `heads`: ChangeHashSet) : TablesEvent() {
         companion object
     }
     
     data class TableChanged(
-        val `id`: Uuid) : TablesEvent() {
+        val `id`: Uuid, 
+        val `heads`: ChangeHashSet) : TablesEvent() {
         companion object
     }
     
@@ -2635,18 +3120,40 @@ sealed class TablesEvent {
 public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
     override fun read(buf: ByteBuffer): TablesEvent {
         return when(buf.getInt()) {
-            1 -> TablesEvent.ListChanged
-            2 -> TablesEvent.WindowChanged(
-                FfiConverterTypeUuid.read(buf),
+            1 -> TablesEvent.ListChanged(
+                FfiConverterTypeChangeHashSet.read(buf),
                 )
-            3 -> TablesEvent.TabChanged(
+            2 -> TablesEvent.WindowAdded(
                 FfiConverterTypeUuid.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
                 )
-            4 -> TablesEvent.PanelChanged(
+            3 -> TablesEvent.WindowChanged(
                 FfiConverterTypeUuid.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
                 )
-            5 -> TablesEvent.TableChanged(
+            4 -> TablesEvent.TabAdded(
                 FfiConverterTypeUuid.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            5 -> TablesEvent.TabChanged(
+                FfiConverterTypeUuid.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            6 -> TablesEvent.PanelAdded(
+                FfiConverterTypeUuid.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            7 -> TablesEvent.PanelChanged(
+                FfiConverterTypeUuid.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            8 -> TablesEvent.TableAdded(
+                FfiConverterTypeUuid.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            9 -> TablesEvent.TableChanged(
+                FfiConverterTypeUuid.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -2657,6 +3164,15 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+            )
+        }
+        is TablesEvent.WindowAdded -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeUuid.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
         is TablesEvent.WindowChanged -> {
@@ -2664,6 +3180,15 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
             (
                 4UL
                 + FfiConverterTypeUuid.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+            )
+        }
+        is TablesEvent.TabAdded -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeUuid.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
         is TablesEvent.TabChanged -> {
@@ -2671,6 +3196,15 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
             (
                 4UL
                 + FfiConverterTypeUuid.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+            )
+        }
+        is TablesEvent.PanelAdded -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeUuid.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
         is TablesEvent.PanelChanged -> {
@@ -2678,6 +3212,15 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
             (
                 4UL
                 + FfiConverterTypeUuid.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+            )
+        }
+        is TablesEvent.TableAdded -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeUuid.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
         is TablesEvent.TableChanged -> {
@@ -2685,6 +3228,7 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
             (
                 4UL
                 + FfiConverterTypeUuid.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
     }
@@ -2693,26 +3237,55 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
         when(value) {
             is TablesEvent.ListChanged -> {
                 buf.putInt(1)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                Unit
+            }
+            is TablesEvent.WindowAdded -> {
+                buf.putInt(2)
+                FfiConverterTypeUuid.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
             is TablesEvent.WindowChanged -> {
-                buf.putInt(2)
+                buf.putInt(3)
                 FfiConverterTypeUuid.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                Unit
+            }
+            is TablesEvent.TabAdded -> {
+                buf.putInt(4)
+                FfiConverterTypeUuid.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
             is TablesEvent.TabChanged -> {
-                buf.putInt(3)
+                buf.putInt(5)
                 FfiConverterTypeUuid.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                Unit
+            }
+            is TablesEvent.PanelAdded -> {
+                buf.putInt(6)
+                FfiConverterTypeUuid.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
             is TablesEvent.PanelChanged -> {
-                buf.putInt(4)
+                buf.putInt(7)
                 FfiConverterTypeUuid.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                Unit
+            }
+            is TablesEvent.TableAdded -> {
+                buf.putInt(8)
+                FfiConverterTypeUuid.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
             is TablesEvent.TableChanged -> {
-                buf.putInt(5)
+                buf.putInt(9)
                 FfiConverterTypeUuid.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -2919,6 +3492,70 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypePropBlame: FfiConverterRustBuffer<PropBlame?> {
+    override fun read(buf: ByteBuffer): PropBlame? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypePropBlame.read(buf)
+    }
+
+    override fun allocationSize(value: PropBlame?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypePropBlame.allocationSize(value)
+        }
+    }
+
+    override fun write(value: PropBlame?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypePropBlame.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeUserMeta: FfiConverterRustBuffer<UserMeta?> {
+    override fun read(buf: ByteBuffer): UserMeta? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeUserMeta.read(buf)
+    }
+
+    override fun allocationSize(value: UserMeta?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeUserMeta.allocationSize(value)
+        }
+    }
+
+    override fun write(value: UserMeta?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeUserMeta.write(value, buf)
         }
     }
 }
@@ -3249,6 +3886,38 @@ public object FfiConverterOptionalSequenceTypeUuid: FfiConverterRustBuffer<List<
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeChangeHashSet: FfiConverterRustBuffer<ChangeHashSet?> {
+    override fun read(buf: ByteBuffer): ChangeHashSet? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeChangeHashSet.read(buf)
+    }
+
+    override fun allocationSize(value: ChangeHashSet?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeChangeHashSet.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ChangeHashSet?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeChangeHashSet.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeUuid: FfiConverterRustBuffer<Uuid?> {
     override fun read(buf: ByteBuffer): Uuid? {
         if (buf.get().toInt() == 0) {
@@ -3473,6 +4142,240 @@ public object FfiConverterSequenceTypeUuid: FfiConverterRustBuffer<List<Uuid>> {
 
 
 
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapStringTypePropBlame: FfiConverterRustBuffer<Map<kotlin.String, PropBlame>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, PropBlame> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, PropBlame>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterTypePropBlame.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, PropBlame>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterTypePropBlame.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, PropBlame>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterTypePropBlame.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapStringTypePropBlameDiff: FfiConverterRustBuffer<Map<kotlin.String, PropBlameDiff>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, PropBlameDiff> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, PropBlameDiff>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterTypePropBlameDiff.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, PropBlameDiff>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterTypePropBlameDiff.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, PropBlameDiff>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterTypePropBlameDiff.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapStringTypeUserMeta: FfiConverterRustBuffer<Map<kotlin.String, UserMeta>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, UserMeta> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, UserMeta>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterTypeUserMeta.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, UserMeta>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterTypeUserMeta.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, UserMeta>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterTypeUserMeta.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapStringTypeUserMetaDiff: FfiConverterRustBuffer<Map<kotlin.String, UserMetaDiff>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, UserMetaDiff> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, UserMetaDiff>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterTypeUserMetaDiff.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, UserMetaDiff>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterTypeUserMetaDiff.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, UserMetaDiff>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterTypeUserMetaDiff.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapStringTypeChangeHashSet: FfiConverterRustBuffer<Map<kotlin.String, ChangeHashSet>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, ChangeHashSet> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, ChangeHashSet>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterTypeChangeHashSet.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, ChangeHashSet>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterTypeChangeHashSet.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, ChangeHashSet>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterTypeChangeHashSet.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapTypePathBufTypeHeadDiff: FfiConverterRustBuffer<Map<PathBuf, HeadDiff>> {
+    override fun read(buf: ByteBuffer): Map<PathBuf, HeadDiff> {
+        val len = buf.getInt()
+        return buildMap<PathBuf, HeadDiff>(len) {
+            repeat(len) {
+                val k = FfiConverterTypePathBuf.read(buf)
+                val v = FfiConverterTypeHeadDiff.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<PathBuf, HeadDiff>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterTypePathBuf.allocationSize(k) +
+            FfiConverterTypeHeadDiff.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<PathBuf, HeadDiff>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterTypePathBuf.write(k, buf)
+            FfiConverterTypeHeadDiff.write(v, buf)
+        }
+    }
+}
+
+
+
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -3493,48 +4396,6 @@ public typealias FfiConverterTypeJson = FfiConverterString
 
 
 
-
-
-/**
- * Typealias from the type name used in the UDL file to the custom type.  This
- * is needed because the UDL type name is used in function/method signatures.
- * It's also what we have an external type that references a custom type.
- */
-public typealias OffsetDateTime = Instant
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeOffsetDateTime: FfiConverter<OffsetDateTime, Long> {
-    override fun lift(value: Long): OffsetDateTime {
-        val builtinValue = FfiConverterLong.lift(value)
-        return Instant.fromEpochSeconds(builtinValue, 0)
-    }
-
-    override fun lower(value: OffsetDateTime): Long {
-        val builtinValue = value.epochSeconds
-        return FfiConverterLong.lower(builtinValue)
-    }
-
-    override fun read(buf: ByteBuffer): OffsetDateTime {
-        val builtinValue = FfiConverterLong.read(buf)
-        return Instant.fromEpochSeconds(builtinValue, 0)
-    }
-
-    override fun allocationSize(value: OffsetDateTime): ULong {
-        val builtinValue = value.epochSeconds
-        return FfiConverterLong.allocationSize(builtinValue)
-    }
-
-    override fun write(value: OffsetDateTime, buf: ByteBuffer) {
-        val builtinValue = value.epochSeconds
-        FfiConverterLong.write(builtinValue, buf)
-    }
-}
-
-
-
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -3542,6 +4403,48 @@ public object FfiConverterTypeOffsetDateTime: FfiConverter<OffsetDateTime, Long>
  */
 public typealias PathBuf = kotlin.String
 public typealias FfiConverterTypePathBuf = FfiConverterString
+
+
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the custom type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias Timestamp = Instant
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTimestamp: FfiConverter<Timestamp, Long> {
+    override fun lift(value: Long): Timestamp {
+        val builtinValue = FfiConverterLong.lift(value)
+        return Instant.fromEpochSeconds(builtinValue, 0)
+    }
+
+    override fun lower(value: Timestamp): Long {
+        val builtinValue = value.epochSeconds
+        return FfiConverterLong.lower(builtinValue)
+    }
+
+    override fun read(buf: ByteBuffer): Timestamp {
+        val builtinValue = FfiConverterLong.read(buf)
+        return Instant.fromEpochSeconds(builtinValue, 0)
+    }
+
+    override fun allocationSize(value: Timestamp): ULong {
+        val builtinValue = value.epochSeconds
+        return FfiConverterLong.allocationSize(builtinValue)
+    }
+
+    override fun write(value: Timestamp, buf: ByteBuffer) {
+        val builtinValue = value.epochSeconds
+        FfiConverterLong.write(builtinValue, buf)
+    }
+}
 
 
 
@@ -3584,4 +4487,6 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+
+
 

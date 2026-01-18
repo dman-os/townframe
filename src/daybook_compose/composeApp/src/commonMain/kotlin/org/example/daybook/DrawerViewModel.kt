@@ -12,6 +12,7 @@ import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.DocPatch
 import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.ListenerRegistration
+import org.example.daybook.uniffi.core.UpdateDocArgs
 
 sealed interface DocListState {
     data class Data(val docIds: List<String>) : DocListState
@@ -49,7 +50,7 @@ class DrawerViewModel(
         override fun onDrawerEvent(event: DrawerEvent) {
             viewModelScope.launch {
                 when (event) {
-                    DrawerEvent.ListChanged -> refreshDocIds()
+                    is DrawerEvent.ListChanged -> refreshDocIds()
                     is DrawerEvent.DocAdded -> {
                         refreshDocIds()
                     }
@@ -92,7 +93,8 @@ class DrawerViewModel(
         viewModelScope.launch {
             _docListState.value = DocListState.Loading
             try {
-                val ids = drawerRepo.list()
+                val branches = drawerRepo.list()
+                val ids = branches.map { it.docId }
                 _docListState.value = DocListState.Data(ids)
             } catch (e: FfiException) {
                 _docListState.value = DocListState.Error(e)
@@ -109,12 +111,12 @@ class DrawerViewModel(
         viewModelScope.launch {
             _loadingDocs.value = _loadingDocs.value + id
             try {
-                val doc = drawerRepo.get(id)
+                val doc = drawerRepo.get(id, "main")
                 if (doc != null) {
                     _loadedDocs.value = _loadedDocs.value + (id to doc)
                 }
             } catch (e: FfiException) {
-                println("Error loading document $id: ${e.message()}")
+                println("Error loading document $id: ${e.message}")
             } finally {
                 _loadingDocs.value = _loadingDocs.value - id
             }
@@ -133,12 +135,12 @@ class DrawerViewModel(
                 val loaded = mutableMapOf<String, Doc>()
                 idsToLoad.forEach { id ->
                     try {
-                        val doc = drawerRepo.get(id)
+                        val doc = drawerRepo.get(id, "main")
                         if (doc != null) {
                             loaded[id] = doc
                         }
                     } catch (e: FfiException) {
-                        println("Error loading document $id: ${e.message()}")
+                        println("Error loading document $id: ${e.message}")
                     }
                 }
                 if (loaded.isNotEmpty()) {
@@ -174,14 +176,14 @@ class DrawerViewModel(
     private fun loadSelectedDoc(id: String) {
         viewModelScope.launch {
             try {
-                val doc = drawerRepo.get(id)
+                val doc = drawerRepo.get(id, "main")
                 if (doc != null) {
                     _selectedDoc.value = doc
                     // Also add to loaded docs
                     _loadedDocs.value = _loadedDocs.value + (id to doc)
                 }
             } catch (e: FfiException) {
-                println("Error loading document $id: ${e.message()}")
+                println("Error loading document $id: ${e.message}")
             }
         }
     }
@@ -195,10 +197,10 @@ class DrawerViewModel(
         debounceJob = viewModelScope.launch {
             kotlinx.coroutines.delay(500) // 500ms debounce
             try {
-                drawerRepo.updateBatch(listOf(patch))
+                drawerRepo.updateBatch(listOf(UpdateDocArgs("main", null, patch)))
                 // The listener will handle updating the state
             } catch (e: FfiException) {
-                println("Error updating document: ${e.message()}")
+                println("Error updating document: ${e.message}")
             }
         }
     }
@@ -206,10 +208,10 @@ class DrawerViewModel(
     fun updateDocs(patches: List<DocPatch>) {
         viewModelScope.launch {
             try {
-                drawerRepo.updateBatch(patches)
+                drawerRepo.updateBatch(patches.map { UpdateDocArgs("main", null, it) })
                 // The listener will handle updating the state
             } catch (e: FfiException) {
-                println("Error updating documents: ${e.message()}")
+                println("Error updating documents: ${e.message}")
             }
         }
     }
