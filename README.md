@@ -55,10 +55,10 @@ There are zero features implemented.
 
 More details can be found in the [design docs](./docs/DEVDOC/design.md) but actively undecided questions include:
 
-1. ~~Local~~ Privacy friendly machine learning use
-    - If I want to, I ought to be able to self-host for me for me and mine.
-2. Mobile first design
-    - I and many others just won't use it unless it's easily usable on the go.
+- ~~Local~~ Privacy friendly machine learning use
+  - If I want to, I ought to be able to self-host for me for me and mine.
+- Mobile first design
+  - I and many others just won't use it unless it's easily usable on the go.
 - Long term sustainablity
   - How to become sustainable without relying on VC money and its strings.
 - Long term use
