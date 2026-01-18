@@ -6,6 +6,7 @@ mod interlude {
 
     pub use utils_rs::prelude::*;
 }
+
 mod gen;
 
 use clap::builder::styling::AnsiColor;

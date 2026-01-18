@@ -6,7 +6,7 @@ use daybook_core::blobs::BlobsRepo;
 #[derive(uniffi::Object)]
 pub struct BlobsRepoFfi {
     fcx: SharedFfiCtx,
-    repo: Arc<BlobsRepo>,
+    pub repo: Arc<BlobsRepo>,
 }
 
 #[uniffi::export]
@@ -14,7 +14,11 @@ impl BlobsRepoFfi {
     #[uniffi::constructor]
     #[tracing::instrument(err, skip(fcx))]
     pub async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
-        let repo = daybook_core::blobs::BlobsRepo::new(fcx.cx.config.blobs_root.clone()).await?;
+        let repo = fcx
+            .do_on_rt(daybook_core::blobs::BlobsRepo::new(
+                fcx.cx.config.blobs_root.clone(),
+            ))
+            .await?;
         Ok(Arc::new(Self { fcx, repo }))
     }
 

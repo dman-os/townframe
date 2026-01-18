@@ -416,9 +416,9 @@ fun App(
         val fcx = FfiCtx.forFfi()
         val drawerRepo = DrawerRepoFfi.load(fcx = fcx)
         val tablesRepo = TablesRepoFfi.load(fcx = fcx)
-        val plugsRepo = org.example.daybook.uniffi.PlugsRepoFfi.load(fcx = fcx)
-        val configRepo = ConfigRepoFfi.load(fcx = fcx, plugRepo = plugsRepo)
         val blobsRepo = org.example.daybook.uniffi.BlobsRepoFfi.load(fcx = fcx)
+        val plugsRepo = org.example.daybook.uniffi.PlugsRepoFfi.load(fcx = fcx, blobsRepo = blobsRepo)
+        val configRepo = ConfigRepoFfi.load(fcx = fcx, plugRepo = plugsRepo)
         
         // Initialize first-time data if needed
         val tablesViewModel = TablesViewModel(tablesRepo)

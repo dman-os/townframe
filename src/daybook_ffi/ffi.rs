@@ -45,7 +45,7 @@ impl FfiCtx {
     #[uniffi::constructor]
     #[tracing::instrument(err)]
     async fn for_ffi() -> Result<Arc<FfiCtx>, FfiError> {
-        utils_rs::testing::setup_tracing_once();
+        utils_rs::setup_tracing_once();
         let rt = crate::init_tokio()?;
         let rt = Arc::new(rt);
         let config = crate::Config::new()

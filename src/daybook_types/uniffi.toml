@@ -1,6 +1,11 @@
 [bindings.kotlin]
 package_name = "org.example.daybook.uniffi.types"
 
+# [bindings.kotlin.rename]
+# "Content.Blob" = "BlobV"
+# # ImageMetadata = "ImageMetadataData"
+# Pending = "PendingData"
+
 # [bindings.kotlin.custom_types.PathBuf]
 # type_name = "String"
 # imports = []

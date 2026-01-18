@@ -7,7 +7,6 @@ import org.example.daybook.uniffi.types.DocContent
 import org.example.daybook.uniffi.types.DocPropKey
 import org.example.daybook.uniffi.types.DocPropTag
 import org.example.daybook.uniffi.types.DocPatch
-import org.example.daybook.uniffi.types.ImageMetadataProp
 import org.example.daybook.uniffi.types.WellKnownPropTag
 import org.example.daybook.uniffi.types.AddDocArgs
 import org.example.daybook.uniffi.core.UpdateDocArgs

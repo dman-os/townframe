@@ -15,6 +15,7 @@ crate::define_enum_and_tag!(
         Text type (String),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        // #[cfg_attr(feature = "uniffi", uniffi(name = "BlobData"))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         Blob struct {

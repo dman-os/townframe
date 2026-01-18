@@ -26,13 +26,16 @@ crate::uniffi_repo_listeners!(PlugsRepoFfi, PlugsEvent);
 #[uniffi::export]
 impl PlugsRepoFfi {
     #[uniffi::constructor]
-    #[tracing::instrument(err, skip(fcx))]
-    async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
+    #[tracing::instrument(err, skip(fcx, blobs_repo))]
+    async fn load(
+        fcx: SharedFfiCtx,
+        blobs_repo: Arc<crate::repos::blobs::BlobsRepoFfi>,
+    ) -> Result<Arc<Self>, FfiError> {
         let fcx = fcx.clone();
         let (repo, stop_token) = fcx
             .do_on_rt(PlugsRepo::load(
                 fcx.cx.acx.clone(),
-                fcx.cx.blobs.clone(),
+                blobs_repo.repo.clone(),
                 fcx.cx.doc_app().document_id().clone(),
                 fcx.cx.local_actor_id.clone(),
             ))

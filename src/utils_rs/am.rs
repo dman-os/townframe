@@ -7,6 +7,7 @@ pub mod codecs;
 #[cfg(feature = "automerge-repo")]
 use automerge::Automerge;
 use automerge::ChangeHash;
+#[cfg(feature = "automerge-repo")]
 use autosurgeon::{Hydrate, Prop, Reconcile};
 
 #[cfg(feature = "automerge-repo")]

@@ -70,6 +70,19 @@ macro_rules! custom_type_set {
 
     };
 }
+
+#[macro_export]
+macro_rules! domain_name {
+    ($domain_key_opt:literal or $key_sure:ident) => {
+        $domain_key_opt
+    };
+    (or $key_sure:ident) => {
+        pastey::paste! {
+            stringify!([<$key_sure:lower>])
+        }
+    };
+}
+
 #[macro_export]
 #[allow(clippy::crate_in_macro_def)]
 macro_rules! define_enum_and_tag {
@@ -109,7 +122,7 @@ macro_rules! define_enum_and_tag {
                 $(#[$attr_item:meta])*
                 // NOTE: $kind comes after $key to avoid ambiguity with tt capturin
                 // the $attr_item for some reason
-                $key:ident $kind:tt $body:tt
+                $($domain_key:literal)? $key:ident $kind:tt $body:tt
             ),*
             $(,)?
         }
@@ -157,7 +170,10 @@ macro_rules! define_enum_and_tag {
             ];
 
             pub const ALL_STR: &[&str] = &[
-                $(concat!($reverse_domain_name, pastey::paste! { stringify!([<$key:lower>]) }),)*
+                $(concat!(
+                    $reverse_domain_name,
+                    crate::domain_name!($($domain_key)? or $key)
+                ),)*
             ];
 
             pub fn as_str(&self) -> &'static str {
@@ -166,9 +182,7 @@ macro_rules! define_enum_and_tag {
                         Self::$key =>
                             concat!(
                                 $reverse_domain_name,
-                                pastey::paste! {
-                                    stringify!([<$key:lower>])
-                                }
+                                crate::domain_name!($($domain_key)? or $key)
                             ),
                     )*
                 }
@@ -179,9 +193,7 @@ macro_rules! define_enum_and_tag {
                 $(
                     if input.eq_ignore_ascii_case(concat!(
                         $reverse_domain_name,
-                        pastey::paste! {
-                            stringify!([<$key:lower>])
-                        }
+                        crate::domain_name!($($domain_key)? or $key)
                     )) {
                         return Some(Self::$key);
                     }

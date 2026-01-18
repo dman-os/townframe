@@ -98,8 +98,6 @@ struct Ctx {
     _acx_stop: tokio::sync::Mutex<Option<utils_rs::am::AmCtxStopToken>>,
     // rt: tokio::runtime::Handle,
     _sql: SqlCtx,
-    blobs: Arc<daybook_core::blobs::BlobsRepo>,
-
     doc_app: tokio::sync::OnceCell<::samod::DocHandle>,
     doc_drawer: tokio::sync::OnceCell<::samod::DocHandle>,
 
@@ -132,8 +130,6 @@ impl Ctx {
                 .await?;
         acx.spawn_ws_connector("ws://0.0.0.0:8090".into());
 
-        let blobs = daybook_core::blobs::BlobsRepo::new(config.blobs_root.clone()).await?;
-
         let doc_app = tokio::sync::OnceCell::new();
         let doc_drawer = tokio::sync::OnceCell::new();
 
@@ -144,7 +140,6 @@ impl Ctx {
             acx,
             _acx_stop: Some(acx_stop).into(),
             _sql: sql,
-            blobs,
             doc_app,
             doc_drawer,
             local_actor_id,

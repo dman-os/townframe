@@ -65,7 +65,7 @@ open class RustBuffer : Structure() {
     companion object {
         internal fun alloc(size: ULong = 0UL) = uniffiRustCall() { status ->
             // Note: need to convert the size to a `Long` value to make this work with JVM.
-            UniffiLib.INSTANCE.ffi_daybook_core_rustbuffer_alloc(size.toLong(), status)
+            UniffiLib.ffi_daybook_core_rustbuffer_alloc(size.toLong(), status)
         }.also {
             if(it.data == null) {
                throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=${size})")
@@ -81,49 +81,15 @@ open class RustBuffer : Structure() {
         }
 
         internal fun free(buf: RustBuffer.ByValue) = uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.ffi_daybook_core_rustbuffer_free(buf, status)
+            UniffiLib.ffi_daybook_core_rustbuffer_free(buf, status)
         }
     }
 
     @Suppress("TooGenericExceptionThrown")
     fun asByteBuffer() =
-        this.data?.getByteBuffer(0, this.len.toLong())?.also {
+        this.data?.getByteBuffer(0, this.len)?.also {
             it.order(ByteOrder.BIG_ENDIAN)
         }
-}
-
-/**
- * The equivalent of the `*mut RustBuffer` type.
- * Required for callbacks taking in an out pointer.
- *
- * Size is the sum of all values in the struct.
- *
- * @suppress
- */
-class RustBufferByReference : ByReference(16) {
-    /**
-     * Set the pointed-to `RustBuffer` to the given value.
-     */
-    fun setValue(value: RustBuffer.ByValue) {
-        // NOTE: The offsets are as they are in the C-like struct.
-        val pointer = getPointer()
-        pointer.setLong(0, value.capacity)
-        pointer.setLong(8, value.len)
-        pointer.setPointer(16, value.data)
-    }
-
-    /**
-     * Get a `RustBuffer.ByValue` from this reference.
-     */
-    fun getValue(): RustBuffer.ByValue {
-        val pointer = getPointer()
-        val value = RustBuffer.ByValue()
-        value.writeField("capacity", pointer.getLong(0))
-        value.writeField("len", pointer.getLong(8))
-        value.writeField("data", pointer.getLong(16))
-
-        return value
-    }
 }
 
 // This is a helper for safely passing byte references into the rust code.
@@ -322,8 +288,9 @@ internal inline fun<T> uniffiTraitInterfaceCall(
     try {
         writeReturn(makeCall())
     } catch(e: kotlin.Exception) {
+        val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
         callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
-        callStatus.error_buf = FfiConverterString.lower(e.toString())
+        callStatus.error_buf = FfiConverterString.lower(err)
     }
 }
 
@@ -340,26 +307,39 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
             callStatus.code = UNIFFI_CALL_ERROR
             callStatus.error_buf = lowerError(e)
         } else {
+            val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
             callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
-            callStatus.error_buf = FfiConverterString.lower(e.toString())
+            callStatus.error_buf = FfiConverterString.lower(err)
         }
     }
 }
+// Initial value and increment amount for handles. 
+// These ensure that Kotlin-generated handles always have the lowest bit set
+private const val UNIFFI_HANDLEMAP_INITIAL = 1.toLong()
+private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
+
 // Map handles to objects
 //
 // This is used pass an opaque 64-bit handle representing a foreign object to the Rust code.
 internal class UniffiHandleMap<T: Any> {
     private val map = ConcurrentHashMap<Long, T>()
-    private val counter = java.util.concurrent.atomic.AtomicLong(0)
+    // Start 
+    private val counter = java.util.concurrent.atomic.AtomicLong(UNIFFI_HANDLEMAP_INITIAL)
 
     val size: Int
         get() = map.size
 
     // Insert a new object into the handle map and get a handle for it
     fun insert(obj: T): Long {
-        val handle = counter.getAndAdd(1)
+        val handle = counter.getAndAdd(UNIFFI_HANDLEMAP_DELTA)
         map.put(handle, obj)
         return handle
+    }
+
+    // Clone a handle, creating a new one
+    fun clone(handle: Long): Long {
+        val obj = map.get(handle) ?: throw InternalException("UniffiHandleMap.clone: Invalid handle")
+        return insert(obj)
     }
 
     // Get an object from the handle map
@@ -384,535 +364,422 @@ private fun findLibraryName(componentName: String): String {
     return "daybook_ffi"
 }
 
-private inline fun <reified Lib : Library> loadIndirect(
-    componentName: String
-): Lib {
-    return Native.load<Lib>(findLibraryName(componentName), Lib::class.java)
-}
-
 // Define FFI callback types
 internal interface UniffiRustFutureContinuationCallback : com.sun.jna.Callback {
     fun callback(`data`: Long,`pollResult`: Byte,)
 }
-internal interface UniffiForeignFutureFree : com.sun.jna.Callback {
+internal interface UniffiForeignFutureDroppedCallback : com.sun.jna.Callback {
     fun callback(`handle`: Long,)
 }
 internal interface UniffiCallbackInterfaceFree : com.sun.jna.Callback {
     fun callback(`handle`: Long,)
 }
+internal interface UniffiCallbackInterfaceClone : com.sun.jna.Callback {
+    fun callback(`handle`: Long,)
+    : Long
+}
 @Structure.FieldOrder("handle", "free")
-internal open class UniffiForeignFuture(
+internal open class UniffiForeignFutureDroppedCallbackStruct(
     @JvmField internal var `handle`: Long = 0.toLong(),
-    @JvmField internal var `free`: UniffiForeignFutureFree? = null,
+    @JvmField internal var `free`: UniffiForeignFutureDroppedCallback? = null,
 ) : Structure() {
     class UniffiByValue(
         `handle`: Long = 0.toLong(),
-        `free`: UniffiForeignFutureFree? = null,
-    ): UniffiForeignFuture(`handle`,`free`,), Structure.ByValue
+        `free`: UniffiForeignFutureDroppedCallback? = null,
+    ): UniffiForeignFutureDroppedCallbackStruct(`handle`,`free`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFuture) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureDroppedCallbackStruct) {
         `handle` = other.`handle`
         `free` = other.`free`
     }
 
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructU8(
+internal open class UniffiForeignFutureResultU8(
     @JvmField internal var `returnValue`: Byte = 0.toByte(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Byte = 0.toByte(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructU8(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultU8(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructU8) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU8) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteU8 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructU8.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU8.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructI8(
+internal open class UniffiForeignFutureResultI8(
     @JvmField internal var `returnValue`: Byte = 0.toByte(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Byte = 0.toByte(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructI8(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultI8(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructI8) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI8) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteI8 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructI8.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI8.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructU16(
+internal open class UniffiForeignFutureResultU16(
     @JvmField internal var `returnValue`: Short = 0.toShort(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Short = 0.toShort(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructU16(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultU16(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructU16) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU16) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteU16 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructU16.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU16.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructI16(
+internal open class UniffiForeignFutureResultI16(
     @JvmField internal var `returnValue`: Short = 0.toShort(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Short = 0.toShort(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructI16(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultI16(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructI16) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI16) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteI16 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructI16.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI16.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructU32(
+internal open class UniffiForeignFutureResultU32(
     @JvmField internal var `returnValue`: Int = 0,
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Int = 0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructU32(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultU32(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructU32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteU32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructU32.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU32.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructI32(
+internal open class UniffiForeignFutureResultI32(
     @JvmField internal var `returnValue`: Int = 0,
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Int = 0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructI32(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultI32(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructI32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteI32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructI32.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI32.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructU64(
+internal open class UniffiForeignFutureResultU64(
     @JvmField internal var `returnValue`: Long = 0.toLong(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Long = 0.toLong(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructU64(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultU64(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructU64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteU64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructU64.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU64.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructI64(
+internal open class UniffiForeignFutureResultI64(
     @JvmField internal var `returnValue`: Long = 0.toLong(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Long = 0.toLong(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructI64(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultI64(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructI64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteI64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructI64.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI64.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructF32(
+internal open class UniffiForeignFutureResultF32(
     @JvmField internal var `returnValue`: Float = 0.0f,
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Float = 0.0f,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructF32(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultF32(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructF32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultF32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteF32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructF32.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultF32.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructF64(
+internal open class UniffiForeignFutureResultF64(
     @JvmField internal var `returnValue`: Double = 0.0,
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Double = 0.0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructF64(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultF64(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructF64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultF64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteF64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructF64.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultF64.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructPointer(
-    @JvmField internal var `returnValue`: Pointer = Pointer.NULL,
-    @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-) : Structure() {
-    class UniffiByValue(
-        `returnValue`: Pointer = Pointer.NULL,
-        `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructPointer(`returnValue`,`callStatus`,), Structure.ByValue
-
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructPointer) {
-        `returnValue` = other.`returnValue`
-        `callStatus` = other.`callStatus`
-    }
-
-}
-internal interface UniffiForeignFutureCompletePointer : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructPointer.UniffiByValue,)
-}
-@Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructRustBuffer(
+internal open class UniffiForeignFutureResultRustBuffer(
     @JvmField internal var `returnValue`: RustBuffer.ByValue = RustBuffer.ByValue(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: RustBuffer.ByValue = RustBuffer.ByValue(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructRustBuffer(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultRustBuffer(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructRustBuffer) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultRustBuffer) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteRustBuffer : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructRustBuffer.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultRustBuffer.UniffiByValue,)
 }
 @Structure.FieldOrder("callStatus")
-internal open class UniffiForeignFutureStructVoid(
+internal open class UniffiForeignFutureResultVoid(
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructVoid(`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultVoid(`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructVoid) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultVoid) {
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructVoid.UniffiByValue,)
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// For large crates we prevent `MethodTooLargeException` (see #2340)
-// N.B. the name of the extension is very misleading, since it is 
-// rather `InterfaceTooLargeException`, caused by too many methods 
-// in the interface for large crates.
-//
-// By splitting the otherwise huge interface into two parts
-// * UniffiLib 
-// * IntegrityCheckingUniffiLib (this)
-// we allow for ~2x as many methods in the UniffiLib interface.
-// 
-// The `ffi_uniffi_contract_version` method and all checksum methods are put 
-// into `IntegrityCheckingUniffiLib` and these methods are called only once,
-// when the library is loaded.
-internal interface IntegrityCheckingUniffiLib : Library {
-    // Integrity check functions only
-    fun uniffi_daybook_core_checksum_method_listenerregistration_unregister(
-): Short
-fun ffi_daybook_core_uniffi_contract_version(
-): Int
-
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
 }
 
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
-internal interface UniffiLib : Library {
-    companion object {
-        internal val INSTANCE: UniffiLib by lazy {
-            val componentName = "daybook_core"
-            // For large crates we prevent `MethodTooLargeException` (see #2340)
-            // N.B. the name of the extension is very misleading, since it is 
-            // rather `InterfaceTooLargeException`, caused by too many methods 
-            // in the interface for large crates.
-            //
-            // By splitting the otherwise huge interface into two parts
-            // * UniffiLib (this)
-            // * IntegrityCheckingUniffiLib
-            // And all checksum methods are put into `IntegrityCheckingUniffiLib`
-            // we allow for ~2x as many methods in the UniffiLib interface.
-            // 
-            // Thus we first load the library with `loadIndirect` as `IntegrityCheckingUniffiLib`
-            // so that we can (optionally!) call `uniffiCheckApiChecksums`...
-            loadIndirect<IntegrityCheckingUniffiLib>(componentName)
-                .also { lib: IntegrityCheckingUniffiLib ->
-                    uniffiCheckContractApiVersion(lib)
-                    uniffiCheckApiChecksums(lib)
-                }
-            // ... and then we load the library as `UniffiLib`
-            // N.B. we cannot use `loadIndirect` once and then try to cast it to `UniffiLib`
-            // => results in `java.lang.ClassCastException: com.sun.proxy.$Proxy cannot be cast to ...`
-            // error. So we must call `loadIndirect` twice. For crates large enough
-            // to trigger this issue, the performance impact is negligible, running on
-            // a macOS M1 machine the `loadIndirect` call takes ~50ms.
-            val lib = loadIndirect<UniffiLib>(componentName)
-            // No need to check the contract version and checksums, since 
-            // we already did that with `IntegrityCheckingUniffiLib` above.
-            org.example.daybook.uniffi.types.uniffiEnsureInitialized()
-            // Loading of library with integrity check done.
-            lib
-        }
-        
-        // The Cleaner for the whole library
-        internal val CLEANER: UniffiCleaner by lazy {
-            UniffiCleaner.create()
-        }
+
+// For large crates we prevent `MethodTooLargeException` (see #2340)
+// N.B. the name of the extension is very misleading, since it is
+// rather `InterfaceTooLargeException`, caused by too many methods
+// in the interface for large crates.
+//
+// By splitting the otherwise huge interface into two parts
+// * UniffiLib (this)
+// * IntegrityCheckingUniffiLib
+// And all checksum methods are put into `IntegrityCheckingUniffiLib`
+// we allow for ~2x as many methods in the UniffiLib interface.
+//
+// Note: above all written when we used JNA's `loadIndirect` etc.
+// We now use JNA's "direct mapping" - unclear if same considerations apply exactly.
+internal object IntegrityCheckingUniffiLib {
+    init {
+        Native.register(IntegrityCheckingUniffiLib::class.java, findLibraryName(componentName = "daybook_core"))
+        uniffiCheckContractApiVersion(this)
+        uniffiCheckApiChecksums(this)
     }
+    external fun uniffi_daybook_core_checksum_method_listenerregistration_unregister(
+    ): Short
+    external fun ffi_daybook_core_uniffi_contract_version(
+    ): Int
 
-    // FFI functions
-    fun uniffi_daybook_core_fn_clone_listenerregistration(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-): Pointer
-fun uniffi_daybook_core_fn_free_listenerregistration(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-fun uniffi_daybook_core_fn_method_listenerregistration_unregister(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-fun ffi_daybook_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-fun ffi_daybook_core_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-fun ffi_daybook_core_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-fun ffi_daybook_core_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-fun ffi_daybook_core_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_u8(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_u8(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-fun ffi_daybook_core_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_i8(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_i8(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-fun ffi_daybook_core_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_u16(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_u16(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Short
-fun ffi_daybook_core_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_i16(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_i16(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Short
-fun ffi_daybook_core_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_u32(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_u32(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Int
-fun ffi_daybook_core_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_i32(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_i32(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Int
-fun ffi_daybook_core_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_u64(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_u64(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-fun ffi_daybook_core_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_i64(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_i64(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-fun ffi_daybook_core_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_f32(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_f32(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Float
-fun ffi_daybook_core_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_f64(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_f64(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Double
-fun ffi_daybook_core_rust_future_poll_pointer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_pointer(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_pointer(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_pointer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Pointer
-fun ffi_daybook_core_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_rust_buffer(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_rust_buffer(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-fun ffi_daybook_core_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_cancel_void(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_free_void(`handle`: Long,
-): Unit
-fun ffi_daybook_core_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
+        
+}
 
+internal object UniffiLib {
+    
+    // The Cleaner for the whole library
+    internal val CLEANER: UniffiCleaner by lazy {
+        UniffiCleaner.create()
+    }
+    
+
+    init {
+        Native.register(UniffiLib::class.java, findLibraryName(componentName = "daybook_core"))
+        org.example.daybook.uniffi.types.uniffiEnsureInitialized()
+        
+    }
+    external fun uniffi_daybook_core_fn_clone_listenerregistration(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_daybook_core_fn_free_listenerregistration(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_daybook_core_fn_method_listenerregistration_unregister(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun ffi_daybook_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_daybook_core_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_daybook_core_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun ffi_daybook_core_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_daybook_core_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_cancel_u8(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_free_u8(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun ffi_daybook_core_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_cancel_i8(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_free_i8(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun ffi_daybook_core_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_cancel_u16(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_free_u16(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Short
+    external fun ffi_daybook_core_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_cancel_i16(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_free_i16(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Short
+    external fun ffi_daybook_core_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_cancel_u32(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_free_u32(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun ffi_daybook_core_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_cancel_i32(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_free_i32(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun ffi_daybook_core_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_cancel_u64(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_free_u64(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun ffi_daybook_core_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_cancel_i64(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_free_i64(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun ffi_daybook_core_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_cancel_f32(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_free_f32(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Float
+    external fun ffi_daybook_core_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_cancel_f64(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_free_f64(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Double
+    external fun ffi_daybook_core_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_cancel_rust_buffer(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_free_rust_buffer(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_daybook_core_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_cancel_void(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_free_void(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_core_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+
+        
 }
 
 private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
     // Get the bindings contract version from our ComponentInterface
-    val bindings_contract_version = 29
+    val bindings_contract_version = 30
     // Get the scaffolding contract version by calling the into the dylib
     val scaffolding_contract_version = lib.ffi_daybook_core_uniffi_contract_version()
     if (bindings_contract_version != scaffolding_contract_version) {
@@ -921,7 +788,7 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if (lib.uniffi_daybook_core_checksum_method_listenerregistration_unregister() != 47679.toShort()) {
+    if (lib.uniffi_daybook_core_checksum_method_listenerregistration_unregister() != 64311.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -930,7 +797,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
  * @suppress
  */
 public fun uniffiEnsureInitialized() {
-    UniffiLib.INSTANCE
+    IntegrityCheckingUniffiLib
+    // UniffiLib() initialized as objects are used, but we still need to explicitly
+    // reference it so initialization across crates works as expected.
+    UniffiLib
 }
 
 // Async support
@@ -997,11 +867,22 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
     }
 
 /** 
+ * Placeholder object used to signal that we're constructing an interface with a FFI handle.
+ *
+ * This is the first argument for interface constructors that input a raw handle. It exists is that
+ * so we can avoid signature conflicts when an interface has a regular constructor than inputs a
+ * Long.
+ *
+ * @suppress
+ * */
+object UniffiWithHandle
+
+/** 
  * Used to instantiate an interface without an actual pointer, for fakes in tests, mostly.
  *
  * @suppress
  * */
-object NoPointer
+object NoHandle
 /**
  * The cleaner interface for Object finalization code to run.
  * This is the entry point to any implementation that we're using.
@@ -1213,21 +1094,18 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 }
 
 
-// This template implements a class for working with a Rust struct via a Pointer/Arc<T>
+// This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
-//
-// Each instance implements core operations for working with the Rust `Arc<T>` and the
-// Kotlin Pointer to work with the live Rust struct on the other side of the FFI.
 //
 // There's some subtlety here, because we have to be careful not to operate on a Rust
 // struct after it has been dropped, and because we must expose a public API for freeing
 // theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
 //
-//   * Each instance holds an opaque pointer to the underlying Rust struct.
-//     Method calls need to read this pointer from the object's state and pass it in to
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
 //     the Rust FFI.
 //
-//   * When an instance is no longer needed, its pointer should be passed to a
+//   * When an instance is no longer needed, its handle should be passed to a
 //     special destructor function provided by the Rust FFI, which will drop the
 //     underlying Rust struct.
 //
@@ -1252,13 +1130,13 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 //      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
 //         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
 //
-// If we try to implement this with mutual exclusion on access to the pointer, there is the
+// If we try to implement this with mutual exclusion on access to the handle, there is the
 // possibility of a race between a method call and a concurrent call to `destroy`:
 //
-//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
-//      before it can pass the pointer over the FFI to Rust.
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
 //    * Thread B calls `destroy` and frees the underlying Rust struct.
-//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
 //      a use-after-free.
 //
 // One possible solution would be to use a `ReadWriteLock`, with each method call taking
@@ -1321,24 +1199,30 @@ public interface ListenerRegistrationInterface {
 open class ListenerRegistration: Disposable, AutoCloseable, ListenerRegistrationInterface
 {
 
-    constructor(pointer: Pointer) {
-        this.pointer = pointer
-        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
     }
 
     /**
+     * @suppress
+     *
      * This constructor can be used to instantiate a fake object. Only used for tests. Any
      * attempt to actually use an object constructed this way will fail as there is no
      * connected Rust object.
      */
     @Suppress("UNUSED_PARAMETER")
-    constructor(noPointer: NoPointer) {
-        this.pointer = null
-        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
     }
 
-    protected val pointer: Pointer?
-    protected val cleanable: UniffiCleaner.Cleanable
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
 
     private val wasDestroyed = AtomicBoolean(false)
     private val callCounter = AtomicLong(1)
@@ -1349,7 +1233,7 @@ open class ListenerRegistration: Disposable, AutoCloseable, ListenerRegistration
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable.clean()
+                cleanable?.clean()
             }
         }
     }
@@ -1359,7 +1243,7 @@ open class ListenerRegistration: Disposable, AutoCloseable, ListenerRegistration
         this.destroy()
     }
 
-    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
         // Check and increment the call counter, to keep the object alive.
         // This needs a compare-and-set retry loop in case of concurrent updates.
         do {
@@ -1371,41 +1255,50 @@ open class ListenerRegistration: Disposable, AutoCloseable, ListenerRegistration
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
         } while (! this.callCounter.compareAndSet(c, c + 1L))
-        // Now we can safely do the method call without the pointer being freed concurrently.
+        // Now we can safely do the method call without the handle being freed concurrently.
         try {
-            return block(this.uniffiClonePointer())
+            return block(this.uniffiCloneHandle())
         } finally {
             // This decrement always matches the increment we performed above.
             if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable.clean()
+                cleanable?.clean()
             }
         }
     }
 
     // Use a static inner class instead of a closure so as not to accidentally
     // capture `this` as part of the cleanable's action.
-    private class UniffiCleanAction(private val pointer: Pointer?) : Runnable {
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
         override fun run() {
-            pointer?.let { ptr ->
-                uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_daybook_core_fn_free_listenerregistration(ptr, status)
-                }
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_daybook_core_fn_free_listenerregistration(handle, status)
             }
         }
     }
 
-    fun uniffiClonePointer(): Pointer {
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_daybook_core_fn_clone_listenerregistration(pointer!!, status)
+            UniffiLib.uniffi_daybook_core_fn_clone_listenerregistration(handle, status)
         }
     }
 
     override fun `unregister`()
         = 
-    callWithPointer {
+    callWithHandle {
     uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_daybook_core_fn_method_listenerregistration_unregister(
-        it, _status)
+    UniffiLib.uniffi_daybook_core_fn_method_listenerregistration_unregister(
+        it,
+        _status)
 }
     }
     
@@ -1414,48 +1307,59 @@ open class ListenerRegistration: Disposable, AutoCloseable, ListenerRegistration
     
 
     
+
+
     
+    
+    /**
+     * @suppress
+     */
     companion object
     
 }
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeListenerRegistration: FfiConverter<ListenerRegistration, Pointer> {
-
-    override fun lower(value: ListenerRegistration): Pointer {
-        return value.uniffiClonePointer()
+public object FfiConverterTypeListenerRegistration: FfiConverter<ListenerRegistration, Long> {
+    override fun lower(value: ListenerRegistration): Long {
+        return value.uniffiCloneHandle()
     }
 
-    override fun lift(value: Pointer): ListenerRegistration {
-        return ListenerRegistration(value)
+    override fun lift(value: Long): ListenerRegistration {
+        return ListenerRegistration(UniffiWithHandle, value)
     }
 
     override fun read(buf: ByteBuffer): ListenerRegistration {
-        // The Rust code always writes pointers as 8 bytes, and will
-        // fail to compile if they don't fit.
-        return lift(Pointer(buf.getLong()))
+        return lift(buf.getLong())
     }
 
     override fun allocationSize(value: ListenerRegistration) = 8UL
 
     override fun write(value: ListenerRegistration, buf: ByteBuffer) {
-        // The Rust code always expects pointers written as 8 bytes,
-        // and will fail to compile if they don't fit.
-        buf.putLong(Pointer.nativeValue(lower(value)))
+        buf.putLong(lower(value))
     }
 }
 
 
 
 data class DocEntry (
-    var `branches`: Map<kotlin.String, ChangeHashSet>, 
-    var `propBlames`: Map<kotlin.String, PropBlame>, 
-    var `users`: Map<kotlin.String, UserMeta>, 
-    var `version`: Uuid, 
+    var `branches`: Map<kotlin.String, ChangeHashSet>
+    , 
+    var `propBlames`: Map<kotlin.String, PropBlame>
+    , 
+    var `users`: Map<kotlin.String, UserMeta>
+    , 
+    var `version`: Uuid
+    , 
     var `previousVersionHeads`: ChangeHashSet?
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1494,10 +1398,17 @@ public object FfiConverterTypeDocEntry: FfiConverterRustBuffer<DocEntry> {
 
 
 data class DocEntryDiff (
-    var `branches`: Map<PathBuf, HeadDiff>, 
-    var `propBlames`: Map<kotlin.String, PropBlameDiff>, 
+    var `branches`: Map<PathBuf, HeadDiff>
+    , 
+    var `propBlames`: Map<kotlin.String, PropBlameDiff>
+    , 
     var `users`: Map<kotlin.String, UserMetaDiff>
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1530,9 +1441,15 @@ public object FfiConverterTypeDocEntryDiff: FfiConverterRustBuffer<DocEntryDiff>
 
 
 data class DocNBranches (
-    var `docId`: kotlin.String, 
+    var `docId`: kotlin.String
+    , 
     var `branches`: Map<kotlin.String, ChangeHashSet>
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1562,9 +1479,15 @@ public object FfiConverterTypeDocNBranches: FfiConverterRustBuffer<DocNBranches>
 
 
 data class HeadDiff (
-    var `from`: ChangeHashSet?, 
+    var `from`: ChangeHashSet?
+    , 
     var `to`: ChangeHashSet?
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1594,10 +1517,17 @@ public object FfiConverterTypeHeadDiff: FfiConverterRustBuffer<HeadDiff> {
 
 
 data class Panel (
-    var `id`: Uuid, 
-    var `version`: Uuid, 
+    var `id`: Uuid
+    , 
+    var `version`: Uuid
+    , 
     var `title`: kotlin.String
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1630,10 +1560,17 @@ public object FfiConverterTypePanel: FfiConverterRustBuffer<Panel> {
 
 
 data class PanelPatch (
-    var `id`: Uuid?, 
-    var `version`: Uuid?, 
+    var `id`: Uuid?
+    , 
+    var `version`: Uuid?
+    , 
     var `title`: kotlin.String?
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1667,7 +1604,12 @@ public object FfiConverterTypePanelPatch: FfiConverterRustBuffer<PanelPatch> {
 
 data class PropBlame (
     var `heads`: ChangeHashSet
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1694,9 +1636,15 @@ public object FfiConverterTypePropBlame: FfiConverterRustBuffer<PropBlame> {
 
 
 data class PropBlameDiff (
-    var `from`: PropBlame?, 
+    var `from`: PropBlame?
+    , 
     var `to`: PropBlame?
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1726,10 +1674,17 @@ public object FfiConverterTypePropBlameDiff: FfiConverterRustBuffer<PropBlameDif
 
 
 data class PropKeyDisplayHint (
-    var `alwaysVisible`: kotlin.Boolean, 
-    var `displayTitle`: kotlin.String?, 
+    var `alwaysVisible`: kotlin.Boolean
+    , 
+    var `displayTitle`: kotlin.String?
+    , 
     var `deets`: PropKeyDisplayDeets
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1762,12 +1717,21 @@ public object FfiConverterTypePropKeyDisplayHint: FfiConverterRustBuffer<PropKey
 
 
 data class Tab (
-    var `id`: Uuid, 
-    var `version`: Uuid, 
-    var `title`: kotlin.String, 
-    var `panels`: List<Uuid>, 
+    var `id`: Uuid
+    , 
+    var `version`: Uuid
+    , 
+    var `title`: kotlin.String
+    , 
+    var `panels`: List<Uuid>
+    , 
     var `selectedPanel`: Uuid?
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1806,12 +1770,21 @@ public object FfiConverterTypeTab: FfiConverterRustBuffer<Tab> {
 
 
 data class TabPatch (
-    var `id`: Uuid?, 
-    var `version`: Uuid?, 
-    var `title`: kotlin.String?, 
-    var `panels`: List<Uuid>?, 
+    var `id`: Uuid?
+    , 
+    var `version`: Uuid?
+    , 
+    var `title`: kotlin.String?
+    , 
+    var `panels`: List<Uuid>?
+    , 
     var `selectedPanel`: Uuid??
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1850,13 +1823,23 @@ public object FfiConverterTypeTabPatch: FfiConverterRustBuffer<TabPatch> {
 
 
 data class Table (
-    var `id`: Uuid, 
-    var `version`: Uuid, 
-    var `title`: kotlin.String, 
-    var `tabs`: List<Uuid>, 
-    var `window`: TableWindow, 
+    var `id`: Uuid
+    , 
+    var `version`: Uuid
+    , 
+    var `title`: kotlin.String
+    , 
+    var `tabs`: List<Uuid>
+    , 
+    var `window`: TableWindow
+    , 
     var `selectedTab`: Uuid?
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1898,13 +1881,23 @@ public object FfiConverterTypeTable: FfiConverterRustBuffer<Table> {
 
 
 data class TablePatch (
-    var `id`: Uuid?, 
-    var `version`: Uuid?, 
-    var `title`: kotlin.String?, 
-    var `tabs`: List<Uuid>?, 
-    var `window`: TableWindow?, 
+    var `id`: Uuid?
+    , 
+    var `version`: Uuid?
+    , 
+    var `title`: kotlin.String?
+    , 
+    var `tabs`: List<Uuid>?
+    , 
+    var `window`: TableWindow?
+    , 
     var `selectedTab`: Uuid??
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1946,11 +1939,19 @@ public object FfiConverterTypeTablePatch: FfiConverterRustBuffer<TablePatch> {
 
 
 data class TablesPatches (
-    var `tabUpdates`: List<TabPatch>?, 
-    var `windowUpdates`: List<WindowPatch>?, 
-    var `panelUpdates`: List<PanelPatch>?, 
+    var `tabUpdates`: List<TabPatch>?
+    , 
+    var `windowUpdates`: List<WindowPatch>?
+    , 
+    var `panelUpdates`: List<PanelPatch>?
+    , 
     var `tableUpdates`: List<TablePatch>?
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -1986,10 +1987,17 @@ public object FfiConverterTypeTablesPatches: FfiConverterRustBuffer<TablesPatche
 
 
 data class UpdateDocArgs (
-    var `branchPath`: PathBuf, 
-    var `heads`: ChangeHashSet?, 
+    var `branchPath`: PathBuf
+    , 
+    var `heads`: ChangeHashSet?
+    , 
     var `patch`: DocPatch
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2022,9 +2030,15 @@ public object FfiConverterTypeUpdateDocArgs: FfiConverterRustBuffer<UpdateDocArg
 
 
 data class UserMeta (
-    var `userPath`: PathBuf, 
+    var `userPath`: PathBuf
+    , 
     var `seenAt`: Timestamp
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2054,9 +2068,15 @@ public object FfiConverterTypeUserMeta: FfiConverterRustBuffer<UserMeta> {
 
 
 data class UserMetaDiff (
-    var `from`: UserMeta?, 
+    var `from`: UserMeta?
+    , 
     var `to`: UserMeta?
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2086,15 +2106,27 @@ public object FfiConverterTypeUserMetaDiff: FfiConverterRustBuffer<UserMetaDiff>
 
 
 data class Window (
-    var `id`: Uuid, 
-    var `version`: Uuid, 
-    var `title`: kotlin.String, 
-    var `tabs`: List<Uuid>, 
-    var `selectedTable`: Uuid?, 
-    var `layout`: WindowLayout, 
-    var `lastCaptureMode`: CaptureMode, 
+    var `id`: Uuid
+    , 
+    var `version`: Uuid
+    , 
+    var `title`: kotlin.String
+    , 
+    var `tabs`: List<Uuid>
+    , 
+    var `selectedTable`: Uuid?
+    , 
+    var `layout`: WindowLayout
+    , 
+    var `lastCaptureMode`: CaptureMode
+    , 
     var `documentsScreenListSizeExpanded`: WindowLayoutRegionSize
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2142,12 +2174,21 @@ public object FfiConverterTypeWindow: FfiConverterRustBuffer<Window> {
 
 
 data class WindowLayout (
-    var `centerRegion`: WindowLayoutRegionChild, 
-    var `leftRegion`: WindowLayoutRegionChild, 
-    var `rightRegion`: WindowLayoutRegionChild, 
-    var `leftVisible`: kotlin.Boolean, 
+    var `centerRegion`: WindowLayoutRegionChild
+    , 
+    var `leftRegion`: WindowLayoutRegionChild
+    , 
+    var `rightRegion`: WindowLayoutRegionChild
+    , 
+    var `leftVisible`: kotlin.Boolean
+    , 
     var `rightVisible`: kotlin.Boolean
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2186,9 +2227,15 @@ public object FfiConverterTypeWindowLayout: FfiConverterRustBuffer<WindowLayout>
 
 
 data class WindowLayoutPane (
-    var `key`: kotlin.String, 
+    var `key`: kotlin.String
+    , 
     var `variant`: WindowLayoutPaneVariant
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2218,10 +2265,17 @@ public object FfiConverterTypeWindowLayoutPane: FfiConverterRustBuffer<WindowLay
 
 
 data class WindowLayoutRegion (
-    var `key`: kotlin.String, 
-    var `orientation`: WindowLayoutOrientation, 
+    var `key`: kotlin.String
+    , 
+    var `orientation`: WindowLayoutOrientation
+    , 
     var `children`: List<WindowLayoutRegionChild>
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2254,9 +2308,15 @@ public object FfiConverterTypeWindowLayoutRegion: FfiConverterRustBuffer<WindowL
 
 
 data class WindowLayoutRegionChild (
-    var `size`: WindowLayoutRegionSize, 
+    var `size`: WindowLayoutRegionSize
+    , 
     var `deets`: WindowLayoutPane
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2342,15 +2402,27 @@ public object FfiConverterTypeWindowLayoutSidebar: FfiConverterRustBuffer<Window
 
 
 data class WindowPatch (
-    var `id`: Uuid?, 
-    var `version`: Uuid?, 
-    var `title`: kotlin.String?, 
-    var `tabs`: List<Uuid>?, 
-    var `selectedTable`: Uuid??, 
-    var `layout`: WindowLayout?, 
-    var `lastCaptureMode`: CaptureMode?, 
+    var `id`: Uuid?
+    , 
+    var `version`: Uuid?
+    , 
+    var `title`: kotlin.String?
+    , 
+    var `tabs`: List<Uuid>?
+    , 
+    var `selectedTable`: Uuid??
+    , 
+    var `layout`: WindowLayout?
+    , 
+    var `lastCaptureMode`: CaptureMode?
+    , 
     var `documentsScreenListSizeExpanded`: WindowLayoutRegionSize?
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2403,6 +2475,10 @@ enum class CaptureMode {
     TEXT,
     CAMERA,
     MIC;
+
+    
+
+
     companion object
 }
 
@@ -2431,12 +2507,21 @@ public object FfiConverterTypeCaptureMode: FfiConverterRustBuffer<CaptureMode> {
 sealed class ConfigEvent {
     
     data class Changed(
-        val `heads`: ChangeHashSet) : ConfigEvent() {
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : ConfigEvent()
+        
+    {
+        
+
         companion object
     }
     
 
     
+
+    
+    
+
+
     companion object
 }
 
@@ -2485,6 +2570,10 @@ enum class DateTimePropDisplayType {
     RELATIVE,
     TIME_ONLY,
     DATE_ONLY;
+
+    
+
+
     companion object
 }
 
@@ -2513,30 +2602,51 @@ public object FfiConverterTypeDateTimePropDisplayType: FfiConverterRustBuffer<Da
 sealed class DispatchEvent {
     
     data class ListChanged(
-        val `heads`: ChangeHashSet) : DispatchEvent() {
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : DispatchEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class DispatchAdded(
         val `id`: kotlin.String, 
-        val `heads`: ChangeHashSet) : DispatchEvent() {
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : DispatchEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class DispatchUpdated(
         val `id`: kotlin.String, 
-        val `heads`: ChangeHashSet) : DispatchEvent() {
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : DispatchEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class DispatchDeleted(
         val `id`: kotlin.String, 
-        val `heads`: ChangeHashSet) : DispatchEvent() {
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : DispatchEvent()
+        
+    {
+        
+
         companion object
     }
     
 
     
+
+    
+    
+
+
     companion object
 }
 
@@ -2635,34 +2745,55 @@ public object FfiConverterTypeDispatchEvent : FfiConverterRustBuffer<DispatchEve
 sealed class DrawerEvent {
     
     data class ListChanged(
-        val `drawerHeads`: ChangeHashSet) : DrawerEvent() {
+        val `drawerHeads`: org.example.daybook.uniffi.core.ChangeHashSet) : DrawerEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class DocAdded(
         val `id`: kotlin.String, 
-        val `entry`: DocEntry, 
-        val `drawerHeads`: ChangeHashSet) : DrawerEvent() {
+        val `entry`: org.example.daybook.uniffi.core.DocEntry, 
+        val `drawerHeads`: org.example.daybook.uniffi.core.ChangeHashSet) : DrawerEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class DocUpdated(
         val `id`: kotlin.String, 
-        val `entry`: DocEntry, 
-        val `diff`: DocEntryDiff, 
-        val `drawerHeads`: ChangeHashSet) : DrawerEvent() {
+        val `entry`: org.example.daybook.uniffi.core.DocEntry, 
+        val `diff`: org.example.daybook.uniffi.core.DocEntryDiff, 
+        val `drawerHeads`: org.example.daybook.uniffi.core.ChangeHashSet) : DrawerEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class DocDeleted(
         val `id`: kotlin.String, 
-        val `entry`: DocEntry, 
-        val `drawerHeads`: ChangeHashSet) : DrawerEvent() {
+        val `entry`: org.example.daybook.uniffi.core.DocEntry, 
+        val `drawerHeads`: org.example.daybook.uniffi.core.ChangeHashSet) : DrawerEvent()
+        
+    {
+        
+
         companion object
     }
     
 
     
+
+    
+    
+
+
     companion object
 }
 
@@ -2773,30 +2904,51 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
 sealed class PlugsEvent {
     
     data class ListChanged(
-        val `heads`: ChangeHashSet) : PlugsEvent() {
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : PlugsEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class PlugAdded(
         val `id`: kotlin.String, 
-        val `heads`: ChangeHashSet) : PlugsEvent() {
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : PlugsEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class PlugChanged(
         val `id`: kotlin.String, 
-        val `heads`: ChangeHashSet) : PlugsEvent() {
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : PlugsEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class PlugDeleted(
         val `id`: kotlin.String, 
-        val `heads`: ChangeHashSet) : PlugsEvent() {
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : PlugsEvent()
+        
+    {
+        
+
         companion object
     }
     
 
     
+
+    
+    
+
+
     companion object
 }
 
@@ -2898,7 +3050,11 @@ sealed class PropKeyDisplayDeets {
     
     
     data class DateTime(
-        val `displayType`: DateTimePropDisplayType) : PropKeyDisplayDeets() {
+        val `displayType`: org.example.daybook.uniffi.core.DateTimePropDisplayType) : PropKeyDisplayDeets()
+        
+    {
+        
+
         companion object
     }
     
@@ -2906,12 +3062,21 @@ sealed class PropKeyDisplayDeets {
     
     
     data class Title(
-        val `showEditor`: kotlin.Boolean) : PropKeyDisplayDeets() {
+        val `showEditor`: kotlin.Boolean) : PropKeyDisplayDeets()
+        
+    {
+        
+
         companion object
     }
     
 
     
+
+    
+    
+
+
     companion object
 }
 
@@ -2996,12 +3161,21 @@ sealed class TableWindow {
     
     
     data class Specific(
-        val `id`: Uuid) : TableWindow() {
+        val `id`: org.example.daybook.uniffi.core.Uuid) : TableWindow()
+        
+    {
+        
+
         companion object
     }
     
 
     
+
+    
+    
+
+
     companion object
 }
 
@@ -3057,60 +3231,101 @@ public object FfiConverterTypeTableWindow : FfiConverterRustBuffer<TableWindow>{
 sealed class TablesEvent {
     
     data class ListChanged(
-        val `heads`: ChangeHashSet) : TablesEvent() {
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class WindowAdded(
-        val `id`: Uuid, 
-        val `heads`: ChangeHashSet) : TablesEvent() {
+        val `id`: org.example.daybook.uniffi.core.Uuid, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class WindowChanged(
-        val `id`: Uuid, 
-        val `heads`: ChangeHashSet) : TablesEvent() {
+        val `id`: org.example.daybook.uniffi.core.Uuid, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class TabAdded(
-        val `id`: Uuid, 
-        val `heads`: ChangeHashSet) : TablesEvent() {
+        val `id`: org.example.daybook.uniffi.core.Uuid, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class TabChanged(
-        val `id`: Uuid, 
-        val `heads`: ChangeHashSet) : TablesEvent() {
+        val `id`: org.example.daybook.uniffi.core.Uuid, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class PanelAdded(
-        val `id`: Uuid, 
-        val `heads`: ChangeHashSet) : TablesEvent() {
+        val `id`: org.example.daybook.uniffi.core.Uuid, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class PanelChanged(
-        val `id`: Uuid, 
-        val `heads`: ChangeHashSet) : TablesEvent() {
+        val `id`: org.example.daybook.uniffi.core.Uuid, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class TableAdded(
-        val `id`: Uuid, 
-        val `heads`: ChangeHashSet) : TablesEvent() {
+        val `id`: org.example.daybook.uniffi.core.Uuid, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
         companion object
     }
     
     data class TableChanged(
-        val `id`: Uuid, 
-        val `heads`: ChangeHashSet) : TablesEvent() {
+        val `id`: org.example.daybook.uniffi.core.Uuid, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
         companion object
     }
     
 
     
+
+    
+    
+
+
     companion object
 }
 
@@ -3301,6 +3516,10 @@ enum class WindowLayoutOrientation {
     
     HORIZONTAL,
     VERTICAL;
+
+    
+
+
     companion object
 }
 
@@ -3329,22 +3548,39 @@ public object FfiConverterTypeWindowLayoutOrientation: FfiConverterRustBuffer<Wi
 sealed class WindowLayoutPaneVariant {
     
     data class Sidebar(
-        val v1: WindowLayoutSidebar) : WindowLayoutPaneVariant() {
+        val v1: org.example.daybook.uniffi.core.WindowLayoutSidebar) : WindowLayoutPaneVariant()
+        
+    {
+        
+
         companion object
     }
     
     data class Routes(
-        val v1: WindowLayoutRoutes) : WindowLayoutPaneVariant() {
+        val v1: org.example.daybook.uniffi.core.WindowLayoutRoutes) : WindowLayoutPaneVariant()
+        
+    {
+        
+
         companion object
     }
     
     data class Region(
-        val v1: WindowLayoutRegion) : WindowLayoutPaneVariant() {
+        val v1: org.example.daybook.uniffi.core.WindowLayoutRegion) : WindowLayoutPaneVariant()
+        
+    {
+        
+
         companion object
     }
     
 
     
+
+    
+    
+
+
     companion object
 }
 
@@ -3419,12 +3655,21 @@ public object FfiConverterTypeWindowLayoutPaneVariant : FfiConverterRustBuffer<W
 sealed class WindowLayoutRegionSize {
     
     data class Weight(
-        val v1: kotlin.Float) : WindowLayoutRegionSize() {
+        val v1: kotlin.Float) : WindowLayoutRegionSize()
+        
+    {
+        
+
         companion object
     }
     
 
     
+
+    
+    
+
+
     companion object
 }
 

@@ -20,3 +20,4 @@
 - Don't be lazy with solutions.
 - Use RUST_LOG_TEST env var for controlling log levels during testing.
 - `printf` and experimental debugging is always quicker than coming up with premature hypothesis.
+- Never ever use git commands. Never!

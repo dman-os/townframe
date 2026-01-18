@@ -166,6 +166,14 @@ pub fn setup_tracing() -> Res<()> {
     Ok(())
 }
 
+// Ensure that the `tracing` stack is only initialised once using `once_cell`
+pub fn setup_tracing_once() {
+    static TRACING: std::sync::Once = std::sync::Once::new();
+    TRACING.call_once(|| {
+        setup_tracing().expect("setup tracing error");
+    });
+}
+
 mod cheapstr {
     use crate::interlude::*;
 
