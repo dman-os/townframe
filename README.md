@@ -39,11 +39,11 @@ There are zero features implemented.
   - The lab's entire corpus really.
 - [Obsidian](https://obsidian.md/)
   - The right senseblities.
-    - File first
-    - Easy portability with minimal lock-in
+    - File first.
+    - Easy portability with minimal lock-in.
 - [Notion](https://www.notion.so/)
   - Great usablitiy that's accessible.
-  - Collaboration is
+  - World class collaboration.
 - [Org mode](https://orgmode.org/)
   - Excellent power user design.
     - Unix senseblities.
@@ -55,27 +55,16 @@ There are zero features implemented.
 
 More details can be found in the [design docs](./docs/DEVDOC/design.md) but actively undecided questions include:
 
-#### ~~Local~~ Privacy friendly machine learning use
-
-If I want to, I ought to be able to self-host for me for me and mine.
-
-#### Mobile first design
-
-I and many others just won't use it unless it's easily usable on the go.
-
-#### Long term sustainablity
-
-How to become sustainable without relying on VC money and its strings.
-
-#### Long term use
-
-How can I have the whole or parts of the system convincingly useful even on my deathbed.
-
-Using local-first design where the server is optional is a big help here.
-
-#### Extensible document store/design
-
-A lot of solutions here rely on webtech to support maximum programmability.
-How to adapt that while previous constraints hold?
-
-One early intiution is that we shouldn't adapt a single document format like markdown as a default and allow generic documents.
+1. ~~Local~~ Privacy friendly machine learning use
+    - If I want to, I ought to be able to self-host for me for me and mine.
+2. Mobile first design
+    - I and many others just won't use it unless it's easily usable on the go.
+- Long term sustainablity
+  - How to become sustainable without relying on VC money and its strings.
+- Long term use
+  - How can I have the whole or parts of the system convincingly useful even on my deathbed.
+  - Using local-first design where the server is optional is a big help here.
+- Extensible document store/design
+  - A lot of solutions here rely on webtech to support maximum programmability.
+    - How to adapt that while previous constraints hold?
+  - One early intiution is that we shouldn't adapt a single document format like markdown as a default and allow generic documents.
