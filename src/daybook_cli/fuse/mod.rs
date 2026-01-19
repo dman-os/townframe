@@ -1,10 +1,9 @@
-pub mod metadata;
 pub mod content;
-pub mod sync;
 pub mod filesystem;
+pub mod metadata;
+pub mod sync;
 
 #[cfg(test)]
 mod tests;
 
-pub use filesystem::{DaybookAsyncFS, DaybookAdapter};
-
+pub use filesystem::{DaybookAdapter, DaybookAsyncFS};

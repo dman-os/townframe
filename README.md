@@ -2,6 +2,11 @@
 
 Experimental.
 
+> [!.plan]
+> Still arranging the bones.
+> - `mltools` base.
+>   - This is where supporting platform for ML based features will go.
+
 ## Daybook
 
 Daybook is an experiental attempt to build to build a "notes app" heavily informed by my (dman-os) tastes and capabilites.

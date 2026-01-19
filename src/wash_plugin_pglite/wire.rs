@@ -541,7 +541,7 @@ pub async fn build_wasi_ctx(config: &Config) -> Res<WasiP1Ctx> {
     fs::create_dir_all(config.dev_path()).await?;
 
     let mut builder = WasiCtxBuilder::new();
-    builder.inherit_stdin();// .inherit_stdout().inherit_stderr();
+    builder.inherit_stdin(); // .inherit_stdout().inherit_stderr();
 
     builder
         .preopened_dir(&config.pgroot, "/tmp", DirPerms::all(), FilePerms::all())

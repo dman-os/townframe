@@ -32,4 +32,3 @@ indenter = "0.3.4"
 
 data-encoding.workspace = true
 ollama-rs = { version = "0.3.3", default-features = false, features = ["rustls"] }
-

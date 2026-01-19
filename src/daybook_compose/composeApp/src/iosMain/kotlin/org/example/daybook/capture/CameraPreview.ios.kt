@@ -21,9 +21,3 @@ actual fun DaybookCameraPreview(
         Text("Camera preview not yet implemented on iOS")
     }
 }
-
-
-
-
-
-

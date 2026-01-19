@@ -1344,4 +1344,3 @@ fun findTitleTag(doc: Doc, keyConfigs: Map<String, PropKeyDisplayHint>): TitleTa
     // Return first title tag if any found
     return titleTags.firstOrNull()
 }
-

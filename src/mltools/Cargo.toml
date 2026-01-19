@@ -1,0 +1,14 @@
+[package]
+name = "mltools"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "pauperfuse"
+path = "lib.rs"
+
+[dependencies]
+utils_rs = { workspace = true, default-features = false }

@@ -23,9 +23,8 @@ pub mod doc {
         Blob,
     }
     impl DocContentKind {
-        pub fn _lift(val:u8) -> DocContentKind {
+        pub fn _lift(val: u8) -> DocContentKind {
             match val {
-
                 0 => DocContentKind::Text,
                 1 => DocContentKind::Blob,
 
@@ -33,7 +32,6 @@ pub mod doc {
             }
         }
     }
-
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     #[serde(rename_all = "camelCase")]
@@ -62,7 +60,6 @@ pub mod doc {
         PathGeneric(String),
         TitleGeneric(String),
     }
-
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct DocAddedEvent {
@@ -100,5 +97,4 @@ pub mod doc {
             Internal(#[from] ErrorInternal),
         }
     }
-
 }

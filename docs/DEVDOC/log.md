@@ -1,5 +1,151 @@
 # duck-log
 
+## 2026-01-21 | existing format interop
+
+I've been thinking, related to our recent thoughts on innovation...
+mighth be best to avoid creating new data formats but instead, try to be a container for existing formats.
+This fits in nicely with the FUSE idea since you can easily map it to an on disk virtual file that can easily be edited by other editors.
+
+Concrete examples:
+- Text only formats:
+  - hledger.ledger
+    - Do we parse/write out the whole ledger on each mutation?
+      - Maybe store JSON repr of the ledger?
+        - Not good, I'd like the file to keep it's own formatting/comments
+  - Markdown
+    - I don't like Markdown, it feels like something better is possible.
+      - BUT...one can always innovate once they have the basics down.
+- Structured
+  - Opencanvas
+
+## 2026-01-21 | key schema
+
+The current key schema has a tag and id approach.
+```js
+{
+  "org.eg.tag/1": "first",
+  "org.eg.second/any-string": "first",
+  "org.eg.second/a/path/even?": "first",
+  "org.eg.second/org.eg.third": "ref to another key",
+  "org.eg.second/8jc88Sad8hLKASdualsdlji/org.eg.fourth/123": "ref to another key in another doc?",
+}
+```
+
+This is too powerful?
+The id section that comes after the slash is only to be parsed by those interested and is to be treated as a string by everyone else.
+
+Additionally, querying for an existence of a tag sucks. 
+You'll need to see it any tag+id keys also exist.
+I.e. you'll have to scan over all keys.
+Though one could argue that if you don't know the id, you shouldn't able to access it.
+Capabilities system that will mediate access will have other blockers anyways.
+
+The reason the current design is like this is:
+- Misunderstanding of automerge array semantics
+- Evolution with array tag list of Nostr
+- Simplicity of adding a new repeated item
+  - You just add a new key as opposted to upserting an old one 
+
+But still, the design is not great. I think I'm going to remove the id approach.
+
+---
+
+Our design is sort of a flipped inside out PDS from ATmosphere.
+In their scheme:
+```yaml
+- user123:
+    org.eg.one:
+    - myDocId.json:
+        myKey1: myValue1
+```
+
+Wheras in our scheme:
+
+```yaml
+- user123:
+  - doc456.json:
+      org.eg.one:
+      - myKey1: myValue1
+```
+
+AT seems to prefer hard types on single documents.
+There are a lot of clients that need to read all X types of a single document.
+In other words, it's less opinionated and more standard/UNIXy.
+They're also using the schema id as a key for top level collections.
+
+Daybook allows documents to contain multitudes.
+A document is more like a directory.
+Think OpenDoc.
+There are usecases for querying all X types of keys across the repo but, in most of them, users are operating on a single document at a time.
+
+I think they're mostly equivalent but it does raise questions.
+- I like that they put the createdAt and so on in the leaves.
+  - In our case, the document has created at but prop metadata is external to the actual content.
+  - Making documents self contained is great.
+  - On the other hand, I've instinctively tried to optimize for easy of writing code against daybook docs (daydocs??).
+    - Ease of scripting, plugins and JIT software.
+  - Should I store the metadata in the document itself?
+    - This would mean having to fetch and decode each doc in a repo to get all meta.
+      - I expect other usecases would have this need anyways.
+    - This would mean two automerge txns for every mutation.
+      - One for the real write and one for the metadata which contains commit heads.
+        - Yikes, yeah, The commit head of the branch metadata would immediately stale out.
+          - We can still move prop metadata within though.
+
+## 2026-01-20 | innovation?
+
+we don't exactly need to innovate here.
+Providing a good free and private alternative to available proprietary products is good enough.
+
+## 2026-01-20 | agents, how?
+
+Claude Cowork is a good idea. 
+How does it fit in here? 
+Don't you dare expand the scope now.
+A thought exercise?
+
+Essentially, unix based computer use seems fantastic.
+Why even build on top of automerge?
+Just build an agent to use git directly and provide a mobile app to talk to it?
+It can find or write the documents on demand?
+A purely human language based interface.
+
+But, chatbots are not perfect yet. For repeated/common tasks, I don't want to use my words.
+Additionally, additions to the vault by agents should be kept to a minimum.
+Or a minimum visibility anyways, "no one likes reading code".
+
+## 2026-01-20 | expense tracking how?
+
+- A document comes in
+- Said document is identified to be related to expenses
+  - A transaction artifact
+    - Reciept photo/screenshot
+    - Account activity email
+    - Account activity sms
+    - Actual receipt
+  - A transaction document is created
+    - Existing accounts are matched hierarchically
+    - New accouts can be created if not recognized
+- How do we veiw account status?
+  - Mantain a hledger file?
+    - A collator doc
+- How do we identify files?
+  - Embedding => proximity check?
+    - Storing embeddings is expensive
+      - Embedding => proximity check => tag?
+        - Nonsense and untaggable files?
+          - Blurry photographs?
+  - Image => Desc => Tag?
+    - Image tokens are not cheap, we should only do VLM if need is identified.
+- How do we group multiple documents of a single transaction?
+  - Collator on the ledger document?
+
+- ACL capabilities
+  - glob `docTag/*` capablities
+  - predicate access capablities
+    - All XXX keys across docs
+      - Do we need an index?
+
 ## 2026-01-17 | dynamic plugs
 
 In the current system, code execution on documents and definining new schemas and so on is determined by plugs.

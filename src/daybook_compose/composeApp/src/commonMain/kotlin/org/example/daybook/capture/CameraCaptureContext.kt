@@ -75,5 +75,3 @@ fun ProvideCameraCaptureContext(
         content()
     }
 }
-
-

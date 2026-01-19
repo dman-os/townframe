@@ -172,9 +172,16 @@ compose.desktop {
         mainClass = "org.example.daybook.MainKt"
 
         nativeDistributions {
-            targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
+            targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.AppImage)
             packageName = "org.example.daybook"
             packageVersion = "1.0.0"
+        }
+        buildTypes {
+            release {
+                proguard {
+                    isEnabled = false
+                }
+            }
         }
     }
 }

@@ -67,9 +67,42 @@
 
   - Provisions a bunch of development tools.
 
-- `./flake.nix`: Nix flake with:
+- `./flake.nix`: Nix flake with development environments.
 
-  - Provisions a bunch of development toolchains and libraries.
+  - Provides four specialized shells for different use cases:
+  
+    - `dev` (default): Full local development environment
+      - All Rust targets (wasm32, Android, native)
+      - Android Studio with SDK/NDK
+      - Desktop UI libraries (for dioxus/Compose desktop)
+      - All interactive tools (rogcat, opentofu, terragrunt, tokio-console, infisical)
+      - Use: `nix develop` or `nix develop .#dev`
+    
+    - `ci-rust`: Minimal CI environment for Rust linting and CLI builds
+      - Rust toolchain with wasm32 + native Linux targets
+      - Basic build tools (pkg-config, openssl, protobuf)
+      - Rust linting tools (cargo-udeps, prek)
+      - No Android, no desktop UI libraries, no Java
+      - Use: `nix develop .#ci-rust`
+    
+    - `ci-android`: CI environment for Android builds and Kotlin linting
+      - Rust toolchain with Android targets (all 4 ABIs) + wasm32
+      - Android SDK/NDK (without Android Studio)
+      - OpenJDK 21 (for Gradle/Kotlin)
+      - CMake (for wasmcloud builds)
+      - Android environment variables configured
+      - No desktop UI libraries
+      - Use: `nix develop .#ci-android`
+    
+    - `ci-desktop`: CI environment for Compose desktop builds and Kotlin linting
+      - Rust toolchain with wasm32 + native Linux targets
+      - OpenJDK 21 (for Gradle/Kotlin)
+      - Desktop UI libraries (wayland, gtk3, webkitgtk, etc.)
+      - Basic build tools (pkg-config, openssl, protobuf)
+      - No Android SDK/NDK, no Android toolchain
+      - Use: `nix develop .#ci-desktop`
+  
+  - For CI workflows, use the specialized shells (`ci-rust`, `ci-android`, or `ci-desktop`) for faster builds.
 
 - `./tools/compose.yml`: docker compose file for supporting services.
 

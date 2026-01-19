@@ -140,7 +140,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automerge",
- "autosurgeon",
+ "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
  "color-eyre",
  "displaydoc",
  "garde",
@@ -369,7 +369,19 @@ version = "0.10.1"
 dependencies = [
  "automerge",
  "automerge-test",
- "autosurgeon-derive",
+ "autosurgeon-derive 0.10.1",
+ "similar",
+ "thiserror 2.0.17",
+ "uuid",
+]
+
+[[package]]
+name = "autosurgeon"
+version = "0.10.1"
+source = "git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006#28d9b6db96f09a34967a0941950f6753fd73a006"
+dependencies = [
+ "automerge",
+ "autosurgeon-derive 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
  "similar",
  "thiserror 2.0.17",
  "uuid",
@@ -381,7 +393,18 @@ version = "0.10.1"
 dependencies = [
  "automerge",
  "automerge-test",
- "autosurgeon",
+ "autosurgeon 0.10.1",
+ "proc-macro2",
+ "quote",
+ "syn",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "autosurgeon-derive"
+version = "0.10.1"
+source = "git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006#28d9b6db96f09a34967a0941950f6753fd73a006"
+dependencies = [
  "proc-macro2",
  "quote",
  "syn",
@@ -1517,7 +1540,7 @@ name = "daybook_cli"
 version = "0.1.0"
 dependencies = [
  "automerge",
- "autosurgeon",
+ "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
  "clap",
  "clap_complete",
  "color-eyre",
@@ -1551,7 +1574,7 @@ dependencies = [
  "api_utils_rs",
  "async-trait",
  "automerge",
- "autosurgeon",
+ "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
  "bs58",
  "color-eyre",
  "data-encoding",
@@ -1598,7 +1621,7 @@ version = "0.1.0"
 dependencies = [
  "api_utils_rs",
  "automerge",
- "autosurgeon",
+ "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
  "color-eyre",
  "daybook_core",
  "daybook_types",
@@ -1632,7 +1655,7 @@ dependencies = [
  "addr",
  "api_utils_rs",
  "automerge",
- "autosurgeon",
+ "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
  "blake3",
  "displaydoc",
  "pastey",
@@ -6121,7 +6144,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "automerge",
- "autosurgeon",
+ "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
  "blake3",
  "bs58",
  "color-eyre",
@@ -6312,7 +6335,7 @@ dependencies = [
  "async-channel",
  "async-trait",
  "automerge",
- "autosurgeon",
+ "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
  "data-encoding",
  "displaydoc",
  "macros",

@@ -26,5 +26,3 @@ fun getExtensionModeName(mode: Int): String = when (mode) {
     ExtensionMode.FACE_RETOUCH -> "Face Retouch"
     else -> "Unknown"
 }
-
-

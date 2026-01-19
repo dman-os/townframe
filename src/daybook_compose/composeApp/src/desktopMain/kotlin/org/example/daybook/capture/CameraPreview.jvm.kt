@@ -56,36 +56,36 @@ enum class WebcamDriverType(
         description = "Built-in driver for Windows, Linux, macOS. Requires libv4l2 and libstdc++ on Linux.",
         createDriver = { WebcamDefaultDriver() }
     ),
-    V4L4J(
-        displayName = "V4L4j",
-        description = "Linux-only driver using V4L4j library. Good for Raspberry Pi. Requires v4l-utils.",
-        createDriver = { V4l4jDriver() }
-    ),
-    GSTREAMER(
-        displayName = "GStreamer",
-        description = "Windows and Linux. Uses GStreamer framework. Requires GStreamer installed.",
-        createDriver = { GStreamerDriver() }
-    ),
-    OPENIMAJ(
-        displayName = "OpenIMAJ",
-        description = "Uses OpenIMAJ framework to access UVC cameras. Cross-platform.",
-        createDriver = { OpenImajDriver() }
-    ),
-    JAVACV(
-        displayName = "JavaCV (OpenCV)",
-        description = "Uses JavaCV bindings for OpenCV. Requires OpenCV native libraries.",
-        createDriver = { JavaCvDriver() }
-    ),
-    VLCJ(
-        displayName = "VLCj",
-        description = "Uses VLCj library to access UVC cameras. Requires VLC media player.",
-        createDriver = { VlcjDriver() }
-    ),
-    FSWEBCAM(
-        displayName = "FsWebcam",
-        description = "Uses fswebcam command-line tool. Unix-like systems only. Requires fswebcam installed.",
-        createDriver = { FsWebcamDriver() }
-    ),
+    // V4L4J(
+    //     displayName = "V4L4j",
+    //     description = "Linux-only driver using V4L4j library. Good for Raspberry Pi. Requires v4l-utils.",
+    //     createDriver = { V4l4jDriver() }
+    // ),
+    // GSTREAMER(
+    //     displayName = "GStreamer",
+    //     description = "Windows and Linux. Uses GStreamer framework. Requires GStreamer installed.",
+    //     createDriver = { GStreamerDriver() }
+    // ),
+    // OPENIMAJ(
+    //     displayName = "OpenIMAJ",
+    //     description = "Uses OpenIMAJ framework to access UVC cameras. Cross-platform.",
+    //     createDriver = { OpenImajDriver() }
+    // ),
+    // JAVACV(
+    //     displayName = "JavaCV (OpenCV)",
+    //     description = "Uses JavaCV bindings for OpenCV. Requires OpenCV native libraries.",
+    //     createDriver = { JavaCvDriver() }
+    // ),
+    // VLCJ(
+    //     displayName = "VLCj",
+    //     description = "Uses VLCj library to access UVC cameras. Requires VLC media player.",
+    //     createDriver = { VlcjDriver() }
+    // ),
+    // FSWEBCAM(
+    //     displayName = "FsWebcam",
+    //     description = "Uses fswebcam command-line tool. Unix-like systems only. Requires fswebcam installed.",
+    //     createDriver = { FsWebcamDriver() }
+    // ),
     // LTI_CIVIL driver - package name needs to be confirmed
     // LTI_CIVIL(
     //     displayName = "LTI-CIVIL",

@@ -47,4 +47,3 @@ automerge = { workspace = true }
 samod = { workspace = true, features = ["tokio", "tungstenite"] }
 
 tracing.workspace = true
-

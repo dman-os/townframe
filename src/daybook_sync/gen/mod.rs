@@ -81,13 +81,24 @@ pub mod doc {
             pub id: Uuid,
         }
 
-        #[derive(Debug, Clone, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
+        #[derive(
+            Debug,
+            Clone,
+            thiserror::Error,
+            displaydoc::Display,
+            Serialize,
+            Deserialize,
+            Hydrate,
+            Reconcile,
+        )]
         /// Id occupied: {id}
         pub struct ErrorIdOccupied {
             pub id: String,
         }
 
-        #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile)]
+        #[derive(
+            Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize, Hydrate, Reconcile,
+        )]
         pub enum Error {
             /// Id occupied {0}
             IdOccupied(#[from] ErrorIdOccupied),
@@ -97,5 +108,4 @@ pub mod doc {
             Internal(#[from] ErrorInternal),
         }
     }
-
 }

@@ -11,6 +11,7 @@ members = [
   "./src/daybook_types",
   "./src/daybook_wflows/",
   "./src/macros",
+  "./src/mltools/",
   "./src/pauperfuse/",
   "./src/test_wflows",
   "./src/utils_rs",
@@ -153,8 +154,7 @@ wit-bindgen = "0.48.1"
 
 # sync
 automerge = "0.7.3"
-# autosurgeon = "0.9"
-autosurgeon = { path = "src/autosurgeon/autosurgeon" }
+autosurgeon = "0.10.1"
 automerge-test = "0.6"
 samod = { version = "0.7.1" }
 # samod = { path = "src/samod/samod" }
@@ -191,9 +191,11 @@ scopeguard = "1.2.0"
 clap = "4.5"
 clap_complete = "4.5"
 
-# [patch.crates-io]
+[patch.crates-io]
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 # restate-sdk-shared-core = { path = "./src/sdk-shared-core/" }
+autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "28d9b6db96f09a34967a0941950f6753fd73a006" }
+
 
 # The default profile is optimized for Wasm builds because
 # that's what [Trunk reads](https://github.com/trunk-rs/trunk/issues/605).

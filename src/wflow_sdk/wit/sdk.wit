@@ -6,4 +6,3 @@ world sdk {
     import townframe:wflow/types;
     import townframe:wflow/host;
 }
-
