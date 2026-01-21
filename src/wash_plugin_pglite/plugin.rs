@@ -66,12 +66,12 @@ impl wash_runtime::plugin::HostPlugin for PglitePlugin {
         Ok(())
     }
 
-    async fn on_component_bind(
+    async fn on_workload_item_bind<'a>(
         &self,
-        component: &mut wash_runtime::engine::workload::WorkloadComponent,
-        _interface_configs: HashSet<WitInterface>,
+        item: &mut wash_runtime::engine::workload::WorkloadItem<'a>,
+        _interfaces: std::collections::HashSet<wash_runtime::wit::WitInterface>,
     ) -> anyhow::Result<()> {
-        let world = component.world();
+        let world = item.world();
         for iface in world.imports {
             if iface.namespace == "townframe"
                 && iface.package == "pglite"
