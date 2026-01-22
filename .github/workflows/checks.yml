@@ -54,6 +54,7 @@ jobs:
       - name: rust tests
         run: |
           . .ghjk/envs/$GHJK_ENV/activate.sh
-          nix develop .#ci-rust --command cargo test --workspace --all-features
+          nix develop .#ci-rust --command cargo build -p test_wflows -p daybook_wflows --target wasm32-wasip2
+          nix develop .#ci-rust --command cargo nextest run --workspace --all-features
         env:
           RUST_LOG: error
