@@ -47,6 +47,6 @@ jobs:
       - name: Run Rust tests
         run: |
           . .ghjk/envs/$GHJK_ENV/activate.sh
-          cargo test --workspace --all-features
+          nix develop .#ci-rust --command cargo test --workspace --all-features
         env:
           RUST_LOG: error
