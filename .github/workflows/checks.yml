@@ -20,7 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: remove unused files
-        if: ${{ matrix.os == 'ubuntu-latest' }}
         # based on https://dev.to/mathio/squeezing-disk-space-from-github-actions-runners-an-engineers-guide-3pjg
         run: |
           sudo rm -rf /usr/lib/jvm
