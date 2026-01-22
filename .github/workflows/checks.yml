@@ -49,12 +49,13 @@ jobs:
       - name: pre-commit hooks
         run: |
           . .ghjk/envs/$GHJK_ENV/activate.sh
-          nix develop .#ci-rust --command prek run --all-files
+          nix develop .#ci-rust --command prek --color=always run --all-files
 
       - name: rust tests
         run: |
           . .ghjk/envs/$GHJK_ENV/activate.sh
-          nix develop .#ci-rust --command cargo build -p test_wflows -p daybook_wflows --target wasm32-wasip2
-          nix develop .#ci-rust --command cargo nextest run --workspace --all-features
+          nix develop .#ci-rust --command cargo --color=always build -p test_wflows -p daybook_wflows --target wasm32-wasip2
+          nix develop .#ci-rust --command cargo --color=always nextest run --workspace --all-features
         env:
-          RUST_LOG: error
+          RUST_LOG: debug
+          RUST_BACKTRACE: 1
