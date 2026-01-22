@@ -26,12 +26,10 @@ jobs:
       - name: Set up Nix cache
         uses: DeterminateSystems/magic-nix-cache-action@v9
 
-      - uses: metatypedev/setup-ghjk@b4ab7287a841fd5f8a4117f3efc14131c7ec62e1
-
       - name: Run pre-commit hooks via prek
-        run: |
-          . .ghjk/envs/$GHJK_ENV/activate.sh
-          prek run --all-files
+        run: nix develop .#ci-rust --command prek run --all-files
+
+      - uses: metatypedev/setup-ghjk@b4ab7287a841fd5f8a4117f3efc14131c7ec62e1
 
       - name: Cache Cargo
         uses: actions/cache@v4
