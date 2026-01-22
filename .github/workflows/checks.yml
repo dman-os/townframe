@@ -8,6 +8,10 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   GHJK_ENV: ci
 
@@ -15,27 +19,40 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: remove unused files
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        # based on https://dev.to/mathio/squeezing-disk-space-from-github-actions-runners-an-engineers-guide-3pjg
+        run: |
+          sudo rm -rf /usr/lib/jvm
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/local/julia*
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /opt/microsoft /opt/google
+          sudo rm -rf /opt/az
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /opt/hostedtoolcache
+
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/nix-installer-action@v16
 
-      - name: Set up Nix cache
-        uses: DeterminateSystems/flakehub-cache-action@v3
+      - uses: DeterminateSystems/flakehub-cache-action@v3
 
       - uses: metatypedev/setup-ghjk@b4ab7287a841fd5f8a4117f3efc14131c7ec62e1
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run pre-commit hooks via prek
+      - name: pre-commit hooks
         run: |
           . .ghjk/envs/$GHJK_ENV/activate.sh
           nix develop .#ci-rust --command prek run --all-files
 
-      - name: Run Rust tests
+      - name: rust tests
         run: |
           . .ghjk/envs/$GHJK_ENV/activate.sh
           nix develop .#ci-rust --command cargo test --workspace --all-features
