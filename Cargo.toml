@@ -2,8 +2,8 @@
 resolver = "3"
 members = [
   "./src/api_utils_rs",
-  "./src/autosurgeon/autosurgeon",
-  "./src/autosurgeon/autosurgeon-derive/",
+  # "./src/autosurgeon/autosurgeon",
+  # "./src/autosurgeon/autosurgeon-derive/",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",

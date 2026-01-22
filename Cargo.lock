@@ -140,7 +140,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automerge",
- "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
+ "autosurgeon",
  "color-eyre",
  "displaydoc",
  "garde",
@@ -152,15 +152,6 @@ dependencies = [
  "utils_rs",
  "utoipa",
  "wit-bindgen 0.48.1",
-]
-
-[[package]]
-name = "approx"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]
@@ -351,53 +342,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "automerge-test"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50eca3c1ecd8744d1899e07f297ab6242e4ce24814a3751e9f7162fe45803283"
-dependencies = [
- "automerge",
- "decorum",
- "serde",
- "serde_json",
- "smol_str",
-]
-
-[[package]]
-name = "autosurgeon"
-version = "0.10.1"
-dependencies = [
- "automerge",
- "automerge-test",
- "autosurgeon-derive 0.10.1",
- "similar",
- "thiserror 2.0.17",
- "uuid",
-]
-
-[[package]]
 name = "autosurgeon"
 version = "0.10.1"
 source = "git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006#28d9b6db96f09a34967a0941950f6753fd73a006"
 dependencies = [
  "automerge",
- "autosurgeon-derive 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
+ "autosurgeon-derive",
  "similar",
  "thiserror 2.0.17",
  "uuid",
-]
-
-[[package]]
-name = "autosurgeon-derive"
-version = "0.10.1"
-dependencies = [
- "automerge",
- "automerge-test",
- "autosurgeon 0.10.1",
- "proc-macro2",
- "quote",
- "syn",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1499,7 +1452,7 @@ name = "daybook_cli"
 version = "0.1.0"
 dependencies = [
  "automerge",
- "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
+ "autosurgeon",
  "clap",
  "clap_complete",
  "color-eyre",
@@ -1533,7 +1486,7 @@ dependencies = [
  "api_utils_rs",
  "async-trait",
  "automerge",
- "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
+ "autosurgeon",
  "bs58",
  "color-eyre",
  "data-encoding",
@@ -1580,7 +1533,7 @@ version = "0.1.0"
 dependencies = [
  "api_utils_rs",
  "automerge",
- "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
+ "autosurgeon",
  "color-eyre",
  "daybook_core",
  "daybook_types",
@@ -1614,7 +1567,7 @@ dependencies = [
  "addr",
  "api_utils_rs",
  "automerge",
- "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
+ "autosurgeon",
  "blake3",
  "displaydoc",
  "pastey",
@@ -1654,20 +1607,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
 dependencies = [
  "uuid",
-]
-
-[[package]]
-name = "decorum"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fcc6bb0c903f3f815b48365bb9182092866f54a132d8ebe906f0b66952936e3"
-dependencies = [
- "approx",
- "num-traits",
- "rustversion",
- "serde",
- "serde_derive",
- "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -6097,7 +6036,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "automerge",
- "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
+ "autosurgeon",
  "blake3",
  "bs58",
  "color-eyre",
@@ -6290,7 +6229,7 @@ dependencies = [
  "async-channel",
  "async-trait",
  "automerge",
- "autosurgeon 0.10.1 (git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006)",
+ "autosurgeon",
  "data-encoding",
  "displaydoc",
  "macros",
