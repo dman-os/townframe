@@ -294,7 +294,7 @@ impl WflowPlugin {
     pub fn job_id_of_ctx(&self, wcx: &SharedWashCtx) -> Option<Arc<str>> {
         self.active_contexts
             .get(&wcx.active_ctx.id[..])
-            .map(|val| val.value().clone())
+            .map(|val| Arc::clone(val.value()))
     }
 }
 
@@ -424,7 +424,9 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
             .context("error pre instantiating service component")?;
 
         for key in &wflow_keys {
-            let old = self.active_keys.insert(key.clone(), workload_id.clone());
+            let old = self
+                .active_keys
+                .insert(Arc::clone(key), Arc::clone(&workload_id));
             assert!(old.is_none(), "fishy");
         }
         let wflow = WflowWorkload {
@@ -514,7 +516,7 @@ impl service::WflowServiceHost for WflowPlugin {
         let (trap_tx, trap_rx) = oneshot::channel();
         let trap_tx = tokio::sync::Mutex::new(Some(trap_tx));
         let _old = self.active_jobs.write().expect(ERROR_MUTEX).insert(
-            job_id.clone(),
+            Arc::clone(&job_id),
             ActiveJobCtx {
                 trap_tx,
                 journal,
@@ -525,7 +527,8 @@ impl service::WflowServiceHost for WflowPlugin {
         );
         assert!(_old.is_none(), "fishy");
 
-        self.active_contexts.insert(ctx_id.clone(), job_id.clone());
+        self.active_contexts
+            .insert(Arc::clone(&ctx_id), Arc::clone(&job_id));
         scopeguard::defer! {
             let _ = self.active_contexts.remove(&ctx_id);
             let _ = self.active_jobs

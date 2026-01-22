@@ -24,7 +24,7 @@ impl BlobsRepoFfi {
 
     #[tracing::instrument(err, skip(self, data))]
     pub async fn put(&self, data: Vec<u8>) -> Result<String, FfiError> {
-        let this = self.repo.clone();
+        let this = Arc::clone(&self.repo);
         self.fcx
             .do_on_rt(async move { this.put(&data).await.map_err(FfiError::from) })
             .await
@@ -32,7 +32,7 @@ impl BlobsRepoFfi {
 
     #[tracing::instrument(err, skip(self))]
     pub async fn get_path(&self, hash: String) -> Result<String, FfiError> {
-        let this = self.repo.clone();
+        let this = Arc::clone(&self.repo);
         self.fcx
             .do_on_rt(async move {
                 this.get_path(&hash)

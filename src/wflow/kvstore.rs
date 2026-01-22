@@ -76,7 +76,7 @@ impl SqliteKvFactory {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(KvMsg::BootTable {
-                table: table.clone(),
+                table: Arc::clone(&table),
                 resp: tx,
             })
             .map_err(|_| ferr!("factory gone"))?;
@@ -108,17 +108,17 @@ impl SqliteKvStore {
         let current_cb = move || snapshot_value.clone();
 
         let store = self.clone();
-        let key_for_cb = key.clone();
+        let key_for_cb = Arc::clone(&key);
         let swap_cb = move |new_value: Arc<[u8]>| -> futures::future::BoxFuture<'static, Res<Result<(), CasError>>> {
             let store = store.clone();
-            let key = key_for_cb.clone();
+            let key = Arc::clone(&key_for_cb);
             Box::pin(async move {
                 let (tx, rx) = oneshot::channel();
                 store
                     .sender
                     .send(KvMsg::Swap {
-                        table: store.table_name.clone(),
-                        key: key.clone(),
+                        table: Arc::clone(&store.table_name),
+                        key: Arc::clone(&key),
                         value: new_value,
                         snapshot_version: version,
                         resp: tx,
@@ -476,7 +476,7 @@ impl KvStore for SqliteKvStore {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(KvMsg::Get {
-                table: self.table_name.clone(),
+                table: Arc::clone(&self.table_name),
                 key: key.to_vec(),
                 resp: tx,
             })
@@ -488,7 +488,7 @@ impl KvStore for SqliteKvStore {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(KvMsg::Set {
-                table: self.table_name.clone(),
+                table: Arc::clone(&self.table_name),
                 key,
                 value,
                 resp: tx,
@@ -501,7 +501,7 @@ impl KvStore for SqliteKvStore {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(KvMsg::Del {
-                table: self.table_name.clone(),
+                table: Arc::clone(&self.table_name),
                 key: key.to_vec(),
                 resp: tx,
             })
@@ -513,7 +513,7 @@ impl KvStore for SqliteKvStore {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(KvMsg::Increment {
-                table: self.table_name.clone(),
+                table: Arc::clone(&self.table_name),
                 key: key.to_vec(),
                 delta,
                 resp: tx,
@@ -526,7 +526,7 @@ impl KvStore for SqliteKvStore {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(KvMsg::NewCas {
-                table: self.table_name.clone(),
+                table: Arc::clone(&self.table_name),
                 key: key.to_vec(),
                 resp: tx,
             })
@@ -548,7 +548,7 @@ mod tests {
         let factory = SqliteKvFactory::boot("sqlite::memory:").await?;
         let store = factory.open_store("test_kv").await?;
         let store_dyn = Arc::new(store);
-        test_kv_store_impl(store_dyn.clone()).await?;
+        test_kv_store_impl(Arc::clone(&store_dyn) as _).await?;
         test_kv_store_concurrency(store_dyn).await
     }
 }

@@ -95,7 +95,7 @@ impl ExportedTypesAppender {
         rust: impl std::fmt::Display,
     ) -> ExportedTypesAppender {
         Self {
-            into: self.into.clone(),
+            into: Arc::clone(&self.into),
             wit_prefix: Some(if let Some(prefix) = &self.wit_prefix {
                 format!("{prefix}/{wit}")
             } else {
@@ -215,7 +215,7 @@ pub const TAG: api::Tag = api::Tag {{
 
         {
             let exp = ExportedTypesAppender {
-                into: exp_root.clone(),
+                into: Arc::clone(&exp_root),
                 wit_prefix: Some(format!(
                     "{wit_module}/{tag}",
                     tag = tag.name.to_kebab_case()
@@ -229,7 +229,7 @@ pub const TAG: api::Tag = api::Tag {{
         }
         {
             let mut exp = ExportedTypesAppender {
-                into: exp_root.clone(),
+                into: Arc::clone(&exp_root),
                 wit_prefix: Some(wit_module.clone()),
                 rust_prefix: Some(tag.name.to_snek_case()),
             };

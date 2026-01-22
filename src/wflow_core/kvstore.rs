@@ -113,7 +113,7 @@ impl From<eyre::Report> for CasError {
 #[async_trait]
 impl KvStore for Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>> {
     async fn get(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
-        Ok(DHashMap::get(self, key).map(|val| val.value().clone()))
+        Ok(DHashMap::get(self, key).map(|val| Arc::clone(val.value())))
     }
     async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>) -> Res<Option<Arc<[u8]>>> {
         Ok(self.insert(key, value))
@@ -167,7 +167,7 @@ impl KvStore for Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>> {
         // Take a snapshot of the current value
         let snapshot = self.get(key).await?;
         let key: Arc<[u8]> = key.into();
-        let store = self.clone();
+        let store = Arc::clone(self);
 
         let current_cb = {
             let snapshot = snapshot.clone();
@@ -175,8 +175,8 @@ impl KvStore for Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>> {
         };
 
         let swap_cb = move |value: Arc<[u8]>| -> futures::future::BoxFuture<'static, Res<Result<(), CasError>>> {
-            let store = store.clone();
-            let key = key.clone();
+            let store = Arc::clone(&store);
+            let key = Arc::clone(&key);
             let snapshot = snapshot.clone();
 
             Box::pin(async move {
@@ -209,12 +209,12 @@ pub mod tests {
         let val2: Arc<[u8]> = b"value2".to_vec().into();
 
         // Test basic set/get
-        store.set(key1.clone(), val1.clone()).await?;
-        assert_eq!(store.get(&key1).await?, Some(val1.clone()));
+        store.set(Arc::clone(&key1), Arc::clone(&val1)).await?;
+        assert_eq!(store.get(&key1).await?, Some(Arc::clone(&val1)));
 
         // Test overwrite
-        store.set(key1.clone(), val2.clone()).await?;
-        assert_eq!(store.get(&key1).await?, Some(val2.clone()));
+        store.set(Arc::clone(&key1), Arc::clone(&val2)).await?;
+        assert_eq!(store.get(&key1).await?, Some(Arc::clone(&val2)));
 
         // Test del
         store.del(&key1).await?;
@@ -235,24 +235,26 @@ pub mod tests {
         // Initial CAS (from None)
         let cas = store.new_cas(&cas_key).await?;
         assert_eq!(cas.current(), None);
-        cas.swap(cas_val1.clone()).await??;
-        assert_eq!(store.get(&cas_key).await?, Some(cas_val1.clone()));
+        cas.swap(Arc::clone(&cas_val1)).await??;
+        assert_eq!(store.get(&cas_key).await?, Some(Arc::clone(&cas_val1)));
 
         // Successful swap
         let cas = store.new_cas(&cas_key).await?;
-        assert_eq!(cas.current(), Some(cas_val1.clone()));
-        cas.swap(cas_val2.clone()).await??;
-        assert_eq!(store.get(&cas_key).await?, Some(cas_val2.clone()));
+        assert_eq!(cas.current(), Some(Arc::clone(&cas_val1)));
+        cas.swap(Arc::clone(&cas_val2)).await??;
+        assert_eq!(store.get(&cas_key).await?, Some(Arc::clone(&cas_val2)));
 
         // Failed swap (concurrent modification)
         let cas_guard = store.new_cas(&cas_key).await?;
         // modify the value before the swap
-        store.set(cas_key.clone(), cas_val3.clone()).await?;
+        store
+            .set(Arc::clone(&cas_key), Arc::clone(&cas_val3))
+            .await?;
 
-        match cas_guard.swap(cas_val1.clone()).await? {
+        match cas_guard.swap(Arc::clone(&cas_val1)).await? {
             Err(CasError::CasFailed(new_guard)) => {
                 // Should return new guard with latest value
-                assert_eq!(new_guard.current(), Some(cas_val3.clone()));
+                assert_eq!(new_guard.current(), Some(Arc::clone(&cas_val3)));
             }
             _ => panic!("Expected CasFailed error"),
         }
@@ -267,8 +269,8 @@ pub mod tests {
 
         let mut tasks = Vec::new();
         for _ in 0..num_tasks {
-            let store = store.clone();
-            let key = counter_key.clone();
+            let store = Arc::clone(&store);
+            let key = Arc::clone(&counter_key);
             tasks.push(tokio::spawn(async move {
                 for _ in 0..increments_per_task {
                     store.increment(&key, 1).await.unwrap();
@@ -294,7 +296,7 @@ pub mod tests {
         #[allow(clippy::type_complexity)]
         let store: Arc<DHashMap<Arc<[u8]>, Arc<[u8]>>> = Arc::new(DHashMap::default());
         let store_dyn: Arc<dyn KvStore + Send + Sync> = Arc::new(store);
-        test_kv_store_impl(store_dyn.clone()).await?;
+        test_kv_store_impl(Arc::clone(&store_dyn)).await?;
         test_kv_store_concurrency(store_dyn).await
     }
 
@@ -310,8 +312,8 @@ pub mod tests {
 
             let threads: Vec<_> = (0..2)
                 .map(|_| {
-                    let store = store.clone();
-                    let key = key.clone();
+                    let store = Arc::clone(&store);
+                    let key = Arc::clone(&key);
                     thread::spawn(move || {
                         block_on(async {
                             let _ = store.increment(&key, 1).await;

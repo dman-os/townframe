@@ -89,7 +89,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             );
             return Ok(ExitCode::SUCCESS);
         }
-        let ctx = context::Ctx::init(conf.clone()).await?;
+        let ctx = context::Ctx::init(Arc::clone(&conf)).await?;
         let drawer_doc_id = ctx.doc_drawer().document_id();
         let app_doc_id = ctx.doc_app().document_id();
 
@@ -104,7 +104,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         let blobs_repo = BlobsRepo::new(conf._blobs_root.clone()).await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
             ctx.acx.clone(),
-            blobs_repo.clone(),
+            Arc::clone(&blobs_repo),
             app_doc_id.clone(),
             ctx.local_actor_id.clone(),
         )
@@ -113,7 +113,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         let (_conf_repo, conf_stop) = ConfigRepo::load(
             ctx.acx.clone(),
             app_doc_id.clone(),
-            plugs_repo.clone(),
+            Arc::clone(&plugs_repo),
             daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
         )
         .await?;
@@ -350,7 +350,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         return Ok(code);
     }
 
-    let ctx = context::Ctx::init(conf.clone()).await?;
+    let ctx = context::Ctx::init(Arc::clone(&conf)).await?;
     let blobs_repo = BlobsRepo::new(conf._blobs_root.clone()).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         ctx.acx.clone(),
@@ -489,7 +489,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
                 let ecx = ExecCtx {
                     rt: Arc::clone(&rt),
                     _cx: Arc::clone(&ctx),
-                    drawer: drawer.clone(),
+                    drawer: Arc::clone(&drawer),
                 };
 
                 let res = (details.action)(sub_matches.clone(), ecx).await;
@@ -645,7 +645,7 @@ Routine impl: {routine_impl:?}
 
             Box::new({
                 // let com_man = com_man.clone();
-                let plug_id = plug_id.clone();
+                let plug_id = Arc::clone(&plug_id);
                 let routine_name = routine_name.0.clone();
                 move |matches: ArgMatches, ecx: ExecCtx| {
                     async move {
@@ -703,8 +703,8 @@ Routine impl: {routine_impl:?}
     Ok(ClapReadyCommand {
         clap: clap_cmd,
         fqcn: format!("{plug_id}/{name}", name = com_name),
-        man: com_man.clone(),
-        src_plug_id: plug_id.clone(),
+        man: Arc::clone(com_man),
+        src_plug_id: Arc::clone(&plug_id),
         action,
     })
 }
@@ -726,7 +726,7 @@ mod lazy {
                 .build()?;
             eyre::Ok(Arc::new(rt))
         }) {
-            Ok(val) => val.clone(),
+            Ok(val) => Arc::clone(val),
             Err(err) => panic!("error on tokio init: {err}"),
         }
     }
@@ -742,7 +742,7 @@ mod lazy {
         {
             Ok(config) => {
                 debug!(?config, "config sourced");
-                Ok(config.clone())
+                Ok(Arc::clone(config))
             }
             Err(err) => Err(err),
         }
@@ -758,7 +758,7 @@ mod lazy {
             })
             .await
         {
-            Ok(config) => Ok(config.clone()),
+            Ok(config) => Ok(Arc::clone(config)),
             Err(err) => Err(err),
         }
     }

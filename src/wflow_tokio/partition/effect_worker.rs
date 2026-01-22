@@ -92,7 +92,7 @@ impl TokioEffectWorker {
             let effects::PartitionEffect { job_id, deets } = effects_map
                 .get(&effect_id)
                 .expect("scheduled effect not found");
-            (job_id.clone(), deets.clone())
+            (Arc::clone(job_id), deets.clone())
         };
 
         match deets {
@@ -101,7 +101,7 @@ impl TokioEffectWorker {
                 let instant = std::time::Instant::now();
                 let run_id = deets.run_id;
 
-                let result = self.run_job_effect(job_id.clone()).await;
+                let result = self.run_job_effect(Arc::clone(&job_id)).await;
                 let end_at = start_at
                     .checked_add(instant.elapsed())
                     .expect("ts overflow");
@@ -142,13 +142,13 @@ impl TokioEffectWorker {
             wflow_core::gen::metastore::WflowServiceMeta::Wasmcloud(meta) => {
                 self.pcx
                     .local_wasmcloud_host
-                    .run(job_id.clone(), job_state_snapshot.clone(), meta)
+                    .run(Arc::clone(&job_id), job_state_snapshot.clone(), meta)
                     .await
             }
             wflow_core::metastore::WflowServiceMeta::LocalNative => {
                 self.pcx
                     .local_native_host
-                    .run(job_id.clone(), job_state_snapshot.clone(), &())
+                    .run(Arc::clone(&job_id), job_state_snapshot.clone(), &())
                     .await
             }
         };

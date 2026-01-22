@@ -51,10 +51,8 @@ impl Ctx {
             .await?,
         );
 
-        let logstore = wflow_core::kvstore::log::KvStoreLog::new(
-            logstore_kv.clone() as Arc<dyn KvStore + Send + Sync>
-        )
-        .await?;
+        let logstore =
+            wflow_core::kvstore::log::KvStoreLog::new(Arc::clone(&logstore_kv) as _).await?;
         let logstore = Arc::new(logstore);
         let snapstore = Arc::new(wflow_core::kvstore::snapstore::KvSnapStore::new(
             snapstore_kv,
@@ -113,8 +111,8 @@ pub async fn start_partition_worker(
 
     let pcx = wflow_tokio::partition::PartitionCtx::new(
         partition_id,
-        wcx.metastore.clone(),
-        wcx.logstore.clone(),
+        Arc::clone(&wcx.metastore),
+        Arc::clone(&wcx.logstore),
         next_entry_id,
         wflow_plugin,
         Arc::new(wflow_tokio::local_native_host::LocalNativeHost {}),
@@ -130,8 +128,8 @@ pub async fn start_partition_worker(
 
     let worker = wflow_tokio::partition::start_tokio_worker(
         pcx,
-        active_state.clone(),
-        wcx.snapstore.clone(),
+        Arc::clone(&active_state),
+        Arc::clone(&wcx.snapstore),
     )
     .await;
 
