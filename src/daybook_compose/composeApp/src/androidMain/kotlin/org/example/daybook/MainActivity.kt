@@ -26,19 +26,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.core.content.ContextCompat
-import com.mohamedrejeb.calf.permissions.ExperimentalPermissionsApi
-import com.mohamedrejeb.calf.permissions.Permission
-import com.mohamedrejeb.calf.permissions.isGranted
-
-import com.mohamedrejeb.calf.permissions.rememberMultiplePermissionsState
 import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.mohamedrejeb.calf.permissions.ExperimentalPermissionsApi
+import com.mohamedrejeb.calf.permissions.Permission
+import com.mohamedrejeb.calf.permissions.isGranted
+import com.mohamedrejeb.calf.permissions.rememberMultiplePermissionsState
 import org.example.daybook.theme.ThemeConfig
 
 class MainActivity : ComponentActivity() {
@@ -69,83 +68,97 @@ fun AndroidApp() {
 
     var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
 
-    val permCtx = run {
-        val notificationPermissionState = rememberMultiplePermissionsState(
-            listOf(
-                Permission.Notification,
-                Permission.Camera,
-                Permission.RecordAudio,
-            )
-        )
-        val lifecycleOwner = LocalLifecycleOwner.current
-        // Observe lifecycle events to refresh permission status when app resumes
-        DisposableEffect(lifecycleOwner) {
-            val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_RESUME) {
-                    hasOverlayPermission = Settings.canDrawOverlays(context)
+    val permCtx =
+        run {
+            val notificationPermissionState =
+                rememberMultiplePermissionsState(
+                    listOf(
+                        Permission.Notification,
+                        Permission.Camera,
+                        Permission.RecordAudio
+                    )
+                )
+            val lifecycleOwner = LocalLifecycleOwner.current
+            // Observe lifecycle events to refresh permission status when app resumes
+            DisposableEffect(lifecycleOwner) {
+                val observer =
+                    LifecycleEventObserver { _, event ->
+                        if (event == Lifecycle.Event.ON_RESUME) {
+                            hasOverlayPermission = Settings.canDrawOverlays(context)
+                        }
+                    }
+                lifecycleOwner.lifecycle.addObserver(observer)
+
+                onDispose {
+                    lifecycleOwner.lifecycle.removeObserver(observer)
                 }
             }
-            lifecycleOwner.lifecycle.addObserver(observer)
-
-            onDispose {
-                lifecycleOwner.lifecycle.removeObserver(observer)
-            }
-        }
-        PermissionsContext(
-            hasOverlay = hasOverlayPermission,
-            hasNotifications =
-                notificationPermissionState.permissions[0].status.isGranted,
-            hasCamera =
-                notificationPermissionState.permissions[1].status.isGranted,
-            hasMicrophone =
-                notificationPermissionState.permissions[2].status.isGranted,
-            requestAllPermissions = {
-                notificationPermissionState.launchMultiplePermissionRequest()
-                if (!hasOverlayPermission) {
-                    // Request permission
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        val intent = Intent(
-                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            "package:${context.packageName}".toUri()
-                        )
-                        context.startActivity(intent)
-                    } else {
-                        // Pre-M, permission is granted if declared, though this case is rare now
-                        // and Settings.canDrawOverlays should already be true if manifest perm is there.
-                        // However, for safety, you might re-check or assume it's okay if declared.
-                        hasOverlayPermission =
-                            Settings.canDrawOverlays(context) // Re-check for safety
-                        if (!hasOverlayPermission) {
-                            throw Exception("impossible");
+            PermissionsContext(
+                hasOverlay = hasOverlayPermission,
+                hasNotifications =
+                    notificationPermissionState.permissions[0].status.isGranted,
+                hasCamera =
+                    notificationPermissionState.permissions[1].status.isGranted,
+                hasMicrophone =
+                    notificationPermissionState.permissions[2].status.isGranted,
+                requestAllPermissions = {
+                    notificationPermissionState.launchMultiplePermissionRequest()
+                    if (!hasOverlayPermission) {
+                        // Request permission
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            val intent =
+                                Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    "package:${context.packageName}".toUri()
+                                )
+                            context.startActivity(intent)
+                        } else {
+                            // Pre-M, permission is granted if declared, though this case is rare now
+                            // and Settings.canDrawOverlays should already be true if manifest perm is there.
+                            // However, for safety, you might re-check or assume it's okay if declared.
+                            hasOverlayPermission =
+                                Settings.canDrawOverlays(context) // Re-check for safety
+                            if (!hasOverlayPermission) {
+                                throw Exception("impossible")
+                            }
                         }
                     }
                 }
-            }
-        )
-    }
-
-    val theme = run {
-        val isDarkMode = isSystemInDarkTheme()
-        when {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-                val context = LocalContext.current
-                ThemeConfig.Custom(
-
-                    if (isDarkMode) dynamicDarkColorScheme(context) else dynamicLightColorScheme(
-                        context
-                    )
-                )
-            }
-
-            isDarkMode -> ThemeConfig.Light
-            else -> ThemeConfig.Light
+            )
         }
-    }
-    val config = run {
-        AppConfig(
-            theme = theme
-        )
-    }
+
+    val theme =
+        run {
+            val isDarkMode = isSystemInDarkTheme()
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+                    val context = LocalContext.current
+                    ThemeConfig.Custom(
+                        if (isDarkMode) {
+                            dynamicDarkColorScheme(context)
+                        } else {
+                            dynamicLightColorScheme(
+                                context
+                            )
+                        }
+                    )
+                }
+
+                isDarkMode -> {
+                    ThemeConfig.Light
+                }
+
+                else -> {
+                    ThemeConfig.Light
+                }
+            }
+        }
+    val config =
+        run {
+            AppConfig(
+                theme = theme
+            )
+        }
 
     CompositionLocalProvider(
         LocalPermCtx provides permCtx,
@@ -153,13 +166,18 @@ fun AndroidApp() {
     ) {
         val layoutDirection = LocalLayoutDirection.current
         App(
-            surfaceModifier = Modifier
-                .padding(
-                    start = WindowInsets.safeDrawing.asPaddingValues()
-                        .calculateStartPadding(layoutDirection),
-                    end = WindowInsets.safeDrawing.asPaddingValues()
-                        .calculateEndPadding(layoutDirection)
-                ),
+            surfaceModifier =
+                Modifier
+                    .padding(
+                        start =
+                            WindowInsets.safeDrawing
+                                .asPaddingValues()
+                                .calculateStartPadding(layoutDirection),
+                        end =
+                            WindowInsets.safeDrawing
+                                .asPaddingValues()
+                                .calculateEndPadding(layoutDirection)
+                    ),
             config = config,
             extraAction = {
                 if (hasOverlayPermission) {
@@ -169,7 +187,6 @@ fun AndroidApp() {
         )
     }
 }
-
 
 fun startMagicWandService(context: Context) {
     val serviceIntent = Intent(context, MagicWandService::class.java)

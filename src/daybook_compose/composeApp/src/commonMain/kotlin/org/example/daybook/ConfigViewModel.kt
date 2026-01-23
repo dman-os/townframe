@@ -12,30 +12,33 @@ import org.example.daybook.uniffi.core.PropKeyDisplayHint
 
 data class ConfigError(val message: String, val exception: FfiException)
 
-class ConfigViewModel(
-    val configRepo: ConfigRepoFfi
-) : ViewModel() {
+class ConfigViewModel(val configRepo: ConfigRepoFfi) : ViewModel() {
     // Error state for showing snackbar
     private val _error = MutableStateFlow<ConfigError?>(null)
     val error = _error.asStateFlow()
-    
+
     // Meta table key configs
     private val _metaTableKeyConfigs = MutableStateFlow<Map<String, PropKeyDisplayHint>>(emptyMap())
     val metaTableKeyConfigs = _metaTableKeyConfigs.asStateFlow()
-    
+
     // Registration handle to auto-unregister
     private var listenerRegistration: ListenerRegistration? = null
-    
+
     init {
         // Register listener for config changes first
         viewModelScope.launch {
             try {
-                listenerRegistration = configRepo.ffiRegisterListener(object : org.example.daybook.uniffi.ConfigEventListener {
-                    override fun onConfigEvent(event: org.example.daybook.uniffi.core.ConfigEvent) {
-                        // Reload all settings when config changes
-                        loadAllSettings()
-                    }
-                })
+                listenerRegistration =
+                    configRepo.ffiRegisterListener(
+                        object : org.example.daybook.uniffi.ConfigEventListener {
+                            override fun onConfigEvent(
+                                event: org.example.daybook.uniffi.core.ConfigEvent
+                            ) {
+                                // Reload all settings when config changes
+                                loadAllSettings()
+                            }
+                        }
+                    )
                 // Load initial values after listener is registered
                 loadAllSettings()
             } catch (e: FfiException) {
@@ -45,17 +48,17 @@ class ConfigViewModel(
             }
         }
     }
-    
+
     override fun onCleared() {
         // Clean up registration
         listenerRegistration?.unregister()
         super.onCleared()
     }
-    
+
     fun clearError() {
         _error.value = null
     }
-    
+
     private fun loadAllSettings() {
         viewModelScope.launch {
             try {
@@ -66,7 +69,7 @@ class ConfigViewModel(
             }
         }
     }
-    
+
     suspend fun setPropDisplayHint(key: String, config: PropKeyDisplayHint) {
         try {
             configRepo.setPropDisplayHint(key, config)

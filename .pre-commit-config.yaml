@@ -35,6 +35,11 @@ repos:
           - commit-msg
   - repo: local
     hooks:
+      # - id: ktlint-fmt
+      #   name: format kotlin
+      #   language: system
+      #   entry: bash -c 'ktlint -F'
+      #   pass_filenames: false
       - id: ghjk-resolve
         name: Ghjk resolve
         language: system

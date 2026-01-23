@@ -7,7 +7,9 @@ import androidx.savedstate.SavedStateRegistryOwner
 
 internal class MagicWandLifecycleOwner : SavedStateRegistryOwner {
     private var mLifecycleRegistry: LifecycleRegistry = LifecycleRegistry(this)
-    private var mSavedStateRegistryController: SavedStateRegistryController = SavedStateRegistryController.create(this)
+    private var mSavedStateRegistryController: SavedStateRegistryController = SavedStateRegistryController.create(
+        this
+    )
 
     /**
      * @return True if the Lifecycle has been initialized.
@@ -19,7 +21,6 @@ internal class MagicWandLifecycleOwner : SavedStateRegistryOwner {
         get() = mSavedStateRegistryController.savedStateRegistry
     override val lifecycle: Lifecycle
         get() = mLifecycleRegistry
-
 
     fun setCurrentState(state: Lifecycle.State) {
         mLifecycleRegistry.currentState = state
@@ -36,5 +37,4 @@ internal class MagicWandLifecycleOwner : SavedStateRegistryOwner {
     fun performSave(outBundle: Bundle) {
         mSavedStateRegistryController.performSave(outBundle)
     }
-
 }

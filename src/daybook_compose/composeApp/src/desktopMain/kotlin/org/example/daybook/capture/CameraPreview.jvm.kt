@@ -56,6 +56,7 @@ enum class WebcamDriverType(
         description = "Built-in driver for Windows, Linux, macOS. Requires libv4l2 and libstdc++ on Linux.",
         createDriver = { WebcamDefaultDriver() }
     ),
+
     // V4L4J(
     //     displayName = "V4L4j",
     //     description = "Linux-only driver using V4L4j library. Good for Raspberry Pi. Requires v4l-utils.",
@@ -96,42 +97,44 @@ enum class WebcamDriverType(
         displayName = "JMF (Java Media Framework)",
         description = "Uses Java Media Framework. Requires JMF installed and configured.",
         createDriver = { JmfDriver() }
-    ),
+    )
 }
 
 @Composable
 actual fun DaybookCameraPreview(
     modifier: Modifier,
     onImageSaved: ((ByteArray) -> Unit)?,
-    onCaptureRequested: (() -> Unit)?,
+    onCaptureRequested: (() -> Unit)?
 ) {
     val captureContext = LocalCameraCaptureContext.current
     val scope = rememberCoroutineScope()
-    
+
     var selectedDriver by remember { mutableStateOf(WebcamDriverType.DEFAULT) }
     var showDriverMenu by remember { mutableStateOf(false) }
-    
+
     // Set driver and get webcams
-    val webcams = remember(selectedDriver) {
-        runCatching {
-            // Set the selected driver
-            val driver = selectedDriver.createDriver()
-            Webcam.setDriver(driver)
-            Webcam.getWebcams()
-        }.getOrNull()
-    }
-    
-    val webcam = remember(webcams) {
-        webcams?.firstOrNull()?.also { w ->
-            // Close it first to ensure clean state
-            if (w.isOpen) {
-                w.close()
-            }
-            // Set view size to a reasonable resolution
-            w.viewSize = WebcamResolution.VGA.size
+    val webcams =
+        remember(selectedDriver) {
+            runCatching {
+                // Set the selected driver
+                val driver = selectedDriver.createDriver()
+                Webcam.setDriver(driver)
+                Webcam.getWebcams()
+            }.getOrNull()
         }
-    }
-    
+
+    val webcam =
+        remember(webcams) {
+            webcams?.firstOrNull()?.also { w ->
+                // Close it first to ensure clean state
+                if (w.isOpen) {
+                    w.close()
+                }
+                // Set view size to a reasonable resolution
+                w.viewSize = WebcamResolution.VGA.size
+            }
+        }
+
     // Set up capture callback
     LaunchedEffect(captureContext, webcam) {
         if (captureContext != null && webcam != null) {
@@ -141,21 +144,22 @@ actual fun DaybookCameraPreview(
                 scope.launch {
                     try {
                         captureContext.setIsCapturing(true)
-                        
+
                         // Capture image on background thread
-                        val image = withContext(Dispatchers.IO) {
-                            w.image
-                        }
-                        
+                        val image =
+                            withContext(Dispatchers.IO) {
+                                w.image
+                            }
+
                         if (image != null) {
                             // Convert BufferedImage to JPEG ByteArray
                             val baos = ByteArrayOutputStream()
                             ImageIO.write(image, "jpg", baos)
                             val bytes = baos.toByteArray()
-                            
+
                             onImageSaved?.invoke(bytes)
                         }
-                        
+
                         captureContext.setIsCapturing(false)
                     } catch (e: Exception) {
                         println("Error capturing image: ${e.message}")
@@ -168,25 +172,26 @@ actual fun DaybookCameraPreview(
             captureContext?.setCaptureCallback(null)
         }
     }
-    
+
     // Create WebcamPanel for preview
-    val panel = remember(webcam) {
-        webcam?.let { w ->
-            WebcamPanel(w, false).apply {
-                isFPSDisplayed = false
-                isDisplayDebugInfo = false
-                isImageSizeDisplayed = false
-                isMirrored = false
+    val panel =
+        remember(webcam) {
+            webcam?.let { w ->
+                WebcamPanel(w, false).apply {
+                    isFPSDisplayed = false
+                    isDisplayDebugInfo = false
+                    isImageSizeDisplayed = false
+                    isMirrored = false
+                }
             }
         }
-    }
-    
+
     // Cleanup webcam and panel on dispose
     DisposableEffect(webcam, panel) {
         onDispose {
             captureContext?.setCaptureCallback(null)
             captureContext?.setCanCapture(false)
-            
+
             panel?.let { p ->
                 try {
                     if (p.isStarted) {
@@ -196,7 +201,7 @@ actual fun DaybookCameraPreview(
                     println("Error stopping panel: ${e.message}")
                 }
             }
-            
+
             webcam?.let { w ->
                 try {
                     if (w.isOpen) {
@@ -208,7 +213,7 @@ actual fun DaybookCameraPreview(
             }
         }
     }
-    
+
     Box(modifier = modifier.fillMaxSize()) {
         when {
             webcams == null || webcam == null -> {
@@ -217,22 +222,24 @@ actual fun DaybookCameraPreview(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .weight(1f),
+                        modifier =
+                            Modifier
+                                .fillMaxSize()
+                                .weight(1f),
                         contentAlignment = Alignment.Center
                     ) {
-                        val error = runCatching {
-                            val driver = selectedDriver.createDriver()
-                            Webcam.setDriver(driver)
-                            Webcam.getWebcams()
-                        }.exceptionOrNull()
-                        
+                        val error =
+                            runCatching {
+                                val driver = selectedDriver.createDriver()
+                                Webcam.setDriver(driver)
+                                Webcam.getWebcams()
+                            }.exceptionOrNull()
+
                         Text(
                             error?.message ?: "No webcam found. Try a different driver."
                         )
                     }
-                    
+
                     // Driver selection menu
                     Box(
                         modifier = Modifier.padding(16.dp),
@@ -247,6 +254,7 @@ actual fun DaybookCameraPreview(
                     }
                 }
             }
+
             else -> {
                 Column(modifier = Modifier.fillMaxSize()) {
                     // Driver selection menu at top
@@ -261,11 +269,11 @@ actual fun DaybookCameraPreview(
                             onExpandedChange = { showDriverMenu = it }
                         )
                     }
-                    
+
                     // Camera preview using WebcamPanel
                     if (panel != null) {
                         SwingPanel(
-                            factory = { 
+                            factory = {
                                 panel.apply {
                                     if (!webcam.isOpen) {
                                         webcam.open()
@@ -309,7 +317,7 @@ private fun DriverSelectionMenu(
         ) {
             WebcamDriverType.entries.forEach { driver ->
                 DropdownMenuItem(
-                    text = { 
+                    text = {
                         Column {
                             Text(driver.displayName)
                             Text(

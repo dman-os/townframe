@@ -66,7 +66,7 @@ package org.example.daybook.dockable
 // ) {
 //     var split by remember { mutableStateOf(initialSplit) }
 //     // Get density as a Float once outside BoxWithConstraintsScope
-//     val density = LocalDensity.current.density 
+//     val density = LocalDensity.current.density
 //
 //     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
 //         val totalWidthPx = constraints.maxWidth.value * density // Dp to Px conversion
@@ -133,7 +133,7 @@ package org.example.daybook.dockable
 // ) {
 //     var split by remember { mutableStateOf(initialSplit) }
 //     // Get density as a Float once outside BoxWithConstraintsScope
-//     val density = LocalDensity.current.density 
+//     val density = LocalDensity.current.density
 //
 //     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
 //         val totalHeightPx = constraints.maxHeight.value * density // Dp to Px conversion

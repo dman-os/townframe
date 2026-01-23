@@ -11,7 +11,7 @@ data class CameraExtensionsState(
     val selectedExtension: Int = ExtensionMode.NONE,
     val availableLens: List<Int> = listOf(CameraSelector.LENS_FACING_BACK),
     val selectedLens: Int = CameraSelector.LENS_FACING_BACK,
-    val isInitialized: Boolean = false,
+    val isInitialized: Boolean = false
 )
 
 /**

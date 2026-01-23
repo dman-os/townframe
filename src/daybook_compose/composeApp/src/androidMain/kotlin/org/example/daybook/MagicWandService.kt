@@ -1,6 +1,6 @@
 /*
  * Magic Wand Service - System-wide floating overlay with draggable puck interface
- * 
+ *
  * This service creates a floating overlay that works across all apps, featuring:
  * - A draggable "puck" that can be tapped or dragged to trigger actions
  * - Smart window resizing: shrinks to hug the puck when hidden, expands for full overlay
@@ -8,7 +8,7 @@
  * - Button collision detection system for drag-to-action interactions
  * - Performance optimizations including throttled window updates and cached calculations
  * - Animation system that respects Android's global animation settings
- * 
+ *
  * Key architectural decisions:
  * - Service handles only system-level concerns (notifications, window management)
  * - Compose UI handles all interaction logic and animations
@@ -151,31 +151,33 @@ class MagicWandService : Service() {
         }
 
         // a persistent notification is needed to have display on top overlays
-        val notification = run {
-            val stopServicePendingIntent = getBroadcast(
-                this,
-                1,
-                Intent(this, StopServiceReceiver::class.java).apply {
-                    this.action =
-                        ACTION_STOP_SERVICE
-                },
-                FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE,
-            )
-            NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-                .setContentText("magic wand")
-                // TODO: icon for notification
-                // NOTE: icons are mandatory
-                .setSmallIcon(ic_launcher_foreground)
-                .setPriority(PRIORITY_LOW)
-                .setOngoing(true)
-                .addAction(
-                    // TODO: use stop icon
-                    ic_launcher_foreground,
-                    "Stop Service",
-                    stopServicePendingIntent
-                )
-                .build()
-        }
+        val notification =
+            run {
+                val stopServicePendingIntent =
+                    getBroadcast(
+                        this,
+                        1,
+                        Intent(this, StopServiceReceiver::class.java).apply {
+                            this.action =
+                                ACTION_STOP_SERVICE
+                        },
+                        FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE
+                    )
+                NotificationCompat
+                    .Builder(this, NOTIFICATION_CHANNEL_ID)
+                    .setContentText("magic wand")
+                    // TODO: icon for notification
+                    // NOTE: icons are mandatory
+                    .setSmallIcon(ic_launcher_foreground)
+                    .setPriority(PRIORITY_LOW)
+                    .setOngoing(true)
+                    .addAction(
+                        // TODO: use stop icon
+                        ic_launcher_foreground,
+                        "Stop Service",
+                        stopServicePendingIntent
+                    ).build()
+            }
         ServiceCompat.startForeground(
             this,
             NOTIFICATION_ID,
@@ -222,11 +224,12 @@ class MagicWandService : Service() {
             }
 
         layoutParams =
-            WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager
+                .LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                         WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                         WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
@@ -237,9 +240,8 @@ class MagicWandService : Service() {
                         WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR or
                         WindowManager.LayoutParams
                             .FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS,
-                PixelFormat.TRANSLUCENT
-            )
-                .apply {
+                    PixelFormat.TRANSLUCENT
+                ).apply {
                     gravity = Gravity.TOP or Gravity.START
                     x = 0
                     y = 0
@@ -320,7 +322,6 @@ class MagicWandService : Service() {
     }
 }
 
-
 /**
  * Animation configuration
  */
@@ -369,11 +370,7 @@ data class PuckState(
 /**
  * Base class for widget descriptors with common position and size properties.
  */
-abstract class WidgetDesc(
-    val id: String,
-    val position: PuckPosition,
-    val size: Dp = 80.dp
-) {
+abstract class WidgetDesc(val id: String, val position: PuckPosition, val size: Dp = 80.dp) {
     abstract fun withPositionAndSize(position: PuckPosition, size: Dp): WidgetDesc
 }
 
@@ -389,9 +386,8 @@ data class ActionButtonDesc(
     val widgetPosition: PuckPosition,
     val widgetSize: Dp = 80.dp
 ) : WidgetDesc(widgetId, widgetPosition, widgetSize) {
-
-    override fun withPositionAndSize(position: PuckPosition, size: Dp): WidgetDesc {
-        return ActionButtonDesc(
+    override fun withPositionAndSize(position: PuckPosition, size: Dp): WidgetDesc =
+        ActionButtonDesc(
             widgetId = widgetId,
             label = label,
             icon = icon,
@@ -400,23 +396,17 @@ data class ActionButtonDesc(
             widgetPosition = position,
             widgetSize = size
         )
-    }
 }
 
 /**
  * Descriptor for the puck widget (for edit mode selection).
  */
-data class PuckDesc(
-    val widgetPosition: PuckPosition,
-    val widgetSize: Dp = 64.dp
-) : WidgetDesc("puck", widgetPosition, widgetSize) {
-
-    override fun withPositionAndSize(position: PuckPosition, size: Dp): WidgetDesc {
-        return PuckDesc(
-            widgetPosition = position,
-            widgetSize = size
-        )
-    }
+data class PuckDesc(val widgetPosition: PuckPosition, val widgetSize: Dp = 64.dp) :
+    WidgetDesc("puck", widgetPosition, widgetSize) {
+    override fun withPositionAndSize(position: PuckPosition, size: Dp): WidgetDesc = PuckDesc(
+        widgetPosition = position,
+        widgetSize = size
+    )
 }
 
 /**
@@ -487,17 +477,15 @@ class WidgetRegistry {
         movingWidgetId: String,
         center: androidx.compose.ui.geometry.Offset,
         radius: Float
-    ): String? {
-        return _collisionData.values
-            .filter { it.id != movingWidgetId }
-            .find { collision ->
-                val dx = center.x - collision.center.x
-                val dy = center.y - collision.center.y
-                val combinedRadius = collision.radius + radius
-                val distanceSquared = dx * dx + dy * dy
-                distanceSquared <= combinedRadius * combinedRadius
-            }?.id
-    }
+    ): String? = _collisionData.values
+        .filter { it.id != movingWidgetId }
+        .find { collision ->
+            val dx = center.x - collision.center.x
+            val dy = center.y - collision.center.y
+            val combinedRadius = collision.radius + radius
+            val distanceSquared = dx * dx + dy * dy
+            distanceSquared <= combinedRadius * combinedRadius
+        }?.id
 
     /**
      * Find widget overlapping with puck (for drag-to-action).
@@ -505,16 +493,14 @@ class WidgetRegistry {
     fun findWidgetOverlappingWith(
         puckCenter: androidx.compose.ui.geometry.Offset,
         puckRadius: Float
-    ): String? {
-        return _collisionData.values
-            .find { collision ->
-                val dx = puckCenter.x - collision.center.x
-                val dy = puckCenter.y - collision.center.y
-                val combinedRadius = collision.radius + puckRadius
-                val distanceSquared = dx * dx + dy * dy
-                distanceSquared <= combinedRadius * combinedRadius
-            }?.id
-    }
+    ): String? = _collisionData.values
+        .find { collision ->
+            val dx = puckCenter.x - collision.center.x
+            val dy = puckCenter.y - collision.center.y
+            val combinedRadius = collision.radius + puckRadius
+            val distanceSquared = dx * dx + dy * dy
+            distanceSquared <= combinedRadius * combinedRadius
+        }?.id
 
     /**
      * Handle widget action (for ActionButton widgets).
@@ -526,26 +512,24 @@ class WidgetRegistry {
     /**
      * Get default widgets for initial setup.
      */
-    fun getDefaultWidgets(screenWidth: Dp): List<WidgetDesc> {
-        return listOf(
-            ActionButtonDesc(
-                widgetId = "camera",
-                label = "Camera",
-                icon = "📷",
-                color = Color.Green,
-                onAction = {},
-                widgetPosition = PuckPosition(screenWidth / 2 - 120.dp, 200.dp)
-            ),
-            ActionButtonDesc(
-                widgetId = "notes",
-                label = "Notes",
-                icon = "📝",
-                color = Color(0xFFFFA500),
-                onAction = {},
-                widgetPosition = PuckPosition(screenWidth / 2 + 40.dp, 200.dp)
-            )
+    fun getDefaultWidgets(screenWidth: Dp): List<WidgetDesc> = listOf(
+        ActionButtonDesc(
+            widgetId = "camera",
+            label = "Camera",
+            icon = "📷",
+            color = Color.Green,
+            onAction = {},
+            widgetPosition = PuckPosition(screenWidth / 2 - 120.dp, 200.dp)
+        ),
+        ActionButtonDesc(
+            widgetId = "notes",
+            label = "Notes",
+            icon = "📝",
+            color = Color(0xFFFFA500),
+            onAction = {},
+            widgetPosition = PuckPosition(screenWidth / 2 + 40.dp, 200.dp)
         )
-    }
+    )
 
     fun clear() {
         _widgets.clear()
@@ -611,14 +595,15 @@ class WeightedDragCalculator {
             totalWeight += weight
         }
 
-        _cachedWeightedVector = if (totalWeight > 0f) {
-            androidx.compose.ui.geometry.Offset(
-                weightedSumX / totalWeight,
-                weightedSumY / totalWeight
-            )
-        } else {
-            androidx.compose.ui.geometry.Offset.Zero
-        }
+        _cachedWeightedVector =
+            if (totalWeight > 0f) {
+                androidx.compose.ui.geometry.Offset(
+                    weightedSumX / totalWeight,
+                    weightedSumY / totalWeight
+                )
+            } else {
+                androidx.compose.ui.geometry.Offset.Zero
+            }
 
         _cacheInvalid = false
         return _cachedWeightedVector!!
@@ -653,8 +638,11 @@ data class DragState(
 
     val dragDirection: androidx.compose.ui.geometry.Offset
         get() =
-            if (dragDistance > 0) totalDragVector / dragDistance
-            else androidx.compose.ui.geometry.Offset.Zero
+            if (dragDistance > 0) {
+                totalDragVector / dragDistance
+            } else {
+                androidx.compose.ui.geometry.Offset.Zero
+            }
 
     fun crossedScreenHalves(screenWidth: Dp): Boolean {
         val startHalf = startPosition.x + 32.dp < screenWidth / 2 // Assuming puck size/2
@@ -727,7 +715,8 @@ class DirectSnapStrategy : SnapAnimationStrategy {
         config: SysAnimationConfig
     ): androidx.compose.animation.core.AnimationSpec<PuckPosition> {
         if (!config.isEnabled) {
-            return androidx.compose.animation.core.snap()
+            return androidx.compose.animation.core
+                .snap()
         }
 
         // Slower stiffness to match parabolic pace better
@@ -802,7 +791,8 @@ class ParabolicSnapStrategy : SnapAnimationStrategy {
         config: SysAnimationConfig
     ): androidx.compose.animation.core.AnimationSpec<PuckPosition> {
         if (!config.isEnabled) {
-            return androidx.compose.animation.core.snap()
+            return androidx.compose.animation.core
+                .snap()
         }
 
         // Base stiffness adjusted by speed factor
@@ -869,14 +859,16 @@ data class PuckPosition(val x: Dp, val y: Dp) {
         return PuckPosition(newX, y)
     }
 
-    operator fun minus(other: PuckPosition): androidx.compose.ui.geometry.Offset {
-        return androidx.compose.ui.geometry.Offset((x - other.x).value, (y - other.y).value)
-    }
+    operator fun minus(other: PuckPosition): androidx.compose.ui.geometry.Offset =
+        androidx.compose.ui.geometry
+            .Offset((x - other.x).value, (y - other.y).value)
 
     companion object {
         val VectorConverter =
             androidx.compose.animation.core.TwoWayConverter<
-                    PuckPosition, androidx.compose.animation.core.AnimationVector2D>(
+                PuckPosition,
+                androidx.compose.animation.core.AnimationVector2D
+                >(
                 convertToVector = { position ->
                     androidx.compose.animation.core.AnimationVector2D(
                         position.x.value,
@@ -921,19 +913,20 @@ fun MagicWandOverlay(
     onStopService: () -> Unit = {},
     onOverlayPosChanged: (OverlayMode, PuckPosition, Dp) -> Unit = { _, _, _ -> }
 ) {
-
     val density = LocalDensity.current
     val puckSize = 64.dp
 
     // LocalContext.current.resources..
     // Get screen dimensions in dp
-    val (screenWidth, screenHeight) = with(density) {
-        Pair(
-            LocalWindowInfo.current.containerSize.width.toDp(),
-            LocalWindowInfo.current.containerSize.height.toDp()
-        )
-    }
-
+    val (screenWidth, screenHeight) =
+        with(density) {
+            Pair(
+                LocalWindowInfo.current.containerSize.width
+                    .toDp(),
+                LocalWindowInfo.current.containerSize.height
+                    .toDp()
+            )
+        }
 
     // Cache frequently used calculations
     val puckRadiusPx = remember { with(density) { puckSize.toPx() / 2f } }
@@ -980,12 +973,12 @@ fun MagicWandOverlay(
 
     // Animate the values that go to updateWindowLayout for smooth transitions
     val animatedPuckPosition by
-    animateValueAsState(
-        targetValue = puckState.position,
-        animationSpec = currentAnimationSpec,
-        label = "puckPosition",
-        typeConverter = PuckPosition.VectorConverter
-    )
+        animateValueAsState(
+            targetValue = puckState.position,
+            animationSpec = currentAnimationSpec,
+            label = "puckPosition",
+            typeConverter = PuckPosition.VectorConverter
+        )
 
     // Notify service when animated values change for window resizing
     LaunchedEffect(puckState.mode, animatedPuckPosition) {
@@ -1013,10 +1006,11 @@ fun MagicWandOverlay(
                     editModeState = EditModeState() // Reset edit mode when dismissing
                 },
                 onEditModeToggle = {
-                    editModeState = editModeState.copy(
-                        isEditMode = !editModeState.isEditMode,
-                        selectedWidgetId = null
-                    )
+                    editModeState =
+                        editModeState.copy(
+                            isEditMode = !editModeState.isEditMode,
+                            selectedWidgetId = null
+                        )
                 },
                 onWidgetSelected = { widgetId ->
                     editModeState = editModeState.copy(selectedWidgetId = widgetId)
@@ -1061,10 +1055,10 @@ fun MagicWandOverlay(
                                 // finger position
                                 val fingerX =
                                     with(density) { puckState.position.x.toPx() } +
-                                            puckState.initialTouchOffset.x
+                                        puckState.initialTouchOffset.x
                                 val fingerY =
                                     with(density) { puckState.position.y.toPx() } +
-                                            puckState.initialTouchOffset.y
+                                        puckState.initialTouchOffset.y
                                 val puckCenterOffsetX =
                                     fingerX - puckRadiusPx
                                 val puckCenterOffsetY =
@@ -1077,10 +1071,14 @@ fun MagicWandOverlay(
                                 // Fallback to standard positioning
                                 IntOffset(
                                     with(density) {
-                                        puckState.position.x.toPx().roundToInt()
+                                        puckState.position.x
+                                            .toPx()
+                                            .roundToInt()
                                     },
                                     with(density) {
-                                        puckState.position.y.toPx().roundToInt()
+                                        puckState.position.y
+                                            .toPx()
+                                            .roundToInt()
                                     }
                                 )
                             }
@@ -1113,22 +1111,25 @@ fun MagicWandOverlay(
                         )
                     }
 
-                    puckState.mode == OverlayMode.TAP_MODE || puckState.mode == OverlayMode.EDIT_MODE -> {
+                    puckState.mode == OverlayMode.TAP_MODE ||
+                        puckState.mode == OverlayMode.EDIT_MODE -> {
                         // Close overlay
-                        puckState = puckState.copy(
-                            mode = OverlayMode.HIDDEN,
-                            hoveredButtonId = null,
-                            initialTouchOffset = androidx.compose.ui.geometry.Offset.Zero
-                        )
+                        puckState =
+                            puckState.copy(
+                                mode = OverlayMode.HIDDEN,
+                                hoveredButtonId = null,
+                                initialTouchOffset = androidx.compose.ui.geometry.Offset.Zero
+                            )
                         editModeState = EditModeState() // Reset edit mode
                     }
 
                     else -> {
                         // Open overlay
-                        puckState = puckState.copy(
-                            mode = if (editModeState.isEditMode) OverlayMode.EDIT_MODE else OverlayMode.TAP_MODE,
-                            initialTouchOffset = androidx.compose.ui.geometry.Offset.Zero
-                        )
+                        puckState =
+                            puckState.copy(
+                                mode = if (editModeState.isEditMode) OverlayMode.EDIT_MODE else OverlayMode.TAP_MODE,
+                                initialTouchOffset = androidx.compose.ui.geometry.Offset.Zero
+                            )
                     }
                 }
             },
@@ -1160,53 +1161,68 @@ fun MagicWandOverlay(
                     val dragAmountDpY = dragAmount.y / density.density
 
                     // Update position with minimal object creation
-                    val newX = (puckState.position.x.value + dragAmountDpX).coerceIn(
-                        0f,
-                        (screenWidth - puckSize).value
-                    )
-                    val newY = (puckState.position.y.value + dragAmountDpY).coerceIn(
-                        0f,
-                        (screenHeight - puckSize).value
-                    )
+                    val newX =
+                        (puckState.position.x.value + dragAmountDpX).coerceIn(
+                            0f,
+                            (screenWidth - puckSize).value
+                        )
+                    val newY =
+                        (puckState.position.y.value + dragAmountDpY).coerceIn(
+                            0f,
+                            (screenHeight - puckSize).value
+                        )
                     val newPosition = PuckPosition(newX.dp, newY.dp)
 
                     // Optimized collision detection - only check if in overlay mode
                     val hoveredWidget =
-                        if (puckState.mode != OverlayMode.HIDDEN && widgetRegistry.widgets.isNotEmpty()) {
+                        if (puckState.mode != OverlayMode.HIDDEN &&
+                            widgetRegistry.widgets.isNotEmpty()
+                        ) {
                             // Pre-calculate visual center
                             val visualCenterX =
                                 newX * density.density + puckState.initialTouchOffset.x
                             val visualCenterY =
                                 newY * density.density + puckState.initialTouchOffset.y
                             val visualCenter =
-                                androidx.compose.ui.geometry.Offset(visualCenterX, visualCenterY)
+                                androidx.compose.ui.geometry
+                                    .Offset(visualCenterX, visualCenterY)
                             widgetRegistry.findWidgetOverlappingWith(visualCenter, puckRadiusPx)
-                        } else null
+                        } else {
+                            null
+                        }
 
                     // Add drag vector and update state in one operation
                     currentDragState.weightedCalculator.addDragVector(dragAmount)
                     val updatedDragState = currentDragState.copy(currentPosition = newPosition)
 
-                    puckState = puckState.copy(
-                        position = newPosition,
-                        dragState = updatedDragState,
-                        hoveredButtonId = hoveredWidget
-                    )
+                    puckState =
+                        puckState.copy(
+                            position = newPosition,
+                            dragState = updatedDragState,
+                            hoveredButtonId = hoveredWidget
+                        )
                 }
             },
             onDragEnd = {
                 // Optimized drag end handling
                 val droppedOnWidget =
-                    if (puckState.mode != OverlayMode.HIDDEN && widgetRegistry.widgets.isNotEmpty()) {
+                    if (puckState.mode != OverlayMode.HIDDEN &&
+                        widgetRegistry.widgets.isNotEmpty()
+                    ) {
                         // Pre-calculate visual center for final collision check
                         val visualCenterX =
-                            puckState.position.x.value * density.density + puckState.initialTouchOffset.x
+                            puckState.position.x.value * density.density +
+                                puckState.initialTouchOffset.x
                         val visualCenterY =
-                            puckState.position.y.value * density.density + puckState.initialTouchOffset.y
+                            puckState.position.y.value * density.density +
+                                puckState.initialTouchOffset.y
                         val visualCenter =
-                            androidx.compose.ui.geometry.Offset(visualCenterX, visualCenterY)
+                            androidx.compose.ui.geometry
+                                .Offset(visualCenterX, visualCenterY)
                         widgetRegistry.findWidgetOverlappingWith(visualCenter, puckRadiusPx)
-                    } else null
+                    } else {
+                        null
+                    }
 
                 if (droppedOnWidget != null) {
                     // Puck was dropped on a widget - handle the action
@@ -1302,19 +1318,21 @@ fun ContentOverlay(
     }
 
     Surface(
-        modifier = Modifier
-            .fillMaxSize()
-            .pointerInput(Unit) {}, // Consume touch events
+        modifier =
+            Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {},
+        // Consume touch events
         color = Color.Black.copy(alpha = 0.7f)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             // Main overlay content
             Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp)
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .padding(16.dp)
             ) {
-
                 // Top bar with close and edit buttons
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1323,15 +1341,20 @@ fun ContentOverlay(
                     // Edit button
                     IconButton(
                         onClick = onEditModeToggle,
-                        modifier = Modifier.background(
-                            color = if (editModeState.isEditMode)
-                                Color.Blue.copy(alpha = 0.3f) else Color.Transparent,
-                            shape = CircleShape
-                        )
+                        modifier =
+                            Modifier.background(
+                                color =
+                                    if (editModeState.isEditMode) {
+                                        Color.Blue.copy(alpha = 0.3f)
+                                    } else {
+                                        Color.Transparent
+                                    },
+                                shape = CircleShape
+                            )
                     ) {
                         androidx.compose.material3.Text(
                             text = if (editModeState.isEditMode) "✏️" else "✏️",
-                            color = if (editModeState.isEditMode) Color.Cyan else Color.White,
+                            color = if (editModeState.isEditMode) Color.Cyan else Color.White
                         )
                     }
 
@@ -1339,7 +1362,7 @@ fun ContentOverlay(
                     IconButton(onClick = onDismiss) {
                         androidx.compose.material3.Text(
                             text = "✕",
-                            color = Color.White,
+                            color = Color.White
                         )
                     }
                 }
@@ -1426,11 +1449,12 @@ fun ContentOverlay(
                             onWidgetAction = { widgetId ->
                                 if (!editModeState.isEditMode) {
                                     widget.onAction()
-                                    Toast.makeText(
-                                        context,
-                                        "${widget.label} action triggered!",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
+                                    Toast
+                                        .makeText(
+                                            context,
+                                            "${widget.label} action triggered!",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
                                 }
                             }
                         ) { desc, isSelected, isHovered, modifier ->
@@ -1447,9 +1471,10 @@ fun ContentOverlay(
 
             // Widget adjustment controls (only in edit mode)
             if (editModeState.isEditMode) {
-                val selectedWidget = editModeState.selectedWidgetId?.let { id ->
-                    widgetRegistry.widgets[id]
-                }
+                val selectedWidget =
+                    editModeState.selectedWidgetId?.let { id ->
+                        widgetRegistry.widgets[id]
+                    }
 
                 WidgetAdjustmentControls(
                     selectedWidget = selectedWidget,
@@ -1500,30 +1525,34 @@ fun OverlayWidget(
 
     // Hover and selection animations
     val animatedScale by animateFloatAsState(
-        targetValue = when {
-            isDragging -> 1.2f
-            isHovered -> 1.1f
-            isSelected -> 1.05f
-            else -> 1f
-        },
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessHigh
-        ),
+        targetValue =
+            when {
+                isDragging -> 1.2f
+                isHovered -> 1.1f
+                isSelected -> 1.05f
+                else -> 1f
+            },
+        animationSpec =
+            spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = Spring.StiffnessHigh
+            ),
         label = "widgetScale"
     )
 
     val animatedGlow by animateFloatAsState(
-        targetValue = when {
-            isDragging -> 1f
-            isHovered -> 0.8f
-            isSelected -> 0.6f
-            else -> 0f
-        },
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessMedium
-        ),
+        targetValue =
+            when {
+                isDragging -> 1f
+                isHovered -> 0.8f
+                isSelected -> 0.6f
+                else -> 0f
+            },
+        animationSpec =
+            spring(
+                dampingRatio = Spring.DampingRatioLowBouncy,
+                stiffness = Spring.StiffnessMedium
+            ),
         label = "widgetGlow"
     )
 
@@ -1535,108 +1564,121 @@ fun OverlayWidget(
     }
 
     Box(
-        modifier = modifier
-            .offset {
-                IntOffset(
-                    with(density) { currentPosition.x.toPx().roundToInt() },
-                    with(density) { currentPosition.y.toPx().roundToInt() }
-                )
-            }
-            .size(widget.size)
-            .graphicsLayer {
-                scaleX = animatedScale
-                scaleY = animatedScale
-            }
-            .onGloballyPositioned { coordinates ->
-                // Register collision data for this widget
-                val centerX = coordinates.positionInWindow().x + coordinates.size.width / 2f
-                val centerY = coordinates.positionInWindow().y + coordinates.size.height / 2f
-                val center = androidx.compose.ui.geometry.Offset(centerX, centerY)
-                widgetRegistry.registerCollisionData(widget.id, center, radiusPx)
-            }
-            .pointerInput(widget.id, editModeState.isEditMode) {
-                if (editModeState.isEditMode) {
-                    // Edit mode: handle dragging
-                    detectDragGestures(
-                        onDragStart = { offset ->
-                            isDragging = true
-                            dragStartPosition = currentPosition
-                            onWidgetDragStart(widget.id, currentPosition)
-                        },
-                        onDrag = { _, dragAmount ->
-                            if (isDragging) {
-                                val newX =
-                                    (currentPosition.x.value + dragAmount.x / density.density).coerceIn(
-                                        0f, 1000f // Use a reasonable max value
-                                    )
-                                val newY =
-                                    (currentPosition.y.value + dragAmount.y / density.density).coerceIn(
-                                        0f, 2000f // Use a reasonable max value
-                                    )
-                                currentPosition = PuckPosition(newX.dp, newY.dp)
-                            }
-                        },
-                        onDragEnd = {
-                            if (isDragging) {
-                                isDragging = false
-
-                                // Check for collision using current position
-                                val centerX =
-                                    currentPosition.x.value * density.density + widget.size.value * density.density / 2
-                                val centerY =
-                                    currentPosition.y.value * density.density + widget.size.value * density.density / 2
-                                val center = androidx.compose.ui.geometry.Offset(centerX, centerY)
-
-                                val hasCollision = widgetRegistry.checkCollision(
-                                    widget.id, center, radiusPx
-                                ) != null
-
-                                if (hasCollision) {
-                                    // Revert to start position
-                                    currentPosition = dragStartPosition ?: widget.position
-                                } else {
-                                    // Update registry with new position
-                                    widgetRegistry.updateWidgetPosition(widget.id, currentPosition)
-                                }
-
-                                onWidgetDragEnd(widget.id, currentPosition, hasCollision)
-                                dragStartPosition = null
-                            }
-                        }
+        modifier =
+            modifier
+                .offset {
+                    IntOffset(
+                        with(density) { currentPosition.x.toPx().roundToInt() },
+                        with(density) { currentPosition.y.toPx().roundToInt() }
                     )
+                }.size(widget.size)
+                .graphicsLayer {
+                    scaleX = animatedScale
+                    scaleY = animatedScale
+                }.onGloballyPositioned { coordinates ->
+                    // Register collision data for this widget
+                    val centerX = coordinates.positionInWindow().x + coordinates.size.width / 2f
+                    val centerY = coordinates.positionInWindow().y + coordinates.size.height / 2f
+                    val center =
+                        androidx.compose.ui.geometry
+                            .Offset(centerX, centerY)
+                    widgetRegistry.registerCollisionData(widget.id, center, radiusPx)
+                }.pointerInput(widget.id, editModeState.isEditMode) {
+                    if (editModeState.isEditMode) {
+                        // Edit mode: handle dragging
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                isDragging = true
+                                dragStartPosition = currentPosition
+                                onWidgetDragStart(widget.id, currentPosition)
+                            },
+                            onDrag = { _, dragAmount ->
+                                if (isDragging) {
+                                    val newX =
+                                        (currentPosition.x.value + dragAmount.x / density.density).coerceIn(
+                                            0f,
+                                            1000f // Use a reasonable max value
+                                        )
+                                    val newY =
+                                        (currentPosition.y.value + dragAmount.y / density.density).coerceIn(
+                                            0f,
+                                            2000f // Use a reasonable max value
+                                        )
+                                    currentPosition = PuckPosition(newX.dp, newY.dp)
+                                }
+                            },
+                            onDragEnd = {
+                                if (isDragging) {
+                                    isDragging = false
+
+                                    // Check for collision using current position
+                                    val centerX =
+                                        currentPosition.x.value * density.density +
+                                            widget.size.value * density.density / 2
+                                    val centerY =
+                                        currentPosition.y.value * density.density +
+                                            widget.size.value * density.density / 2
+                                    val center =
+                                        androidx.compose.ui.geometry
+                                            .Offset(centerX, centerY)
+
+                                    val hasCollision =
+                                        widgetRegistry.checkCollision(
+                                            widget.id,
+                                            center,
+                                            radiusPx
+                                        ) != null
+
+                                    if (hasCollision) {
+                                        // Revert to start position
+                                        currentPosition = dragStartPosition ?: widget.position
+                                    } else {
+                                        // Update registry with new position
+                                        widgetRegistry.updateWidgetPosition(
+                                            widget.id,
+                                            currentPosition
+                                        )
+                                    }
+
+                                    onWidgetDragEnd(widget.id, currentPosition, hasCollision)
+                                    dragStartPosition = null
+                                }
+                            }
+                        )
+                    }
+                }.clickable(enabled = !isDragging) {
+                    if (editModeState.isEditMode) {
+                        onWidgetSelected(widget.id)
+                    } else {
+                        onWidgetAction(widget.id)
+                    }
                 }
-            }
-            .clickable(enabled = !isDragging) {
-                if (editModeState.isEditMode) {
-                    onWidgetSelected(widget.id)
-                } else {
-                    onWidgetAction(widget.id)
-                }
-            }
     ) {
         // Selection border
         if (isSelected) {
             Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .border(
-                        width = 3.dp,
-                        color = Color.Cyan,
-                        shape = CircleShape
-                    )
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .border(
+                            width = 3.dp,
+                            color = Color.Cyan,
+                            shape = CircleShape
+                        )
             )
         }
 
         // Hover glow effect - only show border, not shadow
         if (animatedGlow > 0f) {
             Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .border(
-                        width = (2 * animatedGlow).dp,
-                        color = Color.White.copy(alpha = animatedGlow * 0.5f),
-                        shape = CircleShape
-                    )
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .border(
+                            width = (2 * animatedGlow).dp,
+                            color = Color.White.copy(alpha = animatedGlow * 0.5f),
+                            shape = CircleShape
+                        )
             )
         }
 
@@ -1659,10 +1701,11 @@ fun ActionButtonContent(
         onClick = { /* Handled by OverlayWidget */ },
         modifier = modifier.clip(CircleShape),
         shape = CircleShape,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = actionButton.color,
-            contentColor = Color.White
-        ),
+        colors =
+            ButtonDefaults.buttonColors(
+                containerColor = actionButton.color,
+                contentColor = Color.White
+            ),
         elevation = ButtonDefaults.buttonElevation(0.dp, 0.dp, 0.dp, 0.dp, 0.dp)
     ) {
         Column(
@@ -1702,42 +1745,48 @@ fun WidgetAdjustmentControls(
 
     // Calculate position opposite to the selected widget
     val controlsHeight = 80.dp
-    val controlsY = if (selectedWidget.position.y > screenHeight / 2) {
-        // Widget is in bottom half, show controls at top
-        32.dp
-    } else {
-        // Widget is in top half, show controls at bottom
-        screenHeight - controlsHeight - 32.dp
-    }
+    val controlsY =
+        if (selectedWidget.position.y > screenHeight / 2) {
+            // Widget is in bottom half, show controls at top
+            32.dp
+        } else {
+            // Widget is in top half, show controls at bottom
+            screenHeight - controlsHeight - 32.dp
+        }
 
     Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(controlsHeight)
-            .offset(y = controlsY)
-            .padding(horizontal = 16.dp)
+        modifier =
+            modifier
+                .fillMaxWidth()
+                .height(controlsHeight)
+                .offset(y = controlsY)
+                .padding(horizontal = 16.dp)
     ) {
         Surface(
             modifier = Modifier.fillMaxSize(),
-            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+            shape =
+                androidx.compose.foundation.shape
+                    .RoundedCornerShape(12.dp),
             color = Color.Black.copy(alpha = 0.8f),
             border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.3f))
         ) {
             Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp),
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .padding(16.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Widget info
                 Column {
                     Text(
-                        text = when (currentWidget) {
-                            is ActionButtonDesc -> currentWidget.label
-                            is PuckDesc -> "Puck"
-                            else -> "Widget"
-                        },
+                        text =
+                            when (currentWidget) {
+                                is ActionButtonDesc -> currentWidget.label
+                                is PuckDesc -> "Puck"
+                                else -> "Widget"
+                            },
                         color = Color.White,
                         style = MaterialTheme.typography.titleMedium
                     )
@@ -1821,18 +1870,18 @@ fun MagicPuck(
     val isActive = isPressed || isDragging
 
     val animatedSizeFactor by
-    animateFloatAsState(
-        targetValue = if (isActive) 1f else 0.5f,
-        animationSpec = tween(durationMillis = 100), // Faster animation
-        label = "puckSizeFactor"
-    )
+        animateFloatAsState(
+            targetValue = if (isActive) 1f else 0.5f,
+            animationSpec = tween(durationMillis = 100), // Faster animation
+            label = "puckSizeFactor"
+        )
 
     val animatedAlpha by
-    animateFloatAsState(
-        targetValue = if (isActive) 0.9f else 0.7f,
-        animationSpec = tween(durationMillis = 100), // Faster animation
-        label = "puckAlpha"
-    )
+        animateFloatAsState(
+            targetValue = if (isActive) 0.9f else 0.7f,
+            animationSpec = tween(durationMillis = 100), // Faster animation
+            label = "puckAlpha"
+        )
 
     // Cache computed values
     val containerColor = remember(animatedAlpha) { Color.Blue.copy(alpha = animatedAlpha) }
@@ -1846,7 +1895,8 @@ fun MagicPuck(
                     onDragStart,
                     onDrag,
                     onDragEnd
-                ) { // Add dependencies to prevent recreation
+                ) {
+                    // Add dependencies to prevent recreation
                     detectDragGestures(
                         onDragStart = { offset ->
                             hasDragged = false
@@ -1863,8 +1913,7 @@ fun MagicPuck(
                             hasDragged = false
                         }
                     )
-                }
-                .background(Color.Transparent)
+                }.background(Color.Transparent)
     ) {
         Button(
             onClick = {

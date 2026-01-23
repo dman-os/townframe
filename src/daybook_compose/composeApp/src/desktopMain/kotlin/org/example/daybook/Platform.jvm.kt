@@ -10,9 +10,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.WindowState
 import java.awt.Toolkit
 
-class JVMPlatform: Platform {
+class JVMPlatform : Platform {
     override val name: String = "Java ${System.getProperty("java.version")}"
-    
+
     override fun getScreenWidthDp(): Dp {
         // Fallback to screen size
         val screenSize = Toolkit.getDefaultToolkit().screenSize
@@ -25,12 +25,8 @@ class JVMPlatform: Platform {
 }
 
 @Composable
-fun createReactiveJVMPlatform(windowState: WindowState): Platform {
-    return object : Platform {
-        override val name: String = "Java ${System.getProperty("java.version")}"
-        
-        override fun getScreenWidthDp(): Dp {
-            return windowState.size.width
-        }
-    }
+fun createReactiveJVMPlatform(windowState: WindowState): Platform = object : Platform {
+    override val name: String = "Java ${System.getProperty("java.version")}"
+
+    override fun getScreenWidthDp(): Dp = windowState.size.width
 }

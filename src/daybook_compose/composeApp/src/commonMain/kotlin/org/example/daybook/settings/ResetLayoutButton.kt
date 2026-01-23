@@ -15,12 +15,10 @@ import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.delay
 
 @Composable
-fun ResetLayoutButton(
-    onReset: () -> Unit
-) {
+fun ResetLayoutButton(onReset: () -> Unit) {
     var isConfirming by remember { mutableStateOf(false) }
     var isConfirmEnabled by remember { mutableStateOf(false) }
-    
+
     // Enable confirm button after 1 second delay
     LaunchedEffect(isConfirming) {
         if (isConfirming) {
@@ -29,7 +27,7 @@ fun ResetLayoutButton(
             isConfirmEnabled = true
         }
     }
-    
+
     Button(
         onClick = {
             if (!isConfirming) {
@@ -43,10 +41,23 @@ fun ResetLayoutButton(
             }
         },
         enabled = !isConfirming || isConfirmEnabled,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (isConfirming) Color(0xFFD32F2F) else ButtonDefaults.buttonColors().containerColor,
-            disabledContainerColor = if (isConfirming) Color(0xFFD32F2F) else ButtonDefaults.buttonColors().disabledContainerColor
-        )
+        colors =
+            ButtonDefaults.buttonColors(
+                containerColor = if (isConfirming) {
+                    Color(
+                        0xFFD32F2F
+                    )
+                } else {
+                    ButtonDefaults.buttonColors().containerColor
+                },
+                disabledContainerColor = if (isConfirming) {
+                    Color(
+                        0xFFD32F2F
+                    )
+                } else {
+                    ButtonDefaults.buttonColors().disabledContainerColor
+                }
+            )
     ) {
         Text(
             text = if (isConfirming) "Confirm" else "Reset"

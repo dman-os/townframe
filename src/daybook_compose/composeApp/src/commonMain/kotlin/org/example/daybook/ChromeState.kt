@@ -73,12 +73,12 @@ data class ChromeState(
  */
 class ChromeStateManager {
     private val _currentState = MutableStateFlow<ChromeState>(ChromeState.Empty)
-    
+
     /**
      * Reactive StateFlow for the current ChromeState
      */
     val currentState: StateFlow<ChromeState> = _currentState.asStateFlow()
-    
+
     /**
      * Set the current ChromeState directly
      */
@@ -90,9 +90,10 @@ class ChromeStateManager {
 /**
  * CompositionLocal for ChromeStateManager, allowing screens to set their chrome configuration
  */
-val LocalChromeStateManager = compositionLocalOf<ChromeStateManager> { 
-    error("no ChromeStateManager provided")
-}
+val LocalChromeStateManager =
+    compositionLocalOf<ChromeStateManager> {
+        error("no ChromeStateManager provided")
+    }
 
 /**
  * Helper composable for screens to set their ChromeState
@@ -100,23 +101,20 @@ val LocalChromeStateManager = compositionLocalOf<ChromeStateManager> {
  * No cleanup needed - the next route will replace this state
  */
 @Composable
-fun ProvideChromeState(
-    state: ChromeState,
-    content: @Composable () -> Unit
-) {
+fun ProvideChromeState(state: ChromeState, content: @Composable () -> Unit) {
     val manager = LocalChromeStateManager.current
-    
+
     // Set state immediately when composing and update when state changes
     // Use SideEffect to ensure this happens synchronously during composition
     androidx.compose.runtime.SideEffect {
         manager.setState(state)
     }
-    
+
     // Also update in LaunchedEffect to catch any missed updates
     LaunchedEffect(state) {
         manager.setState(state)
     }
-    
+
     content()
 }
 
@@ -127,7 +125,7 @@ fun ProvideChromeState(
 @Composable
 fun ChromeStateTopAppBar(chromeState: ChromeState) {
     if (!chromeState.showTopBar) return
-    
+
     TopAppBar(
         title = {
             if (chromeState.title != null) {

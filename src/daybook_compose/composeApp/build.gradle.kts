@@ -11,10 +11,17 @@ plugins {
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.composeHotReload)
+    alias(libs.plugins.dev.detekt)
     // alias(libs.plugins.gobleyCargo)
     // alias(libs.plugins.gobleyUniffi)
     // kotlin("plugin.atomicfu") version libs.versions.kotlin
     // alias(libs.plugins.kotlinAndroid)
+}
+
+detekt {
+    toolVersion = "2.0.0-alpha.1"
+    config.setFrom(file("../config/detekt/detekt.yml"))
+    buildUponDefaultConfig = true
 }
 
 // cargo {
@@ -39,7 +46,7 @@ kotlin {
             jvmTarget.set(JvmTarget.JVM_11)
         }
     }
-    
+
     /*listOf(
         iosX64(),
         iosArm64(),
@@ -50,9 +57,9 @@ kotlin {
             isStatic = true
         }
     }*/
-    
+
     jvm("desktop")
-    
+
     @OptIn(ExperimentalWasmDsl::class)
     /* wasmJs {
         outputModuleName.set("composeApp")
@@ -72,10 +79,10 @@ kotlin {
         }
         binaries.executable()
     } */
-    
+
     sourceSets {
         val desktopMain by getting
-        
+
         androidMain.dependencies {
             implementation(compose.preview)
             implementation(libs.androidx.activity.compose)
@@ -130,12 +137,21 @@ kotlin {
 
 android {
     namespace = "org.example.daybook"
-    compileSdk = libs.versions.android.compileSdk.get().toInt()
+    compileSdk =
+        libs.versions.android.compileSdk
+            .get()
+            .toInt()
 
     defaultConfig {
         applicationId = "org.example.daybook"
-        minSdk = libs.versions.android.minSdk.get().toInt()
-        targetSdk = libs.versions.android.targetSdk.get().toInt()
+        minSdk =
+            libs.versions.android.minSdk
+                .get()
+                .toInt()
+        targetSdk =
+            libs.versions.android.targetSdk
+                .get()
+                .toInt()
         versionCode = 1
         versionName = "1.0"
     }
@@ -164,6 +180,7 @@ android {
 dependencies {
     implementation(libs.calf.permissions)
     implementation(libs.androidx.lifecycle.service)
+    detektPlugins(libs.dev.detekt.rules.ktlint.wrapper)
     debugImplementation(compose.uiTooling)
 }
 
@@ -187,31 +204,40 @@ compose.desktop {
 }
 
 // Build the Rust core for Android ABIs and copy .so into jniLibs
-val rustAndroidTargets = mapOf(
-    "arm64-v8a" to "aarch64-linux-android",
-    "armeabi-v7a" to "armv7-linux-androideabi",
-    "x86_64" to "x86_64-linux-android",
-    "x86" to "i686-linux-android",
-)
+val rustAndroidTargets =
+    mapOf(
+        "arm64-v8a" to "aarch64-linux-android",
+        "armeabi-v7a" to "armv7-linux-androideabi",
+        "x86_64" to "x86_64-linux-android",
+        "x86" to "i686-linux-android",
+    )
 
 // Detect which ABI we're actually building for
-val targetAbi = when {
-    // Check if we're building for a specific ABI (from Android Studio or command line)
-    project.hasProperty("android.injected.build.abi") -> {
-        val abi = project.findProperty("android.injected.build.abi") as String
-        // Handle comma-separated ABIs by taking the first one
-        abi.split(",").first().trim()
+val targetAbi =
+    when {
+        // Check if we're building for a specific ABI (from Android Studio or command line)
+        project.hasProperty("android.injected.build.abi") -> {
+            val abi = project.findProperty("android.injected.build.abi") as String
+            // Handle comma-separated ABIs by taking the first one
+            abi.split(",").first().trim()
+        }
+
+        // Check if we're building for a specific device/emulator
+        project.hasProperty("android.injected.device.abi") -> {
+            val abi = project.findProperty("android.injected.device.abi") as String
+            abi.split(",").first().trim()
+        }
+
+        // Check if we're building for a specific target (from gradle properties)
+        project.hasProperty("target.abi") -> {
+            project.findProperty("target.abi") as String
+        }
+
+        // Default to arm64-v8a for modern devices
+        else -> {
+            "arm64-v8a"
+        }
     }
-    // Check if we're building for a specific device/emulator
-    project.hasProperty("android.injected.device.abi") -> {
-        val abi = project.findProperty("android.injected.device.abi") as String
-        abi.split(",").first().trim()
-    }
-    // Check if we're building for a specific target (from gradle properties)
-    project.hasProperty("target.abi") -> project.findProperty("target.abi") as String
-    // Default to arm64-v8a for modern devices
-    else -> "arm64-v8a"
-}
 
 val targetRustTriple = rustAndroidTargets[targetAbi] ?: "aarch64-linux-android"
 
