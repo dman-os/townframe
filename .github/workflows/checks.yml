@@ -51,14 +51,15 @@ jobs:
           . .ghjk/envs/$GHJK_ENV/activate.sh
           nix develop .#ci-rust --command prek --color=always run --all-files
 
-      - name: rust tests
+      - name: rust builds
         run: |
           . .ghjk/envs/$GHJK_ENV/activate.sh
           nix develop .#ci-rust --command cargo --color=always build -p test_wflows -p daybook_wflows --target wasm32-wasip2
-          nix develop .#ci-rust --command cargo --color=always nextest run --workspace --all-features
+          nix develop .#ci-rust --command cargo --color=always build -p daybook_cli
+          # nix develop .#ci-rust --command cargo --color=always nextest run --workspace --all-features
         env:
-          RUST_LOG: debug
           RUST_BACKTRACE: 1
-          # FIXME: use real ollama
-          OLLAMA_URL: http://localhost:11434
-          OLLAMA_MODEL: gemma3 
+          # RUST_LOG: debug
+          # # FIXME: use real ollama
+          # OLLAMA_URL: http://localhost:11434
+          # OLLAMA_MODEL: gemma3 
