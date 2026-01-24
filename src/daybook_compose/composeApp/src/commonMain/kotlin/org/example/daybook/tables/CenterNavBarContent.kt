@@ -1,4 +1,7 @@
-@file:OptIn(kotlin.uuid.ExperimentalUuidApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(
+    kotlin.uuid.ExperimentalUuidApi::class,
+    androidx.compose.material3.ExperimentalMaterial3Api::class
+)
 
 package org.example.daybook.tables
 
@@ -62,17 +65,18 @@ fun RowScope.CenterNavBarContent(
     onFeatureButtonLayout: (String, Rect) -> Unit,
     onAddTab: suspend () -> Unit,
     onFeatureActivate: suspend (FeatureItem) -> Unit,
-    modifier: Modifier = Modifier,
+    modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
-    
+
     // Get chrome state from manager
     val chromeStateManager = LocalChromeStateManager.current
     val chromeState by chromeStateManager.currentState.collectAsState()
     val mainFeatureActionButton = chromeState.mainFeatureActionButton
     val prominentButtons = chromeState.additionalFeatureButtons.filter { it.prominent }
-    val isMenuOpen = showFeaturesMenu || (revealSheetState.isVisible && sheetContent == SheetContent.MENU)
-    
+    val isMenuOpen =
+        showFeaturesMenu || (revealSheetState.isVisible && sheetContent == SheetContent.MENU)
+
     // When TABS sheet is open, show controls (add button). When closed, show nav bar features or chrome state button.
     if (revealSheetState.isVisible && sheetContent == SheetContent.TABS) {
         // Add-tab button expands to fill the center area
@@ -82,15 +86,16 @@ fun RowScope.CenterNavBarContent(
                     onAddTab()
                 }
             },
-            modifier = modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .onGloballyPositioned { layoutCoordinates ->
-                    val r = layoutCoordinates.boundsInWindow()
-                    if (r.width > 0f && r.height > 0f) {
-                        onAddButtonLayout(r)
-                    }
-                },
+            modifier =
+                modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .onGloballyPositioned { layoutCoordinates ->
+                        val r = layoutCoordinates.boundsInWindow()
+                        if (r.width > 0f && r.height > 0f) {
+                            onAddButtonLayout(r)
+                        }
+                    },
             colors = if (addTabReadyState.value) ButtonDefaults.filledTonalButtonColors() else ButtonDefaults.buttonColors()
         ) {
             if (addTabReadyState.value) Text("Release to Add") else Text("Add Tab")
@@ -100,22 +105,26 @@ fun RowScope.CenterNavBarContent(
         // 1. Menu is open (supplanting main feature action button if it exists), OR
         // 2. No main feature action button exists (show prominent buttons always)
         Row(
-            modifier = modifier
-                .weight(1f)
-                .padding(horizontal = 8.dp),
+            modifier =
+                modifier
+                    .weight(1f)
+                    .padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             prominentButtons.forEachIndexed { idx, button ->
                 // Get ready state for this prominent button
                 val prominentButtonKey = button.key
                 // Prominent buttons come after nav bar features in the ready states
-                val readyState = featureReadyStates.getOrNull(
-                    features.size + idx
-                )?.value ?: false
-                val hoverOver = lastDragWindowPos?.let { pw -> 
-                    featureButtonLayouts[prominentButtonKey]?.contains(pw) 
-                } ?: false
-                
+                val readyState =
+                    featureReadyStates
+                        .getOrNull(
+                            features.size + idx
+                        )?.value ?: false
+                val hoverOver =
+                    lastDragWindowPos?.let { pw ->
+                        featureButtonLayouts[prominentButtonKey]?.contains(pw)
+                    } ?: false
+
                 NavigationBarItem(
                     onClick = {
                         if (button.enabled) {
@@ -124,11 +133,15 @@ fun RowScope.CenterNavBarContent(
                             }
                         }
                     },
-                    modifier = Modifier
-                        .weight(1f)
-                        .onGloballyPositioned { layoutCoordinates ->
-                            onFeatureButtonLayout(button.key, layoutCoordinates.boundsInWindow())
-                        },
+                    modifier =
+                        Modifier
+                            .weight(1f)
+                            .onGloballyPositioned { layoutCoordinates ->
+                                onFeatureButtonLayout(
+                                    button.key,
+                                    layoutCoordinates.boundsInWindow()
+                                )
+                            },
                     icon = { button.icon() },
                     label = { button.label() },
                     selected = hoverOver || readyState,
@@ -159,9 +172,10 @@ fun RowScope.CenterNavBarContent(
     } else {
         // Show default nav bar features (Home, Capture, Documents) in the center
         Row(
-            modifier = modifier
-                .weight(1f)
-                .padding(horizontal = 8.dp),
+            modifier =
+                modifier
+                    .weight(1f)
+                    .padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             features.forEachIndexed { idx, feature ->
@@ -176,11 +190,15 @@ fun RowScope.CenterNavBarContent(
                             onFeatureActivate(feature)
                         }
                     },
-                    modifier = Modifier
-                        .weight(1f)
-                        .onGloballyPositioned { layoutCoordinates ->
-                            onFeatureButtonLayout(feature.key, layoutCoordinates.boundsInWindow())
-                        },
+                    modifier =
+                        Modifier
+                            .weight(1f)
+                            .onGloballyPositioned { layoutCoordinates ->
+                                onFeatureButtonLayout(
+                                    feature.key,
+                                    layoutCoordinates.boundsInWindow()
+                                )
+                            },
                     icon = {
                         Text(feature.icon, style = MaterialTheme.typography.bodyLarge)
                     },

@@ -481,9 +481,9 @@ impl HostPlugin for WasiKeyvalue {
         }
     }
 
-    async fn on_component_bind(
+    async fn on_workload_item_bind<'a>(
         &self,
-        component: &mut WorkloadComponent,
+        item: &mut wash_runtime::engine::workload::WorkloadItem<'a>,
         interfaces: std::collections::HashSet<wash_runtime::wit::WitInterface>,
     ) -> anyhow::Result<()> {
         // Check if any of the interfaces are wasi:keyvalue related
@@ -500,10 +500,10 @@ impl HostPlugin for WasiKeyvalue {
         }
 
         tracing::debug!(
-            workload_id = component.id(),
+            workload_id = item.id(),
             "Adding keyvalue interfaces to linker for workload"
         );
-        let linker = component.linker();
+        let linker = item.linker();
 
         bindings::wasi::keyvalue::store::add_to_linker::<_, HasSelf<SharedWashCtx>>(
             linker,
@@ -518,7 +518,7 @@ impl HostPlugin for WasiKeyvalue {
             |ctx| ctx,
         )?;
 
-        let id: Arc<str> = component.workload_id().into();
+        let id: Arc<str> = item.workload_id().into();
         tracing::debug!(
             workload_id = %id,
             "Successfully added keyvalue interfaces to linker for workload"

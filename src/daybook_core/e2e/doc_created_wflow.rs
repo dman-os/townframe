@@ -7,7 +7,6 @@ use daybook_types::doc::{
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_labeler_workflow() -> Res<()> {
-    utils_rs::testing::setup_tracing_once();
     let test_cx = crate::e2e::test_cx(utils_rs::function_full!()).await?;
 
     // Create and add a document to the drawer
@@ -88,7 +87,6 @@ async fn test_labeler_workflow() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_staging_branch_workflow() -> Res<()> {
-    utils_rs::testing::setup_tracing_once();
     let test_cx = crate::e2e::test_cx(utils_rs::function_full!()).await?;
 
     // Create and add a document to the drawer

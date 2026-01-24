@@ -14,7 +14,7 @@ import org.example.daybook.AppScreens
 @Composable
 fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> {
     val scope = rememberCoroutineScope()
-    
+
     return listOf(
         FeatureItem("nav_home", "H", "Home") {
             scope.launch {
@@ -35,7 +35,7 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> {
             scope.launch {
                 navController.navigate(AppScreens.Tables.name)
             }
-        },
+        }
     )
 }
 
@@ -46,7 +46,7 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> {
 @Composable
 fun rememberNavBarFeatures(navController: NavHostController): List<FeatureItem> {
     val allFeatures = rememberAllFeatures(navController)
-    
+
     // Return Home, Capture, Documents in that order
     return listOfNotNull(
         allFeatures.find { it.key == "nav_home" },
@@ -62,7 +62,7 @@ fun rememberNavBarFeatures(navController: NavHostController): List<FeatureItem> 
 @Composable
 fun rememberSidebarFeatures(navController: NavHostController): List<FeatureItem> {
     val allFeatures = rememberAllFeatures(navController)
-    
+
     // Return only Home and Documents
     return listOfNotNull(
         allFeatures.find { it.key == "nav_home" },
@@ -79,20 +79,21 @@ fun rememberSidebarFeatures(navController: NavHostController): List<FeatureItem>
 fun rememberMenuFeatures(navController: NavHostController): List<FeatureItem> {
     val scope = rememberCoroutineScope()
     val allFeatures = rememberAllFeatures(navController)
-    
+
     // Get the bottom bar features (Home, Capture, Documents)
     val bottomBarKeys = setOf("nav_home", "nav_capture", "nav_documents")
-    
+
     // Return all features except those in the bottom bar, plus Settings
     val otherFeatures = allFeatures.filter { it.key !in bottomBarKeys }
-    
-    return otherFeatures + listOf(
-        FeatureItem("nav_settings", "⚙️", "Settings") {
-            scope.launch {
-                navController.navigate(AppScreens.Settings.name)
+
+    return otherFeatures +
+        listOf(
+            FeatureItem("nav_settings", "⚙️", "Settings") {
+                scope.launch {
+                    navController.navigate(AppScreens.Settings.name)
+                }
             }
-        }
-    )
+        )
 }
 
 /**
@@ -101,6 +102,5 @@ fun rememberMenuFeatures(navController: NavHostController): List<FeatureItem> {
  */
 @Composable
 @Deprecated("Use rememberNavBarFeatures, rememberMenuFeatures, or rememberSidebarFeatures instead")
-fun rememberFeatures(navController: NavHostController): List<FeatureItem> {
-    return rememberAllFeatures(navController)
-}
+fun rememberFeatures(navController: NavHostController): List<FeatureItem> =
+    rememberAllFeatures(navController)

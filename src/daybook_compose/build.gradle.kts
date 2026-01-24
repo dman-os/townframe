@@ -10,8 +10,8 @@ plugins {
     alias(libs.plugins.kotlinAndroid) apply false
     alias(libs.plugins.gobleyCargo) apply false
     alias(libs.plugins.gobleyUniffi) apply false
-    kotlin("plugin.atomicfu") version libs.versions.kotlin apply false
-    id("com.github.ben-manes.versions") version "0.51.0"
+    // kotlin("plugin.atomicfu") version libs.versions.kotlin apply false
+    // id("com.github.ben-manes.versions") version "0.51.0"
 }
 
 tasks.register("printJavaHome") {
@@ -20,3 +20,9 @@ tasks.register("printJavaHome") {
         println("java.version = " + System.getProperty("java.version"))
     }
 }
+
+// tasks.register("detektAll") {
+//     allprojects {
+//         this@register.dependsOn(tasks.withType<Detekt>())
+//     }
+// }

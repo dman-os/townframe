@@ -24,6 +24,7 @@ gobley = "0.3.7"
 camerax = "1.5.1"
 coil = "3.0.4"
 webcam-capture = "0.3.12"
+detekt = "2.0.0-alpha.1"
 
 [libraries]
 calf-permissions = { module = "com.mohamedrejeb.calf:calf-permissions", version.ref = "calfPermissions" }
@@ -62,6 +63,7 @@ webcam-capture-vlcj = { module = "com.github.sarxos:webcam-capture-driver-vlcj",
 webcam-capture-fswebcam = { module = "com.github.sarxos:webcam-capture-driver-fswebcam", version.ref = "webcam-capture" }
 webcam-capture-lti-civil = { module = "com.github.sarxos:webcam-capture-driver-lti-civil", version.ref = "webcam-capture" }
 webcam-capture-jmf = { module = "com.github.sarxos:webcam-capture-driver-jmf", version.ref = "webcam-capture" }
+dev-detekt-rules-ktlint-wrapper = { module = "dev.detekt:detekt-rules-ktlint-wrapper", version.ref = "detekt" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }
@@ -73,3 +75,4 @@ kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref =
 kotlinAndroid = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 gobleyCargo = { id = "dev.gobley.cargo", version.ref = "gobley" }
 gobleyUniffi = { id = "dev.gobley.uniffi", version.ref = "gobley" }
+dev-detekt = { id = "dev.detekt", version.ref = "detekt" }

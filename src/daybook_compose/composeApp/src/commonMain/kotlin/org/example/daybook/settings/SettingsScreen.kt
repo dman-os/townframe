@@ -30,26 +30,25 @@ import org.example.daybook.LocalContainer
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(
-    modifier: Modifier = Modifier
-) {
+fun SettingsScreen(modifier: Modifier = Modifier) {
     val configRepo = LocalContainer.current.configRepo
     val configVm = viewModel { ConfigViewModel(configRepo) }
-    
+
     // TODO: Update to use new LayoutWindowConfig structure
     // Observe sidebar settings
     // val sidebarPosExpandedState = configVm.sidebarPosExpanded.collectAsState()
     // val sidebarPos = sidebarPosExpandedState.value ?: SidebarPosition.RIGHT
     val sidebarPos = "RIGHT" // Placeholder
-    
+
     // val sidebarAutoHideExpandedState = configVm.sidebarAutoHideExpanded.collectAsState()
     // val sidebarAutoHide = sidebarAutoHideExpandedState.value ?: false
     val sidebarAutoHide = false // Placeholder
-    
+
     Column(
-        modifier = modifier
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
+        modifier =
+            modifier
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp)
     ) {
         // Layout section
         Text(
@@ -62,8 +61,9 @@ fun SettingsScreen(
 
         // Combined sidebar position toggle for both medium and expanded
         Row(
-            modifier = Modifier
-                .padding(vertical = 8.dp),
+            modifier =
+                Modifier
+                    .padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
@@ -85,11 +85,12 @@ fun SettingsScreen(
                 style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
             )
         }
-        
+
         // Sidebar auto-hide toggle
         Row(
-            modifier = Modifier
-                .padding(vertical = 8.dp),
+            modifier =
+                Modifier
+                    .padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
@@ -110,11 +111,12 @@ fun SettingsScreen(
                 style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
             )
         }
-        
+
         // Reset layout settings button
         Row(
-            modifier = Modifier
-                .padding(vertical = 8.dp),
+            modifier =
+                Modifier
+                    .padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(

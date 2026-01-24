@@ -166,6 +166,10 @@
           ]);
         };
 
+        kotliLintTools = with pkgs; [
+          ktlint
+        ];
+
         # Android-specific build inputs
         androidBuildInputs = with pkgs; [
           androidSdkOnly.androidsdk
@@ -259,6 +263,7 @@
             desktopBuildInputs ++
             washBuildInputs ++
             devTools ++
+            kotliLintTools ++
             devOnlyInputs ++
             (with pkgs; [
               rustFull
@@ -308,4 +313,3 @@
       }
     );
 }
-

@@ -112,7 +112,7 @@ impl WflowTestContextBuilder {
 
         let partition_log = wflow_tokio::partition::PartitionLogRef::new(Arc::clone(&logstore));
         let ingress = Arc::new(crate::ingress::PartitionLogIngress::new(
-            Arc::clone(&partition_log),
+            partition_log.clone(),
             Arc::clone(&metastore),
         ));
 
@@ -129,9 +129,9 @@ impl WflowTestContextBuilder {
         let runtime_config_plugin = plugin::wasi_config::DynamicConfig::default();
 
         self.plugins.extend_from_slice(&[
-            Arc::clone(&wflow_plugin),
+            Arc::clone(&wflow_plugin) as _,
             Arc::new(runtime_config_plugin),
-            Arc::clone(&keyvalue_plugin),
+            Arc::clone(&keyvalue_plugin) as _,
         ]);
 
         let host = crate::build_wash_host(self.plugins).await?;

@@ -52,7 +52,7 @@ impl PartitionCtx {
     }
 
     pub fn log_ref(&self) -> PartitionLogRef {
-        PartitionLogRef::new(self.log.clone())
+        PartitionLogRef::new(Arc::clone(&self.log))
     }
 }
 
@@ -65,7 +65,7 @@ impl Clone for PartitionLogRef {
     fn clone(&self) -> Self {
         Self {
             buffer: default(),
-            log: self.log.clone(),
+            log: Arc::clone(&self.log),
         }
     }
 }
@@ -144,14 +144,14 @@ pub async fn start_tokio_worker(
         effect_workers.push(effect_worker::start_tokio_effect_worker(
             ii,
             pcx.clone(),
-            working_state.clone(),
+            Arc::clone(&working_state),
             effect_rx.clone(),
             cancel_token.child_token(),
         ));
     }
     let part_reducer = reducer::start_tokio_partition_reducer(
         pcx.clone(),
-        working_state.clone(),
+        Arc::clone(&working_state),
         effect_tx,
         cancel_token.child_token(),
         snap_store,

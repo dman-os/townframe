@@ -15,9 +15,9 @@ pub fn reduce_job_init_event(
     }
 
     state.active.insert(
-        event.job_id.clone(),
+        Arc::clone(&event.job_id),
         state::JobState {
-            init_args_json: event.args_json.clone(),
+            init_args_json: Arc::clone(&event.args_json),
             override_wflow_retry_policy: event.override_wflow_retry_policy,
             wflow: event.wflow,
             runs: default(),
@@ -42,7 +42,7 @@ pub fn reduce_job_run_event(
     //     job_id: Arc::clone(&event.job_id),
     //     effect_commands,
     // };
-    let job_id = event.job_id.clone();
+    let job_id = Arc::clone(&event.job_id);
     let Some(state::JobState {
         ref mut runs,
         ref mut steps,
@@ -51,7 +51,7 @@ pub fn reduce_job_run_event(
     }) = get_job_state(state, &job_id)
     else {
         return effects.push(PartitionEffect {
-            job_id: job_id.clone(),
+            job_id: Arc::clone(&job_id),
             deets: effects::PartitionEffectDeets::AbortJob {
                 reason: "event for unrecognized job".into(),
             },
@@ -125,7 +125,7 @@ pub fn reduce_job_run_event(
 
 fn archive_job(state: &mut state::PartitionJobsState, job_id: &Arc<str>) {
     let job_state = state.active.remove(job_id).unwrap();
-    state.archive.insert(job_id.clone(), job_state);
+    state.archive.insert(Arc::clone(job_id), job_state);
 }
 
 fn get_job_state<'a>(

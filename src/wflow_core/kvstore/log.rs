@@ -84,7 +84,7 @@ impl LogStore for KvStoreLog {
     // - Use a CAS to fix it
     fn tail(&'_ self, offset: u64) -> BoxStream<'_, Res<TailLogEntry>> {
         futures::stream::unfold(offset, |offset| {
-            let kv_store = self.kv_store.clone();
+            let kv_store = Arc::clone(&self.kv_store);
             let mut latest_id_rx = self.local_commited_idx_rx.clone();
             async move {
                 let key = offset.to_le_bytes();

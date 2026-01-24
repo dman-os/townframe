@@ -1,0 +1,65 @@
+name: checks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GHJK_ENV: ci
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: remove unused files
+        # based on https://dev.to/mathio/squeezing-disk-space-from-github-actions-runners-an-engineers-guide-3pjg
+        run: |
+          sudo rm -rf /usr/lib/jvm
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/local/julia*
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /opt/microsoft /opt/google
+          sudo rm -rf /opt/az
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /opt/hostedtoolcache
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - uses: metatypedev/setup-ghjk@b4ab7287a841fd5f8a4117f3efc14131c7ec62e1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: pre-commit hooks
+        run: |
+          . .ghjk/envs/$GHJK_ENV/activate.sh
+          nix develop .#ci-rust --command prek --color=always run --all-files
+
+      - name: rust builds
+        run: |
+          . .ghjk/envs/$GHJK_ENV/activate.sh
+          nix develop .#ci-rust --command cargo --color=always build -p test_wflows -p daybook_wflows --target wasm32-wasip2
+          nix develop .#ci-rust --command cargo --color=always build -p daybook_cli
+          # nix develop .#ci-rust --command cargo --color=always nextest run --workspace --all-features
+        env:
+          RUST_BACKTRACE: 1
+          # RUST_LOG: debug
+          # # FIXME: use real ollama
+          # OLLAMA_URL: http://localhost:11434
+          # OLLAMA_MODEL: gemma3 

@@ -2,15 +2,6 @@
 
 package org.example.daybook.capture.screens
 
-import org.example.daybook.uniffi.types.Doc
-import org.example.daybook.uniffi.types.DocContent
-import org.example.daybook.uniffi.types.DocPropKey
-import org.example.daybook.uniffi.types.DocPropTag
-import org.example.daybook.uniffi.types.DocPatch
-import org.example.daybook.uniffi.types.WellKnownPropTag
-import org.example.daybook.uniffi.types.AddDocArgs
-import org.example.daybook.uniffi.core.UpdateDocArgs
-
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
@@ -25,6 +16,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlin.time.Clock
+import kotlin.uuid.Uuid
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -36,18 +29,26 @@ import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
 import org.example.daybook.capture.DaybookCameraPreview
 import org.example.daybook.capture.LocalCameraCaptureContext
+import org.example.daybook.ui.DocEditor
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.*
-import kotlin.time.Clock
-import kotlin.uuid.Uuid
-import org.example.daybook.ui.DocEditor
+import org.example.daybook.uniffi.core.UpdateDocArgs
+import org.example.daybook.uniffi.types.AddDocArgs
+import org.example.daybook.uniffi.types.Doc
+import org.example.daybook.uniffi.types.DocContent
+import org.example.daybook.uniffi.types.DocPatch
+import org.example.daybook.uniffi.types.DocPropKey
+import org.example.daybook.uniffi.types.DocPropTag
+import org.example.daybook.uniffi.types.WellKnownPropTag
 
 sealed interface DocsListState {
     data class Data(val docs: List<Doc>) : DocsListState
+
     data class Error(val error: FfiException) : DocsListState
+
     object Loading : DocsListState
 }
 
@@ -83,12 +84,13 @@ class CaptureScreenViewModel(
             val state = tablesVm.tablesState.value
             val selectedTableId = tablesVm.selectedTableId.value
             if (state is TablesState.Data && selectedTableId != null) {
-                val windowId = state.tables[selectedTableId]?.window?.let { windowPolicy ->
-                    when (windowPolicy) {
-                        is TableWindow.Specific -> windowPolicy.id
-                        is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                val windowId =
+                    state.tables[selectedTableId]?.window?.let { windowPolicy ->
+                        when (windowPolicy) {
+                            is TableWindow.Specific -> windowPolicy.id
+                            is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                        }
                     }
-                }
                 windowId?.let { id ->
                     state.windows[id]?.let { window ->
                         tablesRepo.setWindow(id, window.copy(lastCaptureMode = mode))
@@ -102,17 +104,23 @@ class CaptureScreenViewModel(
         viewModelScope.launch {
             try {
                 val hashStr = blobsRepo.put(bytes)
-                
+
                 // Create AddDocArgs
-                val args = AddDocArgs(
-                    branchPath = "main",
-                    props = mapOf(
-                        DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)) to "{\"blob\":{\"length_octets\":${bytes.size},\"hash\":\"$hashStr\"}}",
-                        DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.IMAGE_METADATA)) to "{\"mime\":\"image/jpeg\",\"width_px\":0,\"height_px\":0}"
-                    ),
-                    userPath = null
-                )
-                
+                val args =
+                    AddDocArgs(
+                        branchPath = "main",
+                        props =
+                            mapOf(
+                                DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)) to
+                                    "{\"blob\":{\"length_octets\":${bytes.size},\"hash\":\"$hashStr\"}}",
+                                DocPropKey.Tag(
+                                    DocPropTag.WellKnown(WellKnownPropTag.IMAGE_METADATA)
+                                ) to
+                                    "{\"mime\":\"image/jpeg\",\"width_px\":0,\"height_px\":0}"
+                            ),
+                        userPath = null
+                    )
+
                 drawerRepo.add(args)
                 _message.value = "Photo saved successfully"
             } catch (e: FfiException) {
@@ -133,13 +141,16 @@ class CaptureScreenViewModel(
                 if (isCreatingDoc) return@launch
                 isCreatingDoc = true
                 // Create new doc
-                val args = AddDocArgs(
-                    branchPath = "main",
-                    props = mapOf(
-                        DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)) to "\"$content\""
-                    ),
-                    userPath = null
-                )
+                val args =
+                    AddDocArgs(
+                        branchPath = "main",
+                        props =
+                            mapOf(
+                                DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)) to
+                                    "\"$content\""
+                            ),
+                        userPath = null
+                    )
                 val returnedId = drawerRepo.add(args)
                 _currentDocId.value = returnedId
                 // We'll let the listener refresh the current doc
@@ -147,15 +158,20 @@ class CaptureScreenViewModel(
                 // Update existing doc
                 val current = _currentDoc.value
                 if (current != null) {
-                    val patch = DocPatch(
-                        id = docId,
-                        propsSet = mapOf(
-                            DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)) to "\"$content\""
-                        ),
-                        propsRemove = emptyList(),
-                        userPath = null
-                    )
-                    
+                    val patch =
+                        DocPatch(
+                            id = docId,
+                            propsSet =
+                                mapOf(
+                                    DocPropKey.Tag(
+                                        DocPropTag.WellKnown(WellKnownPropTag.CONTENT)
+                                    ) to
+                                        "\"$content\""
+                                ),
+                            propsRemove = emptyList(),
+                            userPath = null
+                        )
+
                     drawerRepo.updateBatch(listOf(UpdateDocArgs("main", null, patch)))
                 }
             }
@@ -177,22 +193,30 @@ class CaptureScreenViewModel(
     private var listenerRegistration: ListenerRegistration? = null
 
     // Listener instance implemented on Kotlin side
-    private val listener = object : DrawerEventListener {
-        override fun onDrawerEvent(event: DrawerEvent) {
-            viewModelScope.launch {
-                when (event) {
-                    is DrawerEvent.ListChanged -> refreshDocs()
-                    is DrawerEvent.DocAdded -> refreshDocs()
-                    is DrawerEvent.DocUpdated -> {
-                        if (event.id == _currentDocId.value) {
-                            loadDoc(event.id)
+    private val listener =
+        object : DrawerEventListener {
+            override fun onDrawerEvent(event: DrawerEvent) {
+                viewModelScope.launch {
+                    when (event) {
+                        is DrawerEvent.ListChanged -> {
+                            refreshDocs()
                         }
+
+                        is DrawerEvent.DocAdded -> {
+                            refreshDocs()
+                        }
+
+                        is DrawerEvent.DocUpdated -> {
+                            if (event.id == _currentDocId.value) {
+                                loadDoc(event.id)
+                            }
+                        }
+
+                        else -> {}
                     }
-                    else -> {}
                 }
             }
         }
-    }
 
     init {
         loadLatestDocs()
@@ -202,18 +226,19 @@ class CaptureScreenViewModel(
         viewModelScope.launch {
             listenerRegistration = drawerRepo.ffiRegisterListener(listener)
         }
-        
+
         // Initialize mode from current window
         viewModelScope.launch {
             tablesVm.tablesState.collect { state ->
                 if (state is TablesState.Data) {
                     val selectedTableId = tablesVm.selectedTableId.value
-                    val windowId = state.tables[selectedTableId]?.window?.let { windowPolicy ->
-                        when (windowPolicy) {
-                            is TableWindow.Specific -> windowPolicy.id
-                            is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                    val windowId =
+                        state.tables[selectedTableId]?.window?.let { windowPolicy ->
+                            when (windowPolicy) {
+                                is TableWindow.Specific -> windowPolicy.id
+                                is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                            }
                         }
-                    }
                     windowId?.let { id ->
                         state.windows[id]?.let { window ->
                             _captureMode.value = window.lastCaptureMode
@@ -228,13 +253,14 @@ class CaptureScreenViewModel(
         _docsList.value = DocsListState.Loading
         try {
             val branches = drawerRepo.list()
-            val docs = branches.mapNotNull { b ->
-                try {
-                    drawerRepo.get(b.docId, "main")
-                } catch (e: FfiException) {
-                    null
+            val docs =
+                branches.mapNotNull { b ->
+                    try {
+                        drawerRepo.get(b.docId, "main")
+                    } catch (e: FfiException) {
+                        null
+                    }
                 }
-            }
             _docsList.value = DocsListState.Data(docs)
         } catch (err: FfiException) {
             _docsList.value = DocsListState.Error(err)
@@ -253,38 +279,37 @@ class CaptureScreenViewModel(
     }
 }
 
-
 @Composable
-fun CaptureScreen(
-    modifier: Modifier = Modifier,
-    initialDocId: String? = null
-) {
+fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
     val container = LocalContainer.current
     val tablesVm = viewModel { TablesViewModel(container.tablesRepo) }
-    val vm = viewModel {
-        CaptureScreenViewModel(
-            drawerRepo = container.drawerRepo,
-            tablesRepo = container.tablesRepo,
-            blobsRepo = container.blobsRepo,
-            tablesVm = tablesVm,
-            initialDocId = initialDocId
-        )
-    }
+    val vm =
+        viewModel {
+            CaptureScreenViewModel(
+                drawerRepo = container.drawerRepo,
+                tablesRepo = container.tablesRepo,
+                blobsRepo = container.blobsRepo,
+                tablesVm = tablesVm,
+                initialDocId = initialDocId
+            )
+        }
 
     val captureMode by vm.captureMode.collectAsState()
     val currentDoc by vm.currentDoc.collectAsState()
-    
+
     val captureContext = LocalCameraCaptureContext.current
-    val canCapture = if (captureContext != null && captureMode == CaptureMode.CAMERA) {
-        captureContext.canCapture.collectAsState().value
-    } else {
-        false
-    }
-    val isCapturing = if (captureContext != null && captureMode == CaptureMode.CAMERA) {
-        captureContext.isCapturing.collectAsState().value
-    } else {
-        false
-    }
+    val canCapture =
+        if (captureContext != null && captureMode == CaptureMode.CAMERA) {
+            captureContext.canCapture.collectAsState().value
+        } else {
+            false
+        }
+    val isCapturing =
+        if (captureContext != null && captureMode == CaptureMode.CAMERA) {
+            captureContext.isCapturing.collectAsState().value
+        } else {
+            false
+        }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val message by vm.message.collectAsState()
@@ -295,22 +320,24 @@ fun CaptureScreen(
             vm.clearMessage()
         }
     }
-    
-    val chromeState = remember(captureMode, canCapture, isCapturing) {
-        if (captureMode == CaptureMode.CAMERA && captureContext != null) {
-            val ctx = captureContext
-            ChromeState(
-                mainFeatureActionButton = MainFeatureActionButton.Button(
-                    icon = { Text("📷") },
-                    label = { Text(if (isCapturing) "Capturing..." else "Save Photo") },
-                    enabled = canCapture && !isCapturing,
-                    onClick = { ctx.requestCapture() }
+
+    val chromeState =
+        remember(captureMode, canCapture, isCapturing) {
+            if (captureMode == CaptureMode.CAMERA && captureContext != null) {
+                val ctx = captureContext
+                ChromeState(
+                    mainFeatureActionButton =
+                        MainFeatureActionButton.Button(
+                            icon = { Text("📷") },
+                            label = { Text(if (isCapturing) "Capturing..." else "Save Photo") },
+                            enabled = canCapture && !isCapturing,
+                            onClick = { ctx.requestCapture() }
+                        )
                 )
-            )
-        } else {
-            ChromeState.Empty
+            } else {
+                ChromeState.Empty
+            }
         }
-    }
 
     ProvideChromeState(chromeState) {
         Box(modifier = modifier.fillMaxSize()) {
@@ -323,6 +350,7 @@ fun CaptureScreen(
                         onCaptureRequested = {}
                     )
                 }
+
                 CaptureMode.TEXT -> {
                     DocEditor(
                         doc = currentDoc,
@@ -330,11 +358,15 @@ fun CaptureScreen(
                         modifier = Modifier.padding(16.dp)
                     )
                 }
+
                 CaptureMode.MIC -> {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("🎤", style = MaterialTheme.typography.displayLarge)
-                            Text("Mic mode placeholder", style = MaterialTheme.typography.headlineMedium)
+                            Text(
+                                "Mic mode placeholder",
+                                style = MaterialTheme.typography.headlineMedium
+                            )
                         }
                     }
                 }
@@ -342,9 +374,10 @@ fun CaptureScreen(
 
             // Floating Action Buttons for mode switching
             Column(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(16.dp),
+                modifier =
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 ModeFab(
@@ -373,11 +406,7 @@ fun CaptureScreen(
 }
 
 @Composable
-fun ModeFab(
-    icon: ImageVector,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
+fun ModeFab(icon: ImageVector, selected: Boolean, onClick: () -> Unit) {
     FloatingActionButton(
         onClick = onClick,
         containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer,

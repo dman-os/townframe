@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -64,10 +63,13 @@ fun TabSelectionList(
         }
     }
 
-    val tabsForSelectedTable = if (selectedTableId != null && tablesState is TablesState.Data) {
-        val selectedTable = tablesState.tables[selectedTableId]
-        selectedTable?.tabs?.mapNotNull { tabId -> tablesState.tabs[tabId] } ?: emptyList()
-    } else emptyList()
+    val tabsForSelectedTable =
+        if (selectedTableId != null && tablesState is TablesState.Data) {
+            val selectedTable = tablesState.tables[selectedTableId]
+            selectedTable?.tabs?.mapNotNull { tabId -> tablesState.tabs[tabId] } ?: emptyList()
+        } else {
+            emptyList()
+        }
 
     val scrollState = rememberScrollState()
     // Start at bottom (max scroll) if growing upward
@@ -76,50 +78,57 @@ fun TabSelectionList(
             scrollState.scrollTo(scrollState.maxValue)
         }
     }
-    
+
     // Nested scroll connection to prevent scroll propagation to parent sheet
     // Don't consume in onPreScroll when we can scroll - let child handle it
     // Then consume in onPostScroll any remaining scroll to prevent parent from getting it
-    val tabListNestedScroll = remember(scrollState) {
-        object : NestedScrollConnection {
-            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                // Don't consume here - let the child's verticalScroll handle it first
-                return Offset.Zero
-            }
-            
-            override fun onPostScroll(
-                consumed: Offset,
-                available: Offset,
-                source: NestedScrollSource
-            ): Offset {
-                val dy = available.y
-                if (dy == 0f) return Offset.Zero
-                
-                // Check if we can still scroll in the requested direction
-                val canScrollUp = scrollState.value > 0
-                val canScrollDown = scrollState.value < scrollState.maxValue
-                
-                // If we can scroll, consume remaining scroll to prevent parent from getting it
-                return when {
-                    dy > 0 && canScrollUp -> Offset(0f, dy) // Scrolling up, can scroll - consume
-                    dy < 0 && canScrollDown -> Offset(0f, dy) // Scrolling down, can scroll - consume
-                    else -> Offset.Zero // Can't scroll, let parent handle it
+    val tabListNestedScroll =
+        remember(scrollState) {
+            object : NestedScrollConnection {
+                override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                    // Don't consume here - let the child's verticalScroll handle it first
+                    return Offset.Zero
+                }
+
+                override fun onPostScroll(
+                    consumed: Offset,
+                    available: Offset,
+                    source: NestedScrollSource
+                ): Offset {
+                    val dy = available.y
+                    if (dy == 0f) return Offset.Zero
+
+                    // Check if we can still scroll in the requested direction
+                    val canScrollUp = scrollState.value > 0
+                    val canScrollDown = scrollState.value < scrollState.maxValue
+
+                    // If we can scroll, consume remaining scroll to prevent parent from getting it
+                    return when {
+                        dy > 0 && canScrollUp -> Offset(0f, dy)
+
+                        // Scrolling up, can scroll - consume
+                        dy < 0 && canScrollDown -> Offset(0f, dy)
+
+                        // Scrolling down, can scroll - consume
+                        else -> Offset.Zero // Can't scroll, let parent handle it
+                    }
                 }
             }
         }
-    }
 
     // Fill available height and render tabs
     Column(
-        modifier = modifier
-            .fillMaxHeight()
-            .nestedScroll(tabListNestedScroll)
-            .verticalScroll(scrollState),
-        verticalArrangement = if (growUpward) {
-            Arrangement.spacedBy(4.dp, Alignment.Bottom)
-        } else {
-            Arrangement.spacedBy(4.dp)
-        }
+        modifier =
+            modifier
+                .fillMaxHeight()
+                .nestedScroll(tabListNestedScroll)
+                .verticalScroll(scrollState),
+        verticalArrangement =
+            if (growUpward) {
+                Arrangement.spacedBy(4.dp, Alignment.Bottom)
+            } else {
+                Arrangement.spacedBy(4.dp)
+            }
     ) {
         if (tabsForSelectedTable.isEmpty()) {
             Text("No tabs in this table.", modifier = Modifier.padding(16.dp))
@@ -137,24 +146,26 @@ fun TabSelectionList(
                     onClick = { onTabSelected(tab) },
                     icon = { Text("📄") },
                     label = { Text(tab.title) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .then(
-                            if (onItemLayout != null) {
-                                Modifier.onGloballyPositioned { 
-                                    onItemLayout(tab.id, it.boundsInWindow()) 
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .then(
+                                if (onItemLayout != null) {
+                                    Modifier.onGloballyPositioned {
+                                        onItemLayout(tab.id, it.boundsInWindow())
+                                    }
+                                } else {
+                                    Modifier
                                 }
-                            } else {
-                                Modifier
-                            }
-                        )
-                        .combinedClickable(
-                            onClick = { onTabSelected(tab) },
-                            onLongClick = { menuExpandedState.value = true }
-                        ),
+                            ).combinedClickable(
+                                onClick = { onTabSelected(tab) },
+                                onLongClick = { menuExpandedState.value = true }
+                            ),
                     badge = {
                         // place close action in the badge area
-                        IconButton(onClick = { vm.viewModelScope.launch { vm.removeTab(tab.id) } }) {
+                        IconButton(onClick = {
+                            vm.viewModelScope.launch { vm.removeTab(tab.id) }
+                        }) {
                             Text("✕")
                         }
                     }

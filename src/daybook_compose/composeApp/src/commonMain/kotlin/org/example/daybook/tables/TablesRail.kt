@@ -12,18 +12,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.IconButton
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -56,7 +56,7 @@ fun TablesRail(
     highlightedTable: Uuid? = null,
     onAddTableLayout: ((androidx.compose.ui.geometry.Rect) -> Unit)? = null,
     addTableReadyState: androidx.compose.runtime.State<Boolean>? = null,
-    onToggleTableRail: (() -> Unit)? = null,
+    onToggleTableRail: (() -> Unit)? = null
 ) {
     val tablesRepo = LocalContainer.current.tablesRepo
     val vm = viewModel { TablesViewModel(tablesRepo) }
@@ -70,20 +70,22 @@ fun TablesRail(
                     vm.createNewTable()
                 }
             },
-            modifier = Modifier
-                .size(48.dp)
-                .then(
-                    if (onAddTableLayout != null) {
-                        Modifier.onGloballyPositioned { onAddTableLayout(it.boundsInWindow()) }
-                    } else {
-                        Modifier
-                    }
-                ),
-            containerColor = if (addTableReadyState?.value == true) {
-                MaterialTheme.colorScheme.secondary
-            } else {
-                MaterialTheme.colorScheme.primary
-            }
+            modifier =
+                Modifier
+                    .size(48.dp)
+                    .then(
+                        if (onAddTableLayout != null) {
+                            Modifier.onGloballyPositioned { onAddTableLayout(it.boundsInWindow()) }
+                        } else {
+                            Modifier
+                        }
+                    ),
+            containerColor =
+                if (addTableReadyState?.value == true) {
+                    MaterialTheme.colorScheme.secondary
+                } else {
+                    MaterialTheme.colorScheme.primary
+                }
         ) {
             Text(if (addTableReadyState?.value == true) "✓" else "+")
         }
@@ -97,63 +99,76 @@ fun TablesRail(
                     scrollState.scrollTo(scrollState.maxValue)
                 }
             }
-            
+
             // Nested scroll connection to prevent scroll propagation to parent sheet
             // Don't consume in onPreScroll when we can scroll - let child handle it
             // Then consume in onPostScroll any remaining scroll to prevent parent from getting it
-            val railNestedScroll = remember(scrollState) {
-                object : NestedScrollConnection {
-                    override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                        // Don't consume here - let the child's verticalScroll handle it first
-                        return Offset.Zero
-                    }
-                    
-                    override fun onPostScroll(
-                        consumed: Offset,
-                        available: Offset,
-                        source: NestedScrollSource
-                    ): Offset {
-                        val dy = available.y
-                        if (dy == 0f) return Offset.Zero
-                        
-                        // Check if we can still scroll in the requested direction
-                        val canScrollUp = scrollState.value > 0
-                        val canScrollDown = scrollState.value < scrollState.maxValue
-                        
-                        // If we can scroll, consume remaining scroll to prevent parent from getting it
-                        return when {
-                            dy > 0 && canScrollUp -> Offset(0f, dy) // Scrolling up, can scroll - consume
-                            dy < 0 && canScrollDown -> Offset(0f, dy) // Scrolling down, can scroll - consume
-                            else -> Offset.Zero // Can't scroll, let parent handle it
+            val railNestedScroll =
+                remember(scrollState) {
+                    object : NestedScrollConnection {
+                        override fun onPreScroll(
+                            available: Offset,
+                            source: NestedScrollSource
+                        ): Offset {
+                            // Don't consume here - let the child's verticalScroll handle it first
+                            return Offset.Zero
+                        }
+
+                        override fun onPostScroll(
+                            consumed: Offset,
+                            available: Offset,
+                            source: NestedScrollSource
+                        ): Offset {
+                            val dy = available.y
+                            if (dy == 0f) return Offset.Zero
+
+                            // Check if we can still scroll in the requested direction
+                            val canScrollUp = scrollState.value > 0
+                            val canScrollDown = scrollState.value < scrollState.maxValue
+
+                            // If we can scroll, consume remaining scroll to prevent parent from getting it
+                            return when {
+                                dy > 0 && canScrollUp -> Offset(0f, dy)
+
+                                // Scrolling up, can scroll - consume
+                                dy < 0 && canScrollDown -> Offset(0f, dy)
+
+                                // Scrolling down, can scroll - consume
+                                else -> Offset.Zero // Can't scroll, let parent handle it
+                            }
                         }
                     }
                 }
-            }
             Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .nestedScroll(railNestedScroll)
-                    .verticalScroll(scrollState),
-                verticalArrangement = if (growUpward) {
-                    androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp, Alignment.Bottom)
-                } else {
-                    androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp)
-                }
+                modifier =
+                    Modifier
+                        .weight(1f)
+                        .nestedScroll(railNestedScroll)
+                        .verticalScroll(scrollState),
+                verticalArrangement =
+                    if (growUpward) {
+                        androidx.compose.foundation.layout.Arrangement
+                            .spacedBy(4.dp, Alignment.Bottom)
+                    } else {
+                        androidx.compose.foundation.layout.Arrangement
+                            .spacedBy(4.dp)
+                    }
             ) {
                 // Render in normal order - if growUpward, items appear from bottom due to Arrangement.Bottom
                 // Otherwise, items appear from top (normal behavior)
                 tablesState.tablesList.forEach { table ->
                     val tabCount = table.tabs.size ?: 0
                     NavigationRailItem(
-                        modifier = Modifier.then(
-                            if (onTableLayout != null) {
-                                Modifier.onGloballyPositioned {
-                                    onTableLayout(table.id, it.boundsInWindow())
+                        modifier =
+                            Modifier.then(
+                                if (onTableLayout != null) {
+                                    Modifier.onGloballyPositioned {
+                                        onTableLayout(table.id, it.boundsInWindow())
+                                    }
+                                } else {
+                                    Modifier
                                 }
-                            } else {
-                                Modifier
-                            }
-                        ),
+                            ),
                         selected = (selectedTableId == table.id) || (highlightedTable == table.id),
                         onClick = { onTableSelected(table) },
                         icon = {
@@ -172,9 +187,12 @@ fun TablesRail(
                                 )
                             }
                         },
-                        label = if (showTitles) {
-                            { Text(table.title) }
-                        } else null
+                        label =
+                            if (showTitles) {
+                                { Text(table.title) }
+                            } else {
+                                null
+                            }
                     )
                 }
             }
@@ -182,13 +200,14 @@ fun TablesRail(
             Spacer(Modifier.weight(1f))
             CircularProgressIndicator(modifier = Modifier.size(24.dp))
         }
-        
-        // Bottom row with toggle button 
+
+        // Bottom row with toggle button
         if (onToggleTableRail != null) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
                 horizontalArrangement = Arrangement.Start
             ) {
                 IconButton(onClick = onToggleTableRail) {

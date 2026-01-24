@@ -3,13 +3,14 @@ use crate::interlude::*;
 // Ensure that the `tracing` stack is only initialised once using `once_cell`
 // isn't required in cargo-nextest since each test runs in a new process
 pub fn setup_tracing_once() {
+    // FIXME: this doesn't seem to fucking work??
     static TRACING: std::sync::Once = std::sync::Once::new();
     TRACING.call_once(|| {
         setup_tracing().expect("setup tracing error");
     });
 }
 
-pub fn setup_tracing() -> Res<()> {
+fn setup_tracing() -> Res<()> {
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
         // if std::env::var("RUST_BACKTRACE_TEST").is_err() {

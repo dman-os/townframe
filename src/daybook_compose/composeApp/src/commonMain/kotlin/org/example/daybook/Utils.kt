@@ -45,11 +45,12 @@ fun <T> dbg(value: T, vararg context: Any?): T {
 //        "[unknown location]"
 //    }
 
-    val contextString = if (context.isNotEmpty()) {
-        " | ${context.joinToString { it?.toString() ?: "null" }}"
-    } else {
-        ""
-    }
+    val contextString =
+        if (context.isNotEmpty()) {
+            " | ${context.joinToString { it?.toString() ?: "null" }}"
+        } else {
+            ""
+        }
 
     val message = "${value?.toString() ?: "null"} $contextString"
 

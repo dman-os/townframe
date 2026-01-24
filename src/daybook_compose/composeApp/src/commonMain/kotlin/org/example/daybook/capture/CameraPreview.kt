@@ -13,5 +13,5 @@ import androidx.compose.ui.Modifier
 expect fun DaybookCameraPreview(
     modifier: Modifier = Modifier,
     onImageSaved: ((ByteArray) -> Unit)? = null,
-    onCaptureRequested: (() -> Unit)? = null,
+    onCaptureRequested: (() -> Unit)? = null
 )

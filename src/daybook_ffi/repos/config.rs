@@ -37,12 +37,12 @@ impl ConfigRepoFfi {
     #[uniffi::constructor]
     #[tracing::instrument(err, skip(fcx, plug_repo))]
     async fn load(fcx: SharedFfiCtx, plug_repo: Arc<PlugsRepoFfi>) -> Result<Arc<Self>, FfiError> {
-        let fcx = fcx.clone();
+        let fcx = Arc::clone(&fcx);
         let (repo, stop_token) = fcx
             .do_on_rt(ConfigRepo::load(
                 fcx.cx.acx.clone(),
                 fcx.cx.doc_app().document_id().clone(),
-                plug_repo.repo.clone(),
+                Arc::clone(&plug_repo.repo),
                 daybook_types::doc::UserPath::from(fcx.cx.local_user_path.clone()),
             ))
             .await
@@ -63,7 +63,7 @@ impl ConfigRepoFfi {
 
     #[tracing::instrument(skip(self))]
     async fn get_prop_display_hint(&self, id: String) -> Option<PropKeyDisplayHint> {
-        let repo = self.repo.clone();
+        let repo = Arc::clone(&self.repo);
         self.fcx
             .do_on_rt(async move { repo.get_prop_display_hint(id).await })
             .await
@@ -71,7 +71,7 @@ impl ConfigRepoFfi {
 
     #[tracing::instrument(skip(self))]
     async fn list_display_hints(self: Arc<Self>) -> HashMap<String, PropKeyDisplayHint> {
-        let repo = self.repo.clone();
+        let repo = Arc::clone(&self.repo);
         self.fcx
             .do_on_rt(async move { repo.list_display_hints().await })
             .await
@@ -83,7 +83,7 @@ impl ConfigRepoFfi {
         key: String,
         config: PropKeyDisplayHint,
     ) -> Result<(), FfiError> {
-        let repo = self.repo.clone();
+        let repo = Arc::clone(&self.repo);
         self.fcx
             .do_on_rt(async move {
                 repo.set_prop_display_hint(key, config)

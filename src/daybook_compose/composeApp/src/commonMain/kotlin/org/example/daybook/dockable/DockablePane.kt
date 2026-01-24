@@ -44,15 +44,12 @@ data class PaneState(
     var minHeight: Float = 60f,
     var maxHeight: Float = 400f
 ) {
-    fun widthDp(density: Density): Dp {
-        return with(density) {
-            width.dp
-        }
+    fun widthDp(density: Density): Dp = with(density) {
+        width.dp
     }
-    fun heightDp(density: Density): Dp {
-        return with(density) {
-            height.dp
-        }
+
+    fun heightDp(density: Density): Dp = with(density) {
+        height.dp
     }
 }
 
@@ -61,7 +58,7 @@ data class PaneState(
  */
 enum class RegionOrientation {
     HORIZONTAL, // Left to right
-    VERTICAL    // Top to bottom
+    VERTICAL // Top to bottom
 }
 
 /**
@@ -87,47 +84,50 @@ fun PaneContainer(
     if (!pane.state.isVisible) {
         return
     }
-    
+
     // Use mutableStateOf to track changes and trigger recomposition
     // We need to observe the pane state, but since it's not a state object,
     // we'll update our local state when the resize callback is called
     val widthState = remember(pane.id) { mutableStateOf(pane.state.width) }
     val heightState = remember(pane.id) { mutableStateOf(pane.state.height) }
-    
+
     // Create a wrapper for onResize that also updates our local state
-    val wrappedOnResize = onResize?.let { originalOnResize ->
-        { dragAmount: Float ->
-            originalOnResize(dragAmount)
-            // Update local state to trigger recomposition
-            if (pane.state.width > 0) {
-                widthState.value = pane.state.width
-            } else {
-                heightState.value = pane.state.height
+    val wrappedOnResize =
+        onResize?.let { originalOnResize ->
+            { dragAmount: Float ->
+                originalOnResize(dragAmount)
+                // Update local state to trigger recomposition
+                if (pane.state.width > 0) {
+                    widthState.value = pane.state.width
+                } else {
+                    heightState.value = pane.state.height
+                }
             }
         }
-    }
-    
-    val size = if (widthState.value > 0) {
-        with(density) { widthState.value.dp }
-    } else {
-        with(density) { heightState.value.dp }
-    }
-    
+
+    val size =
+        if (widthState.value > 0) {
+            with(density) { widthState.value.dp }
+        } else {
+            with(density) { heightState.value.dp }
+        }
+
     Box(modifier = modifier) {
         // Pane content
         Box(
-            modifier = Modifier
-                .then(
-                    if (widthState.value > 0) {
-                        Modifier.width(size).fillMaxHeight()
-                    } else {
-                        Modifier.height(size).fillMaxWidth()
-                    }
-                )
+            modifier =
+                Modifier
+                    .then(
+                        if (widthState.value > 0) {
+                            Modifier.width(size).fillMaxHeight()
+                        } else {
+                            Modifier.height(size).fillMaxWidth()
+                        }
+                    )
         ) {
             pane.content(size)
         }
-        
+
         // Resize handle if configured
         if (wrappedOnResize != null && resizeEdge != null) {
             when {
@@ -138,6 +138,7 @@ fun PaneContainer(
                         modifier = Modifier.align(resizeEdge)
                     )
                 }
+
                 resizeEdge == Alignment.BottomCenter || resizeEdge == Alignment.TopCenter -> {
                     // Vertical resize handle
                     VerticalResizeHandle(
@@ -162,25 +163,25 @@ fun HorizontalResizeHandle(
     val interactionSource = remember { MutableInteractionSource() }
     val isHovered by interactionSource.collectIsHoveredAsState()
     val density = LocalDensity.current
-    
+
     Box(
-        modifier = modifier
-            .width(8.dp)
-            .fillMaxHeight()
-            .background(
-                if (isHovered) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
-                } else {
-                    MaterialTheme.colorScheme.outline.copy(alpha = 0.1f)
+        modifier =
+            modifier
+                .width(8.dp)
+                .fillMaxHeight()
+                .background(
+                    if (isHovered) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                    } else {
+                        MaterialTheme.colorScheme.outline.copy(alpha = 0.1f)
+                    }
+                ).hoverable(interactionSource)
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures { change, dragAmount ->
+                        onResize(dragAmount)
+                        change.consume()
+                    }
                 }
-            )
-            .hoverable(interactionSource)
-            .pointerInput(Unit) {
-                detectHorizontalDragGestures { change, dragAmount ->
-                    onResize(dragAmount)
-                    change.consume()
-                }
-            }
     )
 }
 
@@ -196,25 +197,25 @@ fun VerticalResizeHandle(
     val interactionSource = remember { MutableInteractionSource() }
     val isHovered by interactionSource.collectIsHoveredAsState()
     val density = LocalDensity.current
-    
+
     Box(
-        modifier = modifier
-            .height(8.dp)
-            .fillMaxWidth()
-            .background(
-                if (isHovered) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
-                } else {
-                    MaterialTheme.colorScheme.outline.copy(alpha = 0.1f)
+        modifier =
+            modifier
+                .height(8.dp)
+                .fillMaxWidth()
+                .background(
+                    if (isHovered) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                    } else {
+                        MaterialTheme.colorScheme.outline.copy(alpha = 0.1f)
+                    }
+                ).hoverable(interactionSource)
+                .pointerInput(Unit) {
+                    detectVerticalDragGestures { change, dragAmount ->
+                        onResize(dragAmount)
+                        change.consume()
+                    }
                 }
-            )
-            .hoverable(interactionSource)
-            .pointerInput(Unit) {
-                detectVerticalDragGestures { change, dragAmount ->
-                    onResize(dragAmount)
-                    change.consume()
-                }
-            }
     )
 }
 
@@ -235,56 +236,55 @@ fun EdgeDragZone(
     var dragAmount by remember { mutableFloatStateOf(0f) }
     val interactionSource = remember { MutableInteractionSource() }
     val isHovered by interactionSource.collectIsHoveredAsState()
-    
+
     Box(
-        modifier = modifier
-            .then(
-                if (isHorizontal) {
-                    Modifier.width(edgeWidth).fillMaxHeight()
-                } else {
-                    Modifier.height(edgeWidth).fillMaxWidth()
+        modifier =
+            modifier
+                .then(
+                    if (isHorizontal) {
+                        Modifier.width(edgeWidth).fillMaxHeight()
+                    } else {
+                        Modifier.height(edgeWidth).fillMaxWidth()
+                    }
+                ).background(
+                    if (isHovered) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                    } else {
+                        MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
+                    }
+                ).hoverable(interactionSource)
+                .pointerInput(Unit) {
+                    if (isHorizontal) {
+                        detectHorizontalDragGestures(
+                            onHorizontalDrag = { change, dragDelta ->
+                                dragAmount += dragDelta
+                                onDrag(dragDelta)
+                            },
+                            onDragEnd = {
+                                onDragEnd()
+                                dragAmount = 0f
+                            },
+                            onDragCancel = {
+                                onDragEnd()
+                                dragAmount = 0f
+                            }
+                        )
+                    } else {
+                        detectVerticalDragGestures(
+                            onVerticalDrag = { change, dragDelta ->
+                                dragAmount += dragDelta
+                                onDrag(dragDelta)
+                            },
+                            onDragEnd = {
+                                onDragEnd()
+                                dragAmount = 0f
+                            },
+                            onDragCancel = {
+                                onDragEnd()
+                                dragAmount = 0f
+                            }
+                        )
+                    }
                 }
-            )
-            .background(
-                if (isHovered) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
-                } else {
-                    MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
-                }
-            )
-            .hoverable(interactionSource)
-            .pointerInput(Unit) {
-                if (isHorizontal) {
-                    detectHorizontalDragGestures(
-                        onHorizontalDrag = { change, dragDelta ->
-                            dragAmount += dragDelta
-                            onDrag(dragDelta)
-                        },
-                        onDragEnd = {
-                            onDragEnd()
-                            dragAmount = 0f
-                        },
-                        onDragCancel = {
-                            onDragEnd()
-                            dragAmount = 0f
-                        }
-                    )
-                } else {
-                    detectVerticalDragGestures(
-                        onVerticalDrag = { change, dragDelta ->
-                            dragAmount += dragDelta
-                            onDrag(dragDelta)
-                        },
-                        onDragEnd = {
-                            onDragEnd()
-                            dragAmount = 0f
-                        },
-                        onDragCancel = {
-                            onDragEnd()
-                            dragAmount = 0f
-                        }
-                    )
-                }
-            }
     )
 }

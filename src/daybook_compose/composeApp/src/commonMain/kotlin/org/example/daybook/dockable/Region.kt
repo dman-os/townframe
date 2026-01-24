@@ -22,16 +22,18 @@ import androidx.compose.ui.zIndex
 /**
  * Local composition value for region scope
  */
-private val LocalRegionScope = compositionLocalOf<RegionScope> {
-    error("No RegionScope provided")
-}
+private val LocalRegionScope =
+    compositionLocalOf<RegionScope> {
+        error("No RegionScope provided")
+    }
 
 /**
  * Local composition value for pane resize callback
  */
-private val LocalPaneResize = compositionLocalOf<(String, Float) -> Unit> {
-    error("No onPaneResize provided")
-}
+private val LocalPaneResize =
+    compositionLocalOf<(String, Float) -> Unit> {
+        error("No onPaneResize provided")
+    }
 
 /**
  * Region that arranges multiple panes or sub-regions in a configured orientation.
@@ -47,10 +49,10 @@ fun Region(
     content: @Composable RegionScope.() -> Unit
 ) {
     val density = LocalDensity.current
-    
+
     // Use remember to cache the scope - only create once per orientation
     val scope = remember(orientation) { RegionScopeImpl() }
-    
+
     // Cache the items structure - only re-collect when content structure changes
     // We use a hash of the content to detect structure changes
     // For now, we'll re-collect but minimize work by using keys
@@ -63,57 +65,71 @@ fun Region(
         // 1. Using keys in rendering to skip unchanged items
         // 2. Only clearing if we detect a significant change
         // For now, we'll clear and re-collect, but the key() calls will help skip work
-        if (scope.items.isEmpty() || scope.items.any { 
-            it is RegionItem.Pane && !it.state.isVisible 
-        }) {
+        if (scope.items.isEmpty() ||
+            scope.items.any {
+                it is RegionItem.Pane && !it.state.isVisible
+            }
+        ) {
             // Only clear if we detect a visibility change that might affect structure
             // This is a heuristic - ideally we'd track structure changes more precisely
         }
-        
+
         // Always collect to ensure we have current structure
         // But use keys in rendering to minimize recomposition work
         scope.items.clear()
         scope.content()
-        
+
         val currentItems = scope.items
-        
+
         if (currentItems.isEmpty()) {
             return@CompositionLocalProvider
         }
-        
+
         when (orientation) {
             RegionOrientation.HORIZONTAL -> {
                 Row(modifier = modifier.fillMaxSize()) {
                     currentItems.forEachIndexed { index, item ->
                         val hasNext = index < currentItems.size - 1
-                        val isVisible = when (item) {
-                            is RegionItem.Pane -> item.state.isVisible
-                            is RegionItem.SubRegion -> true
-                        }
-                        
+                        val isVisible =
+                            when (item) {
+                                is RegionItem.Pane -> item.state.isVisible
+                                is RegionItem.SubRegion -> true
+                            }
+
                         if (isVisible) {
                             // Use key to help Compose skip unchanged items
-                            androidx.compose.runtime.key(when (item) {
-                                is RegionItem.Pane -> item.id
-                                is RegionItem.SubRegion -> "subregion_${item.orientation}_${index}"
-                            }) {
+                            androidx.compose.runtime.key(
+                                when (item) {
+                                    is RegionItem.Pane -> item.id
+                                    is RegionItem.SubRegion -> "subregion_${item.orientation}_$index"
+                                }
+                            ) {
                                 when (item) {
                                     is RegionItem.Pane -> {
                                         val resizeEdge = if (hasNext) Alignment.CenterEnd else null
-                                        val paneItem = object : PaneItem {
-                                            override val id = item.id
-                                            override val state = item.state
-                                            override val content: @Composable (Dp) -> Unit = item.content
-                                        }
+                                        val paneItem =
+                                            object : PaneItem {
+                                                override val id = item.id
+                                                override val state = item.state
+                                                override val content: @Composable (
+                                                    Dp
+                                                ) -> Unit = item.content
+                                            }
                                         PaneContainer(
                                             pane = paneItem,
-                                            onResize = if (resizeEdge != null) {
-                                                { dragAmount -> onPaneResize(item.id, dragAmount) }
-                                            } else null,
+                                            onResize =
+                                                if (resizeEdge != null) {
+                                                    { dragAmount ->
+                                                        onPaneResize(item.id, dragAmount)
+                                                    }
+                                                } else {
+                                                    null
+                                                },
                                             resizeEdge = resizeEdge,
                                             density = density
                                         )
                                     }
+
                                     is RegionItem.SubRegion -> {
                                         val resizeEdge = if (hasNext) Alignment.CenterEnd else null
                                         Box(modifier = Modifier.fillMaxHeight()) {
@@ -123,14 +139,20 @@ fun Region(
                                                 onPaneResize = onPaneResize,
                                                 content = item.content
                                             )
-                                            if (resizeEdge != null && item.rightmostPaneId != null) {
+                                            if (resizeEdge != null &&
+                                                item.rightmostPaneId != null
+                                            ) {
                                                 HorizontalResizeHandle(
                                                     onResize = { dragAmount ->
-                                                        onPaneResize(item.rightmostPaneId, dragAmount)
+                                                        onPaneResize(
+                                                            item.rightmostPaneId,
+                                                            dragAmount
+                                                        )
                                                     },
-                                                    modifier = Modifier
-                                                        .align(resizeEdge)
-                                                        .zIndex(1f)
+                                                    modifier =
+                                                        Modifier
+                                                            .align(resizeEdge)
+                                                            .zIndex(1f)
                                                 )
                                             }
                                         }
@@ -141,38 +163,51 @@ fun Region(
                     }
                 }
             }
+
             RegionOrientation.VERTICAL -> {
                 Column(modifier = modifier.fillMaxSize()) {
                     currentItems.forEachIndexed { index, item ->
                         val hasNext = index < currentItems.size - 1
-                        val isVisible = when (item) {
-                            is RegionItem.Pane -> item.state.isVisible
-                            is RegionItem.SubRegion -> true
-                        }
-                        
+                        val isVisible =
+                            when (item) {
+                                is RegionItem.Pane -> item.state.isVisible
+                                is RegionItem.SubRegion -> true
+                            }
+
                         if (isVisible) {
                             // Use key to help Compose skip unchanged items
-                            androidx.compose.runtime.key(when (item) {
-                                is RegionItem.Pane -> item.id
-                                is RegionItem.SubRegion -> "subregion_${item.orientation}_${index}"
-                            }) {
+                            androidx.compose.runtime.key(
+                                when (item) {
+                                    is RegionItem.Pane -> item.id
+                                    is RegionItem.SubRegion -> "subregion_${item.orientation}_$index"
+                                }
+                            ) {
                                 when (item) {
                                     is RegionItem.Pane -> {
                                         val resizeEdge = if (hasNext) Alignment.BottomCenter else null
-                                        val paneItem = object : PaneItem {
-                                            override val id = item.id
-                                            override val state = item.state
-                                            override val content: @Composable (Dp) -> Unit = item.content
-                                        }
+                                        val paneItem =
+                                            object : PaneItem {
+                                                override val id = item.id
+                                                override val state = item.state
+                                                override val content: @Composable (
+                                                    Dp
+                                                ) -> Unit = item.content
+                                            }
                                         PaneContainer(
                                             pane = paneItem,
-                                            onResize = if (resizeEdge != null) {
-                                                { dragAmount -> onPaneResize(item.id, dragAmount) }
-                                            } else null,
+                                            onResize =
+                                                if (resizeEdge != null) {
+                                                    { dragAmount ->
+                                                        onPaneResize(item.id, dragAmount)
+                                                    }
+                                                } else {
+                                                    null
+                                                },
                                             resizeEdge = resizeEdge,
                                             density = density
                                         )
                                     }
+
                                     is RegionItem.SubRegion -> {
                                         val resizeEdge = if (hasNext) Alignment.BottomCenter else null
                                         Box(modifier = Modifier.fillMaxWidth()) {
@@ -182,14 +217,20 @@ fun Region(
                                                 onPaneResize = onPaneResize,
                                                 content = item.content
                                             )
-                                            if (resizeEdge != null && item.bottommostPaneId != null) {
+                                            if (resizeEdge != null &&
+                                                item.bottommostPaneId != null
+                                            ) {
                                                 VerticalResizeHandle(
                                                     onResize = { dragAmount ->
-                                                        onPaneResize(item.bottommostPaneId, dragAmount)
+                                                        onPaneResize(
+                                                            item.bottommostPaneId,
+                                                            dragAmount
+                                                        )
                                                     },
-                                                    modifier = Modifier
-                                                        .align(resizeEdge)
-                                                        .zIndex(1f)
+                                                    modifier =
+                                                        Modifier
+                                                            .align(resizeEdge)
+                                                            .zIndex(1f)
                                                 )
                                             }
                                         }
@@ -213,7 +254,7 @@ interface RegionScope {
      */
     @Composable
     fun Pane(id: String, state: PaneState, content: @Composable (Dp) -> Unit)
-    
+
     /**
      * Add a sub-region to the region
      */
@@ -228,12 +269,12 @@ interface RegionScope {
 
 private class RegionScopeImpl : RegionScope {
     val items = mutableListOf<RegionItem>()
-    
+
     @Composable
     override fun Pane(id: String, state: PaneState, content: @Composable (Dp) -> Unit) {
         items.add(RegionItem.Pane(id, state, content))
     }
-    
+
     @Composable
     override fun SubRegion(
         orientation: RegionOrientation,
@@ -246,11 +287,9 @@ private class RegionScopeImpl : RegionScope {
 }
 
 private sealed class RegionItem {
-    data class Pane(
-        val id: String,
-        val state: PaneState,
-        val content: @Composable (Dp) -> Unit
-    ) : RegionItem()
+    data class Pane(val id: String, val state: PaneState, val content: @Composable (Dp) -> Unit) :
+        RegionItem()
+
     data class SubRegion(
         val orientation: RegionOrientation,
         val rightmostPaneId: String?,
@@ -263,11 +302,7 @@ private sealed class RegionItem {
  * Composable function to add a pane to a region
  */
 @Composable
-fun Pane(
-    id: String,
-    state: PaneState,
-    content: @Composable (Dp) -> Unit
-) {
+fun Pane(id: String, state: PaneState, content: @Composable (Dp) -> Unit) {
     LocalRegionScope.current.Pane(id, state, content)
 }
 

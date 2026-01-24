@@ -30,7 +30,7 @@ impl DrawerRepoFfi {
     #[uniffi::constructor]
     #[tracing::instrument(err, skip(fcx))]
     async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
-        let fcx = fcx.clone();
+        let fcx = Arc::clone(&fcx);
         let (repo, stop_token) = fcx
             .do_on_rt(DrawerRepo::load(
                 fcx.cx.acx.clone(),
@@ -56,7 +56,7 @@ impl DrawerRepoFfi {
     // old FFI wrappers for contains/insert/remove removed; use `ffi_get`, `ffi_add`, `ffi_update`, `ffi_del` instead
     #[tracing::instrument(skip(self))]
     async fn list(self: Arc<Self>) -> Vec<DocNBranches> {
-        let this = self.clone();
+        let this = Arc::clone(&self);
         self.fcx
             .do_on_rt(async move { this.repo.list().await })
             .await
@@ -64,7 +64,7 @@ impl DrawerRepoFfi {
 
     #[tracing::instrument(err, skip(self))]
     async fn get(self: Arc<Self>, id: DocId, branch_path: String) -> Result<Option<Doc>, FfiError> {
-        let this = self.clone();
+        let this = Arc::clone(&self);
         let branch_path = daybook_types::doc::BranchPath::from(branch_path);
         Ok(self
             .fcx
@@ -79,7 +79,7 @@ impl DrawerRepoFfi {
 
     #[tracing::instrument(err, skip(self))]
     async fn add(self: Arc<Self>, args: AddDocArgs) -> Result<DocId, FfiError> {
-        let this = self.clone();
+        let this = Arc::clone(&self);
         Ok(self
             .fcx
             .do_on_rt(async move { this.repo.add(args).await })
@@ -93,7 +93,7 @@ impl DrawerRepoFfi {
         branch_path: String,
         heads: Option<ChangeHashSet>,
     ) -> Result<(), FfiError> {
-        let this = self.clone();
+        let this = Arc::clone(&self);
         let branch_path = daybook_types::doc::BranchPath::from(branch_path);
         Ok(self
             .fcx
@@ -108,7 +108,7 @@ impl DrawerRepoFfi {
 
     #[tracing::instrument(err, skip(self))]
     async fn update_batch(self: Arc<Self>, patches: Vec<UpdateDocArgs>) -> Result<(), FfiError> {
-        let this = self.clone();
+        let this = Arc::clone(&self);
         Ok(self
             .fcx
             .do_on_rt(async move {
@@ -122,7 +122,7 @@ impl DrawerRepoFfi {
 
     #[tracing::instrument(err, skip(self))]
     async fn del(self: Arc<Self>, id: DocId) -> Result<bool, FfiError> {
-        let this = self.clone();
+        let this = Arc::clone(&self);
         Ok(self
             .fcx
             .do_on_rt(async move { this.repo.del(&id).await })

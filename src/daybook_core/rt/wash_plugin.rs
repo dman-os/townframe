@@ -213,29 +213,29 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
         Ok(())
     }
 
-    async fn on_component_bind(
+    async fn on_workload_item_bind<'a>(
         &self,
-        component: &mut wash_runtime::engine::workload::WorkloadComponent,
-        _interface_configs: std::collections::HashSet<WitInterface>,
+        item: &mut wash_runtime::engine::workload::WorkloadItem<'a>,
+        _interfaces: std::collections::HashSet<wash_runtime::wit::WitInterface>,
     ) -> anyhow::Result<()> {
-        let world = component.world();
+        let world = item.world();
         for iface in world.imports {
             if iface.namespace == "townframe" && iface.package == "daybook" {
                 if iface.interfaces.contains("drawer") {
                     drawer::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
-                        component.linker(),
+                        item.linker(),
                         |ctx| ctx,
                     )?;
                 }
                 if iface.interfaces.contains("capabilities") {
                     capabilities::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
-                        component.linker(),
+                        item.linker(),
                         |ctx| ctx,
                     )?;
                 }
                 if iface.interfaces.contains("prop-routine") {
                     prop_routine::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
-                        component.linker(),
+                        item.linker(),
                         |ctx| ctx,
                     )?;
                 }

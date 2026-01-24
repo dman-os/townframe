@@ -2,8 +2,8 @@
 resolver = "3"
 members = [
   "./src/api_utils_rs",
-  "./src/autosurgeon/autosurgeon",
-  "./src/autosurgeon/autosurgeon-derive/",
+  # "./src/autosurgeon/autosurgeon",
+  # "./src/autosurgeon/autosurgeon-derive/",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
@@ -182,8 +182,8 @@ uniffi = { version = "0.31.0" }
 
 wasmtime = "*"
 wasmtime-wasi = { version = "*" }
-# wash-runtime = "0.1.0"
-wash-runtime = { path = "../wash/crates/wash-runtime/"}
+wash-runtime = "0.2.0"
+# wash-runtime = { path = "../wash/crates/wash-runtime/"}
 
 scopeguard = "1.2.0"
 
@@ -194,6 +194,7 @@ clap_complete = "4.5"
 [patch.crates-io]
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 # restate-sdk-shared-core = { path = "./src/sdk-shared-core/" }
+wash-runtime = { git = "https://github.com/dman-os/wash", rev = "7ac788c7c232763c740463e70441532403f6d538" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "28d9b6db96f09a34967a0941950f6753fd73a006" }
 
 
