@@ -12,6 +12,13 @@ Experimental.
 ## Daybook
 
 Daybook is an experiental attempt to build to build a "notes app" heavily informed by my (dman-os) tastes and capabilites.
+
+It currently consists of:
+- WIP CLI [^](./src/daybook_cli/)
+- WIP Compose Multiplatform app [^](./src/daybook_compose/)
+
+## Why?
+
 I think tools like these tend to be highly personal to each person and I recommend everyone try to build one for themselves.
 Either from scratch as is foolishly done here or by customizing an existing platform like Obsidian, Emacs, Notion and soforth
 
@@ -21,7 +28,7 @@ Specifically, daybook design is informed by tech I find shiny, gaps I see in the
   - Everything that is and around LLMs.
   - Uses Automerge for an offline and local-first experience
     - With futue expectations around collaborative grounding
-  - Uses Compose Multiplatform for a performant experience on Android
+  - Uses Compose Multiplatform for a reliable experience on Android and Desktop
   - Tries to leverage WASM as a plugin system. 
 - Gaps
   - Emacs/Vim

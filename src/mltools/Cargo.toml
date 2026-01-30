@@ -7,8 +7,13 @@ edition.workspace = true
 workspace = true
 
 [lib]
-name = "pauperfuse"
+name = "mltools"
 path = "lib.rs"
 
 [dependencies]
 utils_rs = { workspace = true, default-features = false }
+api_utils_rs = { workspace = true, default-features = false }
+
+serde.workspace = true
+
+wit-bindgen.workspace = true

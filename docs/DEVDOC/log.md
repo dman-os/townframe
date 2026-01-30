@@ -1,5 +1,548 @@
 # duck-log
 
+## 2026-01-29 | a case for ids in keys
+
+I keep going back and forth on this.
+
+Idea:
+  - Instead of `{"org.eg.item": { "id1": {} }}`, do `{"org.eg.item/id1": {} }`
+  - I.e. roll ids into top-level keys allowing N items for a key without needing a nested array/map
+
+Cons:
+  - Iteration over keys required to find key.
+    - You can't just do a basic hash map lookup
+    - Acceleration structures using prefix matching are out of scope?
+      - I'd say so. We'd like this to be easily programmable through WASI.
+Pros:
+  - The biggest one right now is that this works well with per key metadata
+    - We track createdAt/updatedAt for keys
+    - Additionally, we use the last commit hashes of when a key changed to dedup work
+    - Having ids in keys allows us to have multiple instances of a key while tracking each separately
+    - We'll either have to introduce key level nested metadata or pay additional costs of change checks
+
+Thoughts:
+- How often do we look up keys in a document?
+  - For general routines that must check for existence of multiple keys 
+- Should we do an automerge document per key?
+  - I don't think so, that would increase our document count by an order of magnitiude.
+    - Too much pressure on the sync backend?
+    - We'd still pay the metadata cost per key if we do ids in keys
+- Specialized support for nested ids?
+  - Specify in the definition of a key that it's of the array and map instance type?
+    - Hmm
+  - Arbitrary nested tracking field change tracking support?
+
+I suppose let's flesh out the change tracking idea.
+- We have a key Foo that is derived from key Bar.
+  - A plugin must have registered this relationship somehow.
+  - I.e. types of key Bar are derived from other keys.
+  - I suppose it should indicate which fields of Bar hold the reference key.
+- We'll need to mantain an index of these relationships
+  - In SQLite?
+    - Best fit, querying and indices are efficent
+    - Rebuild on each device?
+      - Painful, will need to read each doc and each key
+      - Consider cross device syncing for sqlite tables in future as optimization
+  - In Automerge?
+    - No, churn would produce too much garbage.
+    - Denormalization should only be considered for cases that don't churn.
+- But wait, how do we minimize work?
+  - Derivation of Bar happens in a plugin defined routine presumably?
+    - Schedule the routine for every change?
+      - Scheduling is not exactly cheap, we're using wflow + wasm
+      - It'd be great if we didn't have to schedule work for simple diff checks that routine would perform
+  - How such a processor routine defined anyways?
+    - Defined to watch Foo instances?
+      - How would we minimize work in this case?
+        - Specialized field diff predicates?
+    - Two processors, one defined to watch new Foos and another to watch dep changes?
+      - Needing to register two routines to just do a basic derivation seems excessive
+- We'll want to have unbounded number of derivied keys
+  - User programmability shouldn't look out for footguns here
+- Let's KISS and add optimzations later
+  - Simple derivation usecase and solutions for it
+    - 1 DocA-Foo -> 1 DocA-Bar
+      - Schedule routine when Foo changes
+    - 1 DocA-Foo -> 1 DocB-Bar
+      - Schedule routine when Foo changes
+    - 1 DocA-Foo, 1 DocA-Baz -> 1 DocA-Bar
+      - Schedule routine when Foo or Bar change
+    - 1 DocA-Foo, 1 DocB-Baz -> 1 DocC-Bar
+      - Schedule routine when Foo or Bar change
+    - 0-N DocA-DocX-Foo -> 1 DocZ-Bar
+      - Schedule routine when any Foo changes
+
+Going back to our main quandry, this doesn't seem relevant to the optimization usecase.
+Our processor system is already granular on keys and not docs.
+I.e. processors are defined per key and changes are processed per key.
+
+We'll still want to mantain key specific change timestamps which gives us key specific commits refs for free.
+The question is, for nested keys, do we want that granularity?
+I think so, since URLs are specific to keys?
+
+---
+
+Alternative solutions:
+
+Top array:
+
+```js
+Doc([
+  {
+    ty: "org.eg.blob",
+    id: "uuid",
+    /**/
+  },
+  {
+    ty: "org.eg.ocr",
+    id: "uuid",
+    /**/
+  }
+])
+```
+
+- Insertions and deletions make prop paths unstable
+- Semanticallly the same but worse than the next proposal
+
+---
+
+Uuids for keys:
+
+```js
+Doc({
+  "uuid": {
+    "$ty": "org.eg.blob",
+    "$id": "uuid",
+    /**/
+  },
+  "uuid": {
+    "$ty": "org.eg.ocr",
+    /**/
+  }
+})
+```
+
+- Type queries require scans
+- Payload has extra ids
+
+---
+
+Hmm, what about: 
+```js
+Doc({
+  "org.eg.dmeta": {
+    "$facetId": "main",
+    /**/
+  },
+  "org.eg.blob": {
+    "main": {
+      /**/
+      ]
+    },
+    "other": {
+      /**/
+    }
+  },
+  "org.eg.ocr": {
+    "$facetId": "main",
+    /**/
+  }
+})
+```
+
+- Payload polluted by extra fields
+
+---
+
+Upon further thought, I think deferring the id scheme to plugins is not a good idea.
+We'll want to have stable and simple global id space that addresses all facets across all docs.
+Usecases like global indices demand this.
+I was hoping to use hierarchical URLs for identity but that's not exactly simple.
+
+Additionally, storage format need not optimize for routine usage. 
+How common is the directly editing the JSON usecase?
+On one hand LLMs should have an easy time with it so supporting that isn't exactly ungrounded.
+Human editable text formats are always a good thing.
+On the other hand, there are a lot of steps involves in editing the the values directly already.
+For example, you'll have to update metadata elsewhere in the indices and the drawer.
+So, if there's ever direct JSON editing involved, it will have to be done on a facet specific projection.
+This is how the prop capability routines do it today, they don't get to see the automerge json directly but an extracted prop.
+
+
+With this in mind, the winner ought to be:
+```js
+Doc({
+  "uuid": {
+    "$daybook.facet.ty": "org.eg.blob",
+    /* */
+  }
+})
+```
+
+Alternatively:
+
+```js
+Doc({
+  "$daybook.doc.meta": {
+    facets: {
+      "uuid": {
+        "ty": "org.eg.blob",
+        createdAt: "2026xxx",
+        updatedAt: ["2026xxx"],
+      }
+    }
+  },
+  "uuid": {
+    /* */
+  }
+})
+```
+
+...BUT!
+
+Hmm.
+One thing I forgot about the original formulation is that not relying on random ids allows adding new keys concurrently with the same intent and merging should work.
+In this design, if I add a new key that's supposed to be a singleton, I can't use a globally unique prop path.
+Think duplicate derivations happening on two devices that are to create new facets but they write to two different keys.
+We'd have to add a separate merging logic to resolve singletons.
+Yes, we'll need to separate the global id space from the prop struct path.
+
+FUCK.
+It's good to write down but it's surprising how initial intiutions can be so efficent.
+
+So, to solve this, plugins need access to a keyspace that they control. 
+But a key space that the drawer aware of since we'd still want to identify and track facets as a unit of information.
+That's something like:
+
+```js
+Doc({
+  "org.eg.dmeta": {
+    facetsByUuid: {
+      "uuid": "org.eg.blob/main"
+    }
+    facetMeta: {
+      "org.eg.blob/main": {
+        guid: ["uuid", "uuid"],
+        createdAt: "2026xxx",
+        updatedAt: ["2026xxx"],
+      }
+    }
+  },
+  "org.eg.blob": {
+    "main": {
+      /* */
+    }
+  }
+})
+```
+
+This brings us back, full-circle, to our main effing quandry.
+
+We do have more information though now.
+We don't expect direct writes to the automerge JSONs bu ont projections.
+I.e. id in keys or nested ids is an impl detail for plugins.
+In fact, if we ever want to migrate to a separate automerge doc per facet in the future, plugins ought to be none the wiser.
+
+At this point, the question becomes, is id in keys efficent for drawers?
+It's not!
+We'll want O(1) lookup.
+
+A small issue, should plugins have ids for each facet?
+- URL ambiguity is a thing.
+  - `db:///docid/org.eg.blob` refers to a facet instance but so does `db:///docid/org.eg.blob/main` which is not great since what if we want to refer to props in facets? How do we differentiate if `main` is a prop or the singleton?
+    - Special case the name `singleton`? Not elegant.
+- We could assign a const `MAIN` key for singleton facet schemas if they don't upfront do so.
+  - Hardly an improvement, let's always require ids but conventionalize main for singletons.
+    - Is there a better name?
+
+- On the concern of what is allowed in facet ids
+  - `main` is simple enough but what if our singleton is to be derived
+    - We'll want to have a id that's based on the inputs somehow
+      - Easiest is to use UUID of the other facet in the id but I'd like to keep most of the uuid usage in the drawer
+        - Also, what if the inputs are multiple?
+      - Hashed input of all input facet URLs?
+        - Good enough I say.
+        - Probably should be the general approach.
+          - This will allow us to reject paths as facet ids
+
+## 2026-01-28 | procrastidesign for expense tracking
+
+```js
+Doc({
+  "org.eg.blob": [
+    {/*..*/}
+  ],
+  "org.eg.ocr": [
+    {
+      url: "db:///self/org.eg.blob/0"
+      atCommit: ["hash1", "hash2"],
+      content: "text",
+      contentWithLocation: [
+        {
+          bboxPx: [0, 0, 100, 100],
+          content: "text",
+        },
+      ]
+    },
+  ],
+  "org.eg.embedding": [
+    {
+      url: "db:///self/org.eg.blobs/0"
+      atCommit: ["hash1", "hash2"],
+      model: "jina-embedding-4",
+      vector: Blob([1.2, 1.3, 1.4])
+    }
+  ],
+  "org.eg.invoice": [
+    {
+      src: [
+        {
+          url: "db:///self/org.eg.embedding/0/#hash1|hash2",
+        },
+        {
+          url: "db:///self/org.eg.ocr/0/#hash1|hash2",
+        },
+      ],
+      items: [
+        {
+          name: "Onions",
+          price: "XXXX",
+          amount: "XXX"
+        },
+      ],
+      subtotal: "XXX",
+      vat: "XXX"
+    }
+  ]
+  "org.eg.txn-ref": [
+    "db:///ledger-file-id/org.eg.ledger/txns/0",
+  ],
+})
+```
+
+```js
+Doc({
+  "org.eg.ledger": {
+    accounts: {},
+    txns: {
+      "txnId-xxx": {
+        src: [
+          {
+            url: "db:///self/org.eg.embedding/0",
+            at: ["hash1", "hash2"],
+          },
+          {
+            url: "db:///self/org.eg.invoice/0",
+            atCommit: ["hash1", "hash2"],
+          },
+        ],
+        ts: "2026xxx",
+        title: "Groceries",
+        subtitle: "Weekly",
+        subitems:  [
+          {
+            acccount: "liabilities:credit",
+            amount: "2000",
+            currency: "ETB",
+          },
+          {
+            account: "expenses:food",
+            amount: "-2000",
+            currency: "ETB",
+          },
+        ]
+      }
+    }
+  },
+})
+```
+
+## 2026-01-27 | procrastidesign
+
+```js
+{
+  "org.eg.dmeta": {
+    primary: "image",
+    createdAt: "2026xxx",
+    updatedAt: "2026xxx",
+    facetMeta: {
+      "org.eg.blob": {
+        createdAt: "2026xxx",
+        // the change hash of the change of this prop
+        // indicates the last commit of the facet
+        // array to allow merge resolution from multiple updates
+        updatedAt: ["2026xxx"],
+      }
+    }
+  },
+  "org.eg.note": {
+    "main": {
+      mime: "text/md",
+      // automerge text
+      content: Text("User written text #hi #hello"),
+    }
+  },
+  "org.eg.labels.hashtags": {
+    // having source groupings avoids redundant
+    // urls in each tag
+    // alternate design would be
+    // tags: [{ content: "hi", url: "db:///xxxx", atCommit: ["xxx", "xxx"]} ]
+    // but that would duplicate the url and commit would churn too much
+    // FIXME: nope, this is a bad convention sicne it'd make referring
+    // to this instance difficult
+    "db:///self/org.eg.note": {
+      // commit in nested key instead of url allows efficent
+      // automerge churn
+      atCommit: ["hash1", "hash2"],
+      tags: [
+        {
+          content: "hi",
+          // this fields would churn too much, not useful enough
+          // byteStart: 15,
+          // byteEnd: 20,
+        },
+        {
+          content: "hello",
+          // byteStart: 15,
+          // byteEnd: 20,
+        },
+      ]
+    }
+  },
+  "org.eg.blob": {
+    // multiple blobs seems like overkill in one sense
+    // why not string together multiple docs?
+    // but on the other hand, since each doc is a separate
+    // automerge document, it makes it a more atomic and 
+    // and portable to have related blobs in one doc
+    // think embedded images in markdown
+    "main": {
+      mime: "image/png",
+      digest: "z38d837e018f9820b9a098f99e0989a98d98bdc980a",
+      lengthOctets: 1024,
+      // TODO: need a convention around oneOf on keys. inline optional fields
+      // or always a nested field like this?
+      inline?: Blob("38d837e018f9820b9a098f99e0989a98d98bdc980a"),
+      urls?: [
+        // no authority need in most urls
+        // FIXME: I hate typing  triple slashes in nvim
+        "db+blob:///dazsdj9sj98ad98cajs9d8cjasd",
+        "https://example.com/pic.png",
+      ]
+    }
+  },
+  "org.eg.dpath": {
+    // hmm, on the other hand, multiple blobs
+    // is a bitch for dpaths
+    paths: [
+      "/docs/hi.d",
+      "/hi/hello.md?org.eg.note/main",
+      "/hi/hello.png?org.eg.blobs/main",
+    ]
+  },
+  "org.eg.image-metas": {
+    "db:///self/org.eg.blobs/main": {
+      atCommit: ["hash1", "hash2"]
+      mime: "image/png",
+      widthPx: 1024,
+      heightPx: 1024,
+    }
+  },
+}
+```
+
+## 2026-01-24 | content schema
+
+Requirements:
+- Raw hand written text
+- Hand written text with markup
+- Media
+  - Images
+  - Videos
+  - Audio
+- Structured documents
+  - OpenCanvas
+  - Ledgers
+- Metadata
+  - Embeddings
+  - Extracted metadata
+  - Tags
+
+Concerns:
+- Should image docs have the blob meta inline or reference other dedicated doc for blob?
+  - Inline is just efficent.
+- Mininimze the number of `match` cases on the consuming side while incrasing the fidelity of the data.
+  - Optional fields?
+  - How do we do fields unique to certain formats?
+- Relying on cross-key and cross-doc reference makes it tricky to mantain consistency
+  - Need a convention/policy around reference liveness
+    - We'll need a database that indices all references across repo
+  - Would key ids help here?
+    - Move related items into a single doc
+
+```js
+{
+  "org.eg.facets": {
+    primary: "image"
+  },
+  "org.eg.blob": {
+    mime: "image/png",
+    digest: "z38d837e018f9820b9a098f99e0989a98d98bdc980a",
+    lengthOctets: 1024,
+    // TODO: need a convention around oneOf on keys. inline optional fields
+    // or always a nested field like this?
+    inline?: Blob("38d837e018f9820b9a098f99e0989a98d98bdc980a"),
+    urls?: [
+      "db+blob://dazsdj9sj98ad98cajs9d8cjasd",
+      "https://example.com/pic.png",
+    ]
+  },
+  "org.eg.image-metadata": {
+    srcRef: "db://self/org.eg.blob?at=hash1,hash2",
+    // case when current key and src commit match
+    srcRef: "db://self/org.eg.blob?at=self",
+    mime: "image/png",
+    widthPx: 1024,
+    heightPx: 1024,
+  },
+  "org.eg.audio-metadata": {
+    srcRef: "db://self/org.eg.blob?at=self",
+    mime: "audio/ogg",
+    lengthMs: 100000,
+  },
+  "org.eg.freehand": {
+    mime: "text/md",
+    // automerge text
+    content: Text("User written text #hi #hello"),
+  },
+  "org.eg.labels.hashtags": {
+    srcRef: "db://self/org.eg.freehand?at=self",
+    tags: [
+      "hi",
+      "hello"
+    ]
+  },
+}
+```
+
+## 2026-01-24 | pseudo labeler
+
+Let's make this happen.
+I'm thinking:
+- Embed content
+- Cluster embedding with known labels
+- If not found in cluster
+  - Label with LLM
+  - Cluster new label
+  - If new label not found in cluster
+    - Add new label to known labels
+  - If label found in cluster
+    - Find label for cluter
+    - Use cluster label
+- If found in cluster 
+  - Find label for cluter
+  - Use cluster for label
+
 ## 2026-01-21 | existing format interop
 
 I've been thinking, related to our recent thoughts on innovation...

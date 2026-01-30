@@ -133,11 +133,10 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
         }
     })?;
 
-    let new_labels = [llm_response.clone()];
+    let new_labels = vec![llm_response.clone()];
 
     cx.effect(|| {
-        let new_prop: daybook_types::doc::DocProp =
-            WellKnownProp::PseudoLabel(new_labels.join(",")).into();
+        let new_prop: daybook_types::doc::DocProp = WellKnownProp::PseudoLabel(new_labels).into();
         let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
         working_prop_token
             .update(&new_prop)

@@ -18,7 +18,7 @@ fn create_test_doc() -> Doc {
     );
     props.insert(
         DocPropKey::from(WellKnownPropTag::PseudoLabel),
-        DocProp::from(WellKnownProp::PseudoLabel("pseudo-label".to_string())),
+        DocProp::from(WellKnownProp::PseudoLabel(vec!["pseudo-label".to_string()])),
     );
     props.insert(
         DocPropKey::from(WellKnownPropTag::Content),
@@ -128,7 +128,7 @@ fn test_doc_with_all_prop_types() -> Res<()> {
     );
     props.insert(
         DocPropKey::from(WellKnownPropTag::PseudoLabel),
-        DocProp::from(WellKnownProp::PseudoLabel("p1".to_string())),
+        DocProp::from(WellKnownProp::PseudoLabel(vec!["p1".to_string()])),
     );
     props.insert(
         DocPropKey::from(WellKnownPropTag::PathGeneric),

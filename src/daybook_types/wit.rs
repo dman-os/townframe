@@ -17,7 +17,7 @@ pub mod doc {
     pub enum WellKnownProp {
         RefGeneric(DocId),
         LabelGeneric(String),
-        PseudoLabel(String),
+        PseudoLabel(Vec<String>),
         TitleGeneric(String),
         PathGeneric(String),
         ImageMetadata(ImageMetadata),

@@ -42,7 +42,7 @@ crate::define_enum_and_tag!(
         // UpdatedAt type (OffsetDateTime),
         RefGeneric type (DocId),
         LabelGeneric type (String),
-        PseudoLabel type (String),
+        PseudoLabel type (Vec<String>),
         TitleGeneric type (String),
         PathGeneric type (PathBuf),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

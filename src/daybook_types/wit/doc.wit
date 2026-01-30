@@ -38,7 +38,7 @@ interface doc {
         // updated-at(datetime),
         ref-generic(doc-ref), 
         label-generic(string), 
-        pseudo-label(string), 
+        pseudo-label(list<string>), 
         title-generic(string), 
         path-generic(string), 
         image-metadata(image-metadata), 

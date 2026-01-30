@@ -215,7 +215,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 //
                 PropKeyManifest {
                     key_tag: WellKnownPropTag::PseudoLabel.into(),
-                    value_schema: schemars::schema_for!(String),
+                    value_schema: schemars::schema_for!(Vec<String>),
                     display_config: default(),
                 },
             ],
