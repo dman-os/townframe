@@ -24,10 +24,6 @@ ML tools support:
     - Server
 
 */
-mod interlude {
-    pub use utils_rs::prelude::*;
-}
-
 // mod wit {
 //     wit_bindgen::generate!({
 //         world: "guest",
@@ -51,16 +47,13 @@ mod interlude {
 //     });
 // }
 
-use crate::interlude::*;
-
-struct Config {}
-
-struct Ctx {
-    config: Config,
-}
-
+/// local execution of ML tools.
 mod local {}
+/// client for cloud token providers.
 mod cloud {}
+/// durable-streams based API for mltools_server or mltools_cloud.
 mod gateway {}
+/// mltools_local but for servers.
 mod server {}
+/// routes to mltools_local, mltools_client or mltools_cloud depending on config.
 mod client {}

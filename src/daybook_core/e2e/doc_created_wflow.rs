@@ -1,9 +1,7 @@
 use crate::interlude::*;
 
 use crate::rt::dispatch::PropRoutineArgs;
-use daybook_types::doc::{
-    AddDocArgs, DocContent, DocPropKey, DocPropTag, WellKnownProp, WellKnownPropTag,
-};
+use daybook_types::doc::{AddDocArgs, FacetKey, FacetTag, WellKnownFacet, WellKnownFacetTag};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_labeler_workflow() -> Res<()> {
@@ -12,15 +10,11 @@ async fn test_labeler_workflow() -> Res<()> {
     // Create and add a document to the drawer
     let new_doc = AddDocArgs {
         branch_path: daybook_types::doc::BranchPath::from("main"),
-        props: [
+        facets: [
             //
             (
-                DocPropKey::from(WellKnownPropTag::Content),
-                WellKnownProp::Content(DocContent::Text(
-                    //
-                    "Hello, world!".into(),
-                ))
-                .into(),
+                FacetKey::from(WellKnownFacetTag::Note),
+                WellKnownFacet::Note("Hello, world!".into()).into(),
             ),
         ]
         .into(),
@@ -60,14 +54,14 @@ async fn test_labeler_workflow() -> Res<()> {
     // Verify the doc has a LabelGeneric tag from test-labeler
     let updated_doc = test_cx
         .drawer_repo
-        .get(&doc_id, &daybook_types::doc::BranchPath::from("main"))
+        .get_doc_with_facets_at_branch(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
         .await?
         .ok_or_eyre("doc not found")?;
 
-    let has_test_label = updated_doc.props.keys().any(|tag| {
+    let has_test_label = updated_doc.facets.keys().any(|key| {
         matches!(
-            tag,
-            DocPropKey::Tag(DocPropTag::WellKnown(WellKnownPropTag::LabelGeneric))
+            key.tag,
+            FacetTag::WellKnown(WellKnownFacetTag::LabelGeneric)
         )
     });
 
@@ -76,7 +70,7 @@ async fn test_labeler_workflow() -> Res<()> {
     assert!(
         has_test_label,
         "doc should have a LabelGeneric tag after test-labeler workflow completes. Props: {:?}",
-        updated_doc.props
+        updated_doc.facets
     );
 
     // Cleanup
@@ -92,9 +86,9 @@ async fn test_staging_branch_workflow() -> Res<()> {
     // Create and add a document to the drawer
     let new_doc = AddDocArgs {
         branch_path: daybook_types::doc::BranchPath::from("main"),
-        props: [(
-            DocPropKey::from(WellKnownPropTag::Content),
-            WellKnownProp::Content(DocContent::Text("Test staging branch".into())).into(),
+        facets: [(
+            FacetKey::from(WellKnownFacetTag::Note),
+            WellKnownFacet::Note("Test staging branch".into()).into(),
         )]
         .into(),
         user_path: None,
@@ -139,13 +133,17 @@ async fn test_staging_branch_workflow() -> Res<()> {
     // Verify that modifications go to the staging branch (if it exists)
     // The staging branch may not exist yet if no writes have happened, or it may have been created
     let branches = test_cx.drawer_repo.get_doc_branches(&doc_id).await;
-    if let Some(branches) = branches {
+    if let Ok(Some(branches)) = branches {
         let staging_branch_str = staging_branch.to_string_lossy().to_string();
         let staging_exists = branches.branches.contains_key(&staging_branch_str);
 
         if staging_exists {
             // If staging branch exists, verify we can read from it
-            if let Some(staging_doc) = test_cx.drawer_repo.get(&doc_id, &staging_branch).await? {
+            if let Some(staging_doc) = test_cx
+                .drawer_repo
+                .get_doc_with_facets_at_branch(&doc_id, &staging_branch, None)
+                .await?
+            {
                 info!(?staging_doc, "staging branch doc");
                 // The staging branch should have the modifications from the workflow
             }
@@ -165,7 +163,7 @@ async fn test_staging_branch_workflow() -> Res<()> {
 
     // Verify the staging branch has been cleaned up (merged or deleted)
     let final_branches = test_cx.drawer_repo.get_doc_branches(&doc_id).await;
-    if let Some(branches) = final_branches {
+    if let Ok(Some(branches)) = final_branches {
         let staging_branch_str = staging_branch.to_string_lossy().to_string();
         let staging_still_exists = branches.branches.contains_key(&staging_branch_str);
 
@@ -179,22 +177,22 @@ async fn test_staging_branch_workflow() -> Res<()> {
     // Verify the final result is in the target branch (main)
     let final_doc = test_cx
         .drawer_repo
-        .get(&doc_id, &daybook_types::doc::BranchPath::from("main"))
+        .get_doc_with_facets_at_branch(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
         .await?
         .ok_or_eyre("doc not found")?;
 
     // Verify the doc has a LabelGeneric tag from test-labeler (workflow succeeded)
-    let has_test_label = final_doc.props.keys().any(|tag| {
+    let has_test_label = final_doc.facets.keys().any(|key| {
         matches!(
-            tag,
-            DocPropKey::Tag(DocPropTag::WellKnown(WellKnownPropTag::LabelGeneric))
+            key.tag,
+            FacetTag::WellKnown(WellKnownFacetTag::LabelGeneric)
         )
     });
 
     assert!(
         has_test_label,
         "doc should have a LabelGeneric tag after test-labeler workflow completes. Props: {:?}",
-        final_doc.props
+        final_doc.facets
     );
 
     // Verify that no new dispatches were created for /tmp/ branch changes

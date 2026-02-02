@@ -15,6 +15,20 @@
 
 ## Stack
 
+- [ ] Drawers v2
+  - [ ] Rename props to facets
+  - [ ] `dmeta`
+  - [ ] LRU caches
+  - [ ] JSONSchema checks
+  - [ ] Facet ref index
+  - [ ] URLs
+    - [ ] Facet URL
+    - [ ] Doc URL
+  - [ ] `dpath`
+- [ ] `mltools`
+  - [ ] OCR
+  - [ ] Embeedding
+  - [ ] API client
 - [ ] daybook_server
   - [ ] Decide on wrpc vs json
 - [ ] CI/CD

@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use automerge::transaction::Transactable;
 
 use utils_rs::am::AmCtx;
 
@@ -132,7 +133,10 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
 
     // Create a drawer document
     let drawer_doc_id = {
-        let doc = automerge::Automerge::load(&crate::drawer::version_updates::version_latest()?)?;
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
         let handle = acx.add_doc(doc).await?;
         handle.document_id().clone()
     };
@@ -151,8 +155,18 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
     let temp_dir = tempfile::tempdir()?;
     let blobs = crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs")).await?;
 
-    let (drawer_repo, drawer_stop) =
-        DrawerRepo::load(acx.clone(), drawer_doc_id, local_actor_id.clone()).await?;
+    let (drawer_repo, drawer_stop) = DrawerRepo::load(
+        acx.clone(),
+        drawer_doc_id,
+        local_actor_id.clone(),
+        Arc::new(std::sync::Mutex::new(
+            crate::drawer::lru::KeyedLruPool::new(1000),
+        )),
+        Arc::new(std::sync::Mutex::new(
+            crate::drawer::lru::KeyedLruPool::new(1000),
+        )),
+    )
+    .await?;
     let (plug_repo, plugs_stop) = PlugsRepo::load(
         acx.clone(),
         Arc::clone(&blobs),

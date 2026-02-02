@@ -21,17 +21,17 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             processors: default(),
             props: vec![
                 PropKeyManifest {
-                    key_tag: WellKnownPropTag::RefGeneric.into(),
+                    key_tag: WellKnownFacetTag::RefGeneric.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: default(),
                 },
                 PropKeyManifest {
-                    key_tag: WellKnownPropTag::LabelGeneric.into(),
+                    key_tag: WellKnownFacetTag::LabelGeneric.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: default(),
                 },
                 PropKeyManifest {
-                    key_tag: WellKnownPropTag::TitleGeneric.into(),
+                    key_tag: WellKnownFacetTag::TitleGeneric.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: PropKeyDisplayHint {
                         display_title: Some("Title".to_string()),
@@ -40,7 +40,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     },
                 },
                 PropKeyManifest {
-                    key_tag: WellKnownPropTag::PathGeneric.into(),
+                    key_tag: WellKnownFacetTag::PathGeneric.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: PropKeyDisplayHint {
                         display_title: Some("Path".to_string()),
@@ -49,17 +49,17 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     },
                 },
                 PropKeyManifest {
-                    key_tag: WellKnownPropTag::ImageMetadata.into(),
+                    key_tag: WellKnownFacetTag::ImageMetadata.into(),
                     value_schema: schemars::schema_for!(ImageMetadata),
                     display_config: default(),
                 },
                 PropKeyManifest {
-                    key_tag: WellKnownPropTag::Content.into(),
-                    value_schema: schemars::schema_for!(Content),
+                    key_tag: WellKnownFacetTag::Note.into(),
+                    value_schema: schemars::schema_for!(Note),
                     display_config: default(),
                 },
                 PropKeyManifest {
-                    key_tag: WellKnownPropTag::Pending.into(),
+                    key_tag: WellKnownFacetTag::Pending.into(),
                     value_schema: schemars::schema_for!(Pending),
                     display_config: default(),
                 },
@@ -78,11 +78,11 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     PlugDependencyManifest {
                         keys: vec![
                             PropKeyDependencyManifest {
-                                key_tag: WellKnownPropTag::Content.into(),
-                                value_schema: schemars::schema_for!(Content),
+                                key_tag: WellKnownFacetTag::Note.into(),
+                                value_schema: schemars::schema_for!(Note),
                             },
                             PropKeyDependencyManifest {
-                                key_tag: WellKnownPropTag::LabelGeneric.into(),
+                                key_tag: WellKnownFacetTag::LabelGeneric.into(),
                                 value_schema: schemars::schema_for!(String),
                             },
                         ],
@@ -100,16 +100,16 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             bundle: "daybook_wflows".into(),
                         },
                         deets: RoutineManifestDeets::DocProp {
-                            working_prop_tag: WellKnownPropTag::PseudoLabel.into(),
+                            working_prop_tag: WellKnownFacetTag::PseudoLabel.into(),
                         },
                         prop_acl: vec![
                             RoutinePropAccess {
-                                tag: WellKnownPropTag::Content.into(),
+                                tag: WellKnownFacetTag::Note.into(),
                                 read: true,
                                 write: false,
                             },
                             RoutinePropAccess {
-                                tag: WellKnownPropTag::PseudoLabel.into(),
+                                tag: WellKnownFacetTag::PseudoLabel.into(),
                                 read: true,
                                 write: true,
                             },
@@ -126,10 +126,10 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             bundle: "daybook_wflows".into(),
                         },
                         deets: RoutineManifestDeets::DocProp {
-                            working_prop_tag: WellKnownPropTag::LabelGeneric.into(),
+                            working_prop_tag: WellKnownFacetTag::LabelGeneric.into(),
                         },
                         prop_acl: vec![RoutinePropAccess {
-                            tag: WellKnownPropTag::LabelGeneric.into(),
+                            tag: WellKnownFacetTag::LabelGeneric.into(),
                             read: true,
                             write: true,
                         }],
@@ -169,7 +169,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         desc: "Use LLM to label the document content".into(),
                         deets: ProcessorDeets::DocProcessor {
                             routine_name: "pseudo-label".into(),
-                            predicate: DocPredicateClause::HasTag(WellKnownPropTag::Content.into()),
+                            predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
                         },
                     }
                     .into(),
@@ -181,7 +181,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         desc: "Add a test LabelGeneric for testing".into(),
                         deets: ProcessorDeets::DocProcessor {
                             routine_name: "test-label".into(),
-                            predicate: DocPredicateClause::HasTag(WellKnownPropTag::Content.into()),
+                            predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
                         },
                     }
                     .into(),
@@ -214,7 +214,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             props: vec![
                 //
                 PropKeyManifest {
-                    key_tag: WellKnownPropTag::PseudoLabel.into(),
+                    key_tag: WellKnownFacetTag::PseudoLabel.into(),
                     value_schema: schemars::schema_for!(Vec<String>),
                     display_config: default(),
                 },

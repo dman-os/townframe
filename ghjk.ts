@@ -1,7 +1,6 @@
 export { sophon } from "@ghjk/ts";
 import { file } from "@ghjk/ts";
 import { sedLock } from "@ghjk/ts/std.ts";
-import jdk_temurin from "./tools/jdk_temurin.port.ts";
 import rust from "./tools/rust.port.ts";
 import * as ports from "@ghjk/ports_wip";
 
@@ -39,7 +38,6 @@ ghjk
 	.install(
 		installs.node,
 		ports.pnpm(),
-		ports.pipi({ packageName: "pre-commit" })[0],
 		// ports.cargobi({ crateName: "kanidm_tools", locked: true }),
 		ports.cargobi({ crateName: "cargo-nextest", locked: true }),
 		ports.cargobi({ crateName: "cargo-ndk", locked: true }),
@@ -70,17 +68,13 @@ ghjk
 		}),
 		ports.cargobi({ crateName: "leptosfmt", locked: true }),
 		ports.cargobi({ crateName: "trunk", locked: true }),
-		ports.pipi({ packageName: "uv" })[0],
-		// ports.pipi({ packageName: "aider-chat" })[0],
 		// expo router
 		ports.npmi({ packageName: "eas-cli" })[0],
-		// ports.npmi({ packageName: "@google/gemini-cli" })[0],
-		// jdk_temurin({ version: "21.0.8\\+9.0.LTS" }),
 	)
 	.vars({
 		// java tooling is not great with wayland scaling
 		// so we force it
-		// FIXME: this only seems to load on hot reload
+		// FIXME: this only seems to work on hot reload buidlss
 		// also, it doesn't support fractions
 		GDK_SCALE: 2,
 		KANIDM_URL: "https://localhost:8443",

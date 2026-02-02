@@ -28,3 +28,4 @@
   - If refactoring across many items, instead of iterating on all items at once, resolve one item and then apply pattern to the rest.
 - Don't be lazy with solutions.
 - CRITICAL: if the users request seems like it comes from a place of misunderstanding, push back!
+- Don't use single char variable names.

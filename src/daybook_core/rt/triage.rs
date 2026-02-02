@@ -4,7 +4,8 @@ use crate::drawer::DrawerEvent;
 use crate::plugs::PlugsEvent;
 use crate::rt::dispatch::DispatchEvent;
 use crate::rt::{DispatchArgs, Rt};
-use daybook_types::doc::{Doc, DocId};
+use daybook_types::doc::BranchPath;
+use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacetTag};
 
 use crate::plugs::manifest::{
     DocPredicateClause, KeyGeneric, ProcessorDeets, RoutineManifestDeets,
@@ -327,26 +328,42 @@ impl DocTriageWorker {
             DrawerEvent::DocUpdated {
                 id,
                 drawer_heads,
-                diff,
+                entry,
+                changed_facet_keys,
                 ..
             } => {
-                // For updates, we only care about branches that actually changed
-                for (branch_path, branch_diff) in &diff.branches {
+                // Skip updates that only changed dmeta bookkeeping.
+                let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
+                let has_non_dmeta_change = changed_facet_keys
+                    .iter()
+                    .any(|facet_key| facet_key != &dmeta_key);
+                if !has_non_dmeta_change {
+                    self.store
+                        .mutate_sync(|store| {
+                            store.drawer_heads = Some(drawer_heads.clone());
+                        })
+                        .await?;
+                    return Ok(());
+                }
+
+                for (branch_name, heads) in &entry.branches {
+                    let branch_path = daybook_types::doc::BranchPath::from(branch_name.as_str());
                     // Skip temporary staging branches
                     if branch_path.to_string_lossy().starts_with("/tmp/") {
                         continue;
                     }
-                    if let Some(heads) = &branch_diff.to {
-                        // Use get_if_latest to avoid work on stale headss
-                        if let Some(doc) =
-                            self.rt.drawer.get_if_latest(id, branch_path, heads).await?
-                        {
-                            self.triage(id, heads, &doc, branch_path.clone())
-                                .await
-                                .wrap_err("error triaging doc")?;
-                        } else {
-                            debug!(?id, ?branch_path, "skipping triage for stale heads");
-                        }
+                    // Use get_if_latest to avoid work on stale headss
+                    if let Some(doc) = self
+                        .rt
+                        .drawer
+                        .get_if_latest(id, &branch_path, heads, None)
+                        .await?
+                    {
+                        self.triage(id, heads, &doc, branch_path)
+                            .await
+                            .wrap_err("error triaging doc")?;
+                    } else {
+                        debug!(?id, ?branch_path, "skipping triage for stale heads");
                     }
                 }
 
@@ -369,7 +386,8 @@ impl DocTriageWorker {
                 drawer_heads,
             } => {
                 for (branch_name, heads) in &entry.branches {
-                    let branch_path = daybook_types::doc::BranchPath::from(branch_name.as_str());
+                    let branch_path: BranchPath =
+                        daybook_types::doc::BranchPath::from(branch_name.as_str());
                     // Skip temporary staging branches
                     if branch_path.to_string_lossy().starts_with("/tmp/") {
                         continue;
@@ -378,7 +396,7 @@ impl DocTriageWorker {
                     if let Some(doc) = self
                         .rt
                         .drawer
-                        .get_if_latest(id, &branch_path, heads)
+                        .get_if_latest(id, &branch_path, heads, None)
                         .await?
                     {
                         self.triage(id, heads, &doc, branch_path)
@@ -477,7 +495,7 @@ impl DocTriageWorker {
 mod tests {
     use super::*;
     use crate::e2e::test_cx;
-    use daybook_types::doc::{AddDocArgs, DocContent, WellKnownPropTag};
+    use daybook_types::doc::{AddDocArgs, WellKnownFacetTag};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_triage_worker_smoke() -> Res<()> {
@@ -489,12 +507,9 @@ mod tests {
             .drawer_repo
             .add(AddDocArgs {
                 branch_path: daybook_types::doc::BranchPath::from("main"),
-                props: [(
-                    WellKnownPropTag::Content.into(),
-                    daybook_types::doc::WellKnownProp::Content(DocContent::Text(
-                        "Hello world".into(),
-                    ))
-                    .into(),
+                facets: [(
+                    WellKnownFacetTag::Note.into(),
+                    daybook_types::doc::WellKnownFacet::Note("Hello world".into()).into(),
                 )]
                 .into(),
                 user_path: None,

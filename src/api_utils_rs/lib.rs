@@ -51,6 +51,7 @@ pub mod wit {
     pub mod utils {
         pub use crate::errs::{ErrorInternal, ErrorsValidation};
         pub use crate::wit::townframe::api_utils::utils::*;
+        pub type Json = String;
     }
     use crate::interlude::utoipa;
     use crate::interlude::Timestamp;

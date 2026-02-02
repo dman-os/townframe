@@ -3,6 +3,7 @@ package townframe:daybook-types;
 interface doc {
     use townframe:api-utils/utils.{datetime, json};
 
+    type uuid = string;
     type mime-type = string;
     type multihash = string;
     type doc-id = string;
@@ -13,14 +14,9 @@ interface doc {
         hash: multihash,
     }
 
-    enum doc-content-kind {
-        text,
-        blob,
-    }
-
-    variant doc-content {
-        text(string), 
-        blob(blob), 
+    record note {
+        mime: mime-type,
+        content: string,
     }
 
     record image-metadata {
@@ -34,34 +30,41 @@ interface doc {
     }
 
     variant well-known-prop {
-        // created-at(datetime),
-        // updated-at(datetime),
         ref-generic(doc-ref), 
         label-generic(string), 
         pseudo-label(list<string>), 
         title-generic(string), 
         path-generic(string), 
         image-metadata(image-metadata), 
-        content(doc-content),
+        dmeta(dmeta),
+        note(note),
+        blob(blob),
         pending(pending),
     }
 
-    type doc-prop = json;
-    //variant doc-prop {
-    //    well-known(well-known-prop),
-    //    any(json), // JSON string
-    //}
+    type facet-raw = json;
 
-    record doc {
+    record facet-meta {
+        created-at: datetime,
+        updated-at: list<datetime>,
+        uuid: list<uuid>,
+    }
+
+    record dmeta {
         id: doc-id,
         created-at: datetime,
-        updated-at: datetime,
-        props: list<tuple<string, doc-prop>>,
+        updated-at: list<datetime>,
+        facet-uuids: list<tuple<string, uuid>>,
+        facets: list<tuple<string, facet-meta>>,
+    }
+    record doc {
+        id: doc-id,
+        props: list<tuple<string, facet-raw>>,
     }
 
     record doc-patch {
         id: doc-id,
-        props-set: list<tuple<string, doc-prop>>,
+        props-set: list<tuple<string, facet-raw>>,
         props-remove: list<string>,
         user-path: option<string>,
     }
