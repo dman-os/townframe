@@ -20,7 +20,7 @@
 
   - `./src/daybook_ffi/`: [uniffi](https://lib.rs/uniffi) based bindigns for kotlin.
 
-      - Use ghjk task `gen-ffi-dayb` to re-generate the bindings and build the library.
+      - `./x/gen-ffi-dayb.ts` to re-generate the bindings and build the library.
 
   - `./src/daybook_wflows/`: wflows for daybook.
 
@@ -61,11 +61,9 @@
   - `./src/test_wflows/`: wflows used for tests in `wflow`.
 
 
-- `./ghjk.ts`: [`ghjk`](https://github.com/metatypedev/ghjk) file.
+- `./x/`: contans a lot of necessary scripts.
 
-  - Contans a lot of necessary scripts accessible through `ghjk x`.
-
-  - Provisions a bunch of development tools.
+  - The nix flake will put them in your PATH for ease of invoking.
 
 - `./flake.nix`: Nix flake with development environments.
 
@@ -108,7 +106,7 @@
 
   - `profiles` are used to group services together and operate on the groups.
 
-  - Ghjk tasks like `compose-up` and `compose-logs` take profile names.
+  - `./x/compose-up.ts` and `./x/compose-logs.ts` take profile names.
 
 ## Style guide
 

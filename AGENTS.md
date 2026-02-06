@@ -7,7 +7,7 @@
     - Network errors
     - User input validation
   - Don't swallow errors with empty catch statements or catch-and-log unless explcitly told to do so.
-- To type check and lint the ./src/daybook_compose multiplatform app, use `ghjk x check-dayb`.
+- To type check and lint the ./src/daybook_compose multiplatform app, use `./x/check-dayb.ts`.
 - Don't be lazy with solutions.
 - Prefer `cargo clippy --all-targets --all-features -p myCrate` over `cargo check`.
 - When working with rust, in addition to `cargo clippy`, small tests can be used to validate ideas.
