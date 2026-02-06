@@ -36,8 +36,12 @@ async fn setup_test_repo() -> Res<(Arc<DrawerRepo>, Handle, tempfile::TempDir)> 
         ctx.acx.clone(),
         drawer_doc_id,
         ctx.local_actor_id.clone(),
-        Arc::new(std::sync::Mutex::new(daybook_core::drawer::lru::KeyedLruPool::new(1000))),
-        Arc::new(std::sync::Mutex::new(daybook_core::drawer::lru::KeyedLruPool::new(1000))),
+        Arc::new(std::sync::Mutex::new(
+            daybook_core::drawer::lru::KeyedLruPool::new(1000),
+        )),
+        Arc::new(std::sync::Mutex::new(
+            daybook_core::drawer::lru::KeyedLruPool::new(1000),
+        )),
     )
     .await?;
     let rt_handle = Handle::current();
@@ -148,7 +152,7 @@ async fn test_read_file() -> Res<()> {
     // Verify it's valid JSON and contains the doc data
     let parsed_doc: Doc = serde_json::from_str(&content)?;
     assert_eq!(parsed_doc.id, doc_id); // Use the ID returned by repo.add()
-    // assert_eq!(parsed_doc.content, doc.content);
+                                       // assert_eq!(parsed_doc.content, doc.content);
 
     // Unmount the filesystem (drops BackgroundSession which auto-unmounts)
     drop(_mount_handle);
@@ -203,7 +207,9 @@ async fn test_write_file() -> Res<()> {
     thread::sleep(Duration::from_millis(200));
 
     // Verify the change was persisted
-    let updated_doc = repo.get_doc_with_facets_at_branch(&doc_id, &daybook_types::doc::BranchPath::from("main"), None).await?;
+    let updated_doc = repo
+        .get_doc_with_facets_at_branch(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
+        .await?;
     let updated_doc = updated_doc.expect("Document should exist");
 
     // assert_eq!(
@@ -211,8 +217,16 @@ async fn test_write_file() -> Res<()> {
     //     DocContent::Text("Modified content".to_string())
     // );
     assert_eq!(
-        updated_doc.facets.get(&daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::TitleGeneric)).unwrap(),
-        &serde_json::to_value(daybook_types::doc::WellKnownFacet::TitleGeneric("Modified Title".to_string())).unwrap()
+        updated_doc
+            .facets
+            .get(&daybook_types::doc::FacetKey::from(
+                daybook_types::doc::WellKnownFacetTag::TitleGeneric
+            ))
+            .unwrap(),
+        &serde_json::to_value(daybook_types::doc::WellKnownFacet::TitleGeneric(
+            "Modified Title".to_string()
+        ))
+        .unwrap()
     );
 
     // Unmount the filesystem (drops BackgroundSession which auto-unmounts)
@@ -308,7 +322,9 @@ async fn test_multiple_files() -> Res<()> {
         let doc = daybook_types::doc::AddDocArgs {
             branch_path: daybook_types::doc::BranchPath::from("main"),
             facets: [(
-                daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::TitleGeneric),
+                daybook_types::doc::FacetKey::from(
+                    daybook_types::doc::WellKnownFacetTag::TitleGeneric,
+                ),
                 daybook_types::doc::WellKnownFacet::TitleGeneric(format!("Doc {}", i)).into(),
             )]
             .into(),

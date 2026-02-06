@@ -16,9 +16,6 @@ repos:
         # exclude all generated files
         exclude: |
           (?x)^(
-              .ghjk/lock.json|
-              .ghjk/hash.json|
-              .ghjk/deno.lock|
               Cargo.lock|
               gh_action/.*.js
           )$
@@ -40,15 +37,20 @@ repos:
       #   language: system
       #   entry: bash -c 'ktlint -F'
       #   pass_filenames: false
-      - id: ghjk-resolve
-        name: Ghjk resolve
+      - id: deno-fmt-x
+        name: Formt scripts
         language: system
-        entry: bash -c 'ghjk p resolve'
+        entry: deno fmt ./x/
         pass_filenames: false
-      - id: lock-sed
-        name: Sed lock
+      - id: deno-lint-x
+        name: Lint scripts
         language: system
-        entry: bash -c 'ghjk x lock-sed'
+        entry: deno lint ./x/
+        pass_filenames: false
+      - id: deno-check-x
+        name: Check scripts
+        language: system
+        entry: deno check ./x/
         pass_filenames: false
       # - id: lint-check
       #   name: Ts check

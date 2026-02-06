@@ -4,16 +4,16 @@ import { $ } from "./utils.ts";
 
 const failurePattern = /(^|\n)(FAILED|FAILURE:|^e:|\bFAILED\b|\bException\b)/im;
 
-const processHandle = Deno.run({
-  cmd: ["/bin/sh", "-lc", "./gradlew hotReloadDesktopMain"],
+const processHandle = new Deno.Command("/bin/sh", {
+  args: ["-lc", "./gradlew hotReloadDesktopMain"],
   stdout: "piped",
   stderr: "piped",
-  cwd: $.relativeDir("../src/daybook_compose/").toString(),
-});
+  cwd: $.dbg($.relativeDir("../src/daybook_compose/").toString()),
+}).spawn();
 const textDecoder = new TextDecoder();
 
-const stdoutReader = processHandle.stdout.readable.getReader();
-const stderrReader = processHandle.stderr.readable.getReader();
+const stdoutReader = processHandle.stdout.getReader();
+const stderrReader = processHandle.stderr.getReader();
 
 let outputBuffer = "";
 
@@ -36,10 +36,10 @@ const pumpReader = async (reader: ReadableStreamDefaultReader<Uint8Array>) => {
 
 await Promise.all([pumpReader(stdoutReader), pumpReader(stderrReader)]);
 
-const statusValue = await processHandle.status();
+const statusValue = await processHandle.status;
 stdoutReader.releaseLock();
 stderrReader.releaseLock();
-processHandle.close();
+// processHandle.close();
 
 if (statusValue.code !== 0 || failurePattern.test(outputBuffer)) {
   console.log(outputBuffer);

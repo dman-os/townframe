@@ -1,4 +1,4 @@
-import { $ as old$, CommandBuilder } from "jsr:@david/dax@0.45.0";
+import { $ as old$, CommandBuilder, Path } from "jsr:@david/dax@0.45.0";
 
 /**
  * This assumes that the script is run from the x/ directory or via deno run
@@ -9,8 +9,15 @@ export const $ = Object.assign(
       .cwd(old$.path(import.meta.resolve("../")).dirname())
       .printCommand(true),
     extras: {
+      dbg<T>(val: T, ...ctx: unknown[]) {
+        console.log("DBG", val, ...ctx);
+        return val;
+      },
       relativeDir(path: string) {
-        return $.path(import.meta.resolve(path)).dirname();
+        return $.path(import.meta.resolve(path));
+      },
+      chdir(path: string | Path) {
+        Deno.chdir($.path(path).toString());
       },
     },
   }),
