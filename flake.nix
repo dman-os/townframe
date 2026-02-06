@@ -183,6 +183,7 @@
             openssl
             protobuf
             mold
+            deno
           ];
 
           rustLintInputs = with pkgs; [
@@ -219,10 +220,11 @@
             wasm-tools
             cargo-leptos
             trunk
-            deno
           ];
 
           devOnlyInputs = with pkgs; [
+            # FIXME: why do we need golang for again?
+            # did an llm strip comments?
             go
             androidComposition
             v4l-utils
