@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use automerge::transaction::Transactable;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::str::FromStr;
@@ -171,7 +172,11 @@ pub async fn init_from_globals(
         ),
         (
             handle_drawer,
-            crate::drawer::version_updates::version_latest,
+            (|| {
+                let mut doc = automerge::AutoCommit::new();
+                doc.put(automerge::ROOT, "version", "0")?;
+                Ok(doc.save_nocompress())
+            }) as fn() -> Res<Vec<u8>>,
         ),
     ] {
         let handle = match handle {

@@ -15,11 +15,20 @@
 
 ## Stack
 
-- [ ] Repos
-  - [ ] Profiles
-  - [x] CLI support
-    - [ ] Make it nice
-  - [ ] GUI support
+- [ ] Drawers v2
+  - [ ] Rename props to facets
+  - [ ] `dmeta`
+  - [ ] LRU caches
+  - [ ] JSONSchema checks
+  - [ ] Facet ref index
+  - [ ] URLs
+    - [ ] Facet URL
+    - [ ] Doc URL
+  - [ ] `dpath`
+- [ ] `mltools`
+  - [ ] OCR
+  - [ ] Embeedding
+  - [ ] API client
 - [ ] daybook_server
   - [ ] Decide on wrpc vs json
 - [ ] CI/CD
@@ -35,7 +44,12 @@
 - [ ] Overhaul bottom bar
 - [ ] Constrain value shapes for known keys at drawer
 - [ ] Receipt parsing
-- [ ] Pending jobs
+- [ ] Pending jobs [LOST]
+- [ ] Repos
+  - [ ] Profiles
+  - [x] CLI support
+    - [ ] Make it nice
+  - [ ] GUI support
 
 - [ ] Cleanup for public pre-alpha
 
@@ -74,7 +88,9 @@
   - [ ] Buy domain
     - [ ] https://daybook.tf
     - [ ] https://daybook.com
-    - [ ] https://mother.db.tf
+    - [ ] https://motherton.db.tf
+    - [ ] https://mother.ton.tf
+    - [ ] https://mother.town.tf
 - [ ] PgLite based testing
 - [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
 - [ ] DRY up all the wit bindgen

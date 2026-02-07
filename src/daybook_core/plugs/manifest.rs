@@ -311,7 +311,7 @@ pub enum DocPredicateClause {
 impl DocPredicateClause {
     pub fn matches(&self, doc: &daybook_types::doc::Doc) -> bool {
         match self {
-            Self::HasTag(tag) => doc.props.keys().any(|key| key.tag().to_string() == tag.0),
+            Self::HasTag(tag) => doc.facets.keys().any(|key| key.tag.to_string() == tag.0),
             Self::Or(clauses) => clauses.iter().any(|clause| clause.matches(doc)),
             Self::And(clauses) => clauses.iter().all(|clause| clause.matches(doc)),
             Self::Not(clause) => !clause.matches(doc),

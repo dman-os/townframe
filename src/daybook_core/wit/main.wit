@@ -5,7 +5,7 @@ interface types {
 }
 
 interface drawer {
-    use townframe:daybook-types/doc.{doc, doc-patch, doc-prop, doc-id};
+    use townframe:daybook-types/doc.{doc, doc-patch, facet-raw, doc-id};
     use types.{heads};
 
     variant get-doc-error {
@@ -34,7 +34,7 @@ interface drawer {
 }
 
 interface capabilities {
-    use townframe:daybook-types/doc.{doc, doc-patch, doc-prop, doc-id};
+    use townframe:daybook-types/doc.{doc, doc-patch, facet-raw, doc-id};
 
     variant update-doc-error {
         invalid-patch(string),
@@ -52,12 +52,12 @@ interface capabilities {
     }
 
     resource prop-token-ro {
-        get: func() -> doc-prop;
+        get: func() -> facet-raw;
     }
 
     resource prop-token-rw {
-        get: func() -> doc-prop;
-        update: func(patch: doc-prop) -> result<_, update-doc-error>;
+        get: func() -> facet-raw;
+        update: func(patch: facet-raw) -> result<_, update-doc-error>;
     }
 }
 

@@ -99,6 +99,12 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             ctx.acx.clone(),
             drawer_doc_id.clone(),
             ctx.local_actor_id.clone(),
+            Arc::new(std::sync::Mutex::new(
+                daybook_core::drawer::lru::KeyedLruPool::new(1000),
+            )),
+            Arc::new(std::sync::Mutex::new(
+                daybook_core::drawer::lru::KeyedLruPool::new(1000),
+            )),
         )
         .await?;
         let blobs_repo = BlobsRepo::new(conf._blobs_root.clone()).await?;
@@ -161,13 +167,23 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     // initializes the repo
     let ctx = context::Ctx::init(conf).await?;
     let drawer_doc_id = ctx.doc_drawer().document_id().clone();
-    let (drawer, drawer_stop) =
-        DrawerRepo::load(ctx.acx.clone(), drawer_doc_id, ctx.local_actor_id.clone()).await?;
+    let (drawer, drawer_stop) = DrawerRepo::load(
+        ctx.acx.clone(),
+        drawer_doc_id,
+        ctx.local_actor_id.clone(),
+        Arc::new(std::sync::Mutex::new(
+            daybook_core::drawer::lru::KeyedLruPool::new(1000),
+        )),
+        Arc::new(std::sync::Mutex::new(
+            daybook_core::drawer::lru::KeyedLruPool::new(1000),
+        )),
+    )
+    .await?;
 
     match cli.command {
         StaticCommands::Init {} | StaticCommands::Completions { .. } => unreachable!(),
         StaticCommands::Ls => {
-            let doc_entries = drawer.list().await;
+            let doc_entries = drawer.list().await?;
 
             let mut docs = Vec::new();
             for entry in &doc_entries {
@@ -175,14 +191,17 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     warn!(doc_id = ?entry.doc_id,"no branches found on doc");
                     continue;
                 };
-                if let Some(doc) = drawer.get(&entry.doc_id, &main_branch).await? {
+                if let Some(doc) = drawer
+                    .get_doc_with_facets_at_branch(&entry.doc_id, &main_branch, None)
+                    .await?
+                {
                     docs.push((entry.clone(), doc));
                 }
             }
 
             use comfy_table::presets::NOTHING;
             use comfy_table::Table;
-            use daybook_types::doc::{WellKnownProp, WellKnownPropTag};
+            use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
             let mut table = Table::new();
             table
@@ -191,12 +210,14 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
 
             for (entry, doc) in docs {
                 let title = doc
-                    .props
-                    .get(&WellKnownPropTag::TitleGeneric.into())
+                    .facets
+                    .get(&WellKnownFacetTag::TitleGeneric.into())
                     .map(|val| {
-                        match WellKnownProp::from_json(val.clone(), WellKnownPropTag::TitleGeneric)
-                        {
-                            Ok(WellKnownProp::TitleGeneric(str)) => str.clone(),
+                        match WellKnownFacet::from_json(
+                            val.clone(),
+                            WellKnownFacetTag::TitleGeneric,
+                        ) {
+                            Ok(WellKnownFacet::TitleGeneric(str)) => str.clone(),
                             _ => panic!("tag - prop mismatch"),
                         }
                     })
@@ -215,7 +236,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             println!("{table}");
         }
         StaticCommands::Cat { id, branch } => {
-            let Some(branches) = drawer.get_doc_branches(&id).await else {
+            let Ok(Some(branches)) = drawer.get_doc_branches(&id).await else {
                 error!("document not found: {id}");
                 return Ok(ExitCode::FAILURE);
             };
@@ -236,7 +257,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 }
             };
             let doc = drawer
-                .get(&id, &branch_path)
+                .get_doc_with_facets_at_branch(&id, &branch_path, None)
                 .await?
                 .expect("document from entry missing");
             println!("{:#?}", &doc);
@@ -245,11 +266,11 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         StaticCommands::Touch => {
             let doc = daybook_types::doc::AddDocArgs {
                 branch_path: daybook_types::doc::BranchPath::from("main"),
-                props: [
+                facets: [
                     //
                     (
-                        daybook_types::doc::WellKnownPropTag::TitleGeneric.into(),
-                        daybook_types::doc::WellKnownProp::TitleGeneric("Untitled".into()).into(),
+                        daybook_types::doc::WellKnownFacetTag::TitleGeneric.into(),
+                        daybook_types::doc::WellKnownFacet::TitleGeneric("Untitled".into()).into(),
                     ),
                 ]
                 .into(),
@@ -262,7 +283,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             println!("{id}");
         }
         StaticCommands::Ed { id, branch } => {
-            let Some(branches) = drawer.get_doc_branches(&id).await else {
+            let Ok(Some(branches)) = drawer.get_doc_branches(&id).await else {
                 error!("document not found: {id}");
                 return Ok(ExitCode::FAILURE);
             };
@@ -282,7 +303,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     branch
                 }
             };
-            let Some((doc, heads)) = drawer.get_with_heads(&id, &branch_path).await? else {
+            let Some((doc, heads)) = drawer.get_with_heads(&id, &branch_path, None).await? else {
                 eyre::bail!("Document not found: {id}");
             };
 
@@ -368,7 +389,13 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         DrawerRepo::load(
             ctx.acx.clone(),
             ctx.doc_drawer().document_id().clone(),
-            ctx.local_actor_id.clone()
+            ctx.local_actor_id.clone(),
+            Arc::new(std::sync::Mutex::new(
+                daybook_core::drawer::lru::KeyedLruPool::new(1000)
+            )),
+            Arc::new(std::sync::Mutex::new(
+                daybook_core::drawer::lru::KeyedLruPool::new(1000)
+            )),
         ),
         DispatchRepo::load(
             ctx.acx.clone(),
@@ -398,11 +425,11 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     let plugs = plugs_repo.list_plugs().await;
 
     // source plug for each command
-    let mut command_details: HashMap<String, ClapReadyCommand> = default();
+    let mut command_details: HashMap<String, PlugCmdClap> = default();
     for plug_man in plugs.iter() {
         let plug_id: Arc<str> = plug_man.id().into();
         for (com_name, com_man) in plug_man.commands.iter() {
-            let details = ready_command_clap(Arc::clone(&plug_id), plug_man, &com_name.0, com_man)?;
+            let details = plug_cmd_to_clap(Arc::clone(&plug_id), plug_man, &com_name.0, com_man)?;
 
             // we check for clash of command names first
             if let Some(clash) = command_details.remove(&com_name.0[..]) {
@@ -593,7 +620,7 @@ struct ExecCtx {
 
 #[derive(educe::Educe)]
 #[educe(Debug)]
-struct ClapReadyCommand {
+struct PlugCmdClap {
     pub clap: clap::Command,
     pub fqcn: String,
     pub src_plug_id: Arc<str>,
@@ -608,12 +635,12 @@ type CliCommandAction = Box<
         + Sync,
 >;
 
-fn ready_command_clap(
+fn plug_cmd_to_clap(
     plug_id: Arc<str>,
     plug_man: &Arc<manifest::PlugManifest>,
     com_name: &str,
     com_man: &Arc<manifest::CommandManifest>,
-) -> Res<ClapReadyCommand> {
+) -> Res<PlugCmdClap> {
     let mut clap_cmd = clap::Command::new(com_name.to_string())
         .long_about(com_man.desc.clone())
         .before_help(format!("From the {plug_id} plug."))
@@ -653,7 +680,7 @@ Routine impl: {routine_impl:?}
                             .get_one::<String>("doc-id")
                             .expect("this shouldn't happen");
                         let branch = matches.get_one::<String>("branch");
-                        let Some(branches) = ecx.drawer.get_doc_branches(doc_id).await else {
+                        let Ok(Some(branches)) = ecx.drawer.get_doc_branches(doc_id).await else {
                             eyre::bail!("document not found: {doc_id}");
                         };
                         let branch_path = match branch {
@@ -700,7 +727,7 @@ Routine impl: {routine_impl:?}
         }
     };
 
-    Ok(ClapReadyCommand {
+    Ok(PlugCmdClap {
         clap: clap_cmd,
         fqcn: format!("{plug_id}/{name}", name = com_name),
         man: Arc::clone(com_man),

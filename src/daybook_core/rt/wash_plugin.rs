@@ -2,10 +2,10 @@ use crate::interlude::*;
 use daybook_types::doc::{self as root_doc};
 
 mod binds_guest {
+    use crate::interlude::*;
+
     use daybook_types::doc::{self as root_doc};
     use daybook_types::wit::doc as wit_doc;
-
-    use townframe::daybook_types::doc as binds_doc;
 
     wash_runtime::wasmtime::component::bindgen!({
         world: "all-guest",
@@ -20,109 +20,178 @@ mod binds_guest {
         }
     });
 
-    impl From<api_utils_rs::wit::townframe::api_utils::utils::Datetime>
-        for townframe::api_utils::utils::Datetime
-    {
-        fn from(value: api_utils_rs::wit::townframe::api_utils::utils::Datetime) -> Self {
-            Self {
-                seconds: value.seconds,
-                nanoseconds: value.nanoseconds,
+    #[allow(dead_code)]
+    pub fn well_known_facet_to_wit(value: root_doc::WellKnownFacet) -> wit_doc::WellKnownProp {
+        match value {
+            root_doc::WellKnownFacet::RefGeneric(val) => wit_doc::WellKnownProp::RefGeneric(val),
+            root_doc::WellKnownFacet::LabelGeneric(val) => {
+                wit_doc::WellKnownProp::LabelGeneric(val)
+            }
+            root_doc::WellKnownFacet::PseudoLabel(val) => wit_doc::WellKnownProp::PseudoLabel(val),
+            root_doc::WellKnownFacet::TitleGeneric(val) => {
+                wit_doc::WellKnownProp::TitleGeneric(val)
+            }
+            root_doc::WellKnownFacet::PathGeneric(val) => {
+                wit_doc::WellKnownProp::PathGeneric(val.to_string_lossy().into_owned())
+            }
+            root_doc::WellKnownFacet::ImageMetadata(val) => {
+                wit_doc::WellKnownProp::ImageMetadata(root_doc::ImageMetadata {
+                    mime: val.mime,
+                    width_px: val.width_px,
+                    height_px: val.height_px,
+                })
+            }
+            root_doc::WellKnownFacet::Note(val) => wit_doc::WellKnownProp::Note(root_doc::Note {
+                mime: val.mime,
+                content: val.content,
+            }),
+            root_doc::WellKnownFacet::Blob(val) => wit_doc::WellKnownProp::Blob(root_doc::Blob {
+                length_octets: val.length_octets,
+                hash: val.hash,
+            }),
+            root_doc::WellKnownFacet::Pending(pending) => {
+                wit_doc::WellKnownProp::Pending(wit_doc::Pending {
+                    key: pending.key.to_string(),
+                })
+            }
+            root_doc::WellKnownFacet::Dmeta(dmeta) => {
+                wit_doc::WellKnownProp::Dmeta(wit_doc::Dmeta {
+                    id: dmeta.id,
+                    created_at: dmeta.created_at.into(),
+                    updated_at: dmeta.updated_at.into_iter().map(Into::into).collect(),
+                    facet_uuids: dmeta
+                        .facet_uuids
+                        .into_iter()
+                        .map(|(uuid, key)| (uuid.to_string(), key.to_string()))
+                        .collect(),
+                    facets: dmeta
+                        .facets
+                        .into_iter()
+                        .map(|(key, meta)| {
+                            (
+                                key.to_string(),
+                                wit_doc::FacetMeta {
+                                    created_at: meta.created_at.into(),
+                                    updated_at: meta
+                                        .updated_at
+                                        .into_iter()
+                                        .map(Into::into)
+                                        .collect(),
+                                    uuid: meta
+                                        .uuid
+                                        .into_iter()
+                                        .map(|facet_uuid| facet_uuid.to_string())
+                                        .collect(),
+                                },
+                            )
+                        })
+                        .collect(),
+                })
             }
         }
     }
-    impl From<binds_doc::WellKnownProp> for wit_doc::WellKnownProp {
-        fn from(value: binds_doc::WellKnownProp) -> Self {
-            match value {
-                binds_doc::WellKnownProp::RefGeneric(val) => {
-                    wit_doc::WellKnownProp::RefGeneric(val)
-                }
-                binds_doc::WellKnownProp::LabelGeneric(val) => {
-                    wit_doc::WellKnownProp::LabelGeneric(val)
-                }
-                binds_doc::WellKnownProp::PseudoLabel(val) => {
-                    wit_doc::WellKnownProp::PseudoLabel(val)
-                }
-                binds_doc::WellKnownProp::TitleGeneric(val) => {
-                    wit_doc::WellKnownProp::TitleGeneric(val)
-                }
-                binds_doc::WellKnownProp::PathGeneric(val) => {
-                    wit_doc::WellKnownProp::PathGeneric(val)
-                }
-                binds_doc::WellKnownProp::ImageMetadata(val) => {
-                    wit_doc::WellKnownProp::ImageMetadata(root_doc::ImageMetadata {
-                        mime: val.mime,
-                        width_px: val.width_px,
-                        height_px: val.height_px,
-                    })
-                }
-                binds_doc::WellKnownProp::Content(val) => {
-                    wit_doc::WellKnownProp::Content(match val {
-                        binds_doc::DocContent::Text(val) => root_doc::DocContent::Text(val),
-                        binds_doc::DocContent::Blob(val) => {
-                            root_doc::DocContent::Blob(root_doc::Blob {
-                                length_octets: val.length_octets,
-                                hash: val.hash,
-                            })
-                        }
-                    })
-                }
-                binds_doc::WellKnownProp::Pending(pending) => {
-                    wit_doc::WellKnownProp::Pending(wit_doc::Pending { key: pending.key })
-                }
+
+    #[allow(dead_code)]
+    pub fn wit_to_well_known_facet(value: wit_doc::WellKnownProp) -> root_doc::WellKnownFacet {
+        match value {
+            wit_doc::WellKnownProp::RefGeneric(val) => root_doc::WellKnownFacet::RefGeneric(val),
+            wit_doc::WellKnownProp::LabelGeneric(val) => {
+                root_doc::WellKnownFacet::LabelGeneric(val)
             }
+            wit_doc::WellKnownProp::PseudoLabel(val) => root_doc::WellKnownFacet::PseudoLabel(val),
+            wit_doc::WellKnownProp::TitleGeneric(val) => {
+                root_doc::WellKnownFacet::TitleGeneric(val)
+            }
+            wit_doc::WellKnownProp::PathGeneric(val) => {
+                root_doc::WellKnownFacet::PathGeneric(val.into())
+            }
+            wit_doc::WellKnownProp::ImageMetadata(val) => {
+                root_doc::WellKnownFacet::ImageMetadata(root_doc::ImageMetadata {
+                    mime: val.mime,
+                    width_px: val.width_px,
+                    height_px: val.height_px,
+                })
+            }
+            wit_doc::WellKnownProp::Pending(pending) => {
+                root_doc::WellKnownFacet::Pending(root_doc::Pending {
+                    key: root_doc::FacetKey::from(pending.key),
+                })
+            }
+            wit_doc::WellKnownProp::Dmeta(dmeta) => {
+                root_doc::WellKnownFacet::Dmeta(root_doc::Dmeta {
+                    id: dmeta.id,
+                    created_at: Timestamp::from_second(dmeta.created_at.seconds as i64).unwrap(),
+                    updated_at: dmeta
+                        .updated_at
+                        .into_iter()
+                        .map(|dt| Timestamp::from_second(dt.seconds as i64).unwrap())
+                        .collect(),
+                    facet_uuids: dmeta
+                        .facet_uuids
+                        .into_iter()
+                        .map(|(facet_uuid_str, facet_key_str)| {
+                            (
+                                Uuid::parse_str(&facet_uuid_str).unwrap(),
+                                root_doc::FacetKey::from(facet_key_str),
+                            )
+                        })
+                        .collect(),
+                    facets: dmeta
+                        .facets
+                        .into_iter()
+                        .map(|(facet_key_str, facet_meta)| {
+                            (
+                                root_doc::FacetKey::from(facet_key_str),
+                                root_doc::FacetMeta {
+                                    created_at: Timestamp::from_second(
+                                        facet_meta.created_at.seconds as i64,
+                                    )
+                                    .unwrap(),
+                                    updated_at: facet_meta
+                                        .updated_at
+                                        .into_iter()
+                                        .map(|dt| {
+                                            Timestamp::from_second(dt.seconds as i64).unwrap()
+                                        })
+                                        .collect(),
+                                    uuid: facet_meta
+                                        .uuid
+                                        .into_iter()
+                                        .map(|facet_uuid_str| {
+                                            Uuid::parse_str(&facet_uuid_str).unwrap()
+                                        })
+                                        .collect(),
+                                },
+                            )
+                        })
+                        .collect(),
+                })
+            }
+            wit_doc::WellKnownProp::Note(note) => root_doc::WellKnownFacet::Note(root_doc::Note {
+                mime: note.mime,
+                content: note.content,
+            }),
+            wit_doc::WellKnownProp::Blob(blob) => root_doc::WellKnownFacet::Blob(root_doc::Blob {
+                length_octets: blob.length_octets,
+                hash: blob.hash,
+            }),
         }
     }
-    impl From<wit_doc::WellKnownProp> for binds_doc::WellKnownProp {
-        fn from(value: wit_doc::WellKnownProp) -> Self {
-            match value {
-                wit_doc::WellKnownProp::RefGeneric(val) => {
-                    binds_doc::WellKnownProp::RefGeneric(val)
-                }
-                wit_doc::WellKnownProp::LabelGeneric(val) => {
-                    binds_doc::WellKnownProp::LabelGeneric(val)
-                }
-                wit_doc::WellKnownProp::PseudoLabel(val) => {
-                    binds_doc::WellKnownProp::PseudoLabel(val)
-                }
-                wit_doc::WellKnownProp::TitleGeneric(val) => {
-                    binds_doc::WellKnownProp::TitleGeneric(val)
-                }
-                wit_doc::WellKnownProp::PathGeneric(val) => {
-                    binds_doc::WellKnownProp::PathGeneric(val)
-                }
-                wit_doc::WellKnownProp::ImageMetadata(val) => {
-                    binds_doc::WellKnownProp::ImageMetadata(binds_doc::ImageMetadata {
-                        mime: val.mime,
-                        width_px: val.width_px,
-                        height_px: val.height_px,
-                    })
-                }
-                wit_doc::WellKnownProp::Content(val) => {
-                    binds_doc::WellKnownProp::Content(match val {
-                        root_doc::DocContent::Text(val) => binds_doc::DocContent::Text(val),
-                        root_doc::DocContent::Blob(val) => {
-                            binds_doc::DocContent::Blob(binds_doc::Blob {
-                                length_octets: val.length_octets,
-                                hash: val.hash,
-                            })
-                        }
-                    })
-                }
-                wit_doc::WellKnownProp::Pending(val) => {
-                    binds_doc::WellKnownProp::Pending(binds_doc::Pending { key: val.key })
-                } // wit_doc::WellKnownProp::CreatedAt(datetime) => binds_doc::WellKnownProp::CreaedAt(),
-                  // wit_doc::WellKnownProp::UpdatedAt(datetime) => todo!(),
-            }
-        }
-    }
-    impl From<wit_doc::Doc> for binds_doc::Doc {
-        fn from(value: wit_doc::Doc) -> Self {
-            Self {
-                id: value.id,
-                created_at: value.created_at.into(),
-                updated_at: value.updated_at.into(),
-                props: value.props.into_iter().collect(),
-            }
+
+    #[allow(dead_code)]
+    pub fn wit_to_root_doc(value: wit_doc::Doc) -> root_doc::Doc {
+        root_doc::Doc {
+            id: value.id,
+            facets: value
+                .facets
+                .into_iter()
+                .map(|(key, val)| {
+                    (
+                        root_doc::FacetKey::from(&key),
+                        root_doc::FacetRaw::from(val),
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -168,10 +237,9 @@ impl DaybookPlugin {
         doc_id: &DocId,
         heads: &ChangeHashSet,
     ) -> Res<Option<Arc<daybook_types::doc::Doc>>> {
-        let Some(doc) = self.drawer_repo.get_at_heads(doc_id, heads).await? else {
-            return Ok(None);
-        };
-        Ok(Some(doc))
+        self.drawer_repo
+            .get_doc_with_facets_at_heads(doc_id, heads, None)
+            .await
     }
 
     async fn patch_doc(
@@ -179,7 +247,7 @@ impl DaybookPlugin {
         branch_path: daybook_types::doc::BranchPath,
         heads: Option<ChangeHashSet>,
         patch: root_doc::DocPatch,
-    ) -> Result<(), crate::drawer::UpdateDocErr> {
+    ) -> Result<(), crate::drawer::types::DrawerError> {
         self.drawer_repo
             .update_at_heads(patch, branch_path, heads)
             .await
@@ -281,8 +349,16 @@ impl drawer::Host for SharedWashCtx {
 
         match plugin.get_doc(&doc_id, &heads).await.to_anyhow()? {
             Some(doc) => {
-                let wit_doc: wit_doc::Doc = (*doc).clone().into();
-                let bind_doc: bindgen_doc::Doc = wit_doc.into();
+                let bind_doc: bindgen_doc::Doc = binds_guest::townframe::daybook_types::doc::Doc {
+                    id: doc.id.clone(),
+                    props: doc
+                        .facets
+                        .iter()
+                        .map(|(facet_key, facet_value)| {
+                            (facet_key.to_string(), wit_doc::doc_prop_from(facet_value))
+                        })
+                        .collect(),
+                };
                 Ok(Ok(bind_doc))
             }
             None => Ok(Err(drawer::GetDocError::DocNotFound)),
@@ -308,8 +384,8 @@ impl drawer::Host for SharedWashCtx {
         };
         let patch = wit_doc::DocPatch {
             id: patch.id,
-            props_set: patch.props_set.into_iter().collect(),
-            props_remove: patch.props_remove,
+            facets_set: patch.props_set.into_iter().collect(),
+            facets_remove: patch.props_remove,
             user_path: None,
         };
         let patch: daybook_types::doc::DocPatch =
@@ -327,16 +403,16 @@ impl drawer::Host for SharedWashCtx {
             .await
         {
             Ok(_) => Ok(Ok(())),
-            Err(crate::drawer::UpdateDocErr::DocNotFound { .. }) => {
+            Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => {
                 Ok(Err(drawer::UpdateDocError::DocNotFound))
             }
-            Err(crate::drawer::UpdateDocErr::BranchNotFound { .. }) => {
+            Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => {
                 Ok(Err(drawer::UpdateDocError::BranchNotFound))
             }
-            Err(crate::drawer::UpdateDocErr::InvalidKey {
-                inner: root_doc::DocPropTagParseError::NotDomainName { _tag: tag },
+            Err(crate::drawer::types::DrawerError::InvalidKey {
+                inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(drawer::UpdateDocError::InvalidKey(tag))),
-            Err(crate::drawer::UpdateDocErr::Other { inner }) => {
+            Err(crate::drawer::types::DrawerError::Other { inner }) => {
                 Err(anyhow::anyhow!("unexepcted error: {inner}"))
             }
         }
@@ -365,8 +441,16 @@ impl capabilities::HostDocTokenRo for SharedWashCtx {
             .to_anyhow()?
         {
             Some(doc) => {
-                let wit_doc: wit_doc::Doc = (*doc).clone().into();
-                let bind_doc: bindgen_doc::Doc = wit_doc.into();
+                let bind_doc: bindgen_doc::Doc = binds_guest::townframe::daybook_types::doc::Doc {
+                    id: doc.id.clone(),
+                    props: doc
+                        .facets
+                        .iter()
+                        .map(|(facet_key, facet_value)| {
+                            (facet_key.to_string(), wit_doc::doc_prop_from(facet_value))
+                        })
+                        .collect(),
+                };
                 Ok(bind_doc)
             }
             // FIXME: either the context should terminal error this
@@ -407,8 +491,16 @@ impl capabilities::HostDocTokenRw for SharedWashCtx {
             .to_anyhow()?
         {
             Some(doc) => {
-                let wit_doc: wit_doc::Doc = (*doc).clone().into();
-                let bind_doc: bindgen_doc::Doc = wit_doc.into();
+                let bind_doc: bindgen_doc::Doc = binds_guest::townframe::daybook_types::doc::Doc {
+                    id: doc.id.clone(),
+                    props: doc
+                        .facets
+                        .iter()
+                        .map(|(facet_key, facet_value)| {
+                            (facet_key.to_string(), wit_doc::doc_prop_from(facet_value))
+                        })
+                        .collect(),
+                };
                 Ok(bind_doc)
             }
             // FIXME: either the context should terminal error this
@@ -430,8 +522,8 @@ impl capabilities::HostDocTokenRw for SharedWashCtx {
             .to_anyhow()?;
         let patch = wit_doc::DocPatch {
             id: patch.id,
-            props_set: patch.props_set.into_iter().collect(),
-            props_remove: patch.props_remove,
+            facets_set: patch.props_set.into_iter().collect(),
+            facets_remove: patch.props_remove,
             user_path: None,
         };
         let patch: daybook_types::doc::DocPatch =
@@ -445,12 +537,12 @@ impl capabilities::HostDocTokenRw for SharedWashCtx {
             Ok(_) => Ok(Ok(())),
             // FIXME: either the context should terminal error this
             // or communicate with the wflow engine
-            Err(crate::drawer::UpdateDocErr::DocNotFound { .. }) => todo!(),
-            Err(crate::drawer::UpdateDocErr::BranchNotFound { .. }) => todo!(),
-            Err(crate::drawer::UpdateDocErr::InvalidKey {
-                inner: root_doc::DocPropTagParseError::NotDomainName { _tag: tag },
+            Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => todo!(),
+            Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => todo!(),
+            Err(crate::drawer::types::DrawerError::InvalidKey {
+                inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(capabilities::UpdateDocError::InvalidKey(tag))),
-            Err(crate::drawer::UpdateDocErr::Other { inner }) => {
+            Err(crate::drawer::types::DrawerError::Other { inner }) => {
                 Err(anyhow::anyhow!("unexepcted error: {inner}"))
             }
         }
@@ -468,14 +560,14 @@ impl capabilities::HostDocTokenRw for SharedWashCtx {
 pub struct PropTokenRo {
     doc_id: DocId,
     heads: ChangeHashSet,
-    prop_key: daybook_types::doc::DocPropKey,
+    prop_key: daybook_types::doc::FacetKey,
 }
 
 impl capabilities::HostPropTokenRo for SharedWashCtx {
     async fn get(
         &mut self,
         handle: wasmtime::component::Resource<capabilities::PropTokenRo>,
-    ) -> wasmtime::Result<bindgen_doc::DocProp> {
+    ) -> wasmtime::Result<String> {
         let plugin = DaybookPlugin::from_ctx(self);
         let token = self
             .table
@@ -488,7 +580,7 @@ impl capabilities::HostPropTokenRo for SharedWashCtx {
             .to_anyhow()?
         {
             Some(doc) => {
-                let Some(prop) = doc.props.get(&token.prop_key) else {
+                let Some(prop) = doc.facets.get(&token.prop_key) else {
                     // FIXME: either the context should terminal error this
                     // or communicate with the wflow engine
                     todo!("")
@@ -517,7 +609,7 @@ pub struct PropTokenRw {
     #[allow(dead_code)]
     target_branch_path: daybook_types::doc::BranchPath,
     heads: ChangeHashSet,
-    prop_key: daybook_types::doc::DocPropKey,
+    prop_key: daybook_types::doc::FacetKey,
     #[allow(dead_code)]
     prop_acl: Vec<crate::plugs::manifest::RoutinePropAccess>,
 }
@@ -526,7 +618,7 @@ impl capabilities::HostPropTokenRw for SharedWashCtx {
     async fn get(
         &mut self,
         handle: wasmtime::component::Resource<capabilities::PropTokenRw>,
-    ) -> wasmtime::Result<bindgen_doc::DocProp> {
+    ) -> wasmtime::Result<String> {
         let plugin = DaybookPlugin::from_ctx(self);
         let token = self
             .table
@@ -539,7 +631,7 @@ impl capabilities::HostPropTokenRw for SharedWashCtx {
             .to_anyhow()?
         {
             Some(doc) => {
-                let Some(prop) = doc.props.get(&token.prop_key) else {
+                let Some(prop) = doc.facets.get(&token.prop_key) else {
                     // FIXME: either the context should terminal error this
                     // or communicate with the wflow engine
                     todo!("")
@@ -556,7 +648,7 @@ impl capabilities::HostPropTokenRw for SharedWashCtx {
     async fn update(
         &mut self,
         handle: wasmtime::component::Resource<capabilities::PropTokenRw>,
-        prop: bindgen_doc::DocProp,
+        prop: String,
     ) -> wasmtime::Result<Result<(), capabilities::UpdateDocError>> {
         let plugin = DaybookPlugin::from_ctx(self);
         let token = self
@@ -564,15 +656,15 @@ impl capabilities::HostPropTokenRw for SharedWashCtx {
             .get(&handle)
             .context("error locating token")
             .to_anyhow()?;
-        let prop: daybook_types::doc::DocProp = wit_doc::doc_prop_into(&prop)
+        let prop: daybook_types::doc::FacetRaw = wit_doc::doc_prop_into(&prop)
             .map_err(|err| capabilities::UpdateDocError::InvalidPatch(err.to_string()))?;
         match plugin
             .drawer_repo
             .update_at_heads(
                 daybook_types::doc::DocPatch {
                     id: token.doc_id.clone(),
-                    props_set: HashMap::from([(token.prop_key.clone(), prop)]),
-                    props_remove: default(),
+                    facets_set: HashMap::from([(token.prop_key.clone(), prop)]),
+                    facets_remove: default(),
                     user_path: None,
                 },
                 token.branch_path.clone(),
@@ -583,12 +675,12 @@ impl capabilities::HostPropTokenRw for SharedWashCtx {
             Ok(_) => Ok(Ok(())),
             // FIXME: either the context should terminal error this
             // or communicate with the wflow engine
-            Err(crate::drawer::UpdateDocErr::DocNotFound { .. }) => todo!(),
-            Err(crate::drawer::UpdateDocErr::BranchNotFound { .. }) => todo!(),
-            Err(crate::drawer::UpdateDocErr::InvalidKey {
-                inner: root_doc::DocPropTagParseError::NotDomainName { _tag: tag },
+            Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => todo!(),
+            Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => todo!(),
+            Err(crate::drawer::types::DrawerError::InvalidKey {
+                inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(capabilities::UpdateDocError::InvalidKey(tag))),
-            Err(crate::drawer::UpdateDocErr::Other { inner }) => {
+            Err(crate::drawer::types::DrawerError::Other { inner }) => {
                 Err(anyhow::anyhow!("unexepcted error: {inner}"))
             }
         }
@@ -609,7 +701,7 @@ impl prop_routine::Host for SharedWashCtx {
     async fn get_args(&mut self) -> wasmtime::Result<prop_routine::PropRoutineArgs> {
         use crate::rt::*;
         use anyhow::Context;
-        use daybook_types::doc::DocPropKey;
+        use daybook_types::doc::FacetKey;
 
         let wflow_plugin = wflow::wash_plugin_wflow::WflowPlugin::try_from_ctx(self)
             .context("only wflows are supported as prop-routine")?;
@@ -647,8 +739,7 @@ impl prop_routine::Host for SharedWashCtx {
         )> = Vec::new();
 
         for access in prop_acl {
-            let prop_key =
-                DocPropKey::Tag(daybook_types::doc::DocPropTag::from(access.tag.0.clone()));
+            let prop_key = FacetKey::from(daybook_types::doc::FacetTag::from(access.tag.0.clone()));
             let prop_key_str = prop_key.to_string();
 
             if access.write {

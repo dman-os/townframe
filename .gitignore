@@ -28,4 +28,3 @@ src/samod/
 **/*/.terragrunt-cache
 
 play.*
-symlinks

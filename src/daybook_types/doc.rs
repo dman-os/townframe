@@ -2,17 +2,70 @@ use crate::interlude::*;
 
 pub type Multihash = String;
 
+pub type MimeType = String;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct FacetMeta {
+    pub created_at: Timestamp,
+    pub updated_at: Vec<Timestamp>,
+    pub uuid: Vec<Uuid>,
+}
+
 crate::define_enum_and_tag!(
-    "",
+    "org.example.daybook.",
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-    DocContentKind,
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+    WellKnownFacetTag,
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
     #[serde(rename_all = "camelCase", untagged)]
     #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-    DocContent {
-        Text type (String),
+    WellKnownFacet {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        Dmeta struct {
+            pub id: DocId,
+            pub created_at: Timestamp,
+            pub updated_at: Vec<Timestamp>,
+            pub facet_uuids: HashMap<Uuid,FacetKey>,
+            pub facets: HashMap<FacetKey, FacetMeta>
+        },
+        RefGeneric type (DocId),
+        LabelGeneric type (String),
+        PseudoLabel type (Vec<String>),
+        TitleGeneric type (String),
+        PathGeneric type (PathBuf),
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        ImageMetadata struct {
+            pub mime: MimeType,
+            pub width_px: u64,
+            pub height_px: u64,
+        },
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        Pending struct {
+            pub key: FacetKey
+        },
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        // #[cfg_attr(feature = "uniffi", uniffi(name = "BlobData"))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        Note struct {
+            pub mime: MimeType,
+            pub content: String,
+        },
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         // #[cfg_attr(feature = "uniffi", uniffi(name = "BlobData"))]
@@ -25,111 +78,84 @@ crate::define_enum_and_tag!(
     }
 );
 
-pub type MimeType = String;
-
-crate::define_enum_and_tag!(
-    "org.example.daybook.",
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-    #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-    WellKnownPropTag,
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-    #[serde(rename_all = "camelCase", untagged)]
-    #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-    WellKnownProp {
-        // CreatedAt type (OffsetDateTime),
-        // UpdatedAt type (OffsetDateTime),
-        RefGeneric type (DocId),
-        LabelGeneric type (String),
-        PseudoLabel type (String),
-        TitleGeneric type (String),
-        PathGeneric type (PathBuf),
-        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-        #[serde(rename_all = "camelCase")]
-        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        ImageMetadata struct {
-            pub mime: MimeType,
-            pub width_px: u64,
-            pub height_px: u64,
-        },
-        Content type (DocContent),
-        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-        #[serde(rename_all = "camelCase")]
-        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        Pending struct {
-            pub key: DocPropKey
-        },
+impl<T> From<T> for Note
+where
+    T: Into<String>,
+{
+    fn from(value: T) -> Self {
+        Note {
+            mime: "text/plain".into(),
+            content: value.into(),
+        }
     }
-);
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub enum DocPropTag {
-    WellKnown(WellKnownPropTag),
+pub enum FacetTag {
+    WellKnown(WellKnownFacetTag),
     Any(String),
 }
 
-impl From<WellKnownPropTag> for DocPropTag {
-    fn from(value: WellKnownPropTag) -> Self {
+impl From<WellKnownFacetTag> for FacetTag {
+    fn from(value: WellKnownFacetTag) -> Self {
         Self::WellKnown(value)
     }
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display, PartialEq)]
-pub enum DocPropTagParseError {
+pub enum FacetTagParseError {
     /// A valid key must consist of a reverse domain name notation
     NotDomainName { _tag: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub enum DocPropKey {
-    Tag(DocPropTag),
-    TagAndId { tag: DocPropTag, id: String },
+pub struct FacetKey {
+    pub tag: FacetTag,
+    pub id: String,
 }
 
-impl From<WellKnownPropTag> for DocPropKey {
-    fn from(value: WellKnownPropTag) -> Self {
-        Self::Tag(value.into())
-    }
-}
-
-impl From<DocPropTag> for DocPropKey {
-    fn from(value: DocPropTag) -> Self {
-        Self::Tag(value)
-    }
-}
-
-impl DocPropKey {
+impl FacetKey {
     pub const TAG_ID_SEPARATOR: char = '/';
+}
 
-    pub fn tag(&self) -> &DocPropTag {
-        match self {
-            Self::Tag(tag) => tag,
-            Self::TagAndId { tag, .. } => tag,
+pub const DEFAULT_FACET_ID: &str = "main";
+
+impl From<WellKnownFacetTag> for FacetKey {
+    fn from(tag: WellKnownFacetTag) -> Self {
+        Self {
+            tag: tag.into(),
+            id: DEFAULT_FACET_ID.into(),
         }
     }
 }
 
-pub type DocProp = serde_json::Value;
+impl From<FacetTag> for FacetKey {
+    fn from(tag: FacetTag) -> Self {
+        Self {
+            tag,
+            id: DEFAULT_FACET_ID.into(),
+        }
+    }
+}
+
+pub type FacetRaw = serde_json::Value;
 
 // #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 // #[serde(rename_all = "camelCase", untagged)]
 // #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 // #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-// pub enum DocProp {
-//     WellKnown(WellKnownProp),
+// pub enum Facet {
+//     WellKnown(WellKnownFacet),
 //     Any(serde_json::Value),
 // }
 //
-// impl<T> From<T> for DocProp
+// impl<T> From<T> for Facet
 // where
-//     T: Into<WellKnownProp>,
+//     T: Into<WellKnownFacet>,
 // {
 //     fn from(value: T) -> Self {
 //         Self::WellKnown(value.into())
@@ -139,7 +165,7 @@ pub type DocProp = serde_json::Value;
 pub type DocId = String;
 
 pub type DocUserId = automerge::ActorId;
-pub type PropBlame = HashMap<DocPropKey, DocUserId>;
+pub type FacetBlame = HashMap<FacetKey, DocUserId>;
 
 pub type UserPath = std::path::PathBuf;
 pub type BranchPath = std::path::PathBuf;
@@ -204,38 +230,34 @@ pub struct Users {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct Doc {
     pub id: DocId,
-    pub created_at: Timestamp,
-    pub updated_at: Timestamp,
-    // FIXME: I'm not sure I like this
-    // FIXME: consider flattening
-    pub props: HashMap<DocPropKey, DocProp>,
+    pub facets: HashMap<FacetKey, FacetRaw>,
 }
 
 impl Doc {
     /// Calculate the difference between two documents and return a patch.
     /// The patch can be applied to `old` to get `new`.
     pub fn diff(old: &Doc, new: &Doc) -> DocPatch {
-        let mut props_set = HashMap::new();
-        let mut props_remove = Vec::new();
+        let mut facets_set = HashMap::new();
+        let mut facets_remove = Vec::new();
 
         // Find added or changed properties
-        for (key, val) in &new.props {
-            if old.props.get(key) != Some(val) {
-                props_set.insert(key.clone(), val.clone());
+        for (key, val) in &new.facets {
+            if old.facets.get(key) != Some(val) {
+                facets_set.insert(key.clone(), val.clone());
             }
         }
 
         // Find removed properties
-        for key in old.props.keys() {
-            if !new.props.contains_key(key) {
-                props_remove.push(key.clone());
+        for key in old.facets.keys() {
+            if !new.facets.contains_key(key) {
+                facets_remove.push(key.clone());
             }
         }
 
         DocPatch {
             id: new.id.clone(),
-            props_set,
-            props_remove,
+            facets_set,
+            facets_remove,
             user_path: None,
         }
     }
@@ -245,7 +267,7 @@ impl Doc {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AddDocArgs {
     pub branch_path: BranchPath,
-    pub props: HashMap<DocPropKey, DocProp>,
+    pub facets: HashMap<FacetKey, FacetRaw>,
     pub user_path: Option<UserPath>,
 }
 
@@ -253,25 +275,25 @@ pub struct AddDocArgs {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DocPatch {
     pub id: DocId,
-    /// Props to set (insert or update)
-    pub props_set: HashMap<DocPropKey, DocProp>,
-    /// Props to remove (by key)
-    pub props_remove: Vec<DocPropKey>,
+    /// facets to set (insert or update)
+    pub facets_set: HashMap<FacetKey, FacetRaw>,
+    /// facets to remove (by key)
+    pub facets_remove: Vec<FacetKey>,
     /// Optional user path for recording in drawer
     pub user_path: Option<UserPath>,
 }
 
 impl DocPatch {
     pub fn is_empty(&self) -> bool {
-        self.props_set.is_empty() && self.props_remove.is_empty()
+        self.facets_set.is_empty() && self.facets_remove.is_empty()
     }
 
     pub fn apply(&mut self, doc: &mut Doc) {
-        for (key, value) in self.props_set.drain() {
-            doc.props.insert(key, value);
+        for (key, value) in self.facets_set.drain() {
+            doc.facets.insert(key, value);
         }
-        for key in self.props_remove.drain(..) {
-            doc.props.remove(&key);
+        for key in self.facets_remove.drain(..) {
+            doc.facets.remove(&key);
         }
     }
 }
@@ -285,7 +307,7 @@ pub struct DocAddedEvent {
 }
 
 #[cfg(feature = "automerge")]
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct ChangeHashSet(pub Arc<[automerge::ChangeHash]>);
 
 #[cfg(feature = "automerge")]
@@ -320,67 +342,37 @@ impl std::ops::Deref for ChangeHashSet {
 mod ord {
     use super::*;
 
-    impl PartialOrd for DocPropTag {
+    impl PartialOrd for FacetTag {
         fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
             Some(self.cmp(other))
         }
     }
 
-    impl Ord for DocPropTag {
+    impl Ord for FacetTag {
         fn cmp(&self, other: &Self) -> std::cmp::Ordering {
             match (self, other) {
-                (DocPropTag::WellKnown(one), DocPropTag::WellKnown(two)) => {
+                (FacetTag::WellKnown(one), FacetTag::WellKnown(two)) => {
                     one.as_str().cmp(two.as_str())
                 }
-                (DocPropTag::WellKnown(one), DocPropTag::Any(two)) => {
-                    one.as_str().cmp(two.as_str())
-                }
-                (DocPropTag::Any(one), DocPropTag::WellKnown(two)) => {
-                    one.as_str().cmp(two.as_str())
-                }
-                (DocPropTag::Any(two), DocPropTag::Any(one)) => one.as_str().cmp(two.as_str()),
+                (FacetTag::WellKnown(one), FacetTag::Any(two)) => one.as_str().cmp(two.as_str()),
+                (FacetTag::Any(one), FacetTag::WellKnown(two)) => one.as_str().cmp(two.as_str()),
+                (FacetTag::Any(two), FacetTag::Any(one)) => one.as_str().cmp(two.as_str()),
             }
         }
     }
 
-    impl PartialOrd for DocPropKey {
+    impl PartialOrd for FacetKey {
         fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
             Some(self.cmp(other))
         }
     }
 
-    impl Ord for DocPropKey {
+    impl Ord for FacetKey {
         fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-            match (self, other) {
-                (DocPropKey::Tag(one), DocPropKey::Tag(two)) => one.cmp(two),
-                (DocPropKey::Tag(one), DocPropKey::TagAndId { tag: two, .. }) => {
-                    match one.cmp(two) {
-                        // id always comes afer none ided keys
-                        std::cmp::Ordering::Equal => std::cmp::Ordering::Less,
-                        ord => ord,
-                    }
-                }
-                (DocPropKey::TagAndId { tag: one, .. }, DocPropKey::Tag(two)) => {
-                    match one.cmp(two) {
-                        // id always comes afer none ided keys
-                        std::cmp::Ordering::Equal => std::cmp::Ordering::Greater,
-                        ord => ord,
-                    }
-                }
-                (
-                    DocPropKey::TagAndId {
-                        tag: one,
-                        id: id_one,
-                    },
-                    DocPropKey::TagAndId {
-                        tag: two,
-                        id: id_two,
-                    },
-                ) => match one.cmp(two) {
-                    // id always comes afer none ided keys
-                    std::cmp::Ordering::Equal => id_one.cmp(id_two),
-                    ord => ord,
-                },
+            match self.tag.cmp(&other.tag) {
+                // id always comes afer none ided keys
+                std::cmp::Ordering::Equal => self.id.cmp(&other.id),
+                ord => ord,
             }
         }
     }
@@ -393,71 +385,71 @@ mod ser_de {
 
     use serde::{de::Visitor, Deserializer, Serializer};
 
-    // impl FromStr for DocPropTag {
-    //     type Err = DocPropTagParseError;
+    // impl FromStr for FacetTag {
+    //     type Err = FacetTagParseError;
     //
     //     fn from_str(str: &str) -> Result<Self, Self::Err> {
-    //         if let Some(val) = WellKnownPropTag::from_str(str) {
+    //         if let Some(val) = WellKnownFacetTag::from_str(str) {
     //             return Ok(Self::WellKnown(val));
     //         }
     //         let _parsed = addr::parse_domain_name(str)
-    //             .map_err(|_err| DocPropTagParseError::NotDomainName { tag: str.into() })?;
+    //             .map_err(|_err| FacetTagParseError::NotDomainName { tag: str.into() })?;
     //         Ok(Self::Any(_parsed.as_str().into()))
     //     }
     // }
-    impl<'a, T> From<T> for DocPropTag
+    impl<'a, T> From<T> for FacetTag
     where
         T: Into<Cow<'a, str>>,
     {
         fn from(value: T) -> Self {
             let value = value.into();
-            if let Some(val) = WellKnownPropTag::from_str(&value[..]) {
+            if let Some(val) = WellKnownFacetTag::from_str(&value[..]) {
                 return Self::WellKnown(val);
             }
             // let _parsed = addr::parse_domain_name(str)
-            //     .map_err(|_err| DocPropTagParseError::NotDomainName { tag: str.into() })?;
+            //     .map_err(|_err| FacetTagParseError::NotDomainName { tag: str.into() })?;
             // Ok(Self::Any(_parsed.as_str().into()))
             Self::Any(value.into())
         }
     }
-    // impl From<&str> for DocPropTag {
+    // impl From<&str> for FacetTag {
     //     fn from(value: &str) -> Self {
-    //         if let Some(val) = WellKnownPropTag::from_str(&value[..]) {
+    //         if let Some(val) = WellKnownFacetTag::from_str(&value[..]) {
     //             return Self::WellKnown(val);
     //         }
     //         // let _parsed = addr::parse_domain_name(str)
-    //         //     .map_err(|_err| DocPropTagParseError::NotDomainName { tag: str.into() })?;
+    //         //     .map_err(|_err| FacetTagParseError::NotDomainName { tag: str.into() })?;
     //         // Ok(Self::Any(_parsed.as_str().into()))
     //         Self::Any(value.into())
     //     }
     // }
-    // impl From<String> for DocPropTag {
+    // impl From<String> for FacetTag {
     //     fn from(value: String) -> Self {
-    //         if let Some(val) = WellKnownPropTag::from_str(&value[..]) {
+    //         if let Some(val) = WellKnownFacetTag::from_str(&value[..]) {
     //             return Self::WellKnown(val);
     //         }
     //         Self::Any(value.into())
     //     }
     // }
-    // impl From<Box<str>> for DocPropTag {
+    // impl From<Box<str>> for FacetTag {
     //     fn from(value: Box<str>) -> Self {
-    //         if let Some(val) = WellKnownPropTag::from_str(&value[..]) {
+    //         if let Some(val) = WellKnownFacetTag::from_str(&value[..]) {
     //             return Self::WellKnown(val);
     //         }
     //         Self::Any(value.into())
     //     }
     // }
 
-    impl std::fmt::Display for DocPropTag {
+    impl std::fmt::Display for FacetTag {
         fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
-                DocPropTag::WellKnown(val) => write!(fmt, "{val}"),
-                DocPropTag::Any(val) => write!(fmt, "{val}"),
+                FacetTag::WellKnown(val) => write!(fmt, "{val}"),
+                FacetTag::Any(val) => write!(fmt, "{val}"),
             }
         }
     }
 
-    impl serde::Serialize for DocPropTag {
+    impl serde::Serialize for FacetTag {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: Serializer,
@@ -466,7 +458,7 @@ mod ser_de {
         }
     }
 
-    impl<'de> serde::Deserialize<'de> for DocPropTag {
+    impl<'de> serde::Deserialize<'de> for FacetTag {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: Deserializer<'de>,
@@ -474,13 +466,13 @@ mod ser_de {
             struct TagVisitor;
 
             impl<'de> Visitor<'de> for TagVisitor {
-                type Value = DocPropTag;
+                type Value = FacetTag;
 
                 fn expecting(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-                    fmt.write_str("a valid DocPropTag")
+                    fmt.write_str("a valid FacetTag")
                 }
 
-                fn visit_str<E>(self, val: &str) -> Result<DocPropTag, E>
+                fn visit_str<E>(self, val: &str) -> Result<FacetTag, E>
                 where
                     E: serde::de::Error,
                 {
@@ -488,7 +480,7 @@ mod ser_de {
                     // val.parse().map_err(E::custom)
                 }
 
-                fn visit_borrowed_str<E>(self, val: &'de str) -> Result<DocPropTag, E>
+                fn visit_borrowed_str<E>(self, val: &'de str) -> Result<FacetTag, E>
                 where
                     E: serde::de::Error,
                 {
@@ -501,8 +493,8 @@ mod ser_de {
         }
     }
 
-    // impl FromStr for DocPropKey {
-    //     type Err = DocPropTagParseError;
+    // impl FromStr for FacetKey {
+    //     type Err = FacetTagParseError;
     //
     //     fn from_str(str: &str) -> Result<Self, Self::Err> {
     //         if let Some((tag, id)) = str.split_once(Self::TAG_ID_SEPARATOR) {
@@ -511,26 +503,26 @@ mod ser_de {
     //                 id: id.into(),
     //             });
     //         }
-    //         str.parse::<DocPropTag>().map(Self::Tag)
+    //         str.parse::<FacetTag>().map(Self::Tag)
     //     }
     // }
-    impl<'a, T> From<T> for DocPropKey
+    impl<'a, T> From<T> for FacetKey
     where
         T: Into<Cow<'a, str>>,
     {
         fn from(value: T) -> Self {
             let value = value.into();
             if let Some((tag, id)) = value.split_once(Self::TAG_ID_SEPARATOR) {
-                return Self::TagAndId {
+                return Self {
                     tag: tag.into(),
                     id: id.into(),
                 };
             }
-            let tag: DocPropTag = value.into();
-            Self::Tag(tag)
+            let tag: FacetTag = value.into();
+            tag.into()
         }
     }
-    // impl From<&str> for DocPropKey {
+    // impl From<&str> for FacetKey {
     //     fn from(value: &str) -> Self {
     //         if let Some((tag, id)) = value.split_once(Self::TAG_ID_SEPARATOR) {
     //             return Self::TagAndId {
@@ -538,12 +530,12 @@ mod ser_de {
     //                 id: id.into(),
     //             };
     //         }
-    //         let tag: DocPropTag = value.into();
+    //         let tag: FacetTag = value.into();
     //         Self::Tag(tag)
     //     }
     // }
     //
-    // impl From<String> for DocPropKey {
+    // impl From<String> for FacetKey {
     //     fn from(value: String) -> Self {
     //         if let Some((tag, id)) = value.split_once(Self::TAG_ID_SEPARATOR) {
     //             return Self::TagAndId {
@@ -551,11 +543,11 @@ mod ser_de {
     //                 id: id.into(),
     //             };
     //         }
-    //         let tag: DocPropTag = value.into();
+    //         let tag: FacetTag = value.into();
     //         Self::Tag(tag)
     //     }
     // }
-    // impl From<&Arc<str>> for DocPropKey {
+    // impl From<&Arc<str>> for FacetKey {
     //     fn from(value: &Arc<str>) -> Self {
     //         if let Some((tag, id)) = value.split_once(Self::TAG_ID_SEPARATOR) {
     //             return Self::TagAndId {
@@ -563,12 +555,12 @@ mod ser_de {
     //                 id: id.into(),
     //             };
     //         }
-    //         let tag: DocPropTag = (&value[..]).into();
+    //         let tag: FacetTag = (&value[..]).into();
     //         Self::Tag(tag)
     //     }
     // }
     //
-    // impl From<Box<str>> for DocPropKey {
+    // impl From<Box<str>> for FacetKey {
     //     fn from(value: Box<str>) -> Self {
     //         if let Some((tag, id)) = value.split_once(Self::TAG_ID_SEPARATOR) {
     //             return Self::TagAndId {
@@ -576,22 +568,18 @@ mod ser_de {
     //                 id: id.into(),
     //             };
     //         }
-    //         let tag: DocPropTag = value.into();
+    //         let tag: FacetTag = value.into();
     //         Self::Tag(tag)
     //     }
     // }
 
-    impl std::fmt::Display for DocPropKey {
+    impl std::fmt::Display for FacetKey {
         fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                DocPropKey::Tag(val) => write!(fmt, "{val}"),
-                DocPropKey::TagAndId { tag, id } => {
-                    write!(fmt, "{tag}{sep}{id}", sep = Self::TAG_ID_SEPARATOR)
-                }
-            }
+            let FacetKey { tag, id } = self;
+            write!(fmt, "{tag}{sep}{id}", sep = Self::TAG_ID_SEPARATOR)
         }
     }
-    impl serde::Serialize for DocPropKey {
+    impl serde::Serialize for FacetKey {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: Serializer,
@@ -600,7 +588,7 @@ mod ser_de {
         }
     }
 
-    impl<'de> serde::Deserialize<'de> for DocPropKey {
+    impl<'de> serde::Deserialize<'de> for FacetKey {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: Deserializer<'de>,
@@ -608,13 +596,13 @@ mod ser_de {
             struct KeyVisitor;
 
             impl<'de> Visitor<'de> for KeyVisitor {
-                type Value = DocPropKey;
+                type Value = FacetKey;
 
                 fn expecting(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-                    fmt.write_str("a valid DocPropKey")
+                    fmt.write_str("a valid FacetKey")
                 }
 
-                fn visit_str<E>(self, val: &str) -> Result<DocPropKey, E>
+                fn visit_str<E>(self, val: &str) -> Result<FacetKey, E>
                 where
                     E: serde::de::Error,
                 {
@@ -622,7 +610,7 @@ mod ser_de {
                     // val.parse().map_err(E::custom)
                 }
 
-                fn visit_borrowed_str<E>(self, val: &'de str) -> Result<DocPropKey, E>
+                fn visit_borrowed_str<E>(self, val: &'de str) -> Result<FacetKey, E>
                 where
                     E: serde::de::Error,
                 {
@@ -635,22 +623,22 @@ mod ser_de {
         }
     }
 
-    // Custom serializer/deserializer for HashMap<DocPropKeys, DocProp>
-    // pub(super) mod props_serde {
+    // Custom serializer/deserializer for HashMap<FacetKeys, Facet>
+    // pub(super) mod facets_serde {
     //     use super::*;
     //     use serde::de::{SeqAccess, Visitor};
     //     use serde::ser::SerializeSeq;
     //     use serde::{Deserializer, Serializer};
     //
     //     pub fn serialize<S>(
-    //         props: &HashMap<DocPropKey, DocProp>,
+    //         facets: &HashMap<FacetKey, Facet>,
     //         serializer: S,
     //     ) -> Result<S::Ok, S::Error>
     //     where
     //         S: Serializer,
     //     {
-    //         let mut seq = serializer.serialize_seq(Some(props.len()))?;
-    //         for (key, value) in props {
+    //         let mut seq = serializer.serialize_seq(Some(facets.len()))?;
+    //         for (key, value) in facets {
     //             seq.serialize_element(&(key, value))?;
     //         }
     //         seq.end()
@@ -658,17 +646,17 @@ mod ser_de {
     //
     //     pub fn deserialize<'de, D>(
     //         deserializer: D,
-    //     ) -> Result<HashMap<DocPropKey, DocProp>, D::Error>
+    //     ) -> Result<HashMap<FacetKey, Facet>, D::Error>
     //     where
     //         D: Deserializer<'de>,
     //     {
-    //         struct PropsVisitor;
+    //         struct facetsVisitor;
     //
-    //         impl<'de> Visitor<'de> for PropsVisitor {
-    //             type Value = HashMap<DocPropKey, DocProp>;
+    //         impl<'de> Visitor<'de> for facetsVisitor {
+    //             type Value = HashMap<FacetKey, Facet>;
     //
     //             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-    //                 formatter.write_str("a sequence of (DocPropKeys, DocProp) tuples")
+    //                 formatter.write_str("a sequence of (FacetKeys, Facet) tuples")
     //             }
     //
     //             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -676,54 +664,62 @@ mod ser_de {
     //                 A: SeqAccess<'de>,
     //             {
     //                 let mut map = HashMap::new();
-    //                 while let Some((key, value)) = seq.next_element::<(DocPropKey, DocProp)>()? {
+    //                 while let Some((key, value)) = seq.next_element::<(FacetKey, Facet)>()? {
     //                     map.insert(key, value);
     //                 }
     //                 Ok(map)
     //             }
     //         }
     //
-    //         deserializer.deserialize_seq(PropsVisitor)
+    //         deserializer.deserialize_seq(facetsVisitor)
     //     }
     // }
-    impl From<WellKnownProp> for DocProp {
-        fn from(value: WellKnownProp) -> Self {
+    impl From<WellKnownFacet> for FacetRaw {
+        fn from(value: WellKnownFacet) -> Self {
             serde_json::to_value(value).expect(ERROR_JSON)
         }
     }
 
-    impl WellKnownProp {
-        pub fn from_json(value: serde_json::Value, tag: WellKnownPropTag) -> Res<Self> {
+    impl WellKnownFacet {
+        pub fn from_json(value: serde_json::Value, tag: WellKnownFacetTag) -> Res<Self> {
             Ok(match tag {
-                WellKnownPropTag::RefGeneric => Self::RefGeneric(
+                WellKnownFacetTag::RefGeneric => Self::RefGeneric(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
-                WellKnownPropTag::LabelGeneric => Self::LabelGeneric(
+                WellKnownFacetTag::LabelGeneric => Self::LabelGeneric(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
-                WellKnownPropTag::PseudoLabel => Self::PseudoLabel(
+                WellKnownFacetTag::PseudoLabel => Self::PseudoLabel(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
-                WellKnownPropTag::TitleGeneric => Self::TitleGeneric(
+                WellKnownFacetTag::TitleGeneric => Self::TitleGeneric(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
-                WellKnownPropTag::PathGeneric => Self::PathGeneric(
+                WellKnownFacetTag::PathGeneric => Self::PathGeneric(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
-                WellKnownPropTag::ImageMetadata => Self::ImageMetadata(
+                WellKnownFacetTag::ImageMetadata => Self::ImageMetadata(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
-                WellKnownPropTag::Content => Self::Content(
+                WellKnownFacetTag::Pending => Self::Pending(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
-                WellKnownPropTag::Pending => Self::Pending(
+                WellKnownFacetTag::Dmeta => Self::Dmeta(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::Note => Self::Note(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::Blob => Self::Blob(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
@@ -827,48 +823,46 @@ mod tests {
     fn test_doc_diff() {
         let mut old = Doc {
             id: "doc1".into(),
-            created_at: Timestamp::now(),
-            updated_at: Timestamp::now(),
-            props: HashMap::new(),
+            facets: HashMap::new(),
         };
-        let tag_title = DocPropTag::WellKnown(WellKnownPropTag::TitleGeneric);
-        let tag_label = DocPropTag::WellKnown(WellKnownPropTag::LabelGeneric);
+        let tag_title = FacetTag::WellKnown(WellKnownFacetTag::TitleGeneric);
+        let tag_label = FacetTag::WellKnown(WellKnownFacetTag::LabelGeneric);
 
-        old.props.insert(
+        old.facets.insert(
             tag_title.clone().into(),
-            WellKnownProp::TitleGeneric("Old Title".into()).into(),
+            WellKnownFacet::TitleGeneric("Old Title".into()).into(),
         );
-        old.props.insert(
+        old.facets.insert(
             tag_label.clone().into(),
-            WellKnownProp::LabelGeneric("Label".into()).into(),
+            WellKnownFacet::LabelGeneric("Label".into()).into(),
         );
 
         let mut new = old.clone();
         // Update Title
-        new.props.insert(
+        new.facets.insert(
             tag_title.clone().into(),
-            WellKnownProp::TitleGeneric("New Title".into()).into(),
+            WellKnownFacet::TitleGeneric("New Title".into()).into(),
         );
         // Remove Label
-        new.props.remove(&tag_label.clone().into());
+        new.facets.remove(&tag_label.clone().into());
         // Add Path
-        let tag_path = DocPropTag::WellKnown(WellKnownPropTag::PathGeneric);
-        new.props.insert(
+        let tag_path = FacetTag::WellKnown(WellKnownFacetTag::PathGeneric);
+        new.facets.insert(
             tag_path.clone().into(),
-            WellKnownProp::PathGeneric(std::path::PathBuf::from("/tmp")).into(),
+            WellKnownFacet::PathGeneric(std::path::PathBuf::from("/tmp")).into(),
         );
 
         let patch = Doc::diff(&old, &new);
 
         assert_eq!(patch.id, "doc1");
-        // Check props_set
-        assert_eq!(patch.props_set.len(), 2);
-        assert!(patch.props_set.contains_key(&tag_title.into()));
-        assert!(patch.props_set.contains_key(&tag_path.into()));
+        // Check facets_set
+        assert_eq!(patch.facets_set.len(), 2);
+        assert!(patch.facets_set.contains_key(&tag_title.into()));
+        assert!(patch.facets_set.contains_key(&tag_path.into()));
 
-        // Check props_remove
-        assert_eq!(patch.props_remove.len(), 1);
-        assert_eq!(patch.props_remove[0], tag_label.into());
+        // Check facets_remove
+        assert_eq!(patch.facets_remove.len(), 1);
+        assert_eq!(patch.facets_remove[0], tag_label.into());
 
         // Test no changes
         let patch_none = Doc::diff(&new, &new);

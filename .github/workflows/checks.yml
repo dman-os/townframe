@@ -32,7 +32,7 @@ jobs:
           sudo rm -rf /opt/microsoft /opt/google
           sudo rm -rf /opt/az
           sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /opt/hostedtoolcache
+          # sudo rm -rf /opt/hostedtoolcache
 
       - uses: actions/checkout@v4
         with:
@@ -42,18 +42,14 @@ jobs:
 
       - uses: DeterminateSystems/flakehub-cache-action@v3
 
-      - uses: metatypedev/setup-ghjk@b4ab7287a841fd5f8a4117f3efc14131c7ec62e1
-
       - uses: Swatinem/rust-cache@v2
 
       - name: pre-commit hooks
         run: |
-          . .ghjk/envs/$GHJK_ENV/activate.sh
           nix develop .#ci-rust --command prek --color=always run --all-files
 
       - name: rust builds
         run: |
-          . .ghjk/envs/$GHJK_ENV/activate.sh
           nix develop .#ci-rust --command cargo --color=always build -p test_wflows -p daybook_wflows --target wasm32-wasip2
           nix develop .#ci-rust --command cargo --color=always build -p daybook_cli
           # nix develop .#ci-rust --command cargo --color=always nextest run --workspace --all-features

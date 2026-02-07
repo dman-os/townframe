@@ -30,7 +30,7 @@ mod wit {
 
             "townframe:utils/llm-chat": generate,
 
-            "townframe:daybook-types/doc": daybook_types::wit::doc,
+            "townframe:daybook-types/doc": generate,
 
             "townframe:daybook/types": generate,
             "townframe:daybook/drawer": generate,
@@ -81,19 +81,17 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
     let doc = drawer::get_doc_at_heads(&args.doc_id, &args.heads)
         .map_err(|err| JobErrorX::Terminal(ferr!("error getting doc: {err:?}")))?;
 
-    let doc: daybook_types::doc::Doc = doc
-        .try_into()
-        .map_err(|err| JobErrorX::Terminal(ferr!("failure on doc parsing: {err:?}")))?;
-
     // Extract text content for LLM
     // Use root types since Doc uses root types (not WIT types)
-    use daybook_types::doc::{DocContent, WellKnownProp, WellKnownPropTag};
+    use daybook_types::doc::{Note, WellKnownFacet, WellKnownFacetTag};
     let content_text = match doc
         .props
-        .get(&WellKnownPropTag::Content.into())
-        .map(|val| WellKnownProp::from_json(val.clone(), WellKnownPropTag::Content))
-    {
-        Some(Ok(WellKnownProp::Content(DocContent::Text(text)))) => text,
+        .iter()
+        .find(|(key, _)| key == &WellKnownFacetTag::Note.to_string())
+        .map(|(_, val)| {
+            WellKnownFacet::from_json(serde_json::from_str(val).unwrap(), WellKnownFacetTag::Note)
+        }) {
+        Some(Ok(WellKnownFacet::Note(Note { content, .. }))) => content,
         Some(Ok(_)) => unreachable!(),
         Some(Err(err)) => {
             return Err(JobErrorX::Terminal(
@@ -103,7 +101,7 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
         None => {
             return Err(JobErrorX::Terminal(ferr!(
                 "no {tag} found on doc",
-                tag = WellKnownPropTag::Content.as_str()
+                tag = WellKnownFacetTag::Note.as_str()
             )))
         }
     };
@@ -133,11 +131,10 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
         }
     })?;
 
-    let new_labels = [llm_response.clone()];
+    let new_labels = vec![llm_response.clone()];
 
     cx.effect(|| {
-        let new_prop: daybook_types::doc::DocProp =
-            WellKnownProp::PseudoLabel(new_labels.join(",")).into();
+        let new_prop: daybook_types::doc::FacetRaw = WellKnownFacet::PseudoLabel(new_labels).into();
         let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
         working_prop_token
             .update(&new_prop)
@@ -168,11 +165,11 @@ fn test_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
 
     // Extract text content for LLM
     // Use root types since Doc uses root types (not WIT types)
-    use daybook_types::doc::WellKnownProp;
+    use daybook_types::doc::WellKnownFacet;
 
     cx.effect(|| {
-        let new_prop: daybook_types::doc::DocProp =
-            WellKnownProp::LabelGeneric("test_label".into()).into();
+        let new_prop: daybook_types::doc::FacetRaw =
+            WellKnownFacet::LabelGeneric("test_label".into()).into();
         let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
         working_prop_token
             .update(&new_prop)

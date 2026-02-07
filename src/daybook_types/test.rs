@@ -1,37 +1,33 @@
 use crate::{interlude::*, wit};
 
-use crate::doc::{
-    Blob, Doc, DocContent, DocProp, DocPropKey, ImageMetadata, WellKnownProp, WellKnownPropTag,
-};
+use crate::doc::{Blob, Doc, FacetKey, FacetRaw, ImageMetadata, WellKnownFacet, WellKnownFacetTag};
 use std::collections::HashMap;
 
 fn create_test_doc() -> Doc {
     let mut props = HashMap::new();
 
     props.insert(
-        DocPropKey::from(WellKnownPropTag::RefGeneric),
-        DocProp::from(WellKnownProp::RefGeneric("ref-123".to_string())),
+        FacetKey::from(WellKnownFacetTag::RefGeneric),
+        FacetRaw::from(WellKnownFacet::RefGeneric("ref-123".to_string())),
     );
     props.insert(
-        DocPropKey::from(WellKnownPropTag::LabelGeneric),
-        DocProp::from(WellKnownProp::LabelGeneric("label-1".to_string())),
+        FacetKey::from(WellKnownFacetTag::LabelGeneric),
+        FacetRaw::from(WellKnownFacet::LabelGeneric("label-1".to_string())),
     );
     props.insert(
-        DocPropKey::from(WellKnownPropTag::PseudoLabel),
-        DocProp::from(WellKnownProp::PseudoLabel("pseudo-label".to_string())),
+        FacetKey::from(WellKnownFacetTag::PseudoLabel),
+        FacetRaw::from(WellKnownFacet::PseudoLabel(
+            vec!["pseudo-label".to_string()],
+        )),
     );
     props.insert(
-        DocPropKey::from(WellKnownPropTag::Content),
-        DocProp::from(WellKnownProp::Content(DocContent::Text(
-            "Test content".to_string(),
-        ))),
+        FacetKey::from(WellKnownFacetTag::Note),
+        FacetRaw::from(WellKnownFacet::Note("Test note".into())),
     );
 
     Doc {
         id: "test-doc-id".to_string(),
-        created_at: Timestamp::now(),
-        updated_at: Timestamp::now(),
-        props,
+        facets: props,
     }
 }
 
@@ -42,14 +38,14 @@ fn test_root_to_wit_conversion() {
 
     assert_eq!(wit_doc.id, root_doc.id);
 
-    // Check if content exists in props
-    let content_prop = wit_doc
-        .props
+    // Check if note exists in props
+    let note_prop = wit_doc
+        .facets
         .iter()
-        .find(|(key, _)| key == &WellKnownPropTag::Content.to_string());
-    assert!(content_prop.is_some());
+        .find(|(key, _)| key == &WellKnownFacetTag::Note.to_string());
+    assert!(note_prop.is_some());
 
-    assert_eq!(wit_doc.props.len(), root_doc.props.len());
+    assert_eq!(wit_doc.facets.len(), root_doc.facets.len());
 }
 
 #[test]
@@ -59,11 +55,11 @@ fn test_wit_to_root_conversion() -> Res<()> {
     let converted_back: Doc = wit_doc.try_into()?;
 
     assert_eq!(converted_back.id, root_doc.id);
-    assert_eq!(converted_back.props.len(), root_doc.props.len());
+    assert_eq!(converted_back.facets.len(), root_doc.facets.len());
 
     // Check specific prop
-    let key = DocPropKey::from(WellKnownPropTag::Content);
-    assert_eq!(converted_back.props.get(&key), root_doc.props.get(&key));
+    let key = FacetKey::from(WellKnownFacetTag::Note);
+    assert_eq!(converted_back.facets.get(&key), root_doc.facets.get(&key));
 
     Ok(())
 }
@@ -75,35 +71,33 @@ fn test_round_trip_root_wit_root() -> Res<()> {
     let back: Doc = wit.try_into()?;
 
     assert_eq!(back.id, original.id);
-    assert_eq!(back.props.len(), original.props.len());
-    assert_eq!(back.props, original.props);
+    assert_eq!(back.facets.len(), original.facets.len());
+    assert_eq!(back.facets, original.facets);
 
     Ok(())
 }
 
 #[test]
-fn test_doc_with_blob_content() -> Res<()> {
+fn test_doc_with_blob() -> Res<()> {
     let mut props = HashMap::new();
     let blob = Blob {
         length_octets: 1024,
         hash: "hash123".to_string(),
     };
     props.insert(
-        DocPropKey::from(WellKnownPropTag::Content),
-        DocProp::from(WellKnownProp::Content(DocContent::Blob(blob))),
+        FacetKey::from(WellKnownFacetTag::Note),
+        FacetRaw::from(WellKnownFacet::Blob(blob)),
     );
 
     let root_doc = Doc {
         id: "blob-doc".to_string(),
-        created_at: Timestamp::now(),
-        updated_at: Timestamp::now(),
-        props,
+        facets: props,
     };
 
     let wit_doc: wit::doc::Doc = root_doc.clone().into();
     let back: Doc = wit_doc.try_into()?;
 
-    assert_eq!(back.props, root_doc.props);
+    assert_eq!(back.facets, root_doc.facets);
     Ok(())
 }
 
@@ -111,48 +105,46 @@ fn test_doc_with_blob_content() -> Res<()> {
 fn test_doc_with_all_prop_types() -> Res<()> {
     let mut props = HashMap::new();
     props.insert(
-        DocPropKey::from(WellKnownPropTag::RefGeneric),
-        DocProp::from(WellKnownProp::RefGeneric("ref1".to_string())),
+        FacetKey::from(WellKnownFacetTag::RefGeneric),
+        FacetRaw::from(WellKnownFacet::RefGeneric("ref1".to_string())),
     );
     props.insert(
-        DocPropKey::from(WellKnownPropTag::LabelGeneric),
-        DocProp::from(WellKnownProp::LabelGeneric("label1".to_string())),
+        FacetKey::from(WellKnownFacetTag::LabelGeneric),
+        FacetRaw::from(WellKnownFacet::LabelGeneric("label1".to_string())),
     );
     props.insert(
-        DocPropKey::from(WellKnownPropTag::ImageMetadata),
-        DocProp::from(WellKnownProp::ImageMetadata(ImageMetadata {
+        FacetKey::from(WellKnownFacetTag::ImageMetadata),
+        FacetRaw::from(WellKnownFacet::ImageMetadata(ImageMetadata {
             mime: "image/png".to_string(),
             width_px: 1920,
             height_px: 1080,
         })),
     );
     props.insert(
-        DocPropKey::from(WellKnownPropTag::PseudoLabel),
-        DocProp::from(WellKnownProp::PseudoLabel("p1".to_string())),
+        FacetKey::from(WellKnownFacetTag::PseudoLabel),
+        FacetRaw::from(WellKnownFacet::PseudoLabel(vec!["p1".to_string()])),
     );
     props.insert(
-        DocPropKey::from(WellKnownPropTag::PathGeneric),
-        DocProp::from(WellKnownProp::PathGeneric(PathBuf::from("/path/to/file"))),
+        FacetKey::from(WellKnownFacetTag::PathGeneric),
+        FacetRaw::from(WellKnownFacet::PathGeneric(PathBuf::from("/path/to/file"))),
     );
     props.insert(
-        DocPropKey::from(WellKnownPropTag::TitleGeneric),
-        DocProp::from(WellKnownProp::TitleGeneric("Title".to_string())),
+        FacetKey::from(WellKnownFacetTag::TitleGeneric),
+        FacetRaw::from(WellKnownFacet::TitleGeneric("Title".to_string())),
     );
 
     let root_doc = Doc {
         id: "all-props-doc".to_string(),
-        created_at: Timestamp::now(),
-        updated_at: Timestamp::now(),
-        props,
+        facets: props,
     };
 
     let wit_doc: wit::doc::Doc = root_doc.clone().into();
     let back: Doc = wit_doc.try_into()?;
 
-    assert_eq!(back.props.len(), root_doc.props.len());
+    assert_eq!(back.facets.len(), root_doc.facets.len());
 
-    for (key, orig_val) in &root_doc.props {
-        let conv_val = back.props.get(key).unwrap();
+    for (key, orig_val) in &root_doc.facets {
+        let conv_val = back.facets.get(key).unwrap();
         assert_eq!(orig_val, conv_val);
     }
     Ok(())

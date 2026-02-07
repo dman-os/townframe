@@ -2,7 +2,8 @@ use crate::interlude::*;
 
 use crate::ffi::{FfiError, SharedFfiCtx};
 
-use daybook_core::drawer::{DocNBranches, DrawerEvent, DrawerRepo, UpdateDocArgs};
+use daybook_core::drawer::types::UpdateDocArgsV2 as UpdateDocArgs;
+use daybook_core::drawer::{DocNBranches, DrawerEvent, DrawerRepo};
 use daybook_types::doc::{AddDocArgs, ChangeHashSet, Doc, DocId, DocPatch};
 
 #[derive(uniffi::Object)]
@@ -36,6 +37,12 @@ impl DrawerRepoFfi {
                 fcx.cx.acx.clone(),
                 fcx.cx.doc_drawer().document_id().clone(),
                 fcx.cx.local_actor_id.clone(),
+                Arc::new(std::sync::Mutex::new(
+                    daybook_core::drawer::lru::KeyedLruPool::new(1000),
+                )),
+                Arc::new(std::sync::Mutex::new(
+                    daybook_core::drawer::lru::KeyedLruPool::new(1000),
+                )),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
@@ -60,6 +67,7 @@ impl DrawerRepoFfi {
         self.fcx
             .do_on_rt(async move { this.repo.list().await })
             .await
+            .expect("error listing docs")
     }
 
     #[tracing::instrument(err, skip(self))]
@@ -70,7 +78,7 @@ impl DrawerRepoFfi {
             .fcx
             .do_on_rt(async move {
                 this.repo
-                    .get(&id, &branch_path)
+                    .get_doc_with_facets_at_branch(&id, &branch_path, None)
                     .await
                     .map(|opt| opt.map(|arc| (*arc).clone()))
             })
@@ -82,7 +90,7 @@ impl DrawerRepoFfi {
         let this = Arc::clone(&self);
         Ok(self
             .fcx
-            .do_on_rt(async move { this.repo.add(args).await })
+            .do_on_rt(async move { this.repo.add(args).await.map_err(eyre::Report::from) })
             .await?)
     }
 
@@ -125,7 +133,7 @@ impl DrawerRepoFfi {
         let this = Arc::clone(&self);
         Ok(self
             .fcx
-            .do_on_rt(async move { this.repo.del(&id).await })
+            .do_on_rt(async move { this.repo.del(&id).await.map_err(eyre::Report::from) })
             .await?)
     }
 }

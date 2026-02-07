@@ -3200,7 +3200,10 @@ dependencies = [
 name = "mltools"
 version = "0.1.0"
 dependencies = [
+ "api_utils_rs",
+ "serde",
  "utils_rs",
+ "wit-bindgen 0.48.1",
 ]
 
 [[package]]

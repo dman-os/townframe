@@ -6,7 +6,7 @@ use crate::drawer::DrawerRepo;
 use crate::plugs::manifest;
 use crate::plugs::PlugsRepo;
 
-use daybook_types::doc::{DocPropKey, DocPropTag};
+use daybook_types::doc::{FacetKey, FacetTag};
 use wash_runtime::{
     host::{Host as WashHost, HostApi},
     types::Component,
@@ -449,10 +449,10 @@ impl Rt {
                     prop_id,
                 },
             ) => {
-                let tag: DocPropTag = working_prop_tag.0.clone().into();
+                let tag: FacetTag = working_prop_tag.0.clone().into();
                 let prop_key = match prop_id {
-                    Some(id) => DocPropKey::TagAndId { tag, id },
-                    None => DocPropKey::Tag(tag),
+                    Some(id) => FacetKey { tag, id },
+                    None => tag.into(),
                 };
                 let prop_key = prop_key.to_string();
                 let dispatch_id = {
@@ -555,7 +555,8 @@ impl Rt {
     }
 
     pub async fn cancel_dispatch(&self, _dispatch_id: &str) -> Res<()> {
-        todo!()
+        //todo!()
+        Ok(())
     }
 
     /// Wait until a log entry matches the provided condition
