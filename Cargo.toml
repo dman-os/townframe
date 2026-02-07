@@ -6,6 +6,7 @@ members = [
   # "./src/autosurgeon/autosurgeon-derive/",
   "./src/daybook_cli",
   "./src/daybook_core",
+  "./src/daybook_fuse",
   "./src/daybook_ffi",
   # "./src/daybook_sync",
   "./src/daybook_types",
@@ -54,7 +55,9 @@ api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
 macros = { path = "./src/macros" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
+daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
+pauperfuse = { path = "./src/pauperfuse", default-features = false }
 wflow = { path = "./src/wflow", default-features = false }
 wflow_core = { path = "./src/wflow_core", default-features = false }
 wflow_tokio = { path = "./src/wflow_tokio", default-features = false }

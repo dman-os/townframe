@@ -12,3 +12,10 @@ path = "lib.rs"
 
 [dependencies]
 utils_rs = { workspace = true, default-features = false }
+async-trait.workspace = true
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+blake3.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

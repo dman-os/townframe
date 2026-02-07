@@ -1,0 +1,25 @@
+[package]
+name = "daybook_fuse"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "daybook_fuse"
+path = "lib.rs"
+
+[dependencies]
+utils_rs = { workspace = true, features = ["native"] }
+daybook_core = { workspace = true }
+daybook_types = { workspace = true }
+pauperfuse = { path = "../pauperfuse" }
+
+tokio = { workspace = true, features = ["fs", "time"] }
+tokio-util = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

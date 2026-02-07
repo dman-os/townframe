@@ -1,5 +1,61 @@
 # duck-log
 
+## 2026-02-07 | ppf genesis prompt
+
+What's pauperfuse? It's the poor man's fuse.
+
+Or in other words. It's going to be like the git worktree.
+In a sense, git worktree is the fuse materialization of the git contents, right?
+
+We're going to implement that.
+
+Our main usecase is remote collaborative document editing except its on the FS layer rather than in the editor.
+Basically, the pauperfuse daemon will update the files as changes come in.
+It'll need to detect changes to files and send it down the pipe.
+
+Ofc, this is tricky to do in POSIX.
+If that file is open in VIM for eg, it'll need to actively watch the file to avoid drift BUT!
+We're not interested in solving that.
+We assume that all editors working on our tree are aware of the semantics and will avoid toctou bugs themselves.
+
+Details:
+- Pauperfuse will be a library that'll be used by daybook_cli mainly
+- It'll accept a bunch of objects that describe files
+  - Their path relative to root
+  - Their stat info
+  - A method to read offsets into the actual contents
+      - This detail is important since we will add an actual FUSE based backend
+      - The actual impl of that object could choose to do passthrough to another file or hold it all in memory
+  - A method to ask for processing changes to the byte contents
+- It shall have an event loop task where it'll process change events
+  - Either from the actual fs through the OS 
+  - Or from the object provider (which will correspond to remote events for our main usecase)
+- No mentions of automerge or collaborative text editing, pauperfuse will be agnostic and general purpose
+- We'll have different backends
+  - A livetree backend (find a better name)
+      - This will just write out the whole files onto the path
+      - It'll watch the paths using https://lib.rs/crates/notify to detect changes
+      - It'll even support this usecase without having to have a daemon online in a lazy and discrete manner like `git` or `jj` worktrees
+      - We'll need to mantain metadata in some location that will be provided to us
+  - An fuse(8) backend on linux (for later)
+
+Tricky details:
+- Most of pauperfuse will use byte offsets and byte arrays
+  - But for example, some of our usecases might have structured datatypes
+    - We'll have to reject bad inputs?
+    - I guess what we want to do is support multiple types of objects and this will be defined by the object given
+      - First case, we reject invalid changes restoring to the valid state
+      - Second case, we keep the ondisk file as is but mark it somehow?
+        - You know how in git, we have staged and unstaged file?
+        - We'll mark invalid files, marks that will be queryable
+- For daybook_cli and any future users, we'll want to make implementing their objects easier
+  - What's the shape of these objects? trait impls?
+    - Dynamic dispatch can be a pain and not cheap. can we do better?
+      - A single pauperfuse context will deal with a heterogenus set of object types
+  - We'll want to provide composable primitives for implementing the different behaviors
+    - Edit rejection to be used by structured files
+    - Passthrough support to other on disk files
+
 ## 2026-01-29 | a case for ids in keys
 
 I keep going back and forth on this.

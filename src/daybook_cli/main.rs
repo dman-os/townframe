@@ -21,7 +21,6 @@ use daybook_core::tables::TablesRepo;
 
 mod config;
 mod context;
-// mod fuse;
 
 fn main() -> Res<ExitCode> {
     // dotenv_flow::dotenv_flow().ok();
@@ -165,7 +164,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     // we only create init the Ctx after checking if the
     // configured repo is Initialized since `init`
     // initializes the repo
-    let ctx = context::Ctx::init(conf).await?;
+    let ctx = context::Ctx::init(Arc::clone(&conf)).await?;
     let drawer_doc_id = ctx.doc_drawer().document_id().clone();
     let (drawer, drawer_stop) = DrawerRepo::load(
         ctx.acx.clone(),
@@ -342,6 +341,76 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             // Cleanup
             tokio::fs::remove_file(&tmp_path).await?;
         }
+        StaticCommands::Livetree { command } => {
+            let root_path = conf.cli_config.repo_path.join("livetree");
+            let metadata_db_path = conf
+                .cli_config
+                .repo_path
+                .join("pauperfuse")
+                .join("livetree.sqlite");
+            let mut livetree_cx = daybook_fuse::DaybookFuseCtx::new(
+                daybook_fuse::Config {
+                    root_path,
+                    metadata_db_path,
+                    branch_path: daybook_types::doc::BranchPath::from("main"),
+                    poll_interval: std::time::Duration::from_millis(250),
+                },
+                Arc::clone(&drawer),
+            );
+
+            match command {
+                LivetreeCommands::Init {} => {
+                    daybook_fuse::bootstrap_livetree(&mut livetree_cx).await?;
+                    println!(
+                        "livetree initialized at {}",
+                        livetree_cx.config.root_path.display()
+                    );
+                }
+                LivetreeCommands::Status {} => {
+                    let status = daybook_fuse::status(&mut livetree_cx).await?;
+                    println!(
+                        "in-sync: {}, provider-only: {}, backend-only: {}, diverged: {}, scanned: {}, changed: {}",
+                        status.in_sync_count,
+                        status.provider_only_count,
+                        status.backend_only_count,
+                        status.diverged_count,
+                        status.scanned_doc_count,
+                        status.changed_doc_count
+                    );
+                }
+                LivetreeCommands::Pull {} => {
+                    let report = daybook_fuse::pull_changes(&mut livetree_cx).await?;
+                    println!(
+                        "pull complete: provider_deltas={}, effects={}, scanned={}, changed={}",
+                        report.provider_delta_count,
+                        report.effect_count,
+                        report.scanned_doc_count,
+                        report.changed_doc_count
+                    );
+                }
+                LivetreeCommands::Push {} => {
+                    let report = daybook_fuse::push_changes(&mut livetree_cx).await?;
+                    println!(
+                        "push complete: backend_deltas={}, effects={}, scanned={}, changed={}",
+                        report.backend_delta_count,
+                        report.effect_count,
+                        report.scanned_doc_count,
+                        report.changed_doc_count
+                    );
+                }
+                LivetreeCommands::Reconcile {} => {
+                    let report = daybook_fuse::reconcile_once(&mut livetree_cx).await?;
+                    println!(
+                        "reconcile complete: backend_deltas={}, provider_deltas={}, effects={}, scanned={}, changed={}",
+                        report.backend_delta_count,
+                        report.provider_delta_count,
+                        report.effect_count,
+                        report.scanned_doc_count,
+                        report.changed_doc_count
+                    );
+                }
+            }
+        }
     }
     drawer_stop.stop().await?;
     if let Some(stop) = ctx.acx_stop.lock().await.take() {
@@ -489,7 +558,8 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         | Ok(StaticCommands::Touch)
         | Ok(StaticCommands::Init { .. })
         | Ok(StaticCommands::Cat { .. })
-        | Ok(StaticCommands::Ed { .. }) => {
+        | Ok(StaticCommands::Ed { .. })
+        | Ok(StaticCommands::Livetree { .. }) => {
             unreachable!("static_cli will prevent these");
         }
     }
@@ -577,11 +647,30 @@ enum StaticCommands {
         #[arg(short, long)]
         branch: Option<String>,
     },
+    /// Work with the pauperfuse livetree materialization
+    Livetree {
+        #[clap(subcommand)]
+        command: LivetreeCommands,
+    },
     /// Generate shell completions
     Completions {
         #[clap(value_enum)]
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum LivetreeCommands {
+    /// Initialize/materialize the livetree from drawer state
+    Init {},
+    /// Show sync state between drawer and livetree files
+    Status {},
+    /// Apply provider (drawer) changes into livetree files
+    Pull {},
+    /// Apply livetree file changes into provider (drawer)
+    Push {},
+    /// Push then pull in one cycle
+    Reconcile {},
 }
 
 enum StaticCliResult {

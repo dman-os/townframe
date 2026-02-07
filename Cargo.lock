@@ -1459,6 +1459,7 @@ dependencies = [
  "colored",
  "comfy-table",
  "daybook_core",
+ "daybook_fuse",
  "daybook_types",
  "directories",
  "displaydoc",
@@ -1557,6 +1558,21 @@ dependencies = [
  "tracing-unwrap",
  "uniffi",
  "url",
+ "utils_rs",
+]
+
+[[package]]
+name = "daybook_fuse"
+version = "0.1.0"
+dependencies = [
+ "daybook_core",
+ "daybook_types",
+ "pauperfuse",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
  "utils_rs",
 ]
 
@@ -3571,6 +3587,11 @@ checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 name = "pauperfuse"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "blake3",
+ "sqlx",
+ "tempfile",
+ "tokio",
  "utils_rs",
 ]
 
