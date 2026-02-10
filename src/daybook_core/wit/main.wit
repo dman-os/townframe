@@ -88,10 +88,17 @@ interface mltools-ocr {
     ocr-image: func(blob-facet: prop-token-ro) -> result<ocr-result, string>;
 }
 
+interface mltools-embed {
+    use townframe:mltools/embed.{embed-result};
+
+    embed-text: func(text: string) -> result<embed-result, string>;
+}
+
 world all-guest {
     import drawer;
     import capabilities;
     import prop-routine;
     import mltools-ocr;
+    import mltools-embed;
     import wasi:filesystem/preopens@0.2.6;
 }

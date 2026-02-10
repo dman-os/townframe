@@ -31,6 +31,7 @@ crate::define_enum_and_tag!(
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         Dmeta struct {
             pub id: DocId,
+            // FIXME: unix timestamp codec
             pub created_at: Timestamp,
             pub updated_at: Vec<Timestamp>,
             pub facet_uuids: HashMap<Uuid,FacetKey>,

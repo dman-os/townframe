@@ -30,6 +30,7 @@ mod wit {
 
             "townframe:mltools/llm-chat": generate,
             "townframe:mltools/ocr": generate,
+            "townframe:mltools/embed": generate,
 
             "townframe:daybook-types/doc": generate,
 
@@ -38,6 +39,7 @@ mod wit {
             "townframe:daybook/capabilities": generate,
             "townframe:daybook/prop-routine": generate,
             "townframe:daybook/mltools-ocr": generate,
+            "townframe:daybook/mltools-embed": generate,
         }
     });
 }
@@ -57,8 +59,77 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
             "pseudo-label" => |cx, _args: serde_json::Value| pseudo_labeler(cx),
             "test-label" => |cx, _args: serde_json::Value| test_labeler(cx),
             "ocr-image" => |cx, _args: serde_json::Value| ocr_image(cx),
+            "embed-text" => |cx, _args: serde_json::Value| embed_text(cx),
         })
     }
+}
+
+fn embed_text(cx: WflowCtx) -> Result<(), JobErrorX> {
+    use crate::wit::townframe::daybook::mltools_embed;
+    use crate::wit::townframe::daybook::prop_routine;
+    use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
+
+    let args = prop_routine::get_args();
+
+    let working_prop_token = args
+        .rw_prop_tokens
+        .iter()
+        .find(|(key, _)| key == &args.prop_key)
+        .map(|(_, token)| token)
+        .ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "working prop key '{}' not found in rw_prop_tokens",
+                args.prop_key
+            ))
+        })?;
+
+    let current_prop_raw = working_prop_token.get();
+
+    let current_prop_json: daybook_types::doc::FacetRaw =
+        serde_json::from_str(&current_prop_raw)
+            .map_err(|err| JobErrorX::Terminal(ferr!("error parsing working prop json: {err}")))?;
+
+    let current_note = WellKnownFacet::from_json(current_prop_json, WellKnownFacetTag::Note)
+        .map_err(|err| JobErrorX::Terminal(err.wrap_err("working prop is not a note facet")))?;
+    let WellKnownFacet::Note(note) = current_note else {
+        return Err(JobErrorX::Terminal(ferr!("working prop is not note")));
+    };
+
+    let embed_result = mltools_embed::embed_text(&note.content)
+        .map_err(|err| JobErrorX::Terminal(ferr!("error running embed-text: {err}")))?;
+
+    let preview_len = 12;
+    let vector_preview = embed_result
+        .vector
+        .iter()
+        .take(preview_len)
+        .map(|value| format!("{value:.4}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let preview_text = format!(
+        "embedding(model={}, dims={}): [{}]",
+        embed_result.model_id, embed_result.dimensions, vector_preview
+    );
+
+    cx.effect(|| {
+        let new_prop: daybook_types::doc::FacetRaw =
+            WellKnownFacet::Note(daybook_types::doc::Note {
+                mime: "text/plain".to_string(),
+                content: preview_text.clone(),
+            })
+            .into();
+
+        let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
+        working_prop_token
+            .update(&new_prop)
+            .wrap_err("error updating note with embedding preview")
+            .map_err(JobErrorX::Terminal)?;
+
+        Ok(Json(()))
+    })?;
+
+    Ok(())
 }
 
 fn ocr_image(cx: WflowCtx) -> Result<(), JobErrorX> {

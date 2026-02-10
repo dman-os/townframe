@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 #[allow(unused)]
 mod interlude {
     pub use crate::stores::Store;

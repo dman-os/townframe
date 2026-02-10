@@ -15,6 +15,7 @@
 
 ## Stack
 
+- [ ] embeddinggemma3 on ollama
 - [ ] `mltools`
   - [ ] OCR
   - [ ] Embeedding

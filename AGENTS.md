@@ -56,4 +56,6 @@ Nice, so we're going to do a very deep feature impl that is going to touch multi
   - we'll then add a tests in ./src/daybook_core/e2e/ that exercises this
   - let's use the image at /tmp/sample.jpg for now. Create a new document that has this blob as content.
 
-Good stuff. So to get this into daybook/mltools-embed interface that has embed_text that accepts a string. Let's mirror the rest of our work from the previous OCR work and make a plan. One item of note is we want to avoid downloads so we'll load the models directly from disk as seen in ocr. The fastembed demo run has downloaded a nomic-ai model at ./target/models/.fastembed_cache that you should use (maybe copy/desymlink it elsewhere).
+Good stuff. So to get this into daybook/mltools-embed interface that has embed_text that accepts a string. Let's mirror the rest of our work from the previous OCR work and make a plan. One item of note is we want to avoid downloads so we'll load the models directly from disk similar to in ocr. The fastembed demo run has downloaded a nomic-ai model at ./target/models/.fastembed_cache that you should use (maybe copy/desymlink it elsewhere) for the hardcoding testing you need to do.
+
+Also, let's make sure both mltools method use spawn_blocking for their major work to avoid blocking tokio.

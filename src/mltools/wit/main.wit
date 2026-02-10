@@ -60,8 +60,17 @@ interface ocr {
     }
 }
 
+interface embed {
+    record embed-result {
+        vector: list<f32>,
+        dimensions: u32,
+        model-id: string,
+    }
+}
+
 world guest {
     import types;
     import llm-chat;
     import ocr;
+    import embed;
 }

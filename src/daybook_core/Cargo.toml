@@ -107,4 +107,4 @@ tokio-util = { workspace = true }
 wflow = { workspace = true, features = ["test-harness"] }
 insta = { workspace = true, features = ["json"] }
 wash_plugin_am_repo.workspace = true
-tempfile = "3.14.0"
+tempfile.workspace = true

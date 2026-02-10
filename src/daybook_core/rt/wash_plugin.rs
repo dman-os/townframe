@@ -14,10 +14,10 @@ mod binds_guest {
         exports: { default: async | trappable | tracing },
 
         with: {
-            "townframe:daybook/capabilities/doc-token-ro": super::DocTokenRo,
-            "townframe:daybook/capabilities/doc-token-rw": super::DocTokenRw,
-            "townframe:daybook/capabilities/prop-token-ro": super::PropTokenRo,
-            "townframe:daybook/capabilities/prop-token-rw": super::PropTokenRw,
+            "townframe:daybook/capabilities.doc-token-ro": super::DocTokenRo,
+            "townframe:daybook/capabilities.doc-token-rw": super::DocTokenRw,
+            "townframe:daybook/capabilities.prop-token-ro": super::PropTokenRo,
+            "townframe:daybook/capabilities.prop-token-rw": super::PropTokenRw,
         }
     });
 
@@ -205,6 +205,7 @@ mod binds_guest {
 
 pub use binds_guest::townframe::daybook::capabilities;
 pub use binds_guest::townframe::daybook::drawer;
+pub use binds_guest::townframe::daybook::mltools_embed;
 pub use binds_guest::townframe::daybook::mltools_ocr;
 pub use binds_guest::townframe::daybook::prop_routine;
 use binds_guest::townframe::daybook_types::doc as bindgen_doc;
@@ -275,7 +276,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
         WitWorld {
             exports: std::collections::HashSet::new(),
             imports: std::collections::HashSet::from([WitInterface::from(
-                "townframe:daybook/drawer,capabilities,prop-routine,mltools-ocr",
+                "townframe:daybook/drawer,capabilities,prop-routine,mltools-ocr,mltools-embed",
             )]),
         }
     }
@@ -320,6 +321,12 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
                 }
                 if iface.interfaces.contains("mltools-ocr") {
                     mltools_ocr::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                        item.linker(),
+                        |ctx| ctx,
+                    )?;
+                }
+                if iface.interfaces.contains("mltools-embed") {
+                    mltools_embed::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         item.linker(),
                         |ctx| ctx,
                     )?;
@@ -817,6 +824,7 @@ impl mltools_ocr::Host for SharedWashCtx {
                         supported_languages_bcp47: vec!["en".to_string()],
                     }],
                 },
+                embed: mltools::EmbedConfig { backends: vec![] },
             },
         };
 
@@ -839,6 +847,40 @@ impl mltools_ocr::Host for SharedWashCtx {
                     confidence: region.confidence,
                 })
                 .collect(),
+        }))
+    }
+}
+
+impl mltools_embed::Host for SharedWashCtx {
+    async fn embed_text(
+        &mut self,
+        text: String,
+    ) -> wasmtime::Result<Result<mltools_embed::EmbedResult, String>> {
+        let cache_dir = std::path::absolute(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("target/models/.fastembed_cache"),
+        )
+        .map_err(|err| anyhow::anyhow!("failed to resolve embedding cache path: {err}"))?;
+
+        let mltools_ctx = mltools::Ctx {
+            config: mltools::Config {
+                ocr: mltools::OcrConfig { backends: vec![] },
+                embed: mltools::EmbedConfig {
+                    backends: vec![mltools::EmbedBackendConfig::LocalFastembedNomic { cache_dir }],
+                },
+            },
+        };
+
+        let result = match mltools::embed_text(&mltools_ctx, &text).await {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
+
+        Ok(Ok(mltools_embed::EmbedResult {
+            vector: result.vector,
+            dimensions: result.dimensions,
+            model_id: result.model_id,
         }))
     }
 }

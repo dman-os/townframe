@@ -657,6 +657,7 @@ async fn ensure_bundle_workload_running(
         .map(|status| match &status.workload_status.workload_state {
             wash_runtime::types::WorkloadState::Starting
             | wash_runtime::types::WorkloadState::Running => true,
+            wash_runtime::types::WorkloadState::NotFound => false,
             wash_runtime::types::WorkloadState::Unspecified
             | wash_runtime::types::WorkloadState::Completed
             | wash_runtime::types::WorkloadState::Stopping
@@ -753,6 +754,7 @@ async fn start_bundle_workload(
                     WitInterface::from("townframe:daybook/capabilities"),
                     WitInterface::from("townframe:daybook/prop-routine"),
                     WitInterface::from("townframe:daybook/mltools-ocr"),
+                    WitInterface::from("townframe:daybook/mltools-embed"),
                     WitInterface::from("townframe:mltools/llm-chat"),
                     // WitInterface::from("wasi:keyvalue/store"),
                 ],

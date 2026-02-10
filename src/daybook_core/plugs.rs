@@ -151,6 +151,24 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     }
                     .into(),
                 ),
+                (
+                    "embed-text".into(),
+                    RoutineManifest {
+                        r#impl: RoutineImpl::Wflow {
+                            key: "embed-text".into(),
+                            bundle: "daybook_wflows".into(),
+                        },
+                        deets: RoutineManifestDeets::DocProp {
+                            working_prop_tag: WellKnownFacetTag::Note.into(),
+                        },
+                        prop_acl: vec![RoutinePropAccess {
+                            tag: WellKnownFacetTag::Note.into(),
+                            read: true,
+                            write: true,
+                        }],
+                    }
+                    .into(),
+                ),
                 #[cfg(debug_assertions)]
                 (
                     "test-label".into(),
@@ -179,6 +197,16 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         desc: "Use LLM to label the document".into(),
                         deets: CommandDeets::DocCommand {
                             routine_name: "pseudo-label".into(),
+                        },
+                    }
+                    .into(),
+                ),
+                (
+                    "embed-text".into(),
+                    CommandManifest {
+                        desc: "Embed note text and write embedding preview".into(),
+                        deets: CommandDeets::DocCommand {
+                            routine_name: "embed-text".into(),
                         },
                     }
                     .into(),
@@ -247,6 +275,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             "pseudo-label".into(),
                             "test-label".into(),
                             "ocr-image".into(),
+                            "embed-text".into(),
                         ],
                         // FIXME: make this more generic
                         component_urls: vec![{
