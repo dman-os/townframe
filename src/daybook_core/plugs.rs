@@ -163,14 +163,22 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             bundle: "daybook_wflows".into(),
                         },
                         deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::Note.into(),
+                            working_facet_tag: WellKnownFacetTag::Embedding.into(),
                         },
-                        facet_acl: vec![RoutineFacetAccess {
-                            tag: WellKnownFacetTag::Note.into(),
-                            key_id: None,
-                            read: true,
-                            write: true,
-                        }],
+                        facet_acl: vec![
+                            RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Note.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                            },
+                            RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Embedding.into(),
+                                key_id: None,
+                                read: true,
+                                write: true,
+                            },
+                        ],
                     }
                     .into(),
                 ),
@@ -210,7 +218,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 (
                     "embed-text".into(),
                     CommandManifest {
-                        desc: "Embed note text and write embedding preview".into(),
+                        desc: "Embed note text and write embedding facet".into(),
                         deets: CommandDeets::DocCommand {
                             routine_name: "embed-text".into(),
                         },
@@ -252,6 +260,22 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),
                                 DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
                                     WellKnownFacetTag::Note.into(),
+                                ))),
+                            ]),
+                        },
+                    }
+                    .into(),
+                ),
+                (
+                    "embed-text".into(),
+                    ProcessorManifest {
+                        desc: "Compute embedding facet from note content".into(),
+                        deets: ProcessorDeets::DocProcessor {
+                            routine_name: "embed-text".into(),
+                            predicate: DocPredicateClause::And(vec![
+                                DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
+                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                    WellKnownFacetTag::Embedding.into(),
                                 ))),
                             ]),
                         },
@@ -307,6 +331,11 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     value_schema: schemars::schema_for!(Vec<String>),
                     display_config: default(),
                 },
+                FacetKeyManifest {
+                    key_tag: WellKnownFacetTag::Embedding.into(),
+                    value_schema: schemars::schema_for!(daybook_types::doc::Embedding),
+                    display_config: default(),
+                },
             ],
         },
     ]
@@ -342,7 +371,9 @@ impl PlugsStore {
 
 #[async_trait]
 impl crate::stores::Store for PlugsStore {
-    const PROP: &str = "plugs";
+    fn prop() -> Cow<'static, str> {
+        "plugs".into()
+    }
 }
 
 pub mod version_updates {
@@ -357,7 +388,7 @@ pub mod version_updates {
         reconcile_prop(
             &mut doc,
             ROOT,
-            super::PlugsStore::PROP,
+            super::PlugsStore::prop().as_ref(),
             super::PlugsStore::default(),
         )?;
         Ok(doc.save_nocompress())

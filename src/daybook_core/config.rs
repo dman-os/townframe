@@ -58,7 +58,9 @@ impl Default for ConfigStore {
 
 #[async_trait]
 impl crate::stores::Store for ConfigStore {
-    const PROP: &str = "config";
+    fn prop() -> Cow<'static, str> {
+        "config".into()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -224,7 +226,7 @@ impl ConfigRepo {
                         &self.app_doc_id,
                         &heads,
                         automerge::ROOT,
-                        vec![ConfigStore::PROP.into()],
+                        vec![ConfigStore::prop().into()],
                     )
                     .await?
                     .expect(ERROR_INVALID_PATCH);
@@ -273,7 +275,7 @@ impl ConfigRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<ConfigEvent>,
     ) -> Res<()> {
-        if !utils_rs::am::changes::path_prefix_matches(&[ConfigStore::PROP.into()], &patch.path) {
+        if !utils_rs::am::changes::path_prefix_matches(&[ConfigStore::prop().into()], &patch.path) {
             return Ok(());
         }
 
@@ -388,7 +390,7 @@ pub mod version_updates {
         reconcile_prop(
             &mut doc,
             ROOT,
-            super::ConfigStore::PROP,
+            super::ConfigStore::prop().as_ref(),
             super::ConfigStore::default(),
         )?;
         Ok(doc.save_nocompress())

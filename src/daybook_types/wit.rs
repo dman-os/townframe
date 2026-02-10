@@ -3,7 +3,7 @@ pub mod doc {
 
     use crate::doc as root_doc;
     use api_utils_rs::wit::townframe::api_utils::utils::Datetime;
-    pub use root_doc::{Blob, DocId, FacetKey, ImageMetadata, MimeType, Multihash, Note, UserPath};
+    pub use root_doc::{Blob, DocId, FacetKey, MimeType, Multihash, Note, UserPath};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Pending {
@@ -40,10 +40,73 @@ pub mod doc {
         TitleGeneric(String),
         PathGeneric(String),
         ImageMetadata(ImageMetadata),
+        OcrResult(OcrResult),
+        Embedding(Embedding),
         Pending(Pending),
         Dmeta(Dmeta),
         Note(Note),
         Blob(Blob),
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct Point {
+        pub x: f32,
+        pub y: f32,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub struct OcrTextRegion {
+        pub bounding_box: Vec<Point>,
+        pub text: Option<String>,
+        pub confidence_score: Option<f32>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ImageMetadata {
+        pub facet_ref: String,
+        pub ref_heads: Vec<String>,
+        pub mime: MimeType,
+        pub width_px: u64,
+        pub height_px: u64,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub struct OcrResult {
+        pub facet_ref: String,
+        pub ref_heads: Vec<String>,
+        pub model_tag: String,
+        pub text: String,
+        pub text_regions: Option<Vec<OcrTextRegion>>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub enum EmbeddingCompression {
+        Zstd,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub enum EmbeddingDtype {
+        F32,
+        F16,
+        I8,
+        Binary,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Embedding {
+        pub facet_ref: String,
+        pub ref_heads: Vec<String>,
+        pub model_tag: String,
+        pub vector: Vec<u8>,
+        pub dim: u32,
+        pub dtype: EmbeddingDtype,
+        pub compression: Option<EmbeddingCompression>,
     }
 
     pub type DocFacet = String;
@@ -128,7 +191,54 @@ pub mod doc {
                 root_doc::WellKnownFacet::PathGeneric(val) => {
                     Self::PathGeneric(val.to_string_lossy().into_owned())
                 }
-                root_doc::WellKnownFacet::ImageMetadata(val) => Self::ImageMetadata(val),
+                root_doc::WellKnownFacet::ImageMetadata(val) => {
+                    Self::ImageMetadata(ImageMetadata {
+                        facet_ref: val.facet_ref.to_string(),
+                        ref_heads: utils_rs::am::serialize_commit_heads(&val.ref_heads.0),
+                        mime: val.mime,
+                        width_px: val.width_px,
+                        height_px: val.height_px,
+                    })
+                }
+                root_doc::WellKnownFacet::OcrResult(val) => Self::OcrResult(OcrResult {
+                    facet_ref: val.facet_ref.to_string(),
+                    ref_heads: utils_rs::am::serialize_commit_heads(&val.ref_heads.0),
+                    model_tag: val.model_tag,
+                    text: val.text,
+                    text_regions: val.text_regions.map(|regions| {
+                        regions
+                            .into_iter()
+                            .map(|region| OcrTextRegion {
+                                bounding_box: region
+                                    .bounding_box
+                                    .into_iter()
+                                    .map(|point| Point {
+                                        x: point.x,
+                                        y: point.y,
+                                    })
+                                    .collect(),
+                                text: region.text,
+                                confidence_score: region.confidence_score,
+                            })
+                            .collect()
+                    }),
+                }),
+                root_doc::WellKnownFacet::Embedding(val) => Self::Embedding(Embedding {
+                    facet_ref: val.facet_ref.to_string(),
+                    ref_heads: utils_rs::am::serialize_commit_heads(&val.ref_heads.0),
+                    model_tag: val.model_tag,
+                    vector: val.vector,
+                    dim: val.dim,
+                    dtype: match val.dtype {
+                        root_doc::EmbeddingDtype::F32 => EmbeddingDtype::F32,
+                        root_doc::EmbeddingDtype::F16 => EmbeddingDtype::F16,
+                        root_doc::EmbeddingDtype::I8 => EmbeddingDtype::I8,
+                        root_doc::EmbeddingDtype::Binary => EmbeddingDtype::Binary,
+                    },
+                    compression: val.compression.map(|compression| match compression {
+                        root_doc::EmbeddingCompression::Zstd => EmbeddingCompression::Zstd,
+                    }),
+                }),
                 root_doc::WellKnownFacet::Pending(pending) => Self::Pending(Pending {
                     key: pending.key.to_string(),
                 }),
@@ -170,7 +280,7 @@ pub mod doc {
     }
 
     impl TryFrom<WellKnownFacet> for root_doc::WellKnownFacet {
-        type Error = uuid::Error;
+        type Error = eyre::Report;
 
         fn try_from(val: WellKnownFacet) -> Result<Self, Self::Error> {
             Ok(match val {
@@ -179,7 +289,60 @@ pub mod doc {
                 WellKnownFacet::PseudoLabel(val) => Self::PseudoLabel(val),
                 WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
                 WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val.into()),
-                WellKnownFacet::ImageMetadata(val) => Self::ImageMetadata(val),
+                WellKnownFacet::ImageMetadata(val) => {
+                    Self::ImageMetadata(root_doc::ImageMetadata {
+                        facet_ref: val.facet_ref.parse()?,
+                        ref_heads: root_doc::ChangeHashSet(utils_rs::am::parse_commit_heads(
+                            &val.ref_heads,
+                        )?),
+                        mime: val.mime,
+                        width_px: val.width_px,
+                        height_px: val.height_px,
+                    })
+                }
+                WellKnownFacet::OcrResult(val) => Self::OcrResult(root_doc::OcrResult {
+                    facet_ref: val.facet_ref.parse()?,
+                    ref_heads: root_doc::ChangeHashSet(utils_rs::am::parse_commit_heads(
+                        &val.ref_heads,
+                    )?),
+                    model_tag: val.model_tag,
+                    text: val.text,
+                    text_regions: val.text_regions.map(|regions| {
+                        regions
+                            .into_iter()
+                            .map(|region| root_doc::OcrTextRegion {
+                                bounding_box: region
+                                    .bounding_box
+                                    .into_iter()
+                                    .map(|point| root_doc::Point {
+                                        x: point.x,
+                                        y: point.y,
+                                    })
+                                    .collect(),
+                                text: region.text,
+                                confidence_score: region.confidence_score,
+                            })
+                            .collect()
+                    }),
+                }),
+                WellKnownFacet::Embedding(val) => Self::Embedding(root_doc::Embedding {
+                    facet_ref: val.facet_ref.parse()?,
+                    ref_heads: root_doc::ChangeHashSet(utils_rs::am::parse_commit_heads(
+                        &val.ref_heads,
+                    )?),
+                    model_tag: val.model_tag,
+                    vector: val.vector,
+                    dim: val.dim,
+                    dtype: match val.dtype {
+                        EmbeddingDtype::F32 => root_doc::EmbeddingDtype::F32,
+                        EmbeddingDtype::F16 => root_doc::EmbeddingDtype::F16,
+                        EmbeddingDtype::I8 => root_doc::EmbeddingDtype::I8,
+                        EmbeddingDtype::Binary => root_doc::EmbeddingDtype::Binary,
+                    },
+                    compression: val.compression.map(|compression| match compression {
+                        EmbeddingCompression::Zstd => root_doc::EmbeddingCompression::Zstd,
+                    }),
+                }),
                 WellKnownFacet::Pending(val) => Self::Pending(crate::doc::Pending {
                     key: val.key.into(),
                 }),
@@ -191,7 +354,7 @@ pub mod doc {
                         .facet_uuids
                         .into_iter()
                         .map(|(key, uuid)| Ok((uuid.parse()?, FacetKey::from(&key))))
-                        .collect::<Result<_, uuid::Error>>()?,
+                        .collect::<Result<_, eyre::Report>>()?,
                     facets: dmeta
                         .facets
                         .into_iter()
@@ -213,7 +376,7 @@ pub mod doc {
                                 },
                             ))
                         })
-                        .collect::<Result<_, uuid::Error>>()?,
+                        .collect::<Result<_, eyre::Report>>()?,
                 }),
                 WellKnownFacet::Note(note) => Self::Note(root_doc::Note {
                     mime: note.mime,

@@ -35,10 +35,55 @@ mod binds_guest {
                 wit_doc::WellKnownFacet::PathGeneric(val.to_string_lossy().into_owned())
             }
             root_doc::WellKnownFacet::ImageMetadata(val) => {
-                wit_doc::WellKnownFacet::ImageMetadata(root_doc::ImageMetadata {
+                wit_doc::WellKnownFacet::ImageMetadata(wit_doc::ImageMetadata {
+                    facet_ref: val.facet_ref.to_string(),
+                    ref_heads: utils_rs::am::serialize_commit_heads(&val.ref_heads.0),
                     mime: val.mime,
                     width_px: val.width_px,
                     height_px: val.height_px,
+                })
+            }
+            root_doc::WellKnownFacet::OcrResult(val) => {
+                wit_doc::WellKnownFacet::OcrResult(wit_doc::OcrResult {
+                    facet_ref: val.facet_ref.to_string(),
+                    ref_heads: utils_rs::am::serialize_commit_heads(&val.ref_heads.0),
+                    model_tag: val.model_tag,
+                    text: val.text,
+                    text_regions: val.text_regions.map(|regions| {
+                        regions
+                            .into_iter()
+                            .map(|region| wit_doc::OcrTextRegion {
+                                bounding_box: region
+                                    .bounding_box
+                                    .into_iter()
+                                    .map(|point| wit_doc::Point {
+                                        x: point.x,
+                                        y: point.y,
+                                    })
+                                    .collect(),
+                                text: region.text,
+                                confidence_score: region.confidence_score,
+                            })
+                            .collect()
+                    }),
+                })
+            }
+            root_doc::WellKnownFacet::Embedding(val) => {
+                wit_doc::WellKnownFacet::Embedding(wit_doc::Embedding {
+                    facet_ref: val.facet_ref.to_string(),
+                    ref_heads: utils_rs::am::serialize_commit_heads(&val.ref_heads.0),
+                    model_tag: val.model_tag,
+                    vector: val.vector,
+                    dim: val.dim,
+                    dtype: match val.dtype {
+                        root_doc::EmbeddingDtype::F32 => wit_doc::EmbeddingDtype::F32,
+                        root_doc::EmbeddingDtype::F16 => wit_doc::EmbeddingDtype::F16,
+                        root_doc::EmbeddingDtype::I8 => wit_doc::EmbeddingDtype::I8,
+                        root_doc::EmbeddingDtype::Binary => wit_doc::EmbeddingDtype::Binary,
+                    },
+                    compression: val.compression.map(|compression| match compression {
+                        root_doc::EmbeddingCompression::Zstd => wit_doc::EmbeddingCompression::Zstd,
+                    }),
                 })
             }
             root_doc::WellKnownFacet::Note(val) => wit_doc::WellKnownFacet::Note(root_doc::Note {
@@ -110,9 +155,60 @@ mod binds_guest {
             }
             wit_doc::WellKnownFacet::ImageMetadata(val) => {
                 root_doc::WellKnownFacet::ImageMetadata(root_doc::ImageMetadata {
+                    facet_ref: val.facet_ref.parse().unwrap(),
+                    ref_heads: root_doc::ChangeHashSet(
+                        utils_rs::am::parse_commit_heads(&val.ref_heads).unwrap(),
+                    ),
                     mime: val.mime,
                     width_px: val.width_px,
                     height_px: val.height_px,
+                })
+            }
+            wit_doc::WellKnownFacet::OcrResult(val) => {
+                root_doc::WellKnownFacet::OcrResult(root_doc::OcrResult {
+                    facet_ref: val.facet_ref.parse().unwrap(),
+                    ref_heads: root_doc::ChangeHashSet(
+                        utils_rs::am::parse_commit_heads(&val.ref_heads).unwrap(),
+                    ),
+                    model_tag: val.model_tag,
+                    text: val.text,
+                    text_regions: val.text_regions.map(|regions| {
+                        regions
+                            .into_iter()
+                            .map(|region| root_doc::OcrTextRegion {
+                                bounding_box: region
+                                    .bounding_box
+                                    .into_iter()
+                                    .map(|point| root_doc::Point {
+                                        x: point.x,
+                                        y: point.y,
+                                    })
+                                    .collect(),
+                                text: region.text,
+                                confidence_score: region.confidence_score,
+                            })
+                            .collect()
+                    }),
+                })
+            }
+            wit_doc::WellKnownFacet::Embedding(val) => {
+                root_doc::WellKnownFacet::Embedding(root_doc::Embedding {
+                    facet_ref: val.facet_ref.parse().unwrap(),
+                    ref_heads: root_doc::ChangeHashSet(
+                        utils_rs::am::parse_commit_heads(&val.ref_heads).unwrap(),
+                    ),
+                    model_tag: val.model_tag,
+                    vector: val.vector,
+                    dim: val.dim,
+                    dtype: match val.dtype {
+                        wit_doc::EmbeddingDtype::F32 => root_doc::EmbeddingDtype::F32,
+                        wit_doc::EmbeddingDtype::F16 => root_doc::EmbeddingDtype::F16,
+                        wit_doc::EmbeddingDtype::I8 => root_doc::EmbeddingDtype::I8,
+                        wit_doc::EmbeddingDtype::Binary => root_doc::EmbeddingDtype::Binary,
+                    },
+                    compression: val.compression.map(|compression| match compression {
+                        wit_doc::EmbeddingCompression::Zstd => root_doc::EmbeddingCompression::Zstd,
+                    }),
                 })
             }
             wit_doc::WellKnownFacet::Pending(pending) => {
@@ -205,6 +301,7 @@ mod binds_guest {
 pub use binds_guest::townframe::daybook::capabilities;
 pub use binds_guest::townframe::daybook::drawer;
 pub use binds_guest::townframe::daybook::facet_routine;
+pub use binds_guest::townframe::daybook::index_vector;
 pub use binds_guest::townframe::daybook::mltools_embed;
 pub use binds_guest::townframe::daybook::mltools_ocr;
 use binds_guest::townframe::daybook_types::doc as bindgen_doc;
@@ -219,6 +316,7 @@ pub struct DaybookPlugin {
     drawer_repo: Arc<crate::drawer::DrawerRepo>,
     dispatch_repo: Arc<crate::rt::DispatchRepo>,
     blobs_repo: Arc<crate::blobs::BlobsRepo>,
+    doc_embedding_index_repo: Arc<crate::index::DocEmbeddingIndexRepo>,
 }
 
 impl DaybookPlugin {
@@ -226,11 +324,13 @@ impl DaybookPlugin {
         drawer_repo: Arc<crate::drawer::DrawerRepo>,
         dispatch_repo: Arc<crate::rt::DispatchRepo>,
         blobs_repo: Arc<crate::blobs::BlobsRepo>,
+        doc_embedding_index_repo: Arc<crate::index::DocEmbeddingIndexRepo>,
     ) -> Self {
         Self {
             drawer_repo,
             dispatch_repo,
             blobs_repo,
+            doc_embedding_index_repo,
         }
     }
 
@@ -275,7 +375,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
         WitWorld {
             exports: std::collections::HashSet::new(),
             imports: std::collections::HashSet::from([WitInterface::from(
-                "townframe:daybook/drawer,capabilities,facet-routine,mltools-ocr,mltools-embed",
+                "townframe:daybook/drawer,capabilities,facet-routine,mltools-ocr,mltools-embed,index-vector",
             )]),
         }
     }
@@ -326,6 +426,12 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
                 }
                 if iface.interfaces.contains("mltools-embed") {
                     mltools_embed::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                        item.linker(),
+                        |ctx| ctx,
+                    )?;
+                }
+                if iface.interfaces.contains("index-vector") {
+                    index_vector::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         item.linker(),
                         |ctx| ctx,
                     )?;
@@ -881,6 +987,33 @@ impl mltools_embed::Host for SharedWashCtx {
             dimensions: result.dimensions,
             model_id: result.model_id,
         }))
+    }
+}
+
+impl index_vector::Host for SharedWashCtx {
+    async fn query_text(
+        &mut self,
+        text: String,
+        num_neighbors: u32,
+    ) -> wasmtime::Result<Result<Vec<index_vector::VectorHit>, String>> {
+        let plugin = DaybookPlugin::from_ctx(self);
+        let hits = match plugin
+            .doc_embedding_index_repo
+            .query_text(&text, num_neighbors)
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
+        Ok(Ok(hits
+            .into_iter()
+            .map(|hit| index_vector::VectorHit {
+                doc_id: hit.doc_id,
+                facet_key: hit.facet_key,
+                heads: utils_rs::am::serialize_commit_heads(&hit.heads.0),
+                distance: hit.distance,
+            })
+            .collect()))
     }
 }
 

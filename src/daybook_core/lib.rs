@@ -24,6 +24,7 @@ mod interlude {
 pub mod blobs;
 pub mod config;
 pub mod drawer;
+pub mod index;
 pub mod plugs;
 #[allow(unused)]
 pub mod repos;
@@ -46,7 +47,12 @@ daybook_types::custom_type_set!();
 pub fn init_sqlite_vec() {
     static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     ONCE.get_or_init(|| unsafe {
-        sqlite_vec::sqlite3_vec_init();
+        let entry_point: unsafe extern "C" fn(
+            *mut libsqlite3_sys::sqlite3,
+            *mut *mut i8,
+            *const libsqlite3_sys::sqlite3_api_routines,
+        ) -> i32 = std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ());
+        libsqlite3_sys::sqlite3_auto_extension(Some(entry_point));
     });
 }
 

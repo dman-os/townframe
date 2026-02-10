@@ -40,6 +40,7 @@ mod wit {
             "townframe:daybook/facet-routine": generate,
             "townframe:daybook/mltools-ocr": generate,
             "townframe:daybook/mltools-embed": generate,
+            "townframe:daybook/index-vector": generate,
         }
     });
 }
@@ -83,46 +84,64 @@ fn embed_text(cx: WflowCtx) -> Result<(), JobErrorX> {
             ))
         })?;
 
-    let current_facet_raw = working_facet_token.get();
+    let note_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Note).to_string();
+    let note_facet_token = args
+        .ro_facet_tokens
+        .iter()
+        .find(|(key, _)| key == &note_facet_key)
+        .map(|(_, token)| token)
+        .ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "note facet key '{}' not found in ro_facet_tokens",
+                note_facet_key
+            ))
+        })?;
+
+    let current_facet_raw = note_facet_token.get();
 
     let current_facet_json: daybook_types::doc::FacetRaw = serde_json::from_str(&current_facet_raw)
         .map_err(|err| JobErrorX::Terminal(ferr!("error parsing working facet json: {err}")))?;
 
     let current_note = WellKnownFacet::from_json(current_facet_json, WellKnownFacetTag::Note)
-        .map_err(|err| JobErrorX::Terminal(err.wrap_err("working facet is not a note facet")))?;
+        .map_err(|err| JobErrorX::Terminal(err.wrap_err("input facet is not a note facet")))?;
     let WellKnownFacet::Note(note) = current_note else {
-        return Err(JobErrorX::Terminal(ferr!("working facet is not note")));
+        return Err(JobErrorX::Terminal(ferr!("input facet is not note")));
     };
 
+    // FIXME: put this in an effect
     let embed_result = mltools_embed::embed_text(&note.content)
         .map_err(|err| JobErrorX::Terminal(ferr!("error running embed-text: {err}")))?;
-
-    let preview_len = 12;
-    let vector_preview = embed_result
+    let heads = utils_rs::am::parse_commit_heads(&args.heads)
+        .map_err(|err| JobErrorX::Terminal(ferr!("invalid heads from facet-routine: {err}")))?;
+    let facet_key = daybook_types::doc::FacetKey::from(args.facet_key.as_str());
+    let facet_ref =
+        daybook_types::url::build_facet_ref(daybook_types::url::FACET_SELF_DOC_ID, &facet_key)
+            .map_err(|err| {
+                JobErrorX::Terminal(err.wrap_err("error creating embedding facet_ref"))
+            })?;
+    let vector_bytes = embed_result
         .vector
         .iter()
-        .take(preview_len)
-        .map(|value| format!("{value:.4}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let preview_text = format!(
-        "embedding(model={}, dims={}): [{}]",
-        embed_result.model_id, embed_result.dimensions, vector_preview
-    );
+        .flat_map(|value| value.to_le_bytes())
+        .collect::<Vec<u8>>();
 
     cx.effect(|| {
         let new_facet: daybook_types::doc::FacetRaw =
-            WellKnownFacet::Note(daybook_types::doc::Note {
-                mime: "text/plain".to_string(),
-                content: preview_text.clone(),
+            WellKnownFacet::Embedding(daybook_types::doc::Embedding {
+                facet_ref: facet_ref.clone(),
+                ref_heads: daybook_types::doc::ChangeHashSet(Arc::clone(&heads)),
+                model_tag: embed_result.model_id.clone(),
+                vector: vector_bytes.clone(),
+                dim: embed_result.dimensions,
+                dtype: daybook_types::doc::EmbeddingDtype::F32,
+                compression: None,
             })
             .into();
 
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
         working_facet_token
             .update(&new_facet)
-            .wrap_err("error updating note with embedding preview")
+            .wrap_err("error updating embedding facet")
             .map_err(JobErrorX::Terminal)?;
 
         Ok(Json(()))

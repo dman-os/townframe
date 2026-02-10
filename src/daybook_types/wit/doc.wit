@@ -23,9 +23,51 @@ interface doc {
     }
 
     record image-metadata {
+        facet-ref: string,
+        ref-heads: list<string>,
         mime: mime-type,
         width-px: u64,
         height-px: u64,
+    }
+
+    record point {
+        x: f32,
+        y: f32,
+    }
+
+    record ocr-text-region {
+        bounding-box: list<point>,
+        text: option<string>,
+        confidence-score: option<f32>,
+    }
+
+    record ocr-result {
+        facet-ref: string,
+        ref-heads: list<string>,
+        model-tag: string,
+        text: string,
+        text-regions: option<list<ocr-text-region>>,
+    }
+
+    enum embedding-compression {
+        zstd,
+    }
+
+    enum embedding-dtype {
+        float32,
+        float16,
+        int8,
+        binary,
+    }
+
+    record embedding {
+        facet-ref: string,
+        ref-heads: list<string>,
+        model-tag: string,
+        vector: list<u8>,
+        dim: u32,
+        dtype: embedding-dtype,
+        compression: option<embedding-compression>,
     }
 
     record pending {
@@ -39,6 +81,8 @@ interface doc {
         title-generic(string), 
         path-generic(string), 
         image-metadata(image-metadata), 
+        ocr-result(ocr-result),
+        embedding(embedding),
         dmeta(dmeta),
         note(note),
         blob(blob),

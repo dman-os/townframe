@@ -173,6 +173,8 @@ insta = { version =  "1.44", features = ["yaml", "filters"] }
 tempfile = "3"
 
 # db
+# sqlite-vec = "0.2.4-alpha"
+sqlite-vec = "0.1.6"
 sqlx = { version = "0.8.6", features = [
   "runtime-tokio",
   # "tls-rustls-ring-webpki",
@@ -204,6 +206,7 @@ clap_complete = "4.5"
 # restate-sdk-shared-core = { path = "./src/sdk-shared-core/" }
 wash-runtime = { git = "https://github.com/wasmcloud/wash", rev = "ea7821407902001c3aeaf3cc22c684c05d49d039" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "28d9b6db96f09a34967a0941950f6753fd73a006" }
+# sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
 
 # The default profile is optimized for Wasm builds because

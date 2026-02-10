@@ -241,7 +241,9 @@ pub struct TablesStore {
 
 #[async_trait]
 impl crate::stores::Store for TablesStore {
-    const PROP: &str = "tables";
+    fn prop() -> Cow<'static, str> {
+        "tables".into()
+    }
 }
 
 impl TablesStore {
@@ -536,7 +538,7 @@ impl TablesRepo {
                                 &heads.0,
                                 automerge::ROOT,
                                 vec![
-                                    TablesStore::PROP.into(),
+                                    TablesStore::prop().into(),
                                     "windows".into(),
                                     autosurgeon::Prop::Key(id.to_string().into()),
                                 ],
@@ -558,7 +560,7 @@ impl TablesRepo {
                                 &heads.0,
                                 automerge::ROOT,
                                 vec![
-                                    TablesStore::PROP.into(),
+                                    TablesStore::prop().into(),
                                     "tabs".into(),
                                     autosurgeon::Prop::Key(id.to_string().into()),
                                 ],
@@ -581,7 +583,7 @@ impl TablesRepo {
                                 &heads.0,
                                 automerge::ROOT,
                                 vec![
-                                    TablesStore::PROP.into(),
+                                    TablesStore::prop().into(),
                                     "panels".into(),
                                     autosurgeon::Prop::Key(id.to_string().into()),
                                 ],
@@ -604,7 +606,7 @@ impl TablesRepo {
                                 &heads.0,
                                 automerge::ROOT,
                                 vec![
-                                    TablesStore::PROP.into(),
+                                    TablesStore::prop().into(),
                                     "tables".into(),
                                     autosurgeon::Prop::Key(id.to_string().into()),
                                 ],

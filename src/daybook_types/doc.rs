@@ -28,8 +28,10 @@ pub struct Point {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct OcrTextRegion {
+    /// Clockwise
     pub bounding_box: Vec<Point>,
     pub text: Option<String>,
+    /// Normalized to 0-1
     pub confidence_score: Option<f32>,
 }
 
@@ -94,25 +96,62 @@ crate::define_enum_and_tag!(
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         ImageMetadata struct {
             // URL to src Blob facet
-            // pub src_url: String,
+            pub facet_ref: Url,
+            pub ref_heads: ChangeHashSet,
             pub mime: MimeType,
             pub width_px: u64,
             pub height_px: u64,
         },
-        // #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-        // #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-        // #[serde(rename_all = "camelCase")]
-        // #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        // OcrResult struct {
-        //     // URL to src ImageMetadata facet
-        //     pub src_url: String,
-        //     pub at_commit: ChangeHashSet,
-        //     pub model_tag: String,
-        //     pub text: String,
-        //     pub text_regions: Vec<OcrTextRegion>
-        // }
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        OcrResult struct {
+            // URL to src ImageMetadata facet
+            pub facet_ref: Url,
+            pub ref_heads: ChangeHashSet,
+            pub model_tag: String,
+            pub text: String,
+            pub text_regions: Option<Vec<OcrTextRegion>>
+        },
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        Embedding struct {
+            // URL to src facet like Note or ImageMetadata
+            pub facet_ref: Url,
+            pub ref_heads: ChangeHashSet,
+            pub model_tag: String,
+            // FIXME: double check these types
+            /// little-endian
+            pub vector: Vec<u8>,
+            pub dim: u32,
+            pub dtype: EmbeddingDtype,
+            /// method tag
+            pub compression: Option<EmbeddingCompression>,
+        }
     }
 );
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum EmbeddingCompression {
+    Zstd,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum EmbeddingDtype {
+    F32,
+    F16,
+    I8,
+    Binary,
+}
 
 impl<T> From<T> for Note
 where
@@ -752,6 +791,14 @@ mod ser_de {
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
                 WellKnownFacetTag::ImageMetadata => Self::ImageMetadata(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::OcrResult => Self::OcrResult(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::Embedding => Self::Embedding(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),

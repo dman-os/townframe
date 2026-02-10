@@ -1,4 +1,5 @@
 use crate::config::ConfigRepo;
+use crate::index::DocEmbeddingIndexRepo;
 use crate::interlude::*;
 
 use crate::blobs::BlobsRepo;
@@ -52,6 +53,7 @@ pub struct Rt {
     pub utils_plugin: Arc<wash_plugin_utils::UtilsPlugin>,
     pub mltools_plugin: Arc<wash_plugin_mltools::MltoolsPlugin>,
     pub blobs_repo: Arc<BlobsRepo>,
+    pub doc_embedding_index_repo: Arc<DocEmbeddingIndexRepo>,
     pub local_actor_id: automerge::ActorId,
     local_wflow_part_id: String,
 }
@@ -61,6 +63,7 @@ pub struct RtStopToken {
     rt: Arc<Rt>,
     partition_watcher: Option<tokio::task::JoinHandle<()>>,
     doc_changes_worker: Option<triage::DocTriageWorkerHandle>,
+    doc_embedding_index_stop: Option<crate::index::DocEmbeddingIndexStopToken>,
 }
 
 impl RtStopToken {
@@ -73,6 +76,15 @@ impl RtStopToken {
                 warn!(
                     ?err,
                     "error stopping doc_changes_worker during shutdown - continuing"
+                );
+            }
+        }
+
+        if let Some(stop) = self.doc_embedding_index_stop.take() {
+            if let Err(err) = stop.stop().await {
+                warn!(
+                    ?err,
+                    "error stopping doc_embedding_index_repo during shutdown - continuing"
                 );
             }
         }
@@ -160,6 +172,15 @@ impl Rt {
     ) -> Res<(Arc<Self>, RtStopToken)> {
         let wcx = wflow::Ctx::init(&wflow_db_url).await?;
 
+        let (doc_embedding_index_repo, doc_embedding_index_stop) =
+            crate::index::DocEmbeddingIndexRepo::boot(
+                acx.clone(),
+                app_doc_id.clone(),
+                Arc::clone(&drawer),
+                local_actor_id.clone(),
+            )
+            .await?;
+
         let wflow_plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new(Arc::clone(
             &wcx.metastore,
         )));
@@ -167,6 +188,7 @@ impl Rt {
             Arc::clone(&drawer),
             Arc::clone(&dispatch_repo),
             Arc::clone(&blobs_repo),
+            Arc::clone(&doc_embedding_index_repo),
         ));
         let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {
             ollama_url: utils_rs::get_env_var("OLLAMA_URL")?,
@@ -254,6 +276,7 @@ impl Rt {
             utils_plugin,
             mltools_plugin,
             blobs_repo,
+            doc_embedding_index_repo,
             config_repo,
             wflow_part_state,
             local_actor_id,
@@ -274,6 +297,7 @@ impl Rt {
                 rt,
                 partition_watcher: Some(partition_watcher),
                 doc_changes_worker: Some(doc_changes_worker),
+                doc_embedding_index_stop: Some(doc_embedding_index_stop),
                 wflow_part_handle: Some(wflow_part_handle),
             },
         ))
@@ -755,6 +779,7 @@ async fn start_bundle_workload(
                     WitInterface::from("townframe:daybook/facet-routine"),
                     WitInterface::from("townframe:daybook/mltools-ocr"),
                     WitInterface::from("townframe:daybook/mltools-embed"),
+                    WitInterface::from("townframe:daybook/index-vector"),
                     WitInterface::from("townframe:mltools/llm-chat"),
                     // WitInterface::from("wasi:keyvalue/store"),
                 ],

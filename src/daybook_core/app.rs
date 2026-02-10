@@ -119,19 +119,34 @@ pub mod version_updates {
         doc.put(ROOT, "version", "0")?;
         // annotate schema for app document
         doc.put(ROOT, "$schema", "daybook.app")?;
-        reconcile_prop(&mut doc, ROOT, TablesStore::PROP, TablesStore::default())?;
-        reconcile_prop(&mut doc, ROOT, ConfigStore::PROP, ConfigStore::default())?;
-        reconcile_prop(&mut doc, ROOT, PlugsStore::PROP, PlugsStore::default())?;
         reconcile_prop(
             &mut doc,
             ROOT,
-            DispatchStore::PROP,
+            TablesStore::prop().as_ref(),
+            TablesStore::default(),
+        )?;
+        reconcile_prop(
+            &mut doc,
+            ROOT,
+            ConfigStore::prop().as_ref(),
+            ConfigStore::default(),
+        )?;
+        reconcile_prop(
+            &mut doc,
+            ROOT,
+            PlugsStore::prop().as_ref(),
+            PlugsStore::default(),
+        )?;
+        reconcile_prop(
+            &mut doc,
+            ROOT,
+            DispatchStore::prop().as_ref(),
             DispatchStore::default(),
         )?;
         reconcile_prop(
             &mut doc,
             ROOT,
-            DocTriageWorkerStateStore::PROP,
+            DocTriageWorkerStateStore::prop().as_ref(),
             DocTriageWorkerStateStore::default(),
         )?;
         Ok(doc.save_nocompress())

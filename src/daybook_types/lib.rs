@@ -12,6 +12,7 @@ mod interlude {
 pub mod doc;
 #[cfg(test)]
 mod test;
+pub mod url;
 
 #[cfg(feature = "wit")]
 pub mod wit;
@@ -39,6 +40,13 @@ macro_rules! custom_type_set {
             remote,
             lower: |path| path.into_os_string().into_string().expect(ERROR_UTF8),
             try_lift: |str| Ok(PathBuf::from(str)),
+        });
+
+        uniffi::custom_type!(Url, String, {
+            remote,
+            lower: |url| url.to_string(),
+            try_lift: |str| str.parse::<Url>()
+                .map_err(|err| uniffi::deps::anyhow::anyhow!(err)),
         });
 
         type Json = serde_json::Value;

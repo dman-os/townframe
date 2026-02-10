@@ -25,7 +25,9 @@ pub struct DocTriageWorkerStateStore {
 
 #[async_trait]
 impl crate::stores::Store for DocTriageWorkerStateStore {
-    const PROP: &str = "triage";
+    fn prop() -> Cow<'static, str> {
+        "triage".into()
+    }
 }
 
 /// Worker that listens to drawer events and schedules workflows

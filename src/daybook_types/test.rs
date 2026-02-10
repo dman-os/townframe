@@ -42,7 +42,7 @@ fn test_root_to_wit_conversion() {
     let note_prop = wit_doc
         .facets
         .iter()
-        .find(|(key, _)| key == &WellKnownFacetTag::Note.to_string());
+        .find(|(key, _)| key == &FacetKey::from(WellKnownFacetTag::Note).to_string());
     assert!(note_prop.is_some());
 
     assert_eq!(wit_doc.facets.len(), root_doc.facets.len());
@@ -118,6 +118,10 @@ fn test_doc_with_all_prop_types() -> Res<()> {
     props.insert(
         FacetKey::from(WellKnownFacetTag::ImageMetadata),
         FacetRaw::from(WellKnownFacet::ImageMetadata(ImageMetadata {
+            facet_ref: "db+facet:///self/org.example.daybook.blob/main"
+                .parse()
+                .unwrap(),
+            ref_heads: crate::doc::ChangeHashSet(Vec::new().into()),
             mime: "image/png".to_string(),
             width_px: 1920,
             height_px: 1080,

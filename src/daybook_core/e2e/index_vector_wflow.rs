@@ -3,7 +3,7 @@ use crate::interlude::*;
 use daybook_types::doc::{AddDocArgs, FacetKey, WellKnownFacet, WellKnownFacetTag};
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_embed_text_workflow() -> Res<()> {
+async fn test_index_vector_query_after_embed_workflow() -> Res<()> {
     let test_cx = crate::e2e::test_cx(utils_rs::function_full!()).await?;
 
     let new_doc = AddDocArgs {
@@ -46,37 +46,29 @@ async fn test_embed_text_workflow() -> Res<()> {
         .wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(90))
         .await?;
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let mut got_hit = false;
+    for _ in 0..50 {
+        let hits = test_cx
+            .rt
+            .doc_embedding_index_repo
+            .query_text("local embedding stack smoke test", 3)
+            .await?;
+        if hits.iter().any(|hit| hit.doc_id == doc_id) {
+            got_hit = true;
+            let hit = hits.into_iter().find(|hit| hit.doc_id == doc_id).unwrap();
+            assert_eq!(
+                hit.facet_key,
+                FacetKey::from(WellKnownFacetTag::Embedding).to_string()
+            );
+            assert!(!hit.heads.0.is_empty());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 
-    let updated_doc = test_cx
-        .drawer_repo
-        .get_doc_with_facets_at_branch(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
-        .await?
-        .ok_or_eyre("doc not found after embed-text workflow")?;
-
-    let embedding_key = FacetKey::from(WellKnownFacetTag::Embedding);
-    let embedding_raw = updated_doc
-        .facets
-        .get(&embedding_key)
-        .ok_or_eyre("embed-text workflow did not write Embedding facet")?;
-    let embedding_facet =
-        WellKnownFacet::from_json(embedding_raw.clone(), WellKnownFacetTag::Embedding)?;
-    let WellKnownFacet::Embedding(embedding) = embedding_facet else {
-        eyre::bail!("embedding facet had unexpected type");
-    };
-
-    assert_eq!(embedding.model_tag, "nomic-ai/nomic-embed-text-v1.5");
-    assert_eq!(embedding.dtype, daybook_types::doc::EmbeddingDtype::F32);
-    assert_eq!(embedding.compression, None);
-    assert_eq!(embedding.dim, 768);
-    assert_eq!(embedding.vector.len(), 768 * 4);
-    assert_eq!(
-        embedding.facet_ref.scheme(),
-        daybook_types::url::FACET_SCHEME
-    );
-    assert_eq!(
-        embedding.facet_ref.path(),
-        "/self/org.example.daybook.note/main"
+    assert!(
+        got_hit,
+        "expected embedded doc to be returned by vector index"
     );
 
     test_cx.stop().await?;

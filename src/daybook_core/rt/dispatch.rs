@@ -55,7 +55,9 @@ pub struct DispatchStore {
 
 #[async_trait]
 impl crate::stores::Store for DispatchStore {
-    const PROP: &str = "dispatch";
+    fn prop() -> Cow<'static, str> {
+        "dispatch".into()
+    }
 }
 
 pub struct DispatchRepo {
@@ -215,7 +217,7 @@ impl DispatchRepo {
                                 &heads.0,
                                 automerge::ROOT,
                                 vec![
-                                    DispatchStore::PROP.into(),
+                                    DispatchStore::prop().into(),
                                     "active_dispatches".into(),
                                     autosurgeon::Prop::Key(id.clone().into()),
                                 ],
@@ -259,7 +261,7 @@ impl DispatchRepo {
         out: &mut Vec<DispatchEvent>,
     ) -> Res<()> {
         if !utils_rs::am::changes::path_prefix_matches(
-            &[DispatchStore::PROP.into(), "active_dispatches".into()],
+            &[DispatchStore::prop().into(), "active_dispatches".into()],
             &patch.path,
         ) {
             return Ok(());
