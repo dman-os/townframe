@@ -59,6 +59,11 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     display_config: default(),
                 },
                 PropKeyManifest {
+                    key_tag: WellKnownFacetTag::Blob.into(),
+                    value_schema: schemars::schema_for!(Blob),
+                    display_config: default(),
+                },
+                PropKeyManifest {
                     key_tag: WellKnownFacetTag::Pending.into(),
                     value_schema: schemars::schema_for!(Pending),
                     display_config: default(),
@@ -85,6 +90,10 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 key_tag: WellKnownFacetTag::LabelGeneric.into(),
                                 value_schema: schemars::schema_for!(String),
                             },
+                            PropKeyDependencyManifest {
+                                key_tag: WellKnownFacetTag::Blob.into(),
+                                value_schema: schemars::schema_for!(Blob),
+                            },
                         ],
                     }
                     .into(),
@@ -110,6 +119,31 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             },
                             RoutinePropAccess {
                                 tag: WellKnownFacetTag::PseudoLabel.into(),
+                                read: true,
+                                write: true,
+                            },
+                        ],
+                    }
+                    .into(),
+                ),
+                (
+                    "ocr-image".into(),
+                    RoutineManifest {
+                        r#impl: RoutineImpl::Wflow {
+                            key: "ocr-image".into(),
+                            bundle: "daybook_wflows".into(),
+                        },
+                        deets: RoutineManifestDeets::DocProp {
+                            working_prop_tag: WellKnownFacetTag::Note.into(),
+                        },
+                        prop_acl: vec![
+                            RoutinePropAccess {
+                                tag: WellKnownFacetTag::Blob.into(),
+                                read: true,
+                                write: false,
+                            },
+                            RoutinePropAccess {
+                                tag: WellKnownFacetTag::Note.into(),
                                 read: true,
                                 write: true,
                             },
@@ -174,6 +208,22 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     }
                     .into(),
                 ),
+                (
+                    "ocr-image".into(),
+                    ProcessorManifest {
+                        desc: "Extract OCR text from blob image into note".into(),
+                        deets: ProcessorDeets::DocProcessor {
+                            routine_name: "ocr-image".into(),
+                            predicate: DocPredicateClause::And(vec![
+                                DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),
+                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                    WellKnownFacetTag::Note.into(),
+                                ))),
+                            ]),
+                        },
+                    }
+                    .into(),
+                ),
                 #[cfg(debug_assertions)]
                 (
                     "test-label".into(),
@@ -193,7 +243,11 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 (
                     "daybook_wflows".into(),
                     WflowBundleManifest {
-                        keys: vec!["pseudo-label".into(), "test-label".into()],
+                        keys: vec![
+                            "pseudo-label".into(),
+                            "test-label".into(),
+                            "ocr-image".into(),
+                        ],
                         // FIXME: make this more generic
                         component_urls: vec![{
                             let path = std::path::absolute(

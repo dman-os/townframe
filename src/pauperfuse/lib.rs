@@ -1,6 +1,15 @@
 #![allow(unused)]
-
 /*!
+We need to do a lot more:
+- The livetree backend impl should live in pauperfuse
+- find better names all over
+- wasi fs backend
+
+*/
+
+/*
+
+WRITTEN BY GPT-5.3
 Pauperfuse is a small reconcile core for "poor man's fuse" workflows.
 
 Idea:
@@ -44,6 +53,7 @@ pub struct Config {
     pub root_path: PathBuf,
 }
 
+// FIXME: unecessary new types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MainStateId(pub u64);
 
@@ -65,16 +75,22 @@ where
     }
 }
 
+// FIXME: this sucks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectSnapshot {
     pub object_id: ObjectId,
     pub relative_path: PathBuf,
+    // we want this to be the provider's impl
+    // they should provide a seekable readear impl
+    // to avoid holding all files in memory
+    // additionally, we're missing passthrough object support and whatnot
     pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRef {
     pub object_id: ObjectId,
+    // FIXME: do we need the path in the ref if we have the id?
     pub relative_path: PathBuf,
 }
 
@@ -107,7 +123,7 @@ pub struct ReconcileReport {
 
 #[derive(Debug, Clone)]
 pub struct Ctx {
-    config: Config,
+    pub config: Config,
     main_state_id: MainStateId,
     provider_state_id: ProviderStateId,
     backend_state_id: BackendStateId,
@@ -131,10 +147,6 @@ impl Ctx {
             pending_backend_deltas: Vec::new(),
             effect_queue: VecDeque::new(),
         }
-    }
-
-    pub fn root_path(&self) -> &Path {
-        &self.config.root_path
     }
 
     pub fn ingest_provider_delta(&mut self, provider_delta: ProviderDelta) -> Res<()> {

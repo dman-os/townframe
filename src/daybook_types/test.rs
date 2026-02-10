@@ -81,8 +81,11 @@ fn test_round_trip_root_wit_root() -> Res<()> {
 fn test_doc_with_blob() -> Res<()> {
     let mut props = HashMap::new();
     let blob = Blob {
+        mime: "image/jpeg".to_string(),
         length_octets: 1024,
-        hash: "hash123".to_string(),
+        digest: "hash123".to_string(),
+        inline: Some(vec![1, 2, 3]),
+        urls: Some(vec!["db+blob:///hash123".to_string()]),
     };
     props.insert(
         FacetKey::from(WellKnownFacetTag::Note),

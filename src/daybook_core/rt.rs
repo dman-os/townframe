@@ -50,6 +50,7 @@ pub struct Rt {
     pub wflow_plugin: Arc<wash_plugin_wflow::WflowPlugin>,
     pub daybook_plugin: Arc<wash_plugin::DaybookPlugin>,
     pub utils_plugin: Arc<wash_plugin_utils::UtilsPlugin>,
+    pub mltools_plugin: Arc<wash_plugin_mltools::MltoolsPlugin>,
     pub blobs_repo: Arc<BlobsRepo>,
     pub local_actor_id: automerge::ActorId,
     local_wflow_part_id: String,
@@ -165,8 +166,14 @@ impl Rt {
         let daybook_plugin = Arc::new(wash_plugin::DaybookPlugin::new(
             Arc::clone(&drawer),
             Arc::clone(&dispatch_repo),
+            Arc::clone(&blobs_repo),
         ));
         let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {
+            ollama_url: utils_rs::get_env_var("OLLAMA_URL")?,
+            ollama_model: utils_rs::get_env_var("OLLAMA_MODEL")?,
+        })
+        .wrap_err("error creating utils plugin")?;
+        let mltools_plugin = wash_plugin_mltools::MltoolsPlugin::new(wash_plugin_mltools::Config {
             ollama_url: utils_rs::get_env_var("OLLAMA_URL")?,
             ollama_model: utils_rs::get_env_var("OLLAMA_MODEL")?,
         })
@@ -179,6 +186,8 @@ impl Rt {
             daybook_plugin.clone(),
             #[allow(clippy::clone_on_ref_ptr)]
             utils_plugin.clone(),
+            #[allow(clippy::clone_on_ref_ptr)]
+            mltools_plugin.clone(),
         ])
         .await?;
 
@@ -243,6 +252,7 @@ impl Rt {
             wflow_plugin,
             daybook_plugin,
             utils_plugin,
+            mltools_plugin,
             blobs_repo,
             config_repo,
             wflow_part_state,
@@ -742,7 +752,8 @@ async fn start_bundle_workload(
                     WitInterface::from("townframe:daybook/drawer"),
                     WitInterface::from("townframe:daybook/capabilities"),
                     WitInterface::from("townframe:daybook/prop-routine"),
-                    WitInterface::from("townframe:utils/llm-chat"),
+                    WitInterface::from("townframe:daybook/mltools-ocr"),
+                    WitInterface::from("townframe:mltools/llm-chat"),
                     // WitInterface::from("wasi:keyvalue/store"),
                 ],
                 volumes: vec![],

@@ -1,0 +1,41 @@
+[package]
+name = "wash_plugin_mltools"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+# internal
+utils_rs.workspace = true
+macros.workspace = true
+
+# encoding
+serde.workspace = true
+serde_json.workspace = true
+
+# async
+async-trait.workspace = true
+tokio-util.workspace = true
+async-channel.workspace = true
+
+# error
+anyhow.workspace = true
+thiserror.workspace = true
+displaydoc.workspace = true
+parking_lot.workspace = true
+
+# wasm
+wasmtime.workspace = true
+wash-runtime.workspace = true
+
+tracing.workspace = true
+ollama-rs = { version = "0.3.3", default-features = false, features = ["rustls"] }
+url.workspace = true

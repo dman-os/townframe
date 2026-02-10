@@ -27,6 +27,7 @@ daybook_types = { workspace = true, features = [
 ] }
 wash_plugin_wflow.workspace = true
 wash_plugin_utils.workspace = true
+wash_plugin_mltools.workspace = true
 
 # encoding
 serde.workspace = true
@@ -95,6 +96,7 @@ schemars = { version = "1.2", features = [
     "jiff02",
     "indexmap2",
 ] }
+mltools.workspace = true
 
 [build-dependencies]
 uniffi = { workspace = true, features = ["build"], optional = true }

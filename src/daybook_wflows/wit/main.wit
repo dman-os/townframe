@@ -6,7 +6,8 @@ world bundle {
     import townframe:wflow/host;
     import townframe:daybook/prop-routine;
     import townframe:daybook/drawer;
-    import townframe:utils/llm-chat;
+    import townframe:daybook/mltools-ocr;
+    import townframe:mltools/llm-chat;
 
     export townframe:wflow/bundle;
 }

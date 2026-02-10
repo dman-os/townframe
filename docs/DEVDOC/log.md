@@ -905,6 +905,7 @@ Decisions:
   - Embedding
     - sentence-transformers on Phone??
     - text-embedding-3 on Server.
+    - jina-embedding-4
   - STT:
     - paraqueet on server.
     - kyrutai for SSTT on server.

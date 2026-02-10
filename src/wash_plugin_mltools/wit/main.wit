@@ -1,0 +1,6 @@
+package townframe:mltools-plugin;
+
+world guest {
+    import townframe:mltools/types;
+    import townframe:mltools/llm-chat;
+}

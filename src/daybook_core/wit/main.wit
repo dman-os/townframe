@@ -81,9 +81,17 @@ interface prop-routine {
     get-args: func() -> prop-routine-args;
 }
 
+interface mltools-ocr {
+    use capabilities.{prop-token-ro};
+    use townframe:mltools/ocr.{ocr-result};
+
+    ocr-image: func(blob-facet: prop-token-ro) -> result<ocr-result, string>;
+}
+
 world all-guest {
     import drawer;
     import capabilities;
     import prop-routine;
+    import mltools-ocr;
     import wasi:filesystem/preopens@0.2.6;
 }

@@ -59,7 +59,6 @@ crate::define_enum_and_tag!(
         },
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-        // #[cfg_attr(feature = "uniffi", uniffi(name = "BlobData"))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         Note struct {
@@ -68,12 +67,15 @@ crate::define_enum_and_tag!(
         },
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-        // #[cfg_attr(feature = "uniffi", uniffi(name = "BlobData"))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         Blob struct {
+            pub mime: MimeType,
             pub length_octets: u64,
-            pub hash: Multihash,
+            pub digest: Multihash,
+            /// Only to be used for small blobs
+            pub inline: Option<Vec<u8>>,
+            pub urls: Option<Vec<String>>
         },
     }
 );

@@ -28,7 +28,8 @@ mod wit {
             "townframe:wflow/host": wflow_sdk::wit::townframe::wflow::host,
             "townframe:wflow/bundle": generate,
 
-            "townframe:utils/llm-chat": generate,
+            "townframe:mltools/llm-chat": generate,
+            "townframe:mltools/ocr": generate,
 
             "townframe:daybook-types/doc": generate,
 
@@ -36,6 +37,7 @@ mod wit {
             "townframe:daybook/drawer": generate,
             "townframe:daybook/capabilities": generate,
             "townframe:daybook/prop-routine": generate,
+            "townframe:daybook/mltools-ocr": generate,
         }
     });
 }
@@ -54,8 +56,99 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
         wflow_sdk::route_wflows!(args, {
             "pseudo-label" => |cx, _args: serde_json::Value| pseudo_labeler(cx),
             "test-label" => |cx, _args: serde_json::Value| test_labeler(cx),
+            "ocr-image" => |cx, _args: serde_json::Value| ocr_image(cx),
         })
     }
+}
+
+fn ocr_image(cx: WflowCtx) -> Result<(), JobErrorX> {
+    use crate::wit::townframe::daybook::mltools_ocr;
+    use crate::wit::townframe::daybook::prop_routine;
+    use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
+
+    let args = prop_routine::get_args();
+
+    let working_prop_token = args
+        .rw_prop_tokens
+        .into_iter()
+        .find(|(key, _)| key == &args.prop_key)
+        .map(|(_, token)| token)
+        .ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "working prop key '{}' not found in rw_prop_tokens",
+                args.prop_key
+            ))
+        })?;
+
+    let blob_prop_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Blob).to_string();
+    let blob_prop_token = args
+        .ro_prop_tokens
+        .into_iter()
+        .find(|(key, _)| key == &blob_prop_key)
+        .map(|(_, token)| token)
+        .ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "blob prop key '{}' not found in ro_prop_tokens",
+                blob_prop_key
+            ))
+        })?;
+
+    let ocr_result = mltools_ocr::ocr_image(blob_prop_token)
+        .map_err(|err| JobErrorX::Terminal(ferr!("error running OCR: {err}")))?;
+
+    cx.effect(|| {
+        let new_prop: daybook_types::doc::FacetRaw =
+            WellKnownFacet::Note(daybook_types::doc::Note {
+                mime: "text/plain".to_string(),
+                content: ocr_result.text.clone(),
+            })
+            .into();
+
+        let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
+        working_prop_token
+            .update(&new_prop)
+            .wrap_err("error updating note with OCR result")
+            .map_err(JobErrorX::Terminal)?;
+
+        Ok(Json(()))
+    })?;
+
+    Ok(())
+}
+
+fn test_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
+    use crate::wit::townframe::daybook::prop_routine;
+    let args = prop_routine::get_args();
+
+    // Find the working prop token (the one with write access matching prop_key)
+    let working_prop_token = args
+        .rw_prop_tokens
+        .iter()
+        .find(|(key, _)| key == &args.prop_key)
+        .map(|(_, token)| token)
+        .ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "working prop key '{}' not found in rw_prop_tokens",
+                args.prop_key
+            ))
+        })?;
+
+    // Extract text content for LLM
+    // Use root types since Doc uses root types (not WIT types)
+    use daybook_types::doc::WellKnownFacet;
+
+    cx.effect(|| {
+        let new_prop: daybook_types::doc::FacetRaw =
+            WellKnownFacet::LabelGeneric("test_label".into()).into();
+        let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
+        working_prop_token
+            .update(&new_prop)
+            .wrap_err("error updating prop")
+            .map_err(JobErrorX::Terminal)?;
+        Ok(Json(()))
+    })?;
+
+    Ok(())
 }
 
 fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
@@ -108,7 +201,7 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
 
     // Call the LLM to generate a label
     let llm_response: String = cx.effect(|| {
-        use crate::wit::townframe::utils::llm_chat;
+        use crate::wit::townframe::mltools::llm_chat;
 
         let message_text = format!(
             "Based on the following document content, provide a single short label or category (1-3 words). \
@@ -135,41 +228,6 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
 
     cx.effect(|| {
         let new_prop: daybook_types::doc::FacetRaw = WellKnownFacet::PseudoLabel(new_labels).into();
-        let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
-        working_prop_token
-            .update(&new_prop)
-            .wrap_err("error updating prop")
-            .map_err(JobErrorX::Terminal)?;
-        Ok(Json(()))
-    })?;
-
-    Ok(())
-}
-
-fn test_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
-    use crate::wit::townframe::daybook::prop_routine;
-    let args = prop_routine::get_args();
-
-    // Find the working prop token (the one with write access matching prop_key)
-    let working_prop_token = args
-        .rw_prop_tokens
-        .iter()
-        .find(|(key, _)| key == &args.prop_key)
-        .map(|(_, token)| token)
-        .ok_or_else(|| {
-            JobErrorX::Terminal(ferr!(
-                "working prop key '{}' not found in rw_prop_tokens",
-                args.prop_key
-            ))
-        })?;
-
-    // Extract text content for LLM
-    // Use root types since Doc uses root types (not WIT types)
-    use daybook_types::doc::WellKnownFacet;
-
-    cx.effect(|| {
-        let new_prop: daybook_types::doc::FacetRaw =
-            WellKnownFacet::LabelGeneric("test_label".into()).into();
         let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
         working_prop_token
             .update(&new_prop)

@@ -18,6 +18,7 @@ members = [
   "./src/utils_rs",
   "./src/wash_plugin_am_repo/",
   # "./src/wash_plugin_pglite/",
+  "./src/wash_plugin_mltools/",
   "./src/wash_plugin_utils/",
   "./src/wash_plugin_wflow/",
   "./src/wflow/",
@@ -57,6 +58,7 @@ macros = { path = "./src/macros" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
+mltools = { path = "./src/mltools", default-features = false }
 pauperfuse = { path = "./src/pauperfuse", default-features = false }
 wflow = { path = "./src/wflow", default-features = false }
 wflow_core = { path = "./src/wflow_core", default-features = false }
@@ -66,8 +68,11 @@ wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false
 wash_plugin_pglite = { path = "./src/wash_plugin_pglite", default-features = false }
 wash_plugin_am_repo = { path = "./src/wash_plugin_am_repo" }
 wash_plugin_utils = { path = "./src/wash_plugin_utils/" }
+wash_plugin_mltools = { path = "./src/wash_plugin_mltools/" }
 
+# meta
 syn = { version = "2", features = ["extra-traits"] }
+bon = "3.7.2"
 
 # futures
 async-trait = "0.1"

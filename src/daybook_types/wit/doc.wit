@@ -10,8 +10,11 @@ interface doc {
     type doc-ref = doc-id;
 
     record blob {
+        mime: mime-type,
         length-octets: u64,
-        hash: multihash,
+        digest: multihash,
+        inline: option<list<u8>>,
+        urls: option<list<string>>,
     }
 
     record note {

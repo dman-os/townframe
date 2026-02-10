@@ -17,3 +17,6 @@ api_utils_rs = { workspace = true, default-features = false }
 serde.workspace = true
 
 wit-bindgen.workspace = true
+
+bon.workspace = true
+oar-ocr = { git = "https://github.com/GreatV/oar-ocr", version = "0.6.1" }

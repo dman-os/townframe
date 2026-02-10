@@ -15,16 +15,6 @@
 
 ## Stack
 
-- [ ] Drawers v2
-  - [ ] Rename props to facets
-  - [ ] `dmeta`
-  - [ ] LRU caches
-  - [ ] JSONSchema checks
-  - [ ] Facet ref index
-  - [ ] URLs
-    - [ ] Facet URL
-    - [ ] Doc URL
-  - [ ] `dpath`
 - [ ] `mltools`
   - [ ] OCR
   - [ ] Embeedding
@@ -42,7 +32,6 @@
     - [ ] Windows.exe
       - [ ] to Scoop.sh
 - [ ] Overhaul bottom bar
-- [ ] Constrain value shapes for known keys at drawer
 - [ ] Receipt parsing
 - [ ] Pending jobs [LOST]
 - [ ] Repos
@@ -53,6 +42,17 @@
 
 - [ ] Cleanup for public pre-alpha
 
+- [ ] Drawers v2
+  - [ ] Constrain value shapes for known keys at drawer
+  - [x] Rename props to facets
+  - [x] `dmeta`
+  - [x] LRU caches
+  - [ ] JSONSchema checks
+  - [ ] Facet ref index
+  - [ ] URLs
+    - [ ] Facet URL
+    - [ ] Doc URL
+  - [ ] `dpath`
 - [ ] Plugins
   - [x] Manifest
   - [ ] Commands
@@ -118,6 +118,7 @@
   - [ ] Get parametrized queries to work
   - [ ] It should accept engine from outside
 - [ ] autosurgeon
+  - [ ] Automorph
   - [ ] Finish autosurgeon::Patch
   - [ ] autosurgeon does't respect serde attribs like untagged and camelCase
     - [ ] Fork with context generic programming?

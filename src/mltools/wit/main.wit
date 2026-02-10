@@ -47,7 +47,21 @@ interface llm-chat {
     respond: func(request: request) -> result<response, string>;
 }
 
+interface ocr {
+    record text-region {
+        bounding-box: list<tuple<f32, f32>>,
+        text: option<string>,
+        confidence: option<f32>,
+    }
+
+    record ocr-result {
+        text: string,
+        regions: list<text-region>,
+    }
+}
+
 world guest {
     import types;
     import llm-chat;
+    import ocr;
 }

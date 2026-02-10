@@ -9,6 +9,7 @@ mod binds_guest {
 
     wash_runtime::wasmtime::component::bindgen!({
         world: "all-guest",
+
         imports: { default: async | trappable | tracing },
         exports: { default: async | trappable | tracing },
 
@@ -46,8 +47,11 @@ mod binds_guest {
                 content: val.content,
             }),
             root_doc::WellKnownFacet::Blob(val) => wit_doc::WellKnownProp::Blob(root_doc::Blob {
+                mime: val.mime,
                 length_octets: val.length_octets,
-                hash: val.hash,
+                digest: val.digest,
+                inline: val.inline,
+                urls: val.urls,
             }),
             root_doc::WellKnownFacet::Pending(pending) => {
                 wit_doc::WellKnownProp::Pending(wit_doc::Pending {
@@ -172,8 +176,11 @@ mod binds_guest {
                 content: note.content,
             }),
             wit_doc::WellKnownProp::Blob(blob) => root_doc::WellKnownFacet::Blob(root_doc::Blob {
+                mime: blob.mime,
                 length_octets: blob.length_octets,
-                hash: blob.hash,
+                digest: blob.digest,
+                inline: blob.inline,
+                urls: blob.urls,
             }),
         }
     }
@@ -198,6 +205,7 @@ mod binds_guest {
 
 pub use binds_guest::townframe::daybook::capabilities;
 pub use binds_guest::townframe::daybook::drawer;
+pub use binds_guest::townframe::daybook::mltools_ocr;
 pub use binds_guest::townframe::daybook::prop_routine;
 use binds_guest::townframe::daybook_types::doc as bindgen_doc;
 
@@ -210,16 +218,19 @@ use wash_runtime::wit::{WitInterface, WitWorld};
 pub struct DaybookPlugin {
     drawer_repo: Arc<crate::drawer::DrawerRepo>,
     dispatch_repo: Arc<crate::rt::DispatchRepo>,
+    blobs_repo: Arc<crate::blobs::BlobsRepo>,
 }
 
 impl DaybookPlugin {
     pub fn new(
         drawer_repo: Arc<crate::drawer::DrawerRepo>,
         dispatch_repo: Arc<crate::rt::DispatchRepo>,
+        blobs_repo: Arc<crate::blobs::BlobsRepo>,
     ) -> Self {
         Self {
             drawer_repo,
             dispatch_repo,
+            blobs_repo,
         }
     }
 
@@ -264,7 +275,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
         WitWorld {
             exports: std::collections::HashSet::new(),
             imports: std::collections::HashSet::from([WitInterface::from(
-                "townframe:daybook/drawer,capabilities,prop-routine",
+                "townframe:daybook/drawer,capabilities,prop-routine,mltools-ocr",
             )]),
         }
     }
@@ -303,6 +314,12 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
                 }
                 if iface.interfaces.contains("prop-routine") {
                     prop_routine::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                        item.linker(),
+                        |ctx| ctx,
+                    )?;
+                }
+                if iface.interfaces.contains("mltools-ocr") {
+                    mltools_ocr::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         item.linker(),
                         |ctx| ctx,
                     )?;
@@ -692,6 +709,137 @@ impl capabilities::HostPropTokenRw for SharedWashCtx {
     ) -> wasmtime::Result<()> {
         self.table.delete(rep)?;
         Ok(())
+    }
+}
+
+impl mltools_ocr::Host for SharedWashCtx {
+    async fn ocr_image(
+        &mut self,
+        blob_facet: wasmtime::component::Resource<capabilities::PropTokenRo>,
+    ) -> wasmtime::Result<Result<mltools_ocr::OcrResult, String>> {
+        let plugin = DaybookPlugin::from_ctx(self);
+
+        let (doc_id, heads, prop_key) = {
+            let token = self
+                .table
+                .get(&blob_facet)
+                .context("error locating blob facet token")
+                .to_anyhow()?;
+            (
+                token.doc_id.clone(),
+                token.heads.clone(),
+                token.prop_key.clone(),
+            )
+        };
+
+        let Some(doc) = plugin.get_doc(&doc_id, &heads).await.to_anyhow()? else {
+            return Ok(Err(format!("doc not found: {doc_id}")));
+        };
+
+        let Some(blob_facet_raw) = doc.facets.get(&prop_key) else {
+            return Ok(Err(format!("blob facet not found: {}", prop_key)));
+        };
+
+        let blob_facet_value = match daybook_types::doc::WellKnownFacet::from_json(
+            blob_facet_raw.clone(),
+            daybook_types::doc::WellKnownFacetTag::Blob,
+        ) {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
+
+        let daybook_types::doc::WellKnownFacet::Blob(blob) = blob_facet_value else {
+            return Ok(Err("facet is not a blob".to_string()));
+        };
+
+        let Some(urls) = blob.urls.as_ref() else {
+            return Ok(Err("blob facet is missing urls".to_string()));
+        };
+        let Some(first_url) = urls.first() else {
+            return Ok(Err("blob facet urls is empty".to_string()));
+        };
+
+        let parsed_url = match url::Url::parse(first_url) {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
+        if parsed_url.scheme() != crate::blobs::BLOB_SCHEME {
+            return Ok(Err(format!(
+                "unsupported blob url scheme '{}'",
+                parsed_url.scheme()
+            )));
+        }
+        if parsed_url.host_str().is_some() {
+            return Ok(Err("blob url authority must be empty".to_string()));
+        }
+
+        let hash = parsed_url.path().trim_start_matches('/');
+        if hash.is_empty() {
+            return Ok(Err("blob url path is missing hash".to_string()));
+        }
+
+        let image_path = match plugin.blobs_repo.get_path(hash).await {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
+
+        let model_path = |suffix: &str| -> Result<PathBuf, String> {
+            let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(suffix);
+            std::path::absolute(candidate)
+                .map_err(|err| format!("failed to resolve absolute model path: {err}"))
+        };
+
+        let det_model_path = match model_path("target/models/detection/v5/det.onnx") {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err)),
+        };
+        let rec_model_path = match model_path("target/models/languages/latin/rec.onnx") {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err)),
+        };
+        let dict_path = match model_path("target/models/languages/latin/dict.txt") {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err)),
+        };
+
+        let mltools_ctx = mltools::Ctx {
+            config: mltools::Config {
+                ocr: mltools::OcrConfig {
+                    backends: vec![mltools::OcrBackendConfig::LocalOnnx {
+                        text_recognition_onnx_path: rec_model_path,
+                        text_detection_onnx_path: det_model_path,
+                        character_dict_txt_path: dict_path,
+                        document_orientation_onnx_path: None,
+                        text_line_orientation_onnx_path: None,
+                        document_rectification_onnx_path: None,
+                        supported_languages_bcp47: vec!["en".to_string()],
+                    }],
+                },
+            },
+        };
+
+        let mut results = match mltools::ocr_image(&mltools_ctx, &[image_path]).await {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
+        let Some(result) = results.pop() else {
+            return Ok(Err("ocr returned no results".to_string()));
+        };
+
+        Ok(Ok(mltools_ocr::OcrResult {
+            text: result.text,
+            regions: result
+                .regions
+                .into_iter()
+                .map(|region| binds_guest::townframe::mltools::ocr::TextRegion {
+                    bounding_box: region.bounding_box,
+                    text: region.text.map(|text| text.to_string()),
+                    confidence: region.confidence,
+                })
+                .collect(),
+        }))
     }
 }
 

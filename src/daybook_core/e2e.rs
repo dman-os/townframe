@@ -7,6 +7,7 @@ use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
 
 mod doc_created_wflow;
+mod ocr_image_wflow;
 
 pub struct DaybookTestContext {
     pub _acx: AmCtx,
