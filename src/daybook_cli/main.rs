@@ -217,7 +217,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                             WellKnownFacetTag::TitleGeneric,
                         ) {
                             Ok(WellKnownFacet::TitleGeneric(str)) => str.clone(),
-                            _ => panic!("tag - prop mismatch"),
+                            _ => panic!("tag - facet mismatch"),
                         }
                     })
                     .unwrap_or_else(|| "<no title>".to_string());
@@ -753,7 +753,7 @@ Routine acl: {routine_acl:?}
 Routine impl: {routine_impl:?}
 ",
                     routine_deets = routine.deets,
-                    routine_acl = routine.prop_acl,
+                    routine_acl = routine.facet_acl,
                     routine_impl = routine.r#impl,
                 ))
                 .arg(Arg::new("doc-id").required(true))
@@ -796,11 +796,11 @@ Routine impl: {routine_impl:?}
                             .dispatch(
                                 &plug_id,
                                 &routine_name[..],
-                                daybook_core::rt::DispatchArgs::DocProp {
+                                daybook_core::rt::DispatchArgs::DocFacet {
                                     doc_id: doc_id.clone(),
                                     branch_path: branch_path.clone(),
                                     heads: heads.clone(),
-                                    prop_id: None,
+                                    facet_key: None,
                                 },
                             )
                             .await?;

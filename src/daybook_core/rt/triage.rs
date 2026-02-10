@@ -249,7 +249,7 @@ fn changed_intersects_read_set(
 impl DocTriageWorker {
     async fn refresh_processors(&mut self) -> Res<()> {
         let plugs = self.rt.plugs_repo.list_plugs().await;
-        let mut cached = Vec::new();
+        self.cached_processors.clear();
         let mut triage_read_tags = HashSet::new();
         let mut triage_read_keys = HashSet::new();
         for plug in plugs {
@@ -274,13 +274,13 @@ impl DocTriageWorker {
                             .map(|tag| tag.0.clone())
                             .collect();
                         let mut read_keys: HashSet<FacetKey> = HashSet::new();
-                        let (acl_tags, acl_keys) = routine.read_prop_set();
+                        let (acl_tags, acl_keys) = routine.read_facet_set();
                         read_tags.extend(acl_tags);
                         read_keys.extend(acl_keys);
                         triage_read_tags.extend(read_tags.iter().cloned());
                         triage_read_keys.extend(read_keys.iter().cloned());
 
-                        cached.push(PreparedProcessor {
+                        self.cached_processors.push(PreparedProcessor {
                             plug_id: plug_id.clone(),
                             routine_name: routine_name.clone(),
                             processor_manifest: Arc::clone(processor),
@@ -292,7 +292,6 @@ impl DocTriageWorker {
                 }
             }
         }
-        self.cached_processors = cached;
         self.triage_read_tags = triage_read_tags;
         self.triage_read_keys = triage_read_keys;
         Ok(())
@@ -525,11 +524,11 @@ impl DocTriageWorker {
                         branch_path: branch_path.clone(),
                         heads: doc_heads.clone(),
                     },
-                    RoutineManifestDeets::DocProp { .. } => DispatchArgs::DocProp {
+                    RoutineManifestDeets::DocFacet { .. } => DispatchArgs::DocFacet {
                         doc_id: doc_id.clone(),
                         branch_path: branch_path.clone(),
                         heads: doc_heads.clone(),
-                        prop_id: None,
+                        facet_key: None,
                     },
                 };
 

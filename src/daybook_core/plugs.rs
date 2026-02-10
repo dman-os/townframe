@@ -19,51 +19,51 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             wflow_bundles: default(),
             commands: default(),
             processors: default(),
-            props: vec![
-                PropKeyManifest {
+            facets: vec![
+                FacetKeyManifest {
                     key_tag: WellKnownFacetTag::RefGeneric.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: default(),
                 },
-                PropKeyManifest {
+                FacetKeyManifest {
                     key_tag: WellKnownFacetTag::LabelGeneric.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: default(),
                 },
-                PropKeyManifest {
+                FacetKeyManifest {
                     key_tag: WellKnownFacetTag::TitleGeneric.into(),
                     value_schema: schemars::schema_for!(String),
-                    display_config: PropKeyDisplayHint {
+                    display_config: FacetKeyDisplayHint {
                         display_title: Some("Title".to_string()),
-                        deets: PropKeyDisplayDeets::Title { show_editor: true },
+                        deets: FacetKeyDisplayDeets::Title { show_editor: true },
                         ..default()
                     },
                 },
-                PropKeyManifest {
+                FacetKeyManifest {
                     key_tag: WellKnownFacetTag::PathGeneric.into(),
                     value_schema: schemars::schema_for!(String),
-                    display_config: PropKeyDisplayHint {
+                    display_config: FacetKeyDisplayHint {
                         display_title: Some("Path".to_string()),
-                        deets: PropKeyDisplayDeets::UnixPath,
+                        deets: FacetKeyDisplayDeets::UnixPath,
                         ..default()
                     },
                 },
-                PropKeyManifest {
+                FacetKeyManifest {
                     key_tag: WellKnownFacetTag::ImageMetadata.into(),
                     value_schema: schemars::schema_for!(ImageMetadata),
                     display_config: default(),
                 },
-                PropKeyManifest {
+                FacetKeyManifest {
                     key_tag: WellKnownFacetTag::Note.into(),
                     value_schema: schemars::schema_for!(Note),
                     display_config: default(),
                 },
-                PropKeyManifest {
+                FacetKeyManifest {
                     key_tag: WellKnownFacetTag::Blob.into(),
                     value_schema: schemars::schema_for!(Blob),
                     display_config: default(),
                 },
-                PropKeyManifest {
+                FacetKeyManifest {
                     key_tag: WellKnownFacetTag::Pending.into(),
                     value_schema: schemars::schema_for!(Pending),
                     display_config: default(),
@@ -82,15 +82,15 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     "@daybook/core@v0.0.1".into(),
                     PlugDependencyManifest {
                         keys: vec![
-                            PropKeyDependencyManifest {
+                            FacetKeyDependencyManifest {
                                 key_tag: WellKnownFacetTag::Note.into(),
                                 value_schema: schemars::schema_for!(Note),
                             },
-                            PropKeyDependencyManifest {
+                            FacetKeyDependencyManifest {
                                 key_tag: WellKnownFacetTag::LabelGeneric.into(),
                                 value_schema: schemars::schema_for!(String),
                             },
-                            PropKeyDependencyManifest {
+                            FacetKeyDependencyManifest {
                                 key_tag: WellKnownFacetTag::Blob.into(),
                                 value_schema: schemars::schema_for!(Blob),
                             },
@@ -108,17 +108,17 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "pseudo-label".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocProp {
-                            working_prop_tag: WellKnownFacetTag::PseudoLabel.into(),
+                        deets: RoutineManifestDeets::DocFacet {
+                            working_facet_tag: WellKnownFacetTag::PseudoLabel.into(),
                         },
-                        prop_acl: vec![
-                            RoutinePropAccess {
+                        facet_acl: vec![
+                            RoutineFacetAccess {
                                 tag: WellKnownFacetTag::Note.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
                             },
-                            RoutinePropAccess {
+                            RoutineFacetAccess {
                                 tag: WellKnownFacetTag::PseudoLabel.into(),
                                 key_id: None,
                                 read: true,
@@ -135,17 +135,17 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "ocr-image".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocProp {
-                            working_prop_tag: WellKnownFacetTag::Note.into(),
+                        deets: RoutineManifestDeets::DocFacet {
+                            working_facet_tag: WellKnownFacetTag::Note.into(),
                         },
-                        prop_acl: vec![
-                            RoutinePropAccess {
+                        facet_acl: vec![
+                            RoutineFacetAccess {
                                 tag: WellKnownFacetTag::Blob.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
                             },
-                            RoutinePropAccess {
+                            RoutineFacetAccess {
                                 tag: WellKnownFacetTag::Note.into(),
                                 key_id: None,
                                 read: true,
@@ -162,10 +162,10 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "embed-text".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocProp {
-                            working_prop_tag: WellKnownFacetTag::Note.into(),
+                        deets: RoutineManifestDeets::DocFacet {
+                            working_facet_tag: WellKnownFacetTag::Note.into(),
                         },
-                        prop_acl: vec![RoutinePropAccess {
+                        facet_acl: vec![RoutineFacetAccess {
                             tag: WellKnownFacetTag::Note.into(),
                             key_id: None,
                             read: true,
@@ -182,10 +182,10 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "test-label".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocProp {
-                            working_prop_tag: WellKnownFacetTag::LabelGeneric.into(),
+                        deets: RoutineManifestDeets::DocFacet {
+                            working_facet_tag: WellKnownFacetTag::LabelGeneric.into(),
                         },
-                        prop_acl: vec![RoutinePropAccess {
+                        facet_acl: vec![RoutineFacetAccess {
                             tag: WellKnownFacetTag::LabelGeneric.into(),
                             key_id: None,
                             read: true,
@@ -300,9 +300,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 ),
             ]
             .into(),
-            props: vec![
+            facets: vec![
                 //
-                PropKeyManifest {
+                FacetKeyManifest {
                     key_tag: WellKnownFacetTag::PseudoLabel.into(),
                     value_schema: schemars::schema_for!(Vec<String>),
                     display_config: default(),
@@ -332,9 +332,9 @@ impl PlugsStore {
         self.tag_to_plug.clear();
 
         for (plug_id, versioned) in &self.manifests {
-            for prop in &versioned.payload.props {
+            for facet in &versioned.payload.facets {
                 self.tag_to_plug
-                    .insert(prop.key_tag.to_string(), plug_id.clone());
+                    .insert(facet.key_tag.to_string(), plug_id.clone());
             }
         }
     }
@@ -653,7 +653,7 @@ impl PlugsRepo {
             .await
     }
 
-    pub async fn get_display_hint(&self, prop_tag: &str) -> Option<manifest::PropKeyDisplayHint> {
+    pub async fn get_display_hint(&self, prop_tag: &str) -> Option<manifest::FacetKeyDisplayHint> {
         self.store
             .query_sync(|store| {
                 let plug_id = store.tag_to_plug.get(prop_tag)?;
@@ -662,9 +662,9 @@ impl PlugsRepo {
                 };
                 let Some(hint) = versioned
                     .payload
-                    .props
+                    .facets
                     .iter()
-                    .find(|prop: &&manifest::PropKeyManifest| &prop.key_tag[..] == prop_tag)
+                    .find(|prop: &&manifest::FacetKeyManifest| &prop.key_tag[..] == prop_tag)
                     .map(|prop| prop.display_config.clone())
                 else {
                     panic!("prop in index '{prop_tag}' not found in expected plug '{plug_id}'");
@@ -675,7 +675,7 @@ impl PlugsRepo {
             .await
     }
 
-    pub async fn list_display_hints(&self) -> Vec<(String, manifest::PropKeyDisplayHint)> {
+    pub async fn list_display_hints(&self) -> Vec<(String, manifest::FacetKeyDisplayHint)> {
         self.store
             .query_sync(|store| {
                 store
@@ -684,9 +684,9 @@ impl PlugsRepo {
                     .flat_map(|versioned| {
                         versioned
                             .payload
-                            .props
+                            .facets
                             .iter()
-                            .map(|prop| (prop.key_tag.to_string(), prop.display_config.clone()))
+                            .map(|facet| (facet.key_tag.to_string(), facet.display_config.clone()))
                     })
                     .collect()
             })
@@ -840,9 +840,9 @@ impl PlugsRepo {
             }
 
             // We also check that property keys aren't removed or their schemas don't become incompatible.
-            for old_prop in &old.props {
+            for old_prop in &old.facets {
                 if let Some(new_prop) = manifest
-                    .props
+                    .facets
                     .iter()
                     .find(|prop| prop.key_tag == old_prop.key_tag)
                 {
@@ -862,7 +862,7 @@ impl PlugsRepo {
         // are already owned by another plug.
         self.store
             .query_sync(|store| {
-                for prop in &manifest.props {
+                for prop in &manifest.facets {
                     if let Some(owner) = store.tag_to_plug.get(&prop.key_tag.to_string()) {
                         if owner != &plug_id {
                             return Err(eyre::eyre!(
@@ -902,7 +902,7 @@ impl PlugsRepo {
 
             for key_dep in &dep_manifest.keys {
                 let provider_prop = provider
-                    .props
+                    .facets
                     .iter()
                     .find(|prop| prop.key_tag == key_dep.key_tag)
                     .ok_or_eyre(format!(
@@ -998,7 +998,7 @@ impl PlugsRepo {
         // To prevent security leaks, a routine can only specify tags that
         // the plug itself declares or explicitly depends on.
         let mut available_tags: HashSet<String> = manifest
-            .props
+            .facets
             .iter()
             .map(|prop| prop.key_tag.to_string())
             .collect();
@@ -1009,19 +1009,19 @@ impl PlugsRepo {
         }
 
         for (routine_name, routine) in &manifest.routines {
-            for access in &routine.prop_acl {
+            for access in &routine.facet_acl {
                 if !available_tags.contains(&access.tag.to_string()) {
                     eyre::bail!("Invalid ACL in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}", routine_name, access.tag);
                 }
             }
 
             // If it's a DocProp routine, the 'working_prop_tag' must also be accessible.
-            if let manifest::RoutineManifestDeets::DocProp { working_prop_tag } = &routine.deets {
-                if !available_tags.contains(&working_prop_tag.to_string()) {
+            if let manifest::RoutineManifestDeets::DocFacet { working_facet_tag } = &routine.deets {
+                if !available_tags.contains(&working_facet_tag.to_string()) {
                     eyre::bail!(
-                        "Invalid routine deets for '{}': working_prop_tag '{}' not in scope",
+                        "Invalid routine deets for '{}': working_facet_tag '{}' not in scope",
                         routine_name,
-                        working_prop_tag
+                        working_facet_tag
                     );
                 }
             }
@@ -1142,7 +1142,7 @@ mod tests {
             version: "0.1.0".parse().unwrap(),
             title: format!("Test Plug {}", name),
             desc: "A test plug".into(),
-            props: vec![],
+            facets: vec![],
             dependencies: default(),
             routines: default(),
             wflow_bundles: default(),
@@ -1169,7 +1169,7 @@ mod tests {
 
         // Add first plug with a tag
         let mut p1 = mock_plug("plug1");
-        p1.props.push(manifest::PropKeyManifest {
+        p1.facets.push(manifest::FacetKeyManifest {
             key_tag: "org.test.tag".into(),
             value_schema: schemars::schema_for!(String),
             display_config: default(),
@@ -1178,7 +1178,7 @@ mod tests {
 
         // Try to add second plug with same tag
         let mut p2 = mock_plug("plug2");
-        p2.props.push(manifest::PropKeyManifest {
+        p2.facets.push(manifest::FacetKeyManifest {
             key_tag: "org.test.tag".into(),
             value_schema: schemars::schema_for!(String),
             display_config: default(),
@@ -1197,7 +1197,7 @@ mod tests {
 
         // Add provider plug
         let mut provider = mock_plug("provider");
-        provider.props.push(manifest::PropKeyManifest {
+        provider.facets.push(manifest::FacetKeyManifest {
             key_tag: "org.test.shared".into(),
             value_schema: schemars::schema_for!(String),
             display_config: default(),
@@ -1209,7 +1209,7 @@ mod tests {
         consumer.dependencies.insert(
             "@test/provider".into(),
             manifest::PlugDependencyManifest {
-                keys: vec![manifest::PropKeyDependencyManifest {
+                keys: vec![manifest::FacetKeyDependencyManifest {
                     key_tag: "org.test.shared".into(),
                     value_schema: schemars::schema_for!(String),
                 }],
@@ -1271,7 +1271,7 @@ mod tests {
                     bundle: "bundle1".into(),
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
-                prop_acl: vec![],
+                facet_acl: vec![],
             }
             .into(),
         );
@@ -1358,7 +1358,7 @@ mod tests {
                     bundle: "missing_bundle".into(),
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
-                prop_acl: vec![],
+                facet_acl: vec![],
             }
             .into(),
         );
@@ -1388,7 +1388,7 @@ mod tests {
                     bundle: "bundle1".into(),
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
-                prop_acl: vec![],
+                facet_acl: vec![],
             }
             .into(),
         );

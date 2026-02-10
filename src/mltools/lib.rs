@@ -309,4 +309,4 @@ mod gateway {}
 /// mltools_local but for servers.
 mod server {}
 /// routes to mltools_local, mltools_client or mltools_cloud depending on config.
-mod client {}
+mod router {}

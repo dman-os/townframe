@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::rt::dispatch::PropRoutineArgs;
+use crate::rt::dispatch::FacetRoutineArgs;
 use daybook_types::doc::{AddDocArgs, FacetKey, FacetTag, WellKnownFacet, WellKnownFacetTag};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -106,14 +106,14 @@ async fn test_staging_branch_workflow() -> Res<()> {
         if let Some((id, dispatch)) = dispatches.iter().find(|(_, d)| {
             matches!(
                 &d.args,
-                crate::rt::dispatch::ActiveDispatchArgs::PropRoutine(_)
+                crate::rt::dispatch::ActiveDispatchArgs::FacetRoutine(_)
             ) && matches!(
                 &d.deets,
                 crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } if wflow_key == "test-label"
             )
         }) {
             dispatch_id = Some(id.clone());
-            let crate::rt::dispatch::ActiveDispatchArgs::PropRoutine(PropRoutineArgs {
+            let crate::rt::dispatch::ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
                 staging_branch_path: path,
                 ..
             }) = &dispatch.args;

@@ -28,7 +28,7 @@ pub mod triage;
 pub mod wash_plugin;
 
 use dispatch::{
-    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchRepo, PropRoutineArgs,
+    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchRepo, FacetRoutineArgs,
 };
 
 pub struct RtConfig {
@@ -136,11 +136,11 @@ pub enum DispatchArgs {
         branch_path: daybook_types::doc::BranchPath,
         heads: ChangeHashSet,
     },
-    DocProp {
+    DocFacet {
         doc_id: String,
         branch_path: daybook_types::doc::BranchPath,
         heads: ChangeHashSet,
-        prop_id: Option<String>,
+        facet_key: Option<String>,
     },
 }
 
@@ -348,7 +348,7 @@ impl Rt {
         };
 
         // Get staging branch path from dispatch
-        let ActiveDispatchArgs::PropRoutine(PropRoutineArgs {
+        let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
             staging_branch_path,
             ..
         }) = &dispatch.args;
@@ -381,7 +381,7 @@ impl Rt {
         };
         if is_done {
             // Handle staging branch cleanup based on success/failure
-            let ActiveDispatchArgs::PropRoutine(PropRoutineArgs {
+            let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
                 doc_id,
                 branch_path: target_branch_path,
                 ..
@@ -451,20 +451,20 @@ impl Rt {
         use crate::plugs::manifest::RoutineManifestDeets;
         let (dispatch_id, mut args) = match (&routine_man.deets, args) {
             (
-                RoutineManifestDeets::DocProp { working_prop_tag },
-                DispatchArgs::DocProp {
+                RoutineManifestDeets::DocFacet { working_facet_tag },
+                DispatchArgs::DocFacet {
                     doc_id,
                     heads,
                     branch_path,
-                    prop_id,
+                    facet_key,
                 },
             ) => {
-                let tag: FacetTag = working_prop_tag.0.clone().into();
-                let prop_key = match prop_id {
+                let tag: FacetTag = working_facet_tag.0.clone().into();
+                let facet_key = match facet_key {
                     Some(id) => FacetKey { tag, id },
                     None => tag.into(),
                 };
-                let prop_key = prop_key.to_string();
+                let facet_key = facet_key.to_string();
                 let dispatch_id = {
                     use std::hash::{Hash, Hasher};
                     // FIXME: we probably want to use a stable hasher impl
@@ -479,12 +479,12 @@ impl Rt {
                 let dispatch_id = format!("{plug_id}/{routine_name}-{dispatch_id}");
                 (
                     dispatch_id,
-                    ActiveDispatchArgs::PropRoutine(PropRoutineArgs {
+                    ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
                         doc_id,
                         branch_path,
                         heads,
-                        prop_key,
-                        prop_acl: routine_man.prop_acl.clone(),
+                        facet_key,
+                        facet_acl: routine_man.facet_acl.clone(),
                         staging_branch_path: daybook_types::doc::BranchPath::from(
                             "/tmp/placeholder",
                         ), // Will be set when job is created
@@ -529,8 +529,8 @@ impl Rt {
                     daybook_types::doc::BranchPath::from(format!("/tmp/{}", job_id));
 
                 // Update args with staging branch path
-                let ActiveDispatchArgs::PropRoutine(ref mut prop_args) = args;
-                prop_args.staging_branch_path = staging_branch_path.clone();
+                let ActiveDispatchArgs::FacetRoutine(ref mut facet_args) = args;
+                facet_args.staging_branch_path = staging_branch_path.clone();
 
                 let entry_id = self
                     .wflow_ingress
@@ -749,10 +749,10 @@ async fn start_bundle_workload(
                     },
                     WitInterface::from("townframe:am-repo/repo"),
                     // FIXME: the following syntax is not supported here
-                    // WitInterface::from("townframe:daybook/drawer,capabilities,prop-routine"),
+                    // WitInterface::from("townframe:daybook/drawer,capabilities,facet-routine"),
                     WitInterface::from("townframe:daybook/drawer"),
                     WitInterface::from("townframe:daybook/capabilities"),
-                    WitInterface::from("townframe:daybook/prop-routine"),
+                    WitInterface::from("townframe:daybook/facet-routine"),
                     WitInterface::from("townframe:daybook/mltools-ocr"),
                     WitInterface::from("townframe:daybook/mltools-embed"),
                     WitInterface::from("townframe:mltools/llm-chat"),

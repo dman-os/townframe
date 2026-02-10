@@ -4,7 +4,7 @@ world bundle {
     include townframe:api-utils/imports;
 
     import townframe:wflow/host;
-    import townframe:daybook/prop-routine;
+    import townframe:daybook/facet-routine;
     import townframe:daybook/drawer;
     import townframe:daybook/mltools-ocr;
     import townframe:daybook/mltools-embed;

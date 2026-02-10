@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::plugs::{manifest::PropKeyDisplayHint, PlugsRepo};
+use crate::plugs::{manifest::FacetKeyDisplayHint, PlugsRepo};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reconcile, Hydrate)]
@@ -15,7 +15,7 @@ pub struct UserMeta {
 #[derive(Reconcile, Hydrate, Clone)]
 pub struct ConfigStore {
     pub version: Uuid,
-    pub prop_display: HashMap<String, ThroughJson<PropKeyDisplayHint>>,
+    pub facet_display: HashMap<String, ThroughJson<FacetKeyDisplayHint>>,
     pub users: HashMap<String, ThroughJson<UserMeta>>,
 }
 
@@ -27,22 +27,22 @@ impl Default for ConfigStore {
 
         key_configs.insert(
             "created_at".to_string(),
-            PropKeyDisplayHint {
+            FacetKeyDisplayHint {
                 always_visible: false,
                 display_title: Some("Created At".to_string()),
-                deets: PropKeyDisplayDeets::DateTime {
-                    display_type: DateTimePropDisplayType::Relative,
+                deets: FacetKeyDisplayDeets::DateTime {
+                    display_type: DateTimeFacetDisplayType::Relative,
                 },
             }
             .into(),
         );
         key_configs.insert(
             "updated_at".to_string(),
-            PropKeyDisplayHint {
+            FacetKeyDisplayHint {
                 always_visible: false,
                 display_title: Some("Updated At".to_string()),
-                deets: PropKeyDisplayDeets::DateTime {
-                    display_type: DateTimePropDisplayType::Relative,
+                deets: FacetKeyDisplayDeets::DateTime {
+                    display_type: DateTimeFacetDisplayType::Relative,
                 },
             }
             .into(),
@@ -50,7 +50,7 @@ impl Default for ConfigStore {
 
         Self {
             version: Uuid::nil(),
-            prop_display: key_configs,
+            facet_display: key_configs,
             users: HashMap::new(),
         }
     }
@@ -187,6 +187,7 @@ impl ConfigRepo {
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
+        // FIXME: this is suspicous
         let mut events = vec![];
         loop {
             let notifs = tokio::select! {
@@ -231,7 +232,7 @@ impl ConfigRepo {
                 self.store
                     .mutate_sync(|store| {
                         store.version = new_store.version;
-                        store.prop_display = new_store.prop_display;
+                        store.facet_display = new_store.facet_display;
                         store.users = new_store.users;
                     })
                     .await?;
@@ -303,10 +304,10 @@ impl ConfigRepo {
         Ok(Arc::from(heads))
     }
 
-    pub async fn get_prop_display_hint(&self, key: String) -> Option<PropKeyDisplayHint> {
+    pub async fn get_facet_display_hint(&self, key: String) -> Option<FacetKeyDisplayHint> {
         let hint = self
             .store
-            .query_sync(|store| store.prop_display.get(&key).cloned())
+            .query_sync(|store| store.facet_display.get(&key).cloned())
             .await;
         if let Some(hint) = hint {
             return Some(hint.0);
@@ -318,7 +319,7 @@ impl ConfigRepo {
         None
     }
 
-    pub async fn list_display_hints(&self) -> HashMap<String, PropKeyDisplayHint> {
+    pub async fn list_display_hints(&self) -> HashMap<String, FacetKeyDisplayHint> {
         let mut defaults: HashMap<_, _> = self
             .plug_repo
             .list_display_hints()
@@ -328,7 +329,7 @@ impl ConfigRepo {
 
         self.store
             .query_sync(move |store| {
-                for (key, val) in &store.prop_display {
+                for (key, val) in &store.facet_display {
                     defaults.insert(key.clone(), val.0.clone());
                 }
                 defaults
@@ -336,14 +337,14 @@ impl ConfigRepo {
             .await
     }
 
-    pub async fn set_prop_display_hint(&self, key: String, hint: PropKeyDisplayHint) -> Res<()> {
+    pub async fn set_facet_display_hint(&self, key: String, hint: FacetKeyDisplayHint) -> Res<()> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
         self.store
             .mutate_sync(move |store| {
                 store.version = Uuid::new_v4();
-                store.prop_display.insert(key, hint.into());
+                store.facet_display.insert(key, hint.into());
             })
             .await?;
         Ok(())

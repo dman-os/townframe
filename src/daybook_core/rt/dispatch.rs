@@ -29,20 +29,20 @@ pub enum ActiveDispatchDeets {
 
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
 pub enum ActiveDispatchArgs {
-    PropRoutine(PropRoutineArgs),
+    FacetRoutine(FacetRoutineArgs),
 }
 
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
-pub struct PropRoutineArgs {
+pub struct FacetRoutineArgs {
     pub doc_id: daybook_types::doc::DocId,
     #[autosurgeon(with = "utils_rs::am::codecs::path")]
     pub branch_path: daybook_types::doc::BranchPath,
     #[autosurgeon(with = "utils_rs::am::codecs::path")]
     pub staging_branch_path: daybook_types::doc::BranchPath,
     pub heads: ChangeHashSet,
-    pub prop_key: String,
+    pub facet_key: String,
     #[autosurgeon(with = "utils_rs::am::codecs::json")]
-    pub prop_acl: Vec<crate::plugs::manifest::RoutinePropAccess>,
+    pub facet_acl: Vec<crate::plugs::manifest::RoutineFacetAccess>,
 }
 
 #[derive(Default, Reconcile, Hydrate)]

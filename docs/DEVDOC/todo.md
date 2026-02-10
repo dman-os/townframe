@@ -16,10 +16,15 @@
 ## Stack
 
 - [ ] embeddinggemma3 on ollama
+
 - [ ] `mltools`
   - [ ] OCR
+    - [ ] Local
   - [ ] Embeedding
+    - [ ] Local
   - [ ] API client
+  - [ ] Router
+  - [ ] durable-streams
 - [ ] daybook_server
   - [ ] Decide on wrpc vs json
 - [ ] CI/CD
@@ -73,7 +78,6 @@
   - [ ] Assert samod fsyncs reliably
   - [ ] Notification handling
     - [ ] How to avoid missing triage work?
-- [ ] Local inference
 - [ ] wflow
   - [ ] Non-wasm impl
     - [ ] Catch panics

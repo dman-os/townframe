@@ -14,6 +14,25 @@ pub struct FacetMeta {
     pub uuid: Vec<Uuid>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct OcrTextRegion {
+    pub bounding_box: Vec<Point>,
+    pub text: Option<String>,
+    pub confidence_score: Option<f32>,
+}
+
 crate::define_enum_and_tag!(
     "org.example.daybook.",
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,15 +65,6 @@ crate::define_enum_and_tag!(
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        ImageMetadata struct {
-            pub mime: MimeType,
-            pub width_px: u64,
-            pub height_px: u64,
-        },
-        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-        #[serde(rename_all = "camelCase")]
-        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         Pending struct {
             pub key: FacetKey
         },
@@ -78,6 +88,29 @@ crate::define_enum_and_tag!(
             pub inline: Option<Vec<u8>>,
             pub urls: Option<Vec<String>>
         },
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        ImageMetadata struct {
+            // URL to src Blob facet
+            // pub src_url: String,
+            pub mime: MimeType,
+            pub width_px: u64,
+            pub height_px: u64,
+        },
+        // #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        // #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        // #[serde(rename_all = "camelCase")]
+        // #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        // OcrResult struct {
+        //     // URL to src ImageMetadata facet
+        //     pub src_url: String,
+        //     pub at_commit: ChangeHashSet,
+        //     pub model_tag: String,
+        //     pub text: String,
+        //     pub text_regions: Vec<OcrTextRegion>
+        // }
     }
 );
 
@@ -312,6 +345,18 @@ pub struct DocAddedEvent {
 #[cfg(feature = "automerge")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct ChangeHashSet(pub Arc<[automerge::ChangeHash]>);
+
+#[cfg(feature = "automerge")]
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for ChangeHashSet {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ChangeHashSet".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::schema_for!(Vec<String>)
+    }
+}
 
 #[cfg(feature = "automerge")]
 impl autosurgeon::Hydrate for ChangeHashSet {

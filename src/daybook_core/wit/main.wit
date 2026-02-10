@@ -51,41 +51,41 @@ interface capabilities {
         update: func(patch: doc-patch) -> result<_, update-doc-error>;
     }
 
-    resource prop-token-ro {
+    resource facet-token-ro {
         get: func() -> facet-raw;
     }
 
-    resource prop-token-rw {
+    resource facet-token-rw {
         get: func() -> facet-raw;
         update: func(patch: facet-raw) -> result<_, update-doc-error>;
     }
 }
 
-interface prop-routine {
+interface facet-routine {
     use townframe:daybook-types/doc.{doc-id};
     use types.{heads};
-    use capabilities.{prop-token-ro, prop-token-rw};
+    use capabilities.{facet-token-ro, facet-token-rw};
 
-    record prop-routine-args {
+    record facet-routine-args {
         doc-id: doc-id,
         heads: heads,
-        prop-key: string,
+        facet-key: string,
 
-        rw-prop-tokens: list<tuple<string, prop-token-rw>>,
-        ro-prop-tokens: list<tuple<string, prop-token-ro>>,
+        rw-facet-tokens: list<tuple<string, facet-token-rw>>,
+        ro-facet-tokens: list<tuple<string, facet-token-ro>>,
     }
 
-    /// Aquire args for prop-routine-args.
+    /// Aquire args for facet-routine-args.
     /// If the running instance isn't reconginzed to be a routine,
     /// a trap is raised to the host.
-    get-args: func() -> prop-routine-args;
+    get-args: func() -> facet-routine-args;
 }
 
 interface mltools-ocr {
-    use capabilities.{prop-token-ro};
+    use capabilities.{facet-token-ro};
     use townframe:mltools/ocr.{ocr-result};
 
-    ocr-image: func(blob-facet: prop-token-ro) -> result<ocr-result, string>;
+    ocr-image: func(blob-facet: facet-token-ro) -> result<ocr-result, string>;
 }
 
 interface mltools-embed {
@@ -97,7 +97,7 @@ interface mltools-embed {
 world all-guest {
     import drawer;
     import capabilities;
-    import prop-routine;
+    import facet-routine;
     import mltools-ocr;
     import mltools-embed;
     import wasi:filesystem/preopens@0.2.6;

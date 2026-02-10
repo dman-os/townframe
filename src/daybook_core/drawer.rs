@@ -6,7 +6,7 @@ pub mod types;
 pub use types::{DocEntry, DocNBranches, DrawerEvent};
 
 use lru::SharedKeyedLruPool;
-use types::{DrawerError, PropBlameV2, UpdateDocArgsV2, UpdateDocBatchErrV2};
+use types::{DrawerError, FacetBlame, UpdateDocArgsV2, UpdateDocBatchErrV2};
 
 use automerge::transaction::Transactable;
 use automerge::ReadDoc;
@@ -580,15 +580,15 @@ impl DrawerRepo {
     ) -> Vec<FacetKey> {
         let mut changed = Vec::new();
         let all_keys: HashSet<String> = old_entry
-            .prop_blames
+            .facet_blames
             .keys()
-            .chain(new_entry.prop_blames.keys())
+            .chain(new_entry.facet_blames.keys())
             .cloned()
             .collect();
 
         for key in all_keys {
-            let old = old_entry.prop_blames.get(&key);
-            let new = new_entry.prop_blames.get(&key);
+            let old = old_entry.facet_blames.get(&key);
+            let new = new_entry.facet_blames.get(&key);
             if old != new {
                 changed.push(FacetKey::from(key));
             }
@@ -686,7 +686,7 @@ impl DrawerRepo {
                     id: doc_id,
                     entry: DocEntry {
                         branches: default(),
-                        prop_blames: default(),
+                        facet_blames: default(),
                         users: default(),
                         version: Uuid::nil(),
                         previous_version_heads: None,
@@ -824,12 +824,12 @@ impl DrawerRepo {
                 heads.clone(),
             )]
             .into(),
-            prop_blames: facet_keys
+            facet_blames: facet_keys
                 .iter()
                 .map(|facet_key| {
                     (
                         facet_key.to_string(),
-                        PropBlameV2 {
+                        FacetBlame {
                             heads: heads.clone(),
                         },
                     )
@@ -968,15 +968,15 @@ impl DrawerRepo {
             .branches
             .insert(branch_path.to_string_lossy().to_string(), new_heads.clone());
         for key in &facet_keys_set {
-            new_entry.prop_blames.insert(
+            new_entry.facet_blames.insert(
                 key.to_string(),
-                PropBlameV2 {
+                FacetBlame {
                     heads: new_heads.clone(),
                 },
             );
         }
         for key in &facet_keys_remove {
-            new_entry.prop_blames.remove(&key.to_string());
+            new_entry.facet_blames.remove(&key.to_string());
         }
         if let Some(user_path) = patch.user_path {
             new_entry.users.insert(
@@ -1124,9 +1124,9 @@ impl DrawerRepo {
         let mut new_entry = entry.clone();
         new_entry.branches.insert(to_branch_name, new_heads.clone());
         for key_str in modified_facets {
-            new_entry.prop_blames.insert(
+            new_entry.facet_blames.insert(
                 key_str,
-                PropBlameV2 {
+                FacetBlame {
                     heads: new_heads.clone(),
                 },
             );
@@ -1219,7 +1219,7 @@ impl DrawerRepo {
                     ChangeHashSet::default(),
                     DocEntry {
                         branches: default(),
-                        prop_blames: default(),
+                        facet_blames: default(),
                         users: default(),
                         version: Uuid::nil(),
                         previous_version_heads: None,
@@ -1818,12 +1818,12 @@ mod tests {
         .await?;
 
         // 1. Add doc
-        let prop_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let facet_title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
         let doc_id = repo
             .add(AddDocArgs {
                 branch_path: "main".into(),
                 facets: [(
-                    prop_title.clone(),
+                    facet_title_key.clone(),
                     WellKnownFacet::TitleGeneric("Initial".into()).into(),
                 )]
                 .into(),
@@ -1843,7 +1843,7 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(
-            doc.facets.get(&prop_title).unwrap(),
+            doc.facets.get(&facet_title_key).unwrap(),
             &serde_json::Value::from(WellKnownFacet::TitleGeneric("Initial".into()))
         );
 
@@ -1852,7 +1852,7 @@ mod tests {
             DocPatch {
                 id: doc_id.clone(),
                 facets_set: [(
-                    prop_title.clone(),
+                    facet_title_key.clone(),
                     WellKnownFacet::TitleGeneric("Updated".into()).into(),
                 )]
                 .into(),
@@ -1869,7 +1869,7 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(
-            doc.facets.get(&prop_title).unwrap(),
+            doc.facets.get(&facet_title_key).unwrap(),
             &serde_json::Value::from(WellKnownFacet::TitleGeneric("Updated".into()))
         );
 
@@ -1915,15 +1915,15 @@ mod tests {
         )
         .await?;
 
-        let prop_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
-        let prop_note = FacetKey::from(WellKnownFacetTag::Note);
+        let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let facet_note = FacetKey::from(WellKnownFacetTag::Note);
 
         // 1. Add doc on main
         let doc_id = repo
             .add(AddDocArgs {
                 branch_path: "main".into(),
                 facets: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("Base".into()).into(),
                 )]
                 .into(),
@@ -1939,7 +1939,7 @@ mod tests {
             DocPatch {
                 id: doc_id.clone(),
                 facets_set: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("A".into()).into(),
                 )]
                 .into(),
@@ -1955,7 +1955,7 @@ mod tests {
         repo.update_at_heads(
             DocPatch {
                 id: doc_id.clone(),
-                facets_set: [(prop_note.clone(), WellKnownFacet::Note("B".into()).into())].into(),
+                facets_set: [(facet_note.clone(), WellKnownFacet::Note("B".into()).into())].into(),
                 facets_remove: vec![],
                 user_path: None,
             },
@@ -1982,11 +1982,11 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(
-            doc.facets.get(&prop_title).unwrap(),
+            doc.facets.get(&facet_title).unwrap(),
             &serde_json::Value::from(WellKnownFacet::TitleGeneric("A".into()))
         );
         assert_eq!(
-            doc.facets.get(&prop_note).unwrap(),
+            doc.facets.get(&facet_note).unwrap(),
             &serde_json::Value::from(WellKnownFacet::Note("B".into()))
         );
 
@@ -2060,12 +2060,12 @@ mod tests {
             .register_listener(move |msg| server_notif_tx.send(msg).expect("send failed"));
 
         // 1. Client adds a doc
-        let prop_note = FacetKey::from(WellKnownFacetTag::Note);
+        let facet_note = FacetKey::from(WellKnownFacetTag::Note);
         let new_doc_id = client_repo
             .add(AddDocArgs {
                 branch_path: "main".into(),
                 facets: [(
-                    prop_note.clone(),
+                    facet_note.clone(),
                     WellKnownFacet::Note("Hello".into()).into(),
                 )]
                 .into(),
@@ -2094,7 +2094,7 @@ mod tests {
             .await?
             .ok_or_eyre("doc not found on server")?;
         assert_eq!(
-            doc.facets.get(&prop_note).unwrap(),
+            doc.facets.get(&facet_note).unwrap(),
             &serde_json::Value::from(WellKnownFacet::Note("Hello".into()))
         );
 
@@ -2137,14 +2137,14 @@ mod tests {
         )
         .await?;
 
-        let prop_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
 
         // 1. Add doc
         let doc_id = repo
             .add(AddDocArgs {
                 branch_path: "main".into(),
                 facets: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("Base".into()).into(),
                 )]
                 .into(),
@@ -2162,7 +2162,7 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(
-            doc.facets.get(&prop_title).unwrap(),
+            doc.facets.get(&facet_title).unwrap(),
             &serde_json::Value::from(WellKnownFacet::TitleGeneric("Base".into()))
         );
 
@@ -2172,7 +2172,7 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(
-            doc_latest.facets.get(&prop_title).unwrap(),
+            doc_latest.facets.get(&facet_title).unwrap(),
             &serde_json::Value::from(WellKnownFacet::TitleGeneric("Base".into()))
         );
 
@@ -2189,7 +2189,7 @@ mod tests {
             patch: DocPatch {
                 id: doc_id.clone(),
                 facets_set: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("Batch Updated".into()).into(),
                 )]
                 .into(),
@@ -2205,7 +2205,7 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(
-            doc_updated.facets.get(&prop_title).unwrap(),
+            doc_updated.facets.get(&facet_title).unwrap(),
             &serde_json::Value::from(WellKnownFacet::TitleGeneric("Batch Updated".into()))
         );
 
@@ -2214,7 +2214,7 @@ mod tests {
             DocPatch {
                 id: doc_id.clone(),
                 facets_set: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("Branch A".into()).into(),
                 )]
                 .into(),
@@ -2233,7 +2233,7 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(
-            doc_merged.facets.get(&prop_title).unwrap(),
+            doc_merged.facets.get(&facet_title).unwrap(),
             &serde_json::Value::from(WellKnownFacet::TitleGeneric("Branch A".into()))
         );
 
@@ -2282,8 +2282,8 @@ mod tests {
         )
         .await?;
 
-        let prop_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
-        let prop_note = FacetKey::from(WellKnownFacetTag::Note);
+        let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let facet_note = FacetKey::from(WellKnownFacetTag::Note);
         let user_path = UserPath::from("/device1/plug1/routine1");
 
         // 1. Test 'add' metadata
@@ -2291,7 +2291,7 @@ mod tests {
             .add(AddDocArgs {
                 branch_path: "main".into(),
                 facets: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("Initial".into()).into(),
                 )]
                 .into(),
@@ -2305,15 +2305,15 @@ mod tests {
             "user should be recorded on add"
         );
         assert!(
-            entry.prop_blames.contains_key(&prop_title.to_string()),
-            "prop_blame should exist for title"
+            entry.facet_blames.contains_key(&facet_title.to_string()),
+            "facet_blame should exist for title"
         );
 
         // Check Dmeta in content doc
         let am_id = DocumentId::from_str(&doc_id)?;
         let handle = acx.find_doc(&am_id).await?.unwrap();
         handle.with_document(|doc| -> Res<()> {
-            let heads = facet_recovery::recover_facet_heads(doc, &prop_title)?;
+            let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
             assert_eq!(heads.len(), 1, "should have 1 head for title");
             Ok(())
         })?;
@@ -2324,7 +2324,7 @@ mod tests {
             DocPatch {
                 id: doc_id.clone(),
                 facets_set: [(
-                    prop_note.clone(),
+                    facet_note.clone(),
                     WellKnownFacet::Note("New Note".into()).into(),
                 )]
                 .into(),
@@ -2342,8 +2342,8 @@ mod tests {
             "user should still be recorded"
         );
         assert!(
-            entry.prop_blames.contains_key(&prop_note.to_string()),
-            "prop_blame should exist for note"
+            entry.facet_blames.contains_key(&facet_note.to_string()),
+            "facet_blame should exist for note"
         );
 
         // 3. Test 'merge' metadata maintenance
@@ -2351,7 +2351,7 @@ mod tests {
             DocPatch {
                 id: doc_id.clone(),
                 facets_set: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("Branch Title".into()).into(),
                 )]
                 .into(),
@@ -2372,8 +2372,8 @@ mod tests {
         let entry_after_merge = repo.get_entry(&doc_id).await?.unwrap();
         assert_eq!(
             entry_after_merge
-                .prop_blames
-                .get(&prop_title.to_string())
+                .facet_blames
+                .get(&facet_title.to_string())
                 .unwrap()
                 .heads
                 .len(),
@@ -2418,14 +2418,14 @@ mod tests {
         )
         .await?;
 
-        let prop_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
 
         // 1. Add doc on main
         let doc_id = repo
             .add(AddDocArgs {
                 branch_path: "main".into(),
                 facets: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("Base".into()).into(),
                 )]
                 .into(),
@@ -2441,7 +2441,7 @@ mod tests {
             DocPatch {
                 id: doc_id.clone(),
                 facets_set: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("A".into()).into(),
                 )]
                 .into(),
@@ -2457,7 +2457,7 @@ mod tests {
             DocPatch {
                 id: doc_id.clone(),
                 facets_set: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("B".into()).into(),
                 )]
                 .into(),
@@ -2484,7 +2484,7 @@ mod tests {
         let handle = acx.find_doc(&am_id).await?.unwrap();
         handle.with_document(|doc| -> Res<()> {
             // recover_facet_heads should return 2 change hashes
-            let heads = facet_recovery::recover_facet_heads(doc, &prop_title)?;
+            let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
 
             // On a concurrent update where both sides clear and insert,
             // Automerge list merge will result in both inserted elements being present.
@@ -2503,7 +2503,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_v2_prop_blame_maintenance() -> Res<()> {
+    async fn test_v2_facet_blame_maintenance() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
             utils_rs::am::Config {
@@ -2534,15 +2534,15 @@ mod tests {
         )
         .await?;
 
-        let prop_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
-        let prop_note = FacetKey::from(WellKnownFacetTag::Note);
+        let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let facet_note = FacetKey::from(WellKnownFacetTag::Note);
 
         // 1. Add doc
         let doc_id = repo
             .add(AddDocArgs {
                 branch_path: "main".into(),
                 facets: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("Initial".into()).into(),
                 )]
                 .into(),
@@ -2554,8 +2554,8 @@ mod tests {
         let initial_heads = entry.branches.get("main").unwrap().clone();
         assert_eq!(
             entry
-                .prop_blames
-                .get(&prop_title.to_string())
+                .facet_blames
+                .get(&facet_title.to_string())
                 .unwrap()
                 .heads,
             initial_heads
@@ -2566,7 +2566,7 @@ mod tests {
             DocPatch {
                 id: doc_id.clone(),
                 facets_set: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("A".into()).into(),
                 )]
                 .into(),
@@ -2582,8 +2582,8 @@ mod tests {
         let a_heads = entry_a.branches.get("branch-a").unwrap().clone();
         assert_eq!(
             entry_a
-                .prop_blames
-                .get(&prop_title.to_string())
+                .facet_blames
+                .get(&facet_title.to_string())
                 .unwrap()
                 .heads,
             a_heads
@@ -2593,7 +2593,7 @@ mod tests {
         repo.update_at_heads(
             DocPatch {
                 id: doc_id.clone(),
-                facets_set: [(prop_note.clone(), WellKnownFacet::Note("B".into()).into())].into(),
+                facets_set: [(facet_note.clone(), WellKnownFacet::Note("B".into()).into())].into(),
                 facets_remove: vec![],
                 user_path: None,
             },
@@ -2606,8 +2606,8 @@ mod tests {
         let b_heads = entry_b.branches.get("branch-b").unwrap().clone();
         assert_eq!(
             entry_b
-                .prop_blames
-                .get(&prop_note.to_string())
+                .facet_blames
+                .get(&facet_note.to_string())
                 .unwrap()
                 .heads,
             b_heads
@@ -2620,8 +2620,8 @@ mod tests {
         let main_heads_a = entry_merged_a.branches.get("main").unwrap().clone();
 
         let blame_a = entry_merged_a
-            .prop_blames
-            .get(&prop_title.to_string())
+            .facet_blames
+            .get(&facet_title.to_string())
             .unwrap()
             .clone();
         assert_eq!(
@@ -2636,8 +2636,8 @@ mod tests {
         let main_heads_b = entry_merged_b.branches.get("main").unwrap().clone();
 
         let blame_b = entry_merged_b
-            .prop_blames
-            .get(&prop_note.to_string())
+            .facet_blames
+            .get(&facet_note.to_string())
             .unwrap()
             .clone();
         assert_eq!(
@@ -2648,8 +2648,8 @@ mod tests {
         // title blame should still be main_heads_a (from previous merge)
         // because it was NOT modified in the second merge.
         let blame_a_after_b = entry_merged_b
-            .prop_blames
-            .get(&prop_title.to_string())
+            .facet_blames
+            .get(&facet_title.to_string())
             .unwrap()
             .clone();
         assert_eq!(
@@ -2711,12 +2711,12 @@ mod tests {
             notif_tx_b.send(evt).expect("send failed");
         });
 
-        let prop_note = FacetKey::from(WellKnownFacetTag::Note);
+        let facet_note = FacetKey::from(WellKnownFacetTag::Note);
         let _doc_id_a = repo_a
             .add(AddDocArgs {
                 branch_path: "main".into(),
                 facets: [(
-                    prop_note.clone(),
+                    facet_note.clone(),
                     WellKnownFacet::Note("hello-from-a".into()).into(),
                 )]
                 .into(),
@@ -2769,18 +2769,18 @@ mod tests {
         )
         .await?;
 
-        let prop_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
-        let prop_note = FacetKey::from(WellKnownFacetTag::Note);
+        let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let facet_note = FacetKey::from(WellKnownFacetTag::Note);
         let doc_id = repo
             .add(AddDocArgs {
                 branch_path: "main".into(),
                 facets: [
                     (
-                        prop_title.clone(),
+                        facet_title.clone(),
                         WellKnownFacet::TitleGeneric("initial".into()).into(),
                     ),
                     (
-                        prop_note.clone(),
+                        facet_note.clone(),
                         WellKnownFacet::Note("initial".into()).into(),
                     ),
                 ]
@@ -2798,11 +2798,11 @@ mod tests {
             DocPatch {
                 id: doc_id.clone(),
                 facets_set: [(
-                    prop_title.clone(),
+                    facet_title.clone(),
                     WellKnownFacet::TitleGeneric("updated".into()).into(),
                 )]
                 .into(),
-                facets_remove: vec![prop_note.clone()],
+                facets_remove: vec![facet_note.clone()],
                 user_path: None,
             },
             "main".into(),
@@ -2833,8 +2833,8 @@ mod tests {
             changed_facet_keys.ok_or_eyre("did not observe DocUpdated event for test doc")?;
 
         let changed: HashSet<FacetKey> = changed_facet_keys.into_iter().collect();
-        assert!(changed.contains(&prop_title));
-        assert!(changed.contains(&prop_note));
+        assert!(changed.contains(&facet_title));
+        assert!(changed.contains(&facet_note));
         assert_eq!(changed.len(), 2);
 
         stop_token.stop().await?;

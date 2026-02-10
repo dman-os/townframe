@@ -37,7 +37,7 @@ mod wit {
             "townframe:daybook/types": generate,
             "townframe:daybook/drawer": generate,
             "townframe:daybook/capabilities": generate,
-            "townframe:daybook/prop-routine": generate,
+            "townframe:daybook/facet-routine": generate,
             "townframe:daybook/mltools-ocr": generate,
             "townframe:daybook/mltools-embed": generate,
         }
@@ -65,34 +65,33 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
 }
 
 fn embed_text(cx: WflowCtx) -> Result<(), JobErrorX> {
+    use crate::wit::townframe::daybook::facet_routine;
     use crate::wit::townframe::daybook::mltools_embed;
-    use crate::wit::townframe::daybook::prop_routine;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
-    let args = prop_routine::get_args();
+    let args = facet_routine::get_args();
 
-    let working_prop_token = args
-        .rw_prop_tokens
+    let working_facet_token = args
+        .rw_facet_tokens
         .iter()
-        .find(|(key, _)| key == &args.prop_key)
+        .find(|(key, _)| key == &args.facet_key)
         .map(|(_, token)| token)
         .ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
-                "working prop key '{}' not found in rw_prop_tokens",
-                args.prop_key
+                "working facet key '{}' not found in rw_facet_tokens",
+                args.facet_key
             ))
         })?;
 
-    let current_prop_raw = working_prop_token.get();
+    let current_facet_raw = working_facet_token.get();
 
-    let current_prop_json: daybook_types::doc::FacetRaw =
-        serde_json::from_str(&current_prop_raw)
-            .map_err(|err| JobErrorX::Terminal(ferr!("error parsing working prop json: {err}")))?;
+    let current_facet_json: daybook_types::doc::FacetRaw = serde_json::from_str(&current_facet_raw)
+        .map_err(|err| JobErrorX::Terminal(ferr!("error parsing working facet json: {err}")))?;
 
-    let current_note = WellKnownFacet::from_json(current_prop_json, WellKnownFacetTag::Note)
-        .map_err(|err| JobErrorX::Terminal(err.wrap_err("working prop is not a note facet")))?;
+    let current_note = WellKnownFacet::from_json(current_facet_json, WellKnownFacetTag::Note)
+        .map_err(|err| JobErrorX::Terminal(err.wrap_err("working facet is not a note facet")))?;
     let WellKnownFacet::Note(note) = current_note else {
-        return Err(JobErrorX::Terminal(ferr!("working prop is not note")));
+        return Err(JobErrorX::Terminal(ferr!("working facet is not note")));
     };
 
     let embed_result = mltools_embed::embed_text(&note.content)
@@ -113,16 +112,16 @@ fn embed_text(cx: WflowCtx) -> Result<(), JobErrorX> {
     );
 
     cx.effect(|| {
-        let new_prop: daybook_types::doc::FacetRaw =
+        let new_facet: daybook_types::doc::FacetRaw =
             WellKnownFacet::Note(daybook_types::doc::Note {
                 mime: "text/plain".to_string(),
                 content: preview_text.clone(),
             })
             .into();
 
-        let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
-        working_prop_token
-            .update(&new_prop)
+        let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
+        working_facet_token
+            .update(&new_facet)
             .wrap_err("error updating note with embedding preview")
             .map_err(JobErrorX::Terminal)?;
 
@@ -133,51 +132,51 @@ fn embed_text(cx: WflowCtx) -> Result<(), JobErrorX> {
 }
 
 fn ocr_image(cx: WflowCtx) -> Result<(), JobErrorX> {
+    use crate::wit::townframe::daybook::facet_routine;
     use crate::wit::townframe::daybook::mltools_ocr;
-    use crate::wit::townframe::daybook::prop_routine;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
-    let args = prop_routine::get_args();
+    let args = facet_routine::get_args();
 
-    let working_prop_token = args
-        .rw_prop_tokens
+    let working_facet_token = args
+        .rw_facet_tokens
         .into_iter()
-        .find(|(key, _)| key == &args.prop_key)
+        .find(|(key, _)| key == &args.facet_key)
         .map(|(_, token)| token)
         .ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
-                "working prop key '{}' not found in rw_prop_tokens",
-                args.prop_key
+                "working facet key '{}' not found in rw_facet_tokens",
+                args.facet_key
             ))
         })?;
 
-    let blob_prop_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Blob).to_string();
-    let blob_prop_token = args
-        .ro_prop_tokens
+    let blob_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Blob).to_string();
+    let blob_facet_token = args
+        .ro_facet_tokens
         .into_iter()
-        .find(|(key, _)| key == &blob_prop_key)
+        .find(|(key, _)| key == &blob_facet_key)
         .map(|(_, token)| token)
         .ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
-                "blob prop key '{}' not found in ro_prop_tokens",
-                blob_prop_key
+                "blob facet key '{}' not found in ro_facet_tokens",
+                blob_facet_key
             ))
         })?;
 
-    let ocr_result = mltools_ocr::ocr_image(blob_prop_token)
+    let ocr_result = mltools_ocr::ocr_image(blob_facet_token)
         .map_err(|err| JobErrorX::Terminal(ferr!("error running OCR: {err}")))?;
 
     cx.effect(|| {
-        let new_prop: daybook_types::doc::FacetRaw =
+        let new_facet: daybook_types::doc::FacetRaw =
             WellKnownFacet::Note(daybook_types::doc::Note {
                 mime: "text/plain".to_string(),
                 content: ocr_result.text.clone(),
             })
             .into();
 
-        let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
-        working_prop_token
-            .update(&new_prop)
+        let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
+        working_facet_token
+            .update(&new_facet)
             .wrap_err("error updating note with OCR result")
             .map_err(JobErrorX::Terminal)?;
 
@@ -188,19 +187,19 @@ fn ocr_image(cx: WflowCtx) -> Result<(), JobErrorX> {
 }
 
 fn test_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
-    use crate::wit::townframe::daybook::prop_routine;
-    let args = prop_routine::get_args();
+    use crate::wit::townframe::daybook::facet_routine;
+    let args = facet_routine::get_args();
 
-    // Find the working prop token (the one with write access matching prop_key)
-    let working_prop_token = args
-        .rw_prop_tokens
+    // Find the working facet token (the one with write access matching facet_key)
+    let working_facet_token = args
+        .rw_facet_tokens
         .iter()
-        .find(|(key, _)| key == &args.prop_key)
+        .find(|(key, _)| key == &args.facet_key)
         .map(|(_, token)| token)
         .ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
-                "working prop key '{}' not found in rw_prop_tokens",
-                args.prop_key
+                "working facet key '{}' not found in rw_facet_tokens",
+                args.facet_key
             ))
         })?;
 
@@ -209,12 +208,12 @@ fn test_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
     use daybook_types::doc::WellKnownFacet;
 
     cx.effect(|| {
-        let new_prop: daybook_types::doc::FacetRaw =
+        let new_facet: daybook_types::doc::FacetRaw =
             WellKnownFacet::LabelGeneric("test_label".into()).into();
-        let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
-        working_prop_token
-            .update(&new_prop)
-            .wrap_err("error updating prop")
+        let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
+        working_facet_token
+            .update(&new_facet)
+            .wrap_err("error updating facet")
             .map_err(JobErrorX::Terminal)?;
         Ok(Json(()))
     })?;
@@ -224,20 +223,20 @@ fn test_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
 
 fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::drawer;
-    use crate::wit::townframe::daybook::prop_routine;
+    use crate::wit::townframe::daybook::facet_routine;
 
-    let args = prop_routine::get_args();
+    let args = facet_routine::get_args();
 
-    // Find the working prop token (the one with write access matching prop_key)
-    let working_prop_token = args
-        .rw_prop_tokens
+    // Find the working facet token (the one with write access matching facet_key)
+    let working_facet_token = args
+        .rw_facet_tokens
         .iter()
-        .find(|(key, _)| key == &args.prop_key)
+        .find(|(key, _)| key == &args.facet_key)
         .map(|(_, token)| token)
         .ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
-                "working prop key '{}' not found in rw_prop_tokens",
-                args.prop_key
+                "working facet key '{}' not found in rw_facet_tokens",
+                args.facet_key
             ))
         })?;
 
@@ -249,7 +248,7 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
     // Use root types since Doc uses root types (not WIT types)
     use daybook_types::doc::{Note, WellKnownFacet, WellKnownFacetTag};
     let content_text = match doc
-        .props
+        .facets
         .iter()
         .find(|(key, _)| key == &WellKnownFacetTag::Note.to_string())
         .map(|(_, val)| {
@@ -259,7 +258,7 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
         Some(Ok(_)) => unreachable!(),
         Some(Err(err)) => {
             return Err(JobErrorX::Terminal(
-                err.wrap_err("unable to parse prop found on doc"),
+                err.wrap_err("unable to parse facet found on doc"),
             ))
         }
         None => {
@@ -298,11 +297,12 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
     let new_labels = vec![llm_response.clone()];
 
     cx.effect(|| {
-        let new_prop: daybook_types::doc::FacetRaw = WellKnownFacet::PseudoLabel(new_labels).into();
-        let new_prop = serde_json::to_string(&new_prop).expect(ERROR_JSON);
-        working_prop_token
-            .update(&new_prop)
-            .wrap_err("error updating prop")
+        let new_facet: daybook_types::doc::FacetRaw =
+            WellKnownFacet::PseudoLabel(new_labels).into();
+        let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
+        working_facet_token
+            .update(&new_facet)
+            .wrap_err("error updating facet")
             .map_err(JobErrorX::Terminal)?;
         Ok(Json(()))
     })?;

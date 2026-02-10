@@ -36,7 +36,7 @@ pub struct UpdateDocBatchErrV2 {
 
 #[derive(Debug, Clone, PartialEq, Reconcile, Hydrate)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct PropBlameV2 {
+pub struct FacetBlame {
     pub heads: ChangeHashSet,
 }
 
@@ -44,7 +44,7 @@ pub struct PropBlameV2 {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DocEntry {
     pub branches: HashMap<String, ChangeHashSet>,
-    pub prop_blames: HashMap<String, PropBlameV2>,
+    pub facet_blames: HashMap<String, FacetBlame>,
     // Mapping from ActorId string to UserMeta
     pub users: HashMap<String, UserMeta>,
     // WARN: field ordering is imporant here, we want reconciliation

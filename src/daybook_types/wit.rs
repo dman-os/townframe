@@ -33,7 +33,7 @@ pub mod doc {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub enum WellKnownProp {
+    pub enum WellKnownFacet {
         RefGeneric(DocId),
         LabelGeneric(String),
         PseudoLabel(Vec<String>),
@@ -46,26 +46,26 @@ pub mod doc {
         Blob(Blob),
     }
 
-    pub type DocProp = String;
+    pub type DocFacet = String;
 
-    pub fn doc_prop_from(value: &root_doc::FacetRaw) -> DocProp {
+    pub fn facet_from(value: &root_doc::FacetRaw) -> DocFacet {
         serde_json::to_string(&value).expect(ERROR_JSON)
     }
-    pub fn doc_prop_into(value: &str) -> serde_json::Result<root_doc::FacetRaw> {
+    pub fn facet_into(value: &str) -> serde_json::Result<root_doc::FacetRaw> {
         serde_json::from_str(value)
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Doc {
         pub id: DocId,
-        pub facets: Vec<(String, DocProp)>,
+        pub facets: Vec<(String, DocFacet)>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct DocPatch {
         pub id: DocId,
-        pub facets_set: Vec<(String, DocProp)>,
+        pub facets_set: Vec<(String, DocFacet)>,
         pub facets_remove: Vec<String>,
         pub user_path: Option<String>,
     }
@@ -85,7 +85,7 @@ pub mod doc {
                 facets_set: val
                     .facets_set
                     .into_iter()
-                    .map(|(key, val)| (key.to_string(), doc_prop_from(&val)))
+                    .map(|(key, val)| (key.to_string(), facet_from(&val)))
                     .collect(),
                 facets_remove: val
                     .facets_remove
@@ -106,7 +106,7 @@ pub mod doc {
                 facets_set: val
                     .facets_set
                     .into_iter()
-                    .map(|(key, val)| Ok((FacetKey::from(&key), doc_prop_into(&val)?)))
+                    .map(|(key, val)| Ok((FacetKey::from(&key), facet_into(&val)?)))
                     .collect::<Result<_, _>>()?,
                 facets_remove: val
                     .facets_remove
@@ -118,7 +118,7 @@ pub mod doc {
         }
     }
 
-    impl From<root_doc::WellKnownFacet> for WellKnownProp {
+    impl From<root_doc::WellKnownFacet> for WellKnownFacet {
         fn from(val: root_doc::WellKnownFacet) -> Self {
             match val {
                 root_doc::WellKnownFacet::RefGeneric(val) => Self::RefGeneric(val),
@@ -169,21 +169,21 @@ pub mod doc {
         }
     }
 
-    impl TryFrom<WellKnownProp> for root_doc::WellKnownFacet {
+    impl TryFrom<WellKnownFacet> for root_doc::WellKnownFacet {
         type Error = uuid::Error;
 
-        fn try_from(val: WellKnownProp) -> Result<Self, Self::Error> {
+        fn try_from(val: WellKnownFacet) -> Result<Self, Self::Error> {
             Ok(match val {
-                WellKnownProp::RefGeneric(val) => Self::RefGeneric(val),
-                WellKnownProp::LabelGeneric(val) => Self::LabelGeneric(val),
-                WellKnownProp::PseudoLabel(val) => Self::PseudoLabel(val),
-                WellKnownProp::TitleGeneric(val) => Self::TitleGeneric(val),
-                WellKnownProp::PathGeneric(val) => Self::PathGeneric(val.into()),
-                WellKnownProp::ImageMetadata(val) => Self::ImageMetadata(val),
-                WellKnownProp::Pending(val) => Self::Pending(crate::doc::Pending {
+                WellKnownFacet::RefGeneric(val) => Self::RefGeneric(val),
+                WellKnownFacet::LabelGeneric(val) => Self::LabelGeneric(val),
+                WellKnownFacet::PseudoLabel(val) => Self::PseudoLabel(val),
+                WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
+                WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val.into()),
+                WellKnownFacet::ImageMetadata(val) => Self::ImageMetadata(val),
+                WellKnownFacet::Pending(val) => Self::Pending(crate::doc::Pending {
                     key: val.key.into(),
                 }),
-                WellKnownProp::Dmeta(dmeta) => Self::Dmeta(root_doc::Dmeta {
+                WellKnownFacet::Dmeta(dmeta) => Self::Dmeta(root_doc::Dmeta {
                     id: dmeta.id,
                     created_at: dmeta.created_at.into(),
                     updated_at: dmeta.updated_at.into_iter().map(Into::into).collect(),
@@ -215,11 +215,11 @@ pub mod doc {
                         })
                         .collect::<Result<_, uuid::Error>>()?,
                 }),
-                WellKnownProp::Note(note) => Self::Note(root_doc::Note {
+                WellKnownFacet::Note(note) => Self::Note(root_doc::Note {
                     mime: note.mime,
                     content: note.content,
                 }),
-                WellKnownProp::Blob(blob) => Self::Blob(blob),
+                WellKnownFacet::Blob(blob) => Self::Blob(blob),
             })
         }
     }
@@ -230,7 +230,7 @@ pub mod doc {
                 id,
                 facets: facets
                     .into_iter()
-                    .map(|(key, val)| (key.to_string(), doc_prop_from(&val)))
+                    .map(|(key, val)| (key.to_string(), facet_from(&val)))
                     .collect(),
             }
         }
@@ -245,7 +245,7 @@ pub mod doc {
                 facets: val
                     .facets
                     .into_iter()
-                    .map(|(key, val)| Ok((FacetKey::from(&key), doc_prop_into(&val)?)))
+                    .map(|(key, val)| Ok((FacetKey::from(&key), facet_into(&val)?)))
                     .collect::<Result<_, _>>()?,
             })
         }

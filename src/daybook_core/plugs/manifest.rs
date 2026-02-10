@@ -8,7 +8,7 @@ pub static USERNAME_REGEX: LazyLock<regex::Regex> =
 pub fn is_domain_name(value: &str, _context: &()) -> garde::Result {
     if let Err(err) = addr::parse_domain_name(value) {
         return Err(garde::Error::new(format!(
-            "error parsing prop tag \"{value}\": {err}"
+            "error parsing facet tag \"{value}\": {err}"
         )));
     }
     Ok(())
@@ -18,9 +18,9 @@ pub fn is_domain_name(value: &str, _context: &()) -> garde::Result {
 #[serde(transparent)]
 #[garde(transparent)]
 #[repr(transparent)]
-pub struct PropTag(#[garde(custom(is_domain_name))] pub String);
+pub struct FacetTag(#[garde(custom(is_domain_name))] pub String);
 
-impl<T> From<T> for PropTag
+impl<T> From<T> for FacetTag
 where
     T: Into<String>,
 {
@@ -29,13 +29,13 @@ where
     }
 }
 
-impl std::fmt::Display for PropTag {
+impl std::fmt::Display for FacetTag {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(fmt, "{}", self.0)
     }
 }
 
-impl std::ops::Deref for PropTag {
+impl std::ops::Deref for FacetTag {
     type Target = String;
 
     fn deref(&self) -> &Self::Target {
@@ -103,7 +103,7 @@ pub struct PlugManifest {
     #[garde(length(min = 1))]
     pub desc: String,
     #[garde(dive)]
-    pub props: Vec<PropKeyManifest>,
+    pub facets: Vec<FacetKeyManifest>,
     // plugin_id: ->
     #[garde(dive)]
     pub dependencies: HashMap<String, Arc<PlugDependencyManifest>>,
@@ -125,29 +125,29 @@ impl PlugManifest {
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct PropKeyManifest {
+pub struct FacetKeyManifest {
     /// Must be reverse domain notation
     #[garde(dive)]
-    pub key_tag: PropTag,
+    pub key_tag: FacetTag,
     #[garde(skip)]
     pub value_schema: schemars::Schema,
     #[garde(dive)]
     #[serde(default)]
-    pub display_config: PropKeyDisplayHint,
+    pub display_config: FacetKeyDisplayHint,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PlugDependencyManifest {
     #[garde(dive)]
-    pub keys: Vec<PropKeyDependencyManifest>,
+    pub keys: Vec<FacetKeyDependencyManifest>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct PropKeyDependencyManifest {
+pub struct FacetKeyDependencyManifest {
     #[garde(dive)]
-    pub key_tag: PropTag,
+    pub key_tag: FacetTag,
     #[garde(skip)]
     pub value_schema: schemars::Schema,
 }
@@ -155,7 +155,7 @@ pub struct PropKeyDependencyManifest {
 #[derive(Debug, Serialize, Deserialize, Default, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct PropKeyDisplayHint {
+pub struct FacetKeyDisplayHint {
     #[serde(default)]
     #[garde(skip)]
     pub always_visible: bool,
@@ -164,17 +164,17 @@ pub struct PropKeyDisplayHint {
     pub display_title: Option<String>,
     #[serde(default)]
     #[garde(skip)]
-    pub deets: PropKeyDisplayDeets,
+    pub deets: FacetKeyDisplayDeets,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, Reconcile, Hydrate, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum PropKeyDisplayDeets {
+pub enum FacetKeyDisplayDeets {
     #[default]
     DebugPrint,
     DateTime {
-        display_type: DateTimePropDisplayType,
+        display_type: DateTimeFacetDisplayType,
     },
     UnixPath,
     Title {
@@ -185,7 +185,7 @@ pub enum PropKeyDisplayDeets {
 #[derive(Debug, Clone, Serialize, Default, Deserialize, Reconcile, Hydrate, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum DateTimePropDisplayType {
+pub enum DateTimeFacetDisplayType {
     #[default]
     TimeAndDate,
     Relative,
@@ -210,22 +210,22 @@ pub struct RoutineManifest {
     #[garde(dive)]
     pub deets: RoutineManifestDeets,
     #[garde(dive)]
-    pub prop_acl: Vec<RoutinePropAccess>,
+    pub facet_acl: Vec<RoutineFacetAccess>,
 }
 
 impl RoutineManifest {
     /// Read set for short-circuit: tag-level (any id) and key-level (tag+id when key_id is set).
     /// Returns (read_tags, read_keys). Predicates/triage match by tag; when key_id is set, match by full key.
-    pub fn read_prop_set(
+    pub fn read_facet_set(
         &self,
     ) -> (
         std::collections::HashSet<String>,
         std::collections::HashSet<daybook_types::doc::FacetKey>,
     ) {
-        use daybook_types::doc::{FacetKey, FacetTag, DEFAULT_FACET_ID};
+        use daybook_types::doc::{FacetKey, FacetTag};
         let mut read_tags = std::collections::HashSet::new();
         let mut read_keys = std::collections::HashSet::new();
-        for access in &self.prop_acl {
+        for access in &self.facet_acl {
             if !access.read {
                 continue;
             }
@@ -239,8 +239,8 @@ impl RoutineManifest {
                 read_tags.insert(access.tag.0.clone());
             }
         }
-        if let RoutineManifestDeets::DocProp { working_prop_tag } = &self.deets {
-            read_tags.insert(working_prop_tag.0.clone());
+        if let RoutineManifestDeets::DocFacet { working_facet_tag } = &self.deets {
+            read_tags.insert(working_facet_tag.0.clone());
         }
         (read_tags, read_keys)
     }
@@ -265,10 +265,10 @@ pub enum RoutineManifestDeets {
     /// FIXME: remove this branch?
     DocInvoke {},
     /// Routine that is invoked when with ro access
-    /// to doc but rw access on prop.
-    DocProp {
+    /// to doc but rw access on facet.
+    DocFacet {
         #[garde(dive)]
-        working_prop_tag: PropTag,
+        working_facet_tag: FacetTag,
     },
     // DocCollator { predicate },
     // DocPropCollator { predicate },
@@ -276,9 +276,9 @@ pub enum RoutineManifestDeets {
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct RoutinePropAccess {
+pub struct RoutineFacetAccess {
     #[garde(dive)]
-    pub tag: PropTag,
+    pub tag: FacetTag,
     /// When set, access is to this tag+id only; when absent, access is to any facet with this tag.
     #[serde(default)]
     #[garde(skip)]
@@ -339,7 +339,7 @@ pub enum ProcessorDeets {
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum DocPredicateClause {
-    HasTag(#[garde(dive)] PropTag),
+    HasTag(#[garde(dive)] FacetTag),
     Or(#[garde(dive)] Vec<Self>),
     And(#[garde(dive)] Vec<Self>),
     Not(#[garde(dive)] Box<Self>),
@@ -356,13 +356,13 @@ impl DocPredicateClause {
     }
 
     /// Collect all PropTags referenced by this predicate (for HasTag, the tag; for And/Or/Not, union from sub-clauses).
-    pub fn referenced_tags(&self) -> std::collections::HashSet<PropTag> {
+    pub fn referenced_tags(&self) -> std::collections::HashSet<FacetTag> {
         let mut out = std::collections::HashSet::new();
         self.collect_referenced_tags(&mut out);
         out
     }
 
-    fn collect_referenced_tags(&self, out: &mut std::collections::HashSet<PropTag>) {
+    fn collect_referenced_tags(&self, out: &mut std::collections::HashSet<FacetTag>) {
         match self {
             Self::HasTag(tag) => {
                 out.insert(tag.clone());

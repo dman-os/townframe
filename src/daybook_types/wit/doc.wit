@@ -32,7 +32,7 @@ interface doc {
         key: string
     }
 
-    variant well-known-prop {
+    variant well-known-facet {
         ref-generic(doc-ref), 
         label-generic(string), 
         pseudo-label(list<string>), 
@@ -62,13 +62,13 @@ interface doc {
     }
     record doc {
         id: doc-id,
-        props: list<tuple<string, facet-raw>>,
+        facets: list<tuple<string, facet-raw>>,
     }
 
     record doc-patch {
         id: doc-id,
-        props-set: list<tuple<string, facet-raw>>,
-        props-remove: list<string>,
+        facets-set: list<tuple<string, facet-raw>>,
+        facets-remove: list<string>,
         user-path: option<string>,
     }
 
