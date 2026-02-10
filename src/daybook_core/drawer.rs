@@ -1533,6 +1533,58 @@ impl DrawerRepo {
             .await
     }
 
+    /// Returns the set of facet keys present for the doc at the given heads, without hydrating facet values.
+    pub async fn facet_keys_at_heads(
+        &self,
+        doc_id: &DocId,
+        heads: &ChangeHashSet,
+    ) -> Res<Option<HashSet<FacetKey>>> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let Some(handle) = self.get_handle(doc_id).await? else {
+            return Ok(None);
+        };
+        let keys = handle.with_document(|am_doc| {
+            let view: automerge::Automerge = am_doc.fork_at(heads)?;
+            let facets_obj = match view.get(automerge::ROOT, "facets")? {
+                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                _ => return Ok::<HashSet<FacetKey>, eyre::Report>(HashSet::new()),
+            };
+            let mut out = HashSet::new();
+            for item in view.map_range(&facets_obj, ..) {
+                let key_str = item.key.to_string();
+                out.insert(FacetKey::from(key_str.as_str()));
+            }
+            Ok(out)
+        })?;
+        Ok(Some(keys))
+    }
+
+    /// Like get_if_latest but returns only facet keys (no facet values). Returns None if branch heads are stale.
+    pub async fn get_facet_keys_if_latest(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+        heads: &ChangeHashSet,
+        drawer_heads: &ChangeHashSet,
+    ) -> Res<Option<HashSet<FacetKey>>> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let entry = self.get_entry_at_heads(doc_id, drawer_heads).await?;
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+        let branch_name = branch_path.to_string_lossy().to_string();
+        if let Some(latest_heads) = entry.branches.get(&branch_name) {
+            if latest_heads == heads {
+                return self.facet_keys_at_heads(doc_id, heads).await;
+            }
+        }
+        Ok(None)
+    }
+
     pub async fn update_batch(
         &self,
         patches: Vec<UpdateDocArgsV2>,

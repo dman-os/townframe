@@ -8,7 +8,7 @@ use daybook_types::doc::BranchPath;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacetTag};
 
 use crate::plugs::manifest::{
-    DocPredicateClause, KeyGeneric, ProcessorDeets, RoutineManifestDeets,
+    KeyGeneric, ProcessorDeets, ProcessorManifest, RoutineManifest, RoutineManifestDeets,
 };
 pub use wflow::{PartitionLogIngress, WflowIngress};
 
@@ -165,6 +165,8 @@ pub async fn spawn_doc_triage_worker(
                 store,
                 rt,
                 cached_processors: Vec::new(),
+                triage_read_tags: HashSet::new(),
+                triage_read_keys: HashSet::new(),
             };
             worker.refresh_processors().await?;
 
@@ -217,20 +219,39 @@ pub async fn spawn_doc_triage_worker(
 struct PreparedProcessor {
     plug_id: String,
     routine_name: KeyGeneric,
-    predicate: DocPredicateClause,
-    routine_deets: RoutineManifestDeets,
+    processor_manifest: Arc<ProcessorManifest>,
+    routine_manifest: Arc<RoutineManifest>,
+    /// Tag-level: any facet with this tag counts as read.
+    read_tags: HashSet<String>,
+    /// Key-level: only this tag+id counts as read.
+    read_keys: HashSet<FacetKey>,
 }
 
 struct DocTriageWorker {
     rt: Arc<Rt>,
     store: crate::stores::StoreHandle<DocTriageWorkerStateStore>,
     cached_processors: Vec<PreparedProcessor>,
+    triage_read_tags: HashSet<String>,
+    triage_read_keys: HashSet<FacetKey>,
+}
+
+/// Returns true if any changed key matches this processor's read set (by tag or by full key).
+fn changed_intersects_read_set(
+    changed: &HashSet<FacetKey>,
+    read_tags: &HashSet<String>,
+    read_keys: &HashSet<FacetKey>,
+) -> bool {
+    changed
+        .iter()
+        .any(|key| read_tags.contains(&key.tag.to_string()) || read_keys.contains(key))
 }
 
 impl DocTriageWorker {
     async fn refresh_processors(&mut self) -> Res<()> {
         let plugs = self.rt.plugs_repo.list_plugs().await;
         let mut cached = Vec::new();
+        let mut triage_read_tags = HashSet::new();
+        let mut triage_read_keys = HashSet::new();
         for plug in plugs {
             let plug_id = plug.id();
             for processor in plug.processors.values() {
@@ -247,17 +268,33 @@ impl DocTriageWorker {
                             )
                         })?;
 
+                        let mut read_tags: HashSet<String> = predicate
+                            .referenced_tags()
+                            .iter()
+                            .map(|tag| tag.0.clone())
+                            .collect();
+                        let mut read_keys: HashSet<FacetKey> = HashSet::new();
+                        let (acl_tags, acl_keys) = routine.read_prop_set();
+                        read_tags.extend(acl_tags);
+                        read_keys.extend(acl_keys);
+                        triage_read_tags.extend(read_tags.iter().cloned());
+                        triage_read_keys.extend(read_keys.iter().cloned());
+
                         cached.push(PreparedProcessor {
                             plug_id: plug_id.clone(),
                             routine_name: routine_name.clone(),
-                            predicate: predicate.clone(),
-                            routine_deets: routine.deets.clone(),
+                            processor_manifest: Arc::clone(processor),
+                            routine_manifest: Arc::clone(routine),
+                            read_tags,
+                            read_keys,
                         });
                     }
                 }
             }
         }
         self.cached_processors = cached;
+        self.triage_read_tags = triage_read_tags;
+        self.triage_read_keys = triage_read_keys;
         Ok(())
     }
 
@@ -346,25 +383,53 @@ impl DocTriageWorker {
                     return Ok(());
                 }
 
+                let changed_facet_keys_set: HashSet<FacetKey> =
+                    changed_facet_keys.iter().cloned().collect();
+                // Global early-out: no processor's read set changed (by tag or by key).
+                if !changed_intersects_read_set(
+                    &changed_facet_keys_set,
+                    &self.triage_read_tags,
+                    &self.triage_read_keys,
+                ) {
+                    self.store
+                        .mutate_sync(|store| {
+                            store.drawer_heads = Some(drawer_heads.clone());
+                        })
+                        .await?;
+                    return Ok(());
+                }
+
                 for (branch_name, heads) in &entry.branches {
                     let branch_path = daybook_types::doc::BranchPath::from(branch_name.as_str());
-                    // Skip temporary staging branches
                     if branch_path.to_string_lossy().starts_with("/tmp/") {
                         continue;
                     }
-                    // Use get_if_latest to avoid work on stale headss
-                    if let Some(doc) = self
+                    let Some(facet_keys_set) = self
                         .rt
                         .drawer
-                        .get_if_latest(id, &branch_path, heads, None)
+                        .get_facet_keys_if_latest(id, &branch_path, heads, drawer_heads)
                         .await?
-                    {
-                        self.triage(id, heads, &doc, branch_path)
-                            .await
-                            .wrap_err("error triaging doc")?;
-                    } else {
+                    else {
                         debug!(?id, ?branch_path, "skipping triage for stale heads");
-                    }
+                        continue;
+                    };
+                    let facets: HashMap<FacetKey, daybook_types::doc::FacetRaw> = facet_keys_set
+                        .iter()
+                        .map(|key| (key.clone(), serde_json::Value::Null))
+                        .collect();
+                    let meta_doc = Doc {
+                        id: id.clone(),
+                        facets,
+                    };
+                    self.triage(
+                        id,
+                        heads,
+                        &meta_doc,
+                        branch_path,
+                        Some(&changed_facet_keys_set),
+                    )
+                    .await
+                    .wrap_err("error triaging doc")?;
                 }
 
                 self.store
@@ -388,21 +453,28 @@ impl DocTriageWorker {
                 for (branch_name, heads) in &entry.branches {
                     let branch_path: BranchPath =
                         daybook_types::doc::BranchPath::from(branch_name.as_str());
-                    // Skip temporary staging branches
                     if branch_path.to_string_lossy().starts_with("/tmp/") {
                         continue;
                     }
-                    // Use get_if_latest even for added docs, although they're usually latest
-                    if let Some(doc) = self
+                    let Some(facet_keys_set) = self
                         .rt
                         .drawer
-                        .get_if_latest(id, &branch_path, heads, None)
+                        .get_facet_keys_if_latest(id, &branch_path, heads, drawer_heads)
                         .await?
-                    {
-                        self.triage(id, heads, &doc, branch_path)
-                            .await
-                            .wrap_err("error triaging doc")?;
-                    }
+                    else {
+                        continue;
+                    };
+                    let facets: HashMap<FacetKey, daybook_types::doc::FacetRaw> = facet_keys_set
+                        .iter()
+                        .map(|key| (key.clone(), serde_json::Value::Null))
+                        .collect();
+                    let meta_doc = Doc {
+                        id: id.clone(),
+                        facets,
+                    };
+                    self.triage(id, heads, &meta_doc, branch_path, None)
+                        .await
+                        .wrap_err("error triaging doc")?;
                 }
                 self.store
                     .mutate_sync(|store| {
@@ -421,6 +493,7 @@ impl DocTriageWorker {
         doc_heads: &ChangeHashSet,
         doc: &Doc,
         branch_path: daybook_types::doc::BranchPath,
+        changed_facet_keys: Option<&HashSet<FacetKey>>,
     ) -> Res<()> {
         debug!(
             processor_count = self.cached_processors.len(),
@@ -428,7 +501,16 @@ impl DocTriageWorker {
         );
 
         for processor in &self.cached_processors {
-            let matches = processor.predicate.matches(doc);
+            if let Some(changed) = changed_facet_keys {
+                if !changed_intersects_read_set(changed, &processor.read_tags, &processor.read_keys)
+                {
+                    continue;
+                }
+            }
+            let predicate = match &processor.processor_manifest.deets {
+                ProcessorDeets::DocProcessor { predicate, .. } => predicate,
+            };
+            let matches = predicate.matches(doc);
             if matches {
                 info!(
                     plug_id = %processor.plug_id,
@@ -437,7 +519,7 @@ impl DocTriageWorker {
                     "dispatching job"
                 );
 
-                let args = match &processor.routine_deets {
+                let args = match &processor.routine_manifest.deets {
                     RoutineManifestDeets::DocInvoke {} => DispatchArgs::DocInvoke {
                         doc_id: doc_id.clone(),
                         branch_path: branch_path.clone(),
@@ -495,7 +577,23 @@ impl DocTriageWorker {
 mod tests {
     use super::*;
     use crate::e2e::test_cx;
-    use daybook_types::doc::{AddDocArgs, WellKnownFacetTag};
+    use crate::rt::dispatch::ActiveDispatch;
+    use daybook_types::doc::{AddDocArgs, DocPatch, WellKnownFacetTag};
+
+    fn count_dispatches_with_wflow_key(
+        dispatches: &[(String, std::sync::Arc<ActiveDispatch>)],
+        key: &str,
+    ) -> usize {
+        dispatches
+            .iter()
+            .filter(|(_, d)| {
+                matches!(
+                    &d.deets,
+                    crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } if wflow_key == key
+                )
+            })
+            .count()
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_triage_worker_smoke() -> Res<()> {
@@ -538,6 +636,114 @@ mod tests {
         ctx.rt
             .wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(90))
             .await?;
+
+        ctx.stop().await?;
+        Ok(())
+    }
+
+    /// Global early-out: when only facets outside any processor's read set change, triage does not load the doc or schedule any processor.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_triage_skip_when_no_processor_read_set_changed() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let ctx = test_cx("triage_skip_unrelated").await?;
+
+        let doc_id = ctx
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: daybook_types::doc::BranchPath::from("main"),
+                facets: [(
+                    WellKnownFacetTag::Note.into(),
+                    daybook_types::doc::WellKnownFacet::Note("Hello world".into()).into(),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        // Wait for test-label dispatch from the add
+        for _ in 0..300 {
+            let dispatches = ctx.dispatch_repo.list().await;
+            if count_dispatches_with_wflow_key(&dispatches, "test-label") >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        let dispatches_before = ctx.dispatch_repo.list().await;
+        let test_label_count_before =
+            count_dispatches_with_wflow_key(&dispatches_before, "test-label");
+
+        // Update only Title (no processor in default plugs has Title in read set for triage)
+        ctx.drawer_repo
+            .update_at_heads(
+                DocPatch {
+                    id: doc_id.clone(),
+                    facets_set: [(
+                        WellKnownFacetTag::TitleGeneric.into(),
+                        daybook_types::doc::WellKnownFacet::TitleGeneric("A title".into()).into(),
+                    )]
+                    .into(),
+                    facets_remove: vec![],
+                    user_path: None,
+                },
+                daybook_types::doc::BranchPath::from("main"),
+                None,
+            )
+            .await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+        let dispatches_after = ctx.dispatch_repo.list().await;
+        let test_label_count_after =
+            count_dispatches_with_wflow_key(&dispatches_after, "test-label");
+
+        assert_eq!(
+            test_label_count_before, test_label_count_after,
+            "triage should skip when only unrelated facet (Title) changed; test-label count should not increase"
+        );
+
+        ctx.stop().await?;
+        Ok(())
+    }
+
+    /// DocAdded still triggers triage using facet-key view (no full doc load).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_triage_doc_added_facet_key_matching() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let ctx = test_cx("triage_doc_added").await?;
+
+        let _doc_id = ctx
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: daybook_types::doc::BranchPath::from("main"),
+                facets: [(
+                    WellKnownFacetTag::Note.into(),
+                    daybook_types::doc::WellKnownFacet::Note("Hi".into()).into(),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        let mut dispatch_id: Option<String> = None;
+        for _ in 0..300 {
+            let dispatches = ctx.dispatch_repo.list().await;
+            if let Some((id, _)) = dispatches.iter().find(|(_, d)| {
+                matches!(
+                    &d.deets,
+                    crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } if wflow_key == "test-label"
+                )
+            }) {
+                dispatch_id = Some(id.clone());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        assert!(
+            dispatch_id.is_some(),
+            "DocAdded with Note should trigger test-label via facet-key matching"
+        );
 
         ctx.stop().await?;
         Ok(())

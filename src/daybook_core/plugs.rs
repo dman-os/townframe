@@ -114,11 +114,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         prop_acl: vec![
                             RoutinePropAccess {
                                 tag: WellKnownFacetTag::Note.into(),
+                                key_id: None,
                                 read: true,
                                 write: false,
                             },
                             RoutinePropAccess {
                                 tag: WellKnownFacetTag::PseudoLabel.into(),
+                                key_id: None,
                                 read: true,
                                 write: true,
                             },
@@ -139,11 +141,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         prop_acl: vec![
                             RoutinePropAccess {
                                 tag: WellKnownFacetTag::Blob.into(),
+                                key_id: None,
                                 read: true,
                                 write: false,
                             },
                             RoutinePropAccess {
                                 tag: WellKnownFacetTag::Note.into(),
+                                key_id: None,
                                 read: true,
                                 write: true,
                             },
@@ -163,6 +167,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         prop_acl: vec![RoutinePropAccess {
                             tag: WellKnownFacetTag::Note.into(),
+                            key_id: None,
                             read: true,
                             write: true,
                         }],
@@ -182,6 +187,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         prop_acl: vec![RoutinePropAccess {
                             tag: WellKnownFacetTag::LabelGeneric.into(),
+                            key_id: None,
                             read: true,
                             write: true,
                         }],

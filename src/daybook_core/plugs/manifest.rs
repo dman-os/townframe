@@ -213,6 +213,39 @@ pub struct RoutineManifest {
     pub prop_acl: Vec<RoutinePropAccess>,
 }
 
+impl RoutineManifest {
+    /// Read set for short-circuit: tag-level (any id) and key-level (tag+id when key_id is set).
+    /// Returns (read_tags, read_keys). Predicates/triage match by tag; when key_id is set, match by full key.
+    pub fn read_prop_set(
+        &self,
+    ) -> (
+        std::collections::HashSet<String>,
+        std::collections::HashSet<daybook_types::doc::FacetKey>,
+    ) {
+        use daybook_types::doc::{FacetKey, FacetTag, DEFAULT_FACET_ID};
+        let mut read_tags = std::collections::HashSet::new();
+        let mut read_keys = std::collections::HashSet::new();
+        for access in &self.prop_acl {
+            if !access.read {
+                continue;
+            }
+            let tag_str = access.tag.0.as_str();
+            if let Some(ref id) = access.key_id {
+                read_keys.insert(FacetKey {
+                    tag: FacetTag::from(tag_str),
+                    id: id.clone(),
+                });
+            } else {
+                read_tags.insert(access.tag.0.clone());
+            }
+        }
+        if let RoutineManifestDeets::DocProp { working_prop_tag } = &self.deets {
+            read_tags.insert(working_prop_tag.0.clone());
+        }
+        (read_tags, read_keys)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum RoutineImpl {
@@ -246,6 +279,10 @@ pub enum RoutineManifestDeets {
 pub struct RoutinePropAccess {
     #[garde(dive)]
     pub tag: PropTag,
+    /// When set, access is to this tag+id only; when absent, access is to any facet with this tag.
+    #[serde(default)]
+    #[garde(skip)]
+    pub key_id: Option<String>,
     #[serde(default)]
     #[garde(skip)]
     pub read: bool,
@@ -315,6 +352,27 @@ impl DocPredicateClause {
             Self::Or(clauses) => clauses.iter().any(|clause| clause.matches(doc)),
             Self::And(clauses) => clauses.iter().all(|clause| clause.matches(doc)),
             Self::Not(clause) => !clause.matches(doc),
+        }
+    }
+
+    /// Collect all PropTags referenced by this predicate (for HasTag, the tag; for And/Or/Not, union from sub-clauses).
+    pub fn referenced_tags(&self) -> std::collections::HashSet<PropTag> {
+        let mut out = std::collections::HashSet::new();
+        self.collect_referenced_tags(&mut out);
+        out
+    }
+
+    fn collect_referenced_tags(&self, out: &mut std::collections::HashSet<PropTag>) {
+        match self {
+            Self::HasTag(tag) => {
+                out.insert(tag.clone());
+            }
+            Self::Or(clauses) | Self::And(clauses) => {
+                for clause in clauses {
+                    clause.collect_referenced_tags(out);
+                }
+            }
+            Self::Not(clause) => clause.collect_referenced_tags(out),
         }
     }
 }

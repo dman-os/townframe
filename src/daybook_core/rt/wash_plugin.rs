@@ -929,7 +929,14 @@ impl prop_routine::Host for SharedWashCtx {
         )> = Vec::new();
 
         for access in prop_acl {
-            let prop_key = FacetKey::from(daybook_types::doc::FacetTag::from(access.tag.0.clone()));
+            let prop_key = access
+                .key_id
+                .as_ref()
+                .map(|id| daybook_types::doc::FacetKey {
+                    tag: daybook_types::doc::FacetTag::from(access.tag.0.as_str()),
+                    id: id.clone(),
+                })
+                .unwrap_or_else(|| FacetKey::from(access.tag.0.as_str()));
             let prop_key_str = prop_key.to_string();
 
             if access.write {
