@@ -13,6 +13,13 @@ pub struct JobInitEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobCancelEvent {
+    pub job_id: Arc<str>,
+    pub timestamp: Timestamp,
+    pub reason: Arc<str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRunEvent {
     pub job_id: Arc<str>,
     pub timestamp: Timestamp,
@@ -29,6 +36,7 @@ pub enum JobRunResult {
     StepEffect(JobEffectResult),
     WorkerErr(JobRunWorkerError),
     WflowErr(JobError),
+    Aborted,
 }
 
 impl From<eyre::Report> for JobRunResult {

@@ -1,6 +1,8 @@
 use crate::interlude::*;
 
 #[cfg(test)]
+mod cancel_job;
+#[cfg(test)]
 mod fails_once;
 #[cfg(test)]
 mod fails_until_told;
@@ -287,6 +289,12 @@ impl WflowTestContext {
         self.ingress
             .add_job(job_id, wflow_key, args_json, None)
             .await
+    }
+
+    /// Request cancellation of a job
+    pub async fn cancel_job(&self, job_id: Arc<str>, reason: String) -> Res<u64> {
+        use crate::WflowIngress;
+        self.ingress.cancel_job(job_id, reason).await
     }
 
     /// Wait until there are no active jobs, with a timeout

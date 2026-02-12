@@ -13,7 +13,8 @@ use utils_rs::prelude::tokio::task::JoinHandle;
 use wflow_core::partition::{effects, log};
 
 use crate::partition::{
-    state::JobCounts, state::PartitionWorkingState, PartitionCtx, PartitionLogRef,
+    state::JobCounts, state::PartitionWorkingState, EffectCancelTokens, PartitionCtx,
+    PartitionLogRef,
 };
 use wflow_core::snapstore::SnapStore;
 
@@ -44,6 +45,7 @@ impl Drop for TokioPartitionReducerHandle {
 pub fn start_tokio_partition_reducer(
     pcx: PartitionCtx,
     state: Arc<PartitionWorkingState>,
+    effect_cancel_tokens: EffectCancelTokens,
     effect_tx: async_channel::Sender<effects::EffectId>,
     cancel_token: CancellationToken,
     snap_store: Arc<dyn SnapStore<Snapshot = Arc<[u8]>>>,
@@ -68,6 +70,7 @@ pub fn start_tokio_partition_reducer(
                 log: pcx.log_ref(),
                 pcx: pcx.clone(),
                 state,
+                effect_cancel_tokens,
                 new_effects: default(),
                 event_effects: default(),
                 effect_tx,
@@ -103,7 +106,24 @@ pub fn start_tokio_partition_reducer(
                 // there has to be a better way to configure this log approach
                 // to avoid such errors
                 if cur_entry_id == latest_entry_id_at_start {
+                    let effects_map = worker.state.read_effects().await;
                     for effect_id in pending_effects_at_start.drain(..) {
+                        let is_run_job = {
+                            effects_map
+                                .get(&effect_id)
+                                .map(|eff| {
+                                    matches!(eff.deets, effects::PartitionEffectDeets::RunJob(..))
+                                })
+                                .unwrap_or(false)
+                        };
+                        if is_run_job {
+                            let cancel_token = CancellationToken::new();
+                            worker
+                                .effect_cancel_tokens
+                                .lock()
+                                .await
+                                .insert(effect_id.clone(), cancel_token);
+                        }
                         info!(?effect_id, "rescheduling effect back after re-boot");
                         worker
                             .effect_tx
@@ -162,6 +182,7 @@ struct TokioPartitionReducer {
     pcx: PartitionCtx,
     log: PartitionLogRef,
     state: Arc<PartitionWorkingState>,
+    effect_cancel_tokens: EffectCancelTokens,
     new_effects: Vec<effects::EffectId>,
     event_effects: Vec<effects::PartitionEffect>,
     effect_tx: async_channel::Sender<effects::EffectId>,
@@ -181,7 +202,9 @@ impl TokioPartitionReducer {
             }
         }
         match entry {
-            log::PartitionLogEntry::JobEffectResult(..) | log::PartitionLogEntry::JobInit(..) => {
+            log::PartitionLogEntry::JobEffectResult(..)
+            | log::PartitionLogEntry::JobInit(..)
+            | log::PartitionLogEntry::JobCancel(..) => {
                 self.handle_job_event(entry_id, entry).await?;
             }
             log::PartitionLogEntry::JobPartitionEffects(effects) => {
@@ -243,6 +266,13 @@ impl TokioPartitionReducer {
                 entry_id,
                 effect_idx: ii as u64,
             };
+            if let effects::PartitionEffectDeets::RunJob(..) = &effect.deets {
+                let cancel_token = CancellationToken::new();
+                self.effect_cancel_tokens
+                    .lock()
+                    .await
+                    .insert(id.clone(), cancel_token);
+            }
             {
                 let mut effects_map = self.state.write_effects().await;
                 effects_map.insert(id.clone(), effect);
@@ -277,6 +307,13 @@ impl TokioPartitionReducer {
                         effects.remove(&evt.effect_id);
                     }
                     wflow_core::partition::reduce::reduce_job_run_event(
+                        &mut jobs,
+                        &mut self.event_effects,
+                        evt,
+                    )
+                }
+                log::PartitionLogEntry::JobCancel(evt) => {
+                    wflow_core::partition::reduce::reduce_job_cancel_event(
                         &mut jobs,
                         &mut self.event_effects,
                         evt,

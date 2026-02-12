@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use wflow_core::metastore;
-use wflow_core::partition::job_events::JobInitEvent;
+use wflow_core::partition::job_events::{JobCancelEvent, JobInitEvent};
 use wflow_core::partition::log::PartitionLogEntry;
 use wflow_tokio::partition::PartitionLogRef;
 
@@ -26,6 +26,9 @@ pub trait WflowIngress: Send + Sync {
         args_json: String,
         retry_policy: Option<wflow_core::partition::RetryPolicy>,
     ) -> Res<u64>;
+
+    /// Request cancellation of a job. Appends JobCancel to partition log.
+    async fn cancel_job(&self, job_id: Arc<str>, reason: String) -> Res<u64>;
 }
 
 /// Implementation that appends directly to partition log
@@ -69,6 +72,18 @@ impl WflowIngress for PartitionLogIngress {
             }))
             .await?;
 
+        Ok(entry_id)
+    }
+
+    async fn cancel_job(&self, job_id: Arc<str>, reason: String) -> Res<u64> {
+        let mut log = self.log.clone();
+        let entry_id = log
+            .append(&PartitionLogEntry::JobCancel(JobCancelEvent {
+                job_id,
+                timestamp: Timestamp::now(),
+                reason: reason.into(),
+            }))
+            .await?;
         Ok(entry_id)
     }
 }

@@ -5,7 +5,9 @@ use tokio_util::sync::CancellationToken;
 use utils_rs::prelude::tokio::task::JoinHandle;
 use wflow_core::partition::{effects, job_events, log};
 
-use crate::partition::{state::PartitionWorkingState, PartitionCtx};
+use crate::partition::{
+    state::PartitionWorkingState, EffectCancelTokens, JobToEffectId, PartitionCtx,
+};
 
 pub struct TokioEffectWorkerHandle {
     cancel_token: CancellationToken,
@@ -34,6 +36,8 @@ pub fn start_tokio_effect_worker(
     worker_id: usize,
     pcx: PartitionCtx,
     state: Arc<PartitionWorkingState>,
+    effect_cancel_tokens: EffectCancelTokens,
+    job_to_effect_id: JobToEffectId,
     effect_rx: async_channel::Receiver<effects::EffectId>,
     cancel_token: CancellationToken,
 ) -> TokioEffectWorkerHandle {
@@ -47,6 +51,8 @@ pub fn start_tokio_effect_worker(
         async move {
             let mut worker = TokioEffectWorker {
                 state,
+                effect_cancel_tokens,
+                job_to_effect_id,
                 log: pcx.log_ref(),
                 pcx,
             };
@@ -82,6 +88,8 @@ struct TokioEffectWorker {
     pcx: PartitionCtx,
     log: crate::partition::PartitionLogRef,
     state: Arc<PartitionWorkingState>,
+    effect_cancel_tokens: EffectCancelTokens,
+    job_to_effect_id: JobToEffectId,
 }
 
 impl TokioEffectWorker {
@@ -96,15 +104,31 @@ impl TokioEffectWorker {
         };
 
         match deets {
-            effects::PartitionEffectDeets::RunJob(deets) => {
+            effects::PartitionEffectDeets::RunJob(run_deets) => {
+                let run_id = run_deets.run_id;
                 let start_at = Timestamp::now();
-                let instant = std::time::Instant::now();
-                let run_id = deets.run_id;
-
-                let result = self.run_job_effect(Arc::clone(&job_id)).await;
-                let end_at = start_at
-                    .checked_add(instant.elapsed())
-                    .expect("ts overflow");
+                let run_start_instant = std::time::Instant::now();
+                let run_abort_token = self
+                    .effect_cancel_tokens
+                    .lock()
+                    .await
+                    .get(&effect_id)
+                    .cloned()
+                    .expect("RunJob effect must have cancellation token");
+                self.job_to_effect_id
+                    .lock()
+                    .await
+                    .insert(Arc::clone(&job_id), effect_id.clone());
+                let run_fut = self.run_job_effect(Arc::clone(&job_id));
+                let result = tokio::select! {
+                    biased;
+                    _ = run_abort_token.cancelled() => job_events::JobRunResult::Aborted,
+                    res = run_fut => res,
+                };
+                self.job_to_effect_id.lock().await.remove(&job_id);
+                self.effect_cancel_tokens.lock().await.remove(&effect_id);
+                let elapsed = run_start_instant.elapsed();
+                let end_at = start_at.checked_add(elapsed).expect("ts overflow");
                 self.log
                     .append(&log::PartitionLogEntry::JobEffectResult(
                         job_events::JobRunEvent {
@@ -119,8 +143,17 @@ impl TokioEffectWorker {
                     ))
                     .await?;
             }
-            effects::PartitionEffectDeets::AbortJob { .. } => {
-                // no resources to cleanup
+            effects::PartitionEffectDeets::AbortRun { .. } => {
+                let run_effect_id = self.job_to_effect_id.lock().await.get(&job_id).cloned();
+                if let Some(run_effect_id) = run_effect_id {
+                    if let Some(abort_token) =
+                        self.effect_cancel_tokens.lock().await.get(&run_effect_id)
+                    {
+                        abort_token.cancel();
+                    }
+                }
+                let mut effects_map = self.state.write_effects().await;
+                effects_map.remove(&effect_id);
             }
         }
         Ok(())

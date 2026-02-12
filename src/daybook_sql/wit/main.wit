@@ -295,4 +295,3 @@ interface query {
   /// This query *can* be used to execute multi-statement queries (common in migrations).
   query-batch: func(query: string) -> result<_, query-error>;
 }
-

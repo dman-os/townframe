@@ -20,6 +20,7 @@ pub fn reduce_job_init_event(
             init_args_json: Arc::clone(&event.args_json),
             override_wflow_retry_policy: event.override_wflow_retry_policy,
             wflow: event.wflow,
+            cancelling: false,
             runs: default(),
             steps: default(),
         },
@@ -29,6 +30,24 @@ pub fn reduce_job_init_event(
         job_id: event.job_id,
         deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets { run_id: 0 }),
     })
+}
+
+pub fn reduce_job_cancel_event(
+    state: &mut state::PartitionJobsState,
+    effects: &mut Vec<PartitionEffect>,
+    event: job_events::JobCancelEvent,
+) {
+    let Some(job_state) = state.active.get_mut(&event.job_id) else {
+        info!("cancel for unknown or already-archived job, skipping");
+        return;
+    };
+    job_state.cancelling = true;
+    effects.push(PartitionEffect {
+        job_id: event.job_id,
+        deets: effects::PartitionEffectDeets::AbortRun {
+            reason: event.reason,
+        },
+    });
 }
 
 pub fn reduce_job_run_event(
@@ -47,12 +66,13 @@ pub fn reduce_job_run_event(
         ref mut runs,
         ref mut steps,
         ref override_wflow_retry_policy,
+        ref cancelling,
         ..
     }) = get_job_state(state, &job_id)
     else {
         return effects.push(PartitionEffect {
             job_id: Arc::clone(&job_id),
-            deets: effects::PartitionEffectDeets::AbortJob {
+            deets: effects::PartitionEffectDeets::AbortRun {
                 reason: "event for unrecognized job".into(),
             },
         });
@@ -65,21 +85,26 @@ pub fn reduce_job_run_event(
     match &event.result {
         job_events::JobRunResult::Success { .. }
         | job_events::JobRunResult::WorkerErr(_)
-        | job_events::JobRunResult::WflowErr(JobError::Terminal { .. }) => {
+        | job_events::JobRunResult::WflowErr(JobError::Terminal { .. })
+        | job_events::JobRunResult::Aborted => {
             archive_job(state, &job_id);
         }
         job_events::JobRunResult::WflowErr(JobError::Transient { retry_policy, .. }) => {
-            let retry_policy = retry_policy
-                .clone()
-                .or(override_wflow_retry_policy.clone())
-                .unwrap_or(crate::partition::RetryPolicy::Immediate);
-            match retry_policy {
-                crate::partition::RetryPolicy::Immediate => effects.push(PartitionEffect {
-                    job_id,
-                    deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets {
-                        run_id: runs.len() as u64,
+            if *cancelling {
+                archive_job(state, &job_id);
+            } else {
+                let retry_policy = retry_policy
+                    .clone()
+                    .or(override_wflow_retry_policy.clone())
+                    .unwrap_or(crate::partition::RetryPolicy::Immediate);
+                match retry_policy {
+                    crate::partition::RetryPolicy::Immediate => effects.push(PartitionEffect {
+                        job_id,
+                        deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets {
+                            run_id: runs.len() as u64,
+                        }),
                     }),
-                }),
+                }
             }
         }
         job_events::JobRunResult::StepEffect(res) => {
@@ -97,27 +122,45 @@ pub fn reduce_job_run_event(
                 job_events::JobEffectResultDeets::EffectErr(JobError::Terminal { .. }) => {
                     archive_job(state, &job_id);
                 }
-                job_events::JobEffectResultDeets::Success { .. } => effects.push(PartitionEffect {
-                    job_id,
-                    deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets {
-                        run_id: runs.len() as u64,
-                    }),
-                }),
+                job_events::JobEffectResultDeets::Success { .. } => {
+                    if *cancelling {
+                        archive_job(state, &job_id);
+                    } else {
+                        effects.push(PartitionEffect {
+                            job_id,
+                            deets: effects::PartitionEffectDeets::RunJob(
+                                effects::RunJobAttemptDeets {
+                                    run_id: runs.len() as u64,
+                                },
+                            ),
+                        });
+                    }
+                }
                 job_events::JobEffectResultDeets::EffectErr(JobError::Transient {
                     retry_policy,
                     ..
-                }) => match retry_policy
-                    .as_ref()
-                    .or(override_wflow_retry_policy.as_ref())
-                    .unwrap_or(&crate::partition::RetryPolicy::Immediate)
-                {
-                    crate::partition::RetryPolicy::Immediate => effects.push(PartitionEffect {
-                        job_id,
-                        deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets {
-                            run_id: runs.len() as u64,
-                        }),
-                    }),
-                },
+                }) => {
+                    if *cancelling {
+                        archive_job(state, &job_id);
+                    } else {
+                        match retry_policy
+                            .as_ref()
+                            .or(override_wflow_retry_policy.as_ref())
+                            .unwrap_or(&crate::partition::RetryPolicy::Immediate)
+                        {
+                            crate::partition::RetryPolicy::Immediate => {
+                                effects.push(PartitionEffect {
+                                    job_id,
+                                    deets: effects::PartitionEffectDeets::RunJob(
+                                        effects::RunJobAttemptDeets {
+                                            run_id: runs.len() as u64,
+                                        },
+                                    ),
+                                })
+                            }
+                        }
+                    }
+                }
             }
         }
     }

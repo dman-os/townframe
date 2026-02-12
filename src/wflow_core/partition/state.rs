@@ -17,6 +17,8 @@ pub struct JobState {
     pub init_args_json: Arc<str>,
     pub wflow: WflowMeta,
     pub override_wflow_retry_policy: Option<RetryPolicy>,
+    // FIXME: could be cleaner
+    pub cancelling: bool,
     pub runs: Vec<JobRunEvent>,
     pub steps: Vec<JobStepState>,
 }

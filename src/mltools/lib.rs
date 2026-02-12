@@ -119,8 +119,12 @@ pub async fn embed_text(ctx: &Ctx, text: &str) -> Res<EmbedResult> {
         eyre::bail!("no embed backend configured");
     };
     match backend_config {
-        EmbedBackendConfig::LocalFastembedNomic { .. } => local::embed_text(backend_config, text).await,
-        EmbedBackendConfig::CloudOllama { url, model } => cloud::embed_text_ollama(url, model, text).await,
+        EmbedBackendConfig::LocalFastembedNomic { .. } => {
+            local::embed_text(backend_config, text).await
+        }
+        EmbedBackendConfig::CloudOllama { url, model } => {
+            cloud::embed_text_ollama(url, model, text).await
+        }
     }
 }
 
@@ -156,7 +160,9 @@ pub async fn llm_chat(ctx: &Ctx, text: &str) -> Res<LlmChatResult> {
     };
 
     match backend_config {
-        LlmBackendConfig::CloudOllama { url, model } => cloud::llm_chat_ollama(url, model, text).await,
+        LlmBackendConfig::CloudOllama { url, model } => {
+            cloud::llm_chat_ollama(url, model, text).await
+        }
     }
 }
 
@@ -200,9 +206,8 @@ mod local {
                 std::fs::read(&onnx_path)
                     .wrap_err_with(|| format!("failed reading {}", onnx_path.display()))?,
                 TokenizerFiles {
-                    tokenizer_file: std::fs::read(&tokenizer_path).wrap_err_with(|| {
-                        format!("failed reading {}", tokenizer_path.display())
-                    })?,
+                    tokenizer_file: std::fs::read(&tokenizer_path)
+                        .wrap_err_with(|| format!("failed reading {}", tokenizer_path.display()))?,
                     config_file: std::fs::read(&config_path)
                         .wrap_err_with(|| format!("failed reading {}", config_path.display()))?,
                     special_tokens_map_file: std::fs::read(&special_tokens_map_path)
@@ -339,8 +344,8 @@ mod cloud {
     use super::*;
 
     pub async fn embed_text_ollama(url: &str, model: &str, text: &str) -> Res<EmbedResult> {
-        let parsed_url = url::Url::parse(url)
-            .wrap_err_with(|| format!("invalid Ollama url: {url}"))?;
+        let parsed_url =
+            url::Url::parse(url).wrap_err_with(|| format!("invalid Ollama url: {url}"))?;
         let host = parsed_url
             .host_str()
             .ok_or_eyre("Ollama url missing host")?;
@@ -371,8 +376,8 @@ mod cloud {
     }
 
     pub async fn llm_chat_ollama(url: &str, model: &str, text: &str) -> Res<LlmChatResult> {
-        let parsed_url = url::Url::parse(url)
-            .wrap_err_with(|| format!("invalid Ollama url: {url}"))?;
+        let parsed_url =
+            url::Url::parse(url).wrap_err_with(|| format!("invalid Ollama url: {url}"))?;
         let host = parsed_url
             .host_str()
             .ok_or_eyre("Ollama url missing host")?;
@@ -534,8 +539,8 @@ mod tests {
     #[test]
     #[ignore = "requires running Ollama and OLLAMA_URL with an embedding model available"]
     fn test_embed_text_cloud_router_roundtrip() -> Res<()> {
-        let embed_model_name = std::env::var("OLLAMA_EMBED_MODEL")
-            .unwrap_or_else(|_| "embeddinggemma".to_string());
+        let embed_model_name =
+            std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "embeddinggemma".to_string());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;

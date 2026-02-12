@@ -382,6 +382,10 @@ impl Rt {
                 info!(?value_json, "success on dispatch wflow");
                 true
             }
+            JobRunResult::Aborted => {
+                info!("dispatch wflow aborted");
+                true
+            }
             JobRunResult::WorkerErr(err) => {
                 error!(?err, "worker error on dispatch wflow");
                 true
@@ -588,8 +592,25 @@ impl Rt {
         Ok(dispatch_id)
     }
 
-    pub async fn cancel_dispatch(&self, _dispatch_id: &str) -> Res<()> {
-        //todo!()
+    pub async fn cancel_dispatch(&self, dispatch_id: &str) -> Res<()> {
+        self.ensure_rt_live()?;
+
+        let dispatch = self
+            .dispatch_repo
+            .get(dispatch_id)
+            .await
+            .ok_or_else(|| ferr!("dispatch not found under {dispatch_id}"))?;
+        match &dispatch.deets {
+            ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
+                self.wflow_ingress
+                    .cancel_job(
+                        Arc::from(wflow_job_id.as_str()),
+                        format!("cancel requested for dispatch {dispatch_id}"),
+                    )
+                    .await
+                    .wrap_err_with(|| format!("error cancelling dispatch {dispatch_id}"))?;
+            }
+        }
         Ok(())
     }
 

@@ -7,6 +7,7 @@ use super::job_events;
 pub enum PartitionLogEntry {
     JobInit(job_events::JobInitEvent),
     JobEffectResult(job_events::JobRunEvent),
+    JobCancel(job_events::JobCancelEvent),
     JobPartitionEffects(JobPartitionEffectsLogEntry),
 }
 

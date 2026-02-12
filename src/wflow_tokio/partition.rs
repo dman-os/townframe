@@ -1,5 +1,7 @@
 use crate::interlude::*;
 
+use std::collections::HashMap;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use wflow_core::{
@@ -13,6 +15,14 @@ use wflow_core::snapstore::SnapStore;
 mod effect_worker;
 pub mod reducer;
 pub mod state;
+
+/// Map from EffectId to cancellation token. Reducer populates for RunJob before sending to channel;
+/// effect worker reads token for select! when present (absent for restored-from-snapshot effects).
+pub type EffectCancelTokens = Arc<Mutex<HashMap<effects::EffectId, CancellationToken>>>;
+
+/// Map from job_id to the EffectId of the RunJob currently executing that job. RunJob worker
+/// registers when starting (when token present); AbortRun worker uses this to find which token to cancel.
+pub type JobToEffectId = Arc<Mutex<HashMap<Arc<str>, effects::EffectId>>>;
 
 #[derive(Clone)]
 pub struct PartitionCtx {
@@ -137,6 +147,8 @@ pub async fn start_tokio_worker(
     snap_store: Arc<dyn SnapStore<Snapshot = Arc<[u8]>>>,
 ) -> TokioPartitionWorkerHandle {
     let cancel_token = CancellationToken::new();
+    let effect_cancel_tokens: EffectCancelTokens = Arc::new(Mutex::new(HashMap::new()));
+    let job_to_effect_id: JobToEffectId = Arc::new(Mutex::new(HashMap::new()));
     let mut effect_workers = vec![];
     // Shared channel for effect scheduling
     let (effect_tx, effect_rx) = async_channel::unbounded::<effects::EffectId>();
@@ -145,6 +157,8 @@ pub async fn start_tokio_worker(
             ii,
             pcx.clone(),
             Arc::clone(&working_state),
+            Arc::clone(&effect_cancel_tokens),
+            Arc::clone(&job_to_effect_id),
             effect_rx.clone(),
             cancel_token.child_token(),
         ));
@@ -152,6 +166,7 @@ pub async fn start_tokio_worker(
     let part_reducer = reducer::start_tokio_partition_reducer(
         pcx.clone(),
         Arc::clone(&working_state),
+        Arc::clone(&effect_cancel_tokens),
         effect_tx,
         cancel_token.child_token(),
         snap_store,

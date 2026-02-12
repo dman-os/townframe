@@ -19,7 +19,7 @@ pub struct PartitionEffect {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum PartitionEffectDeets {
     RunJob(RunJobAttemptDeets),
-    AbortJob { reason: Arc<str> },
+    AbortRun { reason: Arc<str> },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

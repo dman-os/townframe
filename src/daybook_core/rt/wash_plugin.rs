@@ -432,10 +432,10 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
                     )?;
                 }
                 if iface.interfaces.contains("mltools-llm-chat") {
-                    mltools_llm_chat::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
-                        item.linker(),
-                        |ctx| ctx,
-                    )?;
+                    mltools_llm_chat::add_to_linker::<
+                        _,
+                        wasmtime::component::HasSelf<SharedWashCtx>,
+                    >(item.linker(), |ctx| ctx)?;
                 }
                 if iface.interfaces.contains("index-vector") {
                     index_vector::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
