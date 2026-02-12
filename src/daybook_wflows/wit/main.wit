@@ -8,8 +8,8 @@ world bundle {
     import townframe:daybook/drawer;
     import townframe:daybook/mltools-ocr;
     import townframe:daybook/mltools-embed;
+    import townframe:daybook/mltools-llm-chat;
     import townframe:daybook/index-vector;
-    import townframe:mltools/llm-chat;
 
     export townframe:wflow/bundle;
 }

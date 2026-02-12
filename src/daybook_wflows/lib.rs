@@ -28,7 +28,6 @@ mod wit {
             "townframe:wflow/host": wflow_sdk::wit::townframe::wflow::host,
             "townframe:wflow/bundle": generate,
 
-            "townframe:mltools/llm-chat": generate,
             "townframe:mltools/ocr": generate,
             "townframe:mltools/embed": generate,
 
@@ -40,6 +39,7 @@ mod wit {
             "townframe:daybook/facet-routine": generate,
             "townframe:daybook/mltools-ocr": generate,
             "townframe:daybook/mltools-embed": generate,
+            "townframe:daybook/mltools-llm-chat": generate,
             "townframe:daybook/index-vector": generate,
         }
     });
@@ -290,23 +290,24 @@ fn pseudo_labeler(cx: WflowCtx) -> Result<(), JobErrorX> {
 
     // Call the LLM to generate a label
     let llm_response: String = cx.effect(|| {
-        use crate::wit::townframe::mltools::llm_chat;
+        use crate::wit::townframe::daybook::mltools_llm_chat;
 
         let message_text = format!(
             "Based on the following document content, provide a single short label or category (1-3 words). \
             Just return the label, nothing else.\n\nDocument content:\n{}",
             content_text
         );
-        let request = llm_chat::Request {
-            input: llm_chat::RequestInput::Text(message_text),
-        };
-
-        let result = llm_chat::respond(&request);
+        let result = mltools_llm_chat::llm_chat(&message_text);
 
         match result {
-            Ok(response) => {
+            Ok(response_text) => {
                 // Clean up the response - remove quotes, trim whitespace
-                let label = response.text.trim().trim_matches('"').trim_matches('\'').trim().to_string();
+                let label = response_text
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .trim()
+                    .to_string();
                 Ok(Json(label))
             }
             Err(err) => Err(JobErrorX::Terminal(ferr!("error calling LLM: {err}"))),

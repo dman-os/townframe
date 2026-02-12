@@ -275,13 +275,13 @@
                       ++ (with pkgs; [
                         sqlite.dev
                         llvmPackages.libclang.dev
-                        xorg.libXrender
-                        xorg.libXext
-                        xorg.libXtst
-                        xorg.libX11
-                        xorg.libXi
-                        xorg.libXrandr
-                        xorg.libxcb
+                        libxrender
+                        libxext
+                        libxtst
+                        libx11
+                        libxi
+                        libxrandr
+                        libxcb
                         libxkbcommon
                         freetype
                         fontconfig

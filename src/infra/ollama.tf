@@ -4,6 +4,7 @@ resource "kubernetes_namespace" "daybook" {
   }
 }
 
+// add again
 resource "helm_release" "ollama" {
   depends_on = [kubernetes_namespace.daybook]
   namespace = kubernetes_namespace.daybook.metadata[0].name
@@ -12,14 +13,19 @@ resource "helm_release" "ollama" {
 
   repository = "https://helm.otwld.com/"
   chart = "ollama"
-  version = "1.37.0"
+  version = "1.42.0"
+
 
   values = [
     yamlencode({
+      image = {
+        repository = "alpine/ollama"
+      }
       ollama = {
         models = {
           pull = [
             "gemma3",
+            "embeddinggemma"
           ]
         }
       }

@@ -117,6 +117,7 @@ pub struct PlugManifest {
     pub processors: HashMap<KeyGeneric, Arc<ProcessorManifest>>,
 }
 
+
 impl PlugManifest {
     pub fn id(&self) -> String {
         format!("@{}/{}", self.namespace, self.name)
@@ -375,4 +376,15 @@ impl DocPredicateClause {
             Self::Not(clause) => clause.collect_referenced_tags(out),
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalStateManifest {
+    Sqlite3File {}
+}
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalStateDependencyManifest {
+    Sqlite3File {}
 }

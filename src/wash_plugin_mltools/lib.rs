@@ -5,7 +5,7 @@ mod interlude {
 
 use crate::interlude::*;
 
-use wash_runtime::engine::ctx::{Ctx as WashCtx, SharedCtx as SharedWashCtx};
+use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
 mod binds_guest {
@@ -19,7 +19,7 @@ mod binds_guest {
 use binds_guest::townframe::mltools::{llm_chat, types};
 
 pub struct MltoolsPlugin {
-    ollama: ollama_rs::Ollama,
+    #[allow(dead_code)]
     config: Config,
 }
 
@@ -30,32 +30,10 @@ pub struct Config {
 
 impl MltoolsPlugin {
     pub fn new(config: Config) -> Res<Arc<Self>> {
-        // Parse URL to extract host and port
-        let url = url::Url::parse(&config.ollama_url).wrap_err_with(|| {
-            format!(
-                "invalid OLLAMA_URL: {ollama_url}",
-                ollama_url = config.ollama_url
-            )
-        })?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| ferr!("OLLAMA_URL missing host"))?;
-        let scheme = url.scheme();
-        let port = url.port().unwrap_or(11434);
-
-        let ollama = ollama_rs::Ollama::new(format!("{scheme}://{host}"), port);
-
-        Ok(Arc::new(Self { ollama, config }))
+        Ok(Arc::new(Self { config }))
     }
 
     const ID: &str = "townframe:mltools";
-
-    fn from_ctx(wcx: &WashCtx) -> Arc<Self> {
-        let Some(this) = wcx.get_plugin::<Self>(Self::ID) else {
-            panic!("plugin not on ctx");
-        };
-        this
-    }
 }
 
 #[async_trait]
@@ -157,38 +135,4 @@ impl types::Host for SharedWashCtx {
     }
 }
 
-impl llm_chat::Host for SharedWashCtx {
-    async fn respond(
-        &mut self,
-        request: llm_chat::Request,
-    ) -> wasmtime::Result<Result<llm_chat::Response, wasmtime::component::__internal::String>> {
-        let plugin = MltoolsPlugin::from_ctx(&self.active_ctx);
-
-        // Extract message text from request.input
-        let llm_chat::RequestInput::Text(message_text) = request.input;
-
-        // Call Ollama
-        use ollama_rs::generation::completion::request::GenerationRequest;
-        let generation_request =
-            GenerationRequest::new(plugin.config.ollama_model.clone(), message_text);
-
-        let ollama_response = plugin
-            .ollama
-            .generate(generation_request)
-            .await
-            .map_err(|err| wasmtime::Error::msg(format!("ollama error: {err:?}")))?;
-
-        let response_text = ollama_response.response;
-
-        // Build the response
-        let response = llm_chat::Response {
-            items: vec![llm_chat::ResponseItem::Message(llm_chat::ResponseMessage {
-                role: llm_chat::Role::Assitant,
-                text: response_text.clone(),
-            })],
-            text: response_text,
-        };
-
-        Ok(Ok(response))
-    }
-}
+impl llm_chat::Host for SharedWashCtx {}

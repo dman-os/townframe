@@ -303,6 +303,7 @@ pub use binds_guest::townframe::daybook::drawer;
 pub use binds_guest::townframe::daybook::facet_routine;
 pub use binds_guest::townframe::daybook::index_vector;
 pub use binds_guest::townframe::daybook::mltools_embed;
+pub use binds_guest::townframe::daybook::mltools_llm_chat;
 pub use binds_guest::townframe::daybook::mltools_ocr;
 use binds_guest::townframe::daybook_types::doc as bindgen_doc;
 
@@ -375,7 +376,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
         WitWorld {
             exports: std::collections::HashSet::new(),
             imports: std::collections::HashSet::from([WitInterface::from(
-                "townframe:daybook/drawer,capabilities,facet-routine,mltools-ocr,mltools-embed,index-vector",
+                "townframe:daybook/drawer,capabilities,facet-routine,mltools-ocr,mltools-embed,mltools-llm-chat,index-vector",
             )]),
         }
     }
@@ -426,6 +427,12 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
                 }
                 if iface.interfaces.contains("mltools-embed") {
                     mltools_embed::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                        item.linker(),
+                        |ctx| ctx,
+                    )?;
+                }
+                if iface.interfaces.contains("mltools-llm-chat") {
+                    mltools_llm_chat::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         item.linker(),
                         |ctx| ctx,
                     )?;
@@ -930,6 +937,7 @@ impl mltools_ocr::Host for SharedWashCtx {
                     }],
                 },
                 embed: mltools::EmbedConfig { backends: vec![] },
+                llm: mltools::LlmConfig { backends: vec![] },
             },
         };
 
@@ -974,6 +982,7 @@ impl mltools_embed::Host for SharedWashCtx {
                 embed: mltools::EmbedConfig {
                     backends: vec![mltools::EmbedBackendConfig::LocalFastembedNomic { cache_dir }],
                 },
+                llm: mltools::LlmConfig { backends: vec![] },
             },
         };
 
@@ -987,6 +996,38 @@ impl mltools_embed::Host for SharedWashCtx {
             dimensions: result.dimensions,
             model_id: result.model_id,
         }))
+    }
+}
+
+impl mltools_llm_chat::Host for SharedWashCtx {
+    async fn llm_chat(&mut self, text: String) -> wasmtime::Result<Result<String, String>> {
+        let ollama_url = match utils_rs::get_env_var("OLLAMA_URL") {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
+        let ollama_model = match utils_rs::get_env_var("OLLAMA_MODEL") {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
+
+        let mltools_ctx = mltools::Ctx {
+            config: mltools::Config {
+                ocr: mltools::OcrConfig { backends: vec![] },
+                embed: mltools::EmbedConfig { backends: vec![] },
+                llm: mltools::LlmConfig {
+                    backends: vec![mltools::LlmBackendConfig::CloudOllama {
+                        url: ollama_url,
+                        model: ollama_model,
+                    }],
+                },
+            },
+        };
+
+        let result = match mltools::llm_chat(&mltools_ctx, &text).await {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
+        Ok(Ok(result.text))
     }
 }
 

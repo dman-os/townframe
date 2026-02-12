@@ -73,6 +73,8 @@
 - [ ] daybook_cli
     - [ ] `daybook pset docId propKey value`
     - [ ] `daybook pget docId propKey`
+    - [ ] `daybook grep`
+    - [ ] `daybook sed`
 - [ ] Cancellation and shutdown
   - [ ] Kotlin repo's should call close
   - [ ] Assert samod fsyncs reliably

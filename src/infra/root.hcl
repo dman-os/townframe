@@ -6,7 +6,7 @@ remote_state {
   }
   config = {
     config_path = "./kubeconfig.yaml"
-    secret_suffix = replace(basename(path_relative_to_include()), "/[/ _]/", "-")
+    secret_suffix = "daybook-${replace(basename(path_relative_to_include()), "/[/ _]/", "-")}"
     namespace = "terraform-state"
   }
 }

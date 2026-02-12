@@ -44,7 +44,6 @@ interface llm-chat {
         text: string
     }
 
-    respond: func(request: request) -> result<response, string>;
 }
 
 interface ocr {

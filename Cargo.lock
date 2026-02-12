@@ -3984,8 +3984,10 @@ dependencies = [
  "bon",
  "fastembed",
  "oar-ocr",
+ "ollama-rs",
  "serde",
  "tokio",
+ "url",
  "utils_rs",
  "wit-bindgen 0.52.0",
 ]

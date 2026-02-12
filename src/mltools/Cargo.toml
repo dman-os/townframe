@@ -26,3 +26,5 @@ tokio = { workspace = true, features = ["rt"] }
 # ml
 oar-ocr = { git = "https://github.com/GreatV/oar-ocr", version = "0.6.1" }
 fastembed = "5.8.1"
+ollama-rs = "0.3.3"
+url.workspace = true

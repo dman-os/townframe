@@ -94,6 +94,10 @@ interface mltools-embed {
     embed-text: func(text: string) -> result<embed-result, string>;
 }
 
+interface mltools-llm-chat {
+    llm-chat: func(text: string) -> result<string, string>;
+}
+
 interface index-vector {
     use types.{heads};
     use townframe:daybook-types/doc.{doc-id};
@@ -114,6 +118,7 @@ world all-guest {
     import facet-routine;
     import mltools-ocr;
     import mltools-embed;
+    import mltools-llm-chat;
     import index-vector;
     import wasi:filesystem/preopens@0.2.6;
 }

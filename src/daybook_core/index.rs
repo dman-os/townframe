@@ -406,6 +406,7 @@ impl DocEmbeddingIndexRepo {
                 embed: mltools::EmbedConfig {
                     backends: vec![mltools::EmbedBackendConfig::LocalFastembedNomic { cache_dir }],
                 },
+                llm: mltools::LlmConfig { backends: vec![] },
             },
         };
         let embedded = mltools::embed_text(&mltools_ctx, text).await?;
