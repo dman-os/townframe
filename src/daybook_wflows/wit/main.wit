@@ -6,6 +6,7 @@ world bundle {
     import townframe:wflow/host;
     import townframe:daybook/facet-routine;
     import townframe:daybook/drawer;
+    import townframe:daybook/sqlite-connection;
     import townframe:daybook/mltools-ocr;
     import townframe:daybook/mltools-embed;
     import townframe:daybook/mltools-llm-chat;

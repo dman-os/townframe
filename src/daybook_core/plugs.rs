@@ -14,6 +14,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             version: "0.0.1".parse().unwrap(),
             title: "Daybook Core".into(),
             desc: "Core keys and routines".into(),
+            local_states: default(),
             dependencies: default(),
             routines: default(),
             wflow_bundles: default(),
@@ -76,6 +77,11 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             version: "0.0.1".parse().unwrap(),
             title: "Daybook WIP".into(),
             desc: "Experiment bed for WIP features".into(),
+            local_states: [(
+                "doc-embedding-index".into(),
+                Arc::new(LocalStateManifest::SqliteFile {}),
+            )]
+            .into(),
             dependencies: [
                 //
                 (
@@ -95,6 +101,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 value_schema: schemars::schema_for!(Blob),
                             },
                         ],
+                        local_states: vec![],
                     }
                     .into(),
                 ),
@@ -125,6 +132,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 write: true,
                             },
                         ],
+                        local_state_acl: vec![],
                     }
                     .into(),
                 ),
@@ -152,6 +160,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 write: true,
                             },
                         ],
+                        local_state_acl: vec![],
                     }
                     .into(),
                 ),
@@ -179,6 +188,30 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 write: true,
                             },
                         ],
+                        local_state_acl: vec![],
+                    }
+                    .into(),
+                ),
+                (
+                    "index-embedding".into(),
+                    RoutineManifest {
+                        r#impl: RoutineImpl::Wflow {
+                            key: "index-embedding".into(),
+                            bundle: "daybook_wflows".into(),
+                        },
+                        deets: RoutineManifestDeets::DocFacet {
+                            working_facet_tag: WellKnownFacetTag::Embedding.into(),
+                        },
+                        facet_acl: vec![RoutineFacetAccess {
+                            tag: WellKnownFacetTag::Embedding.into(),
+                            key_id: None,
+                            read: true,
+                            write: false,
+                        }],
+                        local_state_acl: vec![RoutineLocalStateAccess {
+                            plug_id: "@daybook/wip".into(),
+                            local_state_key: "doc-embedding-index".into(),
+                        }],
                     }
                     .into(),
                 ),
@@ -199,6 +232,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             read: true,
                             write: true,
                         }],
+                        local_state_acl: vec![],
                     }
                     .into(),
                 ),
@@ -221,6 +255,16 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         desc: "Embed note text and write embedding facet".into(),
                         deets: CommandDeets::DocCommand {
                             routine_name: "embed-text".into(),
+                        },
+                    }
+                    .into(),
+                ),
+                (
+                    "index-embedding".into(),
+                    CommandManifest {
+                        desc: "Index embedding facet into local vector store".into(),
+                        deets: CommandDeets::DocCommand {
+                            routine_name: "index-embedding".into(),
                         },
                     }
                     .into(),
@@ -282,6 +326,19 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     }
                     .into(),
                 ),
+                (
+                    "index-embedding".into(),
+                    ProcessorManifest {
+                        desc: "Index embedding facets into local sqlite vec store".into(),
+                        deets: ProcessorDeets::DocProcessor {
+                            routine_name: "index-embedding".into(),
+                            predicate: DocPredicateClause::HasTag(
+                                WellKnownFacetTag::Embedding.into(),
+                            ),
+                        },
+                    }
+                    .into(),
+                ),
                 #[cfg(debug_assertions)]
                 (
                     "test-label".into(),
@@ -289,7 +346,12 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         desc: "Add a test LabelGeneric for testing".into(),
                         deets: ProcessorDeets::DocProcessor {
                             routine_name: "test-label".into(),
-                            predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
+                            predicate: DocPredicateClause::And(vec![
+                                DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
+                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                    WellKnownFacetTag::LabelGeneric.into(),
+                                ))),
+                            ]),
                         },
                     }
                     .into(),
@@ -306,6 +368,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             "test-label".into(),
                             "ocr-image".into(),
                             "embed-text".into(),
+                            "index-embedding".into(),
                         ],
                         // FIXME: make this more generic
                         component_urls: vec![{
@@ -949,6 +1012,23 @@ impl PlugsRepo {
                     );
                 }
             }
+
+            for local_state_dep in &dep_manifest.local_states {
+                let provider_state_kind = provider
+                    .local_states
+                    .get(&local_state_dep.local_state_key)
+                    .ok_or_eyre(format!(
+                        "Dependency error: plug '{}' does not define local_state '{}'",
+                        dep_base_id, local_state_dep.local_state_key
+                    ))?;
+                if **provider_state_kind != local_state_dep.state_kind {
+                    eyre::bail!(
+                        "Dependency error: incompatible local_state kind for '{}' from plug '{}'",
+                        local_state_dep.local_state_key,
+                        dep_base_id
+                    );
+                }
+            }
         }
 
         // -- Internal Routine Integrity --
@@ -1038,11 +1118,44 @@ impl PlugsRepo {
                 available_tags.insert(key.key_tag.to_string());
             }
         }
+        let mut available_local_states: HashSet<(String, String)> = manifest
+            .local_states
+            .keys()
+            .map(|key| (plug_id.clone(), key.to_string()))
+            .collect();
+        for (dep_id_full, dep_manifest) in &manifest.dependencies {
+            let dep_base_id = if dep_id_full.starts_with('@') {
+                let parts: Vec<&str> = dep_id_full.strip_prefix('@').unwrap().split('@').collect();
+                format!("@{}", parts[0])
+            } else {
+                dep_id_full
+                    .split('@')
+                    .next()
+                    .ok_or_eyre("invalid dependency id")?
+                    .to_string()
+            };
+            for local_state in &dep_manifest.local_states {
+                available_local_states
+                    .insert((dep_base_id.clone(), local_state.local_state_key.to_string()));
+            }
+        }
 
         for (routine_name, routine) in &manifest.routines {
             for access in &routine.facet_acl {
                 if !available_tags.contains(&access.tag.to_string()) {
                     eyre::bail!("Invalid ACL in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}", routine_name, access.tag);
+                }
+            }
+            for access in &routine.local_state_acl {
+                if !available_local_states
+                    .contains(&(access.plug_id.clone(), access.local_state_key.to_string()))
+                {
+                    eyre::bail!(
+                        "Invalid local_state ACL in routine '{}': '{}:{}' is neither declared nor depended on by this plug",
+                        routine_name,
+                        access.plug_id,
+                        access.local_state_key
+                    );
                 }
             }
 
@@ -1174,6 +1287,7 @@ mod tests {
             title: format!("Test Plug {}", name),
             desc: "A test plug".into(),
             facets: vec![],
+            local_states: default(),
             dependencies: default(),
             routines: default(),
             wflow_bundles: default(),
@@ -1244,6 +1358,7 @@ mod tests {
                     key_tag: "org.test.shared".into(),
                     value_schema: schemars::schema_for!(String),
                 }],
+                local_states: vec![],
             }
             .into(),
         );
@@ -1259,7 +1374,11 @@ mod tests {
         let mut consumer = mock_plug("consumer");
         consumer.dependencies.insert(
             "@test/missing".into(),
-            manifest::PlugDependencyManifest { keys: vec![] }.into(),
+            manifest::PlugDependencyManifest {
+                keys: vec![],
+                local_states: vec![],
+            }
+            .into(),
         );
 
         let res = repo.add(consumer).await;
@@ -1303,6 +1422,7 @@ mod tests {
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 facet_acl: vec![],
+                local_state_acl: vec![],
             }
             .into(),
         );
@@ -1390,6 +1510,7 @@ mod tests {
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 facet_acl: vec![],
+                local_state_acl: vec![],
             }
             .into(),
         );
@@ -1420,6 +1541,7 @@ mod tests {
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 facet_acl: vec![],
+                local_state_acl: vec![],
             }
             .into(),
         );

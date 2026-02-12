@@ -25,6 +25,7 @@ pub mod blobs;
 pub mod config;
 pub mod drawer;
 pub mod index;
+pub mod local_state;
 pub mod plugs;
 #[allow(unused)]
 pub mod repos;

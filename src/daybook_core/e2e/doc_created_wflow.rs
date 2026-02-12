@@ -195,9 +195,15 @@ async fn test_staging_branch_workflow() -> Res<()> {
         final_doc.facets
     );
 
-    // Verify that no new dispatches were created for /tmp/ branch changes
-    // (triage should ignore /tmp/ branches)
-    let final_dispatches = test_cx.dispatch_repo.list().await;
+    // Verify that no new dispatches were created for /tmp/ branch changes.
+    // Allow a short drain window for async completion/cancellation.
+    let mut final_dispatches = test_cx.dispatch_repo.list().await;
+    let dispatch_wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !final_dispatches.is_empty() && std::time::Instant::now() < dispatch_wait_deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        final_dispatches = test_cx.dispatch_repo.list().await;
+    }
+
     assert!(
         final_dispatches.is_empty(),
         "no dispatches should remain after workflow completion. Dispatches: {:?}",

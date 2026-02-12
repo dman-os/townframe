@@ -59,7 +59,12 @@ fn setup_tracing() -> Res<()> {
         //   panic hook to implement this behaviour.
         std::process::exit(1);
     }));
-    eyre_hook.install()?;
+    if let Err(err) = eyre_hook.install() {
+        let error_text = err.to_string();
+        if !error_text.contains("a hook has already been installed") {
+            return Err(err.into());
+        }
+    }
 
     Ok(())
 }

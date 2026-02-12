@@ -209,7 +209,13 @@ pub async fn spawn_doc_triage_worker(
         }
     };
     let join_handle = tokio::spawn(async move {
-        fut.await.unwrap_or_log();
+        if let Err(err) = fut.await {
+            if err.to_string().contains("rt is shutting down") {
+                debug!(?err, "DocTriageWorker exiting during shutdown");
+            } else {
+                error!(?err, "DocTriageWorker failed");
+            }
+        }
     });
 
     Ok(DocTriageWorkerHandle {
@@ -353,7 +359,7 @@ impl DocTriageWorker {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self, event))]
     async fn handle_drawer_event(&mut self, event: Arc<DrawerEvent>) -> Res<()> {
         match &*event {
             DrawerEvent::ListChanged { drawer_heads } => {
@@ -367,12 +373,13 @@ impl DocTriageWorker {
                 id,
                 drawer_heads,
                 entry,
-                changed_facet_keys,
+                diff,
                 ..
             } => {
                 // Skip updates that only changed dmeta bookkeeping.
                 let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
-                let has_non_dmeta_change = changed_facet_keys
+                let has_non_dmeta_change = diff
+                    .changed_facet_keys
                     .iter()
                     .any(|facet_key| facet_key != &dmeta_key);
                 if !has_non_dmeta_change {
@@ -385,7 +392,7 @@ impl DocTriageWorker {
                 }
 
                 let changed_facet_keys_set: HashSet<FacetKey> =
-                    changed_facet_keys.iter().cloned().collect();
+                    diff.changed_facet_keys.iter().cloned().collect();
                 // Global early-out: no processor's read set changed (by tag or by key).
                 if !changed_intersects_read_set(
                     &changed_facet_keys_set,
@@ -403,6 +410,13 @@ impl DocTriageWorker {
                 for (branch_name, heads) in &entry.branches {
                     let branch_path = daybook_types::doc::BranchPath::from(branch_name.as_str());
                     if branch_path.to_string_lossy().starts_with("/tmp/") {
+                        continue;
+                    }
+                    if !diff
+                        .moved_branch_names
+                        .iter()
+                        .any(|name| name == branch_name)
+                    {
                         continue;
                     }
                     let Some(facet_keys_set) = self
@@ -469,13 +483,21 @@ impl DocTriageWorker {
                         .iter()
                         .map(|key| (key.clone(), serde_json::Value::Null))
                         .collect();
+                    let changed_facet_keys_set: HashSet<FacetKey> =
+                        facet_keys_set.iter().cloned().collect();
                     let meta_doc = Doc {
                         id: id.clone(),
                         facets,
                     };
-                    self.triage(id, heads, &meta_doc, branch_path, None)
-                        .await
-                        .wrap_err("error triaging doc")?;
+                    self.triage(
+                        id,
+                        heads,
+                        &meta_doc,
+                        branch_path,
+                        Some(&changed_facet_keys_set),
+                    )
+                    .await
+                    .wrap_err("error triaging doc")?;
                 }
                 self.store
                     .mutate_sync(|store| {
@@ -487,7 +509,7 @@ impl DocTriageWorker {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, doc))]
+    #[tracing::instrument(skip(self, doc, doc_heads))]
     async fn triage(
         &mut self,
         doc_id: &DocId,
@@ -545,8 +567,11 @@ impl DocTriageWorker {
                     .query_sync(|store| store.job_to_dispatch.get(&job_key).cloned())
                     .await;
                 if let Some(dispatch_id) = old_dispatch {
-                    info!(?dispatch_id, "cancelling inflight job");
-                    self.rt.cancel_dispatch(&dispatch_id).await?;
+                    info!(
+                        ?dispatch_id,
+                        "inflight job already exists; skipping redispatch"
+                    );
+                    continue;
                 }
 
                 let dispatch_id = self

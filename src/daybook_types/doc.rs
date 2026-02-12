@@ -10,8 +10,9 @@ pub type MimeType = String;
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct FacetMeta {
     pub created_at: Timestamp,
-    pub updated_at: Vec<Timestamp>,
     pub uuid: Vec<Uuid>,
+    // NOTE: field oredring is important for reconcilation order
+    pub updated_at: Vec<Timestamp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
@@ -151,6 +152,30 @@ pub enum EmbeddingDtype {
     F16,
     I8,
     Binary,
+}
+
+pub fn embedding_f32_bytes_to_json(vector: &[u8], dim: u32) -> Res<String> {
+    let expected_len = dim as usize * std::mem::size_of::<f32>();
+    if vector.len() != expected_len {
+        eyre::bail!(
+            "embedding bytes length mismatch: got {}, expected {}",
+            vector.len(),
+            expected_len
+        );
+    }
+    let values = vector
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    Ok(format!("[{}]", values.join(",")))
+}
+
+pub fn embedding_f32_slice_to_le_bytes(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect::<Vec<u8>>()
 }
 
 impl<T> From<T> for Note

@@ -15,8 +15,6 @@
 
 ## Stack
 
-- [ ] embeddinggemma3 on ollama
-
 - [ ] `mltools`
   - [ ] OCR
     - [ ] Local
@@ -25,6 +23,8 @@
   - [ ] API client
   - [ ] Router
   - [ ] durable-streams
+  - [ ] Model manager
+    - [ ] Store in repo
 - [ ] daybook_server
   - [ ] Decide on wrpc vs json
 - [ ] CI/CD
@@ -45,6 +45,9 @@
   - [x] CLI support
     - [ ] Make it nice
   - [ ] GUI support
+- [ ] Blobs server
+  - [ ] Chunked hashing for transfers
+    - Chunks at rest?
 
 - [ ] Cleanup for public pre-alpha
 

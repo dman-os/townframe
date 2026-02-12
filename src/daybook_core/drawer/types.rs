@@ -76,6 +76,54 @@ impl DocNBranches {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DocEntryDiff {
+    pub changed_facet_keys: Vec<FacetKey>,
+    pub moved_branch_names: Vec<String>,
+}
+
+impl DocEntryDiff {
+    pub fn new(old_entry: &DocEntry, new_entry: &DocEntry) -> Self {
+        let mut changed_facet_keys = Vec::new();
+        let all_facet_keys: HashSet<String> = old_entry
+            .facet_blames
+            .keys()
+            .chain(new_entry.facet_blames.keys())
+            .cloned()
+            .collect();
+        for key in all_facet_keys {
+            let old_value = old_entry.facet_blames.get(&key);
+            let new_value = new_entry.facet_blames.get(&key);
+            if old_value != new_value {
+                changed_facet_keys.push(FacetKey::from(key));
+            }
+        }
+        changed_facet_keys.sort();
+
+        let mut moved_branch_names = Vec::new();
+        let all_branch_names: HashSet<String> = old_entry
+            .branches
+            .keys()
+            .chain(new_entry.branches.keys())
+            .cloned()
+            .collect();
+        for branch_name in all_branch_names {
+            let old_heads = old_entry.branches.get(&branch_name);
+            let new_heads = new_entry.branches.get(&branch_name);
+            if old_heads != new_heads {
+                moved_branch_names.push(branch_name);
+            }
+        }
+        moved_branch_names.sort();
+
+        Self {
+            changed_facet_keys,
+            moved_branch_names,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum DrawerEvent {
     ListChanged {
@@ -89,8 +137,7 @@ pub enum DrawerEvent {
     DocUpdated {
         id: DocId,
         entry: DocEntry,
-        changed_facet_keys: Vec<FacetKey>,
-        // diff: DocEntryDiffV2, // Simplified for now
+        diff: DocEntryDiff,
         drawer_heads: ChangeHashSet,
     },
     DocDeleted {

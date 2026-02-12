@@ -10,6 +10,7 @@ mod doc_created_wflow;
 mod embed_text_wflow;
 mod index_vector_wflow;
 mod ocr_image_wflow;
+mod plugin_local_index_wflow;
 
 pub struct DaybookTestContext {
     pub _acx: AmCtx,
@@ -209,6 +210,7 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
         Arc::clone(&blobs),
         Arc::clone(&config_repo),
         local_actor_id,
+        temp_dir.path().join("local_states"),
     )
     .await?;
 

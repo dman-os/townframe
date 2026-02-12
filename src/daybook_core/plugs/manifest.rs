@@ -104,6 +104,9 @@ pub struct PlugManifest {
     pub desc: String,
     #[garde(dive)]
     pub facets: Vec<FacetKeyManifest>,
+    #[garde(dive)]
+    #[serde(default)]
+    pub local_states: HashMap<KeyGeneric, Arc<LocalStateManifest>>,
     // plugin_id: ->
     #[garde(dive)]
     pub dependencies: HashMap<String, Arc<PlugDependencyManifest>>,
@@ -140,7 +143,11 @@ pub struct FacetKeyManifest {
 #[serde(rename_all = "camelCase")]
 pub struct PlugDependencyManifest {
     #[garde(dive)]
+    #[serde(default)]
     pub keys: Vec<FacetKeyDependencyManifest>,
+    #[garde(dive)]
+    #[serde(default)]
+    pub local_states: Vec<LocalStateDependencyManifest>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -211,6 +218,9 @@ pub struct RoutineManifest {
     pub deets: RoutineManifestDeets,
     #[garde(dive)]
     pub facet_acl: Vec<RoutineFacetAccess>,
+    #[garde(dive)]
+    #[serde(default)]
+    pub local_state_acl: Vec<RoutineLocalStateAccess>,
 }
 
 impl RoutineManifest {
@@ -291,6 +301,15 @@ pub struct RoutineFacetAccess {
     pub write: bool,
     // #[serde(default)]
     // pub list: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineLocalStateAccess {
+    #[garde(length(min = 1))]
+    pub plug_id: String,
+    #[garde(dive)]
+    pub local_state_key: KeyGeneric,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -377,13 +396,17 @@ impl DocPredicateClause {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub enum LocalStateManifest {
-    Sqlite3File {},
+    SqliteFile {},
 }
-#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
-pub enum LocalStateDependencyManifest {
-    Sqlite3File {},
+pub struct LocalStateDependencyManifest {
+    #[garde(dive)]
+    pub local_state_key: KeyGeneric,
+    #[garde(dive)]
+    pub state_kind: LocalStateManifest,
 }

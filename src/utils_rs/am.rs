@@ -240,10 +240,7 @@ impl AmCtx {
                 match autosurgeon::hydrate_path(doc, &obj_id, path.clone()) {
                     Ok(Some(value)) => eyre::Ok(Some((value, heads))),
                     Ok(None) => eyre::Ok(None),
-                    Err(err) => {
-                        error!(?path, ?obj_id, "error hydrating path: {:?}", err);
-                        Err(ferr!("error hydrating: {err:?}"))
-                    }
+                    Err(err) => Err(ferr!("error hydrating: {err:?}")),
                 }
             }
         })

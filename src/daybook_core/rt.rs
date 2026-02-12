@@ -1,6 +1,7 @@
 use crate::config::ConfigRepo;
 use crate::index::DocEmbeddingIndexRepo;
 use crate::interlude::*;
+use crate::local_state::SqliteLocalStateRepo;
 
 use crate::blobs::BlobsRepo;
 use crate::drawer::DrawerRepo;
@@ -54,6 +55,7 @@ pub struct Rt {
     pub mltools_plugin: Arc<wash_plugin_mltools::MltoolsPlugin>,
     pub blobs_repo: Arc<BlobsRepo>,
     pub doc_embedding_index_repo: Arc<DocEmbeddingIndexRepo>,
+    pub sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
     pub local_actor_id: automerge::ActorId,
     local_wflow_part_id: String,
 }
@@ -64,6 +66,7 @@ pub struct RtStopToken {
     partition_watcher: Option<tokio::task::JoinHandle<()>>,
     doc_changes_worker: Option<triage::DocTriageWorkerHandle>,
     doc_embedding_index_stop: Option<crate::index::DocEmbeddingIndexStopToken>,
+    sqlite_local_state_stop: Option<crate::repos::RepoStopToken>,
 }
 
 impl RtStopToken {
@@ -85,6 +88,14 @@ impl RtStopToken {
                 warn!(
                     ?err,
                     "error stopping doc_embedding_index_repo during shutdown - continuing"
+                );
+            }
+        }
+        if let Some(stop) = self.sqlite_local_state_stop.take() {
+            if let Err(err) = stop.stop().await {
+                warn!(
+                    ?err,
+                    "error stopping sqlite_local_state_repo during shutdown - continuing"
                 );
             }
         }
@@ -169,8 +180,11 @@ impl Rt {
         blobs_repo: Arc<BlobsRepo>,
         config_repo: Arc<ConfigRepo>,
         local_actor_id: automerge::ActorId,
+        local_state_root: PathBuf,
     ) -> Res<(Arc<Self>, RtStopToken)> {
         let wcx = wflow::Ctx::init(&wflow_db_url).await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            SqliteLocalStateRepo::boot(local_state_root).await?;
 
         let (doc_embedding_index_repo, doc_embedding_index_stop) =
             crate::index::DocEmbeddingIndexRepo::boot(
@@ -189,6 +203,7 @@ impl Rt {
             Arc::clone(&dispatch_repo),
             Arc::clone(&blobs_repo),
             Arc::clone(&doc_embedding_index_repo),
+            Arc::clone(&sqlite_local_state_repo),
         ));
         let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {
             ollama_url: utils_rs::get_env_var("OLLAMA_URL")?,
@@ -277,6 +292,7 @@ impl Rt {
             mltools_plugin,
             blobs_repo,
             doc_embedding_index_repo,
+            sqlite_local_state_repo,
             config_repo,
             wflow_part_state,
             local_actor_id,
@@ -298,6 +314,7 @@ impl Rt {
                 partition_watcher: Some(partition_watcher),
                 doc_changes_worker: Some(doc_changes_worker),
                 doc_embedding_index_stop: Some(doc_embedding_index_stop),
+                sqlite_local_state_stop: Some(sqlite_local_state_stop),
                 wflow_part_handle: Some(wflow_part_handle),
             },
         ))
@@ -370,6 +387,21 @@ impl Rt {
         let Some(dispatch) = self.dispatch_repo.get(dispatch_id).await else {
             return Ok(());
         };
+        let ActiveDispatchDeets::Wflow {
+            wflow_job_id,
+            wflow_key,
+            ..
+        } = &dispatch.deets;
+        if wflow_job_id != event.job_id.as_ref() {
+            debug!(
+                %dispatch_id,
+                active_job_id = %wflow_job_id,
+                completed_job_id = %event.job_id,
+                wflow_key = %wflow_key,
+                "ignoring stale job result for replaced dispatch"
+            );
+            return Ok(());
+        }
 
         // Get staging branch path from dispatch
         let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
@@ -425,10 +457,25 @@ impl Rt {
                     ?target_branch_path,
                     "merging staging branch into target"
                 );
-                self.drawer
+                match self
+                    .drawer
                     .merge_from_branch(doc_id, target_branch_path, staging_branch_path, None)
                     .await
-                    .wrap_err("error merging staging branch")?;
+                {
+                    Ok(()) => {}
+                    Err(crate::drawer::types::DrawerError::BranchNotFound { name }) => {
+                        warn!(
+                            ?doc_id,
+                            ?name,
+                            "staging branch missing during merge; skipping merge/delete"
+                        );
+                        self.dispatch_repo.remove(dispatch_id.into()).await?;
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        return Err(eyre::eyre!(err).wrap_err("error merging staging branch"));
+                    }
+                }
 
                 // Delete the staging branch after successful merge
                 info!(
@@ -513,6 +560,7 @@ impl Rt {
                         heads,
                         facet_key,
                         facet_acl: routine_man.facet_acl.clone(),
+                        local_state_acl: routine_man.local_state_acl.clone(),
                         staging_branch_path: daybook_types::doc::BranchPath::from(
                             "/tmp/placeholder",
                         ), // Will be set when job is created
@@ -600,6 +648,11 @@ impl Rt {
             .get(dispatch_id)
             .await
             .ok_or_else(|| ferr!("dispatch not found under {dispatch_id}"))?;
+        let marked_now = self.dispatch_repo.mark_cancelled(dispatch_id).await?;
+        if !marked_now {
+            debug!(%dispatch_id, "cancel already requested; skipping duplicate cancel");
+            return Ok(());
+        }
         match &dispatch.deets {
             ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
                 self.wflow_ingress
@@ -798,6 +851,7 @@ async fn start_bundle_workload(
                     WitInterface::from("townframe:daybook/drawer"),
                     WitInterface::from("townframe:daybook/capabilities"),
                     WitInterface::from("townframe:daybook/facet-routine"),
+                    WitInterface::from("townframe:daybook/sqlite-connection"),
                     WitInterface::from("townframe:daybook/mltools-ocr"),
                     WitInterface::from("townframe:daybook/mltools-embed"),
                     WitInterface::from("townframe:daybook/mltools-llm-chat"),

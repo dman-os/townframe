@@ -43,12 +43,15 @@ pub struct FacetRoutineArgs {
     pub facet_key: String,
     #[autosurgeon(with = "utils_rs::am::codecs::json")]
     pub facet_acl: Vec<crate::plugs::manifest::RoutineFacetAccess>,
+    #[autosurgeon(with = "utils_rs::am::codecs::json")]
+    pub local_state_acl: Vec<crate::plugs::manifest::RoutineLocalStateAccess>,
 }
 
 #[derive(Default, Reconcile, Hydrate)]
 pub struct DispatchStore {
     pub active_dispatches: HashMap<String, VersionedDispatch>,
     pub wflow_to_dispatch: HashMap<String, String>,
+    pub cancelled_dispatches: HashMap<String, bool>,
     // FUXME: this seems like a bad use of automerge?
     pub wflow_partition_frontier: HashMap<String, u64>,
 }
@@ -400,6 +403,7 @@ impl DispatchRepo {
                         }
                     }
                 }
+                store.cancelled_dispatches.remove(&id);
                 store.active_dispatches.insert(id.clone(), versioned);
             })
             .await?;
@@ -417,7 +421,18 @@ impl DispatchRepo {
     pub async fn remove(&self, id: String) -> Res<Option<Arc<ActiveDispatch>>> {
         let (old, hash) = self
             .store
-            .mutate_sync(|store| store.active_dispatches.remove(&id))
+            .mutate_sync(|store| {
+                let old = store.active_dispatches.remove(&id);
+                store.cancelled_dispatches.remove(&id);
+                if let Some(old_dispatch) = &old {
+                    match &old_dispatch.payload.deets {
+                        ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
+                            store.wflow_to_dispatch.remove(wflow_job_id);
+                        }
+                    }
+                }
+                old
+            })
             .await?;
         let heads = ChangeHashSet(hash.into_iter().collect());
         self.registry.notify([
@@ -440,5 +455,29 @@ impl DispatchRepo {
                     .collect()
             })
             .await
+    }
+
+    /// Marks a dispatch as cancellation-requested.
+    /// Returns true when this call performed the first mark; false if it was already marked.
+    pub async fn mark_cancelled(&self, id: &str) -> Res<bool> {
+        let id = id.to_string();
+        let exists = self
+            .store
+            .query_sync(|store| store.active_dispatches.contains_key(&id))
+            .await;
+        if !exists {
+            eyre::bail!("dispatch not found under {id}");
+        }
+
+        let (marked_now, _hash) = self
+            .store
+            .mutate_sync(|store| {
+                store
+                    .cancelled_dispatches
+                    .insert(id.clone(), true)
+                    .is_none()
+            })
+            .await?;
+        Ok(marked_now)
     }
 }

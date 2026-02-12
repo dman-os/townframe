@@ -78,7 +78,7 @@ impl DocEmbeddingIndexStopToken {
             worker.stop().await?;
         }
         if let Some(handle) = self.worker_handle.take() {
-            utils_rs::wait_on_handle_with_timeout(handle, 5000).await?;
+            utils_rs::wait_on_handle_with_timeout(handle, 10000).await?;
         }
         Ok(())
     }
@@ -196,11 +196,17 @@ impl DocEmbeddingIndexRepo {
     async fn handle_worker_item(&self, item: DocIndexWorkItem) -> Res<()> {
         match item {
             DocIndexWorkItem::Upsert { doc_id, heads } => {
+                debug!(?doc_id, ?heads, "doc embedding index worker upsert");
                 let Some(doc) = self
                     .drawer_repo
                     .get_doc_with_facets_at_heads(&doc_id, &heads, None)
                     .await?
                 else {
+                    debug!(
+                        ?doc_id,
+                        ?heads,
+                        "doc not found at requested heads for indexing"
+                    );
                     return Ok(());
                 };
                 self.reindex_doc(&doc_id, &heads, &doc).await?;
@@ -208,6 +214,7 @@ impl DocEmbeddingIndexRepo {
                     .notify([DocEmbeddingIndexEvent::Updated { doc_id }]);
             }
             DocIndexWorkItem::DeleteDoc { doc_id } => {
+                debug!(?doc_id, "doc embedding index worker delete");
                 self.delete_all_for_doc(&doc_id).await?;
                 self.registry
                     .notify([DocEmbeddingIndexEvent::Deleted { doc_id }]);
@@ -218,12 +225,38 @@ impl DocEmbeddingIndexRepo {
 
     async fn reindex_doc(&self, doc_id: &DocId, heads: &ChangeHashSet, doc: &Doc) -> Res<()> {
         let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
-        let dmeta = doc.facets.get(&dmeta_key).cloned().and_then(|raw| {
-            daybook_types::doc::WellKnownFacet::from_json(raw, WellKnownFacetTag::Dmeta).ok()
-        });
-        let Some(daybook_types::doc::WellKnownFacet::Dmeta(dmeta)) = dmeta else {
+        let Some(dmeta_raw) = doc.facets.get(&dmeta_key).cloned() else {
+            debug!(
+                ?doc_id,
+                facet_keys = ?doc.facets.keys().collect::<Vec<_>>(),
+                "doc missing dmeta facet during index reindex; deleting rows"
+            );
             self.delete_all_for_doc(doc_id).await?;
             return Ok(());
+        };
+        let dmeta = match daybook_types::doc::WellKnownFacet::from_json(
+            dmeta_raw.clone(),
+            WellKnownFacetTag::Dmeta,
+        ) {
+            Ok(daybook_types::doc::WellKnownFacet::Dmeta(dmeta)) => dmeta,
+            Ok(_) => {
+                debug!(
+                    ?doc_id,
+                    "dmeta facet parsed as wrong well-known type; deleting rows"
+                );
+                self.delete_all_for_doc(doc_id).await?;
+                return Ok(());
+            }
+            Err(err) => {
+                debug!(
+                    ?doc_id,
+                    ?err,
+                    dmeta_raw = %serde_json::to_string(&dmeta_raw).unwrap_or_else(|_| "<non-json>".to_string()),
+                    "unable to parse dmeta facet during index reindex; deleting rows"
+                );
+                self.delete_all_for_doc(doc_id).await?;
+                return Ok(());
+            }
         };
 
         let mut keep_uuids: HashSet<Uuid> = HashSet::new();
@@ -259,6 +292,11 @@ impl DocEmbeddingIndexRepo {
             })
             .await?;
         }
+        debug!(
+            ?doc_id,
+            keep_count = keep_uuids.len(),
+            "completed doc embedding reindex pass"
+        );
 
         let existing: Vec<String> = sqlx::query_scalar(
             "SELECT facet_uuid FROM doc_embedding_meta WHERE origin_doc_id = ?1",
@@ -280,7 +318,8 @@ impl DocEmbeddingIndexRepo {
         if record.dim != 768 {
             eyre::bail!("expected embedding dimension 768, got {}", record.dim);
         }
-        let vector_json = f32_bytes_to_json(&record.vector, record.dim)?;
+        let vector_json =
+            daybook_types::doc::embedding_f32_bytes_to_json(&record.vector, record.dim)?;
         let serialized_heads = serde_json::to_string(&utils_rs::am::serialize_commit_heads(
             &record.origin_heads.0,
         ))
@@ -410,19 +449,15 @@ impl DocEmbeddingIndexRepo {
             },
         };
         let embedded = mltools::embed_text(&mltools_ctx, text).await?;
-        let vector_bytes = embedded
-            .vector
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<u8>>();
-        let vector_json = f32_bytes_to_json(&vector_bytes, embedded.dimensions)?;
-        let rows = sqlx::query_as::<_, (String, String, String, f32)>(
+        let vector_bytes = daybook_types::doc::embedding_f32_slice_to_le_bytes(&embedded.vector);
+        let vector_json =
+            daybook_types::doc::embedding_f32_bytes_to_json(&vector_bytes, embedded.dimensions)?;
+        let knn_rows = sqlx::query_as::<_, (i64, f32)>(
             r#"
-            SELECT m.origin_doc_id, m.facet_key, m.origin_heads, v.distance
-            FROM doc_embedding_vec v
-            JOIN doc_embedding_meta m ON m.rowid = v.rowid
-            WHERE v.embedding MATCH ?1 AND k = ?2
-            ORDER BY v.distance ASC
+            SELECT rowid, distance
+            FROM doc_embedding_vec
+            WHERE embedding MATCH ?1 AND k = ?2
+            ORDER BY distance ASC
             "#,
         )
         .bind(&vector_json)
@@ -430,8 +465,14 @@ impl DocEmbeddingIndexRepo {
         .fetch_all(&self.db_pool)
         .await?;
 
-        let mut out = Vec::with_capacity(rows.len());
-        for (doc_id, facet_key, origin_heads, distance) in rows {
+        let mut out = Vec::with_capacity(knn_rows.len());
+        for (rowid, distance) in knn_rows {
+            let (doc_id, facet_key, origin_heads) = sqlx::query_as::<_, (String, String, String)>(
+                "SELECT origin_doc_id, facet_key, origin_heads FROM doc_embedding_meta WHERE rowid = ?1",
+            )
+            .bind(rowid)
+            .fetch_one(&self.db_pool)
+            .await?;
             let heads_json: Vec<String> = serde_json::from_str(&origin_heads)?;
             out.push(VectorHit {
                 doc_id,
@@ -478,7 +519,7 @@ async fn spawn_doc_index_worker(
     let listener = drawer_repo.register_listener({
         let event_tx = event_tx.clone();
         move |event| {
-            event_tx.send(event).expect(ERROR_CHANNEL);
+            let _ = event_tx.send(event);
         }
     });
 
@@ -486,7 +527,9 @@ async fn spawn_doc_index_worker(
     if let Some(known_heads) = initial_drawer_heads {
         let events = drawer_repo.diff_events(known_heads, None).await?;
         for event in events {
-            event_tx.send(Arc::new(event)).expect(ERROR_CHANNEL);
+            if event_tx.send(Arc::new(event)).is_err() {
+                break;
+            }
         }
     } else {
         let events = drawer_repo
@@ -519,13 +562,15 @@ async fn spawn_doc_index_worker(
                     id: doc.doc_id.clone(),
                     facets,
                 };
-                if predicate.matches(&meta_doc) {
-                    work_tx
+                if predicate.matches(&meta_doc)
+                    && work_tx
                         .send(DocIndexWorkItem::Upsert {
                             doc_id: doc.doc_id.clone(),
                             heads,
                         })
-                        .expect(ERROR_CHANNEL);
+                        .is_err()
+                {
+                    break;
                 }
             }
         }
@@ -557,12 +602,19 @@ async fn spawn_doc_index_worker(
                                 }).await?;
                             }
                             DrawerEvent::DocDeleted { id, drawer_heads, .. } => {
-                                work_tx.send(DocIndexWorkItem::DeleteDoc { doc_id: id.clone() }).expect(ERROR_CHANNEL);
+                                if work_tx
+                                    .send(DocIndexWorkItem::DeleteDoc { doc_id: id.clone() })
+                                    .is_err()
+                                {
+                                    break;
+                                }
                                 store.mutate_sync(|store| {
                                     store.drawer_heads = Some(drawer_heads.clone());
                                 }).await?;
                             }
-                            DrawerEvent::DocAdded { id, entry, drawer_heads } | DrawerEvent::DocUpdated { id, entry, drawer_heads, .. } => {
+                            DrawerEvent::DocAdded { id, entry, drawer_heads } => {
+                                let mut matched_heads: Option<ChangeHashSet> = None;
+                                let mut evaluated_latest_branch = false;
                                 for (branch_name, heads) in &entry.branches {
                                     let branch_path = BranchPath::from(branch_name.as_str());
                                     if branch_path.to_string_lossy().starts_with("/tmp/") {
@@ -573,6 +625,7 @@ async fn spawn_doc_index_worker(
                                         .await? else {
                                         continue;
                                     };
+                                    evaluated_latest_branch = true;
                                     let facets: HashMap<FacetKey, daybook_types::doc::FacetRaw> = facet_keys_set
                                         .iter()
                                         .map(|key| (key.clone(), serde_json::Value::Null))
@@ -582,19 +635,101 @@ async fn spawn_doc_index_worker(
                                         facets,
                                     };
                                     if predicate.matches(&meta_doc) {
-                                        work_tx.send(DocIndexWorkItem::Upsert {
-                                            doc_id: id.clone(),
-                                            heads: heads.clone(),
-                                        }).expect(ERROR_CHANNEL);
-                                    } else {
-                                        work_tx.send(DocIndexWorkItem::DeleteDoc {
-                                            doc_id: id.clone(),
-                                        }).expect(ERROR_CHANNEL);
+                                        matched_heads = Some(heads.clone());
+                                        if branch_name == "main" {
+                                            break;
+                                        }
                                     }
                                 }
-                                store.mutate_sync(|store| {
-                                    store.drawer_heads = Some(drawer_heads.clone());
-                                }).await?;
+
+                                if let Some(heads) = matched_heads {
+                                    if work_tx
+                                        .send(DocIndexWorkItem::Upsert {
+                                            doc_id: id.clone(),
+                                            heads,
+                                        })
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                } else if evaluated_latest_branch
+                                    && work_tx
+                                        .send(DocIndexWorkItem::DeleteDoc { doc_id: id.clone() })
+                                        .is_err()
+                                {
+                                    break;
+                                }
+                                store
+                                    .mutate_sync(|store| {
+                                        store.drawer_heads = Some(drawer_heads.clone());
+                                    })
+                                    .await?;
+                            }
+                            DrawerEvent::DocUpdated { id, entry, drawer_heads, .. } => {
+                                let previous_entry = match &entry.previous_version_heads {
+                                    Some(previous_heads) => {
+                                        drawer_repo.get_entry_at_heads(id, previous_heads).await?
+                                    }
+                                    None => None,
+                                };
+
+                                let mut matched_heads: Option<ChangeHashSet> = None;
+                                let mut evaluated_latest_branch = false;
+                                for (branch_name, heads) in &entry.branches {
+                                    let branch_path = BranchPath::from(branch_name.as_str());
+                                    if branch_path.to_string_lossy().starts_with("/tmp/") {
+                                        continue;
+                                    }
+                                    if let Some(previous_entry) = &previous_entry {
+                                        let previous_heads = previous_entry.branches.get(branch_name);
+                                        if previous_heads == Some(heads) {
+                                            continue;
+                                        }
+                                    }
+                                    let Some(facet_keys_set) = drawer_repo
+                                        .get_facet_keys_if_latest(id, &branch_path, heads, drawer_heads)
+                                        .await? else {
+                                        continue;
+                                    };
+                                    evaluated_latest_branch = true;
+                                    let facets: HashMap<FacetKey, daybook_types::doc::FacetRaw> = facet_keys_set
+                                        .iter()
+                                        .map(|key| (key.clone(), serde_json::Value::Null))
+                                        .collect();
+                                    let meta_doc = Doc {
+                                        id: id.clone(),
+                                        facets,
+                                    };
+                                    if predicate.matches(&meta_doc) {
+                                        matched_heads = Some(heads.clone());
+                                        if branch_name == "main" {
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if let Some(heads) = matched_heads {
+                                    if work_tx
+                                        .send(DocIndexWorkItem::Upsert {
+                                            doc_id: id.clone(),
+                                            heads,
+                                        })
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                } else if evaluated_latest_branch
+                                    && work_tx
+                                        .send(DocIndexWorkItem::DeleteDoc { doc_id: id.clone() })
+                                        .is_err()
+                                {
+                                    break;
+                                }
+                                store
+                                    .mutate_sync(|store| {
+                                        store.drawer_heads = Some(drawer_heads.clone());
+                                    })
+                                    .await?;
                             }
                         }
                     }
@@ -614,23 +749,6 @@ async fn spawn_doc_index_worker(
         },
         work_rx,
     ))
-}
-
-fn f32_bytes_to_json(vector: &[u8], dim: u32) -> Res<String> {
-    let expected_len = dim as usize * std::mem::size_of::<f32>();
-    if vector.len() != expected_len {
-        eyre::bail!(
-            "embedding bytes length mismatch: got {}, expected {}",
-            vector.len(),
-            expected_len
-        );
-    }
-    let values = vector
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>();
-    Ok(format!("[{}]", values.join(",")))
 }
 
 #[cfg(test)]

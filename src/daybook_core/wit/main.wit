@@ -65,6 +65,7 @@ interface facet-routine {
     use townframe:daybook-types/doc.{doc-id};
     use types.{heads};
     use capabilities.{facet-token-ro, facet-token-rw};
+    use sqlite-connection.{connection as sqlite-connection-token};
 
     record facet-routine-args {
         doc-id: doc-id,
@@ -73,12 +74,23 @@ interface facet-routine {
 
         rw-facet-tokens: list<tuple<string, facet-token-rw>>,
         ro-facet-tokens: list<tuple<string, facet-token-ro>>,
+        sqlite-connections: list<tuple<string, sqlite-connection-token>>,
     }
 
     /// Aquire args for facet-routine-args.
     /// If the running instance isn't reconginzed to be a routine,
     /// a trap is raised to the host.
     get-args: func() -> facet-routine-args;
+}
+
+interface sqlite-connection {
+    use townframe:sql/types.{sql-value, result-row, query-error};
+
+    resource connection {
+        query: func(query: string, params: list<sql-value>) -> result<list<result-row>, query-error>;
+        query-batch: func(query: string) -> result<_, query-error>;
+        sqlite-file-path: func() -> string;
+    }
 }
 
 interface mltools-ocr {
@@ -116,6 +128,7 @@ world all-guest {
     import drawer;
     import capabilities;
     import facet-routine;
+    import sqlite-connection;
     import mltools-ocr;
     import mltools-embed;
     import mltools-llm-chat;
