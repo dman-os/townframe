@@ -4,12 +4,12 @@ use crate::ffi::{FfiError, SharedFfiCtx};
 
 use crate::repos::plugs::PlugsRepoFfi;
 use daybook_core::config::{ConfigEvent, ConfigRepo};
-use daybook_core::plugs::manifest::FacetKeyDisplayHint;
+use daybook_core::plugs::manifest::FacetDisplayHint;
 
 #[derive(uniffi::Record)]
 pub struct FacetKeyDisplayHintEntry {
     pub key: String,
-    pub config: FacetKeyDisplayHint,
+    pub config: FacetDisplayHint,
 }
 
 #[derive(uniffi::Object)]
@@ -62,7 +62,7 @@ impl ConfigRepoFfi {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn get_facet_display_hint(&self, id: String) -> Option<FacetKeyDisplayHint> {
+    async fn get_facet_display_hint(&self, id: String) -> Option<FacetDisplayHint> {
         let repo = Arc::clone(&self.repo);
         self.fcx
             .do_on_rt(async move { repo.get_facet_display_hint(id).await })
@@ -70,7 +70,7 @@ impl ConfigRepoFfi {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn list_display_hints(self: Arc<Self>) -> HashMap<String, FacetKeyDisplayHint> {
+    async fn list_display_hints(self: Arc<Self>) -> HashMap<String, FacetDisplayHint> {
         let repo = Arc::clone(&self.repo);
         self.fcx
             .do_on_rt(async move { repo.list_display_hints().await })
@@ -81,7 +81,7 @@ impl ConfigRepoFfi {
     async fn set_facet_display_hint(
         &self,
         key: String,
-        config: FacetKeyDisplayHint,
+        config: FacetDisplayHint,
     ) -> Result<(), FfiError> {
         let repo = Arc::clone(&self.repo);
         self.fcx

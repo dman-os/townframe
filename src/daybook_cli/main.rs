@@ -581,6 +581,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
                     Arc::clone(&blobs_repo),
                     Arc::clone(&config_repo),
                     ctx.local_actor_id.clone(),
+                    conf.cli_config.repo_path.join("local_state"),
                 )
                 .await?;
                 let ecx = ExecCtx {

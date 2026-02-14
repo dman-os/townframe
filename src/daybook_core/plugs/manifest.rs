@@ -103,7 +103,7 @@ pub struct PlugManifest {
     #[garde(length(min = 1))]
     pub desc: String,
     #[garde(dive)]
-    pub facets: Vec<FacetKeyManifest>,
+    pub facets: Vec<FacetManifest>,
     #[garde(dive)]
     #[serde(default)]
     pub local_states: HashMap<KeyGeneric, Arc<LocalStateManifest>>,
@@ -128,7 +128,7 @@ impl PlugManifest {
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct FacetKeyManifest {
+pub struct FacetManifest {
     /// Must be reverse domain notation
     #[garde(dive)]
     pub key_tag: FacetTag,
@@ -136,7 +136,7 @@ pub struct FacetKeyManifest {
     pub value_schema: schemars::Schema,
     #[garde(dive)]
     #[serde(default)]
-    pub display_config: FacetKeyDisplayHint,
+    pub display_config: FacetDisplayHint,
     #[garde(dive)]
     #[serde(default)]
     pub references: Vec<FacetReferenceManifest>,
@@ -163,7 +163,7 @@ pub enum FacetReferenceKind {
 pub struct PlugDependencyManifest {
     #[garde(dive)]
     #[serde(default)]
-    pub keys: Vec<FacetKeyDependencyManifest>,
+    pub keys: Vec<FacetDependencyManifest>,
     #[garde(dive)]
     #[serde(default)]
     pub local_states: Vec<LocalStateDependencyManifest>,
@@ -171,7 +171,7 @@ pub struct PlugDependencyManifest {
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct FacetKeyDependencyManifest {
+pub struct FacetDependencyManifest {
     #[garde(dive)]
     pub key_tag: FacetTag,
     #[garde(skip)]
@@ -181,7 +181,7 @@ pub struct FacetKeyDependencyManifest {
 #[derive(Debug, Serialize, Deserialize, Default, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct FacetKeyDisplayHint {
+pub struct FacetDisplayHint {
     #[serde(default)]
     #[garde(skip)]
     pub always_visible: bool,

@@ -224,6 +224,7 @@ impl Rt {
             Arc::clone(&dispatch_repo),
             Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
+            Arc::clone(&config_repo),
         ));
         let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {
             ollama_url: utils_rs::get_env_var("OLLAMA_URL")?,

@@ -31,6 +31,4 @@ bon.workspace = true
 indenter = "0.3.4"
 
 data-encoding.workspace = true
-ollama-rs = { version = "0.3.3", default-features = false, features = ["rustls"] }
-oar-ocr = { git = "https://github.com/GreatV/oar-ocr", version = "0.6.1" }
-fastembed = { version = "5.8.1" }
+ollama-rs = { version = "0.3.4", default-features = false, features = ["rustls"] }

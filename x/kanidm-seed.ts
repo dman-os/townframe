@@ -2,5 +2,5 @@
 
 import { $ } from "./utils.ts";
 
-await $`./x/kanidm-login.ts`;
+await $`${$.path(import.meta.resolve("./kanidm-login.ts")}`;
 await $`cargo x seed-kanidm`;

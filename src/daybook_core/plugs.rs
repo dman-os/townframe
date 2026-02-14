@@ -21,39 +21,39 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             commands: default(),
             processors: default(),
             facets: vec![
-                FacetKeyManifest {
+                FacetManifest {
                     key_tag: WellKnownFacetTag::RefGeneric.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: default(),
                     references: default(),
                 },
-                FacetKeyManifest {
+                FacetManifest {
                     key_tag: WellKnownFacetTag::LabelGeneric.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: default(),
                     references: default(),
                 },
-                FacetKeyManifest {
+                FacetManifest {
                     key_tag: WellKnownFacetTag::TitleGeneric.into(),
                     value_schema: schemars::schema_for!(String),
-                    display_config: FacetKeyDisplayHint {
+                    display_config: FacetDisplayHint {
                         display_title: Some("Title".to_string()),
                         deets: FacetKeyDisplayDeets::Title { show_editor: true },
                         ..default()
                     },
                     references: default(),
                 },
-                FacetKeyManifest {
+                FacetManifest {
                     key_tag: WellKnownFacetTag::PathGeneric.into(),
                     value_schema: schemars::schema_for!(String),
-                    display_config: FacetKeyDisplayHint {
+                    display_config: FacetDisplayHint {
                         display_title: Some("Path".to_string()),
                         deets: FacetKeyDisplayDeets::UnixPath,
                         ..default()
                     },
                     references: default(),
                 },
-                FacetKeyManifest {
+                FacetManifest {
                     key_tag: WellKnownFacetTag::ImageMetadata.into(),
                     value_schema: schemars::schema_for!(ImageMetadata),
                     display_config: default(),
@@ -62,19 +62,19 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         json_path: "/facetRef".into(),
                     }],
                 },
-                FacetKeyManifest {
+                FacetManifest {
                     key_tag: WellKnownFacetTag::Note.into(),
                     value_schema: schemars::schema_for!(Note),
                     display_config: default(),
                     references: default(),
                 },
-                FacetKeyManifest {
+                FacetManifest {
                     key_tag: WellKnownFacetTag::Blob.into(),
                     value_schema: schemars::schema_for!(Blob),
                     display_config: default(),
                     references: default(),
                 },
-                FacetKeyManifest {
+                FacetManifest {
                     key_tag: WellKnownFacetTag::Pending.into(),
                     value_schema: schemars::schema_for!(Pending),
                     display_config: default(),
@@ -109,15 +109,15 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     "@daybook/core@v0.0.1".into(),
                     PlugDependencyManifest {
                         keys: vec![
-                            FacetKeyDependencyManifest {
+                            FacetDependencyManifest {
                                 key_tag: WellKnownFacetTag::Note.into(),
                                 value_schema: schemars::schema_for!(Note),
                             },
-                            FacetKeyDependencyManifest {
+                            FacetDependencyManifest {
                                 key_tag: WellKnownFacetTag::LabelGeneric.into(),
                                 value_schema: schemars::schema_for!(String),
                             },
-                            FacetKeyDependencyManifest {
+                            FacetDependencyManifest {
                                 key_tag: WellKnownFacetTag::Blob.into(),
                                 value_schema: schemars::schema_for!(Blob),
                             },
@@ -410,13 +410,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             .into(),
             facets: vec![
                 //
-                FacetKeyManifest {
+                FacetManifest {
                     key_tag: WellKnownFacetTag::PseudoLabel.into(),
                     value_schema: schemars::schema_for!(Vec<String>),
                     display_config: default(),
                     references: default(),
                 },
-                FacetKeyManifest {
+                FacetManifest {
                     key_tag: WellKnownFacetTag::Embedding.into(),
                     value_schema: schemars::schema_for!(daybook_types::doc::Embedding),
                     display_config: default(),
@@ -773,7 +773,7 @@ impl PlugsRepo {
             .await
     }
 
-    pub async fn get_display_hint(&self, prop_tag: &str) -> Option<manifest::FacetKeyDisplayHint> {
+    pub async fn get_display_hint(&self, prop_tag: &str) -> Option<manifest::FacetDisplayHint> {
         self.store
             .query_sync(|store| {
                 let plug_id = store.tag_to_plug.get(prop_tag)?;
@@ -784,7 +784,7 @@ impl PlugsRepo {
                     .payload
                     .facets
                     .iter()
-                    .find(|prop: &&manifest::FacetKeyManifest| &prop.key_tag[..] == prop_tag)
+                    .find(|prop: &&manifest::FacetManifest| &prop.key_tag[..] == prop_tag)
                     .map(|prop| prop.display_config.clone())
                 else {
                     panic!("prop in index '{prop_tag}' not found in expected plug '{plug_id}'");
@@ -795,7 +795,7 @@ impl PlugsRepo {
             .await
     }
 
-    pub async fn list_display_hints(&self) -> Vec<(String, manifest::FacetKeyDisplayHint)> {
+    pub async fn list_display_hints(&self) -> Vec<(String, manifest::FacetDisplayHint)> {
         self.store
             .query_sync(|store| {
                 store
@@ -1340,7 +1340,7 @@ mod tests {
 
         // Add first plug with a tag
         let mut p1 = mock_plug("plug1");
-        p1.facets.push(manifest::FacetKeyManifest {
+        p1.facets.push(manifest::FacetManifest {
             key_tag: "org.test.tag".into(),
             value_schema: schemars::schema_for!(String),
             display_config: default(),
@@ -1350,7 +1350,7 @@ mod tests {
 
         // Try to add second plug with same tag
         let mut p2 = mock_plug("plug2");
-        p2.facets.push(manifest::FacetKeyManifest {
+        p2.facets.push(manifest::FacetManifest {
             key_tag: "org.test.tag".into(),
             value_schema: schemars::schema_for!(String),
             display_config: default(),
@@ -1370,7 +1370,7 @@ mod tests {
 
         // Add provider plug
         let mut provider = mock_plug("provider");
-        provider.facets.push(manifest::FacetKeyManifest {
+        provider.facets.push(manifest::FacetManifest {
             key_tag: "org.test.shared".into(),
             value_schema: schemars::schema_for!(String),
             display_config: default(),
@@ -1383,7 +1383,7 @@ mod tests {
         consumer.dependencies.insert(
             "@test/provider".into(),
             manifest::PlugDependencyManifest {
-                keys: vec![manifest::FacetKeyDependencyManifest {
+                keys: vec![manifest::FacetDependencyManifest {
                     key_tag: "org.test.shared".into(),
                     value_schema: schemars::schema_for!(String),
                 }],

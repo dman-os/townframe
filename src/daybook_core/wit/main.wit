@@ -83,6 +83,7 @@ interface facet-routine {
     get-args: func() -> facet-routine-args;
 }
 
+// FIXME: rename to local-state-sqlite
 interface sqlite-connection {
     use townframe:sql/types.{sql-value, result-row, query-error};
 

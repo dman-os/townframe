@@ -193,6 +193,14 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
 
     plug_repo.ensure_system_plugs().await?;
 
+    let mltools_config = mltools::models::mobile_default(mltools::models::test_cache_dir())
+        .await
+        .wrap_err("error provisioning default mltools models for e2e")?;
+    config_repo
+        .set_mltools_config(mltools_config)
+        .await
+        .wrap_err("error storing e2e mltools config")?;
+
     let db_path = temp_dir.path().join("wflow.db");
     let wflow_db_url = format!("sqlite:{}?mode=rwc", db_path.display());
 

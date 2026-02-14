@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::plugs::{manifest::FacetKeyDisplayHint, PlugsRepo};
+use crate::plugs::{manifest::FacetDisplayHint, PlugsRepo};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reconcile, Hydrate)]
@@ -15,8 +15,9 @@ pub struct UserMeta {
 #[derive(Reconcile, Hydrate, Clone)]
 pub struct ConfigStore {
     pub version: Uuid,
-    pub facet_display: HashMap<String, ThroughJson<FacetKeyDisplayHint>>,
+    pub facet_display: HashMap<String, ThroughJson<FacetDisplayHint>>,
     pub users: HashMap<String, ThroughJson<UserMeta>>,
+    pub mltools: ThroughJson<mltools::Config>,
 }
 
 impl Default for ConfigStore {
@@ -27,7 +28,7 @@ impl Default for ConfigStore {
 
         key_configs.insert(
             "created_at".to_string(),
-            FacetKeyDisplayHint {
+            FacetDisplayHint {
                 always_visible: false,
                 display_title: Some("Created At".to_string()),
                 deets: FacetKeyDisplayDeets::DateTime {
@@ -38,7 +39,7 @@ impl Default for ConfigStore {
         );
         key_configs.insert(
             "updated_at".to_string(),
-            FacetKeyDisplayHint {
+            FacetDisplayHint {
                 always_visible: false,
                 display_title: Some("Updated At".to_string()),
                 deets: FacetKeyDisplayDeets::DateTime {
@@ -52,6 +53,12 @@ impl Default for ConfigStore {
             version: Uuid::nil(),
             facet_display: key_configs,
             users: HashMap::new(),
+            mltools: mltools::Config {
+                ocr: mltools::OcrConfig { backends: vec![] },
+                embed: mltools::EmbedConfig { backends: vec![] },
+                llm: mltools::LlmConfig { backends: vec![] },
+            }
+            .into(),
         }
     }
 }
@@ -236,6 +243,7 @@ impl ConfigRepo {
                         store.version = new_store.version;
                         store.facet_display = new_store.facet_display;
                         store.users = new_store.users;
+                        store.mltools = new_store.mltools;
                     })
                     .await?;
 
@@ -306,7 +314,7 @@ impl ConfigRepo {
         Ok(Arc::from(heads))
     }
 
-    pub async fn get_facet_display_hint(&self, key: String) -> Option<FacetKeyDisplayHint> {
+    pub async fn get_facet_display_hint(&self, key: String) -> Option<FacetDisplayHint> {
         let hint = self
             .store
             .query_sync(|store| store.facet_display.get(&key).cloned())
@@ -321,7 +329,7 @@ impl ConfigRepo {
         None
     }
 
-    pub async fn list_display_hints(&self) -> HashMap<String, FacetKeyDisplayHint> {
+    pub async fn list_display_hints(&self) -> HashMap<String, FacetDisplayHint> {
         let mut defaults: HashMap<_, _> = self
             .plug_repo
             .list_display_hints()
@@ -339,7 +347,7 @@ impl ConfigRepo {
             .await
     }
 
-    pub async fn set_facet_display_hint(&self, key: String, hint: FacetKeyDisplayHint) -> Res<()> {
+    pub async fn set_facet_display_hint(&self, key: String, hint: FacetDisplayHint) -> Res<()> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
@@ -347,6 +355,24 @@ impl ConfigRepo {
             .mutate_sync(move |store| {
                 store.version = Uuid::new_v4();
                 store.facet_display.insert(key, hint.into());
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_mltools_config(&self) -> mltools::Config {
+        self.store.query_sync(|store| store.mltools.0.clone()).await
+    }
+
+    pub async fn set_mltools_config(&self, config: mltools::Config) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+
+        self.store
+            .mutate_sync(move |store| {
+                store.version = Uuid::new_v4();
+                store.mltools = config.into();
             })
             .await?;
         Ok(())

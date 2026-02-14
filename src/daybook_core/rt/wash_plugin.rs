@@ -13,11 +13,11 @@ mod binds_guest {
         imports: { default: async | trappable | tracing },
         exports: { default: async | trappable | tracing },
         with: {
-            "townframe:daybook/capabilities.doc-token-ro": super::DocTokenRo,
-            "townframe:daybook/capabilities.doc-token-rw": super::DocTokenRw,
-            "townframe:daybook/capabilities.facet-token-ro": super::FacetTokenRo,
-            "townframe:daybook/capabilities.facet-token-rw": super::FacetTokenRw,
-            "townframe:daybook/sqlite-connection.connection": super::SqliteConnectionToken,
+            "townframe:daybook/capabilities.doc-token-ro": super::caps::DocTokenRo,
+            "townframe:daybook/capabilities.doc-token-rw": super::caps::DocTokenRw,
+            "townframe:daybook/capabilities.facet-token-ro": super::caps::FacetTokenRo,
+            "townframe:daybook/capabilities.facet-token-rw": super::caps::FacetTokenRw,
+            "townframe:daybook/sqlite-connection.connection": super::local_state_sql::SqliteConnectionToken,
         }
     });
 
@@ -299,6 +299,10 @@ mod binds_guest {
     }
 }
 
+mod caps;
+mod local_state_sql;
+mod mltools;
+
 pub use binds_guest::townframe::daybook::capabilities;
 pub use binds_guest::townframe::daybook::drawer;
 pub use binds_guest::townframe::daybook::facet_routine;
@@ -311,7 +315,6 @@ use binds_guest::townframe::daybook_types::doc as bindgen_doc;
 use daybook_types::doc::ChangeHashSet;
 use daybook_types::doc::DocId;
 use daybook_types::wit::doc as wit_doc;
-use sqlx::{Column, Row, TypeInfo, ValueRef};
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
@@ -320,6 +323,7 @@ pub struct DaybookPlugin {
     dispatch_repo: Arc<crate::rt::DispatchRepo>,
     blobs_repo: Arc<crate::blobs::BlobsRepo>,
     sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
+    config_repo: Arc<crate::config::ConfigRepo>,
 }
 
 impl DaybookPlugin {
@@ -328,12 +332,14 @@ impl DaybookPlugin {
         dispatch_repo: Arc<crate::rt::DispatchRepo>,
         blobs_repo: Arc<crate::blobs::BlobsRepo>,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
+        config_repo: Arc<crate::config::ConfigRepo>,
     ) -> Self {
         Self {
             drawer_repo,
             dispatch_repo,
             blobs_repo,
             sqlite_local_state_repo,
+            config_repo,
         }
     }
 
@@ -557,736 +563,6 @@ impl drawer::Host for SharedWashCtx {
     }
 }
 
-pub struct DocTokenRo {
-    doc_id: DocId,
-    heads: ChangeHashSet,
-}
-
-impl capabilities::HostDocTokenRo for SharedWashCtx {
-    async fn get(
-        &mut self,
-        handle: wasmtime::component::Resource<capabilities::DocTokenRo>,
-    ) -> wasmtime::Result<bindgen_doc::Doc> {
-        let plugin = DaybookPlugin::from_ctx(self);
-        let token = self
-            .table
-            .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
-        match plugin
-            .get_doc(&token.doc_id, &token.heads)
-            .await
-            .to_anyhow()?
-        {
-            Some(doc) => {
-                let bind_doc: bindgen_doc::Doc = binds_guest::townframe::daybook_types::doc::Doc {
-                    id: doc.id.clone(),
-                    facets: doc
-                        .facets
-                        .iter()
-                        .map(|(facet_key, facet_value)| {
-                            (facet_key.to_string(), wit_doc::facet_from(facet_value))
-                        })
-                        .collect(),
-                };
-                Ok(bind_doc)
-            }
-            // FIXME: either the context should terminal error this
-            // or communicate with the wflow engine
-            None => todo!(),
-        }
-    }
-
-    async fn drop(
-        &mut self,
-        rep: wasmtime::component::Resource<capabilities::DocTokenRo>,
-    ) -> wasmtime::Result<()> {
-        self.table.delete(rep)?;
-        Ok(())
-    }
-}
-
-pub struct DocTokenRw {
-    doc_id: DocId,
-    branch_path: daybook_types::doc::BranchPath,
-    heads: ChangeHashSet,
-}
-
-impl capabilities::HostDocTokenRw for SharedWashCtx {
-    async fn get(
-        &mut self,
-        handle: wasmtime::component::Resource<capabilities::DocTokenRw>,
-    ) -> wasmtime::Result<bindgen_doc::Doc> {
-        let plugin = DaybookPlugin::from_ctx(self);
-        let token = self
-            .table
-            .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
-        match plugin
-            .get_doc(&token.doc_id, &token.heads)
-            .await
-            .to_anyhow()?
-        {
-            Some(doc) => {
-                let bind_doc: bindgen_doc::Doc = binds_guest::townframe::daybook_types::doc::Doc {
-                    id: doc.id.clone(),
-                    facets: doc
-                        .facets
-                        .iter()
-                        .map(|(facet_key, facet_value)| {
-                            (facet_key.to_string(), wit_doc::facet_from(facet_value))
-                        })
-                        .collect(),
-                };
-                Ok(bind_doc)
-            }
-            // FIXME: either the context should terminal error this
-            // or communicate with the wflow engine
-            None => todo!(),
-        }
-    }
-
-    async fn update(
-        &mut self,
-        handle: wasmtime::component::Resource<capabilities::DocTokenRw>,
-        patch: bindgen_doc::DocPatch,
-    ) -> wasmtime::Result<Result<(), capabilities::UpdateDocError>> {
-        let plugin = DaybookPlugin::from_ctx(self);
-        let token = self
-            .table
-            .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
-        let patch = wit_doc::DocPatch {
-            id: patch.id,
-            facets_set: patch.facets_set.into_iter().collect(),
-            facets_remove: patch.facets_remove,
-            user_path: None,
-        };
-        let patch: daybook_types::doc::DocPatch =
-            patch.try_into().map_err(|err: serde_json::Error| {
-                drawer::UpdateDocError::InvalidPatch(err.to_string())
-            })?;
-        match plugin
-            .patch_doc(token.branch_path.clone(), Some(token.heads.clone()), patch)
-            .await
-        {
-            Ok(_) => Ok(Ok(())),
-            // FIXME: either the context should terminal error this
-            // or communicate with the wflow engine
-            Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => todo!(),
-            Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => todo!(),
-            Err(crate::drawer::types::DrawerError::InvalidKey {
-                inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
-            }) => Ok(Err(capabilities::UpdateDocError::InvalidKey(tag))),
-            Err(crate::drawer::types::DrawerError::Other { inner }) => {
-                Err(anyhow::anyhow!("unexepcted error: {inner}"))
-            }
-        }
-    }
-
-    async fn drop(
-        &mut self,
-        rep: wasmtime::component::Resource<capabilities::DocTokenRw>,
-    ) -> wasmtime::Result<()> {
-        self.table.delete(rep)?;
-        Ok(())
-    }
-}
-
-pub struct FacetTokenRo {
-    doc_id: DocId,
-    heads: ChangeHashSet,
-    facet_key: daybook_types::doc::FacetKey,
-}
-
-impl capabilities::HostFacetTokenRo for SharedWashCtx {
-    async fn get(
-        &mut self,
-        handle: wasmtime::component::Resource<capabilities::FacetTokenRo>,
-    ) -> wasmtime::Result<String> {
-        let plugin = DaybookPlugin::from_ctx(self);
-        let token = self
-            .table
-            .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
-        match plugin
-            .get_doc(&token.doc_id, &token.heads)
-            .await
-            .to_anyhow()?
-        {
-            Some(doc) => {
-                let Some(facet) = doc.facets.get(&token.facet_key) else {
-                    // FIXME: either the context should terminal error this
-                    // or communicate with the wflow engine
-                    todo!("")
-                };
-                let facet = wit_doc::facet_from(facet);
-                Ok(facet)
-            }
-            // FIXME: either the context should terminal error this
-            // or communicate with the wflow engine
-            None => todo!(),
-        }
-    }
-
-    async fn drop(
-        &mut self,
-        rep: wasmtime::component::Resource<capabilities::FacetTokenRo>,
-    ) -> wasmtime::Result<()> {
-        self.table.delete(rep)?;
-        Ok(())
-    }
-}
-
-pub struct FacetTokenRw {
-    doc_id: DocId,
-    branch_path: daybook_types::doc::BranchPath,
-    #[allow(dead_code)]
-    target_branch_path: daybook_types::doc::BranchPath,
-    heads: ChangeHashSet,
-    facet_key: daybook_types::doc::FacetKey,
-    #[allow(dead_code)]
-    facet_acl: Vec<crate::plugs::manifest::RoutineFacetAccess>,
-}
-
-pub struct SqliteConnectionToken {
-    local_state_id: String,
-    sqlite_file_path: Option<String>,
-    db_pool: Option<sqlx::SqlitePool>,
-}
-
-async fn ensure_sqlite_file_path(
-    ctx: &mut SharedWashCtx,
-    handle: &wasmtime::component::Resource<sqlite_connection::Connection>,
-) -> Res<String> {
-    if let Some(path) = {
-        let token = ctx
-            .table
-            .get(handle)
-            .context("error locating sqlite-connection token")?;
-        token.sqlite_file_path.clone()
-    } {
-        return Ok(path);
-    }
-
-    let local_state_id = {
-        let token = ctx
-            .table
-            .get(handle)
-            .context("error locating sqlite-connection token")?;
-        token.local_state_id.clone()
-    };
-
-    let plugin = DaybookPlugin::from_ctx(ctx);
-    let (sqlite_file_path, db_pool) = plugin
-        .sqlite_local_state_repo
-        .ensure_sqlite_pool(&local_state_id)
-        .await?;
-
-    {
-        let token = ctx
-            .table
-            .get_mut(handle)
-            .context("error locating sqlite-connection token")?;
-        token.sqlite_file_path = Some(sqlite_file_path.clone());
-        if token.db_pool.is_none() {
-            token.db_pool = Some(db_pool);
-        }
-    }
-
-    Ok(sqlite_file_path)
-}
-
-async fn ensure_sqlite_pool(
-    ctx: &mut SharedWashCtx,
-    handle: &wasmtime::component::Resource<sqlite_connection::Connection>,
-) -> Res<sqlx::SqlitePool> {
-    if let Some(pool) = {
-        let token = ctx
-            .table
-            .get(handle)
-            .context("error locating sqlite-connection token")?;
-        token.db_pool.clone()
-    } {
-        return Ok(pool);
-    }
-
-    let local_state_id = {
-        let token = ctx
-            .table
-            .get(handle)
-            .context("error locating sqlite-connection token")?;
-        token.local_state_id.clone()
-    };
-    let plugin = DaybookPlugin::from_ctx(ctx);
-    let (sqlite_file_path, db_pool) = plugin
-        .sqlite_local_state_repo
-        .ensure_sqlite_pool(&local_state_id)
-        .await?;
-
-    {
-        let token = ctx
-            .table
-            .get_mut(handle)
-            .context("error locating sqlite-connection token")?;
-        if token.db_pool.is_none() {
-            token.sqlite_file_path = Some(sqlite_file_path);
-            token.db_pool = Some(db_pool.clone());
-        }
-    }
-
-    Ok(db_pool)
-}
-
-fn query_error_from_sqlx_error(err: sqlx::Error) -> binds_guest::townframe::sql::types::QueryError {
-    match err {
-        sqlx::Error::Database(db_err) => {
-            binds_guest::townframe::sql::types::QueryError::InvalidQuery(
-                db_err.message().to_string(),
-            )
-        }
-        sqlx::Error::ColumnDecode { .. } | sqlx::Error::Encode(_) | sqlx::Error::Decode(_) => {
-            binds_guest::townframe::sql::types::QueryError::InvalidParams(err.to_string())
-        }
-        _ => binds_guest::townframe::sql::types::QueryError::Unexpected(err.to_string()),
-    }
-}
-
-fn bind_sql_value<'query>(
-    query: sqlx::query::Query<'query, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'query>>,
-    value: binds_guest::townframe::sql::types::SqlValue,
-) -> sqlx::query::Query<'query, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'query>> {
-    match value {
-        binds_guest::townframe::sql::types::SqlValue::Null => query.bind(None::<String>),
-        binds_guest::townframe::sql::types::SqlValue::Integer(value) => query.bind(value),
-        binds_guest::townframe::sql::types::SqlValue::Real(value) => query.bind(value),
-        binds_guest::townframe::sql::types::SqlValue::Text(value) => query.bind(value),
-        binds_guest::townframe::sql::types::SqlValue::Blob(value) => query.bind(value),
-    }
-}
-
-fn sqlite_row_to_result_row(
-    row: &sqlx::sqlite::SqliteRow,
-) -> Result<
-    binds_guest::townframe::sql::types::ResultRow,
-    binds_guest::townframe::sql::types::QueryError,
-> {
-    let mut entries = Vec::with_capacity(row.columns().len());
-    for index in 0..row.columns().len() {
-        let column_name = row.columns()[index].name().to_string();
-        let value_ref = row
-            .try_get_raw(index)
-            .map_err(query_error_from_sqlx_error)?;
-
-        let sql_value = if value_ref.is_null() {
-            binds_guest::townframe::sql::types::SqlValue::Null
-        } else {
-            let type_name = value_ref.type_info().name().to_ascii_uppercase();
-            match type_name.as_str() {
-                "INTEGER" => {
-                    let value: i64 = row.try_get(index).map_err(query_error_from_sqlx_error)?;
-                    binds_guest::townframe::sql::types::SqlValue::Integer(value)
-                }
-                "REAL" => {
-                    let value: f64 = row.try_get(index).map_err(query_error_from_sqlx_error)?;
-                    binds_guest::townframe::sql::types::SqlValue::Real(value)
-                }
-                "TEXT" => {
-                    let value: String = row.try_get(index).map_err(query_error_from_sqlx_error)?;
-                    binds_guest::townframe::sql::types::SqlValue::Text(value)
-                }
-                "BLOB" => {
-                    let value: Vec<u8> = row.try_get(index).map_err(query_error_from_sqlx_error)?;
-                    binds_guest::townframe::sql::types::SqlValue::Blob(value)
-                }
-                _ => {
-                    if let Ok(value) = row.try_get::<i64, usize>(index) {
-                        binds_guest::townframe::sql::types::SqlValue::Integer(value)
-                    } else if let Ok(value) = row.try_get::<f64, usize>(index) {
-                        binds_guest::townframe::sql::types::SqlValue::Real(value)
-                    } else if let Ok(value) = row.try_get::<String, usize>(index) {
-                        binds_guest::townframe::sql::types::SqlValue::Text(value)
-                    } else if let Ok(value) = row.try_get::<Vec<u8>, usize>(index) {
-                        binds_guest::townframe::sql::types::SqlValue::Blob(value)
-                    } else {
-                        return Err(binds_guest::townframe::sql::types::QueryError::Unexpected(
-                            format!("unsupported sqlite value type for column '{column_name}'"),
-                        ));
-                    }
-                }
-            }
-        };
-        entries.push(binds_guest::townframe::sql::types::ResultRowEntry {
-            column_name,
-            value: sql_value,
-        });
-    }
-    Ok(entries)
-}
-
-impl capabilities::HostFacetTokenRw for SharedWashCtx {
-    async fn get(
-        &mut self,
-        handle: wasmtime::component::Resource<capabilities::FacetTokenRw>,
-    ) -> wasmtime::Result<String> {
-        let plugin = DaybookPlugin::from_ctx(self);
-        let token = self
-            .table
-            .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
-        match plugin
-            .get_doc(&token.doc_id, &token.heads)
-            .await
-            .to_anyhow()?
-        {
-            Some(doc) => {
-                let Some(facet) = doc.facets.get(&token.facet_key) else {
-                    // FIXME: either the context should terminal error this
-                    // or communicate with the wflow engine
-                    todo!("")
-                };
-                let facet = wit_doc::facet_from(facet);
-                Ok(facet)
-            }
-            // FIXME: either the context should terminal error this
-            // or communicate with the wflow engine
-            None => todo!(),
-        }
-    }
-
-    async fn update(
-        &mut self,
-        handle: wasmtime::component::Resource<capabilities::FacetTokenRw>,
-        facet_json: String,
-    ) -> wasmtime::Result<Result<(), capabilities::UpdateDocError>> {
-        let plugin = DaybookPlugin::from_ctx(self);
-        let token = self
-            .table
-            .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
-        let facet: daybook_types::doc::FacetRaw = wit_doc::facet_into(&facet_json)
-            .map_err(|err| capabilities::UpdateDocError::InvalidPatch(err.to_string()))?;
-        match plugin
-            .drawer_repo
-            .update_at_heads(
-                daybook_types::doc::DocPatch {
-                    id: token.doc_id.clone(),
-                    facets_set: HashMap::from([(token.facet_key.clone(), facet)]),
-                    facets_remove: default(),
-                    user_path: None,
-                },
-                token.branch_path.clone(),
-                Some(token.heads.clone()),
-            )
-            .await
-        {
-            Ok(_) => Ok(Ok(())),
-            // FIXME: either the context should terminal error this
-            // or communicate with the wflow engine
-            Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => todo!(),
-            Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => todo!(),
-            Err(crate::drawer::types::DrawerError::InvalidKey {
-                inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
-            }) => Ok(Err(capabilities::UpdateDocError::InvalidKey(tag))),
-            Err(crate::drawer::types::DrawerError::Other { inner }) => {
-                Err(anyhow::anyhow!("unexepcted error: {inner}"))
-            }
-        }
-    }
-
-    async fn drop(
-        &mut self,
-        rep: wasmtime::component::Resource<capabilities::FacetTokenRw>,
-    ) -> wasmtime::Result<()> {
-        self.table.delete(rep)?;
-        Ok(())
-    }
-}
-
-impl mltools_ocr::Host for SharedWashCtx {
-    async fn ocr_image(
-        &mut self,
-        blob_facet: wasmtime::component::Resource<capabilities::FacetTokenRo>,
-    ) -> wasmtime::Result<Result<mltools_ocr::OcrResult, String>> {
-        let plugin = DaybookPlugin::from_ctx(self);
-
-        let (doc_id, heads, facet_key) = {
-            let token = self
-                .table
-                .get(&blob_facet)
-                .context("error locating blob facet token")
-                .to_anyhow()?;
-            (
-                token.doc_id.clone(),
-                token.heads.clone(),
-                token.facet_key.clone(),
-            )
-        };
-
-        let Some(doc) = plugin.get_doc(&doc_id, &heads).await.to_anyhow()? else {
-            return Ok(Err(format!("doc not found: {doc_id}")));
-        };
-
-        let Some(blob_facet_raw) = doc.facets.get(&facet_key) else {
-            return Ok(Err(format!("blob facet not found: {}", facet_key)));
-        };
-
-        let blob_facet_value = match daybook_types::doc::WellKnownFacet::from_json(
-            blob_facet_raw.clone(),
-            daybook_types::doc::WellKnownFacetTag::Blob,
-        ) {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err.to_string())),
-        };
-
-        let daybook_types::doc::WellKnownFacet::Blob(blob) = blob_facet_value else {
-            return Ok(Err("facet is not a blob".to_string()));
-        };
-
-        let Some(urls) = blob.urls.as_ref() else {
-            return Ok(Err("blob facet is missing urls".to_string()));
-        };
-        let Some(first_url) = urls.first() else {
-            return Ok(Err("blob facet urls is empty".to_string()));
-        };
-
-        let parsed_url = match url::Url::parse(first_url) {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err.to_string())),
-        };
-        if parsed_url.scheme() != crate::blobs::BLOB_SCHEME {
-            return Ok(Err(format!(
-                "unsupported blob url scheme '{}'",
-                parsed_url.scheme()
-            )));
-        }
-        if parsed_url.host_str().is_some() {
-            return Ok(Err("blob url authority must be empty".to_string()));
-        }
-
-        let hash = parsed_url.path().trim_start_matches('/');
-        if hash.is_empty() {
-            return Ok(Err("blob url path is missing hash".to_string()));
-        }
-
-        let image_path = match plugin.blobs_repo.get_path(hash).await {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err.to_string())),
-        };
-
-        let model_path = |suffix: &str| -> Result<PathBuf, String> {
-            let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join(suffix);
-            std::path::absolute(candidate)
-                .map_err(|err| format!("failed to resolve absolute model path: {err}"))
-        };
-
-        let det_model_path = match model_path("target/models/detection/v5/det.onnx") {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err)),
-        };
-        let rec_model_path = match model_path("target/models/languages/latin/rec.onnx") {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err)),
-        };
-        let dict_path = match model_path("target/models/languages/latin/dict.txt") {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err)),
-        };
-
-        let mltools_ctx = mltools::Ctx {
-            config: mltools::Config {
-                ocr: mltools::OcrConfig {
-                    backends: vec![mltools::OcrBackendConfig::LocalOnnx {
-                        text_recognition_onnx_path: rec_model_path,
-                        text_detection_onnx_path: det_model_path,
-                        character_dict_txt_path: dict_path,
-                        document_orientation_onnx_path: None,
-                        text_line_orientation_onnx_path: None,
-                        document_rectification_onnx_path: None,
-                        supported_languages_bcp47: vec!["en".to_string()],
-                    }],
-                },
-                embed: mltools::EmbedConfig { backends: vec![] },
-                llm: mltools::LlmConfig { backends: vec![] },
-            },
-        };
-
-        let mut results = match mltools::ocr_image(&mltools_ctx, &[image_path]).await {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err.to_string())),
-        };
-        let Some(result) = results.pop() else {
-            return Ok(Err("ocr returned no results".to_string()));
-        };
-
-        Ok(Ok(mltools_ocr::OcrResult {
-            text: result.text,
-            regions: result
-                .regions
-                .into_iter()
-                .map(|region| binds_guest::townframe::mltools::ocr::TextRegion {
-                    bounding_box: region.bounding_box,
-                    text: region.text.map(|text| text.to_string()),
-                    confidence: region.confidence,
-                })
-                .collect(),
-        }))
-    }
-}
-
-impl mltools_embed::Host for SharedWashCtx {
-    async fn embed_text(
-        &mut self,
-        text: String,
-    ) -> wasmtime::Result<Result<mltools_embed::EmbedResult, String>> {
-        let cache_dir = std::path::absolute(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join("target/models/.fastembed_cache"),
-        )
-        .map_err(|err| anyhow::anyhow!("failed to resolve embedding cache path: {err}"))?;
-
-        let mltools_ctx = mltools::Ctx {
-            config: mltools::Config {
-                ocr: mltools::OcrConfig { backends: vec![] },
-                embed: mltools::EmbedConfig {
-                    backends: vec![mltools::EmbedBackendConfig::LocalFastembedNomic { cache_dir }],
-                },
-                llm: mltools::LlmConfig { backends: vec![] },
-            },
-        };
-
-        let result = match mltools::embed_text(&mltools_ctx, &text).await {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err.to_string())),
-        };
-
-        Ok(Ok(mltools_embed::EmbedResult {
-            vector: result.vector,
-            dimensions: result.dimensions,
-            model_id: result.model_id,
-        }))
-    }
-}
-
-impl mltools_llm_chat::Host for SharedWashCtx {
-    async fn llm_chat(&mut self, text: String) -> wasmtime::Result<Result<String, String>> {
-        let ollama_url = match utils_rs::get_env_var("OLLAMA_URL") {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err.to_string())),
-        };
-        let ollama_model = match utils_rs::get_env_var("OLLAMA_MODEL") {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err.to_string())),
-        };
-
-        let mltools_ctx = mltools::Ctx {
-            config: mltools::Config {
-                ocr: mltools::OcrConfig { backends: vec![] },
-                embed: mltools::EmbedConfig { backends: vec![] },
-                llm: mltools::LlmConfig {
-                    backends: vec![mltools::LlmBackendConfig::CloudOllama {
-                        url: ollama_url,
-                        model: ollama_model,
-                    }],
-                },
-            },
-        };
-
-        let result = match mltools::llm_chat(&mltools_ctx, &text).await {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err.to_string())),
-        };
-        Ok(Ok(result.text))
-    }
-}
-
-impl capabilities::Host for SharedWashCtx {}
-
-impl sqlite_connection::Host for SharedWashCtx {}
-
-impl sqlite_connection::HostConnection for SharedWashCtx {
-    async fn query(
-        &mut self,
-        handle: wasmtime::component::Resource<sqlite_connection::Connection>,
-        query: String,
-        params: Vec<binds_guest::townframe::sql::types::SqlValue>,
-    ) -> wasmtime::Result<
-        Result<
-            Vec<binds_guest::townframe::sql::types::ResultRow>,
-            binds_guest::townframe::sql::types::QueryError,
-        >,
-    > {
-        let db_pool = match ensure_sqlite_pool(self, &handle).await {
-            Ok(pool) => pool,
-            Err(err) => {
-                return Ok(Err(
-                    binds_guest::townframe::sql::types::QueryError::Unexpected(err.to_string()),
-                ))
-            }
-        };
-
-        let mut sql_query = sqlx::query(&query);
-        for param in params {
-            sql_query = bind_sql_value(sql_query, param);
-        }
-        let rows = match sql_query.fetch_all(&db_pool).await {
-            Ok(rows) => rows,
-            Err(err) => return Ok(Err(query_error_from_sqlx_error(err))),
-        };
-        let mut result_rows = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let result_row = match sqlite_row_to_result_row(row) {
-                Ok(value) => value,
-                Err(err) => return Ok(Err(err)),
-            };
-            result_rows.push(result_row);
-        }
-        Ok(Ok(result_rows))
-    }
-
-    async fn query_batch(
-        &mut self,
-        handle: wasmtime::component::Resource<sqlite_connection::Connection>,
-        query: String,
-    ) -> wasmtime::Result<Result<(), binds_guest::townframe::sql::types::QueryError>> {
-        let db_pool = match ensure_sqlite_pool(self, &handle).await {
-            Ok(pool) => pool,
-            Err(err) => {
-                return Ok(Err(
-                    binds_guest::townframe::sql::types::QueryError::Unexpected(err.to_string()),
-                ))
-            }
-        };
-        match sqlx::query(&query).execute(&db_pool).await {
-            Ok(_) => Ok(Ok(())),
-            Err(err) => Ok(Err(query_error_from_sqlx_error(err))),
-        }
-    }
-
-    async fn sqlite_file_path(
-        &mut self,
-        handle: wasmtime::component::Resource<sqlite_connection::Connection>,
-    ) -> wasmtime::Result<String> {
-        ensure_sqlite_file_path(self, &handle).await.to_anyhow()
-    }
-
-    async fn drop(
-        &mut self,
-        rep: wasmtime::component::Resource<sqlite_connection::Connection>,
-    ) -> wasmtime::Result<()> {
-        self.table.delete(rep)?;
-        Ok(())
-    }
-}
-
 impl facet_routine::Host for SharedWashCtx {
     async fn get_args(&mut self) -> wasmtime::Result<facet_routine::FacetRoutineArgs> {
         use crate::rt::*;
@@ -1344,7 +620,7 @@ impl facet_routine::Host for SharedWashCtx {
             let facet_key_str = facet_key.to_string();
 
             if access.write {
-                let token = self.table.push(FacetTokenRw {
+                let token = self.table.push(caps::FacetTokenRw {
                     doc_id: doc_id.clone(),
                     heads: heads.clone(),
                     branch_path: staging_branch_path.clone(),
@@ -1354,7 +630,7 @@ impl facet_routine::Host for SharedWashCtx {
                 })?;
                 rw_facet_tokens.push((facet_key_str, token));
             } else if access.read {
-                let token = self.table.push(FacetTokenRo {
+                let token = self.table.push(caps::FacetTokenRo {
                     doc_id: doc_id.clone(),
                     heads: heads.clone(),
                     facet_key: facet_key.clone(),
@@ -1368,7 +644,7 @@ impl facet_routine::Host for SharedWashCtx {
                 &local_state_access.plug_id,
                 &local_state_access.local_state_key.0,
             );
-            let handle = self.table.push(SqliteConnectionToken {
+            let handle = self.table.push(local_state_sql::SqliteConnectionToken {
                 local_state_id,
                 sqlite_file_path: None,
                 db_pool: None,

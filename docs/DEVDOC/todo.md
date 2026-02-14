@@ -59,10 +59,10 @@
   - [x] `dmeta`
   - [x] LRU caches
   - [ ] JSONSchema checks
-  - [ ] Facet ref index
-  - [ ] URLs
-    - [ ] Facet URL
-    - [ ] Doc URL
+  - [x] Facet ref index
+  - [x] URLs
+    - [x] Facet URL
+    - [x] Doc URL
   - [ ] `dpath`
 - [ ] Plugins
   - [x] Manifest

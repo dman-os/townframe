@@ -53,16 +53,22 @@ mod interlude {
 
 use interlude::*;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Config {
     pub ocr: OcrConfig,
     pub embed: EmbedConfig,
     pub llm: LlmConfig,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct OcrConfig {
     pub backends: Vec<OcrBackendConfig>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub enum OcrBackendConfig {
     LocalOnnx {
         text_recognition_onnx_path: PathBuf,
@@ -77,19 +83,37 @@ pub enum OcrBackendConfig {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct EmbedConfig {
     pub backends: Vec<EmbedBackendConfig>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub enum EmbedBackendConfig {
-    LocalFastembedNomic { cache_dir: PathBuf },
-    CloudOllama { url: String, model: String },
+    LocalFastembed {
+        onnx_path: PathBuf,
+        tokenizer_path: PathBuf,
+        config_path: PathBuf,
+        special_tokens_map_path: PathBuf,
+        tokenizer_config_path: PathBuf,
+        model_id: String,
+    },
+    CloudOllama {
+        url: String,
+        model: String,
+    },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct LlmConfig {
     pub backends: Vec<LlmBackendConfig>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub enum LlmBackendConfig {
     CloudOllama { url: String, model: String },
 }
@@ -103,6 +127,9 @@ impl Ctx {
         Self { config }.into()
     }
 }
+
+#[cfg(feature = "hf_hub")]
+pub mod models;
 
 pub struct EmbedResult {
     pub vector: Vec<f32>,
@@ -119,7 +146,8 @@ pub async fn embed_text(ctx: &Ctx, text: &str) -> Res<EmbedResult> {
         eyre::bail!("no embed backend configured");
     };
     match backend_config {
-        EmbedBackendConfig::LocalFastembedNomic { .. } => {
+        EmbedBackendConfig::LocalFastembedNomic { .. }
+        | EmbedBackendConfig::LocalFastembed { .. } => {
             local::embed_text(backend_config, text).await
         }
         EmbedBackendConfig::CloudOllama { url, model } => {
@@ -171,12 +199,45 @@ mod local {
     use super::*;
 
     pub async fn embed_text(backend_config: &EmbedBackendConfig, text: &str) -> Res<EmbedResult> {
-        let cache_dir = match backend_config {
-            EmbedBackendConfig::LocalFastembedNomic { cache_dir } => cache_dir.clone(),
+        let (
+            onnx_path,
+            tokenizer_path,
+            config_path,
+            special_tokens_map_path,
+            tokenizer_config_path,
+            model_id,
+        ) = match backend_config {
+            EmbedBackendConfig::LocalFastembed {
+                onnx_path,
+                tokenizer_path,
+                config_path,
+                special_tokens_map_path,
+                tokenizer_config_path,
+                model_id,
+            } => (
+                onnx_path.clone(),
+                tokenizer_path.clone(),
+                config_path.clone(),
+                special_tokens_map_path.clone(),
+                tokenizer_config_path.clone(),
+                model_id.clone(),
+            ),
             EmbedBackendConfig::CloudOllama { .. } => {
                 eyre::bail!("cloud backend is not supported in local::embed_text")
             }
         };
+
+        for required_path in [
+            &onnx_path,
+            &tokenizer_path,
+            &config_path,
+            &special_tokens_map_path,
+            &tokenizer_config_path,
+        ] {
+            if !required_path.exists() {
+                eyre::bail!("missing embedding model file: {}", required_path.display());
+            }
+        }
 
         let input_text = text.to_string();
         tokio::task::spawn_blocking(move || -> Res<EmbedResult> {
@@ -184,23 +245,6 @@ mod local {
                 InitOptionsUserDefined, QuantizationMode, TextEmbedding, TokenizerFiles,
                 UserDefinedEmbeddingModel,
             };
-
-            let model_root = cache_dir.join("models--nomic-ai--nomic-embed-text-v1.5");
-            let refs_main_path = model_root.join("refs/main");
-            let snapshot_id = std::fs::read_to_string(&refs_main_path).wrap_err_with(|| {
-                format!("failed reading refs/main: {}", refs_main_path.display())
-            })?;
-            let snapshot_id = snapshot_id.trim();
-            if snapshot_id.is_empty() {
-                eyre::bail!("empty snapshot id in {}", refs_main_path.display());
-            }
-
-            let snapshot_root = model_root.join("snapshots").join(snapshot_id);
-            let onnx_path = snapshot_root.join("onnx/model_quantized.onnx");
-            let tokenizer_path = snapshot_root.join("tokenizer.json");
-            let config_path = snapshot_root.join("config.json");
-            let special_tokens_map_path = snapshot_root.join("special_tokens_map.json");
-            let tokenizer_config_path = snapshot_root.join("tokenizer_config.json");
 
             let user_model = UserDefinedEmbeddingModel::new(
                 std::fs::read(&onnx_path)
@@ -235,7 +279,7 @@ mod local {
             Ok(EmbedResult {
                 vector,
                 dimensions,
-                model_id: "nomic-ai/nomic-embed-text-v1.5".to_string(),
+                model_id,
             })
         })
         .await
@@ -414,6 +458,11 @@ mod tests {
         std::env::var("OLLAMA_URL").expect("OLLAMA_URL must be set for cloud mltools tests")
     }
 
+    #[cfg(feature = "hf_hub")]
+    fn test_model_cache_dir() -> PathBuf {
+        crate::models::test_cache_dir()
+    }
+
     fn context_with(
         ocr_backends: Vec<OcrBackendConfig>,
         embed_backends: Vec<EmbedBackendConfig>,
@@ -537,7 +586,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires running Ollama and OLLAMA_URL with an embedding model available"]
     fn test_embed_text_cloud_router_roundtrip() -> Res<()> {
         let embed_model_name =
             std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "embeddinggemma".to_string());
@@ -564,7 +612,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires running Ollama and OLLAMA_URL with a chat model available"]
     fn test_llm_chat_cloud_router_roundtrip() -> Res<()> {
         let llm_model_name =
             std::env::var("OLLAMA_LLM_MODEL").unwrap_or_else(|_| "gemma3".to_string());
@@ -584,6 +631,43 @@ mod tests {
 
             let result = llm_chat(&context, "reply with one short word").await?;
             assert!(!result.text.trim().is_empty());
+
+            Ok(())
+        })
+    }
+
+    #[cfg(feature = "hf_hub")]
+    #[test]
+    #[ignore = "downloads model assets from remote registries"]
+    fn test_mobile_default_provisions_models() -> Res<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let config = crate::models::mobile_default(test_model_cache_dir()).await?;
+
+            assert_eq!(config.ocr.backends.len(), 1);
+            assert_eq!(config.embed.backends.len(), 2);
+            assert_eq!(config.llm.backends.len(), 1);
+
+            let EmbedBackendConfig::LocalFastembed {
+                onnx_path,
+                tokenizer_path,
+                config_path,
+                special_tokens_map_path,
+                tokenizer_config_path,
+                model_id,
+            } = &config.embed.backends[0]
+            else {
+                panic!("expected local user-defined embed backend");
+            };
+
+            assert_eq!(model_id, "nomic-ai/nomic-embed-text-v1.5");
+            assert!(onnx_path.exists());
+            assert!(tokenizer_path.exists());
+            assert!(config_path.exists());
+            assert!(special_tokens_map_path.exists());
+            assert!(tokenizer_config_path.exists());
 
             Ok(())
         })
