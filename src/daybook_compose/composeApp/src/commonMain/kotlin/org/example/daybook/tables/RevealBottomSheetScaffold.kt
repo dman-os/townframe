@@ -200,6 +200,7 @@ fun RevealBottomSheetScaffold(
     sheetPeekHeight: Dp = 0.dp,
     sheetMaxWidth: Dp = Dp.Unspecified,
     sheetHeader: (@Composable (Modifier) -> Unit)? = null,
+    sheetHeaderUnderlay: (@Composable (Modifier) -> Unit)? = null,
     sheetContainerColor: Color = BottomSheetDefaults.ContainerColor,
     sheetContentColor: Color = contentColorFor(sheetContainerColor),
     sheetShape: Shape = BottomSheetDefaults.ExpandedShape,
@@ -393,6 +394,12 @@ fun RevealBottomSheetScaffold(
                             }
                         }
                     },
+                    // underlay slot measured separately and anchored to the header reveal position
+                    {
+                        if (sheetHeaderUnderlay != null) {
+                            sheetHeaderUnderlay(Modifier)
+                        }
+                    },
                     // header slot measured separately so we can position it relative to the reveal edge
                     {
                         if (sheetHeader != null) {
@@ -438,10 +445,13 @@ fun RevealBottomSheetScaffold(
                     },
                     { snackBarHost(remember { SnackbarHostState() }) }
                 )
-        ) {
-                (topBarMeasurables, bodyMeasurables, sheetMeasurables, headerMeasurables, snackbarMeasurables),
-                constraints
-            ->
+        ) { measurables, constraints ->
+            val topBarMeasurables = measurables[0]
+            val bodyMeasurables = measurables[1]
+            val sheetMeasurables = measurables[2]
+            val underlayMeasurables = measurables[3]
+            val headerMeasurables = measurables[4]
+            val snackbarMeasurables = measurables[5]
             val layoutWidth = constraints.maxWidth
             val layoutHeight = constraints.maxHeight
             val loose = constraints.copy(minWidth = 0, minHeight = 0)
@@ -451,6 +461,7 @@ fun RevealBottomSheetScaffold(
             val bodyConstraints = loose.copy(maxHeight = layoutHeight - topBarHeight)
             val bodyPlaceables = bodyMeasurables.map { it.measure(bodyConstraints) }
             val sheetPlaceables = sheetMeasurables.map { it.measure(loose) }
+            val underlayPlaceables = underlayMeasurables.map { it.measure(loose) }
             val headerPlaceables = headerMeasurables.map { it.measure(loose) }
             val snackbarPlaceables = snackbarMeasurables.map { it.measure(loose) }
 
@@ -464,13 +475,20 @@ fun RevealBottomSheetScaffold(
                     p.placeRelative(left, layoutHeight - p.height)
                 }
 
-                // Position header above the sheet at the reveal edge if provided
-                if (headerPlaceables.isNotEmpty()) {
+                if (underlayPlaceables.isNotEmpty() || headerPlaceables.isNotEmpty()) {
                     // compute visible px from sheetHeightPx and progress
                     val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
                     val visiblePx =
                         if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
                     val headerTopGlobal = (layoutHeight - visiblePx).toInt()
+
+
+                    // Place underlay first so header can partially obscure it.
+                    underlayPlaceables.fastForEach { up ->
+                        val ux = (layoutWidth - up.width) / 2
+                        up.placeRelative(ux, headerTopGlobal)
+                    }
+                    // Position header above the sheet at the reveal edge if provided
                     headerPlaceables.fastForEach { hp ->
                         val hx = (layoutWidth - hp.width) / 2
                         // place header so its top aligns with reveal edge

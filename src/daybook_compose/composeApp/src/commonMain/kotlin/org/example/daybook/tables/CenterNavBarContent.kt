@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Text
@@ -52,18 +51,13 @@ import org.example.daybook.TablesViewModel
 @Composable
 fun RowScope.CenterNavBarContent(
     navController: NavHostController,
-    revealSheetState: RevealBottomSheetState,
-    sheetContent: SheetContent,
+    isMenuOpen: Boolean,
     showFeaturesMenu: Boolean,
-    addTabReadyState: androidx.compose.runtime.State<Boolean>,
-    addTableReadyState: androidx.compose.runtime.State<Boolean>,
     featureReadyStates: List<androidx.compose.runtime.State<Boolean>>,
     features: List<FeatureItem>,
     featureButtonLayouts: Map<String, Rect>,
     lastDragWindowPos: androidx.compose.ui.geometry.Offset?,
-    onAddButtonLayout: (Rect) -> Unit,
     onFeatureButtonLayout: (String, Rect) -> Unit,
-    onAddTab: suspend () -> Unit,
     onFeatureActivate: suspend (FeatureItem) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -74,33 +68,9 @@ fun RowScope.CenterNavBarContent(
     val chromeState by chromeStateManager.currentState.collectAsState()
     val mainFeatureActionButton = chromeState.mainFeatureActionButton
     val prominentButtons = chromeState.additionalFeatureButtons.filter { it.prominent }
-    val isMenuOpen =
-        showFeaturesMenu || (revealSheetState.isVisible && sheetContent == SheetContent.MENU)
+    val isMenuOpenResolved = showFeaturesMenu || isMenuOpen
 
-    // When TABS sheet is open, show controls (add button). When closed, show nav bar features or chrome state button.
-    if (revealSheetState.isVisible && sheetContent == SheetContent.TABS) {
-        // Add-tab button expands to fill the center area
-        Button(
-            onClick = {
-                scope.launch {
-                    onAddTab()
-                }
-            },
-            modifier =
-                modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .onGloballyPositioned { layoutCoordinates ->
-                        val r = layoutCoordinates.boundsInWindow()
-                        if (r.width > 0f && r.height > 0f) {
-                            onAddButtonLayout(r)
-                        }
-                    },
-            colors = if (addTabReadyState.value) ButtonDefaults.filledTonalButtonColors() else ButtonDefaults.buttonColors()
-        ) {
-            if (addTabReadyState.value) Text("Release to Add") else Text("Add Tab")
-        }
-    } else if (prominentButtons.isNotEmpty() && (isMenuOpen || mainFeatureActionButton == null)) {
+    if (prominentButtons.isNotEmpty() && (isMenuOpenResolved || mainFeatureActionButton == null)) {
         // Show prominent buttons when:
         // 1. Menu is open (supplanting main feature action button if it exists), OR
         // 2. No main feature action button exists (show prominent buttons always)
@@ -149,7 +119,7 @@ fun RowScope.CenterNavBarContent(
                 )
             }
         }
-    } else if (mainFeatureActionButton != null && !isMenuOpen) {
+    } else if (mainFeatureActionButton != null && !isMenuOpenResolved) {
         // Show button from ChromeState (only when menu is not open and no prominent buttons to show)
         val button = mainFeatureActionButton as MainFeatureActionButton.Button
         Button(
@@ -173,7 +143,7 @@ fun RowScope.CenterNavBarContent(
         // Show default nav bar features (Home, Capture, Documents) in the center
         Row(
             modifier =
-                modifier
+                Modifier
                     .weight(1f)
                     .padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween
