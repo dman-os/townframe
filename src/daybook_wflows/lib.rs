@@ -42,7 +42,6 @@ mod wit {
             "townframe:daybook/mltools-ocr": generate,
             "townframe:daybook/mltools-embed": generate,
             "townframe:daybook/mltools-llm-chat": generate,
-            "townframe:daybook/index-vector": generate,
         }
     });
 }

@@ -1,3 +1,5 @@
+// FIXME: use nested ids for facet keys
+
 use crate::interlude::*;
 
 pub mod lru;

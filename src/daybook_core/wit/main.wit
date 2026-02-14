@@ -110,20 +110,6 @@ interface mltools-llm-chat {
     llm-chat: func(text: string) -> result<string, string>;
 }
 
-interface index-vector {
-    use types.{heads};
-    use townframe:daybook-types/doc.{doc-id};
-
-    record vector-hit {
-        doc-id: doc-id,
-        facet-key: string,
-        heads: heads,
-        distance: f32,
-    }
-
-    query-text: func(text: string, k: u32) -> result<list<vector-hit>, string>;
-}
-
 world all-guest {
     import drawer;
     import capabilities;
@@ -132,6 +118,5 @@ world all-guest {
     import mltools-ocr;
     import mltools-embed;
     import mltools-llm-chat;
-    import index-vector;
     import wasi:filesystem/preopens@0.2.6;
 }

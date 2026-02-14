@@ -25,11 +25,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     key_tag: WellKnownFacetTag::RefGeneric.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: default(),
+                    references: default(),
                 },
                 FacetKeyManifest {
                     key_tag: WellKnownFacetTag::LabelGeneric.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: default(),
+                    references: default(),
                 },
                 FacetKeyManifest {
                     key_tag: WellKnownFacetTag::TitleGeneric.into(),
@@ -39,6 +41,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         deets: FacetKeyDisplayDeets::Title { show_editor: true },
                         ..default()
                     },
+                    references: default(),
                 },
                 FacetKeyManifest {
                     key_tag: WellKnownFacetTag::PathGeneric.into(),
@@ -48,26 +51,34 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         deets: FacetKeyDisplayDeets::UnixPath,
                         ..default()
                     },
+                    references: default(),
                 },
                 FacetKeyManifest {
                     key_tag: WellKnownFacetTag::ImageMetadata.into(),
                     value_schema: schemars::schema_for!(ImageMetadata),
                     display_config: default(),
+                    references: vec![FacetReferenceManifest {
+                        reference_kind: FacetReferenceKind::UrlFacet,
+                        json_path: "/facetRef".into(),
+                    }],
                 },
                 FacetKeyManifest {
                     key_tag: WellKnownFacetTag::Note.into(),
                     value_schema: schemars::schema_for!(Note),
                     display_config: default(),
+                    references: default(),
                 },
                 FacetKeyManifest {
                     key_tag: WellKnownFacetTag::Blob.into(),
                     value_schema: schemars::schema_for!(Blob),
                     display_config: default(),
+                    references: default(),
                 },
                 FacetKeyManifest {
                     key_tag: WellKnownFacetTag::Pending.into(),
                     value_schema: schemars::schema_for!(Pending),
                     display_config: default(),
+                    references: default(),
                 },
             ],
         },
@@ -77,10 +88,20 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             version: "0.0.1".parse().unwrap(),
             title: "Daybook WIP".into(),
             desc: "Experiment bed for WIP features".into(),
-            local_states: [(
-                "doc-embedding-index".into(),
-                Arc::new(LocalStateManifest::SqliteFile {}),
-            )]
+            local_states: [
+                (
+                    "doc-embedding-index".into(),
+                    Arc::new(LocalStateManifest::SqliteFile {}),
+                ),
+                (
+                    "doc-facet-set-index".into(),
+                    Arc::new(LocalStateManifest::SqliteFile {}),
+                ),
+                (
+                    "doc-facet-ref-index".into(),
+                    Arc::new(LocalStateManifest::SqliteFile {}),
+                ),
+            ]
             .into(),
             dependencies: [
                 //
@@ -393,11 +414,16 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     key_tag: WellKnownFacetTag::PseudoLabel.into(),
                     value_schema: schemars::schema_for!(Vec<String>),
                     display_config: default(),
+                    references: default(),
                 },
                 FacetKeyManifest {
                     key_tag: WellKnownFacetTag::Embedding.into(),
                     value_schema: schemars::schema_for!(daybook_types::doc::Embedding),
                     display_config: default(),
+                    references: vec![FacetReferenceManifest {
+                        reference_kind: FacetReferenceKind::UrlFacet,
+                        json_path: "/facetRef".into(),
+                    }],
                 },
             ],
         },
@@ -1318,6 +1344,7 @@ mod tests {
             key_tag: "org.test.tag".into(),
             value_schema: schemars::schema_for!(String),
             display_config: default(),
+            references: default(),
         });
         repo.add(p1).await?;
 
@@ -1327,6 +1354,7 @@ mod tests {
             key_tag: "org.test.tag".into(),
             value_schema: schemars::schema_for!(String),
             display_config: default(),
+            references: default(),
         });
 
         let res = repo.add(p2).await;
@@ -1346,6 +1374,7 @@ mod tests {
             key_tag: "org.test.shared".into(),
             value_schema: schemars::schema_for!(String),
             display_config: default(),
+            references: default(),
         });
         repo.add(provider).await?;
 

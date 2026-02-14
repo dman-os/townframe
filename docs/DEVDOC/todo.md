@@ -48,6 +48,8 @@
 - [ ] Blobs server
   - [ ] Chunked hashing for transfers
     - Chunks at rest?
+- [ ] P2P
+  - [ ] iroh
 
 - [ ] Cleanup for public pre-alpha
 

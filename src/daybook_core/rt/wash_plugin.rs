@@ -302,7 +302,6 @@ mod binds_guest {
 pub use binds_guest::townframe::daybook::capabilities;
 pub use binds_guest::townframe::daybook::drawer;
 pub use binds_guest::townframe::daybook::facet_routine;
-pub use binds_guest::townframe::daybook::index_vector;
 pub use binds_guest::townframe::daybook::mltools_embed;
 pub use binds_guest::townframe::daybook::mltools_llm_chat;
 pub use binds_guest::townframe::daybook::mltools_ocr;
@@ -320,7 +319,6 @@ pub struct DaybookPlugin {
     drawer_repo: Arc<crate::drawer::DrawerRepo>,
     dispatch_repo: Arc<crate::rt::DispatchRepo>,
     blobs_repo: Arc<crate::blobs::BlobsRepo>,
-    doc_embedding_index_repo: Arc<crate::index::DocEmbeddingIndexRepo>,
     sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
 }
 
@@ -329,14 +327,12 @@ impl DaybookPlugin {
         drawer_repo: Arc<crate::drawer::DrawerRepo>,
         dispatch_repo: Arc<crate::rt::DispatchRepo>,
         blobs_repo: Arc<crate::blobs::BlobsRepo>,
-        doc_embedding_index_repo: Arc<crate::index::DocEmbeddingIndexRepo>,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     ) -> Self {
         Self {
             drawer_repo,
             dispatch_repo,
             blobs_repo,
-            doc_embedding_index_repo,
             sqlite_local_state_repo,
         }
     }
@@ -382,7 +378,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
         WitWorld {
             exports: std::collections::HashSet::new(),
             imports: std::collections::HashSet::from([WitInterface::from(
-                "townframe:daybook/drawer,capabilities,facet-routine,sqlite-connection,mltools-ocr,mltools-embed,mltools-llm-chat,index-vector",
+                "townframe:daybook/drawer,capabilities,facet-routine,sqlite-connection,mltools-ocr,mltools-embed,mltools-llm-chat",
             )]),
         }
     }
@@ -448,12 +444,6 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
                         _,
                         wasmtime::component::HasSelf<SharedWashCtx>,
                     >(item.linker(), |ctx| ctx)?;
-                }
-                if iface.interfaces.contains("index-vector") {
-                    index_vector::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
-                        item.linker(),
-                        |ctx| ctx,
-                    )?;
                 }
             }
         }
@@ -1215,33 +1205,6 @@ impl mltools_llm_chat::Host for SharedWashCtx {
             Err(err) => return Ok(Err(err.to_string())),
         };
         Ok(Ok(result.text))
-    }
-}
-
-impl index_vector::Host for SharedWashCtx {
-    async fn query_text(
-        &mut self,
-        text: String,
-        num_neighbors: u32,
-    ) -> wasmtime::Result<Result<Vec<index_vector::VectorHit>, String>> {
-        let plugin = DaybookPlugin::from_ctx(self);
-        let hits = match plugin
-            .doc_embedding_index_repo
-            .query_text(&text, num_neighbors)
-            .await
-        {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err.to_string())),
-        };
-        Ok(Ok(hits
-            .into_iter()
-            .map(|hit| index_vector::VectorHit {
-                doc_id: hit.doc_id,
-                facet_key: hit.facet_key,
-                heads: utils_rs::am::serialize_commit_heads(&hit.heads.0),
-                distance: hit.distance,
-            })
-            .collect()))
     }
 }
 

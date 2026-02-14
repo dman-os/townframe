@@ -137,6 +137,25 @@ pub struct FacetKeyManifest {
     #[garde(dive)]
     #[serde(default)]
     pub display_config: FacetKeyDisplayHint,
+    #[garde(dive)]
+    #[serde(default)]
+    pub references: Vec<FacetReferenceManifest>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct FacetReferenceManifest {
+    #[garde(dive)]
+    pub reference_kind: FacetReferenceKind,
+    /// JSON pointer (e.g. `/facetRef`) or root-dot path (e.g. `$.facetRef`)
+    #[garde(length(min = 1))]
+    pub json_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum FacetReferenceKind {
+    UrlFacet,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -346,6 +365,7 @@ pub struct ProcessorManifest {
 #[serde(rename_all = "camelCase")]
 pub enum ProcessorDeets {
     /// Tests `predicate` whenever a doc changes and
+    /// invokes routine if it's true.
     DocProcessor {
         #[garde(dive)]
         predicate: DocPredicateClause,

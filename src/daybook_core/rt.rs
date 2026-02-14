@@ -1,5 +1,5 @@
 use crate::config::ConfigRepo;
-use crate::index::DocEmbeddingIndexRepo;
+use crate::index::{DocFacetRefIndexRepo, DocFacetSetIndexRepo};
 use crate::interlude::*;
 use crate::local_state::SqliteLocalStateRepo;
 
@@ -54,7 +54,8 @@ pub struct Rt {
     pub utils_plugin: Arc<wash_plugin_utils::UtilsPlugin>,
     pub mltools_plugin: Arc<wash_plugin_mltools::MltoolsPlugin>,
     pub blobs_repo: Arc<BlobsRepo>,
-    pub doc_embedding_index_repo: Arc<DocEmbeddingIndexRepo>,
+    pub doc_facet_set_index_repo: Arc<DocFacetSetIndexRepo>,
+    pub doc_facet_ref_index_repo: Arc<DocFacetRefIndexRepo>,
     pub sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
     pub local_actor_id: automerge::ActorId,
     local_wflow_part_id: String,
@@ -65,7 +66,8 @@ pub struct RtStopToken {
     rt: Arc<Rt>,
     partition_watcher: Option<tokio::task::JoinHandle<()>>,
     doc_changes_worker: Option<triage::DocTriageWorkerHandle>,
-    doc_embedding_index_stop: Option<crate::index::DocEmbeddingIndexStopToken>,
+    doc_facet_set_index_stop: Option<crate::index::DocFacetSetIndexStopToken>,
+    doc_facet_ref_index_stop: Option<crate::index::DocFacetRefIndexStopToken>,
     sqlite_local_state_stop: Option<crate::repos::RepoStopToken>,
 }
 
@@ -83,11 +85,19 @@ impl RtStopToken {
             }
         }
 
-        if let Some(stop) = self.doc_embedding_index_stop.take() {
+        if let Some(stop) = self.doc_facet_set_index_stop.take() {
             if let Err(err) = stop.stop().await {
                 warn!(
                     ?err,
-                    "error stopping doc_embedding_index_repo during shutdown - continuing"
+                    "error stopping doc_facet_set_index_repo during shutdown - continuing"
+                );
+            }
+        }
+        if let Some(stop) = self.doc_facet_ref_index_stop.take() {
+            if let Err(err) = stop.stop().await {
+                warn!(
+                    ?err,
+                    "error stopping doc_facet_ref_index_repo during shutdown - continuing"
                 );
             }
         }
@@ -186,11 +196,22 @@ impl Rt {
         let (sqlite_local_state_repo, sqlite_local_state_stop) =
             SqliteLocalStateRepo::boot(local_state_root).await?;
 
-        let (doc_embedding_index_repo, doc_embedding_index_stop) =
-            crate::index::DocEmbeddingIndexRepo::boot(
+        let (doc_facet_set_index_repo, doc_facet_set_index_stop) =
+            crate::index::DocFacetSetIndexRepo::boot(
                 acx.clone(),
                 app_doc_id.clone(),
                 Arc::clone(&drawer),
+                Arc::clone(&sqlite_local_state_repo),
+                local_actor_id.clone(),
+            )
+            .await?;
+        let (doc_facet_ref_index_repo, doc_facet_ref_index_stop) =
+            crate::index::DocFacetRefIndexRepo::boot(
+                acx.clone(),
+                app_doc_id.clone(),
+                Arc::clone(&drawer),
+                Arc::clone(&plugs_repo),
+                Arc::clone(&sqlite_local_state_repo),
                 local_actor_id.clone(),
             )
             .await?;
@@ -202,7 +223,6 @@ impl Rt {
             Arc::clone(&drawer),
             Arc::clone(&dispatch_repo),
             Arc::clone(&blobs_repo),
-            Arc::clone(&doc_embedding_index_repo),
             Arc::clone(&sqlite_local_state_repo),
         ));
         let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {
@@ -291,7 +311,8 @@ impl Rt {
             utils_plugin,
             mltools_plugin,
             blobs_repo,
-            doc_embedding_index_repo,
+            doc_facet_set_index_repo,
+            doc_facet_ref_index_repo,
             sqlite_local_state_repo,
             config_repo,
             wflow_part_state,
@@ -313,7 +334,8 @@ impl Rt {
                 rt,
                 partition_watcher: Some(partition_watcher),
                 doc_changes_worker: Some(doc_changes_worker),
-                doc_embedding_index_stop: Some(doc_embedding_index_stop),
+                doc_facet_set_index_stop: Some(doc_facet_set_index_stop),
+                doc_facet_ref_index_stop: Some(doc_facet_ref_index_stop),
                 sqlite_local_state_stop: Some(sqlite_local_state_stop),
                 wflow_part_handle: Some(wflow_part_handle),
             },
@@ -855,7 +877,6 @@ async fn start_bundle_workload(
                     WitInterface::from("townframe:daybook/mltools-ocr"),
                     WitInterface::from("townframe:daybook/mltools-embed"),
                     WitInterface::from("townframe:daybook/mltools-llm-chat"),
-                    WitInterface::from("townframe:daybook/index-vector"),
                     // WitInterface::from("wasi:keyvalue/store"),
                 ],
                 volumes: vec![],
