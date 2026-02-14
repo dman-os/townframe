@@ -47,6 +47,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -168,14 +169,6 @@ class HoverHoldControllerViewModel : androidx.lifecycle.ViewModel() {
         // debug: cancel called
     }
 }
-
-// Descriptor for a toolbar feature button
-data class FeatureItem(
-    val key: String,
-    val icon: String,
-    val label: String,
-    val onActivate: suspend () -> Unit
-)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -763,46 +756,45 @@ fun DaybookBottomNavigationBar(
     // Box(modifier = bottomBarModifier.fillMaxWidth().height(70.dp)) {
     // }
 
-    BottomAppBar(
-        modifier = bottomBarModifier.fillMaxWidth().height(70.dp),
-        actions = {
-            Box(modifier = Modifier.fillMaxWidth()) {
-                if (showLeftDrawerHint) {
-                    Box(
+    NavigationBar(
+        modifier = bottomBarModifier.fillMaxWidth()//.height(70.dp),
+    ) {
+        Box(modifier = Modifier.fillMaxWidth()) {
+            if (showLeftDrawerHint) {
+                Box(
+                    modifier =
+                        Modifier
+                            .align(Alignment.BottomEnd)
+                            .offset(x = 16.dp),
+                ) {
+                    LeftDrawerEdgeHint(
                         modifier =
                             Modifier
-                                .align(Alignment.BottomEnd)
-                                .offset(x = 16.dp, y = -5.dp),
-                    ) {
-                        LeftDrawerEdgeHint(
-                            modifier =
-                                Modifier
-                                    .size(width = 90.dp, height = 90.dp)
-                                    .graphicsLayer(
-                                        rotationZ = -90f,
-                                        alpha = 0.85f
-                                    )
-                        )
-                    }
-                    Box(
-                        modifier =
-                            Modifier
-                                .align(Alignment.CenterStart)
-                                .graphicsLayer(alpha = 0.85f),
-                    ) {
-                        LeftDrawerEdgeHint(
-                            modifier = Modifier.size(width = 90.dp, height = 90.dp)
-                        )
-                    }
+                                .size(width = 90.dp, height = 90.dp)
+                                .graphicsLayer(
+                                    rotationZ = -90f,
+                                    alpha = 0.85f
+                                )
+                    )
                 }
-                Row(Modifier.matchParentSize()) {
-                    // Center dynamic area (expandable). When featuresExpanded, render feature buttons
-                    centerContent()
-
+                Box(
+                    modifier =
+                        Modifier
+                            .align(Alignment.CenterStart)
+                            // .offset(x = -5.dp)
+                            .graphicsLayer(alpha = 0.85f),
+                ) {
+                    LeftDrawerEdgeHint(
+                        modifier = Modifier.size(width = 90.dp, height = 90.dp)
+                    )
                 }
             }
+            Row(Modifier.matchParentSize()) {
+                // Center dynamic area (expandable). When featuresExpanded, render feature buttons
+                centerContent()
+            }
         }
-    )
+    }
 }
 
 @Composable
@@ -891,7 +883,7 @@ fun NavDrawerBottomBar(
 ) {
     val scope = rememberCoroutineScope()
     BottomAppBar(
-        modifier = modifier.fillMaxWidth().height(70.dp),
+        modifier = modifier.fillMaxWidth(),//.height(70.dp),
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
         Button(
@@ -1027,15 +1019,7 @@ fun SheetContentHost(
     // Combine menu features with non-prominent chrome buttons
     val allMenuItems =
         remember(features, nonProminentButtons) {
-            features +
-                nonProminentButtons.map { button ->
-                    FeatureItem(
-                        key = button.key,
-                        icon = "", // Will use button.icon() composable instead
-                        label = "", // Will use button.label() composable instead
-                        onActivate = { button.onClick() }
-                    )
-                }
+            features.withAdditionalFeatureButtons(nonProminentButtons)
         }
     Column(
         modifier =
@@ -1195,37 +1179,22 @@ fun SheetContentHost(
                 ) {
                     allMenuItems.forEach { item ->
                         val isHighlighted = item.key == highlightedMenuItem
-                        // Check if this is a chrome button (has empty icon/label strings)
-                        val isChromeButton = item.icon.isEmpty() && item.label.isEmpty()
-                        val chromeButton =
-                            if (isChromeButton) {
-                                nonProminentButtons.find { it.key == item.key }
-                            } else {
-                                null
-                            }
-
                         NavigationDrawerItem(
                             selected = isHighlighted,
                             onClick = {
                                 scope.launch {
-                                    item.onActivate()
+                                    if (item.enabled) {
+                                        item.onActivate()
+                                    }
                                     onFeatureActivate?.invoke()
                                     onDismiss()
                                 }
                             },
                             icon = {
-                                if (chromeButton != null) {
-                                    chromeButton.icon()
-                                } else {
-                                    FeatureIcon(item)
-                                }
+                                item.icon()
                             },
                             label = {
-                                if (chromeButton != null) {
-                                    chromeButton.label()
-                                } else {
-                                    Text(item.label)
-                                }
+                                item.labelContent?.invoke() ?: Text(item.label)
                             },
                             modifier =
                                 Modifier

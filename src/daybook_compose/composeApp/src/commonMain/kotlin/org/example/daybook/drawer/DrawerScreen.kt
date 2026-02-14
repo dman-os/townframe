@@ -32,15 +32,14 @@ import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
 import org.example.daybook.tables.DockableRegion
 import org.example.daybook.ui.DocEditor
+import org.example.daybook.ui.DocFacetSidebar
 import org.example.daybook.ui.dequoteJson
 import org.example.daybook.ui.noteContentFromFacetJson
-import org.example.daybook.ui.noteFacetJson
+import org.example.daybook.ui.editor.EditorSessionController
+import org.example.daybook.ui.editor.noteFacetKey
+import org.example.daybook.ui.editor.titleFacetKey
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.*
-import org.example.daybook.uniffi.types.DocPatch
-import org.example.daybook.uniffi.types.FacetKey
-import org.example.daybook.uniffi.types.FacetTag
-import org.example.daybook.uniffi.types.WellKnownFacetTag
 
 class DrawerScreenViewModel(
     val drawerVm: DrawerViewModel,
@@ -48,6 +47,13 @@ class DrawerScreenViewModel(
     val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
     val tablesVm: TablesViewModel
 ) : ViewModel() {
+    val editorController =
+        EditorSessionController(
+            drawerRepo = drawerVm.drawerRepo,
+            scope = viewModelScope,
+            onDocCreated = { docId -> drawerVm.selectDoc(docId) }
+        )
+
     val listSizeExpanded =
         tablesVm.tablesState
             .map { state ->
@@ -102,27 +108,6 @@ class DrawerScreenViewModel(
         }
     }
 
-    private var debounceJob: kotlinx.coroutines.Job? = null
-
-    fun updateDocContent(content: String) {
-        val docId = drawerVm.selectedDocId.value ?: return
-
-        // Cancel previous debounce job
-        debounceJob?.cancel()
-        // Start new debounce job
-        debounceJob =
-            viewModelScope.launch {
-                kotlinx.coroutines.delay(500) // 500ms debounce
-                drawerVm.updateDoc(
-                    DocPatch(
-                        id = docId,
-                        facetsSet = mapOf(noteFacetKey() to noteFacetJson(content)),
-                        facetsRemove = emptyList(),
-                        userPath = null
-                    )
-                )
-            }
-    }
 }
 
 @Composable
@@ -137,6 +122,9 @@ fun DrawerScreen(contentType: DaybookContentType, modifier: Modifier = Modifier)
 
     val selectedDocId by drawerVm.selectedDocId.collectAsState()
     val selectedDoc by drawerVm.selectedDoc.collectAsState()
+    LaunchedEffect(selectedDoc?.id) {
+        vm.editorController.bindDoc(selectedDoc)
+    }
 
     if (contentType == DaybookContentType.LIST_AND_DETAIL) {
         val listSize by vm.listSizeExpanded.collectAsState()
@@ -145,7 +133,7 @@ fun DrawerScreen(contentType: DaybookContentType, modifier: Modifier = Modifier)
                 is WindowLayoutRegionSize.Weight -> s.v1
             }
 
-        ProvideChromeState(ChromeState(title = "Documents")) {
+        ProvideChromeState(ChromeState(title = "Drawer")) {
             DockableRegion(
                 modifier = modifier.fillMaxSize(),
                 orientation = Orientation.Horizontal,
@@ -167,13 +155,24 @@ fun DrawerScreen(contentType: DaybookContentType, modifier: Modifier = Modifier)
                 pane("editor") {
                     Box(modifier = Modifier.fillMaxSize()) {
                         if (selectedDocId != null) {
-                            DocEditor(
-                                doc = selectedDoc,
-                                onContentChange = { vm.updateDocContent(it) },
-                                modifier = Modifier.padding(16.dp),
-                                blobsRepo = vm.blobsRepo,
-                                drawerViewModel = drawerVm
-                            )
+                            DockableRegion(
+                                modifier = Modifier.fillMaxSize().padding(16.dp),
+                                orientation = Orientation.Horizontal,
+                                initialWeights = mapOf("doc-main" to 0.72f, "doc-facets" to 0.28f)
+                            ) {
+                                pane("doc-main") {
+                                    DocEditor(
+                                        controller = vm.editorController,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                                pane("doc-facets") {
+                                    DocFacetSidebar(
+                                        controller = vm.editorController,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
                         } else {
                             Box(
                                 modifier = Modifier.fillMaxSize(),
@@ -196,16 +195,14 @@ fun DrawerScreen(contentType: DaybookContentType, modifier: Modifier = Modifier)
             ) {
                 Box(modifier = modifier.fillMaxSize()) {
                     DocEditor(
-                        doc = selectedDoc,
-                        onContentChange = { vm.updateDocContent(it) },
+                        controller = vm.editorController,
+                        showInlineFacetRack = true,
                         modifier = Modifier.padding(16.dp),
-                        blobsRepo = vm.blobsRepo,
-                        drawerViewModel = drawerVm
                     )
                 }
             }
         } else {
-            ProvideChromeState(ChromeState(title = "Documents")) {
+            ProvideChromeState(ChromeState(title = "Drawer")) {
                 // Observe drawerState reactively
                 DocList(
                     drawerViewModel = drawerVm,
@@ -370,9 +367,3 @@ fun DocList(
         }
     }
 }
-
-private fun titleFacetKey(): FacetKey =
-    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.TITLE_GENERIC), "main")
-
-private fun noteFacetKey(): FacetKey =
-    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.NOTE), "main")

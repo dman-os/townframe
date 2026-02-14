@@ -8,7 +8,7 @@ members = [
   "./src/daybook_core",
   "./src/daybook_fuse",
   "./src/daybook_ffi",
-  # "./src/daybook_sync",
+  # "./src/daybook_server",
   "./src/daybook_types",
   "./src/daybook_wflows/",
   "./src/macros",

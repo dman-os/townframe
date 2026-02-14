@@ -1,5 +1,5 @@
 [package]
-name = "daybook_sync"
+name = "daybook_server"
 version.workspace = true
 edition.workspace = true
 
@@ -7,7 +7,7 @@ edition.workspace = true
 workspace = true
 
 [[bin]]
-name = "daybook_sync"
+name = "daybook_server"
 path = "main.rs"
 
 [dependencies]

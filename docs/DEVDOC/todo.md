@@ -7,7 +7,7 @@
     - [x] Un-previlaged processors should go in their own branch
   - [ ] Chatbot
   - [ ] Generated UI
-  - [ ] FUSE
+  - [ ] FUSE/dpath
   - [ ] Programmability
     - Dynamic processors, defined in document?
       - I could just describe to the LLM what the document is to do and it could write it
@@ -15,11 +15,16 @@
 
 ## Stack
 
+- [ ] DocEditor
+- [ ] DrawerScreen
+- [ ] Progress bar
+  - [ ] Blob download
 - [ ] `mltools`
   - [ ] OCR
     - [ ] Local
   - [ ] Embeedding
     - [ ] Local
+  - [ ] STT
   - [ ] API client
   - [ ] Router
   - [ ] durable-streams
@@ -37,7 +42,8 @@
       - [ ] to Flathub
     - [ ] Windows.exe
       - [ ] to Scoop.sh
-- [ ] Overhaul bottom bar
+- [x] Overhaul bottom bar
+  - [ ] Change color when in different modes.
 - [ ] Receipt parsing
 - [ ] Pending jobs [LOST]
 - [ ] Repos
@@ -51,6 +57,7 @@
 - [ ] P2P
   - [ ] iroh
 - [ ] E2E tests for daybook
+- [ ] File locks on repo
 
 - [ ] Cleanup for public pre-alpha
 

@@ -33,6 +33,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
+import kotlinx.serialization.Serializable
 
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
@@ -1076,6 +1077,7 @@ public object FfiConverterTypeAddDocArgs: FfiConverterRustBuffer<AddDocArgs> {
 
 
 
+@Serializable
 data class Blob (
     var `mime`: kotlin.String
     , 
@@ -1468,6 +1470,7 @@ public object FfiConverterTypeFacetMeta: FfiConverterRustBuffer<FacetMeta> {
 
 
 
+@Serializable
 data class ImageMetadata (
     var `facetRef`: Url
     , 
@@ -1521,6 +1524,7 @@ public object FfiConverterTypeImageMetadata: FfiConverterRustBuffer<ImageMetadat
 
 
 
+@Serializable
 data class Note (
     var `mime`: kotlin.String
     , 

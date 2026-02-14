@@ -1,6 +1,10 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
+
+use regex::Regex;
 
 fn main() {
     // Parse command line arguments to detect if we're generating bindings
@@ -31,15 +35,13 @@ fn main() {
 }
 
 fn apply_kotlin_modifications(out_dir: &str) {
-    // Look for the generated Kotlin file
     let real_out_dir = Path::new(out_dir)
         .join("org")
         .join("example")
         .join("daybook")
         .join("uniffi");
-    // .join("daybook_ffi.kt");
 
-    let mut kotlin_files = vec![];
+    let mut kotlin_files: Vec<PathBuf> = vec![];
     let mut dirs = vec![real_out_dir];
     loop {
         let Some(dir_path) = dirs.pop() else {
@@ -60,20 +62,55 @@ fn apply_kotlin_modifications(out_dir: &str) {
             }
         }
     }
+
+    let file_opt_in =
+        "@file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)";
+    let file_opt_in_re = Regex::new(r"(?m)^@file:.*$").expect("invalid regex");
+    let data_class_re =
+        Regex::new(r"(?m)^(@Serializable\s*\n)?(data class\s+([A-Za-z0-9_]+)\s*\()")
+            .expect("invalid regex");
+    let import_re = Regex::new(r"(?m)^import .+\n").expect("invalid regex");
+    let package_re = Regex::new(r"(?m)^package .+\n").expect("invalid regex");
+    let serializable_types: HashSet<&str> = ["Blob", "Note", "ImageMetadata"].into_iter().collect();
+
     for path in kotlin_files {
         match fs::read_to_string(&path) {
             Ok(content) => {
-                let modified_content = content
-                    .split('\n')
-                    .map(|line| {
-                        if line.contains("@file") {
-                            format!("{}\n@file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)", line)
-                        } else {
-                            line.to_string()
+                let mut modified_content = content;
+                if !modified_content.contains(file_opt_in) {
+                    modified_content = file_opt_in_re
+                        .replace(&modified_content, |captures: &regex::Captures| {
+                            format!("{}\n{}", &captures[0], file_opt_in)
+                        })
+                        .to_string();
+                }
+
+                let is_daybook_types_file = path.ends_with("uniffi/types/daybook_types.kt");
+                if is_daybook_types_file {
+                    if !modified_content.contains("import kotlinx.serialization.Serializable") {
+                        let insertion_index = import_re
+                            .find_iter(&modified_content)
+                            .last()
+                            .map(|mat| mat.end())
+                            .or_else(|| package_re.find(&modified_content).map(|mat| mat.end()));
+                        if let Some(index) = insertion_index {
+                            modified_content
+                                .insert_str(index, "import kotlinx.serialization.Serializable\n");
                         }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                    }
+                    modified_content = data_class_re
+                        .replace_all(&modified_content, |captures: &regex::Captures| {
+                            let type_name =
+                                captures.get(3).map(|group| group.as_str()).unwrap_or("");
+                            if !serializable_types.contains(type_name) || captures.get(1).is_some()
+                            {
+                                captures[0].to_string()
+                            } else {
+                                format!("@Serializable\n{}", &captures[2])
+                            }
+                        })
+                        .to_string();
+                }
 
                 if let Err(err) = fs::write(&path, modified_content) {
                     panic!("Warning: Failed to apply Kotlin modifications: {err}");

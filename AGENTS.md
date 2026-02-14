@@ -26,3 +26,4 @@
 - Don't be lazy with solutions.
 - CRITICAL: if the users request seems like it comes from a place of misunderstanding, push back!
 - Don't use single char variable names.
+- If you're not able to cleanly read a provided web link through tool calls, pause and ask for a copy/paste of the contents. NEVER ASSUME THE CONTENTS OF A LINK YOU HAVEN'T SEEN!

@@ -171,15 +171,7 @@ fun ExpandedLayout(
     val nonProminentButtons = screenChromeState.additionalFeatureButtons.filter { !it.prominent }
     val allMenuFeatures =
         remember(menuFeatures, nonProminentButtons) {
-            menuFeatures +
-                nonProminentButtons.map { button ->
-                    FeatureItem(
-                        key = button.key,
-                        icon = "", // Will use button.icon() composable instead
-                        label = "", // Will use button.label() composable instead
-                        onActivate = { button.onClick() }
-                    )
-                }
+            menuFeatures.withAdditionalFeatureButtons(nonProminentButtons)
         }
 
     // Merge layout-specific chrome with screen chrome
@@ -285,36 +277,21 @@ fun ExpandedLayout(
                         onDismissRequest = { showFeaturesMenu = false }
                     ) {
                         allMenuFeatures.forEach { item ->
-                            // Check if this is a chrome button (has empty icon/label strings)
-                            val isChromeButton = item.icon.isEmpty() && item.label.isEmpty()
-                            val chromeButton =
-                                if (isChromeButton) {
-                                    nonProminentButtons.find { it.key == item.key }
-                                } else {
-                                    null
-                                }
-
                             DropdownMenuItem(
                                 text = {
-                                    if (chromeButton != null) {
-                                        chromeButton.label()
-                                    } else {
-                                        Text(item.label)
-                                    }
+                                    item.labelContent?.invoke() ?: Text(item.label)
                                 },
                                 onClick = {
                                     showFeaturesMenu = false
                                     scope.launch {
-                                        item.onActivate()
+                                        if (item.enabled) {
+                                            item.onActivate()
+                                        }
                                     }
                                 },
                                 leadingIcon = {
-                                    if (chromeButton != null) {
-                                        chromeButton.icon()
-                                    } else {
-                                        FeatureIcon(item)
-                                    }
-                                }
+                                    item.icon()
+                                },
                             )
                         }
                     }
@@ -518,24 +495,16 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
     // Combine sidebar features with prominent chrome buttons
     val allSidebarFeatures =
         remember(sidebarFeatures, prominentButtons) {
-            sidebarFeatures +
-                prominentButtons.map { button ->
-                    FeatureItem(
-                        key = button.key,
-                        icon = "", // Will use button.icon() composable instead
-                        label = "", // Will use button.label() composable instead
-                        onActivate = { button.onClick() }
-                    )
-                }
+            sidebarFeatures.withAdditionalFeatureButtons(prominentButtons)
         }
 
     // Map feature keys to routes for selection
     fun getRouteForFeature(feature: FeatureItem): String? = when (feature.key) {
-        "nav_home" -> AppScreens.Home.name
-        "nav_tables" -> AppScreens.Tables.name
-        "nav_capture" -> AppScreens.Capture.name
-        "nav_documents" -> AppScreens.Drawer.name
-        "nav_settings" -> AppScreens.Settings.name
+        FeatureKeys.Home -> AppScreens.Home.name
+        FeatureKeys.Tables -> AppScreens.Tables.name
+        FeatureKeys.Capture -> AppScreens.Capture.name
+        FeatureKeys.Drawer -> AppScreens.Drawer.name
+        FeatureKeys.Settings -> AppScreens.Settings.name
         else -> null
     }
 
@@ -582,7 +551,7 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                             captureFeature?.let { feature ->
                                 ExtendedFloatingActionButton(
                                     text = { Text(feature.label) },
-                                    icon = { FeatureIcon(feature) },
+                                    icon = { feature.icon() },
                                     onClick = {
                                         scope.launch {
                                             feature.onActivate()
@@ -603,35 +572,20 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                         val featureRoute = getRouteForFeature(item)
                         val isSelected = featureRoute != null && featureRoute == currentRoute
 
-                        // Check if this is a chrome button (has empty icon/label strings)
-                        val isChromeButton = item.icon.isEmpty() && item.label.isEmpty()
-                        val chromeButton =
-                            if (isChromeButton) {
-                                prominentButtons.find { it.key == item.key }
-                            } else {
-                                null
-                            }
-
                         NavigationDrawerItem(
                             selected = isSelected,
                             onClick = {
                                 scope.launch {
-                                    item.onActivate()
+                                    if (item.enabled) {
+                                        item.onActivate()
+                                    }
                                 }
                             },
                             icon = {
-                                if (chromeButton != null) {
-                                    chromeButton.icon()
-                                } else {
-                                    FeatureIcon(item)
-                                }
+                                item.icon()
                             },
                             label = {
-                                if (chromeButton != null) {
-                                    chromeButton.label()
-                                } else {
-                                    Text(item.label)
-                                }
+                                item.labelContent?.invoke() ?: Text(item.label)
                             },
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -691,7 +645,7 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                                         }
                                     }
                                 ) {
-                                    FeatureIcon(feature)
+                                    feature.icon()
                                 }
                             }
                         }
@@ -702,15 +656,6 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                     val featureRoute = getRouteForFeature(item)
                     val isSelected = featureRoute != null && featureRoute == currentRoute
 
-                    // Check if this is a chrome button (has empty icon/label strings)
-                    val isChromeButton = item.icon.isEmpty() && item.label.isEmpty()
-                    val chromeButton =
-                        if (isChromeButton) {
-                            prominentButtons.find { it.key == item.key }
-                        } else {
-                            null
-                        }
-
                     NavigationRailItem(
                         selected = isSelected,
                         onClick = {
@@ -718,12 +663,9 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                                 item.onActivate()
                             }
                         },
+                        enabled = item.enabled,
                         icon = {
-                            if (chromeButton != null) {
-                                chromeButton.icon()
-                            } else {
-                                FeatureIcon(item)
-                            }
+                            item.icon()
                         },
                         label = null // Rail mode: icon-only, no labels
                     )

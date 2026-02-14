@@ -1,19 +1,33 @@
 package org.example.daybook.ui
 
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.encodeToString
+import org.example.daybook.uniffi.types.Blob
+import org.example.daybook.uniffi.types.ImageMetadata
+import org.example.daybook.uniffi.types.Note
 
 private val facetJsonCodec = Json {
     ignoreUnknownKeys = true
     isLenient = true
 }
 
-fun quoteJsonString(value: String): String = Json.encodeToString(value)
+fun quoteJsonString(value: String): String = facetJsonCodec.encodeToString(value)
+
+fun decodeJsonStringFacet(value: String): Result<String> =
+    runCatching { facetJsonCodec.decodeFromString<String>(value) }
+
+fun decodeNoteFacet(value: String): Result<Note> =
+    runCatching { facetJsonCodec.decodeFromString<Note>(value) }
+
+fun decodeBlobFacet(value: String): Result<Blob> =
+    runCatching { facetJsonCodec.decodeFromString<Blob>(value) }
+
+fun decodeImageMetadataFacet(value: String): Result<ImageMetadata> =
+    runCatching { facetJsonCodec.decodeFromString<ImageMetadata>(value) }
 
 fun dequoteJson(json: String): String {
     val parsed = runCatching { facetJsonCodec.parseToJsonElement(json) }.getOrNull() ?: return json
@@ -24,16 +38,11 @@ fun dequoteJson(json: String): String {
     return parsedPrimitive.content
 }
 
-fun noteFacetJson(content: String): String =
-    buildJsonObject {
-        put("mime", JsonPrimitive("text/plain"))
-        put("content", JsonPrimitive(content))
-    }.toString()
+fun noteFacetJson(content: String): String = facetJsonCodec.encodeToString(Note("text/plain", content))
 
 fun noteContentFromFacetJson(noteFacetJson: String?): String {
     if (noteFacetJson == null) {
         return ""
     }
-    val parsed = runCatching { facetJsonCodec.parseToJsonElement(noteFacetJson) }.getOrNull() ?: return ""
-    return parsed.jsonObject["content"]?.jsonPrimitive?.contentOrNull ?: ""
+    return decodeNoteFacet(noteFacetJson).getOrNull()?.content ?: ""
 }

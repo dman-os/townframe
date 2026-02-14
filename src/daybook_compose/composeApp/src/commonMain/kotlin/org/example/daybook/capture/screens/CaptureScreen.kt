@@ -28,7 +28,9 @@ import org.example.daybook.TablesViewModel
 import org.example.daybook.capture.DaybookCameraPreview
 import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.ui.DocEditor
-import org.example.daybook.ui.noteFacetJson
+import org.example.daybook.ui.editor.EditorSessionController
+import org.example.daybook.ui.editor.blobFacetKey
+import org.example.daybook.ui.editor.imageMetadataFacetKey
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
@@ -36,10 +38,6 @@ import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.*
 import org.example.daybook.uniffi.types.AddDocArgs
 import org.example.daybook.uniffi.types.Doc
-import org.example.daybook.uniffi.types.DocPatch
-import org.example.daybook.uniffi.types.FacetKey
-import org.example.daybook.uniffi.types.FacetTag
-import org.example.daybook.uniffi.types.WellKnownFacetTag
 
 sealed interface DocsListState {
     data class Data(val docs: List<Doc>) : DocsListState
@@ -68,7 +66,15 @@ class CaptureScreenViewModel(
     private val _message = MutableStateFlow<String?>(null)
     val message = _message.asStateFlow()
 
-    private var isCreatingDoc = false
+    val editorController =
+        EditorSessionController(
+            drawerRepo = drawerRepo,
+            scope = viewModelScope,
+            onDocCreated = { createdDocId ->
+                _currentDocId.value = createdDocId
+                loadDoc(createdDocId)
+            }
+        )
 
     fun setCaptureMode(mode: CaptureMode) {
         if (_captureMode.value == mode) return
@@ -129,48 +135,12 @@ class CaptureScreenViewModel(
         _message.value = null
     }
 
-    fun updateDocContent(content: String) {
-        viewModelScope.launch {
-            val docId = _currentDocId.value
-            if (docId == null) {
-                if (isCreatingDoc) return@launch
-                isCreatingDoc = true
-                // Create new doc
-                val args =
-                    AddDocArgs(
-                        branchPath = "main",
-                        facets =
-                            mapOf(
-                                noteFacetKey() to noteFacetJson(content)
-                            ),
-                        userPath = null
-                    )
-                val returnedId = drawerRepo.add(args)
-                _currentDocId.value = returnedId
-                // We'll let the listener refresh the current doc
-            } else {
-                // Update existing doc
-                val current = _currentDoc.value
-                if (current != null) {
-                    val patch =
-                        DocPatch(
-                            id = docId,
-                            facetsSet = mapOf(noteFacetKey() to noteFacetJson(content)),
-                            facetsRemove = emptyList(),
-                            userPath = null
-                        )
-
-                    drawerRepo.updateBatch(listOf(UpdateDocArgsV2("main", null, patch)))
-                }
-            }
-        }
-    }
-
     fun loadDoc(id: String) {
         viewModelScope.launch {
             val doc = drawerRepo.get(id, "main")
             _currentDocId.value = id
             _currentDoc.value = doc
+            editorController.bindDoc(doc)
         }
     }
 
@@ -210,6 +180,8 @@ class CaptureScreenViewModel(
         loadLatestDocs()
         if (initialDocId != null) {
             loadDoc(initialDocId)
+        } else {
+            editorController.bindDoc(null)
         }
         viewModelScope.launch {
             listenerRegistration = drawerRepo.ffiRegisterListener(listener)
@@ -267,15 +239,6 @@ class CaptureScreenViewModel(
     }
 }
 
-private fun noteFacetKey(): FacetKey =
-    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.NOTE), "main")
-
-private fun blobFacetKey(): FacetKey =
-    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.BLOB), "main")
-
-private fun imageMetadataFacetKey(): FacetKey =
-    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.IMAGE_METADATA), "main")
-
 @Composable
 fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
     val container = LocalContainer.current
@@ -292,7 +255,6 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
         }
 
     val captureMode by vm.captureMode.collectAsState()
-    val currentDoc by vm.currentDoc.collectAsState()
 
     val captureContext = LocalCameraCaptureContext.current
     val canCapture =
@@ -355,8 +317,7 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
 
                 CaptureMode.TEXT -> {
                     DocEditor(
-                        doc = currentDoc,
-                        onContentChange = { vm.updateDocContent(it) },
+                        controller = vm.editorController,
                         modifier = Modifier.padding(16.dp)
                     )
                 }

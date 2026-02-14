@@ -49,6 +49,7 @@ garde.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs"] }
 tokio-util.workspace = true
 futures = { workspace = true }
+regex = "1"
 
 # ffi
 uniffi = { workspace = true, features = ["cli"] }

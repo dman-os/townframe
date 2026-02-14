@@ -36,12 +36,17 @@ bon.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
 # ml
-oar-ocr = { git = "https://github.com/GreatV/oar-ocr", version = "0.6.1" }
-fastembed = { version = "5.8.1", default-features = false, features = ["ort-download-binaries", "image-models"]
-}
 ollama-rs = { version = "0.3.4", default-features = false, features = ["rustls"] }
 url.workspace = true
 hf-hub = { version = "0.4.3", default-features = false, features = ["tokio"], optional = true }
 fs4 = { version = "0.13.1", optional = true }
 ureq = { version = "3.2.0", optional = true }
 dirs = { version = "6.0.0", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+oar-ocr = { git = "https://github.com/GreatV/oar-ocr", version = "0.6.1", default-features = false }
+fastembed = { version = "5.8.1", default-features = false, features = ["ort-load-dynamic", "image-models"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+oar-ocr = { git = "https://github.com/GreatV/oar-ocr", version = "0.6.1" }
+fastembed = { version = "5.8.1", default-features = false, features = ["ort-download-binaries", "image-models"] }

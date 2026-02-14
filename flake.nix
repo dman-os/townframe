@@ -159,11 +159,13 @@
               CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/armv7a-linux-androideabi${androidApiLevel}-clang";
               CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_AR = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/llvm-ar";
               CC_armv7_linux_androideabi = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/armv7a-linux-androideabi${androidApiLevel}-clang";
+              CXX_armv7_linux_androideabi = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/armv7a-linux-androideabi${androidApiLevel}-clang++";
               AR_armv7_linux_androideabi = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/llvm-ar";
 
               CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/aarch64-linux-android${androidApiLevel}-clang";
               CARGO_TARGET_AARCH64_LINUX_ANDROID_AR = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/llvm-ar";
               CC_aarch64_linux_android = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/aarch64-linux-android${androidApiLevel}-clang";
+              CXX_aarch64_linux_android = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/aarch64-linux-android${androidApiLevel}-clang++";
               AR_aarch64_linux_android = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/llvm-ar";
               CMAKE_SYSTEM_PROCESSOR_aarch64_linux_android = "aarch64";
               CMAKE_ANDROID_ARCH_ABI_aarch64_linux_android = "arm64-v8a";
@@ -171,11 +173,13 @@
               CARGO_TARGET_I686_LINUX_ANDROID_LINKER = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/i686-linux-android${androidApiLevel}-clang";
               CARGO_TARGET_I686_LINUX_ANDROID_AR = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/llvm-ar";
               CC_i686_linux_android = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/i686-linux-android${androidApiLevel}-clang";
+              CXX_i686_linux_android = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/i686-linux-android${androidApiLevel}-clang++";
               AR_i686_linux_android = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/llvm-ar";
 
               CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/x86_64-linux-android${androidApiLevel}-clang";
               CARGO_TARGET_X86_64_LINUX_ANDROID_AR = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/llvm-ar";
               CC_x86_64_linux_android = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/x86_64-linux-android${androidApiLevel}-clang";
+              CXX_x86_64_linux_android = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/x86_64-linux-android${androidApiLevel}-clang++";
               AR_x86_64_linux_android = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin/llvm-ar";
             };
 
@@ -185,6 +189,7 @@
             protobuf
             mold
             deno
+            libarchive
           ];
 
           rustLintInputs = with pkgs; [
@@ -300,8 +305,7 @@
                   exec $(getent passwd $USER | cut -d: -f7)
                 fi
               '';
-            } // ghjkMainEnv // ghjkDevEnv)
-            // (androidEnvVars { androidSdk = androidComposition; });
+            } // ghjkMainEnv // ghjkDevEnv // (androidEnvVars { androidSdk = androidComposition; }));
 
         in
         {

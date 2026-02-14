@@ -2,4 +2,4 @@
 
 import { $ } from "./utils.ts";
 
-await $`${$.path(import.meta.resolve("./db-mig-btress.ts")}`;
+await $`${$.path(import.meta.resolve("./db-mig-btress.ts"))}`;

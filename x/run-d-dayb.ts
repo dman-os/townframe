@@ -8,7 +8,7 @@ const currentLibraryPath = $.env.LD_LIBRARY_PATH ?? "";
 const debugLibraryPath = $.relativeDir("../target/debug/").toString();
 
 await $`./gradlew run --no-daemon`
-	.cwd($.relativeDir("../src/daybook_compose/"))
-	.env({
-		LD_LIBRARY_PATH: `${currentLibraryPath}:${debugLibraryPath}`,
-	});
+  .cwd($.relativeDir("../src/daybook_compose/"))
+  .env({
+    LD_LIBRARY_PATH: `${currentLibraryPath}:${debugLibraryPath}`,
+  });

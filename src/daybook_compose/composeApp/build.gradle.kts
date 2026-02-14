@@ -7,6 +7,7 @@ import java.io.File
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
+    alias(libs.plugins.kotlinSerialization)
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
@@ -250,6 +251,66 @@ val targetAbi =
     }
 
 val targetRustTriple = rustAndroidTargets[targetAbi] ?: "aarch64-linux-android"
+val androidApiLevel = "31"
+
+data class AndroidRustToolchain(
+    val targetTriple: String,
+    val ccPath: String,
+    val cxxPath: String,
+    val arPath: String,
+)
+
+fun androidRustToolchainForAbi(targetAbi: String, ndkToolchainBinDir: String): AndroidRustToolchain? {
+    val arPath = "$ndkToolchainBinDir/llvm-ar"
+    return when (targetAbi) {
+        "arm64-v8a" ->
+            AndroidRustToolchain(
+                targetTriple = "aarch64-linux-android",
+                ccPath = "$ndkToolchainBinDir/aarch64-linux-android${androidApiLevel}-clang",
+                cxxPath = "$ndkToolchainBinDir/aarch64-linux-android${androidApiLevel}-clang++",
+                arPath = arPath
+            )
+
+        "armeabi-v7a" ->
+            AndroidRustToolchain(
+                targetTriple = "armv7-linux-androideabi",
+                ccPath = "$ndkToolchainBinDir/armv7a-linux-androideabi${androidApiLevel}-clang",
+                cxxPath = "$ndkToolchainBinDir/armv7a-linux-androideabi${androidApiLevel}-clang++",
+                arPath = arPath
+            )
+
+        "x86_64" ->
+            AndroidRustToolchain(
+                targetTriple = "x86_64-linux-android",
+                ccPath = "$ndkToolchainBinDir/x86_64-linux-android${androidApiLevel}-clang",
+                cxxPath = "$ndkToolchainBinDir/x86_64-linux-android${androidApiLevel}-clang++",
+                arPath = arPath
+            )
+
+        "x86" ->
+            AndroidRustToolchain(
+                targetTriple = "i686-linux-android",
+                ccPath = "$ndkToolchainBinDir/i686-linux-android${androidApiLevel}-clang",
+                cxxPath = "$ndkToolchainBinDir/i686-linux-android${androidApiLevel}-clang++",
+                arPath = arPath
+            )
+
+        else -> null
+    }
+}
+
+fun ndkLibCppSharedForAbi(targetAbi: String, androidNdkRoot: String): File? {
+    val ndkSysrootLibDir = "$androidNdkRoot/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
+    val ndkAbiTriple =
+        when (targetAbi) {
+            "arm64-v8a" -> "aarch64-linux-android"
+            "armeabi-v7a" -> "arm-linux-androideabi"
+            "x86_64" -> "x86_64-linux-android"
+            "x86" -> "i686-linux-android"
+            else -> return null
+        }
+    return File("$ndkSysrootLibDir/$ndkAbiTriple/libc++_shared.so")
+}
 
 // Debug variant: build Rust in debug mode
 tasks.register<Exec>("buildRustAndroidDebug") {
@@ -257,12 +318,21 @@ tasks.register<Exec>("buildRustAndroidDebug") {
     description = "Build Rust daybook_ffi (debug) for Android ABIs"
 
     commandLine("cargo", "build", "-p", "daybook_ffi", "--target", targetRustTriple)
-    // Only pass essential environment variables for cargo
-    // environment("PATH", System.getenv("PATH"))
-    // environment("HOME", System.getenv("HOME"))
-    // environment("CARGO_HOME", System.getenv("CARGO_HOME"))
-    // environment("RUSTUP_HOME", System.getenv("RUSTUP_HOME"))
-    // environment("RUSTUP_TOOLCHAIN", System.getenv("RUSTUP_TOOLCHAIN"))
+    val ndkToolchainBinDir = System.getenv("ANDROID_NDK_TOOLCHAIN_BIN_DIR")
+    if (!ndkToolchainBinDir.isNullOrBlank()) {
+        val toolchain = androidRustToolchainForAbi(targetAbi, ndkToolchainBinDir)
+        if (toolchain != null) {
+            val targetEnvSuffix = toolchain.targetTriple.replace("-", "_")
+            val cargoTargetSuffix = toolchain.targetTriple.uppercase().replace("-", "_")
+
+            environment("CC_$targetEnvSuffix", toolchain.ccPath)
+            environment("CXX_$targetEnvSuffix", toolchain.cxxPath)
+            environment("AR_$targetEnvSuffix", toolchain.arPath)
+
+            environment("CARGO_TARGET_${cargoTargetSuffix}_LINKER", toolchain.ccPath)
+            environment("CARGO_TARGET_${cargoTargetSuffix}_AR", toolchain.arPath)
+        }
+    }
 }
 
 // Copy task for debug variant
@@ -274,20 +344,35 @@ tasks.register<Copy>("copyRustAndroidDebug") {
 
     val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
     val sourceSoFile = File(repoRoot, "target/$targetRustTriple/debug/libdaybook_ffi.so")
+    val androidNdkRoot = System.getenv("ANDROID_NDK_ROOT")
+    val libcxxSourceFile = if (!androidNdkRoot.isNullOrBlank()) ndkLibCppSharedForAbi(targetAbi, androidNdkRoot) else null
     val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
     val destSoFile = File(destDir, "libdaybook_ffi.so")
+    val destLibcxxFile = File(destDir, "libc++_shared.so")
 
     // Only copy if source is newer than destination
     onlyIf {
-        !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
+        val needsRustCopy = !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
+        val needsLibcxxCopy =
+            libcxxSourceFile?.let { source ->
+                !destLibcxxFile.exists() || source.lastModified() > destLibcxxFile.lastModified()
+            } ?: false
+        needsRustCopy || needsLibcxxCopy
     }
 
     from(sourceSoFile)
+    if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
+        from(libcxxSourceFile)
+    }
     into(destDir)
 
     // Declare inputs and outputs for proper up-to-date checking
     inputs.file(sourceSoFile)
+    if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
+        inputs.file(libcxxSourceFile)
+    }
     outputs.file(destSoFile)
+    outputs.file(destLibcxxFile)
 }
 
 // Release variant: build Rust in release mode
@@ -296,6 +381,21 @@ tasks.register<Exec>("buildRustAndroidRelease") {
     description = "Build Rust daybook_ffi (release) for Android ABIs"
 
     commandLine("cargo", "build", "-p", "daybook_ffi", "--release", "--target", targetRustTriple)
+    val ndkToolchainBinDir = System.getenv("ANDROID_NDK_TOOLCHAIN_BIN_DIR")
+    if (!ndkToolchainBinDir.isNullOrBlank()) {
+        val toolchain = androidRustToolchainForAbi(targetAbi, ndkToolchainBinDir)
+        if (toolchain != null) {
+            val targetEnvSuffix = toolchain.targetTriple.replace("-", "_")
+            val cargoTargetSuffix = toolchain.targetTriple.uppercase().replace("-", "_")
+
+            environment("CC_$targetEnvSuffix", toolchain.ccPath)
+            environment("CXX_$targetEnvSuffix", toolchain.cxxPath)
+            environment("AR_$targetEnvSuffix", toolchain.arPath)
+
+            environment("CARGO_TARGET_${cargoTargetSuffix}_LINKER", toolchain.ccPath)
+            environment("CARGO_TARGET_${cargoTargetSuffix}_AR", toolchain.arPath)
+        }
+    }
 }
 
 // Copy task for release variant
@@ -307,20 +407,35 @@ tasks.register<Copy>("copyRustAndroidRelease") {
 
     val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
     val sourceSoFile = File(repoRoot, "target/$targetRustTriple/release/libdaybook_ffi.so")
+    val androidNdkRoot = System.getenv("ANDROID_NDK_ROOT")
+    val libcxxSourceFile = if (!androidNdkRoot.isNullOrBlank()) ndkLibCppSharedForAbi(targetAbi, androidNdkRoot) else null
     val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
     val destSoFile = File(destDir, "libdaybook_ffi.so")
+    val destLibcxxFile = File(destDir, "libc++_shared.so")
 
     // Only copy if source is newer than destination
     onlyIf {
-        !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
+        val needsRustCopy = !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
+        val needsLibcxxCopy =
+            libcxxSourceFile?.let { source ->
+                !destLibcxxFile.exists() || source.lastModified() > destLibcxxFile.lastModified()
+            } ?: false
+        needsRustCopy || needsLibcxxCopy
     }
 
     from(sourceSoFile)
+    if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
+        from(libcxxSourceFile)
+    }
     into(destDir)
 
     // Declare inputs and outputs for proper up-to-date checking
     inputs.file(sourceSoFile)
+    if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
+        inputs.file(libcxxSourceFile)
+    }
     outputs.file(destSoFile)
+    outputs.file(destLibcxxFile)
 }
 
 // Wire tasks to Android variants

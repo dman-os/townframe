@@ -170,7 +170,7 @@ fun RowScope.CenterNavBarContent(
                                 )
                             },
                     icon = {
-                        FeatureIcon(feature)
+                        feature.icon()
                     },
                     label = {
                         Text(feature.label, style = MaterialTheme.typography.labelSmall)

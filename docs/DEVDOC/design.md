@@ -35,9 +35,9 @@
       - Collaborative vaults
     - Branch based workflow (think Patchwork)
   - Application
-    - For you screen
+    - For you screen [MVP]
       - Short form like swiping based call-to-action/summary
-    - Inbox screen
+    - Inbox screen [MVP]
       - Gen UI based assistant
     - Capture screen [MVP]
       - Photo [MVP]
@@ -86,6 +86,8 @@
     - Browser extension
     - Discord bot
     - Mastodon bot
+    - Email [MVP]
+    - SMS [MVP]
   - CLI
     - FUSE tree on Linux (think Ethersync) [MVP]
     - Directly run processor on given file

@@ -2,6 +2,13 @@
 
 package org.example.daybook.tables
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.LibraryBooks
+import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.TableChart
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.navigation.NavHostController
@@ -16,22 +23,22 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> {
     val scope = rememberCoroutineScope()
 
     return listOf(
-        FeatureItem("nav_home", "", "Home") {
+        FeatureItem(FeatureKeys.Home, { Icon(Icons.Default.Home, contentDescription = "Home") }, "Home") {
             scope.launch {
                 navController.navigate(AppScreens.Home.name)
             }
         },
-        FeatureItem("nav_capture", "", "Capture") {
+        FeatureItem(FeatureKeys.Capture, { Icon(Icons.Default.CameraAlt, contentDescription = "Capture") }, "Capture") {
             scope.launch {
                 navController.navigate(AppScreens.Capture.name)
             }
         },
-        FeatureItem("nav_documents", "", "Drawer") {
+        FeatureItem(FeatureKeys.Drawer, { Icon(Icons.AutoMirrored.Filled.LibraryBooks, contentDescription = "Drawer") }, "Drawer") {
             scope.launch {
                 navController.navigate(AppScreens.Drawer.name)
             }
         },
-        FeatureItem("nav_tables", "", "Tables") {
+        FeatureItem(FeatureKeys.Tables, { Icon(Icons.Default.TableChart, contentDescription = "Tables") }, "Tables") {
             scope.launch {
                 navController.navigate(AppScreens.Tables.name)
             }
@@ -49,9 +56,9 @@ fun rememberNavBarFeatures(navController: NavHostController): List<FeatureItem> 
 
     // Return Home, Capture, Documents in that order
     return listOfNotNull(
-        allFeatures.find { it.key == "nav_home" },
-        allFeatures.find { it.key == "nav_capture" },
-        allFeatures.find { it.key == "nav_documents" }
+        allFeatures.find { it.key == FeatureKeys.Home },
+        allFeatures.find { it.key == FeatureKeys.Capture },
+        allFeatures.find { it.key == FeatureKeys.Drawer }
     )
 }
 
@@ -65,8 +72,8 @@ fun rememberSidebarFeatures(navController: NavHostController): List<FeatureItem>
 
     // Return only Home and Documents
     return listOfNotNull(
-        allFeatures.find { it.key == "nav_home" },
-        allFeatures.find { it.key == "nav_documents" }
+        allFeatures.find { it.key == FeatureKeys.Home },
+        allFeatures.find { it.key == FeatureKeys.Drawer }
     )
 }
 
@@ -81,14 +88,14 @@ fun rememberMenuFeatures(navController: NavHostController): List<FeatureItem> {
     val allFeatures = rememberAllFeatures(navController)
 
     // Get the bottom bar features (Home, Capture, Documents)
-    val bottomBarKeys = setOf("nav_home", "nav_capture", "nav_documents")
+    val bottomBarKeys = setOf(FeatureKeys.Home, FeatureKeys.Capture, FeatureKeys.Drawer)
 
     // Return all features except those in the bottom bar, plus Settings
     val otherFeatures = allFeatures.filter { it.key !in bottomBarKeys }
 
     return otherFeatures +
         listOf(
-            FeatureItem("nav_settings", "", "Settings") {
+            FeatureItem(FeatureKeys.Settings, { Icon(Icons.Default.Settings, contentDescription = "Settings") }, "Settings") {
                 scope.launch {
                     navController.navigate(AppScreens.Settings.name)
                 }

@@ -199,7 +199,10 @@ class TablesViewModel(val tablesRepo: TablesRepoFfi) : ViewModel() {
     }
 
     private suspend fun refreshTables() {
-        _tablesState.value = TablesState.Loading
+        val hadData = _tablesState.value is TablesState.Data
+        if (!hadData) {
+            _tablesState.value = TablesState.Loading
+        }
         try {
             val windows = tablesRepo.listWindows()
             val tabs = tablesRepo.listTabs()
