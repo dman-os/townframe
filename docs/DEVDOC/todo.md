@@ -50,6 +50,7 @@
     - Chunks at rest?
 - [ ] P2P
   - [ ] iroh
+- [ ] E2E tests for daybook
 
 - [ ] Cleanup for public pre-alpha
 

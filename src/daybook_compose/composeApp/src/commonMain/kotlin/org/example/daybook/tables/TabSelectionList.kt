@@ -10,9 +10,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.Text
@@ -144,7 +148,12 @@ fun TabSelectionList(
                 NavigationDrawerItem(
                     selected = isHighlighted,
                     onClick = { onTabSelected(tab) },
-                    icon = { Text("📄") },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Default.Description,
+                            contentDescription = "Tab"
+                        )
+                    },
                     label = { Text(tab.title) },
                     modifier =
                         Modifier
@@ -166,7 +175,10 @@ fun TabSelectionList(
                         IconButton(onClick = {
                             vm.viewModelScope.launch { vm.removeTab(tab.id) }
                         }) {
-                            Text("✕")
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close tab"
+                            )
                         }
                     }
                 )

@@ -23,10 +23,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MenuOpen
 import androidx.compose.material3.*
-import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -42,7 +43,6 @@ import androidx.compose.material3.PermanentDrawerSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
@@ -79,13 +79,11 @@ import org.example.daybook.LocalContainer
 import org.example.daybook.Routes
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
-import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.core.WindowLayout
 import org.example.daybook.uniffi.core.WindowLayoutOrientation as ConfigOrientation
 import org.example.daybook.uniffi.core.WindowLayoutPane
 import org.example.daybook.uniffi.core.WindowLayoutPaneVariant
 import org.example.daybook.uniffi.core.WindowLayoutRegion
-import org.example.daybook.uniffi.core.WindowLayoutRegionChild
 import org.example.daybook.uniffi.core.WindowLayoutRegionSize
 
 /**
@@ -277,7 +275,10 @@ fun ExpandedLayout(
                 screenChromeState.actions?.invoke()
                 Box {
                     IconButton(onClick = { showFeaturesMenu = true }) {
-                        Text("☰")
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "Open features menu"
+                        )
                     }
                     DropdownMenu(
                         expanded = showFeaturesMenu,
@@ -311,7 +312,7 @@ fun ExpandedLayout(
                                     if (chromeButton != null) {
                                         chromeButton.icon()
                                     } else {
-                                        Text(item.icon)
+                                        FeatureIcon(item)
                                     }
                                 }
                             )
@@ -533,7 +534,7 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
         "nav_home" -> AppScreens.Home.name
         "nav_tables" -> AppScreens.Tables.name
         "nav_capture" -> AppScreens.Capture.name
-        "nav_documents" -> AppScreens.Documents.name
+        "nav_documents" -> AppScreens.Drawer.name
         "nav_settings" -> AppScreens.Settings.name
         else -> null
     }
@@ -581,7 +582,7 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                             captureFeature?.let { feature ->
                                 ExtendedFloatingActionButton(
                                     text = { Text(feature.label) },
-                                    icon = { Text(feature.icon) },
+                                    icon = { FeatureIcon(feature) },
                                     onClick = {
                                         scope.launch {
                                             feature.onActivate()
@@ -597,7 +598,7 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                         }
                     }
 
-                    // Features section - Home, Documents, and prominent chrome buttons
+                    // Features section - Home, Drawer, and prominent chrome buttons
                     allSidebarFeatures.forEach { item ->
                         val featureRoute = getRouteForFeature(item)
                         val isSelected = featureRoute != null && featureRoute == currentRoute
@@ -622,7 +623,7 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                                 if (chromeButton != null) {
                                     chromeButton.icon()
                                 } else {
-                                    Text(item.icon)
+                                    FeatureIcon(item)
                                 }
                             },
                             label = {
@@ -690,7 +691,7 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                                         }
                                     }
                                 ) {
-                                    Text(feature.icon)
+                                    FeatureIcon(feature)
                                 }
                             }
                         }
@@ -721,7 +722,7 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                             if (chromeButton != null) {
                                 chromeButton.icon()
                             } else {
-                                Text(item.icon)
+                                FeatureIcon(item)
                             }
                         },
                         label = null // Rail mode: icon-only, no labels
@@ -1497,7 +1498,10 @@ fun TablesTabsList(onToggleTableRail: () -> Unit, showToggleButton: Boolean = tr
                 horizontalArrangement = Arrangement.Start
             ) {
                 IconButton(onClick = onToggleTableRail) {
-                    Text("▶")
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "Show table rail"
+                    )
                 }
             }
         }

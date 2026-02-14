@@ -2,4 +2,4 @@
 
 import { $ } from "./utils.ts";
 
-await $.raw`./src/daybook_compose/gradlew ${$.argv}`;
+await $`./gradlew ${$.argv}`.cwd($.relativeDir("../src/daybook_compose/"));

@@ -146,10 +146,7 @@ pub async fn embed_text(ctx: &Ctx, text: &str) -> Res<EmbedResult> {
         eyre::bail!("no embed backend configured");
     };
     match backend_config {
-        EmbedBackendConfig::LocalFastembedNomic { .. }
-        | EmbedBackendConfig::LocalFastembed { .. } => {
-            local::embed_text(backend_config, text).await
-        }
+        EmbedBackendConfig::LocalFastembed { .. } => local::embed_text(backend_config, text).await,
         EmbedBackendConfig::CloudOllama { url, model } => {
             cloud::embed_text_ollama(url, model, text).await
         }

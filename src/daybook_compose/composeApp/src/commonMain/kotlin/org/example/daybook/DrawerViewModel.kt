@@ -10,7 +10,7 @@ import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.ListenerRegistration
-import org.example.daybook.uniffi.core.UpdateDocArgs
+import org.example.daybook.uniffi.core.UpdateDocArgsV2
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.DocPatch
 
@@ -199,7 +199,7 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
             viewModelScope.launch {
                 kotlinx.coroutines.delay(500) // 500ms debounce
                 try {
-                    drawerRepo.updateBatch(listOf(UpdateDocArgs("main", null, patch)))
+                    drawerRepo.updateBatch(listOf(UpdateDocArgsV2("main", null, patch)))
                     // The listener will handle updating the state
                 } catch (e: FfiException) {
                     println("Error updating document: ${e.message}")
@@ -210,7 +210,7 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
     fun updateDocs(patches: List<DocPatch>) {
         viewModelScope.launch {
             try {
-                drawerRepo.updateBatch(patches.map { UpdateDocArgs("main", null, it) })
+                drawerRepo.updateBatch(patches.map { UpdateDocArgsV2("main", null, it) })
                 // The listener will handle updating the state
             } catch (e: FfiException) {
                 println("Error updating documents: ${e.message}")

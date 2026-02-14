@@ -16,8 +16,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlin.time.Clock
-import kotlin.uuid.Uuid
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -30,19 +28,18 @@ import org.example.daybook.TablesViewModel
 import org.example.daybook.capture.DaybookCameraPreview
 import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.ui.DocEditor
+import org.example.daybook.ui.noteFacetJson
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.*
-import org.example.daybook.uniffi.core.UpdateDocArgs
 import org.example.daybook.uniffi.types.AddDocArgs
 import org.example.daybook.uniffi.types.Doc
-import org.example.daybook.uniffi.types.DocContent
 import org.example.daybook.uniffi.types.DocPatch
-import org.example.daybook.uniffi.types.DocPropKey
-import org.example.daybook.uniffi.types.DocPropTag
-import org.example.daybook.uniffi.types.WellKnownPropTag
+import org.example.daybook.uniffi.types.FacetKey
+import org.example.daybook.uniffi.types.FacetTag
+import org.example.daybook.uniffi.types.WellKnownFacetTag
 
 sealed interface DocsListState {
     data class Data(val docs: List<Doc>) : DocsListState
@@ -109,13 +106,11 @@ class CaptureScreenViewModel(
                 val args =
                     AddDocArgs(
                         branchPath = "main",
-                        props =
+                        facets =
                             mapOf(
-                                DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)) to
-                                    "{\"blob\":{\"length_octets\":${bytes.size},\"hash\":\"$hashStr\"}}",
-                                DocPropKey.Tag(
-                                    DocPropTag.WellKnown(WellKnownPropTag.IMAGE_METADATA)
-                                ) to
+                                blobFacetKey() to
+                                    "{\"length_octets\":${bytes.size},\"hash\":\"$hashStr\"}",
+                                imageMetadataFacetKey() to
                                     "{\"mime\":\"image/jpeg\",\"width_px\":0,\"height_px\":0}"
                             ),
                         userPath = null
@@ -144,10 +139,9 @@ class CaptureScreenViewModel(
                 val args =
                     AddDocArgs(
                         branchPath = "main",
-                        props =
+                        facets =
                             mapOf(
-                                DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)) to
-                                    "\"$content\""
+                                noteFacetKey() to noteFacetJson(content)
                             ),
                         userPath = null
                     )
@@ -161,18 +155,12 @@ class CaptureScreenViewModel(
                     val patch =
                         DocPatch(
                             id = docId,
-                            propsSet =
-                                mapOf(
-                                    DocPropKey.Tag(
-                                        DocPropTag.WellKnown(WellKnownPropTag.CONTENT)
-                                    ) to
-                                        "\"$content\""
-                                ),
-                            propsRemove = emptyList(),
+                            facetsSet = mapOf(noteFacetKey() to noteFacetJson(content)),
+                            facetsRemove = emptyList(),
                             userPath = null
                         )
 
-                    drawerRepo.updateBatch(listOf(UpdateDocArgs("main", null, patch)))
+                    drawerRepo.updateBatch(listOf(UpdateDocArgsV2("main", null, patch)))
                 }
             }
         }
@@ -279,6 +267,15 @@ class CaptureScreenViewModel(
     }
 }
 
+private fun noteFacetKey(): FacetKey =
+    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.NOTE), "main")
+
+private fun blobFacetKey(): FacetKey =
+    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.BLOB), "main")
+
+private fun imageMetadataFacetKey(): FacetKey =
+    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.IMAGE_METADATA), "main")
+
 @Composable
 fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
     val container = LocalContainer.current
@@ -328,7 +325,12 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
                 ChromeState(
                     mainFeatureActionButton =
                         MainFeatureActionButton.Button(
-                            icon = { Text("📷") },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Default.CameraAlt,
+                                    contentDescription = "Save Photo"
+                                )
+                            },
                             label = { Text(if (isCapturing) "Capturing..." else "Save Photo") },
                             enabled = canCapture && !isCapturing,
                             onClick = { ctx.requestCapture() }
@@ -362,7 +364,11 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
                 CaptureMode.MIC -> {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("🎤", style = MaterialTheme.typography.displayLarge)
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "Microphone",
+                                modifier = Modifier.size(64.dp)
+                            )
                             Text(
                                 "Mic mode placeholder",
                                 style = MaterialTheme.typography.headlineMedium

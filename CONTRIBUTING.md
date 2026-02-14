@@ -1,6 +1,7 @@
 # CONTRIBUTING
 
 - Avoid adding dependencies if possible
+  - `wc -l Cargo.lock` is around 10k lines. Let's keep it that way.
 - Always audit LLM code in an editor with an IDE present.
   - Assume you'll need to slightly improve every result.
 
@@ -8,21 +9,23 @@
 
 - `./src/daybook_core/`: Rust core for daybook.
 
-  - `./src/daybook_types/`: Core types for daybook.
-
-  - `./src/daybook_cli/`: CLI app for daybook.
-
-  - `./src/daybook_compose/`: Compose multplatform app for daybook.
-
-    - Confirmed to run on desktop and android.
+  - `./src/daybook_core/rt/wash_plugin/`: wash plugin for daybook host support.
 
   - Uses automerge (through [`samod`](https://lib.rs/samod)) and SQLite (through [`sqlx`](https://lib.rs/sqlx)) for storage.
 
-  - `./src/daybook_ffi/`: [uniffi](https://lib.rs/uniffi) based bindigns for kotlin.
+- `./src/daybook_types/`: Core types for daybook.
 
-      - `./x/gen-ffi-dayb.ts` to re-generate the bindings and build the library.
+- `./src/daybook_cli/`: CLI app for daybook.
 
-  - `./src/daybook_wflows/`: wflows for daybook.
+- `./src/daybook_compose/`: Compose multplatform app for daybook.
+
+    - Confirmed to run on desktop and android.
+
+- `./src/daybook_ffi/`: [uniffi](https://lib.rs/uniffi) based bindigns for kotlin.
+
+    - `./x/gen-ffi-dayb.ts` to re-generate the bindings and build the library.
+
+- `./src/daybook_wflows/`: wflows for daybook.
 
 - `./src/btress_api/`: Supporting WASI API for all apps.
 
@@ -33,6 +36,8 @@
 - `./src/utils_rs/`: General purpose utilities.
 
   - `./src/api_utils_rs/`: Utilities for writing WASI APIs.
+
+- `./src/mltools/`: ML stack.
 
 - `./src/macros/`: Proc-macro utilities.
 
@@ -80,5 +85,11 @@
 
 - Avoid crates with a `src/` directory. 
   - The source files and `Cargo.toml` should reside in the same root.
-- Avoid deeply nested directory hierarchies.
+  - Avoid deeply nested directory hierarchies.
 - Are you importing that type in too many files? Consider putting it in the `interlude` module of the crate.
+- Don't use single char variable names.
+- DHashMaps shouldn't not be used for sync across tasks/threads. 
+  - They easily deadlock if modified across multiple tasks.
+  - They're only a good fit for single modifier situation where a normal HashMap won't due to do async problems.
+- Do not use the cargo integration tests features.
+  - I.e. avoid making tests in crate_root::tests.

@@ -16,22 +16,22 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> {
     val scope = rememberCoroutineScope()
 
     return listOf(
-        FeatureItem("nav_home", "H", "Home") {
+        FeatureItem("nav_home", "", "Home") {
             scope.launch {
                 navController.navigate(AppScreens.Home.name)
             }
         },
-        FeatureItem("nav_capture", "＋", "Capture") {
+        FeatureItem("nav_capture", "", "Capture") {
             scope.launch {
                 navController.navigate(AppScreens.Capture.name)
             }
         },
-        FeatureItem("nav_documents", "📄", "Documents") {
+        FeatureItem("nav_documents", "", "Drawer") {
             scope.launch {
-                navController.navigate(AppScreens.Documents.name)
+                navController.navigate(AppScreens.Drawer.name)
             }
         },
-        FeatureItem("nav_tables", "T", "Tables") {
+        FeatureItem("nav_tables", "", "Tables") {
             scope.launch {
                 navController.navigate(AppScreens.Tables.name)
             }
@@ -88,7 +88,7 @@ fun rememberMenuFeatures(navController: NavHostController): List<FeatureItem> {
 
     return otherFeatures +
         listOf(
-            FeatureItem("nav_settings", "⚙️", "Settings") {
+            FeatureItem("nav_settings", "", "Settings") {
                 scope.launch {
                     navController.navigate(AppScreens.Settings.name)
                 }

@@ -4,29 +4,21 @@
     kotlin.time.ExperimentalTime::class
 )
 
-package org.example.daybook.documents
+package org.example.daybook.drawer
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.size
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlin.time.Clock
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -41,19 +33,16 @@ import org.example.daybook.TablesViewModel
 import org.example.daybook.tables.DockableRegion
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.dequoteJson
-import org.example.daybook.uniffi.DrawerRepoFfi
-import org.example.daybook.uniffi.FfiException
+import org.example.daybook.ui.noteContentFromFacetJson
+import org.example.daybook.ui.noteFacetJson
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.*
-import org.example.daybook.uniffi.core.UpdateDocArgs
-import org.example.daybook.uniffi.types.Doc
-import org.example.daybook.uniffi.types.DocContent
 import org.example.daybook.uniffi.types.DocPatch
-import org.example.daybook.uniffi.types.DocPropKey
-import org.example.daybook.uniffi.types.DocPropTag
-import org.example.daybook.uniffi.types.WellKnownPropTag
+import org.example.daybook.uniffi.types.FacetKey
+import org.example.daybook.uniffi.types.FacetTag
+import org.example.daybook.uniffi.types.WellKnownFacetTag
 
-class DocumentsScreenViewModel(
+class DrawerScreenViewModel(
     val drawerVm: DrawerViewModel,
     val tablesRepo: TablesRepoFfi,
     val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
@@ -117,18 +106,6 @@ class DocumentsScreenViewModel(
 
     fun updateDocContent(content: String) {
         val docId = drawerVm.selectedDocId.value ?: return
-        val current = drawerVm.selectedDoc.value ?: return
-
-        // Optimistic update - wait, current.copy is no longer available easily because content is in props
-        // Actually, let's just skip optimistic update for now or implement it by updating props map
-        val newProps = current.props.toMutableMap()
-        newProps[DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT))] = "\"$content\""
-        val updatedDoc =
-            current.copy(
-                props = newProps,
-                updatedAt = Clock.System.now()
-            )
-        drawerVm._selectedDocMutable.value = updatedDoc
 
         // Cancel previous debounce job
         debounceJob?.cancel()
@@ -139,11 +116,8 @@ class DocumentsScreenViewModel(
                 drawerVm.updateDoc(
                     DocPatch(
                         id = docId,
-                        propsSet = mapOf(
-                            DocPropKey.Tag(DocPropTag.WellKnown(WellKnownPropTag.CONTENT)) to
-                                "\"$content\""
-                        ),
-                        propsRemove = emptyList(),
+                        facetsSet = mapOf(noteFacetKey() to noteFacetJson(content)),
+                        facetsRemove = emptyList(),
                         userPath = null
                     )
                 )
@@ -152,13 +126,13 @@ class DocumentsScreenViewModel(
 }
 
 @Composable
-fun DocumentsScreen(contentType: DaybookContentType, modifier: Modifier = Modifier) {
+fun DrawerScreen(contentType: DaybookContentType, modifier: Modifier = Modifier) {
     val container = LocalContainer.current
     val tablesVm: TablesViewModel = viewModel { TablesViewModel(container.tablesRepo) }
     val drawerVm: DrawerViewModel = viewModel { DrawerViewModel(container.drawerRepo) }
     val vm =
         viewModel {
-            DocumentsScreenViewModel(drawerVm, container.tablesRepo, container.blobsRepo, tablesVm)
+            DrawerScreenViewModel(drawerVm, container.tablesRepo, container.blobsRepo, tablesVm)
         }
 
     val selectedDocId by drawerVm.selectedDocId.collectAsState()
@@ -309,25 +283,17 @@ fun DocList(
                             val draw = @Composable {
                                 ListItem(
                                     headlineContent = {
-                                        val titleJson = doc.props[
-                                            DocPropKey.Tag(
-                                                DocPropTag.WellKnown(WellKnownPropTag.TITLE_GENERIC)
-                                            )
+                                        val titleJson = doc.facets[
+                                            titleFacetKey()
                                         ]
-                                        val contentJson = doc.props[
-                                            DocPropKey.Tag(
-                                                DocPropTag.WellKnown(WellKnownPropTag.CONTENT)
-                                            )
-                                        ]
+                                        val noteJson = doc.facets[noteFacetKey()]
+                                        val content = noteContentFromFacetJson(noteJson)
                                         Text(
                                             text =
                                                 titleJson?.let { dequoteJson(it) }
-                                                    ?: contentJson?.let {
-                                                        dequoteJson(it).take(50).ifEmpty {
-                                                            "Empty document"
-                                                        }
-                                                    }
-                                                    ?: "Unsupported content",
+                                                    ?: content.take(50).ifEmpty {
+                                                        "Empty document"
+                                                    },
                                             maxLines = 1
                                         )
                                     },
@@ -404,3 +370,9 @@ fun DocList(
         }
     }
 }
+
+private fun titleFacetKey(): FacetKey =
+    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.TITLE_GENERIC), "main")
+
+private fun noteFacetKey(): FacetKey =
+    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.NOTE), "main")

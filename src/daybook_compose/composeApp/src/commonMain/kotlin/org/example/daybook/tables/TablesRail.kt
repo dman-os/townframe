@@ -14,9 +14,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationRail
@@ -87,7 +92,10 @@ fun TablesRail(
                     MaterialTheme.colorScheme.primary
                 }
         ) {
-            Text(if (addTableReadyState?.value == true) "✓" else "+")
+            Icon(
+                imageVector = if (addTableReadyState?.value == true) Icons.Default.Check else Icons.Default.Add,
+                contentDescription = "Add table"
+            )
         }
 
         // Scrollable list of table items
@@ -178,7 +186,7 @@ fun TablesRail(
                                     modifier = Modifier.size(36.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text("📁")
+                                    TableIcon(contentDescription = "Table")
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
@@ -211,7 +219,10 @@ fun TablesRail(
                 horizontalArrangement = Arrangement.Start
             ) {
                 IconButton(onClick = onToggleTableRail) {
-                    Text("◀")
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                        contentDescription = "Hide table rail"
+                    )
                 }
             }
         }

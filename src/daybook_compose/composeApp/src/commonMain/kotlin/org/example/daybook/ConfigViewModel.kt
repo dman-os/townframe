@@ -7,8 +7,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.FfiException
+import org.example.daybook.uniffi.core.FacetDisplayHint
 import org.example.daybook.uniffi.core.ListenerRegistration
-import org.example.daybook.uniffi.core.PropKeyDisplayHint
 
 data class ConfigError(val message: String, val exception: FfiException)
 
@@ -18,7 +18,7 @@ class ConfigViewModel(val configRepo: ConfigRepoFfi) : ViewModel() {
     val error = _error.asStateFlow()
 
     // Meta table key configs
-    private val _metaTableKeyConfigs = MutableStateFlow<Map<String, PropKeyDisplayHint>>(emptyMap())
+    private val _metaTableKeyConfigs = MutableStateFlow<Map<String, FacetDisplayHint>>(emptyMap())
     val metaTableKeyConfigs = _metaTableKeyConfigs.asStateFlow()
 
     // Registration handle to auto-unregister
@@ -70,9 +70,9 @@ class ConfigViewModel(val configRepo: ConfigRepoFfi) : ViewModel() {
         }
     }
 
-    suspend fun setPropDisplayHint(key: String, config: PropKeyDisplayHint) {
+    suspend fun setFacetDisplayHint(key: String, config: FacetDisplayHint) {
         try {
-            configRepo.setPropDisplayHint(key, config)
+            configRepo.setFacetDisplayHint(key, config)
             // Reload to get updated configs
             loadAllSettings()
         } catch (e: FfiException) {

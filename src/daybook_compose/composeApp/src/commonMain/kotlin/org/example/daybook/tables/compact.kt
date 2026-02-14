@@ -27,14 +27,23 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.SecondaryScrollableTabRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -166,7 +175,6 @@ fun CompactLayout(
 ) {
     var showFeaturesMenu by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val density = LocalDensity.current
     val revealSheetState = rememberRevealBottomSheetState(initiallyVisible = false)
     var sheetContent by remember { mutableStateOf(SheetContent.TABS) }
 
@@ -652,15 +660,9 @@ fun CompactLayout(
                                                 // )
                                             }
                                         ) {
-                                            Text(
-                                                text =
-                                                    when (tableViewMode) {
-                                                        "HIDDEN" -> "☰"
-                                                        "RAIL" -> "⊞"
-                                                        "TAB_ROW" -> "☷"
-                                                        else -> "☰"
-                                                    },
-                                                style = MaterialTheme.typography.titleLarge
+                                            Icon(
+                                                imageVector = Icons.Default.Menu,
+                                                contentDescription = "Toggle table view mode"
                                             )
                                         }
 
@@ -856,9 +858,9 @@ fun DaybookBottomNavigationBar(
                             contentDescription = "Toggle menu"
                         }
             ) {
-                Text(
-                    text = "⋮",
-                    fontSize = 20.sp
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = "Toggle menu"
                 )
             }
         },
@@ -1118,14 +1120,17 @@ fun SheetContentHost(
                                 },
                                 modifier = Modifier.padding(horizontal = 8.dp)
                             ) {
-                                Text("+", style = MaterialTheme.typography.titleLarge)
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = "Add table"
+                                )
                             }
 
                             // ScrollableTabRow for table tabs
                             if (tablesListSnapshot.isNotEmpty()) {
                                 // Ensure index is within bounds of the current snapshot
                                 val maxIndex = (tablesListSnapshot.size - 1).coerceAtLeast(0)
-                                ScrollableTabRow(
+                                SecondaryScrollableTabRow(
                                     selectedTabIndex = selectedTabIndexState.coerceIn(0, maxIndex),
                                     modifier = Modifier.weight(1f),
                                     edgePadding = 0.dp
@@ -1208,7 +1213,7 @@ fun SheetContentHost(
                                 if (chromeButton != null) {
                                     chromeButton.icon()
                                 } else {
-                                    Text(item.icon)
+                                    FeatureIcon(item)
                                 }
                             },
                             label = {
@@ -1266,7 +1271,7 @@ fun FeaturesFAB(onDismiss: () -> Unit, modifier: Modifier = Modifier) {
                 },
                 modifier = Modifier.size(56.dp)
             ) {
-                Text("📁", fontSize = 20.sp)
+                Icon(Icons.Default.Folder, contentDescription = "Add table")
             }
 
             // Add Tab FAB
@@ -1277,7 +1282,7 @@ fun FeaturesFAB(onDismiss: () -> Unit, modifier: Modifier = Modifier) {
                 },
                 modifier = Modifier.size(56.dp)
             ) {
-                Text("📄", fontSize = 20.sp)
+                Icon(Icons.Default.Description, contentDescription = "Add tab")
             }
 
             // Settings FAB
@@ -1288,7 +1293,7 @@ fun FeaturesFAB(onDismiss: () -> Unit, modifier: Modifier = Modifier) {
                 },
                 modifier = Modifier.size(56.dp)
             ) {
-                Text("⚙️", fontSize = 20.sp)
+                Icon(Icons.Default.Settings, contentDescription = "Settings")
             }
         }
     }

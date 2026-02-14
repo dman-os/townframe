@@ -16,22 +16,20 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeContentPadding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -60,13 +58,10 @@ import daybook.composeapp.generated.resources.compose_multiplatform
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import org.example.daybook.AdditionalFeatureButton
-import org.example.daybook.ChromeState
-import org.example.daybook.ProvideChromeState
 import org.example.daybook.capture.CameraCaptureContext
 import org.example.daybook.capture.ProvideCameraCaptureContext
 import org.example.daybook.capture.screens.CaptureScreen
-import org.example.daybook.documents.DocumentsScreen
+import org.example.daybook.drawer.DrawerScreen
 import org.example.daybook.settings.SettingsScreen
 import org.example.daybook.tables.CompactLayout
 import org.example.daybook.tables.ExpandedLayout
@@ -132,7 +127,7 @@ enum class AppScreens {
     Capture,
     Tables,
     Settings,
-    Documents
+    Drawer
 }
 
 private sealed interface AppInitState {
@@ -611,7 +606,12 @@ fun TablesScreen(modifier: Modifier = Modifier) {
                         // Prominent button for creating new table
                         AdditionalFeatureButton(
                             key = "tables_new_table",
-                            icon = { Text("➕") },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = "New Table"
+                                )
+                            },
                             label = { Text("New Table") },
                             prominent = true,
                             onClick = {
@@ -624,7 +624,12 @@ fun TablesScreen(modifier: Modifier = Modifier) {
                         if (selectedTableId != null) {
                             AdditionalFeatureButton(
                                 key = "tables_new_tab",
-                                icon = { Text("📄") },
+                                icon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Description,
+                                        contentDescription = "New Tab"
+                                    )
+                                },
                                 label = { Text("New Tab") },
                                 prominent = true,
                                 onClick = {
@@ -641,7 +646,12 @@ fun TablesScreen(modifier: Modifier = Modifier) {
                         // Non-prominent button for table settings
                         AdditionalFeatureButton(
                             key = "tables_settings",
-                            icon = { Text("⚙️") },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Default.Settings,
+                                    contentDescription = "Table Settings"
+                                )
+                            },
                             label = { Text("Table Settings") },
                             prominent = false,
                             onClick = {
@@ -753,9 +763,9 @@ fun Routes(
                 SettingsScreen(modifier = modifier)
             }
         }
-        composable(route = AppScreens.Documents.name) {
-            ProvideChromeState(ChromeState(title = "Documents")) {
-                DocumentsScreen(modifier = modifier, contentType = contentType)
+        composable(route = AppScreens.Drawer.name) {
+            ProvideChromeState(ChromeState(title = "Drawer")) {
+                DrawerScreen(modifier = modifier, contentType = contentType)
             }
         }
         composable(route = AppScreens.Home.name) {

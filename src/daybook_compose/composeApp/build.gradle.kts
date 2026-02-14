@@ -109,11 +109,15 @@ kotlin {
             implementation(libs.androidx.navigation.compose)
             implementation(libs.androidx.navigation.compose)
             implementation(libs.kotlinx.coroutinesCore)
+            implementation(libs.kotlinx.serialization.json)
             implementation(libs.coil.compose)
             implementation(libs.coil.network.ktor)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
+
+            @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
+            implementation(compose.uiTest)
         }
         desktopMain.dependencies {
             implementation(libs.skikoLinuxX64)
@@ -131,6 +135,12 @@ kotlin {
             implementation(libs.webcam.capture.jmf)
             // implementation(compose.foundation)
             // implementation(compose.ui)
+        }
+        val desktopTest by getting {
+            dependencies {
+                implementation(compose.desktop.uiTestJUnit4)
+                implementation(compose.desktop.currentOs)
+            }
         }
     }
 }
