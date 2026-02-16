@@ -17,8 +17,12 @@
 
 - [ ] DocEditor
 - [ ] DrawerScreen
-- [ ] Progress bar
+  - [ ] Search FAB
+  - [ ] Press again to change views
+- [ ] Progress system
   - [ ] Blob download
+- [x] Overhaul bottom bar
+  - [ ] Change color when in different modes.
 - [ ] `mltools`
   - [ ] OCR
     - [ ] Local
@@ -42,8 +46,6 @@
       - [ ] to Flathub
     - [ ] Windows.exe
       - [ ] to Scoop.sh
-- [x] Overhaul bottom bar
-  - [ ] Change color when in different modes.
 - [ ] Receipt parsing
 - [ ] Pending jobs [LOST]
 - [ ] Repos

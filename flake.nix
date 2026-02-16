@@ -209,6 +209,7 @@
 
           desktopBuildInputs = with pkgs; [
             openjdk21
+            appimage-run
           ];
 
           washBuildInputs = with pkgs; [ ];
