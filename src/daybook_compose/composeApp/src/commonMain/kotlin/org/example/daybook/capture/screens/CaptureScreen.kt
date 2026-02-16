@@ -28,6 +28,9 @@ import org.example.daybook.TablesViewModel
 import org.example.daybook.capture.DaybookCameraPreview
 import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.ui.DocEditor
+import org.example.daybook.ui.buildBlobFacetFromDigest
+import org.example.daybook.ui.buildImageMetadataFacet
+import org.example.daybook.ui.putWellKnownFacet
 import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.ui.editor.blobFacetKey
 import org.example.daybook.ui.editor.imageMetadataFacetKey
@@ -107,18 +110,23 @@ class CaptureScreenViewModel(
         viewModelScope.launch {
             try {
                 val hashStr = blobsRepo.put(bytes)
+                val facets = mutableMapOf<org.example.daybook.uniffi.types.FacetKey, String>()
+                putWellKnownFacet(
+                    facets = facets,
+                    key = blobFacetKey(),
+                    facet = buildBlobFacetFromDigest(hashStr, bytes.size.toULong(), "image/jpeg"),
+                )
+                putWellKnownFacet(
+                    facets = facets,
+                    key = imageMetadataFacetKey(),
+                    facet = buildImageMetadataFacet("image/jpeg", widthPx = 0UL, heightPx = 0UL),
+                )
 
                 // Create AddDocArgs
                 val args =
                     AddDocArgs(
                         branchPath = "main",
-                        facets =
-                            mapOf(
-                                blobFacetKey() to
-                                    "{\"length_octets\":${bytes.size},\"hash\":\"$hashStr\"}",
-                                imageMetadataFacetKey() to
-                                    "{\"mime\":\"image/jpeg\",\"width_px\":0,\"height_px\":0}"
-                            ),
+                        facets = facets,
                         userPath = null
                     )
 

@@ -4,13 +4,16 @@ use crate::ffi::{FfiError, SharedFfiCtx};
 
 use daybook_core::drawer::types::UpdateDocArgsV2 as UpdateDocArgs;
 use daybook_core::drawer::{DocNBranches, DrawerEvent, DrawerRepo};
+use daybook_core::plugs::PlugsRepo;
 use daybook_types::doc::{AddDocArgs, ChangeHashSet, Doc, DocId, DocPatch};
 
 #[derive(uniffi::Object)]
 struct DrawerRepoFfi {
     fcx: SharedFfiCtx,
     repo: Arc<DrawerRepo>,
+    _plugs_repo: Arc<PlugsRepo>,
     stop_token: tokio::sync::Mutex<Option<daybook_core::repos::RepoStopToken>>,
+    plugs_stop_token: tokio::sync::Mutex<Option<daybook_core::repos::RepoStopToken>>,
 }
 
 impl daybook_core::repos::Repo for DrawerRepoFfi {
@@ -32,6 +35,10 @@ impl DrawerRepoFfi {
     #[tracing::instrument(err, skip(fcx))]
     async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
         let fcx = Arc::clone(&fcx);
+        let blobs_repo = daybook_core::blobs::BlobsRepo::new(fcx.cx.config.blobs_root.clone())
+            .await
+            .wrap_err("error loading blobs repo for drawer bindings")?;
+
         let (repo, stop_token) = fcx
             .do_on_rt(DrawerRepo::load(
                 fcx.cx.acx.clone(),
@@ -46,14 +53,29 @@ impl DrawerRepoFfi {
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
+        let (plugs_repo, plugs_stop_token) = fcx
+            .do_on_rt(PlugsRepo::load(
+                fcx.cx.acx.clone(),
+                blobs_repo,
+                fcx.cx.doc_app().document_id().clone(),
+                fcx.cx.local_actor_id.clone(),
+            ))
+            .await
+            .inspect_err(|err| tracing::error!(?err))?;
+        repo.set_plugs_repo(Arc::clone(&plugs_repo));
         Ok(Arc::new(Self {
             fcx,
             repo,
+            _plugs_repo: plugs_repo,
             stop_token: Some(stop_token).into(),
+            plugs_stop_token: Some(plugs_stop_token).into(),
         }))
     }
 
     async fn stop(&self) -> Result<(), FfiError> {
+        if let Some(token) = self.plugs_stop_token.lock().await.take() {
+            token.stop().await?;
+        }
         if let Some(token) = self.stop_token.lock().await.take() {
             token.stop().await?;
         }

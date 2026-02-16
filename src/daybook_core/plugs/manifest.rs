@@ -150,6 +150,16 @@ pub struct FacetReferenceManifest {
     /// JSON pointer (e.g. `/facetRef`) or root-dot path (e.g. `$.facetRef`)
     #[garde(length(min = 1))]
     pub json_path: String,
+    /// Optional JSON path for commit-heads associated with this reference.
+    ///
+    /// Convention:
+    /// - When present and the selected value is exactly `[]`, this means "self":
+    ///   the referenced facet must be in the same validated facet set.
+    /// - When absent, commit heads must be encoded in the reference URL fragment
+    ///   as pipe-separated hashes (e.g. `#h1|h2|h3`).
+    #[serde(default)]
+    #[garde(inner(length(min = 1)))]
+    pub at_commit_json_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]

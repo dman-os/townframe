@@ -33,13 +33,14 @@ import org.example.daybook.TablesViewModel
 import org.example.daybook.tables.DockableRegion
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.DocFacetSidebar
-import org.example.daybook.ui.dequoteJson
-import org.example.daybook.ui.noteContentFromFacetJson
+import org.example.daybook.ui.decodeJsonStringOrRaw
+import org.example.daybook.ui.decodeWellKnownFacet
 import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.ui.editor.noteFacetKey
 import org.example.daybook.ui.editor.titleFacetKey
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.*
+import org.example.daybook.uniffi.types.WellKnownFacet
 
 class DrawerScreenViewModel(
     val drawerVm: DrawerViewModel,
@@ -284,10 +285,16 @@ fun DocList(
                                             titleFacetKey()
                                         ]
                                         val noteJson = doc.facets[noteFacetKey()]
-                                        val content = noteContentFromFacetJson(noteJson)
+                                        val content =
+                                            noteJson?.let { value ->
+                                                decodeWellKnownFacet<WellKnownFacet.Note>(value)
+                                                    .getOrNull()
+                                                    ?.v1
+                                                    ?.content
+                                            } ?: ""
                                         Text(
                                             text =
-                                                titleJson?.let { dequoteJson(it) }
+                                                titleJson?.let { decodeJsonStringOrRaw(it) }
                                                     ?: content.take(50).ifEmpty {
                                                         "Empty document"
                                                     },

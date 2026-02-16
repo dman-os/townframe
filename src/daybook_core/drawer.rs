@@ -13,6 +13,7 @@ use types::{DrawerError, FacetBlame, UpdateDocArgsV2, UpdateDocBatchErrV2};
 use automerge::transaction::Transactable;
 use automerge::ReadDoc;
 use daybook_types::doc::{AddDocArgs, ChangeHashSet, Doc, DocId, DocPatch, FacetKey, FacetRaw};
+use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
 mod facet_recovery;
 
 // FIXME: refactor by hand?
@@ -327,6 +328,37 @@ struct FacetCacheEntry {
     value: FacetRaw,
 }
 
+struct ValidatedReference {
+    doc_id: DocId,
+    facet_key: FacetKey,
+    url_value: String,
+}
+
+fn parse_commit_heads_array(
+    values: &[serde_json::Value],
+    origin_facet_key: &FacetKey,
+    at_commit_json_path: &str,
+) -> Res<()> {
+    let mut commit_head_strings = Vec::with_capacity(values.len());
+    for value in values {
+        let serde_json::Value::String(commit_head) = value else {
+            eyre::bail!(
+                "facet '{}' at_commit path '{}' must be an array of commit-hash strings",
+                origin_facet_key,
+                at_commit_json_path
+            );
+        };
+        commit_head_strings.push(commit_head.clone());
+    }
+    utils_rs::am::parse_commit_heads(&commit_head_strings).wrap_err_with(|| {
+        format!(
+            "facet '{}' at_commit path '{}' contains invalid commit hash values",
+            origin_facet_key, at_commit_json_path
+        )
+    })?;
+    Ok(())
+}
+
 pub struct DrawerRepo {
     pub acx: AmCtx,
     drawer_doc_id: DocumentId,
@@ -345,6 +377,7 @@ pub struct DrawerRepo {
     _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
     current_heads: std::sync::RwLock<ChangeHashSet>,
     drawer_am_handle: samod::DocHandle,
+    plugs_repo: std::sync::RwLock<Option<Arc<crate::plugs::PlugsRepo>>>,
 }
 
 struct FacetCacheState {
@@ -493,6 +526,7 @@ impl DrawerRepo {
             _change_listener_tickets: vec![ticket],
             current_heads: std::sync::RwLock::new(initial_heads),
             drawer_am_handle,
+            plugs_repo: std::sync::RwLock::new(None),
         });
 
         let worker_handle = tokio::spawn({
@@ -584,6 +618,219 @@ impl DrawerRepo {
             }
         }
         Ok(())
+    }
+
+    pub fn set_plugs_repo(&self, plugs_repo: Arc<crate::plugs::PlugsRepo>) {
+        *self.plugs_repo.write().unwrap() = Some(plugs_repo);
+    }
+
+    async fn facet_manifest_for_tag(
+        &self,
+        facet_tag: &str,
+    ) -> Option<crate::plugs::manifest::FacetManifest> {
+        let plugs_repo = self.plugs_repo.read().unwrap().clone();
+        if let Some(plugs_repo) = plugs_repo {
+            return plugs_repo.get_facet_manifest_by_tag(facet_tag).await;
+        }
+
+        static SYSTEM_FACET_MANIFESTS: std::sync::OnceLock<
+            HashMap<String, crate::plugs::manifest::FacetManifest>,
+        > = std::sync::OnceLock::new();
+        let system_facet_manifests = SYSTEM_FACET_MANIFESTS.get_or_init(|| {
+            let mut out = HashMap::new();
+            for plug_manifest in crate::plugs::system_plugs() {
+                for facet_manifest in plug_manifest.facets {
+                    out.insert(facet_manifest.key_tag.to_string(), facet_manifest);
+                }
+            }
+            out
+        });
+        system_facet_manifests.get(facet_tag).cloned()
+    }
+
+    pub async fn validate_facets(&self, facets: &HashMap<FacetKey, FacetRaw>) -> Res<()> {
+        for (facet_key, facet_value) in facets {
+            let facet_tag = facet_key.tag.to_string();
+            let Some(facet_manifest) = self.facet_manifest_for_tag(&facet_tag).await else {
+                eyre::bail!(
+                    "facet tag '{}' has no registered manifest in plugs repo",
+                    facet_tag
+                );
+            };
+
+            let schema_json = serde_json::to_value(&facet_manifest.value_schema)?;
+            let validator = jsonschema::validator_for(&schema_json)?;
+            if let Err(validation_error) = validator.validate(facet_value) {
+                eyre::bail!(
+                    "facet '{}' failed schema validation: {}",
+                    facet_key,
+                    validation_error
+                );
+            }
+
+            for reference_manifest in &facet_manifest.references {
+                self.validate_facet_reference(facets, facet_key, facet_value, reference_manifest)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_facet_reference(
+        &self,
+        facets: &HashMap<FacetKey, FacetRaw>,
+        origin_facet_key: &FacetKey,
+        origin_facet_value: &FacetRaw,
+        reference_manifest: &crate::plugs::manifest::FacetReferenceManifest,
+    ) -> Res<()> {
+        let selected_values = crate::plugs::reference::select_json_path_values(
+            origin_facet_value,
+            &reference_manifest.json_path,
+        )?;
+        if selected_values.is_empty() {
+            eyre::bail!(
+                "facet '{}' reference path '{}' is missing",
+                origin_facet_key,
+                reference_manifest.json_path
+            );
+        }
+
+        let mut referenced_facets = Vec::new();
+        for selected_value in selected_values {
+            match selected_value {
+                serde_json::Value::String(url_value) => {
+                    referenced_facets
+                        .push(self.validate_reference_url(url_value, origin_facet_key)?);
+                }
+                serde_json::Value::Array(url_values) => {
+                    for url_value in url_values {
+                        let serde_json::Value::String(url_string) = url_value else {
+                            eyre::bail!(
+                                "facet '{}' reference path '{}' must contain URL strings",
+                                origin_facet_key,
+                                reference_manifest.json_path
+                            );
+                        };
+                        referenced_facets
+                            .push(self.validate_reference_url(url_string, origin_facet_key)?);
+                    }
+                }
+                _ => {
+                    eyre::bail!(
+                        "facet '{}' reference path '{}' must contain URL strings",
+                        origin_facet_key,
+                        reference_manifest.json_path
+                    );
+                }
+            }
+        }
+
+        if let Some(at_commit_json_path) = &reference_manifest.at_commit_json_path {
+            let at_commit_values = crate::plugs::reference::select_json_path_values(
+                origin_facet_value,
+                at_commit_json_path,
+            )?;
+            if at_commit_values.is_empty() {
+                eyre::bail!(
+                    "facet '{}' at_commit path '{}' is missing",
+                    origin_facet_key,
+                    at_commit_json_path
+                );
+            }
+            if at_commit_values.len() != 1 {
+                eyre::bail!(
+                    "facet '{}' at_commit path '{}' must resolve to a single value",
+                    origin_facet_key,
+                    at_commit_json_path
+                );
+            }
+
+            let self_reference_mode = match at_commit_values[0] {
+                serde_json::Value::Array(values) => {
+                    if values.is_empty() {
+                        true
+                    } else {
+                        parse_commit_heads_array(values, origin_facet_key, at_commit_json_path)?;
+                        false
+                    }
+                }
+                _ => {
+                    eyre::bail!(
+                        "facet '{}' at_commit path '{}' must be an array of commit hashes",
+                        origin_facet_key,
+                        at_commit_json_path
+                    );
+                }
+            };
+
+            if self_reference_mode {
+                for referenced_facet in referenced_facets {
+                    if referenced_facet.doc_id == FACET_SELF_DOC_ID
+                        && !facets.contains_key(&referenced_facet.facet_key)
+                    {
+                        eyre::bail!(
+                            "facet '{}' self-reference target '{}' must exist in validated facet set",
+                            origin_facet_key,
+                            referenced_facet.facet_key
+                        );
+                    }
+                }
+            }
+        } else {
+            for referenced_facet in referenced_facets {
+                let parsed_url = url::Url::parse(&referenced_facet.url_value)?;
+                let Some(fragment) = parsed_url.fragment() else {
+                    eyre::bail!(
+                        "facet '{}' reference '{}' must include commit heads in URL fragment when at_commit_json_path is not declared",
+                        origin_facet_key,
+                        referenced_facet.url_value
+                    );
+                };
+                let commit_head_strings: Vec<String> = fragment
+                    .split('|')
+                    .filter(|segment| !segment.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+                if commit_head_strings.is_empty() {
+                    eyre::bail!(
+                        "facet '{}' reference '{}' has empty commit-head fragment",
+                        origin_facet_key,
+                        referenced_facet.url_value
+                    );
+                }
+                utils_rs::am::parse_commit_heads(&commit_head_strings).wrap_err_with(|| {
+                    format!(
+                        "facet '{}' reference '{}' has invalid commit-head fragment",
+                        origin_facet_key, referenced_facet.url_value
+                    )
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_reference_url(
+        &self,
+        url_value: &str,
+        origin_facet_key: &FacetKey,
+    ) -> Res<ValidatedReference> {
+        let parsed_url = url::Url::parse(url_value).wrap_err_with(|| {
+            format!(
+                "facet '{}' contains invalid reference URL '{}'",
+                origin_facet_key, url_value
+            )
+        })?;
+        let parsed_facet_ref = parse_facet_ref(&parsed_url).wrap_err_with(|| {
+            format!(
+                "facet '{}' contains invalid facet reference URL '{}'",
+                origin_facet_key, url_value
+            )
+        })?;
+        Ok(ValidatedReference {
+            doc_id: parsed_facet_ref.doc_id,
+            facet_key: parsed_facet_ref.facet_key,
+            url_value: url_value.to_string(),
+        })
     }
 
     fn invalidate_entry_cache(&self, id: &DocId) {
@@ -787,6 +1034,7 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             return Err(ferr!("repo is stopped"))?;
         }
+        self.validate_facets(&args.facets).await?;
         let mutation_actor_id = if let Some(path) = &args.user_path {
             daybook_types::doc::user_path::to_actor_id(path)
         } else {
@@ -942,6 +1190,21 @@ impl DrawerRepo {
                     .ok_or_else(|| DrawerError::BranchNotFound { name: branch_name })?
             }
         };
+
+        let current_doc = self
+            .get_doc_with_facets_at_heads(&patch.id, &heads, None)
+            .await?
+            .ok_or_else(|| DrawerError::DocNotFound {
+                id: patch.id.clone(),
+            })?;
+        let mut facets_for_validation = current_doc.facets.clone();
+        for (facet_key, facet_value) in &patch.facets_set {
+            facets_for_validation.insert(facet_key.clone(), facet_value.clone());
+        }
+        for facet_key in &patch.facets_remove {
+            facets_for_validation.remove(facet_key);
+        }
+        self.validate_facets(&facets_for_validation).await?;
 
         let now = Timestamp::now();
         let facet_keys_set: Vec<_> = patch.facets_set.keys().cloned().collect();
@@ -1807,6 +2070,7 @@ mod tests {
     use crate::drawer::lru::KeyedLruPool;
     use crate::repos::Repo;
     use daybook_types::doc::{FacetKey, UserPath, WellKnownFacet, WellKnownFacetTag};
+    use daybook_types::url::build_facet_ref;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_smoke() -> Res<()> {
@@ -2854,6 +3118,115 @@ mod tests {
         assert!(changed.contains(&facet_title));
         assert!(changed.contains(&facet_note));
         assert_eq!(changed.len(), 2);
+
+        stop_token.stop().await?;
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let (acx, acx_stop) = AmCtx::boot(
+            utils_rs::am::Config {
+                peer_id: "test-v2-unknown-tag".into(),
+                storage: utils_rs::am::StorageConfig::Memory,
+            },
+            Some(samod::AlwaysAnnounce),
+        )
+        .await?;
+
+        let drawer_doc_id = {
+            let mut doc = automerge::Automerge::new();
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+            let handle = acx.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+
+        let (repo, stop_token) = DrawerRepo::load(
+            acx,
+            drawer_doc_id,
+            automerge::ActorId::random(),
+            Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+            Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+        )
+        .await?;
+
+        let unknown_facet_key = FacetKey::from("org.test.unknown/main");
+        let add_result = repo
+            .add(AddDocArgs {
+                branch_path: "main".into(),
+                facets: [(unknown_facet_key, serde_json::json!({"hello":"world"}))].into(),
+                user_path: None,
+            })
+            .await;
+        assert!(add_result.is_err());
+        assert!(add_result
+            .unwrap_err()
+            .to_string()
+            .contains("no registered manifest"));
+
+        stop_token.stop().await?;
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let (acx, acx_stop) = AmCtx::boot(
+            utils_rs::am::Config {
+                peer_id: "test-v2-self-ref".into(),
+                storage: utils_rs::am::StorageConfig::Memory,
+            },
+            Some(samod::AlwaysAnnounce),
+        )
+        .await?;
+
+        let drawer_doc_id = {
+            let mut doc = automerge::Automerge::new();
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+            let handle = acx.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+
+        let (repo, stop_token) = DrawerRepo::load(
+            acx,
+            drawer_doc_id,
+            automerge::ActorId::random(),
+            Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+            Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+        )
+        .await?;
+
+        let blob_facet_key = FacetKey::from(WellKnownFacetTag::Blob);
+        let image_metadata_facet_key = FacetKey::from(WellKnownFacetTag::ImageMetadata);
+        let facet_ref = build_facet_ref(daybook_types::url::FACET_SELF_DOC_ID, &blob_facet_key)?;
+        let image_metadata_facet =
+            WellKnownFacet::ImageMetadata(daybook_types::doc::ImageMetadata {
+                facet_ref,
+                ref_heads: ChangeHashSet(Arc::new([])),
+                mime: "image/jpeg".into(),
+                width_px: 1,
+                height_px: 1,
+            });
+
+        let add_result = repo
+            .add(AddDocArgs {
+                branch_path: "main".into(),
+                facets: [(image_metadata_facet_key, image_metadata_facet.into())].into(),
+                user_path: None,
+            })
+            .await;
+        assert!(add_result.is_err());
+        assert!(add_result
+            .unwrap_err()
+            .to_string()
+            .contains("self-reference target"));
 
         stop_token.stop().await?;
         acx_stop.stop().await?;

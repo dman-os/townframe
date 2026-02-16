@@ -2,6 +2,7 @@ use crate::interlude::*;
 use tokio_util::sync::CancellationToken;
 
 pub mod manifest;
+pub mod reference;
 
 pub fn system_plugs() -> Vec<manifest::PlugManifest> {
     use daybook_types::doc::*;
@@ -60,6 +61,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     references: vec![FacetReferenceManifest {
                         reference_kind: FacetReferenceKind::UrlFacet,
                         json_path: "/facetRef".into(),
+                        at_commit_json_path: Some("/refHeads".into()),
                     }],
                 },
                 FacetManifest {
@@ -423,6 +425,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     references: vec![FacetReferenceManifest {
                         reference_kind: FacetReferenceKind::UrlFacet,
                         json_path: "/facetRef".into(),
+                        at_commit_json_path: Some("/refHeads".into()),
                     }],
                 },
             ],
@@ -443,16 +446,22 @@ pub struct PlugsStore {
     /// Index: property tag -> plug id (@ns/name)
     #[autosurgeon(with = "utils_rs::am::codecs::skip")]
     pub tag_to_plug: HashMap<String, String>,
+    /// Index: property tag -> facet manifest
+    #[autosurgeon(with = "utils_rs::am::codecs::skip")]
+    pub facet_manifests: HashMap<String, manifest::FacetManifest>,
 }
 
 impl PlugsStore {
     pub fn rebuild_indices(&mut self) {
         self.tag_to_plug.clear();
+        self.facet_manifests.clear();
 
         for (plug_id, versioned) in &self.manifests {
             for facet in &versioned.payload.facets {
                 self.tag_to_plug
                     .insert(facet.key_tag.to_string(), plug_id.clone());
+                self.facet_manifests
+                    .insert(facet.key_tag.to_string(), facet.clone());
             }
         }
     }
@@ -776,22 +785,20 @@ impl PlugsRepo {
     pub async fn get_display_hint(&self, prop_tag: &str) -> Option<manifest::FacetDisplayHint> {
         self.store
             .query_sync(|store| {
-                let plug_id = store.tag_to_plug.get(prop_tag)?;
-                let Some(versioned) = store.manifests.get(plug_id) else {
-                    panic!("plug specified by tag '{prop_tag}' not found");
-                };
-                let Some(hint) = versioned
-                    .payload
-                    .facets
-                    .iter()
-                    .find(|prop: &&manifest::FacetManifest| &prop.key_tag[..] == prop_tag)
-                    .map(|prop| prop.display_config.clone())
-                else {
-                    panic!("prop in index '{prop_tag}' not found in expected plug '{plug_id}'");
-                };
-
-                Some(hint)
+                store
+                    .facet_manifests
+                    .get(prop_tag)
+                    .map(|facet_manifest| facet_manifest.display_config.clone())
             })
+            .await
+    }
+
+    pub async fn get_facet_manifest_by_tag(
+        &self,
+        facet_tag: &str,
+    ) -> Option<manifest::FacetManifest> {
+        self.store
+            .query_sync(|store| store.facet_manifests.get(facet_tag).cloned())
             .await
     }
 
@@ -923,6 +930,20 @@ impl PlugsRepo {
         manifest
             .validate()
             .map_err(|err| eyre::eyre!("validation error: {err}"))?;
+
+        let mut seen_facet_tags = HashSet::new();
+        for facet_manifest in &manifest.facets {
+            let facet_tag = facet_manifest.key_tag.to_string();
+            if !seen_facet_tags.insert(facet_tag.clone()) {
+                eyre::bail!("duplicate facet tag '{}' in plug manifest", facet_tag);
+            }
+
+            validate_facet_reference_manifests(
+                &facet_manifest.key_tag.to_string(),
+                &facet_manifest.value_schema,
+                &facet_manifest.references,
+            )?;
+        }
 
         let plug_id = manifest.id();
         let existing = self.get(&plug_id).await;
@@ -1093,6 +1114,23 @@ impl PlugsRepo {
             }
         }
 
+        for (processor_name, processor_manifest) in &manifest.processors {
+            match &processor_manifest.deets {
+                manifest::ProcessorDeets::DocProcessor {
+                    routine_name,
+                    predicate: _,
+                } => {
+                    if !manifest.routines.contains_key(routine_name) {
+                        eyre::bail!(
+                            "Invalid processor deets: routine '{}' not found in plug (processor='{}')",
+                            routine_name,
+                            processor_name
+                        );
+                    }
+                }
+            }
+        }
+
         // -- Component URL Validation --
         for (bundle_name, bundle) in &manifest.wflow_bundles {
             for url in &bundle.component_urls {
@@ -1197,6 +1235,25 @@ impl PlugsRepo {
             }
         }
 
+        for (processor_name, processor_manifest) in &manifest.processors {
+            match &processor_manifest.deets {
+                manifest::ProcessorDeets::DocProcessor {
+                    predicate,
+                    routine_name: _,
+                } => {
+                    for referenced_tag in predicate.referenced_tags() {
+                        if !available_tags.contains(&referenced_tag.to_string()) {
+                            eyre::bail!(
+                                "Invalid processor predicate in '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
+                                processor_name,
+                                referenced_tag
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -1276,6 +1333,61 @@ fn is_json_schema_compatible(old: &serde_json::Value, new: &serde_json::Value) -
         }
         _ => false,
     }
+}
+
+fn validate_facet_reference_manifests(
+    facet_tag: &str,
+    value_schema: &schemars::Schema,
+    references: &[manifest::FacetReferenceManifest],
+) -> Res<()> {
+    let schema_json = serde_json::to_value(value_schema)?;
+    for reference_manifest in references {
+        let Some(reference_node) = crate::plugs::reference::schema_node_for_json_path(
+            &schema_json,
+            &reference_manifest.json_path,
+        )?
+        else {
+            eyre::bail!(
+                "invalid reference json_path '{}' for facet tag '{}': path does not exist in schema",
+                reference_manifest.json_path,
+                facet_tag
+            );
+        };
+
+        match reference_manifest.reference_kind {
+            manifest::FacetReferenceKind::UrlFacet => {
+                if !crate::plugs::reference::schema_allows_url_reference(reference_node) {
+                    eyre::bail!(
+                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow a URL string or an array of URL strings",
+                        reference_manifest.json_path,
+                        facet_tag
+                    );
+                }
+            }
+        }
+
+        if let Some(at_commit_json_path) = &reference_manifest.at_commit_json_path {
+            let Some(at_commit_node) = crate::plugs::reference::schema_node_for_json_path(
+                &schema_json,
+                at_commit_json_path,
+            )?
+            else {
+                eyre::bail!(
+                    "invalid at_commit_json_path '{}' for facet tag '{}': path does not exist in schema",
+                    at_commit_json_path,
+                    facet_tag
+                );
+            };
+            if !crate::plugs::reference::schema_allows_array_of_strings(at_commit_node) {
+                eyre::bail!(
+                    "invalid at_commit_json_path '{}' for facet tag '{}': schema node must allow an array of commit hashes",
+                    at_commit_json_path,
+                    facet_tag
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1649,6 +1761,138 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Unsupported URL scheme"));
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_plug_reference_json_path_must_exist_in_schema() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        let mut plug = mock_plug("ref-path");
+        plug.facets.push(manifest::FacetManifest {
+            key_tag: "org.test.image".into(),
+            value_schema: schemars::schema_for!(daybook_types::doc::ImageMetadata),
+            display_config: default(),
+            references: vec![manifest::FacetReferenceManifest {
+                reference_kind: manifest::FacetReferenceKind::UrlFacet,
+                json_path: "/doesNotExist".into(),
+                at_commit_json_path: Some("/refHeads".into()),
+            }],
+        });
+
+        let result = repo.add(plug).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("path does not exist in schema"));
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_plug_at_commit_json_path_type_must_be_array_of_strings() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        let mut plug = mock_plug("bad-at-commit");
+        plug.facets.push(manifest::FacetManifest {
+            key_tag: "org.test.image".into(),
+            value_schema: schemars::schema_for!(daybook_types::doc::ImageMetadata),
+            display_config: default(),
+            references: vec![manifest::FacetReferenceManifest {
+                reference_kind: manifest::FacetReferenceKind::UrlFacet,
+                json_path: "/facetRef".into(),
+                at_commit_json_path: Some("/mime".into()),
+            }],
+        });
+
+        let result = repo.add(plug).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must allow an array of commit hashes"));
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_processor_routine_must_exist() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        let mut plug = mock_plug("processor-routine");
+        plug.processors.insert(
+            "proc1".into(),
+            manifest::ProcessorManifest {
+                desc: "Processor".into(),
+                deets: manifest::ProcessorDeets::DocProcessor {
+                    predicate: manifest::DocPredicateClause::HasTag("org.test.tag".into()),
+                    routine_name: "missing-routine".into(),
+                },
+            }
+            .into(),
+        );
+
+        let result = repo.add(plug).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid processor deets"));
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_processor_predicate_tags_must_be_in_scope() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path().join("component.wasm");
+        tokio::fs::write(&temp_path, b"dummy wasm").await?;
+        let file_url = url::Url::from_file_path(&temp_path).unwrap();
+
+        let mut plug = mock_plug("processor-predicate-scope");
+        plug.routines.insert(
+            "routine1".into(),
+            manifest::RoutineManifest {
+                r#impl: manifest::RoutineImpl::Wflow {
+                    key: "wflow1".into(),
+                    bundle: "bundle1".into(),
+                },
+                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                facet_acl: vec![],
+                local_state_acl: vec![],
+            }
+            .into(),
+        );
+        plug.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec!["wflow1".into()],
+                component_urls: vec![file_url],
+            }
+            .into(),
+        );
+        plug.processors.insert(
+            "proc1".into(),
+            manifest::ProcessorManifest {
+                desc: "Processor".into(),
+                deets: manifest::ProcessorDeets::DocProcessor {
+                    predicate: manifest::DocPredicateClause::HasTag("org.test.missing".into()),
+                    routine_name: "routine1".into(),
+                },
+            }
+            .into(),
+        );
+
+        let result = repo.add(plug).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid processor predicate"));
 
         Ok(())
     }

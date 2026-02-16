@@ -15,6 +15,8 @@
 
 ## Stack
 
+- [ ] Js execution
+  - [ ] json componenents baseed display
 - [ ] DocEditor
 - [ ] DrawerScreen
   - [ ] Search FAB
@@ -64,11 +66,11 @@
 - [ ] Cleanup for public pre-alpha
 
 - [ ] Drawers v2
-  - [ ] Constrain value shapes for known keys at drawer
+  - [x] Constrain value shapes for known keys at drawer
+    - [x] JSONSchema checks
   - [x] Rename props to facets
   - [x] `dmeta`
   - [x] LRU caches
-  - [ ] JSONSchema checks
   - [x] Facet ref index
   - [x] URLs
     - [x] Facet URL

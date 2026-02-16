@@ -8,16 +8,19 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import org.example.daybook.ui.decodeJsonStringFacet
-import org.example.daybook.ui.decodeNoteFacet
-import org.example.daybook.ui.noteFacetJson
-import org.example.daybook.ui.quoteJsonString
+import org.example.daybook.ui.buildNoteFacet
+import org.example.daybook.ui.decodeJsonString
+import org.example.daybook.ui.decodeJsonStringOrRaw
+import org.example.daybook.ui.decodeWellKnownFacet
+import org.example.daybook.ui.encodeJsonString
+import org.example.daybook.ui.putWellKnownFacet
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.core.UpdateDocArgsV2
 import org.example.daybook.uniffi.types.AddDocArgs
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.DocPatch
 import org.example.daybook.uniffi.types.FacetKey
+import org.example.daybook.uniffi.types.WellKnownFacet
 
 data class FacetEditorDescriptor(
     val facetKey: FacetKey,
@@ -82,12 +85,12 @@ class EditorSessionController(
                 if (titleRawValue == null) {
                     Triple("", true, null)
                 } else {
-                    val decodeResult = decodeJsonStringFacet(titleRawValue)
+                    val decodeResult = decodeJsonString(titleRawValue)
                     if (decodeResult.isSuccess) {
                         Triple(decodeResult.getOrThrow(), true, null)
                     } else {
                         Triple(
-                            org.example.daybook.ui.dequoteJson(titleRawValue),
+                            decodeJsonStringOrRaw(titleRawValue),
                             false,
                             "Invalid title facet payload; editing disabled to avoid destructive writes.",
                         )
@@ -99,15 +102,15 @@ class EditorSessionController(
                 if (noteRawValue == null) {
                     Triple("", true, null)
                 } else {
-                    val decodeResult = decodeNoteFacet(noteRawValue)
+                    val decodeResult = decodeWellKnownFacet<WellKnownFacet.Note>(noteRawValue)
                     if (decodeResult.isFailure) {
                         Triple(
-                            org.example.daybook.ui.dequoteJson(noteRawValue),
+                            decodeJsonStringOrRaw(noteRawValue),
                             false,
                             "Invalid note facet payload; editing disabled to avoid destructive writes.",
                         )
                     } else {
-                        val note = decodeResult.getOrThrow()
+                        val note = decodeResult.getOrThrow().v1
                         if (note.mime == "text/plain") {
                             Triple(note.content, true, null)
                         } else {
@@ -183,12 +186,12 @@ class EditorSessionController(
                 if (snapshot.titleDraft.isBlank()) {
                     facetsRemove.add(titleFacetKey())
                 } else {
-                    facetsSet[titleFacetKey()] = quoteJsonString(snapshot.titleDraft)
+                    facetsSet[titleFacetKey()] = encodeJsonString(snapshot.titleDraft)
                 }
             }
 
             if (snapshot.noteEditable) {
-                facetsSet[noteFacetKey()] = noteFacetJson(snapshot.noteDraft)
+                putWellKnownFacet(facetsSet, noteFacetKey(), buildNoteFacet(snapshot.noteDraft))
             }
 
             val currentDocId = snapshot.docId

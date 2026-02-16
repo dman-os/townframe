@@ -177,6 +177,7 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
         local_actor_id.clone(),
     )
     .await?;
+    drawer_repo.set_plugs_repo(Arc::clone(&plug_repo));
     let (config_repo, config_stop) = crate::config::ConfigRepo::load(
         acx.clone(),
         app_doc_id.clone(),

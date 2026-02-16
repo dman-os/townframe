@@ -115,6 +115,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         )
         .await
         .wrap_err("error loading plugs repo")?;
+        _drawer.set_plugs_repo(Arc::clone(&plugs_repo));
         let (_conf_repo, conf_stop) = ConfigRepo::load(
             ctx.acx.clone(),
             app_doc_id.clone(),
@@ -478,6 +479,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
         )
     )?;
+    drawer.set_plugs_repo(Arc::clone(&plugs_repo));
 
     macro_rules! do_cleanup {
         () => {

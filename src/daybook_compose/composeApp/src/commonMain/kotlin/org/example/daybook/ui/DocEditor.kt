@@ -36,13 +36,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import org.example.daybook.LocalContainer
-import org.example.daybook.ui.decodeBlobFacet
-import org.example.daybook.ui.decodeImageMetadataFacet
 import org.example.daybook.ui.editor.FacetEditorKind
 import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.ui.editor.imageMetadataFacetKey
 import org.example.daybook.ui.editor.blobFacetKey
 import org.example.daybook.uniffi.types.Blob
+import org.example.daybook.uniffi.types.WellKnownFacet
 
 @Composable
 fun DocEditor(
@@ -261,9 +260,10 @@ private fun ImageFacetEditor(controller: EditorSessionController, onError: (Stri
     val doc = state.doc
     val blobValue = doc?.facets?.get(blobFacetKey())
     val imageMetaValue = doc?.facets?.get(imageMetadataFacetKey())
-    val blobDecodeResult = blobValue?.let { value -> decodeBlobFacet(value) }
-    val imageMetaDecodeResult = imageMetaValue?.let { value -> decodeImageMetadataFacet(value) }
-    val blobHash = blobDecodeResult?.getOrNull()?.let { blob -> blobHash(blob) }
+    val blobDecodeResult = blobValue?.let { value -> decodeWellKnownFacet<WellKnownFacet.Blob>(value) }
+    val imageMetaDecodeResult =
+        imageMetaValue?.let { value -> decodeWellKnownFacet<WellKnownFacet.ImageMetadata>(value) }
+    val blobHash = blobDecodeResult?.getOrNull()?.let { facet -> blobHash(facet.v1) }
     val imageErrorNotice =
         when {
             blobDecodeResult?.isFailure == true ->
@@ -341,11 +341,6 @@ private fun blobHash(blob: Blob): String? {
         return fromUrl
     }
     return blob.digest.ifBlank { null }
-}
-
-private fun previewFacetValue(json: String): String {
-    val dequoted = dequoteJson(json)
-    return if (dequoted == json) json.take(120) else dequoted.take(120)
 }
 
 private fun facetKeyString(key: org.example.daybook.uniffi.types.FacetKey): String {
