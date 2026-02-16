@@ -210,6 +210,8 @@
           desktopBuildInputs = with pkgs; [
             openjdk21
             appimage-run
+            v4l-utils
+            libv4l
           ];
 
           washBuildInputs = with pkgs; [ ];
@@ -281,7 +283,7 @@
                       devShellBuildInputs
                       ++ (with pkgs; [
                         sqlite.dev
-                        llvmPackages.libclang.dev
+                        llvmPackages.libclang
                         libxrender
                         libxext
                         libxtst

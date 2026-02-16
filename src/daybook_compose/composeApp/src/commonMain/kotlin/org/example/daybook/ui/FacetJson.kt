@@ -15,6 +15,7 @@ private val facetJsonCodec = Json {
     isLenient = true
 }
 
+// FIXME: suspicious. Anyone authoring facets should probably use the typed values
 fun quoteJsonString(value: String): String = facetJsonCodec.encodeToString(value)
 
 fun decodeJsonStringFacet(value: String): Result<String> =
@@ -29,6 +30,7 @@ fun decodeBlobFacet(value: String): Result<Blob> =
 fun decodeImageMetadataFacet(value: String): Result<ImageMetadata> =
     runCatching { facetJsonCodec.decodeFromString<ImageMetadata>(value) }
 
+// FIXME: no one should be using this except previewFacetValue
 fun dequoteJson(json: String): String {
     val parsed = runCatching { facetJsonCodec.parseToJsonElement(json) }.getOrNull() ?: return json
     val parsedPrimitive = parsed as? JsonPrimitive ?: return json
@@ -40,6 +42,7 @@ fun dequoteJson(json: String): String {
 
 fun noteFacetJson(content: String): String = facetJsonCodec.encodeToString(Note("text/plain", content))
 
+// FIXME: remove this, they should use decodeNoteFacet directly
 fun noteContentFromFacetJson(noteFacetJson: String?): String {
     if (noteFacetJson == null) {
         return ""

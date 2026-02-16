@@ -18,6 +18,7 @@ pub use daybook_core::app::SqlCtx;
 
 uniffi::setup_scaffolding!();
 
+mod camera;
 mod ffi;
 mod macros;
 mod repos;

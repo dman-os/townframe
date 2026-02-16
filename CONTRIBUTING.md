@@ -21,7 +21,7 @@
 
     - Confirmed to run on desktop and android.
 
-- `./src/daybook_ffi/`: [uniffi](https://lib.rs/uniffi) based bindigns for kotlin.
+- `./src/daybook_ffi/`: [uniffi](https://mozilla.github.io/uniffi-rs/latest/) based bindigns for kotlin.
 
     - `./x/gen-ffi-dayb.ts` to re-generate the bindings and build the library.
 
@@ -51,7 +51,7 @@
 
 - `./src/granary_web/`: Web app for granary (haitus).
 
-- `./src/wflow/`: the top level crate for wflow.
+- `./src/wflow/`: the top level crate for wflow, a durable workflows impl.
 
   - `./src/wflow_core/`: the core types and logic.
  

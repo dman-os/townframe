@@ -1,6 +1,6 @@
-use tokio::sync::oneshot;
-
 use crate::interlude::*;
+
+use tokio::sync::oneshot;
 
 daybook_types::custom_type_set!();
 

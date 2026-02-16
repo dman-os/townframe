@@ -34,4 +34,3 @@ fun AdditionalFeatureButton.toFeatureItem(): FeatureItem =
 
 fun List<FeatureItem>.withAdditionalFeatureButtons(buttons: List<AdditionalFeatureButton>): List<FeatureItem> =
     this + buttons.map { it.toFeatureItem() }
-

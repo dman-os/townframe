@@ -15,4 +15,3 @@ fun blobFacetKey(): FacetKey =
 
 fun imageMetadataFacetKey(): FacetKey =
     FacetKey(FacetTag.WellKnown(WellKnownFacetTag.IMAGE_METADATA), "main")
-

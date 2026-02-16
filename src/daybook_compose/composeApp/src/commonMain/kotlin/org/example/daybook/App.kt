@@ -68,6 +68,7 @@ import org.example.daybook.tables.ExpandedLayout
 import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
 import org.example.daybook.uniffi.ConfigRepoFfi
+import org.example.daybook.uniffi.CameraPreviewFfi
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiCtx
 import org.example.daybook.uniffi.FfiException
@@ -112,7 +113,8 @@ data class AppContainer(
     val tablesRepo: TablesRepoFfi,
     val plugsRepo: org.example.daybook.uniffi.PlugsRepoFfi,
     val configRepo: ConfigRepoFfi,
-    val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi
+    val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
+    val cameraPreviewFfi: CameraPreviewFfi
 )
 
 val LocalContainer =
@@ -425,6 +427,7 @@ fun App(
             org.example.daybook.uniffi.PlugsRepoFfi
                 .load(fcx = fcx, blobsRepo = blobsRepo)
         val configRepo = ConfigRepoFfi.load(fcx = fcx, plugRepo = plugsRepo)
+        val cameraPreviewFfi = CameraPreviewFfi.load()
 
         // Initialize first-time data if needed
         val tablesViewModel = TablesViewModel(tablesRepo)
@@ -438,7 +441,8 @@ fun App(
                     tablesRepo = tablesRepo,
                     plugsRepo = plugsRepo,
                     configRepo = configRepo,
-                    blobsRepo = blobsRepo
+                    blobsRepo = blobsRepo,
+                    cameraPreviewFfi = cameraPreviewFfi
                 )
             )
     }
@@ -467,6 +471,7 @@ fun App(
                         appContainer.tablesRepo.close()
                         appContainer.plugsRepo.close()
                         appContainer.configRepo.close()
+                        appContainer.cameraPreviewFfi.close()
                         appContainer.ffiCtx.close()
                     }
                 }

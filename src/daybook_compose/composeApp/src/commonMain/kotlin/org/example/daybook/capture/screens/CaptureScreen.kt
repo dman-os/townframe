@@ -308,6 +308,7 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
             when (captureMode) {
                 CaptureMode.CAMERA -> {
                     DaybookCameraPreview(
+                        cameraPreviewFfi = container.cameraPreviewFfi,
                         onImageSaved = { byteArray ->
                             vm.saveImage(byteArray)
                         },

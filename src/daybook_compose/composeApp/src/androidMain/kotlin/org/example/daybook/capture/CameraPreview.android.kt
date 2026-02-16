@@ -54,9 +54,11 @@ import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import org.example.daybook.LocalPermCtx
 import org.example.daybook.capture.LocalCameraCaptureContext
+import org.example.daybook.uniffi.CameraPreviewFfi
 
 @Composable
 actual fun DaybookCameraPreview(
+    cameraPreviewFfi: CameraPreviewFfi,
     modifier: Modifier,
     onImageSaved: ((ByteArray) -> Unit)?,
     onCaptureRequested: (() -> Unit)?

@@ -28,7 +28,6 @@ serde_json.workspace = true
 api_utils_rs.workspace = true
 
 # error
-color-eyre.workspace = true
 thiserror.workspace = true
 displaydoc.workspace = true
 
@@ -68,3 +67,8 @@ directories.workspace = true
 uniffi = { workspace = true, features = [ "build" ] }
 
 [features]
+default = ["nokhwa"]
+nokhwa = ["dep:nokhwa"]
+
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+nokhwa = { version = "0.10.10", default-features = false, features = ["input-native", "output-threaded", "decoding"], optional = true }

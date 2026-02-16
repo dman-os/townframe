@@ -125,15 +125,6 @@ kotlin {
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutinesSwing)
             implementation(libs.jna)
-            implementation(libs.webcam.capture)
-            implementation(libs.webcam.capture.v4l4j)
-            implementation(libs.webcam.capture.gstreamer)
-            implementation(libs.webcam.capture.openimaj)
-            implementation(libs.webcam.capture.javacv)
-            implementation(libs.webcam.capture.vlcj)
-            implementation(libs.webcam.capture.fswebcam)
-            implementation(libs.webcam.capture.lti.civil)
-            implementation(libs.webcam.capture.jmf)
             // implementation(compose.foundation)
             // implementation(compose.ui)
         }
@@ -260,6 +251,19 @@ data class AndroidRustToolchain(
     val arPath: String,
 )
 
+// Desktop Rust builds
+tasks.register<Exec>("buildRustDesktopDebug") {
+    group = "build"
+    description = "Build Rust daybook_ffi (debug) for desktop with nokhwa"
+    commandLine("cargo", "build", "-p", "daybook_ffi", "--features", "nokhwa")
+}
+
+tasks.register<Exec>("buildRustDesktopRelease") {
+    group = "build"
+    description = "Build Rust daybook_ffi (release) for desktop with nokhwa"
+    commandLine("cargo", "build", "-p", "daybook_ffi", "--release", "--features", "nokhwa")
+}
+
 fun androidRustToolchainForAbi(targetAbi: String, ndkToolchainBinDir: String): AndroidRustToolchain? {
     val arPath = "$ndkToolchainBinDir/llvm-ar"
     return when (targetAbi) {
@@ -317,7 +321,7 @@ tasks.register<Exec>("buildRustAndroidDebug") {
     group = "build"
     description = "Build Rust daybook_ffi (debug) for Android ABIs"
 
-    commandLine("cargo", "build", "-p", "daybook_ffi", "--target", targetRustTriple)
+    commandLine("cargo", "build", "-p", "daybook_ffi", "--no-default-features", "--target", targetRustTriple)
     val ndkToolchainBinDir = System.getenv("ANDROID_NDK_TOOLCHAIN_BIN_DIR")
     if (!ndkToolchainBinDir.isNullOrBlank()) {
         val toolchain = androidRustToolchainForAbi(targetAbi, ndkToolchainBinDir)
@@ -380,7 +384,7 @@ tasks.register<Exec>("buildRustAndroidRelease") {
     group = "build"
     description = "Build Rust daybook_ffi (release) for Android ABIs"
 
-    commandLine("cargo", "build", "-p", "daybook_ffi", "--release", "--target", targetRustTriple)
+    commandLine("cargo", "build", "-p", "daybook_ffi", "--no-default-features", "--release", "--target", targetRustTriple)
     val ndkToolchainBinDir = System.getenv("ANDROID_NDK_TOOLCHAIN_BIN_DIR")
     if (!ndkToolchainBinDir.isNullOrBlank()) {
         val toolchain = androidRustToolchainForAbi(targetAbi, ndkToolchainBinDir)
@@ -451,4 +455,28 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
     if (!isCheckTask) {
         dependsOn("buildRustAndroidRelease")
     }
+}
+
+// Wire desktop tasks to Rust desktop builds with nokhwa enabled
+tasks.matching {
+    it.name in
+        setOf(
+            "compileKotlinDesktop",
+            "desktopRun",
+            "desktopRunHot",
+        )
+}.configureEach {
+    dependsOn("buildRustDesktopDebug")
+}
+
+tasks.matching {
+    it.name in
+        setOf(
+            "packageReleaseAppImage",
+            "packageReleaseDeb",
+            "packageReleaseDmg",
+            "packageReleaseMsi",
+        )
+}.configureEach {
+    dependsOn("buildRustDesktopRelease")
 }
