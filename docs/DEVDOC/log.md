@@ -1,5 +1,99 @@
 # duck-log
 
+## 2026-02-17 | the missing research
+
+I should sit down and study more prior art.
+I should sit down and design the app in full in PenPot, also.
+But to do that, I should probably study prior art well.
+I'm just going off Obsidian and Notion and Patchwork which are well and good.
+But that's just things I'm familiar with, difficult to see the foundations when you're holding things you're familar with.
+Familarity blindness? Is that a thing?
+
+Having accessible index of prior art for each feature is going to help speed all of this up.
+Start from the earliest systems to the latest, there's a looot of prior art here.
+Xandu, OpenDoc, Org-mode...all the way upto the millions of Notion clones and todo apps I've used in the past few years.
+
+I should make a rubric for evaluating them:
+- UI usability
+  - Is it layed out well? Accessible?
+- UI looks
+  - Does it look good? Inviting?
+- Flexability
+  - Will I need to use another app for a usecase that should be covored?
+- Text editor
+  - How functional is the text editor? This used to be make or break for me and here I am completely throwing that down the drain.
+- Programmability
+- Userbase satisfaction
+  - I mean, the historical record of the actual people they served. Why and how and when?
+- Automation
+- A11n
+
+Shortlist of things to study:
+- Notion
+- Obsidian
+- Anytype
+- Org-mode
+- Patchwork
+- Craft.co
+- Roam
+- OpenDoc
+- Xanadu
+- LogSeq
+- Joplin
+- Keep Notes
+- Telegram Saved Messages
+- HackMD
+
+---
+
+Wait a fuck? Xanadu was never released??
+
+## 2026-02-17 | one fucking year
+
+I just noticed it's been 1 year since I created the first commit in here.
+I haven't really been working on it that much, employment and all but...yes, let's try to clean it up and make the repo public before the month is out.
+Freeze feature work and get the CI working for Android, Linux, Windows, MacOS and iOS.
+Who am I forgetting there?
+
+Need to setup proper contact vectors, setup a Discord (yuck)?
+
+## 2026-02-17 | saving prompts?
+
+Should I keep a forever log of the prompts used to make this app?
+Would that be useful?
+Cursor doesn't provide these data for some reason, I'd love to go back and see all the chat threads I've had with them but those are hardly useful.
+I do like the prompts/plans I'd workshopped working with the latest models and with Codex CLI though.
+Especially the fist plan/prompt for a feature, those seem well written. 
+
+Looking in ~/.codex, the full history with all the details is stored in JSON files. One could easily extract and make a viewer for these.
+I'd like to have some kind of index that takes me from a feature/file to the relevant chat thread for it. Maybe summuraize it first?
+Actually no, the artifacts in the code should be enough for whatever task.
+Documentation should be documentation and that should be where rigor is appled, no need for hacks.
+Good to know that ~/.codex exists at least, in case I ever need to remember undocumented details. 
+
+---
+
+Ah fuck, I know I'll never write the right docs.
+And LLM written prose has the ick factor.
+But still, these prompts, as lengthy and detailed as they are, are not written to be read again.
+Wouldn't writing prompts to be read again be too laborious?
+
+## 2026-02-17 | I <3 paths!
+
+I keep finding paths as a good solution for my tagging or identification problems.
+So far we have:
+- UserPaths for identifying actors
+- BranchPaths for naming doc branches
+- Dpath system
+- Progress tags path
+
+When in doubt, use paths!
+
+But there's nuance here:
+- We're a CRDT Jose, there's no global arbiter to ensure exclusivity.
+  - Some paths like dpath and progress tags allow multiple items to have the same path
+  - Mapping these to posix require tricks, lotsa tricks.
+
 ## 2026-02-07 | ppf genesis prompt
 
 What's pauperfuse? It's the poor man's fuse.

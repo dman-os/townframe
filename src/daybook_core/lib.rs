@@ -27,6 +27,7 @@ pub mod drawer;
 pub mod index;
 pub mod local_state;
 pub mod plugs;
+pub mod repo;
 #[allow(unused)]
 pub mod repos;
 pub mod rt;

@@ -12,11 +12,20 @@
     - Dynamic processors, defined in document?
       - I could just describe to the LLM what the document is to do and it could write it
   - [ ] Granary
+  - [ ] Import Obsidian vault
+- [ ] Best in class in something?
+  - [ ] Ingest?
+    - [ ] Email
+    - [ ] SMS
+  - [ ] Programmability?
+    - [ ] How to beat web tech?
 
 ## Stack
 
+- [ ] File locks on repo
+- [ ] Store plugin info in drawer??
 - [ ] Js execution
-  - [ ] json componenents baseed display
+  - [ ] https://json-render.dev/ based display
 - [ ] DocEditor
 - [ ] DrawerScreen
   - [ ] Search FAB
@@ -25,17 +34,7 @@
   - [ ] Blob download
 - [x] Overhaul bottom bar
   - [ ] Change color when in different modes.
-- [ ] `mltools`
-  - [ ] OCR
-    - [ ] Local
-  - [ ] Embeedding
-    - [ ] Local
-  - [ ] STT
-  - [ ] API client
-  - [ ] Router
-  - [ ] durable-streams
-  - [ ] Model manager
-    - [ ] Store in repo
+  - [ ] Experiment with floating bottom bar
 - [ ] daybook_server
   - [ ] Decide on wrpc vs json
 - [ ] CI/CD
@@ -48,6 +47,7 @@
       - [ ] to Flathub
     - [ ] Windows.exe
       - [ ] to Scoop.sh
+- [ ] Good and local document classification
 - [ ] Receipt parsing
 - [ ] Pending jobs [LOST]
 - [ ] Repos
@@ -56,15 +56,47 @@
     - [ ] Make it nice
   - [ ] GUI support
 - [ ] Blobs server
+  - [ ] Iroh blobs?
   - [ ] Chunked hashing for transfers
     - Chunks at rest?
 - [ ] P2P
   - [ ] iroh
-- [ ] E2E tests for daybook
-- [ ] File locks on repo
+- [ ] Penpot design file
+- [ ] Bugs
+  - [ ] `WflowNotFound`
+    - `HostEvent(WflowRegistered)``?
+- [ ] Cancellation and shutdown
+  - [ ] Kotlin repo's should call close
+  - [ ] Assert samod fsyncs reliably
+  - [ ] Notification handling
+    - [ ] How to avoid missing triage work?
 
 - [ ] Cleanup for public pre-alpha
 
+- [ ] Cross-routine,cross-plugin risk analysis
+  - [ ] Can a routine with previlaged outbound access exfiltrate data by coordinating with another that has previlaged read access?
+  - [ ] Harsher bounds on data shapes
+  - [ ] LLM auidted registry subset
+    - Open-source
+- [ ] Screenshots and screen recording
+  - [ ] How to make it cross platform?
+- [ ] Publishing
+  - [ ] ATProto
+  - [ ] Apub
+  - [ ] micro.blog?
+- [ ] wrpc + iroh
+- [ ] `mltools`
+  - [ ] OCR
+    - [ ] Local
+  - [ ] Embeedding
+    - [ ] Local
+  - [ ] STT
+  - [ ] API client
+  - [ ] Router
+  - [ ] durable-streams
+  - [ ] Model manager
+    - [ ] Store in repo
+- [ ] E2E tests for daybook
 - [ ] Drawers v2
   - [x] Constrain value shapes for known keys at drawer
     - [x] JSONSchema checks
@@ -76,6 +108,7 @@
     - [x] Facet URL
     - [x] Doc URL
   - [ ] `dpath`
+    - [ ] Dpath for plugin info
 - [ ] Plugins
   - [x] Manifest
   - [ ] Commands
@@ -92,11 +125,6 @@
     - [ ] `daybook pget docId propKey`
     - [ ] `daybook grep`
     - [ ] `daybook sed`
-- [ ] Cancellation and shutdown
-  - [ ] Kotlin repo's should call close
-  - [ ] Assert samod fsyncs reliably
-  - [ ] Notification handling
-    - [ ] How to avoid missing triage work?
 - [ ] wflow
   - [ ] Non-wasm impl
     - [ ] Catch panics
@@ -129,7 +157,6 @@
     - [ ] wRPC everything??
 - [x] Replace time with jiff??
 - [ ] Pipeline editor web app
-- [ ] wrpc + iroh
 - [ ] Magic wand
   - [ ] Follow bubble behavior from android
   - [ ] Status bar/Gesture bar insets for puck and widgets

@@ -32,12 +32,13 @@ impl PlugsRepoFfi {
         blobs_repo: Arc<crate::repos::blobs::BlobsRepoFfi>,
     ) -> Result<Arc<Self>, FfiError> {
         let fcx = Arc::clone(&fcx);
+        let cx = Arc::clone(fcx.repo_ctx());
         let (repo, stop_token) = fcx
             .do_on_rt(PlugsRepo::load(
-                fcx.cx.acx.clone(),
+                cx.acx().clone(),
                 Arc::clone(&blobs_repo.repo),
-                fcx.cx.doc_app().document_id().clone(),
-                fcx.cx.local_actor_id.clone(),
+                cx.doc_app().document_id().clone(),
+                cx.local_actor_id().clone(),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;

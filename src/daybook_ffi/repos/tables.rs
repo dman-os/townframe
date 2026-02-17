@@ -30,11 +30,12 @@ impl TablesRepoFfi {
     #[tracing::instrument(err, skip(fcx))]
     async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
         let fcx = Arc::clone(&fcx);
+        let cx = Arc::clone(fcx.repo_ctx());
         let (repo, stop_token) = fcx
             .do_on_rt(TablesRepo::load(
-                fcx.cx.acx.clone(),
-                fcx.cx.doc_app().document_id().clone(),
-                fcx.cx.local_actor_id.clone(),
+                cx.acx().clone(),
+                cx.doc_app().document_id().clone(),
+                cx.local_actor_id().clone(),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;

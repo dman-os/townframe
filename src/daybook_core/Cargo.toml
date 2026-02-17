@@ -84,6 +84,7 @@ sqlite-vec.workspace = true
 # misc
 pastey.workspace = true
 directories.workspace = true
+fs4 = "0.13.1"
 
 # wasm
 wash-runtime = { workspace = true }

@@ -17,7 +17,6 @@ use daybook_core::config::ConfigRepo;
 use daybook_core::drawer::DrawerRepo;
 use daybook_core::plugs::{manifest, PlugsRepo};
 use daybook_core::rt::dispatch::DispatchRepo;
-use daybook_core::tables::TablesRepo;
 
 mod config;
 mod context;
@@ -88,66 +87,10 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             );
             return Ok(ExitCode::SUCCESS);
         }
-        let ctx = context::Ctx::init(Arc::clone(&conf)).await?;
-        let drawer_doc_id = ctx.doc_drawer().document_id();
-        let app_doc_id = ctx.doc_app().document_id();
-
-        let _local_user_path = ctx.local_user_path.clone();
-
-        let (_drawer, drawer_stop) = DrawerRepo::load(
-            ctx.acx.clone(),
-            drawer_doc_id.clone(),
-            ctx.local_actor_id.clone(),
-            Arc::new(std::sync::Mutex::new(
-                daybook_core::drawer::lru::KeyedLruPool::new(1000),
-            )),
-            Arc::new(std::sync::Mutex::new(
-                daybook_core::drawer::lru::KeyedLruPool::new(1000),
-            )),
-        )
-        .await?;
-        let blobs_repo = BlobsRepo::new(conf._blobs_root.clone()).await?;
-        let (plugs_repo, plugs_stop) = PlugsRepo::load(
-            ctx.acx.clone(),
-            Arc::clone(&blobs_repo),
-            app_doc_id.clone(),
-            ctx.local_actor_id.clone(),
-        )
-        .await
-        .wrap_err("error loading plugs repo")?;
-        _drawer.set_plugs_repo(Arc::clone(&plugs_repo));
-        let (_conf_repo, conf_stop) = ConfigRepo::load(
-            ctx.acx.clone(),
-            app_doc_id.clone(),
-            Arc::clone(&plugs_repo),
-            daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
-        )
-        .await?;
-        let (_tables_repo, tables_stop) = TablesRepo::load(
-            ctx.acx.clone(),
-            app_doc_id.clone(),
-            ctx.local_actor_id.clone(),
-        )
-        .await?;
-        let (_dispatc_repo, dispatc_stop) = DispatchRepo::load(
-            ctx.acx.clone(),
-            app_doc_id.clone(),
-            ctx.local_actor_id.clone(),
-        )
-        .await?;
-
-        plugs_repo.ensure_system_plugs().await?;
-
-        drawer_stop.stop().await?;
-        plugs_stop.stop().await?;
-        conf_stop.stop().await?;
-        tables_stop.stop().await?;
-        dispatc_stop.stop().await?;
-
+        let ctx = context::open_repo_ctx(&conf, true, None).await?;
         if let Some(stop) = ctx.acx_stop.lock().await.take() {
             stop.stop().await?;
         }
-        tokio::fs::File::create(conf.cli_config.repo_path.join("db.repo.txt")).await?;
         info!(
             path = ?conf.cli_config.repo_path,
             "repo initialization success"
@@ -165,8 +108,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     // we only create init the Ctx after checking if the
     // configured repo is Initialized since `init`
     // initializes the repo
-    let ctx = context::Ctx::init(Arc::clone(&conf)).await?;
-    let drawer_doc_id = ctx.doc_drawer().document_id().clone();
+    let ctx = context::open_repo_ctx(&conf, false, None).await?;
+    let drawer_doc_id = ctx.doc_drawer.document_id().clone();
     let (drawer, drawer_stop) = DrawerRepo::load(
         ctx.acx.clone(),
         drawer_doc_id,
@@ -441,12 +384,12 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         return Ok(code);
     }
 
-    let ctx = context::Ctx::init(Arc::clone(&conf)).await?;
-    let blobs_repo = BlobsRepo::new(conf._blobs_root.clone()).await?;
+    let ctx = context::open_repo_ctx(&conf, false, None).await?;
+    let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone()).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         ctx.acx.clone(),
         Arc::clone(&blobs_repo),
-        ctx.doc_app().document_id().clone(),
+        ctx.doc_app.document_id().clone(),
         ctx.local_actor_id.clone(),
     )
     .await?;
@@ -458,7 +401,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     ) = tokio::try_join!(
         DrawerRepo::load(
             ctx.acx.clone(),
-            ctx.doc_drawer().document_id().clone(),
+            ctx.doc_drawer.document_id().clone(),
             ctx.local_actor_id.clone(),
             Arc::new(std::sync::Mutex::new(
                 daybook_core::drawer::lru::KeyedLruPool::new(1000)
@@ -469,12 +412,12 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         ),
         DispatchRepo::load(
             ctx.acx.clone(),
-            ctx.doc_app().document_id().clone(),
+            ctx.doc_app.document_id().clone(),
             ctx.local_actor_id.clone()
         ),
         ConfigRepo::load(
             ctx.acx.clone(),
-            ctx.doc_app().document_id().clone(),
+            ctx.doc_app.document_id().clone(),
             Arc::clone(&plugs_repo),
             daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
         )
@@ -574,8 +517,8 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
                     daybook_core::rt::RtConfig {
                         device_id: "main_TODO_XXX".into(),
                     },
-                    ctx.doc_app().document_id().clone(),
-                    conf.sql.database_url.clone(),
+                    ctx.doc_app.document_id().clone(),
+                    format!("sqlite://{}", ctx.layout.sqlite_path.display()),
                     ctx.acx.clone(),
                     Arc::clone(&drawer),
                     Arc::clone(&plugs_repo),
@@ -872,7 +815,7 @@ mod lazy {
         match CONFIG
             .get_or_try_init(|| async {
                 let cli_config = cli_config().await?;
-                let conf = Config::new(cli_config)?;
+                let conf = Config::new(cli_config).await?;
                 eyre::Ok(Arc::new(conf))
             })
             .await

@@ -38,12 +38,13 @@ impl ConfigRepoFfi {
     #[tracing::instrument(err, skip(fcx, plug_repo))]
     async fn load(fcx: SharedFfiCtx, plug_repo: Arc<PlugsRepoFfi>) -> Result<Arc<Self>, FfiError> {
         let fcx = Arc::clone(&fcx);
+        let cx = Arc::clone(fcx.repo_ctx());
         let (repo, stop_token) = fcx
             .do_on_rt(ConfigRepo::load(
-                fcx.cx.acx.clone(),
-                fcx.cx.doc_app().document_id().clone(),
+                cx.acx().clone(),
+                cx.doc_app().document_id().clone(),
                 Arc::clone(&plug_repo.repo),
-                daybook_types::doc::UserPath::from(fcx.cx.local_user_path.clone()),
+                daybook_types::doc::UserPath::from(cx.local_user_path().to_string()),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;

@@ -70,7 +70,7 @@ There are zero features implemented.
 More details can be found in the [design docs](./docs/DEVDOC/design.md) but actively undecided questions include:
 
 - ~~Local~~ Privacy friendly machine learning use
-  - If I want to, I ought to be able to self-host for me for me and mine.
+  - If I want to, I ought to be able to self-host for for me and mine.
 - Mobile first design
   - I and many others just won't use it unless it's easily usable on the go.
 - Long term sustainablity
@@ -82,3 +82,7 @@ More details can be found in the [design docs](./docs/DEVDOC/design.md) but acti
   - A lot of solutions here rely on webtech to support maximum programmability.
     - How to adapt that while previous constraints hold?
   - One early intiution is that we shouldn't adapt a single document format like markdown as a default and allow generic documents.
+
+## Want to hack on this?
+
+Feel free to throw yourself or tokens at the code though I'd personally appreciate help the most in the design and research aspect.

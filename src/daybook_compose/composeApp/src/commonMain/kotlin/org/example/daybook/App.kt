@@ -13,23 +13,32 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -58,6 +67,8 @@ import daybook.composeapp.generated.resources.compose_multiplatform
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import io.github.vinceglb.filekit.dialogs.compose.rememberDirectoryPickerLauncher
+import io.github.vinceglb.filekit.path
 import org.example.daybook.capture.CameraCaptureContext
 import org.example.daybook.capture.ProvideCameraCaptureContext
 import org.example.daybook.capture.screens.CaptureScreen
@@ -72,6 +83,7 @@ import org.example.daybook.uniffi.CameraPreviewFfi
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiCtx
 import org.example.daybook.uniffi.FfiException
+import org.example.daybook.uniffi.KnownRepoEntryFfi
 import org.example.daybook.uniffi.TablesEventListener
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.ListenerRegistration
@@ -134,6 +146,10 @@ enum class AppScreens {
 
 private sealed interface AppInitState {
     data object Loading : AppInitState
+
+    data class Welcome(val repos: List<KnownRepoEntryFfi>) : AppInitState
+
+    data class OpeningRepo(val repoPath: String) : AppInitState
 
     data class Ready(val container: AppContainer) : AppInitState
 
@@ -414,43 +430,83 @@ fun App(
 ) {
     var initAttempt by remember { mutableStateOf(0) }
     var initState by remember { mutableStateOf<AppInitState>(AppInitState.Loading) }
+    var pendingOpenRepoPath by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(initAttempt) {
         initState = AppInitState.Loading
-        val fcx = FfiCtx.forFfi()
-        val drawerRepo = DrawerRepoFfi.load(fcx = fcx)
-        val tablesRepo = TablesRepoFfi.load(fcx = fcx)
-        val blobsRepo =
-            org.example.daybook.uniffi.BlobsRepoFfi
-                .load(fcx = fcx)
-        val plugsRepo =
-            org.example.daybook.uniffi.PlugsRepoFfi
-                .load(fcx = fcx, blobsRepo = blobsRepo)
-        val configRepo = ConfigRepoFfi.load(fcx = fcx, plugRepo = plugsRepo)
-        val cameraPreviewFfi = CameraPreviewFfi.load()
+        try {
+            val globalsCtx = FfiCtx.forGlobals()
+            val knownRepos = globalsCtx.listKnownRepos()
+            val lastUsedRepo = globalsCtx.getLastUsedRepo()
+            val shouldOpenLastUsedRepo =
+                lastUsedRepo != null && globalsCtx.isRepoUsable(lastUsedRepo.path)
+            globalsCtx.close()
+            if (shouldOpenLastUsedRepo) {
+                pendingOpenRepoPath = lastUsedRepo.path
+                initState = AppInitState.OpeningRepo(repoPath = lastUsedRepo.path)
+            } else {
+                initState = AppInitState.Welcome(repos = knownRepos)
+            }
+        } catch (throwable: Throwable) {
+            initState = AppInitState.Error(throwable)
+        }
+    }
 
-        // Initialize first-time data if needed
-        val tablesViewModel = TablesViewModel(tablesRepo)
-        tablesViewModel.initializeFirstTime()
+    LaunchedEffect(pendingOpenRepoPath) {
+        val repoPath = pendingOpenRepoPath ?: return@LaunchedEffect
+        try {
+            initState = AppInitState.OpeningRepo(repoPath = repoPath)
+            val fcx = FfiCtx.forRepoRoot(repoPath)
+            val tablesRepo = TablesRepoFfi.load(fcx = fcx)
+            val blobsRepo =
+                org.example.daybook.uniffi.BlobsRepoFfi
+                    .load(fcx = fcx)
+            val plugsRepo =
+                org.example.daybook.uniffi.PlugsRepoFfi
+                    .load(fcx = fcx, blobsRepo = blobsRepo)
+            val drawerRepo = DrawerRepoFfi.load(fcx = fcx, plugsRepo = plugsRepo)
+            val configRepo = ConfigRepoFfi.load(fcx = fcx, plugRepo = plugsRepo)
+            val cameraPreviewFfi = CameraPreviewFfi.load()
 
-        initState =
-            AppInitState.Ready(
-                AppContainer(
-                    ffiCtx = fcx,
-                    drawerRepo = drawerRepo,
-                    tablesRepo = tablesRepo,
-                    plugsRepo = plugsRepo,
-                    configRepo = configRepo,
-                    blobsRepo = blobsRepo,
-                    cameraPreviewFfi = cameraPreviewFfi
+            val tablesViewModel = TablesViewModel(tablesRepo)
+            tablesViewModel.initializeFirstTime()
+
+            initState =
+                AppInitState.Ready(
+                    AppContainer(
+                        ffiCtx = fcx,
+                        drawerRepo = drawerRepo,
+                        tablesRepo = tablesRepo,
+                        plugsRepo = plugsRepo,
+                        configRepo = configRepo,
+                        blobsRepo = blobsRepo,
+                        cameraPreviewFfi = cameraPreviewFfi
+                    )
                 )
-            )
+        } catch (throwable: Throwable) {
+            initState = AppInitState.Error(throwable)
+        } finally {
+            pendingOpenRepoPath = null
+        }
     }
 
     DaybookTheme(themeConfig = config.theme) {
         when (val state = initState) {
             is AppInitState.Loading -> {
                 LoadingScreen()
+            }
+
+            is AppInitState.Welcome -> {
+                WelcomeScreen(
+                    repos = state.repos,
+                    onOpenRepo = { selectedRepoPath ->
+                        pendingOpenRepoPath = selectedRepoPath
+                    }
+                )
+            }
+
+            is AppInitState.OpeningRepo -> {
+                LoadingScreen(message = "Opening repo: ${state.repoPath}")
             }
 
             is AppInitState.Error -> {
@@ -820,7 +876,7 @@ fun Routes(
 }
 
 @Composable
-private fun LoadingScreen() {
+private fun LoadingScreen(message: String = "Preparing Daybook…") {
     val infiniteTransition = rememberInfiniteTransition(label = "loading_transition")
     val scale by infiniteTransition.animateFloat(
         initialValue = 1f,
@@ -848,10 +904,88 @@ private fun LoadingScreen() {
             )
             Spacer(Modifier.height(24.dp))
             Text(
-                "Preparing Daybook…",
+                message,
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
             )
+        }
+    }
+}
+
+@Composable
+private fun WelcomeScreen(
+    repos: List<KnownRepoEntryFfi>,
+    onOpenRepo: (String) -> Unit
+) {
+    val openRepoLauncher = rememberDirectoryPickerLauncher { directory ->
+        val selectedPath = directory?.path ?: return@rememberDirectoryPickerLauncher
+        onOpenRepo(selectedPath)
+    }
+
+    val createRepoLauncher = rememberDirectoryPickerLauncher { directory ->
+        val selectedPath = directory?.path ?: return@rememberDirectoryPickerLauncher
+        onOpenRepo(selectedPath)
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Text(
+                text = "Welcome to Daybook",
+                style = MaterialTheme.typography.headlineMedium
+            )
+            Text(
+                text = "Select a repository to continue",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = { createRepoLauncher.launch() }) {
+                    Icon(Icons.Default.CreateNewFolder, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Create New Repo")
+                }
+                Button(onClick = { openRepoLauncher.launch() }) {
+                    Icon(Icons.Default.FolderOpen, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Open Directory")
+                }
+            }
+
+            HorizontalDivider()
+
+            if (repos.isEmpty()) {
+                Text(
+                    text = "No known repositories yet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(repos, key = { repo -> repo.id }) { repo ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().clickable { onOpenRepo(repo.path) },
+                            shape = MaterialTheme.shapes.medium,
+                            tonalElevation = 2.dp
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                                Text(text = repo.path, style = MaterialTheme.typography.bodyLarge)
+                                Text(
+                                    text = "Last opened: ${repo.lastOpenedAtUnixSecs}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -2,8 +2,6 @@
 
 - Avoid adding dependencies if possible
   - `wc -l Cargo.lock` is around 10k lines. Let's keep it that way.
-- Always audit LLM code in an editor with an IDE present.
-  - Assume you'll need to slightly improve every result.
 
 ## Repo guide
 
@@ -21,7 +19,7 @@
 
     - Confirmed to run on desktop and android.
 
-- `./src/daybook_ffi/`: [uniffi](https://mozilla.github.io/uniffi-rs/latest/) based bindigns for kotlin.
+- `./src/daybook_ffi/`: [uniffi](https://mozilla.github.io/uniffi-rs/latest/) based bindings for kotlin.
 
     - `./x/gen-ffi-dayb.ts` to re-generate the bindings and build the library.
 
@@ -41,16 +39,6 @@
 
 - `./src/macros/`: Proc-macro utilities.
 
-- `./src/infra/`: Terraform IaC for deployment.
-
-- `./src/xtask/`: General purpose scripts.
-
-  - Includes the `cargo x gen` command used to do codegen.
-
-    - Is source of truth for the interfaces for the WASI apis and handles all the boilerplate.
-
-- `./src/granary_web/`: Web app for granary (haitus).
-
 - `./src/wflow/`: the top level crate for wflow, a durable workflows impl.
 
   - `./src/wflow_core/`: the core types and logic.
@@ -65,15 +53,15 @@
 
   - `./src/test_wflows/`: wflows used for tests in `wflow`.
 
+- `./src/infra/`: Terraform IaC for deployment.
+
+- `./src/xtask/`: Scripts in rust.
+
 - `./x/`: contans a lot of necessary scripts.
 
   - The nix flake will put them in your PATH for ease of invoking.
 
 - `./flake.nix`: Nix flake with development environments.
-
-  - Provides four specialized dev shells for different use cases.
-  
-    - For CI workflows, use the specialized shells (`ci-rust`, `ci-android`, or `ci-desktop`) for faster builds.
 
 - `./tools/compose.yml`: docker compose file for supporting services.
 
@@ -87,9 +75,30 @@
   - The source files and `Cargo.toml` should reside in the same root.
   - Avoid deeply nested directory hierarchies.
 - Are you importing that type in too many files? Consider putting it in the `interlude` module of the crate.
-- Don't use single char variable names.
+- Don't use single char variable names, they make harder to use `sed` for replacement.
 - DHashMaps shouldn't not be used for sync across tasks/threads. 
   - They easily deadlock if modified across multiple tasks.
   - They're only a good fit for single modifier situation where a normal HashMap won't due to do async problems.
 - Do not use the cargo integration tests features.
   - I.e. avoid making tests in crate_root::tests.
+- Git submodules? I'm using `jj` :'/
+
+## Useful command snippets
+
+```bash
+# run a hot reload instance daybook desktop
+./x/dev-d-dayb.ts
+# run the daybook cli
+DAYB_REPO_PATH=/tmp/repo1 cargo r -p daybook_cli --help
+# run the xtask CLI
+cargo x --help
+
+# test rust code
+RUST_LOG_TEST=info cargo nextest run
+# lint rust code
+cargo clippy --all-targets --all-features
+# run pre commit hooks
+prek -a
+# type check kotlin app 
+./x/check-dayb.ts
+```

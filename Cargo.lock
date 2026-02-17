@@ -1938,6 +1938,7 @@ dependencies = [
  "daybook_types",
  "directories",
  "displaydoc",
+ "fs4",
  "futures",
  "garde",
  "insta",

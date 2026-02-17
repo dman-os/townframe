@@ -816,6 +816,14 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_camerapreviewframelistener_on_camera_preview_frame(
     ): Short
+    external fun uniffi_daybook_ffi_checksum_method_ffictx_get_last_used_repo(
+    ): Short
+    external fun uniffi_daybook_ffi_checksum_method_ffictx_is_repo_usable(
+    ): Short
+    external fun uniffi_daybook_ffi_checksum_method_ffictx_list_known_repos(
+    ): Short
+    external fun uniffi_daybook_ffi_checksum_method_ffictx_register_repo_path(
+    ): Short
     external fun uniffi_daybook_ffi_checksum_method_ffierror_message(
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_blobsrepoffi_get_path(
@@ -902,6 +910,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_daybook_ffi_checksum_constructor_ffictx_for_ffi(
     ): Short
+    external fun uniffi_daybook_ffi_checksum_constructor_ffictx_for_globals(
+    ): Short
+    external fun uniffi_daybook_ffi_checksum_constructor_ffictx_for_repo_root(
+    ): Short
     external fun uniffi_daybook_ffi_checksum_constructor_blobsrepoffi_load(
     ): Short
     external fun uniffi_daybook_ffi_checksum_constructor_configrepoffi_load(
@@ -967,6 +979,18 @@ external fun uniffi_daybook_ffi_fn_free_ffictx(`handle`: Long,uniffi_out_err: Un
 ): Unit
 external fun uniffi_daybook_ffi_fn_constructor_ffictx_for_ffi(
 ): Long
+external fun uniffi_daybook_ffi_fn_constructor_ffictx_for_globals(
+): Long
+external fun uniffi_daybook_ffi_fn_constructor_ffictx_for_repo_root(`repoRoot`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_ffictx_get_last_used_repo(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_ffictx_is_repo_usable(`ptr`: Long,`repoRoot`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_ffictx_list_known_repos(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_ffictx_register_repo_path(`ptr`: Long,`repoRoot`: RustBuffer.ByValue,
+): Long
 external fun uniffi_daybook_ffi_fn_clone_ffierror(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_daybook_ffi_fn_free_ffierror(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1019,7 +1043,7 @@ external fun uniffi_daybook_ffi_fn_clone_drawerrepoffi(`handle`: Long,uniffi_out
 ): Long
 external fun uniffi_daybook_ffi_fn_free_drawerrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_daybook_ffi_fn_constructor_drawerrepoffi_load(`fcx`: Long,
+external fun uniffi_daybook_ffi_fn_constructor_drawerrepoffi_load(`fcx`: Long,`plugsRepo`: Long,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_add(`ptr`: Long,`args`: RustBufferAddDocArgs.ByValue,
 ): Long
@@ -1244,6 +1268,18 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewframelistener_on_camera_preview_frame() != 54052.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_daybook_ffi_checksum_method_ffictx_get_last_used_repo() != 35423.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_ffictx_is_repo_usable() != 15091.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_ffictx_list_known_repos() != 60784.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_ffictx_register_repo_path() != 14592.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_daybook_ffi_checksum_method_ffierror_message() != 61441.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1373,13 +1409,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_constructor_ffictx_for_ffi() != 34021.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_daybook_ffi_checksum_constructor_ffictx_for_globals() != 37051.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_constructor_ffictx_for_repo_root() != 37091.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_daybook_ffi_checksum_constructor_blobsrepoffi_load() != 24145.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_constructor_configrepoffi_load() != 11344.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load() != 114.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load() != 49207.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_constructor_plugsrepoffi_load() != 22500.toShort()) {
@@ -4032,9 +4074,9 @@ open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
         
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-     suspend fun `load`(`fcx`: FfiCtx) : DrawerRepoFfi {
+     suspend fun `load`(`fcx`: FfiCtx, `plugsRepo`: PlugsRepoFfi) : DrawerRepoFfi {
         return uniffiRustCallAsync(
-        UniffiLib.uniffi_daybook_ffi_fn_constructor_drawerrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_drawerrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypePlugsRepoFfi.lower(`plugsRepo`),),
         { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
@@ -4172,6 +4214,14 @@ public object FfiConverterTypeDrawerRepoFfi: FfiConverter<DrawerRepoFfi, Long> {
 
 public interface FfiCtxInterface {
     
+    suspend fun `getLastUsedRepo`(): KnownRepoEntryFfi?
+    
+    suspend fun `isRepoUsable`(`repoRoot`: kotlin.String): kotlin.Boolean
+    
+    suspend fun `listKnownRepos`(): List<KnownRepoEntryFfi>
+    
+    suspend fun `registerRepoPath`(`repoRoot`: kotlin.String): KnownRepoEntryFfi
+    
     companion object
 }
 
@@ -4272,6 +4322,90 @@ open class FfiCtx: Disposable, AutoCloseable, FfiCtxInterface
     }
 
     
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getLastUsedRepo`() : KnownRepoEntryFfi? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_ffictx_get_last_used_repo(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeKnownRepoEntryFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `isRepoUsable`(`repoRoot`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_ffictx_is_repo_usable(
+                uniffiHandle,
+                FfiConverterString.lower(`repoRoot`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `listKnownRepos`() : List<KnownRepoEntryFfi> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_ffictx_list_known_repos(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeKnownRepoEntryFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `registerRepoPath`(`repoRoot`: kotlin.String) : KnownRepoEntryFfi {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_ffictx_register_repo_path(
+                uniffiHandle,
+                FfiConverterString.lower(`repoRoot`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeKnownRepoEntryFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
 
     
 
@@ -4284,6 +4418,38 @@ open class FfiCtx: Disposable, AutoCloseable, FfiCtxInterface
      suspend fun `forFfi`() : FfiCtx {
         return uniffiRustCallAsync(
         UniffiLib.uniffi_daybook_ffi_fn_constructor_ffictx_for_ffi(),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeFfiCtx.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `forGlobals`() : FfiCtx {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_ffictx_for_globals(),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeFfiCtx.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `forRepoRoot`(`repoRoot`: kotlin.String) : FfiCtx {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_ffictx_for_repo_root(FfiConverterString.lower(`repoRoot`),),
         { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
@@ -6283,6 +6449,54 @@ public object FfiConverterTypeFacetKeyDisplayHintEntry: FfiConverterRustBuffer<F
 
 
 
+data class KnownRepoEntryFfi (
+    var `id`: kotlin.String
+    , 
+    var `path`: kotlin.String
+    , 
+    var `createdAtUnixSecs`: kotlin.Long
+    , 
+    var `lastOpenedAtUnixSecs`: kotlin.Long
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeKnownRepoEntryFfi: FfiConverterRustBuffer<KnownRepoEntryFfi> {
+    override fun read(buf: ByteBuffer): KnownRepoEntryFfi {
+        return KnownRepoEntryFfi(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: KnownRepoEntryFfi) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`path`) +
+            FfiConverterLong.allocationSize(value.`createdAtUnixSecs`) +
+            FfiConverterLong.allocationSize(value.`lastOpenedAtUnixSecs`)
+    )
+
+    override fun write(value: KnownRepoEntryFfi, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`path`, buf)
+            FfiConverterLong.write(value.`createdAtUnixSecs`, buf)
+            FfiConverterLong.write(value.`lastOpenedAtUnixSecs`, buf)
+    }
+}
+
+
+
 
 enum class CameraPreviewFrameEncoding {
     
@@ -6503,6 +6717,38 @@ public object FfiConverterOptionalTypeCameraPreviewFrame: FfiConverterRustBuffer
         } else {
             buf.put(1)
             FfiConverterTypeCameraPreviewFrame.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeKnownRepoEntryFfi: FfiConverterRustBuffer<KnownRepoEntryFfi?> {
+    override fun read(buf: ByteBuffer): KnownRepoEntryFfi? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeKnownRepoEntryFfi.read(buf)
+    }
+
+    override fun allocationSize(value: KnownRepoEntryFfi?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeKnownRepoEntryFfi.allocationSize(value)
+        }
+    }
+
+    override fun write(value: KnownRepoEntryFfi?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeKnownRepoEntryFfi.write(value, buf)
         }
     }
 }
@@ -6801,6 +7047,34 @@ public object FfiConverterSequenceTypeCameraDeviceInfo: FfiConverterRustBuffer<L
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeKnownRepoEntryFfi: FfiConverterRustBuffer<List<KnownRepoEntryFfi>> {
+    override fun read(buf: ByteBuffer): List<KnownRepoEntryFfi> {
+        val len = buf.getInt()
+        return List<KnownRepoEntryFfi>(len) {
+            FfiConverterTypeKnownRepoEntryFfi.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<KnownRepoEntryFfi>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeKnownRepoEntryFfi.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<KnownRepoEntryFfi>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeKnownRepoEntryFfi.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterMapStringTypeFacetDisplayHint: FfiConverterRustBuffer<Map<kotlin.String, FacetDisplayHint>> {
     override fun read(buf: ByteBuffer): Map<kotlin.String, FacetDisplayHint> {
         val len = buf.getInt()
@@ -6957,3 +7231,44 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
