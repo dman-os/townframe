@@ -243,6 +243,7 @@ impl From<FacetTag> for FacetKey {
 }
 
 pub type FacetRaw = serde_json::Value;
+pub type ArcFacetRaw = Arc<serde_json::Value>;
 
 // #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 // #[serde(rename_all = "camelCase", untagged)]
@@ -788,7 +789,14 @@ mod ser_de {
     // }
     impl From<WellKnownFacet> for FacetRaw {
         fn from(value: WellKnownFacet) -> Self {
-            serde_json::to_value(value).expect(ERROR_JSON)
+            #[cfg(feature = "uniffi")]
+            {
+                serde_json::to_value(value).expect(ERROR_JSON)
+            }
+            #[cfg(not(feature = "uniffi"))]
+            {
+                Arc::new(serde_json::to_value(value).expect(ERROR_JSON))
+            }
         }
     }
 

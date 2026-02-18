@@ -1,4 +1,5 @@
 use crate::drawer::{DrawerEvent, DrawerRepo};
+use crate::index::BufferedRepoEvents;
 use crate::interlude::*;
 use crate::repos::Repo;
 use crate::stores::Store;
@@ -180,14 +181,15 @@ impl DocFacetSetIndexRepo {
     async fn handle_worker_item(&self, item: DocFacetSetIndexWorkItem) -> Res<()> {
         match item {
             DocFacetSetIndexWorkItem::Upsert { doc_id, heads } => {
-                let Some(doc) = self
+                let Some(facet_keys) = self
                     .drawer_repo
-                    .get_doc_with_facets_at_heads(&doc_id, &heads, None)
+                    .facet_keys_at_heads(&doc_id, &heads)
                     .await?
                 else {
                     return Ok(());
                 };
-                self.reindex_doc(&doc_id, &heads, &doc).await?;
+                self.reindex_doc_with_keys(&doc_id, &heads, &facet_keys)
+                    .await?;
                 self.registry
                     .notify([DocFacetSetIndexEvent::Updated { doc_id }]);
             }
@@ -214,18 +216,17 @@ impl DocFacetSetIndexRepo {
         Ok(tag_id)
     }
 
-    pub async fn reindex_doc(
+    pub async fn reindex_doc_with_keys(
         &self,
         doc_id: &DocId,
         heads: &ChangeHashSet,
-        doc: &daybook_types::doc::Doc,
+        facet_keys: &HashSet<daybook_types::doc::FacetKey>,
     ) -> Res<()> {
         let serialized_heads =
             serde_json::to_string(&utils_rs::am::serialize_commit_heads(&heads.0))
                 .expect(ERROR_JSON);
-        let mut desired_tags: HashSet<String> = doc
-            .facets
-            .keys()
+        let mut desired_tags: HashSet<String> = facet_keys
+            .iter()
             .map(|facet_key| facet_key.tag.to_string())
             .collect();
         desired_tags.remove(WellKnownFacetTag::Dmeta.as_str());
@@ -376,33 +377,24 @@ async fn spawn_doc_facet_set_index_worker(
 )> {
     let (work_tx, work_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<Arc<DrawerEvent>>();
+    let buffered_events = BufferedRepoEvents::new(event_tx.clone());
+    let current_drawer_heads = drawer_repo.get_drawer_heads();
 
-    let listener = drawer_repo.register_listener({
-        let event_tx = event_tx.clone();
-        move |event| {
-            let _ = event_tx.send(event);
-        }
-    });
+    let listener = drawer_repo.register_listener(buffered_events.listener_callback());
 
     let initial_drawer_heads = store.query_sync(|store| store.drawer_heads.clone()).await;
-    if let Some(known_heads) = initial_drawer_heads {
-        let events = drawer_repo.diff_events(known_heads, None).await?;
-        for event in events {
-            if event_tx.send(Arc::new(event)).is_err() {
-                break;
-            }
-        }
-    } else {
-        let events = drawer_repo
-            .diff_events(ChangeHashSet(Vec::new().into()), None)
-            .await?;
-        let mut current_heads: Option<ChangeHashSet> = None;
-        for event in &events {
-            if let DrawerEvent::ListChanged { drawer_heads } = event {
-                current_heads = Some(drawer_heads.clone());
-            }
-        }
-        let current_heads = current_heads.unwrap_or_else(|| ChangeHashSet(Vec::new().into()));
+    let events = drawer_repo
+        .diff_events(
+            initial_drawer_heads
+                .clone()
+                .unwrap_or_else(|| ChangeHashSet(Vec::new().into())),
+            Some(current_drawer_heads.clone()),
+        )
+        .await?;
+    let _ = buffered_events.push_diff_events(events);
+    let _ = buffered_events.finish_bootstrap();
+
+    if initial_drawer_heads.is_none() {
         for doc in drawer_repo.list().await? {
             for (branch_name, heads) in doc.branches {
                 let branch_path = BranchPath::from(branch_name.as_str());
@@ -410,7 +402,12 @@ async fn spawn_doc_facet_set_index_worker(
                     continue;
                 }
                 let Some(_facet_keys_set) = drawer_repo
-                    .get_facet_keys_if_latest(&doc.doc_id, &branch_path, &heads, &current_heads)
+                    .get_facet_keys_if_latest(
+                        &doc.doc_id,
+                        &branch_path,
+                        &heads,
+                        &current_drawer_heads,
+                    )
                     .await?
                 else {
                     continue;
@@ -429,7 +426,7 @@ async fn spawn_doc_facet_set_index_worker(
         }
         store
             .mutate_sync(|store| {
-                store.drawer_heads = Some(current_heads);
+                store.drawer_heads = Some(current_drawer_heads);
             })
             .await?;
     }

@@ -7,6 +7,7 @@ use hf_hub::{api::tokio::ApiBuilder, Cache};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use utils_rs::prelude::*;
 
 const OLLAMA_URL_DEFAULT: &str = "http://localhost:11434";
@@ -14,6 +15,8 @@ const OLLAMA_EMBED_MODEL_DEFAULT: &str = "embeddinggemma";
 const OLLAMA_LLM_MODEL_DEFAULT: &str = "gemma3";
 const NOMIC_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
 const OAR_RELEASE_BASE_URL: &str = "https://github.com/GreatV/oar-ocr/releases/download/v0.3.0";
+const DOWNLOAD_BODY_LIMIT_BYTES: u64 = 200 * 1024 * 1024;
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 struct DownloadLockGuard {
     file: std::fs::File,
@@ -51,11 +54,20 @@ async fn download_url_to_path(url: &str, output_path: &Path) -> Res<()> {
     let url = url.to_string();
     tokio::task::spawn_blocking(move || -> Res<()> {
         let response = ureq::get(&url)
+            .config()
+            .timeout_global(Some(DOWNLOAD_TIMEOUT))
+            .timeout_connect(Some(DOWNLOAD_TIMEOUT))
+            .timeout_send_request(Some(DOWNLOAD_TIMEOUT))
+            .timeout_recv_response(Some(DOWNLOAD_TIMEOUT))
+            .timeout_recv_body(Some(DOWNLOAD_TIMEOUT))
+            .build()
             .call()
             .map_err(|error| eyre::eyre!("error downloading {url}: {error}"))?;
 
         let mut response = response.into_body();
         let mut bytes = response
+            .with_config()
+            .limit(DOWNLOAD_BODY_LIMIT_BYTES)
             .read_to_vec()
             .map_err(|error| eyre::eyre!("error reading response body from {url}: {error}"))?;
 
@@ -187,8 +199,5 @@ pub fn test_cache_dir() -> PathBuf {
             return preferred_path;
         }
     }
-
-    let fallback_path = PathBuf::from("/tmp/daybook-tests/mltools/mobile_default");
-    std::fs::create_dir_all(&fallback_path).unwrap_or_log();
-    fallback_path
+    panic!("WTF")
 }

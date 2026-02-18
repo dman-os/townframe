@@ -23,6 +23,12 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             processors: default(),
             facets: vec![
                 FacetManifest {
+                    key_tag: WellKnownFacetTag::Dmeta.into(),
+                    value_schema: schemars::schema_for!(serde_json::Value),
+                    display_config: default(),
+                    references: default(),
+                },
+                FacetManifest {
                     key_tag: WellKnownFacetTag::RefGeneric.into(),
                     value_schema: schemars::schema_for!(String),
                     display_config: default(),
@@ -702,6 +708,11 @@ impl PlugsRepo {
             self.events_for_patch(&patch, &heads, &mut events).await?;
         }
         Ok(events)
+    }
+
+    pub fn get_plugs_heads(&self) -> ChangeHashSet {
+        self.app_am_handle
+            .with_document(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
     }
 
     async fn events_for_patch(

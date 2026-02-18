@@ -10,6 +10,7 @@ use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacetTag};
 use crate::plugs::manifest::{
     KeyGeneric, ProcessorDeets, ProcessorManifest, RoutineManifest, RoutineManifestDeets,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 pub use wflow::{PartitionLogIngress, WflowIngress};
 
 #[derive(Default, Debug, Reconcile, Hydrate, Serialize, Deserialize)]
@@ -77,32 +78,6 @@ pub async fn spawn_doc_triage_worker(
     let (dispatch_event_tx, mut dispatch_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<Arc<DispatchEvent>>();
 
-    let listener = rt.drawer.register_listener({
-        let event_tx = event_tx.clone();
-        move |event| event_tx.send(event).expect(ERROR_CHANNEL)
-    });
-
-    let plug_listener = rt.plugs_repo.register_listener({
-        let plug_event_tx = plug_event_tx.clone();
-        move |event| {
-            plug_event_tx.send(event).expect(ERROR_CHANNEL);
-        }
-    });
-
-    let config_listener = rt.config_repo.register_listener({
-        let config_event_tx = config_event_tx.clone();
-        move |event| {
-            config_event_tx.send(event).expect(ERROR_CHANNEL);
-        }
-    });
-
-    let dispatch_listener = rt.dispatch_repo.register_listener({
-        let dispatch_event_tx = dispatch_event_tx.clone();
-        move |event| {
-            dispatch_event_tx.send(event).expect(ERROR_CHANNEL);
-        }
-    });
-
     // Catch up on missed events
     let (initial_drawer_heads, initial_dispatch_heads, initial_plug_heads, initial_config_heads) =
         store
@@ -116,41 +91,134 @@ pub async fn spawn_doc_triage_worker(
             })
             .await;
 
-    // Use empty heads if None to catch up from beginning
     let empty_heads = ChangeHashSet(vec![].into());
+    let drawer_heads_now = rt.drawer.get_drawer_heads();
+    let dispatch_heads_now = rt.dispatch_repo.get_dispatch_heads();
+    let plug_heads_now = rt.plugs_repo.get_plugs_heads();
+    let config_heads_now = ChangeHashSet(rt.config_repo.get_config_heads().await?);
+
+    let drawer_bootstrap_done = Arc::new(AtomicBool::new(false));
+    let drawer_pending_events = Arc::new(std::sync::Mutex::new(Vec::<Arc<DrawerEvent>>::new()));
+    let listener = rt.drawer.register_listener({
+        let event_tx = event_tx.clone();
+        let drawer_bootstrap_done = Arc::clone(&drawer_bootstrap_done);
+        let drawer_pending_events = Arc::clone(&drawer_pending_events);
+        move |event| {
+            if drawer_bootstrap_done.load(Ordering::Acquire) {
+                event_tx.send(event).expect(ERROR_CHANNEL);
+            } else {
+                drawer_pending_events.lock().unwrap().push(event);
+            }
+        }
+    });
+
+    let plugs_bootstrap_done = Arc::new(AtomicBool::new(false));
+    let plugs_pending_events = Arc::new(std::sync::Mutex::new(Vec::<Arc<PlugsEvent>>::new()));
+    let plug_listener = rt.plugs_repo.register_listener({
+        let plug_event_tx = plug_event_tx.clone();
+        let plugs_bootstrap_done = Arc::clone(&plugs_bootstrap_done);
+        let plugs_pending_events = Arc::clone(&plugs_pending_events);
+        move |event| {
+            if plugs_bootstrap_done.load(Ordering::Acquire) {
+                plug_event_tx.send(event).expect(ERROR_CHANNEL);
+            } else {
+                plugs_pending_events.lock().unwrap().push(event);
+            }
+        }
+    });
+
+    let config_bootstrap_done = Arc::new(AtomicBool::new(false));
+    let config_pending_events = Arc::new(std::sync::Mutex::new(Vec::<
+        Arc<crate::config::ConfigEvent>,
+    >::new()));
+    let config_listener = rt.config_repo.register_listener({
+        let config_event_tx = config_event_tx.clone();
+        let config_bootstrap_done = Arc::clone(&config_bootstrap_done);
+        let config_pending_events = Arc::clone(&config_pending_events);
+        move |event| {
+            if config_bootstrap_done.load(Ordering::Acquire) {
+                config_event_tx.send(event).expect(ERROR_CHANNEL);
+            } else {
+                config_pending_events.lock().unwrap().push(event);
+            }
+        }
+    });
+
+    let dispatch_bootstrap_done = Arc::new(AtomicBool::new(false));
+    let dispatch_pending_events = Arc::new(std::sync::Mutex::new(Vec::<Arc<DispatchEvent>>::new()));
+    let dispatch_listener = rt.dispatch_repo.register_listener({
+        let dispatch_event_tx = dispatch_event_tx.clone();
+        let dispatch_bootstrap_done = Arc::clone(&dispatch_bootstrap_done);
+        let dispatch_pending_events = Arc::clone(&dispatch_pending_events);
+        move |event| {
+            if dispatch_bootstrap_done.load(Ordering::Acquire) {
+                dispatch_event_tx.send(event).expect(ERROR_CHANNEL);
+            } else {
+                dispatch_pending_events.lock().unwrap().push(event);
+            }
+        }
+    });
 
     let events = rt
         .drawer
-        .diff_events(initial_drawer_heads.unwrap_or(empty_heads.clone()), None)
+        .diff_events(
+            initial_drawer_heads.unwrap_or_else(|| empty_heads.clone()),
+            Some(drawer_heads_now),
+        )
         .await?;
     for event in events {
         event_tx.send(Arc::new(event)).expect(ERROR_CHANNEL);
     }
+    drawer_bootstrap_done.store(true, Ordering::Release);
+    for event in drawer_pending_events.lock().unwrap().drain(..) {
+        event_tx.send(event).expect(ERROR_CHANNEL);
+    }
 
     let events = rt
         .dispatch_repo
-        .diff_events(initial_dispatch_heads.unwrap_or(empty_heads.clone()), None)
+        .diff_events(
+            initial_dispatch_heads.unwrap_or_else(|| empty_heads.clone()),
+            Some(dispatch_heads_now),
+        )
         .await?;
     for event in events {
         dispatch_event_tx
             .send(Arc::new(event))
             .expect(ERROR_CHANNEL);
     }
+    dispatch_bootstrap_done.store(true, Ordering::Release);
+    for event in dispatch_pending_events.lock().unwrap().drain(..) {
+        dispatch_event_tx.send(event).expect(ERROR_CHANNEL);
+    }
 
     let events = rt
         .plugs_repo
-        .diff_events(initial_plug_heads.unwrap_or(empty_heads.clone()), None)
+        .diff_events(
+            initial_plug_heads.unwrap_or_else(|| empty_heads.clone()),
+            Some(plug_heads_now),
+        )
         .await?;
     for event in events {
         plug_event_tx.send(Arc::new(event)).expect(ERROR_CHANNEL);
     }
+    plugs_bootstrap_done.store(true, Ordering::Release);
+    for event in plugs_pending_events.lock().unwrap().drain(..) {
+        plug_event_tx.send(event).expect(ERROR_CHANNEL);
+    }
 
     let events = rt
         .config_repo
-        .diff_events(initial_config_heads.unwrap_or(empty_heads), None)
+        .diff_events(
+            initial_config_heads.unwrap_or(empty_heads),
+            Some(config_heads_now),
+        )
         .await?;
     for event in events {
         config_event_tx.send(Arc::new(event)).expect(ERROR_CHANNEL);
+    }
+    config_bootstrap_done.store(true, Ordering::Release);
+    for event in config_pending_events.lock().unwrap().drain(..) {
+        config_event_tx.send(event).expect(ERROR_CHANNEL);
     }
 
     let cancel_token = tokio_util::sync::CancellationToken::new();

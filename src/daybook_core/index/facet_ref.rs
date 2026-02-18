@@ -1,4 +1,5 @@
 use crate::drawer::{DrawerEvent, DrawerRepo};
+use crate::index::BufferedRepoEvents;
 use crate::interlude::*;
 use crate::plugs::manifest::{FacetReferenceKind, FacetReferenceManifest};
 use crate::plugs::reference::select_json_path_values;
@@ -186,14 +187,7 @@ impl DocFacetRefIndexRepo {
     async fn handle_worker_item(&self, item: DocFacetRefIndexWorkItem) -> Res<()> {
         match item {
             DocFacetRefIndexWorkItem::Upsert { doc_id, heads } => {
-                let Some(doc) = self
-                    .drawer_repo
-                    .get_doc_with_facets_at_heads(&doc_id, &heads, None)
-                    .await?
-                else {
-                    return Ok(());
-                };
-                self.reindex_doc(&doc_id, &heads, &doc).await?;
+                self.reindex_doc(&doc_id, &heads).await?;
                 self.registry
                     .notify([DocFacetRefIndexEvent::Updated { doc_id }]);
             }
@@ -236,6 +230,13 @@ impl DocFacetRefIndexRepo {
             .execute(&self.db_pool)
             .await?;
 
+        let specs = self.reference_specs.read().await.clone();
+        let reference_tags: HashSet<String> = specs.keys().cloned().collect();
+        drop(specs);
+        if reference_tags.is_empty() {
+            return Ok(());
+        }
+
         let docs = self.drawer_repo.list().await?;
         for doc in docs {
             let mut selected_branch: Option<BranchPath> = doc.main_branch_path();
@@ -253,24 +254,70 @@ impl DocFacetRefIndexRepo {
                 continue;
             }
 
-            let Some((doc_value, heads)) = self
+            let Some(heads) = doc
+                .branches
+                .get(&branch_path.to_string_lossy().to_string())
+                .cloned()
+            else {
+                continue;
+            };
+            let Some(facet_keys) = self
                 .drawer_repo
-                .get_with_heads(&doc.doc_id, &branch_path, None)
+                .facet_keys_at_heads(&doc.doc_id, &heads)
                 .await?
             else {
                 continue;
             };
-            self.reindex_doc(&doc.doc_id, &heads, &doc_value).await?;
+            let selected_keys: Vec<FacetKey> = facet_keys
+                .into_iter()
+                .filter(|facet_key| reference_tags.contains(&facet_key.tag.to_string()))
+                .collect();
+            let facets = self
+                .drawer_repo
+                .get_at_heads_with_facets_arc(&doc.doc_id, &heads, Some(selected_keys))
+                .await?
+                .unwrap_or_default();
+            self.reindex_doc_from_facets(&doc.doc_id, &heads, &facets)
+                .await?;
         }
 
         Ok(())
     }
 
-    pub async fn reindex_doc(
+    pub async fn reindex_doc(&self, doc_id: &DocId, heads: &ChangeHashSet) -> Res<()> {
+        let specs = self.reference_specs.read().await.clone();
+        let reference_tags: HashSet<String> = specs.keys().cloned().collect();
+        drop(specs);
+        if reference_tags.is_empty() {
+            self.delete_doc(doc_id).await?;
+            return Ok(());
+        }
+
+        let Some(facet_keys) = self.drawer_repo.facet_keys_at_heads(doc_id, heads).await? else {
+            self.delete_doc(doc_id).await?;
+            return Ok(());
+        };
+        let selected_keys: Vec<FacetKey> = facet_keys
+            .into_iter()
+            .filter(|facet_key| reference_tags.contains(&facet_key.tag.to_string()))
+            .collect();
+        if selected_keys.is_empty() {
+            self.delete_doc(doc_id).await?;
+            return Ok(());
+        }
+        let facets = self
+            .drawer_repo
+            .get_at_heads_with_facets_arc(doc_id, heads, Some(selected_keys))
+            .await?
+            .unwrap_or_default();
+        self.reindex_doc_from_facets(doc_id, heads, &facets).await
+    }
+
+    async fn reindex_doc_from_facets(
         &self,
         doc_id: &DocId,
         heads: &ChangeHashSet,
-        doc: &daybook_types::doc::Doc,
+        facets: &HashMap<FacetKey, daybook_types::doc::ArcFacetRaw>,
     ) -> Res<()> {
         let serialized_heads =
             serde_json::to_string(&utils_rs::am::serialize_commit_heads(&heads.0))
@@ -282,14 +329,14 @@ impl DocFacetRefIndexRepo {
             .await?;
 
         let specs = self.reference_specs.read().await.clone();
-        for (facet_key, facet_value) in &doc.facets {
+        for (facet_key, facet_value) in facets {
             let facet_tag = facet_key.tag.to_string();
             let Some(tag_specs) = specs.get(&facet_tag) else {
                 continue;
             };
 
             for spec in tag_specs {
-                let references = extract_references(spec, facet_value, doc_id, facet_key)?;
+                let references = extract_references(spec, facet_value.as_ref(), doc_id, facet_key)?;
                 for reference in references {
                     sqlx::query(
                         r#"
@@ -548,46 +595,35 @@ async fn spawn_doc_facet_ref_index_worker(
         tokio::sync::mpsc::unbounded_channel::<Arc<DrawerEvent>>();
     let (plugs_event_tx, mut plugs_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<Arc<PlugsEvent>>();
+    let drawer_buffered_events = BufferedRepoEvents::new(drawer_event_tx.clone());
+    let plugs_buffered_events = BufferedRepoEvents::new(plugs_event_tx.clone());
+    let drawer_heads_now = drawer_repo.get_drawer_heads();
+    let plugs_heads_now = plugs_repo.get_plugs_heads();
 
-    let drawer_listener = drawer_repo.register_listener({
-        let drawer_event_tx = drawer_event_tx.clone();
-        move |event| {
-            let _ = drawer_event_tx.send(event);
-        }
-    });
-    let plugs_listener = plugs_repo.register_listener({
-        let plugs_event_tx = plugs_event_tx.clone();
-        move |event| {
-            let _ = plugs_event_tx.send(event);
-        }
-    });
+    let drawer_listener = drawer_repo.register_listener(drawer_buffered_events.listener_callback());
+    let plugs_listener = plugs_repo.register_listener(plugs_buffered_events.listener_callback());
 
     let (initial_drawer_heads, initial_plugs_heads) = store
         .query_sync(|state| (state.drawer_heads.clone(), state.plugs_heads.clone()))
         .await;
 
-    let empty_heads = ChangeHashSet(Vec::new().into());
-
     let drawer_events = drawer_repo
         .diff_events(
-            initial_drawer_heads.unwrap_or_else(|| empty_heads.clone()),
-            None,
+            initial_drawer_heads.unwrap_or_else(|| ChangeHashSet(Vec::new().into())),
+            Some(drawer_heads_now),
         )
         .await?;
-    for event in drawer_events {
-        if drawer_event_tx.send(Arc::new(event)).is_err() {
-            break;
-        }
-    }
+    let _ = drawer_buffered_events.push_diff_events(drawer_events);
+    let _ = drawer_buffered_events.finish_bootstrap();
 
     let plugs_events = plugs_repo
-        .diff_events(initial_plugs_heads.unwrap_or(empty_heads), None)
+        .diff_events(
+            initial_plugs_heads.unwrap_or_else(|| ChangeHashSet(Vec::new().into())),
+            Some(plugs_heads_now),
+        )
         .await?;
-    for event in plugs_events {
-        if plugs_event_tx.send(Arc::new(event)).is_err() {
-            break;
-        }
-    }
+    let _ = plugs_buffered_events.push_diff_events(plugs_events);
+    let _ = plugs_buffered_events.finish_bootstrap();
 
     let cancel_token = CancellationToken::new();
     let fut = {

@@ -338,6 +338,11 @@ impl DispatchRepo {
         Ok(events)
     }
 
+    pub fn get_dispatch_heads(&self) -> ChangeHashSet {
+        self.dispatch_am_handle
+            .with_document(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
+    }
+
     pub async fn get(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
         self.store
             .query_sync(|store| {
