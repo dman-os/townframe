@@ -107,20 +107,4 @@ enum Commands {
     // SeedKanidm {},
     Play {},
     Gen {},
-    OcrDemo {
-        #[clap(long)]
-        image: PathBuf,
-        #[clap(long, default_value = "target/models/detection/v5/det.onnx")]
-        det_model: PathBuf,
-        #[clap(long, default_value = "target/models/languages/latin/rec.onnx")]
-        rec_model: PathBuf,
-        #[clap(long, default_value = "target/models/languages/latin/dict.txt")]
-        dict_path: PathBuf,
-    },
-    EmbedDemo {
-        #[clap(long = "text")]
-        text: Vec<String>,
-        #[clap(long)]
-        batch_size: Option<usize>,
-    },
 }

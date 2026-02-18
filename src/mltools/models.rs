@@ -193,11 +193,36 @@ pub async fn mobile_default(download_dir: impl AsRef<Path>) -> Res<Config> {
 
 #[cfg(any(test, feature = "tests"))]
 pub fn test_cache_dir() -> PathBuf {
+    fn is_writable_dir(path: &Path) -> bool {
+        if std::fs::create_dir_all(path).is_err() {
+            return false;
+        }
+        let probe_path = path.join(".write_probe");
+        let create_res = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&probe_path);
+        match create_res {
+            Ok(_) => {
+                let _ = std::fs::remove_file(probe_path);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     if let Some(home_dir) = dirs::home_dir() {
         let preferred_path = home_dir.join(".cache/daybook-tests/mltools/mobile_default");
-        if std::fs::create_dir_all(&preferred_path).is_ok() {
+        if is_writable_dir(&preferred_path) {
             return preferred_path;
         }
     }
-    panic!("WTF")
+    let fallback_path = std::env::temp_dir().join("daybook-tests/mltools/mobile_default");
+    assert!(
+        is_writable_dir(&fallback_path),
+        "failed to create writable fallback mltools test cache at {}",
+        fallback_path.display()
+    );
+    fallback_path
 }

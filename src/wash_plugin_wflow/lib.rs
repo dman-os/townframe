@@ -423,11 +423,30 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
         let instance_pre = binds_service::ServicePre::new(instance_pre)
             .context("error pre instantiating service component")?;
 
+        // Handle workload restarts/re-resolves deterministically by clearing any
+        // prior registration for this workload ID before inserting fresh keys.
+        if let Some(previous_workload) = self
+            .active_workloads
+            .write()
+            .expect(ERROR_MUTEX)
+            .remove(&workload_id)
+        {
+            for key in &previous_workload.wflow_keys {
+                self.active_keys.remove(key);
+            }
+        }
+
         for key in &wflow_keys {
             let old = self
                 .active_keys
                 .insert(Arc::clone(key), Arc::clone(&workload_id));
-            assert!(old.is_none(), "fishy");
+            if let Some(old_workload_id) = old {
+                if old_workload_id != workload_id {
+                    anyhow::bail!(
+                        "wflow key '{key}' already mapped to workload '{old_workload_id}', cannot remap to '{workload_id}'"
+                    );
+                }
+            }
         }
         let wflow = WflowWorkload {
             wflow_keys,

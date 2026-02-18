@@ -9,6 +9,7 @@ use crate::plugs::manifest;
 use crate::plugs::PlugsRepo;
 
 use daybook_types::doc::{FacetKey, FacetTag};
+use std::collections::BTreeMap;
 use wash_runtime::{
     host::{Host as WashHost, HostApi},
     types::Component,
@@ -26,6 +27,7 @@ use wflow::{
 };
 
 pub mod dispatch;
+pub mod switch;
 pub mod triage;
 pub mod wash_plugin;
 
@@ -65,7 +67,7 @@ pub struct RtStopToken {
     wflow_part_handle: Option<TokioPartitionWorkerHandle>,
     rt: Arc<Rt>,
     partition_watcher: Option<tokio::task::JoinHandle<()>>,
-    doc_changes_worker: Option<triage::DocTriageWorkerHandle>,
+    switch_worker: Option<switch::SwitchWorkerHandle>,
     doc_facet_set_index_stop: Option<crate::index::DocFacetSetIndexStopToken>,
     doc_facet_ref_index_stop: Option<crate::index::DocFacetRefIndexStopToken>,
     sqlite_local_state_stop: Option<crate::repos::RepoStopToken>,
@@ -76,7 +78,7 @@ impl RtStopToken {
         self.rt.cancel_token.cancel();
 
         // Stop triage worker first to prevent new dispatches from being created
-        if let Some(worker) = self.doc_changes_worker.take() {
+        if let Some(worker) = self.switch_worker.take() {
             if let Err(err) = worker.stop().await {
                 warn!(
                     ?err,
@@ -199,21 +201,15 @@ impl Rt {
 
         let (doc_facet_set_index_repo, doc_facet_set_index_stop) =
             crate::index::DocFacetSetIndexRepo::boot(
-                acx.clone(),
-                app_doc_id.clone(),
                 Arc::clone(&drawer),
                 Arc::clone(&sqlite_local_state_repo),
-                local_actor_id.clone(),
             )
             .await?;
         let (doc_facet_ref_index_repo, doc_facet_ref_index_stop) =
             crate::index::DocFacetRefIndexRepo::boot(
-                acx.clone(),
-                app_doc_id.clone(),
                 Arc::clone(&drawer),
                 Arc::clone(&plugs_repo),
                 Arc::clone(&sqlite_local_state_repo),
-                local_actor_id.clone(),
             )
             .await?;
 
@@ -313,8 +309,8 @@ impl Rt {
             utils_plugin,
             mltools_plugin,
             blobs_repo,
-            doc_facet_set_index_repo,
-            doc_facet_ref_index_repo,
+            doc_facet_set_index_repo: Arc::clone(&doc_facet_set_index_repo),
+            doc_facet_ref_index_repo: Arc::clone(&doc_facet_ref_index_repo),
             sqlite_local_state_repo,
             config_repo,
             wflow_part_state,
@@ -322,8 +318,27 @@ impl Rt {
         });
 
         // Start the DocTriageWorker to automatically queue jobs when docs are added
-        let doc_changes_worker =
-            crate::rt::triage::spawn_doc_triage_worker(Arc::clone(&rt), app_doc_id).await?;
+        let triage_listeners: BTreeMap<
+            String,
+            Box<dyn crate::rt::switch::SwitchSink + Send + Sync>,
+        > = [
+            (
+                "doc_processor".to_string(),
+                crate::rt::triage::doc_processor_triage_listener(),
+            ),
+            (
+                "facet_set".to_string(),
+                doc_facet_set_index_repo.triage_listener(),
+            ),
+            (
+                "facet_ref".to_string(),
+                doc_facet_ref_index_repo.triage_listener(),
+            ),
+        ]
+        .into();
+        let switch_worker =
+            crate::rt::switch::spawn_switch_worker(Arc::clone(&rt), app_doc_id, triage_listeners)
+                .await?;
 
         let partition_watcher = tokio::spawn({
             let repo = Arc::clone(&rt);
@@ -335,7 +350,7 @@ impl Rt {
             RtStopToken {
                 rt,
                 partition_watcher: Some(partition_watcher),
-                doc_changes_worker: Some(doc_changes_worker),
+                switch_worker: Some(switch_worker),
                 doc_facet_set_index_stop: Some(doc_facet_set_index_stop),
                 doc_facet_ref_index_stop: Some(doc_facet_ref_index_stop),
                 sqlite_local_state_stop: Some(sqlite_local_state_stop),

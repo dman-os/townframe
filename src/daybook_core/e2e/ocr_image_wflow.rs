@@ -4,7 +4,13 @@ use daybook_types::doc::{AddDocArgs, Blob, FacetKey, WellKnownFacet, WellKnownFa
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_ocr_image_workflow() -> Res<()> {
-    let test_cx = crate::e2e::test_cx(utils_rs::function_full!()).await?;
+    let test_cx = crate::e2e::test_cx_with_options(
+        utils_rs::function_full!(),
+        crate::e2e::DaybookTestCxOptions {
+            provision_mltools_models: true,
+        },
+    )
+    .await?;
 
     let image_bytes = tokio::fs::read("/tmp/sample.jpg").await?;
     let blob_hash = test_cx.rt.blobs_repo.put(&image_bytes).await?;

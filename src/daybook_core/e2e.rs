@@ -26,6 +26,11 @@ pub struct DaybookTestContext {
     pub _temp_dir: tempfile::TempDir,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DaybookTestCxOptions {
+    pub provision_mltools_models: bool,
+}
+
 impl DaybookTestContext {
     /// Wait until there are no active jobs, with a timeout
     pub async fn _wait_until_no_active_jobs(&self, timeout_secs: u64) -> Res<()> {
@@ -114,7 +119,14 @@ impl DaybookTestContext {
     }
 }
 
-pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
+pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
+    test_cx_with_options(test_name, DaybookTestCxOptions::default()).await
+}
+
+pub async fn test_cx_with_options(
+    _test_name: &'static str,
+    options: DaybookTestCxOptions,
+) -> Res<DaybookTestContext> {
     tokio::task::block_in_place(|| {
         utils_rs::testing::load_envs_once();
         utils_rs::testing::setup_tracing_once();
@@ -194,13 +206,15 @@ pub async fn test_cx(_test_name: &'static str) -> Res<DaybookTestContext> {
 
     plug_repo.ensure_system_plugs().await?;
 
-    let mltools_config = mltools::models::mobile_default(mltools::models::test_cache_dir())
-        .await
-        .wrap_err("error provisioning default mltools models for e2e")?;
-    config_repo
-        .set_mltools_config(mltools_config)
-        .await
-        .wrap_err("error storing e2e mltools config")?;
+    if options.provision_mltools_models {
+        let mltools_config = mltools::models::mobile_default(mltools::models::test_cache_dir())
+            .await
+            .wrap_err("error provisioning default mltools models for e2e")?;
+        config_repo
+            .set_mltools_config(mltools_config)
+            .await
+            .wrap_err("error storing e2e mltools config")?;
+    }
 
     let db_path = temp_dir.path().join("wflow.db");
     let wflow_db_url = format!("sqlite:{}?mode=rwc", db_path.display());

@@ -4,7 +4,13 @@ use daybook_types::doc::{AddDocArgs, FacetKey, WellKnownFacet, WellKnownFacetTag
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_embed_text_workflow() -> Res<()> {
-    let test_cx = crate::e2e::test_cx(utils_rs::function_full!()).await?;
+    let test_cx = crate::e2e::test_cx_with_options(
+        utils_rs::function_full!(),
+        crate::e2e::DaybookTestCxOptions {
+            provision_mltools_models: true,
+        },
+    )
+    .await?;
 
     let new_doc = AddDocArgs {
         branch_path: daybook_types::doc::BranchPath::from("main"),
@@ -21,6 +27,10 @@ async fn test_embed_text_workflow() -> Res<()> {
     };
 
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;
+    // Auto-triage also dispatches doc processors for Note changes.
+    // Drain those jobs so this test's explicit embed-text dispatch is deterministic.
+    test_cx._wait_until_no_active_jobs(120).await?;
+
     let (_doc, heads) = test_cx
         .drawer_repo
         .get_with_heads(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)

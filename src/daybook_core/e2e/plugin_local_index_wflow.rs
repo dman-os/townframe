@@ -53,6 +53,9 @@ async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Re
         .await?
         .ok_or_eyre("doc not found after add")?;
 
+    // Let any automatically triaged dispatches settle before this test's explicit dispatch.
+    test_context._wait_until_no_active_jobs(90).await?;
+
     let index_dispatch_id = test_context
         .rt
         .dispatch(

@@ -489,7 +489,7 @@ pub mod version_updates {
     use crate::config::ConfigStore;
     use crate::plugs::PlugsStore;
     use crate::rt::dispatch::DispatchStore;
-    use crate::rt::triage::DocTriageWorkerStateStore;
+    use crate::rt::switch::SwitchStateStore;
     use crate::tables::TablesStore;
 
     pub fn version_latest() -> Res<Vec<u8>> {
@@ -525,8 +525,8 @@ pub mod version_updates {
         reconcile_prop(
             &mut doc,
             ROOT,
-            DocTriageWorkerStateStore::prop().as_ref(),
-            DocTriageWorkerStateStore::default(),
+            SwitchStateStore::prop().as_ref(),
+            SwitchStateStore::default(),
         )?;
         Ok(doc.save_nocompress())
     }
