@@ -77,21 +77,6 @@ jobs:
   appimage:
     runs-on: ubuntu-latest
     steps:
-      - name: remove unused files
-        # based on https://dev.to/mathio/squeezing-disk-space-from-github-actions-runners-an-engineers-guide-3pjg
-        run: |
-          sudo rm -rf /usr/lib/jvm
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/julia*
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /opt/microsoft /opt/google
-          sudo rm -rf /opt/az
-          sudo rm -rf /usr/local/share/powershell
-          # sudo rm -rf /opt/hostedtoolcache
-
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -108,25 +93,109 @@ jobs:
           toolchain: nightly-2026-01-01
           target: wasm32-wasip2,wasm32-unknown-unknown,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
 
-      - name: Set up Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build AppImage + tarball
+      - name: Build release AppImage
         run: |
-          ./x/build-appimage-dayb.ts
+          export PROTOC="$(command -v protoc)"
+          cargo build -p daybook_ffi --release --features nokhwa
+          cd src/daybook_compose
+          ./gradlew :composeApp:packageReleaseAppImage --no-daemon
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
         with:
           name: daybook-appimage
-          path: target/appimage/daybook-linuxdeploy-x64.AppImage
+          path: src/daybook_compose/composeApp/build/compose/binaries/main-release/**/*.AppImage
 
-      - name: Upload App Tarball
+  android-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Android debug APK
+        run: |
+          nix develop .#ci-android --command bash -lc 'cd src/daybook_compose && ./gradlew :composeApp:assembleDebug --no-daemon'
+
+      - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: daybook-app-tar
-          path: target/appimage/daybook-linuxdeploy-x64.tar.xz
+          name: daybook-android-debug
+          path: src/daybook_compose/composeApp/build/outputs/apk/debug/*.apk
+
+  desktop-windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-01-01
+          target: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release MSI (Windows)
+        shell: pwsh
+        run: |
+          cargo build -p daybook_ffi --release --features nokhwa
+          .\gradlew.bat :composeApp:packageReleaseMsi --no-daemon
+        working-directory: src/daybook_compose
+
+      - name: Upload Windows desktop installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: daybook-windows-installer
+          path: |
+            src/daybook_compose/composeApp/build/compose/binaries/main-release/**/*.msi
+            src/daybook_compose/composeApp/build/compose/binaries/main-release/**/*.exe
+
+  desktop-macos-build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release DMG (macOS)
+        run: |
+          nix develop .#ci-compose --command bash -lc '
+            set -euo pipefail
+            cargo build -p daybook_ffi --release --features nokhwa
+            cd src/daybook_compose
+            ./gradlew :composeApp:packageReleaseDmg --no-daemon
+          '
+
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: daybook-macos-dmg
+          path: src/daybook_compose/composeApp/build/compose/binaries/main-release/**/*.dmg

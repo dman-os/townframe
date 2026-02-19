@@ -317,6 +317,13 @@ fun ndkLibCppSharedForAbi(targetAbi: String, androidNdkRoot: String): File? {
     return File("$ndkSysrootLibDir/$ndkAbiTriple/libc++_shared.so")
 }
 
+fun rustDesktopLibraryNameForHost(hostOs: org.gradle.internal.os.OperatingSystem): String =
+    when {
+        hostOs.isWindows -> "daybook_ffi.dll"
+        hostOs.isMacOsX -> "libdaybook_ffi.dylib"
+        else -> "libdaybook_ffi.so"
+    }
+
 // Debug variant: build Rust in debug mode
 tasks.register<Exec>("buildRustAndroidDebug") {
     group = "build"
@@ -481,7 +488,10 @@ tasks.matching {
 }.configureEach {
     doFirst {
         val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
-        val rustDesktopReleaseLib = File(repoRoot, "target/release/libdaybook_ffi.so")
+        val rustDesktopReleaseLib = File(
+            repoRoot,
+            "target/release/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}"
+        )
         if (!rustDesktopReleaseLib.exists()) {
             throw GradleException(
                 "Missing Rust desktop library: ${rustDesktopReleaseLib.absolutePath}. " +

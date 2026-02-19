@@ -291,6 +291,11 @@
             buildInputs = baseBuildInputs ++ dioxusBuildInputs ++ desktopBuildInputs ++ [ rustRust ];
           } // ghjkMainEnv);
 
+          ciComposeShell = pkgs.mkShell ({
+            name = "ci-compose";
+            buildInputs = baseBuildInputs ++ [ pkgs.openjdk21 rustRust ];
+          } // ghjkMainEnv);
+
           devShell =
             pkgs.mkShell ({
               name = "dev";
@@ -340,6 +345,7 @@
             ci-rust = ciRustShell;
             ci-android = ciAndroidShell;
             ci-desktop = ciDesktopShell;
+            ci-compose = ciComposeShell;
           };
         };
     };
