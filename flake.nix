@@ -259,7 +259,24 @@
 
           ciRustShell = pkgs.mkShell ({
             name = "ci-rust";
-            buildInputs = baseBuildInputs ++ rustLintInputs ++ [ rustRust ];
+            buildInputs =
+              baseBuildInputs
+              ++ rustLintInputs
+              ++ [
+                rustRust
+                pkgs.llvmPackages.clang
+                pkgs.llvmPackages.libclang
+                pkgs.stdenv.cc.cc.lib
+              ];
+            shellHook = ''
+              export LIBCLANG_PATH="${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib"
+              export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${
+                pkgs.lib.makeLibraryPath [
+                  (pkgs.lib.getLib pkgs.llvmPackages.libclang)
+                  pkgs.stdenv.cc.cc.lib
+                ]
+              }"
+            '';
           } // ghjkMainEnv);
 
           ciAndroidShell =

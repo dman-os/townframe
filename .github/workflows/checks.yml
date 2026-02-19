@@ -108,29 +108,25 @@ jobs:
           toolchain: nightly-2026-01-01
           target: wasm32-wasip2,wasm32-unknown-unknown,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
 
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install packaging dependencies
+      - name: Build AppImage + tarball
         run: |
-          sudo apt-get update
-          sudo apt-get install -y file patchelf libglib2.0-bin protobuf-compiler
-
-      - name: Build Rust desktop library on Ubuntu
-        run: |
-          cargo build -p daybook_ffi --features nokhwa
-
-      - name: Build Compose desktop inputs on Ubuntu
-        run: |
-          ./gradlew :composeApp:packageAppImage --no-daemon
-        working-directory: src/daybook_compose
-
-      - name: Build AppImage
-        uses: AppImageCrafters/build-appimage-action@v1
-        with:
-          recipe: tools/appimage-builder/daybook-jvm.AppImageBuilder.yml
+          ./x/build-appimage-dayb.ts
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
         with:
           name: daybook-appimage
-          path: daybook-appimage-builder-x86_64.AppImage
+          path: target/appimage/daybook-linuxdeploy-x64.AppImage
+
+      - name: Upload App Tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: daybook-app-tar
+          path: target/appimage/daybook-linuxdeploy-x64.tar.xz
