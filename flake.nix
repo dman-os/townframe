@@ -243,6 +243,7 @@
             androidComposition
             v4l-utils
             libv4l
+            gh
           ];
 
           devShellBuildInputs =
@@ -283,8 +284,7 @@
             pkgs.mkShell ({
               name = "ci-android";
               buildInputs = baseBuildInputs ++ androidBuildInputs ++ [ rustAndroid ];
-            } // ghjkMainEnv)
-            // (androidEnvVars { androidSdk = androidSdkOnly.androidsdk; });
+            } // ghjkMainEnv // androidEnvVars { androidSdk = androidSdkOnly.androidsdk; });
 
           ciDesktopShell = pkgs.mkShell ({
             name = "ci-desktop";

@@ -18,7 +18,7 @@ const composeAppDir = composeRoot.join(
   "build",
   "compose",
   "binaries",
-  "main-release",
+  "main",
   "app",
   "org.example.daybook",
 );
@@ -123,7 +123,9 @@ async function findFfiSoPath() {
   }
   throw new Error(
     `missing libdaybook_ffi.so (checked: ${
-      candidatePaths.map((path) => path.toString()).join(", ")
+      candidatePaths
+        .map((path) => path.toString())
+        .join(", ")
     })`,
   );
 }
@@ -138,7 +140,7 @@ async function ensureFfiSoPath() {
 }
 
 await ensureUbuntuDeps();
-await $`./gradlew :composeApp:packageReleaseAppImage --no-daemon --no-configuration-cache`
+await $`./gradlew :composeApp:packageAppImage --no-daemon --no-configuration-cache`
   .cwd(composeRoot)
   .env({
     LD_LIBRARY_PATH: "",
