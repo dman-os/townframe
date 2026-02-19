@@ -103,6 +103,7 @@ AppDir:
       - libxkbcommon0
       - libxrandr2
       - libxrender1
+      - protobuf-compiler
       - zlib1g
 
 AppImage:

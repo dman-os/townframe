@@ -239,7 +239,7 @@
           devOnlyInputs = with pkgs; [
             # FIXME: why do we need golang for again?
             # did an llm strip comments?
-            go
+            # go
             androidComposition
             v4l-utils
             libv4l

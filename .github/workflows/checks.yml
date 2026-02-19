@@ -113,7 +113,7 @@ jobs:
       - name: Install packaging dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y file patchelf libglib2.0-bin
+          sudo apt-get install -y file patchelf libglib2.0-bin protobuf-compiler
 
       - name: Build Rust desktop library on Ubuntu
         run: |
