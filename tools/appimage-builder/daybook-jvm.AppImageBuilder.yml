@@ -3,9 +3,9 @@ version: 1
 script:
   - rm -rf AppDir || true
   - mkdir -p AppDir/usr/libexec AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
-  - cp -a src/daybook_compose/composeApp/build/compose/binaries/main-release/app/org.example.daybook AppDir/usr/libexec/daybook
-  - test -f target/release/libdaybook_ffi.so
-  - cp target/release/libdaybook_ffi.so AppDir/usr/libexec/daybook/lib/app/
+  - cp -a src/daybook_compose/composeApp/build/compose/binaries/main/app/org.example.daybook AppDir/usr/libexec/daybook
+  - test -f target/debug/libdaybook_ffi.so
+  - cp target/debug/libdaybook_ffi.so AppDir/usr/libexec/daybook/lib/app/
   - ln -sf ../libexec/daybook/bin/org.example.daybook AppDir/usr/bin/org.example.daybook
   - cp src/daybook_compose/composeApp/src/androidMain/res/mipmap-xxxhdpi/ic_launcher.png AppDir/usr/share/icons/hicolor/256x256/apps/org.example.daybook.png
   - |
