@@ -17,41 +17,20 @@ mod binds_guest {
     });
 }
 
-use binds_guest::townframe::utils::{llm_chat, types};
+use binds_guest::townframe::utils::types;
 
-pub struct UtilsPlugin {
-    ollama: ollama_rs::Ollama,
-    config: Config,
-}
+pub struct UtilsPlugin {}
 
-pub struct Config {
-    pub ollama_url: String,
-    pub ollama_model: String,
-}
+pub struct Config {}
 
 impl UtilsPlugin {
-    pub fn new(config: Config) -> Res<Arc<Self>> {
-        // Parse URL to extract host and port
-        let url = url::Url::parse(&config.ollama_url).wrap_err_with(|| {
-            format!(
-                "invalid OLLAMA_URL: {ollama_url}",
-                ollama_url = config.ollama_url
-            )
-        })?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| ferr!("OLLAMA_URL missing host"))?;
-        let scheme = url.scheme();
-        let port = url.port().unwrap_or(11434);
-
-        let ollama = ollama_rs::Ollama::new(format!("{scheme}://{host}"), port);
-
-        Ok(Arc::new(Self { ollama, config }))
+    pub fn new(_config: Config) -> Res<Arc<Self>> {
+        Ok(Arc::new(Self {}))
     }
 
     const ID: &str = "townframe:utils";
 
-    fn from_ctx(wcx: &WashCtx) -> Arc<Self> {
+    fn _from_ctx(wcx: &WashCtx) -> Arc<Self> {
         let Some(this) = wcx.get_plugin::<Self>(Self::ID) else {
             panic!("plugin not on ctx");
         };
@@ -68,9 +47,7 @@ impl wash_runtime::plugin::HostPlugin for UtilsPlugin {
     fn world(&self) -> WitWorld {
         WitWorld {
             exports: std::collections::HashSet::new(),
-            imports: std::collections::HashSet::from([WitInterface::from(
-                "townframe:utils/types,llm-chat",
-            )]),
+            imports: std::collections::HashSet::from([WitInterface::from("townframe:utils/types")]),
         }
     }
 
@@ -88,7 +65,6 @@ impl wash_runtime::plugin::HostPlugin for UtilsPlugin {
             if iface.namespace == "townframe"
                 && iface.package == "utils"
                 && !iface.interfaces.contains("types")
-                && !iface.interfaces.contains("llm-chat")
             {
                 anyhow::bail!("unsupported utils interface: {iface:?}");
             }
@@ -103,20 +79,13 @@ impl wash_runtime::plugin::HostPlugin for UtilsPlugin {
     ) -> anyhow::Result<()> {
         let world = item.world();
         for iface in world.imports {
-            if iface.namespace == "townframe" && iface.package == "utils" {
-                if iface.interfaces.contains("types") {
+            if iface.namespace == "townframe" && iface.package == "utils"
+                && iface.interfaces.contains("types") {
                     types::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
                         item.linker(),
                         |ctx| ctx,
                     )?;
                 }
-                if iface.interfaces.contains("llm-chat") {
-                    llm_chat::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
-                        item.linker(),
-                        |ctx| ctx,
-                    )?;
-                }
-            }
         }
         Ok(())
     }
@@ -155,41 +124,5 @@ impl types::Host for SharedWashCtx {
         // Implementation for the noop function from the types interface
         // This is a copy of the utils interface, so we can just return Ok
         Ok(Ok(()))
-    }
-}
-
-impl llm_chat::Host for SharedWashCtx {
-    async fn respond(
-        &mut self,
-        request: llm_chat::Request,
-    ) -> wasmtime::Result<Result<llm_chat::Response, wasmtime::component::__internal::String>> {
-        let plugin = UtilsPlugin::from_ctx(&self.active_ctx);
-
-        // Extract message text from request.input
-        let llm_chat::RequestInput::Text(message_text) = request.input;
-
-        // Call Ollama
-        use ollama_rs::generation::completion::request::GenerationRequest;
-        let generation_request =
-            GenerationRequest::new(plugin.config.ollama_model.clone(), message_text);
-
-        let ollama_response = plugin
-            .ollama
-            .generate(generation_request)
-            .await
-            .map_err(|err| wasmtime::Error::msg(format!("ollama error: {err:?}")))?;
-
-        let response_text = ollama_response.response;
-
-        // Build the response
-        let response = llm_chat::Response {
-            items: vec![llm_chat::ResponseItem::Message(llm_chat::ResponseMessage {
-                role: llm_chat::Role::Assitant,
-                text: response_text.clone(),
-            })],
-            text: response_text,
-        };
-
-        Ok(Ok(response))
     }
 }

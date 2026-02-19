@@ -8,9 +8,9 @@ use daybook_core::drawer::{DocNBranches, DrawerEvent, DrawerRepo};
 use daybook_types::doc::{AddDocArgs, ChangeHashSet, Doc, DocId, DocPatch};
 
 #[derive(uniffi::Object)]
-struct DrawerRepoFfi {
+pub struct DrawerRepoFfi {
     fcx: SharedFfiCtx,
-    repo: Arc<DrawerRepo>,
+    pub repo: Arc<DrawerRepo>,
     _plugs_repo: Arc<PlugsRepoFfi>,
     stop_token: tokio::sync::Mutex<Option<daybook_core::repos::RepoStopToken>>,
 }

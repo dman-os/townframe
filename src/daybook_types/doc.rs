@@ -789,7 +789,7 @@ mod ser_de {
     // }
     impl From<WellKnownFacet> for FacetRaw {
         fn from(value: WellKnownFacet) -> Self {
-                serde_json::to_value(value).expect(ERROR_JSON)
+            serde_json::to_value(value).expect(ERROR_JSON)
         }
     }
 

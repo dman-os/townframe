@@ -16,7 +16,7 @@ uniffi = ["dep:uniffi"]
 
 [dependencies]
 # internal
-utils_rs = { workspace = true, features = ["hash", "native", "automerge-repo"] }
+utils_rs = { workspace = true, features = ["hash", "native", "automerge-repo", "downloader"] }
 api_utils_rs = { workspace = true, features = ["automerge"] }
 wflow = { workspace = true }
 daybook_types = { workspace = true, features = [
@@ -84,7 +84,7 @@ sqlite-vec.workspace = true
 # misc
 pastey.workspace = true
 directories.workspace = true
-fs4 = "0.13.1"
+fs4.workspace = true
 
 # wasm
 wash-runtime = { workspace = true }

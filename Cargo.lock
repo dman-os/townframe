@@ -4283,7 +4283,7 @@ version = "0.1.0"
 dependencies = [
  "api_utils_rs",
  "bon",
- "dirs",
+ "directories",
  "fastembed",
  "fs4",
  "hf-hub",
@@ -4291,7 +4291,6 @@ dependencies = [
  "ollama-rs",
  "serde",
  "tokio",
- "ureq",
  "url",
  "utils_rs",
  "wit-bindgen 0.52.0",
@@ -8038,17 +8037,14 @@ checksum = "fdc97a28575b85cfedf2a7e7d3cc64b3e11bd8ac766666318003abbacc7a21fc"
 dependencies = [
  "base64 0.22.1",
  "der",
- "flate2",
  "log",
  "native-tls",
  "percent-encoding",
- "rustls 0.23.28",
  "rustls-pki-types",
  "socks",
  "ureq-proto",
  "utf-8",
  "webpki-root-certs",
- "webpki-roots 1.0.2",
 ]
 
 [[package]]
@@ -8128,6 +8124,7 @@ dependencies = [
  "json-canon",
  "multihash",
  "regex",
+ "reqwest",
  "samod",
  "serde",
  "serde_json",
@@ -8399,7 +8396,6 @@ dependencies = [
  "async-trait",
  "displaydoc",
  "macros",
- "ollama-rs",
  "parking_lot",
  "serde",
  "serde_json",

@@ -203,6 +203,10 @@ pub async fn test_cx_with_options(
         local_actor_id.clone(),
     )
     .await?;
+    let progress_repo = crate::progress::ProgressRepo::boot(
+        crate::app::SqlCtx::new("sqlite::memory:").await?.db_pool,
+    )
+    .await?;
 
     plug_repo.ensure_system_plugs().await?;
 
@@ -229,6 +233,7 @@ pub async fn test_cx_with_options(
         Arc::clone(&drawer_repo),
         Arc::clone(&plug_repo),
         Arc::clone(&dispatch_repo),
+        Arc::clone(&progress_repo),
         Arc::clone(&blobs),
         Arc::clone(&config_repo),
         local_actor_id,

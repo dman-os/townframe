@@ -1,3 +1,5 @@
+#[cfg(feature = "downloader")]
+pub mod downloader;
 mod macros;
 pub mod testing;
 

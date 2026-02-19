@@ -10,6 +10,7 @@ object FeatureKeys {
     const val Capture = "nav_capture"
     const val Drawer = "nav_drawer"
     const val Tables = "nav_tables"
+    const val Progress = "nav_progress"
     const val Settings = "nav_settings"
 }
 

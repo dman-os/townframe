@@ -10,7 +10,7 @@ workspace = true
 path = "lib.rs"
 
 [features]
-default = ["automerge-repo", "hash", "native"]
+default = ["automerge-repo", "hash", "native", "downloader"]
 automerge = ["dep:autosurgeon", "dep:automerge"]
 automerge-repo = [
     "automerge",
@@ -19,6 +19,7 @@ automerge-repo = [
     "samod/tungstenite",
     "dep:tokio-tungstenite"
 ]
+downloader = ["dep:reqwest", "tokio/fs", "tokio/io-util"]
 hash = [
     "dep:multihash",
     "dep:json-canon",
@@ -37,9 +38,10 @@ browser = ["uuid/js"]
 # futures
 async-trait.workspace = true
 futures.workspace = true
-tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
+tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread", "time"] }
 tokio-util = { workspace = true }
 tokio-tungstenite = { version = "0.27.0", features = ["url"], optional = true }
+reqwest = { workspace = true, default-features = false, features = ["stream", "rustls-tls"], optional = true }
 
 # encoding
 serde.workspace = true

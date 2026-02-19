@@ -2,13 +2,13 @@
 
 package org.example.daybook.tables
 
-// TablesTabsList lives in the same package (`org.example.daybook.tables`) so no import required
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MenuOpen
@@ -31,10 +32,9 @@ import androidx.compose.material3.*
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LargeFloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationRail
@@ -79,6 +79,7 @@ import org.example.daybook.LocalContainer
 import org.example.daybook.Routes
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
+import org.example.daybook.progress.ProgressList
 import org.example.daybook.uniffi.core.WindowLayout
 import org.example.daybook.uniffi.core.WindowLayoutOrientation as ConfigOrientation
 import org.example.daybook.uniffi.core.WindowLayoutPane
@@ -300,9 +301,30 @@ fun ExpandedLayout(
             showTopBar = if (isScreenChromeEmpty) true else screenChromeState.showTopBar
         )
 
+    val allFeatures = rememberAllFeatures(navController)
+    val captureFeature = allFeatures.find { it.key == FeatureKeys.Capture }
+
     Scaffold(
         modifier = modifier,
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        floatingActionButton = {
+            val button = screenChromeState.mainFeatureActionButton
+            val onClick: (suspend () -> Unit)? = when (button) {
+                is org.example.daybook.MainFeatureActionButton.Button -> {
+                    if (button.enabled) button.onClick else null
+                }
+
+                null -> captureFeature?.onActivate
+            }
+            if (onClick != null) {
+                LargeFloatingActionButton(
+                    onClick = { scope.launch { onClick() } },
+                    shape = CircleShape,
+                ) {
+                    Icon(Icons.Filled.Add, "Large floating action button")
+                }
+            }
+        },
         topBar = {
             ChromeStateTopAppBar(mergedChromeState)
         }
@@ -475,7 +497,6 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
     val isWide = widthDp >= 200.dp
 
     val sidebarFeatures = rememberSidebarFeatures(navController)
-    val allFeatures = rememberAllFeatures(navController)
     val scope = rememberCoroutineScope()
 
     // Observe route changes to update selection highlight
@@ -486,11 +507,7 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
     // Get chrome state to check for main feature action button and prominent buttons
     val chromeStateManager = LocalChromeStateManager.current
     val chromeState by chromeStateManager.currentState.collectAsState()
-    val mainFeatureActionButton = chromeState.mainFeatureActionButton
     val prominentButtons = chromeState.additionalFeatureButtons.filter { it.prominent }
-
-    // Default to Capture feature if no chrome button is provided
-    val captureFeature = allFeatures.find { it.key == "nav_capture" }
 
     // Combine sidebar features with prominent chrome buttons
     val allSidebarFeatures =
@@ -515,7 +532,9 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
             }
     ) {
         if (isWide) {
-            // Wide mode: PermanentDrawerSheet with features and TabSelectionList
+            var selectedSidebarPane by remember { mutableIntStateOf(0) }
+
+            // Wide mode: navigation row + tabbed pane (tabs/progress)
             PermanentDrawerSheet(
                 modifier =
                     Modifier
@@ -525,133 +544,59 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                 Column(
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    // Main feature action button at the top (from chrome or default to Capture)
-                    when (val button = mainFeatureActionButton) {
-                        is org.example.daybook.MainFeatureActionButton.Button -> {
-                            ExtendedFloatingActionButton(
-                                text = button.label,
-                                icon = button.icon,
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        allSidebarFeatures.forEach { item ->
+                            val featureRoute = getRouteForFeature(item)
+                            val isSelected = featureRoute != null && featureRoute == currentRoute
+                            NavigationRailItem(
+                                selected = isSelected,
                                 onClick = {
-                                    if (button.enabled) {
-                                        scope.launch {
-                                            button.onClick()
+                                    scope.launch {
+                                        if (item.enabled) {
+                                            item.onActivate()
                                         }
                                     }
                                 },
-                                modifier =
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                                enabled = item.enabled,
+                                icon = { item.icon() },
+                                label = { item.labelContent?.invoke() ?: Text(item.label) },
+                                alwaysShowLabel = false
                             )
-                            HorizontalDivider()
-                        }
-
-                        null -> {
-                            // Default to Capture feature button when no chrome button is provided
-                            captureFeature?.let { feature ->
-                                ExtendedFloatingActionButton(
-                                    text = { Text(feature.label) },
-                                    icon = { feature.icon() },
-                                    onClick = {
-                                        scope.launch {
-                                            feature.onActivate()
-                                        }
-                                    },
-                                    modifier =
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 16.dp, vertical = 8.dp)
-                                )
-                                HorizontalDivider()
-                            }
                         }
                     }
-
-                    // Features section - Home, Drawer, and prominent chrome buttons
-                    allSidebarFeatures.forEach { item ->
-                        val featureRoute = getRouteForFeature(item)
-                        val isSelected = featureRoute != null && featureRoute == currentRoute
-
-                        NavigationDrawerItem(
-                            selected = isSelected,
-                            onClick = {
-                                scope.launch {
-                                    if (item.enabled) {
-                                        item.onActivate()
-                                    }
-                                }
-                            },
-                            icon = {
-                                item.icon()
-                            },
-                            label = {
-                                item.labelContent?.invoke() ?: Text(item.label)
-                            },
-                            modifier = Modifier.fillMaxWidth()
+                    HorizontalDivider()
+                    TabRow(selectedTabIndex = selectedSidebarPane) {
+                        Tab(
+                            selected = selectedSidebarPane == 0,
+                            onClick = { selectedSidebarPane = 0 },
+                            text = { Text("Tabs") }
+                        )
+                        Tab(
+                            selected = selectedSidebarPane == 1,
+                            onClick = { selectedSidebarPane = 1 },
+                            text = { Text("Progress") }
                         )
                     }
+                    when (selectedSidebarPane) {
+                        0 -> {
+                            TabSelectionList(
+                                onTabSelected = { /* TODO: Handle tab selection */ },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
 
-                    // Divider between features and tabs
-                    HorizontalDivider()
-
-                    // TabSelectionList section
-                    TabSelectionList(
-                        onTabSelected = { /* TODO: Handle tab selection */ },
-                        modifier = Modifier.weight(1f)
-                    )
+                        else -> {
+                            ProgressList(modifier = Modifier.weight(1f).fillMaxWidth())
+                        }
+                    }
                 }
             }
         } else {
             // Narrow mode: NavigationRail with features only
             NavigationRail(modifier = Modifier.fillMaxHeight()) {
-                // Main feature action button at the top (from chrome or default to Capture)
-                when (val button = mainFeatureActionButton) {
-                    is org.example.daybook.MainFeatureActionButton.Button -> {
-                        Box(
-                            modifier =
-                                Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 8.dp, vertical = 8.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            FloatingActionButton(
-                                onClick = {
-                                    if (button.enabled) {
-                                        scope.launch {
-                                            button.onClick()
-                                        }
-                                    }
-                                }
-                            ) {
-                                button.icon()
-                            }
-                        }
-                    }
-
-                    null -> {
-                        // Default to Capture feature button when no chrome button is provided
-                        captureFeature?.let { feature ->
-                            Box(
-                                modifier =
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 8.dp, vertical = 8.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                FloatingActionButton(
-                                    onClick = {
-                                        scope.launch {
-                                            feature.onActivate()
-                                        }
-                                    }
-                                ) {
-                                    feature.icon()
-                                }
-                            }
-                        }
-                    }
-                }
-
                 allSidebarFeatures.forEach { item ->
                     val featureRoute = getRouteForFeature(item)
                     val isSelected = featureRoute != null && featureRoute == currentRoute
@@ -1417,34 +1362,6 @@ fun DockableRegion(
             ) {
                 val adapter = remember(this) { ColumnScopeAdapter(this) }
                 draw(adapter)
-            }
-        }
-    }
-}
-
-@Composable
-fun TablesTabsList(onToggleTableRail: () -> Unit, showToggleButton: Boolean = true) {
-    Column(modifier = Modifier.fillMaxHeight()) {
-        TabSelectionList(
-            onTabSelected = { /* TODO: Select tab */ },
-            modifier = Modifier.weight(1f)
-        )
-
-        // Bottom row with toggle button (only when nav rail is hidden)
-        if (showToggleButton) {
-            Row(
-                modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(8.dp),
-                horizontalArrangement = Arrangement.Start
-            ) {
-                IconButton(onClick = onToggleTableRail) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = "Show table rail"
-                    )
-                }
             }
         }
     }

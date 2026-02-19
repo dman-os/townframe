@@ -6,6 +6,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.LibraryBooks
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material3.Icon
@@ -41,6 +42,11 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> {
         FeatureItem(FeatureKeys.Tables, { Icon(Icons.Default.TableChart, contentDescription = "Tables") }, "Tables") {
             scope.launch {
                 navController.navigate(AppScreens.Tables.name)
+            }
+        },
+        FeatureItem(FeatureKeys.Progress, { Icon(Icons.Default.Notifications, contentDescription = "Progress") }, "Progress") {
+            scope.launch {
+                navController.navigate(AppScreens.Progress.name)
             }
         }
     )

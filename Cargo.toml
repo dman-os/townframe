@@ -143,6 +143,7 @@ kanidm_proto = "1.7.2"
 # os
 dotenv-flow = "0.16"
 directories = "6.0"
+fs4 = "0.13.1"
 
 # http
 axum = { version = "0.8.6", default-features = false }

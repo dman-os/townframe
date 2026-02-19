@@ -70,6 +70,7 @@
   - [ ] Assert samod fsyncs reliably
   - [ ] Notification handling
     - [ ] How to avoid missing triage work?
+- [ ] SQL update path
 
 - [ ] Cleanup for public pre-alpha
 

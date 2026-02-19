@@ -73,6 +73,7 @@ import org.example.daybook.capture.CameraCaptureContext
 import org.example.daybook.capture.ProvideCameraCaptureContext
 import org.example.daybook.capture.screens.CaptureScreen
 import org.example.daybook.drawer.DrawerScreen
+import org.example.daybook.progress.ProgressList
 import org.example.daybook.settings.SettingsScreen
 import org.example.daybook.tables.CompactLayout
 import org.example.daybook.tables.ExpandedLayout
@@ -81,9 +82,12 @@ import org.example.daybook.theme.ThemeConfig
 import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.CameraPreviewFfi
 import org.example.daybook.uniffi.DrawerRepoFfi
+import org.example.daybook.uniffi.DispatchRepoFfi
 import org.example.daybook.uniffi.FfiCtx
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.KnownRepoEntryFfi
+import org.example.daybook.uniffi.ProgressRepoFfi
+import org.example.daybook.uniffi.RtFfi
 import org.example.daybook.uniffi.TablesEventListener
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.ListenerRegistration
@@ -123,6 +127,9 @@ data class AppContainer(
     val ffiCtx: FfiCtx,
     val drawerRepo: DrawerRepoFfi,
     val tablesRepo: TablesRepoFfi,
+    val dispatchRepo: DispatchRepoFfi,
+    val progressRepo: ProgressRepoFfi,
+    val rtFfi: RtFfi,
     val plugsRepo: org.example.daybook.uniffi.PlugsRepoFfi,
     val configRepo: ConfigRepoFfi,
     val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
@@ -140,6 +147,7 @@ enum class AppScreens {
     Home,
     Capture,
     Tables,
+    Progress,
     Settings,
     Drawer
 }
@@ -466,6 +474,19 @@ fun App(
                     .load(fcx = fcx, blobsRepo = blobsRepo)
             val drawerRepo = DrawerRepoFfi.load(fcx = fcx, plugsRepo = plugsRepo)
             val configRepo = ConfigRepoFfi.load(fcx = fcx, plugRepo = plugsRepo)
+            val dispatchRepo = DispatchRepoFfi.load(fcx = fcx)
+            val progressRepo = ProgressRepoFfi.load(fcx = fcx)
+            val rtFfi =
+                RtFfi.load(
+                    fcx = fcx,
+                    drawerRepo = drawerRepo,
+                    plugsRepo = plugsRepo,
+                    dispatchRepo = dispatchRepo,
+                    progressRepo = progressRepo,
+                    blobsRepo = blobsRepo,
+                    configRepo = configRepo,
+                    deviceId = "compose-client"
+                )
             val cameraPreviewFfi = CameraPreviewFfi.load()
 
             val tablesViewModel = TablesViewModel(tablesRepo)
@@ -477,6 +498,9 @@ fun App(
                         ffiCtx = fcx,
                         drawerRepo = drawerRepo,
                         tablesRepo = tablesRepo,
+                        dispatchRepo = dispatchRepo,
+                        progressRepo = progressRepo,
+                        rtFfi = rtFfi,
                         plugsRepo = plugsRepo,
                         configRepo = configRepo,
                         blobsRepo = blobsRepo,
@@ -525,6 +549,9 @@ fun App(
                     onDispose {
                         appContainer.drawerRepo.close()
                         appContainer.tablesRepo.close()
+                        appContainer.dispatchRepo.close()
+                        appContainer.progressRepo.close()
+                        appContainer.rtFfi.close()
                         appContainer.plugsRepo.close()
                         appContainer.configRepo.close()
                         appContainer.cameraPreviewFfi.close()
@@ -821,6 +848,11 @@ fun Routes(
         }
         composable(route = AppScreens.Tables.name) {
             TablesScreen(modifier = modifier)
+        }
+        composable(route = AppScreens.Progress.name) {
+            ProvideChromeState(ChromeState(title = "Progress")) {
+                ProgressList(modifier = modifier)
+            }
         }
         composable(route = AppScreens.Settings.name) {
             ProvideChromeState(ChromeState(title = "Settings")) {

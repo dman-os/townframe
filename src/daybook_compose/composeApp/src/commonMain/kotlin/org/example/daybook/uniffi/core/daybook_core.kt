@@ -954,6 +954,29 @@ private class JavaLangRefCleanable(
 /**
  * @suppress
  */
+public object FfiConverterULong: FfiConverter<ULong, Long> {
+    override fun lift(value: Long): ULong {
+        return value.toULong()
+    }
+
+    override fun read(buf: ByteBuffer): ULong {
+        return lift(buf.getLong())
+    }
+
+    override fun lower(value: ULong): Long {
+        return value.toLong()
+    }
+
+    override fun allocationSize(value: ULong) = 8UL
+
+    override fun write(value: ULong, buf: ByteBuffer) {
+        buf.putLong(value.toLong())
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterLong: FfiConverter<Long, Long> {
     override fun lift(value: Long): Long {
         return value
@@ -1347,6 +1370,49 @@ public object FfiConverterTypeListenerRegistration: FfiConverter<ListenerRegistr
 
 
 
+data class CreateProgressTaskArgs (
+    var `id`: kotlin.String
+    , 
+    var `tags`: List<kotlin.String>
+    , 
+    var `retention`: ProgressRetentionPolicy
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCreateProgressTaskArgs: FfiConverterRustBuffer<CreateProgressTaskArgs> {
+    override fun read(buf: ByteBuffer): CreateProgressTaskArgs {
+        return CreateProgressTaskArgs(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterTypeProgressRetentionPolicy.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CreateProgressTaskArgs) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterSequenceString.allocationSize(value.`tags`) +
+            FfiConverterTypeProgressRetentionPolicy.allocationSize(value.`retention`)
+    )
+
+    override fun write(value: CreateProgressTaskArgs, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterSequenceString.write(value.`tags`, buf)
+            FfiConverterTypeProgressRetentionPolicy.write(value.`retention`, buf)
+    }
+}
+
+
+
 data class DocEntry (
     var `branches`: Map<kotlin.String, ChangeHashSet>
     , 
@@ -1633,6 +1699,175 @@ public object FfiConverterTypePanelPatch: FfiConverterRustBuffer<PanelPatch> {
             FfiConverterOptionalTypeUuid.write(value.`id`, buf)
             FfiConverterOptionalTypeUuid.write(value.`version`, buf)
             FfiConverterOptionalString.write(value.`title`, buf)
+    }
+}
+
+
+
+data class ProgressTask (
+    var `id`: kotlin.String
+    , 
+    var `title`: kotlin.String?
+    , 
+    var `tags`: List<kotlin.String>
+    , 
+    var `createdAtUnixSecs`: kotlin.Long
+    , 
+    var `updatedAtUnixSecs`: kotlin.Long
+    , 
+    var `viewedAtUnixSecs`: kotlin.Long?
+    , 
+    var `dismissedAtUnixSecs`: kotlin.Long?
+    , 
+    var `state`: ProgressTaskState
+    , 
+    var `retention`: ProgressRetentionPolicy
+    , 
+    var `retentionOverride`: ProgressRetentionPolicy?
+    , 
+    var `latestUpdate`: ProgressUpdateEntry?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProgressTask: FfiConverterRustBuffer<ProgressTask> {
+    override fun read(buf: ByteBuffer): ProgressTask {
+        return ProgressTask(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterTypeProgressTaskState.read(buf),
+            FfiConverterTypeProgressRetentionPolicy.read(buf),
+            FfiConverterOptionalTypeProgressRetentionPolicy.read(buf),
+            FfiConverterOptionalTypeProgressUpdateEntry.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ProgressTask) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterOptionalString.allocationSize(value.`title`) +
+            FfiConverterSequenceString.allocationSize(value.`tags`) +
+            FfiConverterLong.allocationSize(value.`createdAtUnixSecs`) +
+            FfiConverterLong.allocationSize(value.`updatedAtUnixSecs`) +
+            FfiConverterOptionalLong.allocationSize(value.`viewedAtUnixSecs`) +
+            FfiConverterOptionalLong.allocationSize(value.`dismissedAtUnixSecs`) +
+            FfiConverterTypeProgressTaskState.allocationSize(value.`state`) +
+            FfiConverterTypeProgressRetentionPolicy.allocationSize(value.`retention`) +
+            FfiConverterOptionalTypeProgressRetentionPolicy.allocationSize(value.`retentionOverride`) +
+            FfiConverterOptionalTypeProgressUpdateEntry.allocationSize(value.`latestUpdate`)
+    )
+
+    override fun write(value: ProgressTask, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterOptionalString.write(value.`title`, buf)
+            FfiConverterSequenceString.write(value.`tags`, buf)
+            FfiConverterLong.write(value.`createdAtUnixSecs`, buf)
+            FfiConverterLong.write(value.`updatedAtUnixSecs`, buf)
+            FfiConverterOptionalLong.write(value.`viewedAtUnixSecs`, buf)
+            FfiConverterOptionalLong.write(value.`dismissedAtUnixSecs`, buf)
+            FfiConverterTypeProgressTaskState.write(value.`state`, buf)
+            FfiConverterTypeProgressRetentionPolicy.write(value.`retention`, buf)
+            FfiConverterOptionalTypeProgressRetentionPolicy.write(value.`retentionOverride`, buf)
+            FfiConverterOptionalTypeProgressUpdateEntry.write(value.`latestUpdate`, buf)
+    }
+}
+
+
+
+data class ProgressUpdate (
+    var `atUnixSecs`: kotlin.Long
+    , 
+    var `title`: kotlin.String?
+    , 
+    var `deets`: ProgressUpdateDeets
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProgressUpdate: FfiConverterRustBuffer<ProgressUpdate> {
+    override fun read(buf: ByteBuffer): ProgressUpdate {
+        return ProgressUpdate(
+            FfiConverterLong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeProgressUpdateDeets.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ProgressUpdate) = (
+            FfiConverterLong.allocationSize(value.`atUnixSecs`) +
+            FfiConverterOptionalString.allocationSize(value.`title`) +
+            FfiConverterTypeProgressUpdateDeets.allocationSize(value.`deets`)
+    )
+
+    override fun write(value: ProgressUpdate, buf: ByteBuffer) {
+            FfiConverterLong.write(value.`atUnixSecs`, buf)
+            FfiConverterOptionalString.write(value.`title`, buf)
+            FfiConverterTypeProgressUpdateDeets.write(value.`deets`, buf)
+    }
+}
+
+
+
+data class ProgressUpdateEntry (
+    var `sequence`: kotlin.Long
+    , 
+    var `atUnixSecs`: kotlin.Long
+    , 
+    var `update`: ProgressUpdate
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProgressUpdateEntry: FfiConverterRustBuffer<ProgressUpdateEntry> {
+    override fun read(buf: ByteBuffer): ProgressUpdateEntry {
+        return ProgressUpdateEntry(
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterTypeProgressUpdate.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ProgressUpdateEntry) = (
+            FfiConverterLong.allocationSize(value.`sequence`) +
+            FfiConverterLong.allocationSize(value.`atUnixSecs`) +
+            FfiConverterTypeProgressUpdate.allocationSize(value.`update`)
+    )
+
+    override fun write(value: ProgressUpdateEntry, buf: ByteBuffer) {
+            FfiConverterLong.write(value.`sequence`, buf)
+            FfiConverterLong.write(value.`atUnixSecs`, buf)
+            FfiConverterTypeProgressUpdate.write(value.`update`, buf)
     }
 }
 
@@ -3039,6 +3274,540 @@ public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
 
 
 
+sealed class ProgressEvent {
+    
+    data class TaskUpserted(
+        val `id`: kotlin.String) : ProgressEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class TaskRemoved(
+        val `id`: kotlin.String) : ProgressEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class UpdateAdded(
+        val `id`: kotlin.String) : ProgressEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+    object ListChanged : ProgressEvent()
+    
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProgressEvent : FfiConverterRustBuffer<ProgressEvent>{
+    override fun read(buf: ByteBuffer): ProgressEvent {
+        return when(buf.getInt()) {
+            1 -> ProgressEvent.TaskUpserted(
+                FfiConverterString.read(buf),
+                )
+            2 -> ProgressEvent.TaskRemoved(
+                FfiConverterString.read(buf),
+                )
+            3 -> ProgressEvent.UpdateAdded(
+                FfiConverterString.read(buf),
+                )
+            4 -> ProgressEvent.ListChanged
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ProgressEvent) = when(value) {
+        is ProgressEvent.TaskUpserted -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+            )
+        }
+        is ProgressEvent.TaskRemoved -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+            )
+        }
+        is ProgressEvent.UpdateAdded -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+            )
+        }
+        is ProgressEvent.ListChanged -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: ProgressEvent, buf: ByteBuffer) {
+        when(value) {
+            is ProgressEvent.TaskUpserted -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`id`, buf)
+                Unit
+            }
+            is ProgressEvent.TaskRemoved -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`id`, buf)
+                Unit
+            }
+            is ProgressEvent.UpdateAdded -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`id`, buf)
+                Unit
+            }
+            is ProgressEvent.ListChanged -> {
+                buf.putInt(4)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class ProgressFinalState {
+    
+    SUCCEEDED,
+    FAILED,
+    CANCELLED,
+    DISMISSED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProgressFinalState: FfiConverterRustBuffer<ProgressFinalState> {
+    override fun read(buf: ByteBuffer) = try {
+        ProgressFinalState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ProgressFinalState) = 4UL
+
+    override fun write(value: ProgressFinalState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+sealed class ProgressRetentionPolicy {
+    
+    object UserDismissable : ProgressRetentionPolicy()
+    
+    
+    data class AutoDismissAfter(
+        val `seconds`: kotlin.ULong) : ProgressRetentionPolicy()
+        
+    {
+        
+
+        companion object
+    }
+    
+    object DismissAfterViewed : ProgressRetentionPolicy()
+    
+    
+    object Ephemeral : ProgressRetentionPolicy()
+    
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProgressRetentionPolicy : FfiConverterRustBuffer<ProgressRetentionPolicy>{
+    override fun read(buf: ByteBuffer): ProgressRetentionPolicy {
+        return when(buf.getInt()) {
+            1 -> ProgressRetentionPolicy.UserDismissable
+            2 -> ProgressRetentionPolicy.AutoDismissAfter(
+                FfiConverterULong.read(buf),
+                )
+            3 -> ProgressRetentionPolicy.DismissAfterViewed
+            4 -> ProgressRetentionPolicy.Ephemeral
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ProgressRetentionPolicy) = when(value) {
+        is ProgressRetentionPolicy.UserDismissable -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is ProgressRetentionPolicy.AutoDismissAfter -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterULong.allocationSize(value.`seconds`)
+            )
+        }
+        is ProgressRetentionPolicy.DismissAfterViewed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is ProgressRetentionPolicy.Ephemeral -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: ProgressRetentionPolicy, buf: ByteBuffer) {
+        when(value) {
+            is ProgressRetentionPolicy.UserDismissable -> {
+                buf.putInt(1)
+                Unit
+            }
+            is ProgressRetentionPolicy.AutoDismissAfter -> {
+                buf.putInt(2)
+                FfiConverterULong.write(value.`seconds`, buf)
+                Unit
+            }
+            is ProgressRetentionPolicy.DismissAfterViewed -> {
+                buf.putInt(3)
+                Unit
+            }
+            is ProgressRetentionPolicy.Ephemeral -> {
+                buf.putInt(4)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class ProgressSeverity {
+    
+    INFO,
+    WARN,
+    ERROR;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProgressSeverity: FfiConverterRustBuffer<ProgressSeverity> {
+    override fun read(buf: ByteBuffer) = try {
+        ProgressSeverity.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ProgressSeverity) = 4UL
+
+    override fun write(value: ProgressSeverity, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class ProgressTaskState {
+    
+    ACTIVE,
+    SUCCEEDED,
+    FAILED,
+    CANCELLED,
+    DISMISSED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProgressTaskState: FfiConverterRustBuffer<ProgressTaskState> {
+    override fun read(buf: ByteBuffer) = try {
+        ProgressTaskState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ProgressTaskState) = 4UL
+
+    override fun write(value: ProgressTaskState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+sealed class ProgressUnit {
+    
+    object Bytes : ProgressUnit()
+    
+    
+    data class Generic(
+        val `label`: kotlin.String) : ProgressUnit()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProgressUnit : FfiConverterRustBuffer<ProgressUnit>{
+    override fun read(buf: ByteBuffer): ProgressUnit {
+        return when(buf.getInt()) {
+            1 -> ProgressUnit.Bytes
+            2 -> ProgressUnit.Generic(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ProgressUnit) = when(value) {
+        is ProgressUnit.Bytes -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is ProgressUnit.Generic -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`label`)
+            )
+        }
+    }
+
+    override fun write(value: ProgressUnit, buf: ByteBuffer) {
+        when(value) {
+            is ProgressUnit.Bytes -> {
+                buf.putInt(1)
+                Unit
+            }
+            is ProgressUnit.Generic -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`label`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+sealed class ProgressUpdateDeets {
+    
+    data class Status(
+        val `severity`: org.example.daybook.uniffi.core.ProgressSeverity, 
+        val `message`: kotlin.String) : ProgressUpdateDeets()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Amount(
+        val `severity`: org.example.daybook.uniffi.core.ProgressSeverity, 
+        val `done`: kotlin.ULong, 
+        val `total`: kotlin.ULong?, 
+        val `unit`: org.example.daybook.uniffi.core.ProgressUnit, 
+        val `message`: kotlin.String?) : ProgressUpdateDeets()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Completed(
+        val `state`: org.example.daybook.uniffi.core.ProgressFinalState, 
+        val `message`: kotlin.String?) : ProgressUpdateDeets()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProgressUpdateDeets : FfiConverterRustBuffer<ProgressUpdateDeets>{
+    override fun read(buf: ByteBuffer): ProgressUpdateDeets {
+        return when(buf.getInt()) {
+            1 -> ProgressUpdateDeets.Status(
+                FfiConverterTypeProgressSeverity.read(buf),
+                FfiConverterString.read(buf),
+                )
+            2 -> ProgressUpdateDeets.Amount(
+                FfiConverterTypeProgressSeverity.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterOptionalULong.read(buf),
+                FfiConverterTypeProgressUnit.read(buf),
+                FfiConverterOptionalString.read(buf),
+                )
+            3 -> ProgressUpdateDeets.Completed(
+                FfiConverterTypeProgressFinalState.read(buf),
+                FfiConverterOptionalString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ProgressUpdateDeets) = when(value) {
+        is ProgressUpdateDeets.Status -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeProgressSeverity.allocationSize(value.`severity`)
+                + FfiConverterString.allocationSize(value.`message`)
+            )
+        }
+        is ProgressUpdateDeets.Amount -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeProgressSeverity.allocationSize(value.`severity`)
+                + FfiConverterULong.allocationSize(value.`done`)
+                + FfiConverterOptionalULong.allocationSize(value.`total`)
+                + FfiConverterTypeProgressUnit.allocationSize(value.`unit`)
+                + FfiConverterOptionalString.allocationSize(value.`message`)
+            )
+        }
+        is ProgressUpdateDeets.Completed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeProgressFinalState.allocationSize(value.`state`)
+                + FfiConverterOptionalString.allocationSize(value.`message`)
+            )
+        }
+    }
+
+    override fun write(value: ProgressUpdateDeets, buf: ByteBuffer) {
+        when(value) {
+            is ProgressUpdateDeets.Status -> {
+                buf.putInt(1)
+                FfiConverterTypeProgressSeverity.write(value.`severity`, buf)
+                FfiConverterString.write(value.`message`, buf)
+                Unit
+            }
+            is ProgressUpdateDeets.Amount -> {
+                buf.putInt(2)
+                FfiConverterTypeProgressSeverity.write(value.`severity`, buf)
+                FfiConverterULong.write(value.`done`, buf)
+                FfiConverterOptionalULong.write(value.`total`, buf)
+                FfiConverterTypeProgressUnit.write(value.`unit`, buf)
+                FfiConverterOptionalString.write(value.`message`, buf)
+                Unit
+            }
+            is ProgressUpdateDeets.Completed -> {
+                buf.putInt(3)
+                FfiConverterTypeProgressFinalState.write(value.`state`, buf)
+                FfiConverterOptionalString.write(value.`message`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
 sealed class TableWindow {
     
     object AllWindows : TableWindow()
@@ -3599,6 +4368,70 @@ public object FfiConverterTypeWindowLayoutRegionSize : FfiConverterRustBuffer<Wi
 /**
  * @suppress
  */
+public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
+    override fun read(buf: ByteBuffer): kotlin.ULong? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterULong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ULong?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterULong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ULong?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalLong: FfiConverterRustBuffer<kotlin.Long?> {
+    override fun read(buf: ByteBuffer): kotlin.Long? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterLong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Long?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterLong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Long?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterLong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
@@ -3621,6 +4454,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeProgressUpdateEntry: FfiConverterRustBuffer<ProgressUpdateEntry?> {
+    override fun read(buf: ByteBuffer): ProgressUpdateEntry? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeProgressUpdateEntry.read(buf)
+    }
+
+    override fun allocationSize(value: ProgressUpdateEntry?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeProgressUpdateEntry.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ProgressUpdateEntry?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeProgressUpdateEntry.write(value, buf)
         }
     }
 }
@@ -3685,6 +4550,38 @@ public object FfiConverterOptionalTypeCaptureMode: FfiConverterRustBuffer<Captur
         } else {
             buf.put(1)
             FfiConverterTypeCaptureMode.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeProgressRetentionPolicy: FfiConverterRustBuffer<ProgressRetentionPolicy?> {
+    override fun read(buf: ByteBuffer): ProgressRetentionPolicy? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeProgressRetentionPolicy.read(buf)
+    }
+
+    override fun allocationSize(value: ProgressRetentionPolicy?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeProgressRetentionPolicy.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ProgressRetentionPolicy?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeProgressRetentionPolicy.write(value, buf)
         }
     }
 }
