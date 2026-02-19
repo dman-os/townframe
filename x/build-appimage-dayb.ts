@@ -138,7 +138,7 @@ async function ensureFfiSoPath() {
 }
 
 await ensureUbuntuDeps();
-await $`./gradlew :composeApp:packageReleaseAppImage --no-daemon`
+await $`./gradlew :composeApp:packageReleaseAppImage --no-daemon --no-configuration-cache`
   .cwd(composeRoot)
   .env({
     LD_LIBRARY_PATH: "",

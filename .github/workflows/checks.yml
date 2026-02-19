@@ -105,7 +105,7 @@ jobs:
           export PROTOC="$(command -v protoc)"
           cargo build -p daybook_ffi --release --features nokhwa
           cd src/daybook_compose
-          ./gradlew :composeApp:packageReleaseAppImage --no-daemon
+          ./gradlew :composeApp:packageReleaseAppImage --no-daemon --no-configuration-cache
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
@@ -128,7 +128,7 @@ jobs:
 
       - name: Build Android debug APK
         run: |
-          nix develop .#ci-android --command bash -lc 'cd src/daybook_compose && ./gradlew :composeApp:assembleDebug --no-daemon'
+          nix develop .#ci-android --command bash -lc 'cd src/daybook_compose && ./gradlew :composeApp:assembleDebug --no-daemon --no-configuration-cache'
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
@@ -161,7 +161,7 @@ jobs:
         shell: pwsh
         run: |
           cargo build -p daybook_ffi --release --features nokhwa
-          .\gradlew.bat :composeApp:packageReleaseMsi --no-daemon
+          .\gradlew.bat :composeApp:packageReleaseMsi --no-daemon --no-configuration-cache
         working-directory: src/daybook_compose
 
       - name: Upload Windows desktop installer
@@ -191,7 +191,7 @@ jobs:
             set -euo pipefail
             cargo build -p daybook_ffi --release --features nokhwa
             cd src/daybook_compose
-            ./gradlew :composeApp:packageReleaseDmg --no-daemon
+            ./gradlew :composeApp:packageReleaseDmg --no-daemon --no-configuration-cache
           '
 
       - name: Upload macOS DMG
