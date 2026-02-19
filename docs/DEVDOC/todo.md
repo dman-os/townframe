@@ -181,6 +181,7 @@
   - [ ] iOS
   - [ ] Windows
   - [ ] macOS
+- [ ] GraalVM for Linux
 
 ## Upstream Issues
 

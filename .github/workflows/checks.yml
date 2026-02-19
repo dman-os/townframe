@@ -96,18 +96,47 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
 
-      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip squashfs-tools file patchelf libglib2.0-bin
+          python3 -m pip install --user appimage-builder==0.9.2 packaging==20.9
+          curl -L -o "$HOME/.local/bin/appimagetool.AppImage" "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x "$HOME/.local/bin/appimagetool.AppImage"
+          cat > "$HOME/.local/bin/appimagetool" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec "$HOME/.local/bin/appimagetool.AppImage" --appimage-extract-and-run "$@"
+          EOF
+          chmod +x "$HOME/.local/bin/appimagetool"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build Rust desktop library on Ubuntu
+        run: |
+          cargo build -p daybook_ffi --release --features nokhwa
+
+      - name: Build Compose desktop inputs on Ubuntu
+        run: |
+          ./gradlew :composeApp:packageReleaseAppImage --no-daemon
+        working-directory: src/daybook_compose
+
       - name: Build AppImage
         run: |
-          nix develop .#ci-desktop --command ./x/build-appimage-dayb.ts
+          appimage-builder --recipe tools/appimage-builder/daybook-jvm.AppImageBuilder.yml
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
         with:
           name: daybook-appimage
-          path: target/appimage/*.AppImage
+          path: daybook-appimage-builder-x86_64.AppImage

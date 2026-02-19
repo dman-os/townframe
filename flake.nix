@@ -209,6 +209,11 @@
 
           desktopBuildInputs = with pkgs; [
             openjdk21
+            # graalvmPackages.graalvm-ce
+            # curl
+            # file
+            # patchelf
+            # binutils
             appimage-run
             v4l-utils
             libv4l
