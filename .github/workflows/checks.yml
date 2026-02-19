@@ -128,7 +128,7 @@ jobs:
 
       - name: Build Android debug APK
         run: |
-          nix develop .#ci-android --command bash -lc 'cd src/daybook_compose && ./gradlew :composeApp:assembleDebug --no-daemon --no-configuration-cache'
+          nix develop .#ci-android --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew :composeApp:assembleDebug --no-daemon --no-configuration-cache'
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
@@ -157,9 +157,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Set up protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "32.x"
+
       - name: Build release MSI (Windows)
         shell: pwsh
         run: |
+          $env:PROTOC = (Get-Command protoc).Source
           cargo build -p daybook_ffi --release --features nokhwa
           .\gradlew.bat :composeApp:packageReleaseMsi --no-daemon --no-configuration-cache
         working-directory: src/daybook_compose
@@ -179,20 +185,32 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
 
-      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-01-01
+          target: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install protobuf (macOS)
+        run: |
+          brew update
+          brew install protobuf
+
       - name: Build release DMG (macOS)
         run: |
-          nix develop .#ci-compose --command bash -lc '
-            set -euo pipefail
-            cargo build -p daybook_ffi --release --features nokhwa
-            cd src/daybook_compose
-            ./gradlew :composeApp:packageReleaseDmg --no-daemon --no-configuration-cache
-          '
+          set -euo pipefail
+          export PROTOC="$(command -v protoc)"
+          cargo build -p daybook_ffi --release --features nokhwa
+          cd src/daybook_compose
+          ./gradlew :composeApp:packageReleaseDmg --no-daemon --no-configuration-cache
 
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
