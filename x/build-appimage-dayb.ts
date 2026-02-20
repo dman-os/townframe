@@ -59,7 +59,6 @@ const stageIconPath = stageAppDir.join(`${desktopId}.png`);
 const stageLauncherPath = stageBinDir.join(appName);
 const stagedMainExecutablePath = stageLibexecDir.join("bin", desktopId);
 const stagedCfgPath = stageLibexecDir.join("lib", "app", `${desktopId}.cfg`);
-const repoRoot = $.relativeDir("../");
 
 async function ensureUbuntuDeps() {
   if (Deno.env.get("DAYBOOK_SKIP_APT_INSTALL") === "1") {
@@ -111,34 +110,6 @@ async function ensureUbuntuDeps() {
   await $`sudo apt-get install -y ${packages}`;
 }
 
-async function findFfiSoPath() {
-  const candidatePaths = [
-    repoRoot.join("target", "debug", "libdaybook_ffi.so"),
-    repoRoot.join("target", "release", "libdaybook_ffi.so"),
-  ];
-  for (const candidatePath of candidatePaths) {
-    if (await candidatePath.exists()) {
-      return candidatePath;
-    }
-  }
-  throw new Error(
-    `missing libdaybook_ffi.so (checked: ${
-      candidatePaths
-        .map((path) => path.toString())
-        .join(", ")
-    })`,
-  );
-}
-
-async function ensureFfiSoPath() {
-  const existingPath = await findFfiSoPath().catch(() => null);
-  if (existingPath) {
-    return existingPath;
-  }
-  await $`cargo build -p daybook_ffi`;
-  return await findFfiSoPath();
-}
-
 await ensureUbuntuDeps();
 await $`./gradlew :composeApp:packageAppImage --no-daemon --no-configuration-cache`
   .cwd(composeRoot)
@@ -165,9 +136,6 @@ if (await stageAppDir.exists()) {
 await stageBinDir.ensureDir();
 await composeAppDir.copy(stageLibexecDir);
 await stageAppLibDir.ensureDir();
-
-const ffiSoPath = await ensureFfiSoPath();
-await ffiSoPath.copyFile(stageAppLibDir.join("libdaybook_ffi.so"));
 
 if (!(await stagedMainExecutablePath.exists())) {
   throw new Error(`missing staged executable: ${stagedMainExecutablePath}`);
