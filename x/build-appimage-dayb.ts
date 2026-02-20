@@ -98,7 +98,7 @@ async function ensureUbuntuDeps() {
   ];
 
   const isRoot = (await $`id -u`.text()).trim() === "0";
-  const hasSudo = (await $`command -v sudo`.noThrow()).code === 0;
+  const hasSudo = (await $`bach -c "command -v sudo"`.noThrow()).code === 0;
   if (isRoot) {
     await $`apt-get update`;
     await $`apt-get install -y ${packages}`;
