@@ -317,6 +317,13 @@ fun ndkLibCppSharedForAbi(targetAbi: String, androidNdkRoot: String): File? {
     return File("$ndkSysrootLibDir/$ndkAbiTriple/libc++_shared.so")
 }
 
+fun rustDesktopLibraryNameForHost(hostOs: org.gradle.internal.os.OperatingSystem): String =
+    when {
+        hostOs.isWindows -> "daybook_ffi.dll"
+        hostOs.isMacOsX -> "libdaybook_ffi.dylib"
+        else -> "libdaybook_ffi.so"
+    }
+
 // Debug variant: build Rust in debug mode
 tasks.register<Exec>("buildRustAndroidDebug") {
     group = "build"
@@ -462,7 +469,12 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
 tasks.matching {
     it.name in
         setOf(
-            "compileKotlinDesktop",
+            "createDistributable",
+            "packageAppImage",
+            "packageDeb",
+            "packageDmg",
+            "packageMsi",
+            "packageDistributionForCurrentOS",
             "desktopRun",
             "desktopRunHot",
         )
@@ -477,7 +489,175 @@ tasks.matching {
             "packageReleaseDeb",
             "packageReleaseDmg",
             "packageReleaseMsi",
+            "packageReleaseDistributionForCurrentOS",
         )
 }.configureEach {
     dependsOn("buildRustDesktopRelease")
+    doFirst {
+        val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
+        val rustDesktopReleaseLib = File(
+            repoRoot,
+            "target/release/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}"
+        )
+        if (!rustDesktopReleaseLib.exists()) {
+            throw GradleException(
+                "Missing Rust desktop library: ${rustDesktopReleaseLib.absolutePath}. " +
+                    "Build it explicitly (for example: cargo build -p daybook_ffi --release --features nokhwa)."
+            )
+        }
+    }
+}
+
+val hostOsForNativePackaging = org.gradle.internal.os.OperatingSystem.current()!!
+val hostArchForNativePackaging = System.getProperty("os.arch")
+val resourcesDirNameForNativePackaging = when {
+    hostOsForNativePackaging.isLinux && hostArchForNativePackaging in setOf("amd64", "x86_64") -> "linux-x64"
+    hostOsForNativePackaging.isLinux && hostArchForNativePackaging in setOf("aarch64", "arm64") -> "linux-arm64"
+    else -> "unsupported"
+}
+
+tasks.register<Exec>("buildNativeImageDayb") {
+    group = "distribution"
+    description = "Build a Linux native image for Daybook from the uber jar"
+
+    val outputDir = file("build/compose/native/$resourcesDirNameForNativePackaging")
+    val outputFile = File(outputDir, "daybook")
+    val reachabilityDir = file("reachability-metadata/linux")
+    val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
+    val rustLibFile = File(repoRoot, "target/release/libdaybook_ffi.so")
+
+    dependsOn("packageUberJarForCurrentOS")
+    dependsOn("buildRustDesktopRelease")
+
+    inputs.dir(file("build/compose/jars"))
+    inputs.file(rustLibFile)
+    inputs.dir(reachabilityDir)
+    outputs.file(outputFile)
+    notCompatibleWithConfigurationCache("experimental native-image packaging task")
+
+    doFirst {
+        if (!hostOsForNativePackaging.isLinux || resourcesDirNameForNativePackaging == "unsupported") {
+            throw GradleException("buildNativeImageDayb currently supports Linux only")
+        }
+        if (!rustLibFile.exists()) {
+            throw GradleException("Missing Rust desktop library: ${rustLibFile.absolutePath}")
+        }
+        if (!reachabilityDir.exists()) {
+            throw GradleException("Missing reachability metadata dir: ${reachabilityDir.absolutePath}")
+        }
+
+        val jarCandidates = fileTree("build/compose/jars") {
+            include("org.example.daybook-$resourcesDirNameForNativePackaging-*.jar")
+        }.files.sortedBy { it.name }
+        val jarFile = jarCandidates.lastOrNull()
+            ?: throw GradleException("Missing uber jar for $resourcesDirNameForNativePackaging in build/compose/jars")
+
+        outputDir.mkdirs()
+        val nativeImageCmd = System.getenv("NATIVE_IMAGE_BIN") ?: "native-image"
+
+        val existingLibraryPath = System.getenv("LIBRARY_PATH").orEmpty()
+        val joinedLibraryPath = listOf(rustLibFile.parentFile.absolutePath, existingLibraryPath)
+            .filter { it.isNotBlank() }
+            .joinToString(":")
+        environment("LIBRARY_PATH", joinedLibraryPath)
+
+        commandLine(
+            nativeImageCmd,
+            "--no-fallback",
+            "--enable-native-access=ALL-UNNAMED",
+            "--add-modules=java.desktop,jdk.unsupported",
+            "--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED",
+            "-H:ConfigurationFileDirectories=${reachabilityDir.absolutePath}",
+            "-H:+AddAllCharsets",
+            "-J-Dcompose.application.configure.swing.globals=true",
+            "-J-Djava.awt.headless=false",
+            "-J-Dsun.java2d.dpiaware=true",
+            "-J-Dfile.encoding=UTF-8",
+            "-H:+ReportExceptionStackTraces",
+            "-jar",
+            jarFile.absolutePath,
+            "-o",
+            outputFile.absolutePath,
+        )
+    }
+
+    doLast {
+        val libDir = File(outputDir, "lib")
+        libDir.mkdirs()
+        rustLibFile.copyTo(File(libDir, rustLibFile.name), overwrite = true)
+
+        val jarCandidates = fileTree("build/compose/jars") {
+            include("org.example.daybook-$resourcesDirNameForNativePackaging-*.jar")
+        }.files.sortedBy { it.name }
+        val jarFile = jarCandidates.lastOrNull()
+            ?: throw GradleException("Missing uber jar for $resourcesDirNameForNativePackaging in build/compose/jars")
+
+        val jarEntriesToExtract = when (resourcesDirNameForNativePackaging) {
+            "linux-x64" -> arrayOf(
+                "libskiko-linux-x64.so",
+                "libskiko-linux-x64.so.sha256",
+                "natives/linux_x64/libsqliteJni.so",
+                "com/sun/jna/linux-x86-64/libjnidispatch.so",
+            )
+            "linux-arm64" -> arrayOf(
+                "libskiko-linux-arm64.so",
+                "libskiko-linux-arm64.so.sha256",
+                "natives/linux_arm64/libsqliteJni.so",
+                "com/sun/jna/linux-aarch64/libjnidispatch.so",
+            )
+            else -> emptyArray()
+        }
+
+        if (jarEntriesToExtract.isNotEmpty()) {
+            zipTree(jarFile).matching {
+                include(*jarEntriesToExtract)
+            }.forEach { extracted ->
+                extracted.copyTo(File(outputDir, extracted.name), overwrite = true)
+            }
+        }
+
+        val nativeImageBin = System.getenv("NATIVE_IMAGE_BIN")
+        val graalHome =
+            nativeImageBin
+                ?.let { File(it).absoluteFile.parentFile?.parentFile }
+                ?: System.getenv("GRAALVM_HOME")?.let { File(it) }
+        val jawtSource = graalHome?.let { File(it, "lib/libjawt.so") }
+        if (jawtSource != null && jawtSource.exists()) {
+            jawtSource.copyTo(File(libDir, "libjawt.so"), overwrite = true)
+        }
+    }
+}
+
+tasks.register<Exec>("packageLinuxAppImageAndTarballDayb") {
+    group = "distribution"
+    description = "Package Linux tarball and AppImage from native image artifacts"
+    dependsOn("buildNativeImageDayb")
+    notCompatibleWithConfigurationCache("experimental Linux packaging task")
+    commandLine(
+        "bash",
+        "../package-for-linux-dayb.sh",
+    )
+}
+
+tasks.register<Exec>("packageLinuxAppImageWithLinuxdeployDayb") {
+    group = "distribution"
+    description = "Package Linux tarball and AppImage via linuxdeploy"
+    dependsOn("buildNativeImageDayb")
+    notCompatibleWithConfigurationCache("experimental Linux packaging task using linuxdeploy")
+    commandLine(
+        "bash",
+        "../package-for-linux-dayb-linuxdeploy.sh",
+    )
+}
+
+tasks.configureEach {
+    when (name) {
+        "buildNativeImageDayb" -> {
+            mustRunAfter("packageUberJarForCurrentOS")
+            dependsOn("packageUberJarForCurrentOS")
+        }
+        "packageLinuxAppImageAndTarballDayb" -> {
+            dependsOn("buildNativeImageDayb")
+        }
+    }
 }

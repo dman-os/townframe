@@ -58,6 +58,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -99,6 +100,7 @@ import org.example.daybook.LocalContainer
 import org.example.daybook.Routes
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
+import org.example.daybook.progress.ProgressList
 import org.example.daybook.uniffi.core.Tab
 import org.example.daybook.uniffi.core.Table
 // TODO: Update compact.kt to use new LayoutWindowConfig structure
@@ -852,25 +854,49 @@ fun LeftDrawer(
         modifier = modifier.width(320.dp),
         drawerContainerColor = MaterialTheme.colorScheme.surfaceContainer
     ) {
+        var selectedPane by remember { mutableIntStateOf(0) }
+
         Text(
             text = "LeftDrawer",
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.padding(16.dp)
         )
         HorizontalDivider()
-        selectedTable?.let { table ->
-            Text(
-                text = table.title,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-            )
-            HorizontalDivider()
+
+        when (selectedPane) {
+            0 -> {
+                selectedTable?.let { table ->
+                    Text(
+                        text = table.title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    HorizontalDivider()
+                }
+                TabSelectionList(
+                    onTabSelected = onTabSelected,
+                    modifier = Modifier.weight(1f),
+                    growUpward = false
+                )
+            }
+
+            else -> {
+                ProgressList(modifier = Modifier.weight(1f).fillMaxWidth())
+            }
         }
-        TabSelectionList(
-            onTabSelected = onTabSelected,
-            modifier = Modifier.weight(1f),
-            growUpward = false
-        )
+
+        TabRow(selectedTabIndex = selectedPane) {
+            Tab(
+                selected = selectedPane == 0,
+                onClick = { selectedPane = 0 },
+                text = { Text("Tabs") }
+            )
+            Tab(
+                selected = selectedPane == 1,
+                onClick = { selectedPane = 1 },
+                text = { Text("Progress") }
+            )
+        }
         NavDrawerBottomBar(onAddTab = onAddTab, onClose = onDismiss)
     }
 }

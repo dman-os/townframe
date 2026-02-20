@@ -20,9 +20,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  GHJK_ENV: ci
-
 jobs:
   checks:
     runs-on: ubuntu-latest
@@ -73,41 +70,3 @@ jobs:
           # # FIXME: use real ollama
           # OLLAMA_URL: http://localhost:11434
           # OLLAMA_MODEL: gemma3 
-
-  appimage:
-    runs-on: ubuntu-latest
-    steps:
-      - name: remove unused files
-        # based on https://dev.to/mathio/squeezing-disk-space-from-github-actions-runners-an-engineers-guide-3pjg
-        run: |
-          sudo rm -rf /usr/lib/jvm
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/julia*
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /opt/microsoft /opt/google
-          sudo rm -rf /opt/az
-          sudo rm -rf /usr/local/share/powershell
-          # sudo rm -rf /opt/hostedtoolcache
-
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: DeterminateSystems/nix-installer-action@v16
-
-      - uses: DeterminateSystems/flakehub-cache-action@v3
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build AppImage
-        run: |
-          nix develop .#ci-desktop --command ./x/build-appimage-dayb.ts
-
-      - name: Upload AppImage
-        uses: actions/upload-artifact@v4
-        with:
-          name: daybook-appimage
-          path: target/appimage/*.AppImage

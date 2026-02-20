@@ -8,7 +8,7 @@ const processHandle = new Deno.Command("/bin/sh", {
   args: ["-lc", "./gradlew hotReloadDesktopMain"],
   stdout: "piped",
   stderr: "piped",
-  cwd: $.dbg($.relativeDir("../src/daybook_compose/").toString()),
+  cwd: $.relativeDir("../src/daybook_compose/").toString(),
 }).spawn();
 const textDecoder = new TextDecoder();
 

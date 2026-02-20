@@ -209,6 +209,11 @@
 
           desktopBuildInputs = with pkgs; [
             openjdk21
+            # graalvmPackages.graalvm-ce
+            # curl
+            # file
+            # patchelf
+            # binutils
             appimage-run
             v4l-utils
             libv4l
@@ -234,10 +239,11 @@
           devOnlyInputs = with pkgs; [
             # FIXME: why do we need golang for again?
             # did an llm strip comments?
-            go
+            # go
             androidComposition
             v4l-utils
             libv4l
+            gh
           ];
 
           devShellBuildInputs =
@@ -254,19 +260,40 @@
 
           ciRustShell = pkgs.mkShell ({
             name = "ci-rust";
-            buildInputs = baseBuildInputs ++ rustLintInputs ++ [ rustRust ];
+            buildInputs =
+              baseBuildInputs
+              ++ rustLintInputs
+              ++ [
+                rustRust
+                pkgs.llvmPackages.clang
+                pkgs.llvmPackages.libclang
+                pkgs.stdenv.cc.cc.lib
+              ];
+            shellHook = ''
+              export LIBCLANG_PATH="${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib"
+              export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${
+                pkgs.lib.makeLibraryPath [
+                  (pkgs.lib.getLib pkgs.llvmPackages.libclang)
+                  pkgs.stdenv.cc.cc.lib
+                ]
+              }"
+            '';
           } // ghjkMainEnv);
 
           ciAndroidShell =
             pkgs.mkShell ({
               name = "ci-android";
               buildInputs = baseBuildInputs ++ androidBuildInputs ++ [ rustAndroid ];
-            } // ghjkMainEnv)
-            // (androidEnvVars { androidSdk = androidSdkOnly.androidsdk; });
+            } // ghjkMainEnv // androidEnvVars { androidSdk = androidSdkOnly.androidsdk; });
 
           ciDesktopShell = pkgs.mkShell ({
             name = "ci-desktop";
             buildInputs = baseBuildInputs ++ dioxusBuildInputs ++ desktopBuildInputs ++ [ rustRust ];
+          } // ghjkMainEnv);
+
+          ciComposeShell = pkgs.mkShell ({
+            name = "ci-compose";
+            buildInputs = baseBuildInputs ++ [ pkgs.openjdk21 rustRust ];
           } // ghjkMainEnv);
 
           devShell =
@@ -318,6 +345,7 @@
             ci-rust = ciRustShell;
             ci-android = ciAndroidShell;
             ci-desktop = ciDesktopShell;
+            ci-compose = ciComposeShell;
           };
         };
     };

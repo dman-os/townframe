@@ -17,37 +17,6 @@ interface types {
     noop: func(inc: tuple<errors-validation, error-internal, datetime, uuid>) -> result;
 }
 
-interface llm-chat {
-    variant role {
-        user,
-        assitant
-    }
-
-    variant request-input {
-        text(string)
-    }
-
-    record request {
-        input: request-input
-    }
-
-    record response-message {
-        role: role,
-        text: string,
-    }
-    variant response-item {
-        message(response-message)
-    }
-
-    record response {
-        items:  list<response-item>,
-        text: string
-    }
-
-    respond: func(request: request) -> result<response, string>;
-}
-
 world guest {
     import types;
-    import llm-chat;
 }

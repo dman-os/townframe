@@ -47,6 +47,7 @@ pub struct Rt {
     pub config_repo: Arc<ConfigRepo>,
     pub wflow_ingress: Arc<dyn wflow::WflowIngress>,
     pub dispatch_repo: Arc<dispatch::DispatchRepo>,
+    pub progress_repo: Arc<crate::progress::ProgressRepo>,
     pub acx: AmCtx,
     pub wflow_part_state: Arc<PartitionWorkingState>,
     pub wcx: wflow::Ctx,
@@ -189,6 +190,7 @@ impl Rt {
         drawer: Arc<DrawerRepo>,
         plugs_repo: Arc<PlugsRepo>,
         dispatch_repo: Arc<DispatchRepo>,
+        progress_repo: Arc<crate::progress::ProgressRepo>,
         blobs_repo: Arc<BlobsRepo>,
         config_repo: Arc<ConfigRepo>,
         local_actor_id: automerge::ActorId,
@@ -223,11 +225,8 @@ impl Rt {
             Arc::clone(&sqlite_local_state_repo),
             Arc::clone(&config_repo),
         ));
-        let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {
-            ollama_url: utils_rs::get_env_var("OLLAMA_URL")?,
-            ollama_model: utils_rs::get_env_var("OLLAMA_MODEL")?,
-        })
-        .wrap_err("error creating utils plugin")?;
+        let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {})
+            .wrap_err("error creating utils plugin")?;
         let mltools_plugin = wash_plugin_mltools::MltoolsPlugin::new(wash_plugin_mltools::Config {
             ollama_url: utils_rs::get_env_var("OLLAMA_URL")?,
             ollama_model: utils_rs::get_env_var("OLLAMA_MODEL")?,
@@ -302,6 +301,7 @@ impl Rt {
             acx,
             wflow_ingress,
             dispatch_repo,
+            progress_repo,
             wcx,
             wash_host,
             wflow_plugin,
@@ -451,18 +451,70 @@ impl Rt {
         let is_done = match &event.result {
             JobRunResult::Success { value_json } => {
                 info!(?value_json, "success on dispatch wflow");
+                self.progress_repo
+                    .add_update(
+                        dispatch_id,
+                        crate::progress::ProgressUpdate {
+                            at: jiff::Timestamp::now(),
+                            title: None,
+                            deets: crate::progress::ProgressUpdateDeets::Status {
+                                severity: crate::progress::ProgressSeverity::Info,
+                                message: "dispatch completed successfully".to_string(),
+                            },
+                        },
+                    )
+                    .await?;
                 true
             }
             JobRunResult::Aborted => {
                 info!("dispatch wflow aborted");
+                self.progress_repo
+                    .add_update(
+                        dispatch_id,
+                        crate::progress::ProgressUpdate {
+                            at: jiff::Timestamp::now(),
+                            title: None,
+                            deets: crate::progress::ProgressUpdateDeets::Status {
+                                severity: crate::progress::ProgressSeverity::Warn,
+                                message: "dispatch aborted".to_string(),
+                            },
+                        },
+                    )
+                    .await?;
                 true
             }
             JobRunResult::WorkerErr(err) => {
                 error!(?err, "worker error on dispatch wflow");
+                self.progress_repo
+                    .add_update(
+                        dispatch_id,
+                        crate::progress::ProgressUpdate {
+                            at: jiff::Timestamp::now(),
+                            title: None,
+                            deets: crate::progress::ProgressUpdateDeets::Status {
+                                severity: crate::progress::ProgressSeverity::Error,
+                                message: format!("worker error: {err:?}"),
+                            },
+                        },
+                    )
+                    .await?;
                 true
             }
             JobRunResult::WflowErr(JobError::Terminal { error_json }) => {
                 error!(?error_json, "terminal error on dispatch wflow");
+                self.progress_repo
+                    .add_update(
+                        dispatch_id,
+                        crate::progress::ProgressUpdate {
+                            at: jiff::Timestamp::now(),
+                            title: None,
+                            deets: crate::progress::ProgressUpdateDeets::Status {
+                                severity: crate::progress::ProgressSeverity::Error,
+                                message: format!("terminal error: {error_json}"),
+                            },
+                        },
+                    )
+                    .await?;
                 true
             }
             JobRunResult::WflowErr(JobError::Transient {
@@ -474,6 +526,19 @@ impl Rt {
                 retry_policy: Some(RetryPolicy::Immediate),
             }) => {
                 warn!("transient error on dispatch wflow: {error_json:?}");
+                self.progress_repo
+                    .add_update(
+                        dispatch_id,
+                        crate::progress::ProgressUpdate {
+                            at: jiff::Timestamp::now(),
+                            title: None,
+                            deets: crate::progress::ProgressUpdateDeets::Status {
+                                severity: crate::progress::ProgressSeverity::Warn,
+                                message: format!("transient error, retrying: {error_json}"),
+                            },
+                        },
+                    )
+                    .await?;
                 false
             }
             JobRunResult::StepEffect(..) => false,
@@ -487,6 +552,25 @@ impl Rt {
             }) = &dispatch.args;
 
             let is_success = matches!(&event.result, JobRunResult::Success { .. });
+            self.progress_repo
+                .add_update(
+                    dispatch_id,
+                    crate::progress::ProgressUpdate {
+                        at: jiff::Timestamp::now(),
+                        title: None,
+                        deets: crate::progress::ProgressUpdateDeets::Completed {
+                            state: if is_success {
+                                crate::progress::ProgressFinalState::Succeeded
+                            } else if matches!(&event.result, JobRunResult::Aborted) {
+                                crate::progress::ProgressFinalState::Cancelled
+                            } else {
+                                crate::progress::ProgressFinalState::Failed
+                            },
+                            message: None,
+                        },
+                    },
+                )
+                .await?;
 
             if is_success {
                 // Merge staging branch into target branch
@@ -670,10 +754,38 @@ impl Rt {
                 }
             }
         };
+        let active_dispatch = Arc::new(ActiveDispatch { args, deets });
         self.dispatch_repo
-            .add(
-                dispatch_id.clone(),
-                Arc::new(ActiveDispatch { args, deets }),
+            .add(dispatch_id.clone(), Arc::clone(&active_dispatch))
+            .await?;
+        let mut tags = vec![
+            "/type/dispatch".to_string(),
+            format!("/dispatch/{dispatch_id}"),
+        ];
+        let title = match &active_dispatch.args {
+            ActiveDispatchArgs::FacetRoutine(facet_args) => {
+                tags.push(format!("/docs/{}", facet_args.doc_id));
+                dispatch_id.clone()
+            }
+        };
+        self.progress_repo
+            .upsert_task(crate::progress::CreateProgressTaskArgs {
+                id: dispatch_id.clone(),
+                tags,
+                retention: crate::progress::ProgressRetentionPolicy::UserDismissable,
+            })
+            .await?;
+        self.progress_repo
+            .add_update(
+                &dispatch_id,
+                crate::progress::ProgressUpdate {
+                    at: jiff::Timestamp::now(),
+                    title: Some(title),
+                    deets: crate::progress::ProgressUpdateDeets::Status {
+                        severity: crate::progress::ProgressSeverity::Info,
+                        message: "dispatch queued".to_string(),
+                    },
+                },
             )
             .await?;
         Ok(dispatch_id)
@@ -694,6 +806,19 @@ impl Rt {
         }
         match &dispatch.deets {
             ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
+                self.progress_repo
+                    .add_update(
+                        dispatch_id,
+                        crate::progress::ProgressUpdate {
+                            at: jiff::Timestamp::now(),
+                            title: None,
+                            deets: crate::progress::ProgressUpdateDeets::Status {
+                                severity: crate::progress::ProgressSeverity::Warn,
+                                message: "cancellation requested".to_string(),
+                            },
+                        },
+                    )
+                    .await?;
                 self.wflow_ingress
                     .cancel_job(
                         Arc::from(wflow_job_id.as_str()),

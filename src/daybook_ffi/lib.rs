@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 #[allow(unused)]
 mod interlude {
     pub(crate) use crate::{Ctx, SharedCtx};
@@ -21,6 +23,7 @@ mod camera;
 mod ffi;
 mod macros;
 mod repos;
+mod rt;
 
 pub use daybook_core::repo::{GlobalCtx, RepoOpenOptions, SqlCtx};
 
@@ -69,8 +72,16 @@ impl Ctx {
         &self.repo_ctx.local_user_path
     }
 
+    fn sql(&self) -> &daybook_core::repo::SqlCtx {
+        &self.repo_ctx.sql
+    }
+
     fn blobs_root(&self) -> &std::path::Path {
         &self.repo_ctx.layout.blobs_root
+    }
+
+    fn repo_root(&self) -> &std::path::Path {
+        &self.repo_ctx.layout.repo_root
     }
 }
 

@@ -13,9 +13,9 @@ pub struct FacetKeyDisplayHintEntry {
 }
 
 #[derive(uniffi::Object)]
-struct ConfigRepoFfi {
+pub struct ConfigRepoFfi {
     fcx: SharedFfiCtx,
-    repo: Arc<ConfigRepo>,
+    pub repo: Arc<ConfigRepo>,
     stop_token: tokio::sync::Mutex<Option<daybook_core::repos::RepoStopToken>>,
 }
 

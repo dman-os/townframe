@@ -1,0 +1,157 @@
+name: build daybook compose
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      tmate_enabled:
+        type: boolean
+        description: |
+          Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate).
+        required: false
+        default: false
+
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-appimage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: set up java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: set up rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-01-01
+          target: wasm32-wasip2,wasm32-unknown-unknown,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: denoland/setup-deno@v2
+
+      - name: install rust dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libarchive-tools
+
+      - name: debug build 
+        run: |
+          export PROTOC="$(command -v protoc)"
+          deno run -A ./x/build-appimage-dayb.ts
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: daybook-appimage
+          path: ./target/appimage/
+
+  android-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: debug build
+        run: |
+          nix develop .#ci-android --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew :composeApp:assembleDebug --no-daemon --no-configuration-cache'
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: daybook-android-debug
+          path: src/daybook_compose/composeApp/build/outputs/apk/
+
+  windows-msi:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-01-01
+          target: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: set up protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "32.x"
+
+      - name: debug build
+        shell: pwsh
+        run: |
+          $env:PROTOC = (Get-Command protoc).Source
+          cargo build -p daybook_ffi
+          .\gradlew.bat :composeApp:packageMsi --no-daemon --no-configuration-cache
+        working-directory: src/daybook_compose
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: daybook-windows-installer
+          path: |
+            src/daybook_compose/composeApp/build/compose/binaries/
+
+  macos-dmg:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-01-01
+          target: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: install deps
+        run: |
+          brew update
+          brew install protobuf
+
+      - name: debug build
+        run: |
+          set -euo pipefail
+          export PROTOC="$(command -v protoc)"
+          cargo build -p daybook_ffi
+          ./gradlew :composeApp:packageDmg --no-daemon --no-configuration-cache
+        working-directory: src/daybook_compose
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: daybook-macos-dmg
+          path: src/daybook_compose/composeApp/build/compose/binaries/

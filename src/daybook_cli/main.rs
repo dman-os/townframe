@@ -16,6 +16,7 @@ use daybook_core::blobs::BlobsRepo;
 use daybook_core::config::ConfigRepo;
 use daybook_core::drawer::DrawerRepo;
 use daybook_core::plugs::{manifest, PlugsRepo};
+use daybook_core::progress::ProgressRepo;
 use daybook_core::rt::dispatch::DispatchRepo;
 
 mod config;
@@ -397,6 +398,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         //
         (drawer, drawer_stop),
         (dispatch_repo, dispatch_stop),
+        progress_repo,
         (config_repo, config_stop),
     ) = tokio::try_join!(
         DrawerRepo::load(
@@ -415,6 +417,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             ctx.doc_app.document_id().clone(),
             ctx.local_actor_id.clone()
         ),
+        ProgressRepo::boot(ctx.sql.db_pool.clone()),
         ConfigRepo::load(
             ctx.acx.clone(),
             ctx.doc_app.document_id().clone(),
@@ -523,6 +526,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
                     Arc::clone(&drawer),
                     Arc::clone(&plugs_repo),
                     Arc::clone(&dispatch_repo),
+                    Arc::clone(&progress_repo),
                     Arc::clone(&blobs_repo),
                     Arc::clone(&config_repo),
                     ctx.local_actor_id.clone(),
