@@ -11,7 +11,7 @@ Experimental.
 
 ## Daybook
 
-Daybook is an experiental attempt to build to build a "notes app" heavily informed by my (dman-os) tastes and capabilites.
+Daybook is an experiental attempt to build to build a "notes app" heavily informed by my tastes and capabilites.
 
 It currently consists of:
 - WIP CLI [^](./src/daybook_cli/)
