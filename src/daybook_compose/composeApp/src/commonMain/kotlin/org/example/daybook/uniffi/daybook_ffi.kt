@@ -941,15 +941,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_progresseventlistener_on_progress_event(
     ): Short
+    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_add_update(
+    ): Short
     external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_clear_completed(
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_dismiss(
     ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_add_update(
-    ): Short
     external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_register_listener(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_upsert_task(
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_get(
     ): Short
@@ -962,6 +960,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_mark_viewed(
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_set_retention_override(
+    ): Short
+    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_upsert_task(
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event(
     ): Short
@@ -1222,27 +1222,27 @@ external fun uniffi_daybook_ffi_fn_free_progressrepoffi(`handle`: Long,uniffi_ou
 ): Unit
 external fun uniffi_daybook_ffi_fn_constructor_progressrepoffi_load(`fcx`: Long,
 ): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_add_update(`ptr`: Long,`taskId`: RustBuffer.ByValue,`update`: RustBufferProgressUpdate.ByValue,
+): Long
 external fun uniffi_daybook_ffi_fn_method_progressrepoffi_clear_completed(`ptr`: Long,
 ): Long
-external fun uniffi_daybook_ffi_fn_method_progressrepoffi_dismiss(`ptr`: Long,`id`: RustBuffer.ByValue,
-): Long
-external fun uniffi_daybook_ffi_fn_method_progressrepoffi_ffi_add_update(`ptr`: Long,`id`: RustBuffer.ByValue,`update`: RustBufferProgressUpdate.ByValue,
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_dismiss(`ptr`: Long,`taskId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_progressrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
-external fun uniffi_daybook_ffi_fn_method_progressrepoffi_ffi_upsert_task(`ptr`: Long,`args`: RustBufferCreateProgressTaskArgs.ByValue,
-): Long
-external fun uniffi_daybook_ffi_fn_method_progressrepoffi_get(`ptr`: Long,`id`: RustBuffer.ByValue,
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_get(`ptr`: Long,`taskId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_progressrepoffi_list(`ptr`: Long,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_progressrepoffi_list_by_tag_prefix(`ptr`: Long,`tagPrefix`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_daybook_ffi_fn_method_progressrepoffi_list_updates(`ptr`: Long,`id`: RustBuffer.ByValue,
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_list_updates(`ptr`: Long,`taskId`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_daybook_ffi_fn_method_progressrepoffi_mark_viewed(`ptr`: Long,`id`: RustBuffer.ByValue,
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_mark_viewed(`ptr`: Long,`taskId`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_daybook_ffi_fn_method_progressrepoffi_set_retention_override(`ptr`: Long,`id`: RustBuffer.ByValue,`retention`: RustBuffer.ByValue,
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_set_retention_override(`ptr`: Long,`taskId`: RustBuffer.ByValue,`retentionOverride`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_upsert_task(`ptr`: Long,`args`: RustBufferCreateProgressTaskArgs.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_clone_tableseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
@@ -1533,22 +1533,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_progresseventlistener_on_progress_event() != 13451.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_add_update() != 18382.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_clear_completed() != 12325.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_dismiss() != 13023.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_add_update() != 26002.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_dismiss() != 26190.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_register_listener() != 41661.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_upsert_task() != 24380.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_get() != 19936.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_get() != 58400.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_list() != 40222.toShort()) {
@@ -1557,13 +1554,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_list_by_tag_prefix() != 32341.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_list_updates() != 10270.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_list_updates() != 48318.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_mark_viewed() != 64573.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_mark_viewed() != 14385.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_set_retention_override() != 36164.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_set_retention_override() != 53529.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_upsert_task() != 16899.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event() != 16910.toShort()) {
@@ -6619,27 +6619,27 @@ public object FfiConverterTypeProgressEventListener: FfiConverter<ProgressEventL
 
 public interface ProgressRepoFfiInterface {
     
+    suspend fun `addUpdate`(`taskId`: kotlin.String, `update`: ProgressUpdate)
+    
     suspend fun `clearCompleted`(): kotlin.ULong
     
-    suspend fun `dismiss`(`id`: kotlin.String)
-    
-    suspend fun `ffiAddUpdate`(`id`: kotlin.String, `update`: ProgressUpdate)
+    suspend fun `dismiss`(`taskId`: kotlin.String)
     
     fun `ffiRegisterListener`(`listener`: ProgressEventListener): ListenerRegistration
     
-    suspend fun `ffiUpsertTask`(`args`: CreateProgressTaskArgs)
-    
-    suspend fun `get`(`id`: kotlin.String): ProgressTask?
+    suspend fun `get`(`taskId`: kotlin.String): ProgressTask?
     
     suspend fun `list`(): List<ProgressTask>
     
     suspend fun `listByTagPrefix`(`tagPrefix`: kotlin.String): List<ProgressTask>
     
-    suspend fun `listUpdates`(`id`: kotlin.String): List<ProgressUpdateEntry>
+    suspend fun `listUpdates`(`taskId`: kotlin.String): List<ProgressUpdateEntry>
     
-    suspend fun `markViewed`(`id`: kotlin.String)
+    suspend fun `markViewed`(`taskId`: kotlin.String)
     
-    suspend fun `setRetentionOverride`(`id`: kotlin.String, `retention`: ProgressRetentionPolicy?)
+    suspend fun `setRetentionOverride`(`taskId`: kotlin.String, `retentionOverride`: ProgressRetentionPolicy?)
+    
+    suspend fun `upsertTask`(`args`: CreateProgressTaskArgs)
     
     companion object
 }
@@ -6743,6 +6743,28 @@ open class ProgressRepoFfi: Disposable, AutoCloseable, ProgressRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `addUpdate`(`taskId`: kotlin.String, `update`: ProgressUpdate) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_add_update(
+                uniffiHandle,
+                FfiConverterString.lower(`taskId`),FfiConverterTypeProgressUpdate.lower(`update`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `clearCompleted`() : kotlin.ULong {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
@@ -6764,34 +6786,12 @@ open class ProgressRepoFfi: Disposable, AutoCloseable, ProgressRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `dismiss`(`id`: kotlin.String) {
+    override suspend fun `dismiss`(`taskId`: kotlin.String) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_dismiss(
                 uniffiHandle,
-                FfiConverterString.lower(`id`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiAddUpdate`(`id`: kotlin.String, `update`: ProgressUpdate) {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_ffi_add_update(
-                uniffiHandle,
-                FfiConverterString.lower(`id`),FfiConverterTypeProgressUpdate.lower(`update`),
+                FfiConverterString.lower(`taskId`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
@@ -6821,34 +6821,12 @@ open class ProgressRepoFfi: Disposable, AutoCloseable, ProgressRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `ffiUpsertTask`(`args`: CreateProgressTaskArgs) {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_ffi_upsert_task(
-                uniffiHandle,
-                FfiConverterTypeCreateProgressTaskArgs.lower(`args`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `get`(`id`: kotlin.String) : ProgressTask? {
+    override suspend fun `get`(`taskId`: kotlin.String) : ProgressTask? {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_get(
                 uniffiHandle,
-                FfiConverterString.lower(`id`),
+                FfiConverterString.lower(`taskId`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -6906,12 +6884,12 @@ open class ProgressRepoFfi: Disposable, AutoCloseable, ProgressRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `listUpdates`(`id`: kotlin.String) : List<ProgressUpdateEntry> {
+    override suspend fun `listUpdates`(`taskId`: kotlin.String) : List<ProgressUpdateEntry> {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_list_updates(
                 uniffiHandle,
-                FfiConverterString.lower(`id`),
+                FfiConverterString.lower(`taskId`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -6927,12 +6905,12 @@ open class ProgressRepoFfi: Disposable, AutoCloseable, ProgressRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `markViewed`(`id`: kotlin.String) {
+    override suspend fun `markViewed`(`taskId`: kotlin.String) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_mark_viewed(
                 uniffiHandle,
-                FfiConverterString.lower(`id`),
+                FfiConverterString.lower(`taskId`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
@@ -6949,12 +6927,34 @@ open class ProgressRepoFfi: Disposable, AutoCloseable, ProgressRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setRetentionOverride`(`id`: kotlin.String, `retention`: ProgressRetentionPolicy?) {
+    override suspend fun `setRetentionOverride`(`taskId`: kotlin.String, `retentionOverride`: ProgressRetentionPolicy?) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_set_retention_override(
                 uniffiHandle,
-                FfiConverterString.lower(`id`),FfiConverterOptionalTypeProgressRetentionPolicy.lower(`retention`),
+                FfiConverterString.lower(`taskId`),FfiConverterOptionalTypeProgressRetentionPolicy.lower(`retentionOverride`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `upsertTask`(`args`: CreateProgressTaskArgs) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_upsert_task(
+                uniffiHandle,
+                FfiConverterTypeCreateProgressTaskArgs.lower(`args`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },

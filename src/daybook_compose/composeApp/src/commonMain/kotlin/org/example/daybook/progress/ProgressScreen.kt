@@ -1,3 +1,5 @@
+@file:OptIn(kotlin.time.ExperimentalTime::class)
+
 package org.example.daybook.progress
 
 import androidx.compose.foundation.background
@@ -178,7 +180,7 @@ private fun ProgressTaskRow(
                         )
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             LiveDurationText(
-                                createdAtSecs = task.createdAtUnixSecs,
+                                createdAtSecs = task.createdAt.epochSeconds,
                                 endAtSecs = endAtSecs,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -226,14 +228,14 @@ private fun ProgressTaskRow(
                 }
                 is ProgressUpdateDeets.Status -> {
                     TimelineUpdateRow(
-                        at = task.latestUpdate?.atUnixSecs ?: task.updatedAtUnixSecs,
+                        at = task.latestUpdate?.at?.epochSeconds ?: task.updatedAt.epochSeconds,
                         deets = updateEntry
                     )
                 }
 
                 is ProgressUpdateDeets.Completed -> {
                     TimelineUpdateRow(
-                        at = task.latestUpdate?.atUnixSecs ?: task.updatedAtUnixSecs,
+                        at = task.latestUpdate?.at?.epochSeconds ?: task.updatedAt.epochSeconds,
                         deets = updateEntry
                     )
                 }
@@ -367,7 +369,7 @@ private fun ProgressDetailScreen(
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         LiveDurationText(
-                            createdAtSecs = task.createdAtUnixSecs,
+                            createdAtSecs = task.createdAt.epochSeconds,
                             endAtSecs = taskEndTimestamp(task),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -426,7 +428,7 @@ private fun ProgressDetailScreen(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 items(updates, key = { it.sequence }) { update ->
-                    TimelineUpdateRow(at = update.atUnixSecs, deets = update.update.deets)
+                    TimelineUpdateRow(at = update.at.epochSeconds, deets = update.update.deets)
                 }
             }
         }
@@ -501,7 +503,7 @@ private fun formatDuration(secondsRaw: Long): String {
 private fun taskEndTimestamp(task: ProgressTask): Long? =
     when (task.state) {
         ProgressTaskState.ACTIVE -> null
-        else -> task.latestUpdate?.atUnixSecs ?: task.updatedAtUnixSecs
+        else -> task.latestUpdate?.at?.epochSeconds ?: task.updatedAt.epochSeconds
     }
 
 private data class ProgressTypeInfo(

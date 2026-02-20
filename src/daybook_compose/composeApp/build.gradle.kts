@@ -469,6 +469,12 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
 tasks.matching {
     it.name in
         setOf(
+            "createDistributable",
+            "packageAppImage",
+            "packageDeb",
+            "packageDmg",
+            "packageMsi",
+            "packageDistributionForCurrentOS",
             "desktopRun",
             "desktopRunHot",
         )
@@ -483,8 +489,10 @@ tasks.matching {
             "packageReleaseDeb",
             "packageReleaseDmg",
             "packageReleaseMsi",
+            "packageReleaseDistributionForCurrentOS",
         )
 }.configureEach {
+    dependsOn("buildRustDesktopRelease")
     doFirst {
         val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
         val rustDesktopReleaseLib = File(

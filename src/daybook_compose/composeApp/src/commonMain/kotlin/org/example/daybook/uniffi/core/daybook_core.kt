@@ -1711,13 +1711,13 @@ data class ProgressTask (
     , 
     var `tags`: List<kotlin.String>
     , 
-    var `createdAtUnixSecs`: kotlin.Long
+    var `createdAt`: Timestamp
     , 
-    var `updatedAtUnixSecs`: kotlin.Long
+    var `updatedAt`: Timestamp
     , 
-    var `viewedAtUnixSecs`: kotlin.Long?
+    var `viewedAt`: Timestamp?
     , 
-    var `dismissedAtUnixSecs`: kotlin.Long?
+    var `dismissedAt`: Timestamp?
     , 
     var `state`: ProgressTaskState
     , 
@@ -1745,10 +1745,10 @@ public object FfiConverterTypeProgressTask: FfiConverterRustBuffer<ProgressTask>
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterSequenceString.read(buf),
-            FfiConverterLong.read(buf),
-            FfiConverterLong.read(buf),
-            FfiConverterOptionalLong.read(buf),
-            FfiConverterOptionalLong.read(buf),
+            FfiConverterTypeTimestamp.read(buf),
+            FfiConverterTypeTimestamp.read(buf),
+            FfiConverterOptionalTypeTimestamp.read(buf),
+            FfiConverterOptionalTypeTimestamp.read(buf),
             FfiConverterTypeProgressTaskState.read(buf),
             FfiConverterTypeProgressRetentionPolicy.read(buf),
             FfiConverterOptionalTypeProgressRetentionPolicy.read(buf),
@@ -1760,10 +1760,10 @@ public object FfiConverterTypeProgressTask: FfiConverterRustBuffer<ProgressTask>
             FfiConverterString.allocationSize(value.`id`) +
             FfiConverterOptionalString.allocationSize(value.`title`) +
             FfiConverterSequenceString.allocationSize(value.`tags`) +
-            FfiConverterLong.allocationSize(value.`createdAtUnixSecs`) +
-            FfiConverterLong.allocationSize(value.`updatedAtUnixSecs`) +
-            FfiConverterOptionalLong.allocationSize(value.`viewedAtUnixSecs`) +
-            FfiConverterOptionalLong.allocationSize(value.`dismissedAtUnixSecs`) +
+            FfiConverterTypeTimestamp.allocationSize(value.`createdAt`) +
+            FfiConverterTypeTimestamp.allocationSize(value.`updatedAt`) +
+            FfiConverterOptionalTypeTimestamp.allocationSize(value.`viewedAt`) +
+            FfiConverterOptionalTypeTimestamp.allocationSize(value.`dismissedAt`) +
             FfiConverterTypeProgressTaskState.allocationSize(value.`state`) +
             FfiConverterTypeProgressRetentionPolicy.allocationSize(value.`retention`) +
             FfiConverterOptionalTypeProgressRetentionPolicy.allocationSize(value.`retentionOverride`) +
@@ -1774,10 +1774,10 @@ public object FfiConverterTypeProgressTask: FfiConverterRustBuffer<ProgressTask>
             FfiConverterString.write(value.`id`, buf)
             FfiConverterOptionalString.write(value.`title`, buf)
             FfiConverterSequenceString.write(value.`tags`, buf)
-            FfiConverterLong.write(value.`createdAtUnixSecs`, buf)
-            FfiConverterLong.write(value.`updatedAtUnixSecs`, buf)
-            FfiConverterOptionalLong.write(value.`viewedAtUnixSecs`, buf)
-            FfiConverterOptionalLong.write(value.`dismissedAtUnixSecs`, buf)
+            FfiConverterTypeTimestamp.write(value.`createdAt`, buf)
+            FfiConverterTypeTimestamp.write(value.`updatedAt`, buf)
+            FfiConverterOptionalTypeTimestamp.write(value.`viewedAt`, buf)
+            FfiConverterOptionalTypeTimestamp.write(value.`dismissedAt`, buf)
             FfiConverterTypeProgressTaskState.write(value.`state`, buf)
             FfiConverterTypeProgressRetentionPolicy.write(value.`retention`, buf)
             FfiConverterOptionalTypeProgressRetentionPolicy.write(value.`retentionOverride`, buf)
@@ -1788,7 +1788,7 @@ public object FfiConverterTypeProgressTask: FfiConverterRustBuffer<ProgressTask>
 
 
 data class ProgressUpdate (
-    var `atUnixSecs`: kotlin.Long
+    var `at`: Timestamp
     , 
     var `title`: kotlin.String?
     , 
@@ -1809,20 +1809,20 @@ data class ProgressUpdate (
 public object FfiConverterTypeProgressUpdate: FfiConverterRustBuffer<ProgressUpdate> {
     override fun read(buf: ByteBuffer): ProgressUpdate {
         return ProgressUpdate(
-            FfiConverterLong.read(buf),
+            FfiConverterTypeTimestamp.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterTypeProgressUpdateDeets.read(buf),
         )
     }
 
     override fun allocationSize(value: ProgressUpdate) = (
-            FfiConverterLong.allocationSize(value.`atUnixSecs`) +
+            FfiConverterTypeTimestamp.allocationSize(value.`at`) +
             FfiConverterOptionalString.allocationSize(value.`title`) +
             FfiConverterTypeProgressUpdateDeets.allocationSize(value.`deets`)
     )
 
     override fun write(value: ProgressUpdate, buf: ByteBuffer) {
-            FfiConverterLong.write(value.`atUnixSecs`, buf)
+            FfiConverterTypeTimestamp.write(value.`at`, buf)
             FfiConverterOptionalString.write(value.`title`, buf)
             FfiConverterTypeProgressUpdateDeets.write(value.`deets`, buf)
     }
@@ -1833,7 +1833,7 @@ public object FfiConverterTypeProgressUpdate: FfiConverterRustBuffer<ProgressUpd
 data class ProgressUpdateEntry (
     var `sequence`: kotlin.Long
     , 
-    var `atUnixSecs`: kotlin.Long
+    var `at`: Timestamp
     , 
     var `update`: ProgressUpdate
     
@@ -1853,20 +1853,20 @@ public object FfiConverterTypeProgressUpdateEntry: FfiConverterRustBuffer<Progre
     override fun read(buf: ByteBuffer): ProgressUpdateEntry {
         return ProgressUpdateEntry(
             FfiConverterLong.read(buf),
-            FfiConverterLong.read(buf),
+            FfiConverterTypeTimestamp.read(buf),
             FfiConverterTypeProgressUpdate.read(buf),
         )
     }
 
     override fun allocationSize(value: ProgressUpdateEntry) = (
             FfiConverterLong.allocationSize(value.`sequence`) +
-            FfiConverterLong.allocationSize(value.`atUnixSecs`) +
+            FfiConverterTypeTimestamp.allocationSize(value.`at`) +
             FfiConverterTypeProgressUpdate.allocationSize(value.`update`)
     )
 
     override fun write(value: ProgressUpdateEntry, buf: ByteBuffer) {
             FfiConverterLong.write(value.`sequence`, buf)
-            FfiConverterLong.write(value.`atUnixSecs`, buf)
+            FfiConverterTypeTimestamp.write(value.`at`, buf)
             FfiConverterTypeProgressUpdate.write(value.`update`, buf)
     }
 }
@@ -4400,38 +4400,6 @@ public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
 /**
  * @suppress
  */
-public object FfiConverterOptionalLong: FfiConverterRustBuffer<kotlin.Long?> {
-    override fun read(buf: ByteBuffer): kotlin.Long? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterLong.read(buf)
-    }
-
-    override fun allocationSize(value: kotlin.Long?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterLong.allocationSize(value)
-        }
-    }
-
-    override fun write(value: kotlin.Long?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterLong.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
 public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
@@ -4870,6 +4838,38 @@ public object FfiConverterOptionalTypeChangeHashSet: FfiConverterRustBuffer<Chan
         } else {
             buf.put(1)
             FfiConverterTypeChangeHashSet.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeTimestamp: FfiConverterRustBuffer<Timestamp?> {
+    override fun read(buf: ByteBuffer): Timestamp? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeTimestamp.read(buf)
+    }
+
+    override fun allocationSize(value: Timestamp?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeTimestamp.allocationSize(value)
+        }
+    }
+
+    override fun write(value: Timestamp?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeTimestamp.write(value, buf)
         }
     }
 }
