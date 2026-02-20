@@ -73,7 +73,7 @@ async function ensureUbuntuDeps() {
     console.log("Skipping apt dependency installation (non-linux host)");
     return;
   }
-  if ((await $`command -v apt-get`.noThrow()).code !== 0) {
+  if ((await $`bash -c "command -v apt-get"`.noThrow()).code !== 0) {
     console.log("Skipping apt dependency installation (apt-get not found)");
     return;
   }
@@ -135,7 +135,7 @@ async function ensureFfiSoPath() {
   if (existingPath) {
     return existingPath;
   }
-  await $`cargo build -p daybook_ffi --features nokhwa`;
+  await $`cargo build -p daybook_ffi`;
   return await findFfiSoPath();
 }
 

@@ -79,13 +79,15 @@ impl wash_runtime::plugin::HostPlugin for UtilsPlugin {
     ) -> anyhow::Result<()> {
         let world = item.world();
         for iface in world.imports {
-            if iface.namespace == "townframe" && iface.package == "utils"
-                && iface.interfaces.contains("types") {
-                    types::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
-                        item.linker(),
-                        |ctx| ctx,
-                    )?;
-                }
+            if iface.namespace == "townframe"
+                && iface.package == "utils"
+                && iface.interfaces.contains("types")
+            {
+                types::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                    item.linker(),
+                    |ctx| ctx,
+                )?;
+            }
         }
         Ok(())
     }

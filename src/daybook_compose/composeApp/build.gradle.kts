@@ -469,7 +469,6 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
 tasks.matching {
     it.name in
         setOf(
-            "compileKotlinDesktop",
             "desktopRun",
             "desktopRunHot",
         )

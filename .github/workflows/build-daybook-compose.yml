@@ -47,9 +47,9 @@ jobs:
       - name: install rust dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          sudo apt-get install -y protobuf-compiler libarchive-tools
 
-      - name: build AppImage
+      - name: debug build 
         run: |
           export PROTOC="$(command -v protoc)"
           deno run -A ./x/build-appimage-dayb.ts
@@ -72,14 +72,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: build
+      - name: debug build
         run: |
-          nix develop .#ci-android --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew :composeApp:assemble --no-daemon --no-configuration-cache'
+          nix develop .#ci-android --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew :composeApp:assembleDebug --no-daemon --no-configuration-cache'
 
       - uses: actions/upload-artifact@v6
         with:
           name: daybook-android-debug
-          path: src/daybook_compose/composeApp/build/outputs/apk/*
+          path: src/daybook_compose/composeApp/build/outputs/apk/
 
   windows-msi:
     runs-on: windows-latest
@@ -105,11 +105,10 @@ jobs:
         with:
           version: "32.x"
 
-      - name: build
+      - name: debug build
         shell: pwsh
         run: |
           $env:PROTOC = (Get-Command protoc).Source
-          cargo build -p daybook_ffi --features nokhwa
           .\gradlew.bat :composeApp:packageMsi --no-daemon --no-configuration-cache
         working-directory: src/daybook_compose
 
@@ -117,7 +116,7 @@ jobs:
         with:
           name: daybook-windows-installer
           path: |
-            src/daybook_compose/composeApp/build/compose/binaries/main/**/*
+            src/daybook_compose/composeApp/build/compose/binaries/
 
   macos-dmg:
     runs-on: macos-14
@@ -143,15 +142,14 @@ jobs:
           brew update
           brew install protobuf
 
-      - name: build
+      - name: debug build
         run: |
           set -euo pipefail
           export PROTOC="$(command -v protoc)"
-          cargo build -p daybook_ffi --features nokhwa
-          cd src/daybook_compose
           ./gradlew :composeApp:packageDmg --no-daemon --no-configuration-cache
+        working-directory: src/daybook_compose
 
       - uses: actions/upload-artifact@v6
         with:
           name: daybook-macos-dmg
-          path: src/daybook_compose/composeApp/build/compose/binaries/main/**/*
+          path: src/daybook_compose/composeApp/build/compose/binaries/
