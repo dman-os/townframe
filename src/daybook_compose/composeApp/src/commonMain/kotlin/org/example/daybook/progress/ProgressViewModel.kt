@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.example.daybook.CoalescingIntentRunner
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.ProgressEventListener
 import org.example.daybook.uniffi.ProgressRepoFfi
@@ -25,54 +26,99 @@ sealed interface ProgressState {
     data class Error(val error: FfiException) : ProgressState
 }
 
+private data class ProgressRefreshIntent(
+    val listChanged: Boolean = false,
+    val touchedTaskIds: Set<String> = emptySet()
+) {
+    fun merge(other: ProgressRefreshIntent): ProgressRefreshIntent =
+        ProgressRefreshIntent(
+            listChanged = listChanged || other.listChanged,
+            touchedTaskIds = touchedTaskIds + other.touchedTaskIds
+        )
+
+    companion object {
+        val ListOnly = ProgressRefreshIntent(listChanged = true)
+    }
+}
+
 class ProgressViewModel(private val progressRepo: ProgressRepoFfi) : ViewModel() {
     private val _state = MutableStateFlow<ProgressState>(ProgressState.Loading)
     val state = _state.asStateFlow()
 
     private var listenerRegistration: ListenerRegistration? = null
 
+    private val refreshRunner =
+        CoalescingIntentRunner<ProgressRefreshIntent>(
+            scope = viewModelScope,
+            debounceMs = 80,
+            merge = { left: ProgressRefreshIntent, right: ProgressRefreshIntent -> left.merge(right) },
+            onIntent = { intent: ProgressRefreshIntent -> applyRefreshIntent(intent) }
+        )
+
     private val listener =
         object : ProgressEventListener {
             override fun onProgressEvent(event: ProgressEvent) {
-                viewModelScope.launch {
-                    when (event) {
-                        is ProgressEvent.ListChanged -> refresh()
-                        is ProgressEvent.TaskRemoved -> refresh()
-                        is ProgressEvent.TaskUpserted -> refresh()
-                        is ProgressEvent.UpdateAdded -> refresh()
-                    }
+                when (event) {
+                    is ProgressEvent.ListChanged -> refreshRunner.submit(ProgressRefreshIntent.ListOnly)
+                    is ProgressEvent.TaskRemoved ->
+                        refreshRunner.submit(
+                            ProgressRefreshIntent(
+                                listChanged = true,
+                                touchedTaskIds = setOf(event.id)
+                            )
+                        )
+
+                    is ProgressEvent.TaskUpserted ->
+                        refreshRunner.submit(
+                            ProgressRefreshIntent(
+                                touchedTaskIds = setOf(event.id)
+                            )
+                        )
+
+                    is ProgressEvent.UpdateAdded ->
+                        refreshRunner.submit(
+                            ProgressRefreshIntent(
+                                touchedTaskIds = setOf(event.id)
+                            )
+                        )
                 }
             }
         }
 
     init {
         viewModelScope.launch {
-            refresh()
+            refreshRunner.submit(ProgressRefreshIntent.ListOnly)
             listenerRegistration = progressRepo.ffiRegisterListener(listener)
         }
     }
 
-    fun refresh() {
-        viewModelScope.launch {
-            val selectedTaskId = (state.value as? ProgressState.Data)?.selectedTaskId
-            try {
-                val tasks = progressRepo.list()
-                val updates =
-                    if (selectedTaskId != null) {
-                        progressRepo.listUpdates(selectedTaskId)
-                    } else {
-                        emptyList()
-                    }
-                _state.value =
-                    ProgressState.Data(
-                        tasks = tasks,
-                        selectedTaskId = selectedTaskId,
-                        selectedTaskUpdates = updates
-                    )
-            } catch (error: FfiException) {
-                _state.value = ProgressState.Error(error)
-            }
+    private suspend fun applyRefreshIntent(intent: ProgressRefreshIntent) {
+        val current = _state.value as? ProgressState.Data
+        val selectedTaskId = current?.selectedTaskId
+        val selectedTaskTouched = selectedTaskId != null && intent.touchedTaskIds.contains(selectedTaskId)
+        val shouldRefreshSelectedUpdates = selectedTaskId != null && (intent.listChanged || selectedTaskTouched)
+
+        try {
+            val tasks = progressRepo.list()
+            val updates =
+                if (shouldRefreshSelectedUpdates && selectedTaskId != null) {
+                    progressRepo.listUpdates(selectedTaskId)
+                } else {
+                    current?.selectedTaskUpdates ?: emptyList()
+                }
+            _state.value =
+                ProgressState.Data(
+                    tasks = tasks,
+                    selectedTaskId = selectedTaskId,
+                    selectedTaskUpdates = updates
+                )
+        } catch (error: FfiException) {
+            _state.value = ProgressState.Error(error)
         }
+    }
+
+    fun refresh() {
+        refreshRunner.submit(ProgressRefreshIntent.ListOnly)
     }
 
     fun selectTask(taskId: String?) {
@@ -131,6 +177,7 @@ class ProgressViewModel(private val progressRepo: ProgressRepoFfi) : ViewModel()
     }
 
     override fun onCleared() {
+        refreshRunner.cancel()
         listenerRegistration?.unregister()
         super.onCleared()
     }

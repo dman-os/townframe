@@ -41,9 +41,6 @@ const outputSuffix = arch === "aarch64" ? "arm64" : "x64";
 const outputPath = outputDir.join(
   `daybook-linuxdeploy-${outputSuffix}.AppImage`,
 );
-const tarballPath = outputDir.join(
-  `daybook-linuxdeploy-${outputSuffix}.tar.xz`,
-);
 const linuxdeployToolPath = appImageToolsDir.join(
   `linuxdeploy-${arch}.AppImage`,
 );
@@ -180,12 +177,6 @@ await outputDir.ensureDir();
 if (await outputPath.exists()) {
   await outputPath.remove();
 }
-if (await tarballPath.exists()) {
-  await tarballPath.remove();
-}
-
-await $`bsdtar -c -J -f ${tarballPath} --format=gnutar --options xz:compression-level=9,xz:threads=0 -C ${stageUsrDir} .`;
-
 const outputValue = outputPath.toString();
 await $`${linuxdeployToolPath}
   --appdir ${stageAppDir}
@@ -204,5 +195,4 @@ await $`${linuxdeployToolPath}
   DYLD_LIBRARY_PATH: "",
 });
 
-console.log(`Created tarball: ${tarballPath}`);
 console.log(`Created AppImage: ${outputPath}`);

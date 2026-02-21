@@ -13,7 +13,9 @@ use std::sync::{
 use utils_rs::downloader::Downloader;
 use utils_rs::prelude::*;
 
-const OLLAMA_URL_DEFAULT: &str = "http://localhost:11434";
+const OLLAMA_URL_DEFAULT: &str = env!("OLLAMA_URL");
+const OLLAMA_USERNAME: &str = env!("OLLAMA_USERNAME");
+const OLLAMA_PASSWORD: &str = env!("OLLAMA_PASSWORD");
 const OLLAMA_EMBED_MODEL_DEFAULT: &str = "embeddinggemma";
 const OLLAMA_LLM_MODEL_DEFAULT: &str = "gemma3";
 const NOMIC_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
@@ -337,6 +339,10 @@ pub async fn mobile_default_with_observer(
             backends: vec![LlmBackendConfig::CloudOllama {
                 url: OLLAMA_URL_DEFAULT.to_string(),
                 model: OLLAMA_LLM_MODEL_DEFAULT.to_string(),
+                auth: Some(crate::CloudAuth::Basic {
+                    username: OLLAMA_USERNAME.to_string(),
+                    password: OLLAMA_PASSWORD.to_string(),
+                }),
             }],
         },
     })

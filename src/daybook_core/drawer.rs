@@ -2429,9 +2429,7 @@ mod tests {
         )
         .await?;
 
-        let (server_notif_tx, mut server_notif_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _listener_handle = server_repo
-            .register_listener(move |msg| server_notif_tx.send(msg).expect("send failed"));
+        let server_listener = server_repo.subscribe(crate::repos::SubscribeOpts::new(128));
 
         // 1. Client adds a doc
         let facet_note = FacetKey::from(WellKnownFacetTag::Note);
@@ -2448,10 +2446,13 @@ mod tests {
             .await?;
 
         // 2. Server should receive DocAdded event
-        let event = tokio::time::timeout(std::time::Duration::from_secs(5), server_notif_rx.recv())
-            .await
-            .wrap_err("timeout waiting for DocAdded")?
-            .ok_or_eyre("channel closed")?;
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server_listener.recv_lossy_async(),
+        )
+        .await
+        .wrap_err("timeout waiting for DocAdded")?
+        .map_err(|_| eyre::eyre!("listener closed"))?;
 
         match &*event {
             DrawerEvent::DocAdded { id, .. } => assert_eq!(id, &new_doc_id),
@@ -3320,10 +3321,7 @@ mod tests {
         )
         .await?;
 
-        let (notif_tx_b, mut notif_rx_b) = tokio::sync::mpsc::unbounded_channel();
-        let _listener_b = repo_b.register_listener(move |evt| {
-            notif_tx_b.send(evt).expect("send failed");
-        });
+        let listener_b = repo_b.subscribe(crate::repos::SubscribeOpts::new(128));
 
         let facet_note = FacetKey::from(WellKnownFacetTag::Note);
         let _doc_id_a = repo_a
@@ -3338,8 +3336,11 @@ mod tests {
             })
             .await?;
 
-        let maybe_event =
-            tokio::time::timeout(std::time::Duration::from_millis(300), notif_rx_b.recv()).await;
+        let maybe_event = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            listener_b.recv_lossy_async(),
+        )
+        .await;
         assert!(
             maybe_event.is_err(),
             "repo_b received an event from foreign drawer doc"
@@ -3403,10 +3404,7 @@ mod tests {
             })
             .await?;
 
-        let (evt_tx, mut evt_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _listener = repo.register_listener(move |evt| {
-            evt_tx.send(evt).expect("send failed");
-        });
+        let listener = repo.subscribe(crate::repos::SubscribeOpts::new(256));
 
         repo.update_at_heads(
             DocPatch {
@@ -3427,10 +3425,10 @@ mod tests {
         let mut changed_facet_keys = None;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline {
-            let next_event = tokio::time::timeout_at(deadline, evt_rx.recv())
+            let next_event = tokio::time::timeout_at(deadline, listener.recv_lossy_async())
                 .await
                 .wrap_err("timeout waiting for update event")?
-                .ok_or_eyre("channel closed")?;
+                .map_err(|_| eyre::eyre!("listener closed"))?;
             if let DrawerEvent::DocUpdated { id, diff, .. } = &*next_event {
                 if id == &doc_id {
                     changed_facet_keys = Some(diff.changed_facet_keys.clone());

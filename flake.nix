@@ -330,6 +330,9 @@
                 if [ "$(uname -s)" = "Darwin" ]; then
                   export DYLD_LIBRARY_PATH="$LD_LIBRARY_PATH"
                 fi
+                if [ -e .env.sh ]; then
+                  source .env.sh
+                fi
                 export PATH=$PATH:$PWD/x/
                 if [[ -t 0 ]]; then
                   exec $(getent passwd $USER | cut -d: -f7)

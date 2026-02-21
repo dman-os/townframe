@@ -65,9 +65,9 @@ impl DrawerRepoFfi {
         Ok(())
     }
 
-    // old FFI wrappers for contains/insert/remove removed; use `ffi_get`, `ffi_add`, `ffi_update`, `ffi_del` instead
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self), ret)]
     async fn list(self: Arc<Self>) -> Vec<DocNBranches> {
+        info!("XXX");
         let this = Arc::clone(&self);
         self.fcx
             .do_on_rt(async move { this.repo.list().await })
@@ -75,8 +75,9 @@ impl DrawerRepoFfi {
             .expect("error listing docs")
     }
 
-    #[tracing::instrument(err, skip(self))]
+    #[tracing::instrument(err, skip(self), ret)]
     async fn get(self: Arc<Self>, id: DocId, branch_path: String) -> Result<Option<Doc>, FfiError> {
+        info!("XXX");
         let this = Arc::clone(&self);
         let branch_path = daybook_types::doc::BranchPath::from(branch_path);
         Ok(self

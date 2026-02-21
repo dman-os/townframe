@@ -227,11 +227,9 @@ impl Rt {
         ));
         let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {})
             .wrap_err("error creating utils plugin")?;
-        let mltools_plugin = wash_plugin_mltools::MltoolsPlugin::new(wash_plugin_mltools::Config {
-            ollama_url: utils_rs::get_env_var("OLLAMA_URL")?,
-            ollama_model: utils_rs::get_env_var("OLLAMA_MODEL")?,
-        })
-        .wrap_err("error creating utils plugin")?;
+        let mltools_plugin =
+            wash_plugin_mltools::MltoolsPlugin::new(wash_plugin_mltools::Config {})
+                .wrap_err("error creating utils plugin")?;
 
         let wash_host = wflow::build_wash_host(vec![
             #[allow(clippy::clone_on_ref_ptr)]
@@ -840,28 +838,29 @@ impl Rt {
     ) -> Res<()> {
         self.ensure_rt_live()?;
 
-        use crate::repos::Repo;
+        use crate::repos::{Repo, SubscribeOpts};
 
-        let (notif_tx, mut notif_rx) = tokio::sync::watch::channel(());
-        let _listener_handle = self.dispatch_repo.register_listener({
-            let dispatch_id = dispatch_id.to_string();
-            move |msg| {
-                if let dispatch::DispatchEvent::DispatchDeleted { id, .. } = &*msg {
-                    if *id == dispatch_id {
-                        notif_tx.send(()).expect(ERROR_CHANNEL)
-                    }
-                }
-            }
-        });
+        let listener_handle = self.dispatch_repo.subscribe(SubscribeOpts::new(128));
 
         // check if the dispatch exists first
         let Some(_dispatch) = self.dispatch_repo.get(dispatch_id).await else {
             return Ok(());
         };
 
-        tokio::time::timeout(timeout, notif_rx.changed())
-            .await?
-            .expect(ERROR_CHANNEL);
+        tokio::time::timeout(timeout, async {
+            loop {
+                let event = listener_handle
+                    .recv_async()
+                    .await
+                    .map_err(|err| eyre::eyre!("dispatch listener closed: {err:?}"))?;
+                if let dispatch::DispatchEvent::DispatchDeleted { id, .. } = &*event {
+                    if id == dispatch_id {
+                        return Ok::<(), eyre::Report>(());
+                    }
+                }
+            }
+        })
+        .await??;
 
         Ok(())
     }

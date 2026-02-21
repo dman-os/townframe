@@ -126,6 +126,7 @@ crate::define_enum_and_tag!(
             pub model_tag: String,
             // FIXME: double check these types
             /// little-endian
+            /// check that this does translate to bytes
             pub vector: Vec<u8>,
             pub dim: u32,
             pub dtype: EmbeddingDtype,

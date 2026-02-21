@@ -115,7 +115,17 @@ pub struct LlmConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum LlmBackendConfig {
-    CloudOllama { url: String, model: String },
+    CloudOllama {
+        url: String,
+        model: String,
+        auth: Option<CloudAuth>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum CloudAuth {
+    Basic { username: String, password: String },
 }
 
 pub struct Ctx {
@@ -185,8 +195,8 @@ pub async fn llm_chat(ctx: &Ctx, text: &str) -> Res<LlmChatResult> {
     };
 
     match backend_config {
-        LlmBackendConfig::CloudOllama { url, model } => {
-            cloud::llm_chat_ollama(url, model, text).await
+        LlmBackendConfig::CloudOllama { url, model, auth } => {
+            cloud::llm_chat_ollama(url, model, text, auth.as_ref()).await
         }
     }
 }
@@ -416,16 +426,41 @@ mod cloud {
         })
     }
 
-    pub async fn llm_chat_ollama(url: &str, model: &str, text: &str) -> Res<LlmChatResult> {
+    pub async fn llm_chat_ollama(
+        url: &str,
+        model: &str,
+        text: &str,
+        auth: Option<&CloudAuth>,
+    ) -> Res<LlmChatResult> {
         let parsed_url =
             url::Url::parse(url).wrap_err_with(|| format!("invalid Ollama url: {url}"))?;
         let host = parsed_url
             .host_str()
             .ok_or_eyre("Ollama url missing host")?;
         let scheme = parsed_url.scheme();
-        let port = parsed_url.port().unwrap_or(11434);
+        let port = parsed_url.port().unwrap_or(80);
 
-        let ollama = ollama_rs::Ollama::new(format!("{scheme}://{host}"), port);
+        let ollama = ollama_rs::Ollama::new_with_client(
+            format!("{scheme}://{host}"),
+            port,
+            match auth {
+                Some(CloudAuth::Basic { username, password }) => reqwest::Client::builder()
+                    .default_headers({
+                        let mut headers = reqwest::header::HeaderMap::new();
+                        let mut token = "Basic ".to_string();
+                        data_encoding::BASE64.encode_append(username.as_bytes(), &mut token);
+                        data_encoding::BASE64.encode_append(b":", &mut token);
+                        data_encoding::BASE64.encode_append(password.as_bytes(), &mut token);
+                        headers.insert(
+                            reqwest::header::AUTHORIZATION,
+                            token.parse().wrap_err("error formatting Auth header")?,
+                        );
+                        headers
+                    })
+                    .build()?,
+                None => reqwest::Client::builder().build()?,
+            },
+        );
         use ollama_rs::generation::completion::request::GenerationRequest;
 
         let generation_request = GenerationRequest::new(model.to_owned(), text.to_owned());
@@ -623,6 +658,7 @@ mod tests {
                 vec![LlmBackendConfig::CloudOllama {
                     url: test_ollama_url(),
                     model: llm_model_name,
+                    auth: None,
                 }],
             );
 

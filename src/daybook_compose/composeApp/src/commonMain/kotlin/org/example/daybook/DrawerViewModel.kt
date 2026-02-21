@@ -2,6 +2,7 @@ package org.example.daybook
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -20,6 +21,23 @@ sealed interface DocListState {
     data class Error(val error: FfiException) : DocListState
 
     object Loading : DocListState
+}
+
+private data class DrawerRefreshIntent(
+    val refreshList: Boolean = false,
+    val refreshDocIds: Set<String> = emptySet(),
+    val refreshSelectedDoc: Boolean = false
+) {
+    fun merge(other: DrawerRefreshIntent): DrawerRefreshIntent =
+        DrawerRefreshIntent(
+            refreshList = refreshList || other.refreshList,
+            refreshDocIds = refreshDocIds + other.refreshDocIds,
+            refreshSelectedDoc = refreshSelectedDoc || other.refreshSelectedDoc
+        )
+
+    companion object {
+        val ListOnly = DrawerRefreshIntent(refreshList = true)
+    }
 }
 
 class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
@@ -46,38 +64,42 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
 
     private var listenerRegistration: ListenerRegistration? = null
 
+    private val refreshRunner =
+        CoalescingIntentRunner<DrawerRefreshIntent>(
+            scope = viewModelScope,
+            debounceMs = 120,
+            merge = { left: DrawerRefreshIntent, right: DrawerRefreshIntent -> left.merge(right) },
+            onIntent = { intent: DrawerRefreshIntent -> applyRefreshIntent(intent) }
+        )
+
     private val listener =
         object : DrawerEventListener {
             override fun onDrawerEvent(event: DrawerEvent) {
                 viewModelScope.launch {
                     when (event) {
                         is DrawerEvent.ListChanged -> {
-                            refreshDocIds()
+                            refreshRunner.submit(DrawerRefreshIntent.ListOnly)
                         }
 
                         is DrawerEvent.DocAdded -> {
-                            refreshDocIds()
+                            refreshRunner.submit(DrawerRefreshIntent.ListOnly)
                         }
 
                         is DrawerEvent.DocUpdated -> {
-                            // Reload the document if it's already loaded
-                            val currentLoaded = _loadedDocs.value
-                            if (currentLoaded.containsKey(event.id)) {
-                                loadDoc(event.id)
-                            }
-
-                            // Update selected doc if it's the one that was updated
-                            if (event.id == _selectedDocId.value) {
-                                loadSelectedDoc(event.id)
-                            }
+                            val shouldRefreshLoaded = _loadedDocs.value.containsKey(event.id)
+                            val shouldRefreshSelected = event.id == _selectedDocId.value
+                            refreshRunner.submit(
+                                DrawerRefreshIntent(
+                                    refreshDocIds = if (shouldRefreshLoaded) setOf(event.id) else emptySet(),
+                                    refreshSelectedDoc = shouldRefreshSelected
+                                )
+                            )
                         }
 
                         is DrawerEvent.DocDeleted -> {
-                            // Remove from loaded docs and doc IDs
                             _loadedDocs.value = _loadedDocs.value - event.id
-                            refreshDocIds()
+                            refreshRunner.submit(DrawerRefreshIntent.ListOnly)
 
-                            // Clear selected doc if it was deleted
                             if (event.id == _selectedDocId.value) {
                                 _selectedDocId.value = null
                                 _selectedDoc.value = null
@@ -89,73 +111,25 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
         }
 
     init {
-        refreshDocIds()
+        refreshRunner.submit(DrawerRefreshIntent.ListOnly)
         viewModelScope.launch {
             listenerRegistration = drawerRepo.ffiRegisterListener(listener)
         }
     }
 
     fun refreshDocIds() {
-        viewModelScope.launch {
-            _docListState.value = DocListState.Loading
-            try {
-                val branches = drawerRepo.list()
-                val ids = branches.map { it.docId }
-                _docListState.value = DocListState.Data(ids)
-            } catch (e: FfiException) {
-                _docListState.value = DocListState.Error(e)
-            }
-        }
+        refreshRunner.submit(DrawerRefreshIntent.ListOnly)
     }
 
     fun loadDoc(id: String) {
-        // Don't load if already loaded or currently loading
-        if (_loadedDocs.value.containsKey(id) || _loadingDocs.value.contains(id)) {
-            return
-        }
-
         viewModelScope.launch {
-            _loadingDocs.value = _loadingDocs.value + id
-            try {
-                val doc = drawerRepo.get(id, "main")
-                if (doc != null) {
-                    _loadedDocs.value = _loadedDocs.value + (id to doc)
-                }
-            } catch (e: FfiException) {
-                println("Error loading document $id: ${e.message}")
-            } finally {
-                _loadingDocs.value = _loadingDocs.value - id
-            }
+            loadDocsInternal(listOf(id), force = false)
         }
     }
 
     fun loadDocs(ids: List<String>) {
         viewModelScope.launch {
-            val idsToLoad =
-                ids.filter { id ->
-                    !_loadedDocs.value.containsKey(id) && !_loadingDocs.value.contains(id)
-                }
-            if (idsToLoad.isEmpty()) return@launch
-
-            _loadingDocs.value = _loadingDocs.value + idsToLoad
-            try {
-                val loaded = mutableMapOf<String, Doc>()
-                idsToLoad.forEach { id ->
-                    try {
-                        val doc = drawerRepo.get(id, "main")
-                        if (doc != null) {
-                            loaded[id] = doc
-                        }
-                    } catch (e: FfiException) {
-                        println("Error loading document $id: ${e.message}")
-                    }
-                }
-                if (loaded.isNotEmpty()) {
-                    _loadedDocs.value = _loadedDocs.value + loaded
-                }
-            } finally {
-                _loadingDocs.value = _loadingDocs.value - idsToLoad
-            }
+            loadDocsInternal(ids, force = false)
         }
     }
 
@@ -168,39 +142,103 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
     fun selectDoc(id: String?) {
         _selectedDocId.value = id
         if (id != null) {
-            loadSelectedDoc(id)
+            viewModelScope.launch {
+                refreshSelectedDoc(id)
+            }
         } else {
             _selectedDoc.value = null
         }
     }
 
-    private fun loadSelectedDoc(id: String) {
-        viewModelScope.launch {
-            try {
-                val doc = drawerRepo.get(id, "main")
-                if (doc != null) {
-                    _selectedDoc.value = doc
-                    // Also add to loaded docs
-                    _loadedDocs.value = _loadedDocs.value + (id to doc)
-                }
-            } catch (e: FfiException) {
-                println("Error loading document $id: ${e.message}")
+    private suspend fun applyRefreshIntent(intent: DrawerRefreshIntent) {
+        if (intent.refreshList) {
+            refreshDocIdsNow()
+        }
+
+        if (intent.refreshDocIds.isNotEmpty()) {
+            loadDocsInternal(intent.refreshDocIds.toList(), force = true)
+        }
+
+        if (intent.refreshSelectedDoc) {
+            _selectedDocId.value?.let { id ->
+                refreshSelectedDoc(id)
             }
         }
     }
 
-    private var debounceJob: kotlinx.coroutines.Job? = null
+    private suspend fun refreshDocIdsNow() {
+        val hadData = _docListState.value is DocListState.Data
+        if (!hadData) {
+            _docListState.value = DocListState.Loading
+        }
+
+        try {
+            val branches = drawerRepo.list()
+            val ids = branches.map { it.docId }
+            _docListState.value = DocListState.Data(ids)
+        } catch (e: FfiException) {
+            _docListState.value = DocListState.Error(e)
+        }
+    }
+
+    private suspend fun loadDocsInternal(ids: List<String>, force: Boolean) {
+        val uniqueIds = ids.distinct()
+        val currentlyLoading = _loadingDocs.value
+        val currentLoaded = _loadedDocs.value
+
+        val idsToLoad =
+            uniqueIds.filter { id ->
+                !currentlyLoading.contains(id) && (force || !currentLoaded.containsKey(id))
+            }
+
+        if (idsToLoad.isEmpty()) {
+            return
+        }
+
+        _loadingDocs.value = _loadingDocs.value + idsToLoad
+
+        try {
+            val loaded = mutableMapOf<String, Doc>()
+            idsToLoad.forEach { id ->
+                try {
+                    val doc = drawerRepo.get(id, "main")
+                    if (doc != null) {
+                        loaded[id] = doc
+                    }
+                } catch (e: FfiException) {
+                    println("Error loading document $id: ${e.message}")
+                }
+            }
+
+            if (loaded.isNotEmpty()) {
+                _loadedDocs.value = _loadedDocs.value + loaded
+            }
+        } finally {
+            _loadingDocs.value = _loadingDocs.value - idsToLoad.toSet()
+        }
+    }
+
+    private suspend fun refreshSelectedDoc(id: String) {
+        try {
+            val doc = drawerRepo.get(id, "main")
+            if (doc != null) {
+                _selectedDoc.value = doc
+                _loadedDocs.value = _loadedDocs.value + (id to doc)
+            }
+        } catch (e: FfiException) {
+            println("Error loading document $id: ${e.message}")
+        }
+    }
+
+    private var debounceJob: Job? = null
 
     fun updateDoc(patch: DocPatch) {
-        // Cancel previous debounce job
         debounceJob?.cancel()
-        // Start new debounce job
         debounceJob =
             viewModelScope.launch {
-                kotlinx.coroutines.delay(500) // 500ms debounce
+                kotlinx.coroutines.delay(500)
                 try {
                     drawerRepo.updateBatch(listOf(UpdateDocArgsV2("main", null, patch)))
-                    // The listener will handle updating the state
                 } catch (e: FfiException) {
                     println("Error updating document: ${e.message}")
                 }
@@ -211,7 +249,6 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
         viewModelScope.launch {
             try {
                 drawerRepo.updateBatch(patches.map { UpdateDocArgsV2("main", null, it) })
-                // The listener will handle updating the state
             } catch (e: FfiException) {
                 println("Error updating documents: ${e.message}")
             }
@@ -219,6 +256,7 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
     }
 
     override fun onCleared() {
+        refreshRunner.cancel()
         listenerRegistration?.unregister()
         super.onCleared()
     }

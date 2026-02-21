@@ -17,22 +17,15 @@ macro_rules! uniffi_repo_listeners {
             #[uniffi::export]
             impl $t_repo {
                 // Register a listener; returns a handle that unregisters on drop.
-                //
-                // UniFFI expects callback parameters to be plain trait objects (Box<dyn Trait>) rather than Arc<dyn Trait>.
                 #[tracing::instrument(skip(self, listener))]
                 fn ffi_register_listener(
                     self: Arc<Self>,
                     listener: Arc<dyn [<$t_event Listener>]>,
                 ) -> Arc<daybook_core::repos::ListenerRegistration> {
-                    use daybook_core::repos::Repo;
-                    let ticket = self.register_listener(
-                        move |ev| {
-                            // FIXME: uniffi doesn't support Arc args on with_foreign
-                            // and clones the full event per guest listener
-                            listener.[<on_ $t_event:snake>]($t_event::clone(&ev))
-                        }
-                    );
-                    Arc::new(ticket)
+                    $crate::listener_bridge::register_uniffi_listener(self.as_ref(), move |ev| {
+                        // UniFFI with_foreign does not support Arc callback args.
+                        listener.[<on_ $t_event:snake>]($t_event::clone(&ev));
+                    })
                 }
             }
         }

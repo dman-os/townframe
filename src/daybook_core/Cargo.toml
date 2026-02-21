@@ -111,3 +111,4 @@ wflow = { workspace = true, features = ["test-harness"] }
 insta = { workspace = true, features = ["json"] }
 wash_plugin_am_repo.workspace = true
 tempfile.workspace = true
+loom = "0.7.2"

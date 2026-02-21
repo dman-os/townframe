@@ -23,10 +23,7 @@ pub struct MltoolsPlugin {
     config: Config,
 }
 
-pub struct Config {
-    pub ollama_url: String,
-    pub ollama_model: String,
-}
+pub struct Config {}
 
 impl MltoolsPlugin {
     pub fn new(config: Config) -> Res<Arc<Self>> {
