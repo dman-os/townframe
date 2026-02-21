@@ -14,6 +14,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.FfiException
+import org.example.daybook.uniffi.NoHandle
 import org.example.daybook.uniffi.ProgressEventListener
 import org.example.daybook.uniffi.ProgressRepoFfi
 import org.example.daybook.uniffi.core.FacetDisplayHint
@@ -178,13 +179,25 @@ class ConfigViewModel(
                 llm = parseBackendRows(root, "llm")
             )
         } catch (e: SerializationException) {
-            println("Failed to parse MLTools config JSON: ${e.message}")
+            _error.value =
+                ConfigError(
+                    "Failed to parse MLTools config JSON: ${e.message}",
+                    FfiException(NoHandle)
+                )
             MltoolsConfigSummary(emptyList(), emptyList(), emptyList())
         } catch (e: IllegalStateException) {
-            println("Invalid MLTools config shape: ${e.message}")
+            _error.value =
+                ConfigError(
+                    "Invalid MLTools config shape: ${e.message}",
+                    FfiException(NoHandle)
+                )
             MltoolsConfigSummary(emptyList(), emptyList(), emptyList())
         } catch (e: Exception) {
-            println("Unexpected MLTools config parse error: ${e.message}")
+            _error.value =
+                ConfigError(
+                    "Unexpected MLTools config parse error: ${e.message}",
+                    FfiException(NoHandle)
+                )
             MltoolsConfigSummary(emptyList(), emptyList(), emptyList())
         }
     }
@@ -227,9 +240,7 @@ class ConfigViewModel(
             return MltoolsProvisionState.Running
         }
 
-        val latestFailed = tasks
-            .filter { it.state == ProgressTaskState.FAILED }
-            .firstOrNull()
+        val latestFailed = tasks.firstOrNull { it.state == ProgressTaskState.FAILED }
         if (latestFailed != null) {
             val failedMessage =
                 (latestFailed.latestUpdate?.update?.deets as? ProgressUpdateDeets.Completed)

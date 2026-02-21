@@ -23,7 +23,7 @@
   - User input validation
 - A well constructed program should rarely permit errors by using type state elimination of error paths.
   - External errors ought to be handled at the edges of the system.
-  - Invariants should be assumed to hold and consumer of these invariants should trust it and shouldn't guard against them.
+  - Invariants should be assumed to hold and consumers of these invariants should trust them and shouldn't guard against them.
   - Essentially, we want our programs to be correct in construction and not taped together till they work.
 - Don't swallow errors with empty catch statements or catch-and-log unless explcitly told to do so.
   - This is especially critical in Kotlin or UI code. 

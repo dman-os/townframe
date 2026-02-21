@@ -94,16 +94,20 @@ async fn download_url_to_path_with_observer(
     output_path: &Path,
     observer: Option<&MobileDefaultObserver>,
 ) -> Res<()> {
-    if output_path.exists() {
-        return Ok(());
-    }
-
-    let downloader = utils_rs::downloader::ReqwestRangeDownloader::new()?;
     let source = "oar".to_string();
     let file = output_path
         .file_name()
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_else(|| output_path.display().to_string());
+
+    if output_path.exists() {
+        if let Some(observer) = observer {
+            observer.emit(MobileDefaultEvent::DownloadCompleted { source, file });
+        }
+        return Ok(());
+    }
+
+    let downloader = utils_rs::downloader::ReqwestRangeDownloader::new()?;
     let download_observer = observer.map(|observer| {
         let observer = observer.clone();
         let source = source.clone();

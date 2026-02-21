@@ -2,4 +2,4 @@
 reviews:
   path_filters:
     - "**/*"
-    - "!./src/daybook_compose/composeApp/src/commonMain/kotlin/org/example/daybook/uniffi/"
+    - "!src/daybook_compose/composeApp/src/commonMain/kotlin/org/example/daybook/uniffi/**"

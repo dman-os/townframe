@@ -350,6 +350,18 @@ fun registerRustAndroidCopyTask(
         val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
         val destSoFile = File(destDir, "libdaybook_ffi.so")
         val destLibcxxFile = File(destDir, "libc++_shared.so")
+        
+        doFirst {
+            if (!sourceSoFile.exists()) {
+                throw GradleException("Missing Rust library: ${sourceSoFile.absolutePath}")
+            }
+            if (androidNdkRoot.isNullOrBlank()) {
+                throw GradleException("ANDROID_NDK_ROOT is not set; cannot locate libc++_shared.so")
+            }
+            if (libcxxSourceFile == null || !libcxxSourceFile.exists()) {
+                throw GradleException("Missing libc++_shared.so for ABI $targetAbi")
+            }
+        }
 
         onlyIf {
             val needsRustCopy = !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
@@ -433,6 +445,14 @@ registerRustAndroidCopyTask(
     buildTaskName = "buildRustAndroidRelease",
     sourceLibPath = "target/$targetRustTriple/release/libdaybook_ffi.so",
 )
+
+val hostOsForNativePackaging = org.gradle.internal.os.OperatingSystem.current()!!
+val hostArchForNativePackaging = System.getProperty("os.arch")
+val resourcesDirNameForNativePackaging = when {
+    hostOsForNativePackaging.isLinux && hostArchForNativePackaging in setOf("amd64", "x86_64") -> "linux-x64"
+    hostOsForNativePackaging.isLinux && hostArchForNativePackaging in setOf("aarch64", "arm64") -> "linux-arm64"
+    else -> "unsupported"
+}
 
 tasks.register<Copy>("copyRustDesktopDebugToComposeApp") {
     group = "build"
@@ -537,14 +557,6 @@ tasks.matching {
             )
         }
     }
-}
-
-val hostOsForNativePackaging = org.gradle.internal.os.OperatingSystem.current()!!
-val hostArchForNativePackaging = System.getProperty("os.arch")
-val resourcesDirNameForNativePackaging = when {
-    hostOsForNativePackaging.isLinux && hostArchForNativePackaging in setOf("amd64", "x86_64") -> "linux-x64"
-    hostOsForNativePackaging.isLinux && hostArchForNativePackaging in setOf("aarch64", "arm64") -> "linux-arm64"
-    else -> "unsupported"
 }
 
 tasks.register<Exec>("buildNativeImageDayb") {
