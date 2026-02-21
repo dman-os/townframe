@@ -339,22 +339,22 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     }
                     .into(),
                 ),
-                // (
-                //     "embed-text".into(),
-                //     ProcessorManifest {
-                //         desc: "Compute embedding facet from note content".into(),
-                //         deets: ProcessorDeets::DocProcessor {
-                //             routine_name: "embed-text".into(),
-                //             predicate: DocPredicateClause::And(vec![
-                //                 DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
-                //                 DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
-                //                     WellKnownFacetTag::Embedding.into(),
-                //                 ))),
-                //             ]),
-                //         },
-                //     }
-                //     .into(),
-                // ),
+                (
+                    "embed-text".into(),
+                    ProcessorManifest {
+                        desc: "Compute embedding facet from note content".into(),
+                        deets: ProcessorDeets::DocProcessor {
+                            routine_name: "embed-text".into(),
+                            predicate: DocPredicateClause::And(vec![
+                                DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
+                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                    WellKnownFacetTag::Embedding.into(),
+                                ))),
+                            ]),
+                        },
+                    }
+                    .into(),
+                ),
                 (
                     "index-embedding".into(),
                     ProcessorManifest {

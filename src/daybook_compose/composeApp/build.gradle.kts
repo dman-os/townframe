@@ -124,7 +124,6 @@ kotlin {
             implementation(compose.uiTest)
         }
         desktopMain.dependencies {
-            implementation(libs.skikoLinuxX64)
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutinesSwing)
             implementation(libs.jna)
@@ -337,7 +336,7 @@ fun registerRustAndroidCopyTask(
     taskName: String,
     buildTaskName: String,
     sourceLibPath: String,
-)=
+) =
     tasks.register<Copy>(taskName) {
         group = "build"
         description = "Copy Rust daybook_ffi and libc++_shared.so to Android jniLibs"
@@ -372,7 +371,9 @@ fun registerRustAndroidCopyTask(
             inputs.file(libcxxSourceFile)
         }
         outputs.file(destSoFile)
-        outputs.file(destLibcxxFile)
+        if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
+            outputs.file(destLibcxxFile)
+        }
     }
 
 // Debug variant: build Rust in debug mode

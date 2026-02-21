@@ -24,7 +24,7 @@
 - A well constructed program should rarely permit errors by using type state elimination of error paths.
   - External errors ought to be handled at the edges of the system.
   - Invariants should be assumed to hold and consumer of these invariants should trust it and shouldn't guard against them.
-  - Essentially, we want our programs be correct in construction and not taped together till they work.
+  - Essentially, we want our programs to be correct in construction and not taped together till they work.
 - Don't swallow errors with empty catch statements or catch-and-log unless explcitly told to do so.
   - This is especially critical in Kotlin or UI code. 
     - If an error occurs that can't be handled, it should crash the program or show a toast if it's not critical. 

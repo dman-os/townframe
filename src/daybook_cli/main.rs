@@ -144,9 +144,10 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                             .iter()
                             .all(|val| matches!(val, serde_json::Value::Number(..)))
                         {
-                            *val = serde_json::Value::String(
-                                format!("byte array, len = {}", values.len()).into(),
-                            )
+                            *val = serde_json::Value::String(format!(
+                                "byte array, len = {}",
+                                values.len()
+                            ))
                         } else {
                             for val in values {
                                 display_byte_array(val);
@@ -627,7 +628,7 @@ struct Cli {
 enum StaticCommands {
     // Initialize repo
     Init {},
-    // dump full automerge contents
+    /// Dump full automerge contents
     Dump,
     /// List documents
     Ls,

@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -169,19 +170,31 @@ class ConfigViewModel(
     }
 
     private fun parseMltoolsConfig(configJson: String): MltoolsConfigSummary {
-        val root = Json.parseToJsonElement(configJson).jsonObject
-        return MltoolsConfigSummary(
-            ocr = parseBackendRows(root, "ocr"),
-            embed = parseBackendRows(root, "embed"),
-            llm = parseBackendRows(root, "llm")
-        )
+        return try {
+            val root = Json.parseToJsonElement(configJson).jsonObject
+            MltoolsConfigSummary(
+                ocr = parseBackendRows(root, "ocr"),
+                embed = parseBackendRows(root, "embed"),
+                llm = parseBackendRows(root, "llm")
+            )
+        } catch (e: SerializationException) {
+            println("Failed to parse MLTools config JSON: ${e.message}")
+            MltoolsConfigSummary(emptyList(), emptyList(), emptyList())
+        } catch (e: IllegalStateException) {
+            println("Invalid MLTools config shape: ${e.message}")
+            MltoolsConfigSummary(emptyList(), emptyList(), emptyList())
+        } catch (e: Exception) {
+            println("Unexpected MLTools config parse error: ${e.message}")
+            MltoolsConfigSummary(emptyList(), emptyList(), emptyList())
+        }
     }
 
     private fun parseBackendRows(root: JsonObject, section: String): List<MltoolsBackendRow> {
-        val sectionObj = root[section]?.jsonObject ?: return emptyList()
-        val backends = sectionObj["backends"]?.jsonArray ?: return emptyList()
+        val sectionObj = root[section] as? JsonObject ?: return emptyList()
+        val backends = sectionObj["backends"] as? JsonArray ?: return emptyList()
         return backends.map { backend ->
-            val backendObj = backend.jsonObject
+            val backendObj = backend as? JsonObject
+                ?: return@map MltoolsBackendRow("Unknown", backend.toString().trim('"'))
             val (backendType, backendValue) = backendObj.entries.firstOrNull()
                 ?: return@map MltoolsBackendRow("Unknown", "")
             MltoolsBackendRow(

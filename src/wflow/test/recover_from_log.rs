@@ -55,7 +55,7 @@ async fn recovers_partition_from_log_only_without_duplicate_effects() -> Res<()>
         .start()
         .await?;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    test_cx.wait_until_no_active_jobs(10).await?;
     let after = test_cx.get_partition_log_snapshot().await?;
     let after_counts = source_effect_counts(&after);
     test_cx.stop().await?;

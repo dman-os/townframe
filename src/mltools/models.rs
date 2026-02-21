@@ -227,10 +227,20 @@ async fn hf_download_with_progress(
     observer: Option<&MobileDefaultObserver>,
 ) -> Res<PathBuf> {
     let progress = HfHubProgress::new(observer.cloned(), file.to_string());
-    model_repo
+    let result = model_repo
         .download_with_progress(file, progress)
         .await
-        .wrap_err_with(|| format!("error downloading {file} from {NOMIC_MODEL_ID}"))
+        .wrap_err_with(|| format!("error downloading {file} from {NOMIC_MODEL_ID}"));
+    if let Err(err) = &result {
+        if let Some(observer) = observer {
+            observer.emit(MobileDefaultEvent::DownloadFailed {
+                source: "hf-hub".to_string(),
+                file: file.to_string(),
+                message: format!("{err:?}"),
+            });
+        }
+    }
+    result
 }
 
 /// Downloads mobile-friendly OCR + embedding model artifacts and returns a ready-to-use config.
