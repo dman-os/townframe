@@ -201,30 +201,7 @@ private fun ProgressTaskRow(
                 }
             when (val updateEntry = task.latestUpdate?.update?.deets) {
             is ProgressUpdateDeets.Amount -> {
-                val progress =
-                    if (updateEntry.total == null || updateEntry.total == 0UL) {
-                        null
-                    } else {
-                        updateEntry.done.toFloat() / updateEntry.total.toFloat()
-                    }
-                    if (progress != null) {
-                        LinearProgressIndicator(
-                            progress = { progress.coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    val totalText = updateEntry.total?.toString() ?: "?"
-                    Text(
-                        "${updateEntry.done}/${totalText} ${updateEntry.unit}",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    if (updateEntry.message != null) {
-                        Text(
-                            updateEntry.message,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                ProgressAmountBlock(updateEntry, modifier = Modifier.fillMaxWidth())
                 }
                 is ProgressUpdateDeets.Status -> {
                     TimelineUpdateRow(
@@ -285,7 +262,7 @@ private fun TimelineUpdateRow(at: Long, deets: ProgressUpdateDeets) {
             tint = MaterialTheme.colorScheme.primary
             title = "Progress"
             body =
-                "${deets.done}/${deets.total ?: "?"} ${deets.unit}" +
+                formatAmountSummary(deets.done, deets.total, deets.unit) +
                     if (deets.message != null) " • ${deets.message}" else ""
         }
 
@@ -346,6 +323,9 @@ private fun ProgressDetailScreen(
     updates: List<ProgressUpdateEntry>,
     onBack: () -> Unit
 ) {
+    val amountEntry = latestAmountEntry(task, updates)
+    val timelineUpdates = updates.filter { it.update.deets !is ProgressUpdateDeets.Amount }
+
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp)
@@ -420,6 +400,18 @@ private fun ProgressDetailScreen(
                     }
                 }
             }
+            if (amountEntry != null) {
+                Spacer(Modifier.height(4.dp))
+                Text("Progress", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(4.dp))
+                val amount = amountEntry.update.deets as ProgressUpdateDeets.Amount
+                ProgressAmountBlock(amount, modifier = Modifier.fillMaxWidth())
+                Text(
+                    "Updated ${formatClock(amountEntry.at.epochSeconds)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             Spacer(Modifier.height(4.dp))
             Text("Timeline", style = MaterialTheme.typography.titleSmall)
             Spacer(Modifier.height(4.dp))
@@ -427,7 +419,7 @@ private fun ProgressDetailScreen(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                items(updates, key = { it.sequence }) { update ->
+                items(timelineUpdates, key = { it.sequence }) { update ->
                     TimelineUpdateRow(at = update.at.epochSeconds, deets = update.update.deets)
                 }
             }
@@ -517,6 +509,17 @@ private fun progressTypeInfo(task: ProgressTask): ProgressTypeInfo {
     return when (type) {
         "dispatch" -> ProgressTypeInfo(label = "Dispatch", icon = Icons.Default.Sync)
         else -> ProgressTypeInfo(label = task.title ?: task.id, icon = Icons.Default.Circle)
+    }
+}
+
+private fun latestAmountEntry(task: ProgressTask, updates: List<ProgressUpdateEntry>): ProgressUpdateEntry? {
+    val latestFromTimeline = updates.lastOrNull { it.update.deets is ProgressUpdateDeets.Amount }
+    val latestTask = task.latestUpdate?.takeIf { it.update.deets is ProgressUpdateDeets.Amount }
+    return when {
+        latestTask == null -> latestFromTimeline
+        latestFromTimeline == null -> latestTask
+        latestTask.sequence >= latestFromTimeline.sequence -> latestTask
+        else -> latestFromTimeline
     }
 }
 

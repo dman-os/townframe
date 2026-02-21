@@ -901,9 +901,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_facet_display_hint(
     ): Short
+    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_mltools_config_json(
+    ): Short
     external fun uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints(
     ): Short
+    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_provision_mobile_default_mltools(
+    ): Short
     external fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_facet_display_hint(
+    ): Short
+    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_mltools_config_json(
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_configrepoffi_stop(
     ): Short
@@ -1134,9 +1140,15 @@ external fun uniffi_daybook_ffi_fn_method_configrepoffi_ffi_register_listener(`p
 ): Long
 external fun uniffi_daybook_ffi_fn_method_configrepoffi_get_facet_display_hint(`ptr`: Long,`id`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_daybook_ffi_fn_method_configrepoffi_get_mltools_config_json(`ptr`: Long,
+): Long
 external fun uniffi_daybook_ffi_fn_method_configrepoffi_list_display_hints(`ptr`: Long,
 ): Long
+external fun uniffi_daybook_ffi_fn_method_configrepoffi_provision_mobile_default_mltools(`ptr`: Long,`progressRepo`: Long,
+): Long
 external fun uniffi_daybook_ffi_fn_method_configrepoffi_set_facet_display_hint(`ptr`: Long,`key`: RustBuffer.ByValue,`config`: RustBufferFacetDisplayHint.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_configrepoffi_set_mltools_config_json(`ptr`: Long,`configJson`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_configrepoffi_stop(`ptr`: Long,
 ): Long
@@ -1473,10 +1485,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_facet_display_hint() != 14702.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_mltools_config_json() != 36447.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints() != 47455.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_provision_mobile_default_mltools() != 36327.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_facet_display_hint() != 7725.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_mltools_config_json() != 35501.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_stop() != 42921.toShort()) {
@@ -3391,9 +3412,15 @@ public interface ConfigRepoFfiInterface {
     
     suspend fun `getFacetDisplayHint`(`id`: kotlin.String): FacetDisplayHint?
     
+    suspend fun `getMltoolsConfigJson`(): kotlin.String
+    
     suspend fun `listDisplayHints`(): Map<kotlin.String, FacetDisplayHint>
     
+    suspend fun `provisionMobileDefaultMltools`(`progressRepo`: ProgressRepoFfi)
+    
     suspend fun `setFacetDisplayHint`(`key`: kotlin.String, `config`: FacetDisplayHint)
+    
+    suspend fun `setMltoolsConfigJson`(`configJson`: kotlin.String)
     
     suspend fun `stop`()
     
@@ -3530,6 +3557,27 @@ open class ConfigRepoFfi: Disposable, AutoCloseable, ConfigRepoFfiInterface
     }
 
     
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getMltoolsConfigJson`() : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_get_mltools_config_json(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `listDisplayHints`() : Map<kotlin.String, FacetDisplayHint> {
         return uniffiRustCallAsync(
@@ -3552,12 +3600,56 @@ open class ConfigRepoFfi: Disposable, AutoCloseable, ConfigRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `provisionMobileDefaultMltools`(`progressRepo`: ProgressRepoFfi) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_provision_mobile_default_mltools(
+                uniffiHandle,
+                FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `setFacetDisplayHint`(`key`: kotlin.String, `config`: FacetDisplayHint) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_set_facet_display_hint(
                 uniffiHandle,
                 FfiConverterString.lower(`key`),FfiConverterTypeFacetDisplayHint.lower(`config`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setMltoolsConfigJson`(`configJson`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_set_mltools_config_json(
+                uniffiHandle,
+                FfiConverterString.lower(`configJson`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },

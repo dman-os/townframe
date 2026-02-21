@@ -188,7 +188,8 @@ fun CompactLayout(
 
     // Config ViewModel
     val configRepo = LocalContainer.current.configRepo
-    val configVm = viewModel { ConfigViewModel(configRepo) }
+    val progressRepo = LocalContainer.current.progressRepo
+    val configVm = viewModel { ConfigViewModel(configRepo, progressRepo) }
 
     // TODO: Update to use new LayoutWindowConfig structure
     // val tableViewModeState = configVm.tableViewModeCompact.collectAsState()

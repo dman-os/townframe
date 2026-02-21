@@ -30,3 +30,5 @@ src/samod/
 play.*
 jniLibs
 .gradle-local
+
+*.log

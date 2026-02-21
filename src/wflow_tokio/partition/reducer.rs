@@ -3,6 +3,7 @@
 
 use crate::interlude::*;
 
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -66,6 +67,12 @@ pub fn start_tokio_partition_reducer(
     let fut = {
         let cancel_token = cancel_token.clone();
         async move {
+            let latest_entry_id_at_start = pcx
+                .log
+                .latest_idx()
+                .await
+                .wrap_err("error getting latest id from log")?;
+
             let mut worker = TokioPartitionReducer {
                 log: pcx.log_ref(),
                 pcx: pcx.clone(),
@@ -78,17 +85,14 @@ pub fn start_tokio_partition_reducer(
                 entries_since_snapshot: 0,
                 last_snapshot_time: Timestamp::now(),
                 last_snapshotted_entry_id: start_offset.saturating_sub(1),
+                replay_latest_entry_id: latest_entry_id_at_start,
+                replay_seen_effect_sources: default(),
+                did_reschedule_after_replay: false,
             };
 
-            let mut pending_effects_at_start = {
-                let effects = worker.state.read_effects().await;
-                effects.keys().cloned().collect::<Vec<_>>()
-            };
-            let latest_entry_id_at_start = pcx
-                .log
-                .latest_idx()
-                .await
-                .wrap_err("error getting latest id from log")?;
+            worker
+                .index_existing_effect_sources(start_offset, latest_entry_id_at_start)
+                .await?;
 
             let log = pcx.log_ref();
             let mut stream = log.tail(start_offset);
@@ -105,9 +109,10 @@ pub fn start_tokio_partition_reducer(
                 // FIXME: not elegant!
                 // there has to be a better way to configure this log approach
                 // to avoid such errors
-                if cur_entry_id == latest_entry_id_at_start {
+                if cur_entry_id == latest_entry_id_at_start && !worker.did_reschedule_after_replay {
                     let effects_map = worker.state.read_effects().await;
-                    for effect_id in pending_effects_at_start.drain(..) {
+                    for effect_id in effects_map.keys() {
+                        let effect_id = effect_id.clone();
                         let is_run_job = {
                             effects_map
                                 .get(&effect_id)
@@ -131,6 +136,7 @@ pub fn start_tokio_partition_reducer(
                             .await
                             .wrap_err("failed to schedule effect at startup")?;
                     }
+                    worker.did_reschedule_after_replay = true;
                 }
                 // Poll the stream with cancellation check
                 tokio::select! {
@@ -190,9 +196,34 @@ struct TokioPartitionReducer {
     entries_since_snapshot: u64,
     last_snapshot_time: Timestamp,
     last_snapshotted_entry_id: u64,
+    replay_latest_entry_id: u64,
+    replay_seen_effect_sources: HashSet<u64>,
+    did_reschedule_after_replay: bool,
 }
 
 impl TokioPartitionReducer {
+    async fn index_existing_effect_sources(
+        &mut self,
+        start_offset: u64,
+        latest_entry_id_at_start: u64,
+    ) -> Res<()> {
+        if start_offset > latest_entry_id_at_start {
+            return Ok(());
+        }
+        let mut stream = self.log.tail(start_offset);
+        while let Some(entry) = stream.next().await {
+            let (entry_id, entry) = entry?;
+            if let Some(log::PartitionLogEntry::JobPartitionEffects(entry)) = entry {
+                self.replay_seen_effect_sources
+                    .insert(entry.source_entry_id);
+            }
+            if entry_id >= latest_entry_id_at_start {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     #[tracing::instrument(skip(self, entry))]
     async fn reduce(&mut self, entry_id: u64, entry: log::PartitionLogEntry) -> Res<()> {
         {
@@ -277,7 +308,9 @@ impl TokioPartitionReducer {
                 let mut effects_map = self.state.write_effects().await;
                 effects_map.insert(id.clone(), effect);
             }
-            self.new_effects.push(id);
+            if entry_id > self.replay_latest_entry_id {
+                self.new_effects.push(id);
+            }
         }
         // Send all effects to the channel
         for effect_id in self.new_effects.drain(..) {
@@ -332,6 +365,12 @@ impl TokioPartitionReducer {
         self.state.notify_counts_changed(new_counts);
 
         if !self.event_effects.is_empty() {
+            let replay_already_emitted = entry_id <= self.replay_latest_entry_id
+                && self.replay_seen_effect_sources.contains(&entry_id);
+            if replay_already_emitted {
+                self.event_effects.clear();
+                return Ok(());
+            }
             // NOTE: this little dance gives as arena like semantics
             // without Drop issues
             let mut entry = log::JobPartitionEffectsLogEntry {

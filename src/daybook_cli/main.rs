@@ -126,6 +126,51 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
 
     match cli.command {
         StaticCommands::Init {} | StaticCommands::Completions { .. } => unreachable!(),
+        StaticCommands::Dump => {
+            let mut drawer = ctx.doc_drawer.with_document(|doc| {
+                // eyre::Ok(doc.hydrate(None))
+                let value: ThroughJson<serde_json::Value> = autosurgeon::hydrate(doc)?;
+                eyre::Ok(value.0)
+            })?;
+            let mut app = ctx.doc_app.with_document(|doc| {
+                // eyre::Ok(doc.hydrate(None))
+                let value: ThroughJson<serde_json::Value> = autosurgeon::hydrate(doc)?;
+                eyre::Ok(value.0)
+            })?;
+            fn display_byte_array(val: &mut serde_json::Value) {
+                match val {
+                    serde_json::Value::Array(values) => {
+                        if values
+                            .iter()
+                            .all(|val| matches!(val, serde_json::Value::Number(..)))
+                        {
+                            *val = serde_json::Value::String(
+                                format!("byte array, len = {}", values.len()).into(),
+                            )
+                        } else {
+                            for val in values {
+                                display_byte_array(val);
+                            }
+                        }
+                    }
+                    serde_json::Value::Object(map) => {
+                        for (_, val) in map {
+                            display_byte_array(val)
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            display_byte_array(&mut drawer);
+            display_byte_array(&mut app);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "drawer": drawer,
+                    "app": app,
+                }))?
+            )
+        }
         StaticCommands::Ls => {
             let doc_entries = drawer.list().await?;
 
@@ -502,7 +547,8 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         Ok(StaticCommands::Completions { .. }) => {
             unreachable!("completions have already been handled");
         }
-        Ok(StaticCommands::Ls)
+        Ok(StaticCommands::Dump)
+        | Ok(StaticCommands::Ls)
         | Ok(StaticCommands::Touch)
         | Ok(StaticCommands::Init { .. })
         | Ok(StaticCommands::Cat { .. })
@@ -581,6 +627,8 @@ struct Cli {
 enum StaticCommands {
     // Initialize repo
     Init {},
+    // dump full automerge contents
+    Dump,
     /// List documents
     Ls,
     /// Show details for a specific document

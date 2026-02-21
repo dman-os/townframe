@@ -53,12 +53,10 @@ const linuxdeployUrl = $.env.DAYBOOK_LINUXDEPLOY_URL ??
 const stageUsrDir = stageAppDir.join("usr");
 const stageBinDir = stageUsrDir.join("bin");
 const stageLibexecDir = stageUsrDir.join("libexec", appName);
-const stageAppLibDir = stageLibexecDir.join("lib", "app");
 const stageDesktopPath = stageAppDir.join(`${desktopId}.desktop`);
 const stageIconPath = stageAppDir.join(`${desktopId}.png`);
 const stageLauncherPath = stageBinDir.join(appName);
 const stagedMainExecutablePath = stageLibexecDir.join("bin", desktopId);
-const stagedCfgPath = stageLibexecDir.join("lib", "app", `${desktopId}.cfg`);
 
 async function ensureUbuntuDeps() {
   if (Deno.env.get("DAYBOOK_SKIP_APT_INSTALL") === "1") {
@@ -135,26 +133,9 @@ if (await stageAppDir.exists()) {
 }
 await stageBinDir.ensureDir();
 await composeAppDir.copy(stageLibexecDir);
-await stageAppLibDir.ensureDir();
 
 if (!(await stagedMainExecutablePath.exists())) {
   throw new Error(`missing staged executable: ${stagedMainExecutablePath}`);
-}
-
-if (!(await stagedCfgPath.exists())) {
-  throw new Error(`missing cfg file: ${stagedCfgPath}`);
-}
-const cfgText = await stagedCfgPath.readText();
-const cfgLinesToAdd = [
-  "java-options=-Djava.library.path=$APPDIR/lib/app",
-  "java-options=-Djna.boot.library.path=$APPDIR/lib/app",
-  "java-options=-Djna.nosys=true",
-];
-const missingCfgLines = cfgLinesToAdd.filter((line) => !cfgText.includes(line));
-if (missingCfgLines.length > 0) {
-  await stagedCfgPath.writeText(
-    `${cfgText.trimEnd()}\n${missingCfgLines.join("\n")}\n`,
-  );
 }
 
 await stageLauncherPath.writeText(
