@@ -130,7 +130,8 @@ fun ExpandedLayout(
 
     // Config ViewModel (for error handling)
     val configRepo = LocalContainer.current.configRepo
-    val configVm = viewModel { ConfigViewModel(configRepo) }
+    val progressRepo = LocalContainer.current.progressRepo
+    val configVm = viewModel { ConfigViewModel(configRepo, progressRepo) }
 
     // Observe layout config from the selected window
     val tablesState by tablesVm.tablesState.collectAsState()

@@ -3,6 +3,8 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
+import org.gradle.api.tasks.Copy
+import org.gradle.api.tasks.Exec
 import java.io.File
 
 plugins {
@@ -122,7 +124,6 @@ kotlin {
             implementation(compose.uiTest)
         }
         desktopMain.dependencies {
-            implementation(libs.skikoLinuxX64)
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutinesSwing)
             implementation(libs.jna)
@@ -252,6 +253,8 @@ data class AndroidRustToolchain(
     val arPath: String,
 )
 
+val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
+
 // Desktop Rust builds
 tasks.register<Exec>("buildRustDesktopDebug") {
     group = "build"
@@ -324,6 +327,67 @@ fun rustDesktopLibraryNameForHost(hostOs: org.gradle.internal.os.OperatingSystem
         else -> "libdaybook_ffi.so"
     }
 
+fun desktopComposeAppDir(isRelease: Boolean): File {
+    val buildVariantDir = if (isRelease) "main-release" else "main"
+    return File(project.buildDir, "compose/binaries/$buildVariantDir/app/org.example.daybook")
+}
+
+fun registerRustAndroidCopyTask(
+    taskName: String,
+    buildTaskName: String,
+    sourceLibPath: String,
+) =
+    tasks.register<Copy>(taskName) {
+        group = "build"
+        description = "Copy Rust daybook_ffi and libc++_shared.so to Android jniLibs"
+
+        dependsOn(buildTaskName)
+
+        val sourceSoFile = File(repoRoot, sourceLibPath)
+        val androidNdkRoot = System.getenv("ANDROID_NDK_ROOT")
+        val libcxxSourceFile =
+            if (!androidNdkRoot.isNullOrBlank()) ndkLibCppSharedForAbi(targetAbi, androidNdkRoot) else null
+        val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
+        val destSoFile = File(destDir, "libdaybook_ffi.so")
+        val destLibcxxFile = File(destDir, "libc++_shared.so")
+        
+        doFirst {
+            if (!sourceSoFile.exists()) {
+                throw GradleException("Missing Rust library: ${sourceSoFile.absolutePath}")
+            }
+            if (androidNdkRoot.isNullOrBlank()) {
+                throw GradleException("ANDROID_NDK_ROOT is not set; cannot locate libc++_shared.so")
+            }
+            if (libcxxSourceFile == null || !libcxxSourceFile.exists()) {
+                throw GradleException("Missing libc++_shared.so for ABI $targetAbi")
+            }
+        }
+
+        onlyIf {
+            val needsRustCopy = !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
+            val needsLibcxxCopy =
+                libcxxSourceFile?.let { source ->
+                    !destLibcxxFile.exists() || source.lastModified() > destLibcxxFile.lastModified()
+                } ?: false
+            needsRustCopy || needsLibcxxCopy
+        }
+
+        from(sourceSoFile)
+        if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
+            from(libcxxSourceFile)
+        }
+        into(destDir)
+
+        inputs.file(sourceSoFile)
+        if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
+            inputs.file(libcxxSourceFile)
+        }
+        outputs.file(destSoFile)
+        if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
+            outputs.file(destLibcxxFile)
+        }
+    }
+
 // Debug variant: build Rust in debug mode
 tasks.register<Exec>("buildRustAndroidDebug") {
     group = "build"
@@ -347,45 +411,11 @@ tasks.register<Exec>("buildRustAndroidDebug") {
     }
 }
 
-// Copy task for debug variant
-tasks.register<Copy>("copyRustAndroidDebug") {
-    group = "build"
-    description = "Copy Rust daybook_ffi (debug) to jniLibs"
-
-    dependsOn("buildRustAndroidDebug")
-
-    val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
-    val sourceSoFile = File(repoRoot, "target/$targetRustTriple/debug/libdaybook_ffi.so")
-    val androidNdkRoot = System.getenv("ANDROID_NDK_ROOT")
-    val libcxxSourceFile = if (!androidNdkRoot.isNullOrBlank()) ndkLibCppSharedForAbi(targetAbi, androidNdkRoot) else null
-    val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
-    val destSoFile = File(destDir, "libdaybook_ffi.so")
-    val destLibcxxFile = File(destDir, "libc++_shared.so")
-
-    // Only copy if source is newer than destination
-    onlyIf {
-        val needsRustCopy = !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
-        val needsLibcxxCopy =
-            libcxxSourceFile?.let { source ->
-                !destLibcxxFile.exists() || source.lastModified() > destLibcxxFile.lastModified()
-            } ?: false
-        needsRustCopy || needsLibcxxCopy
-    }
-
-    from(sourceSoFile)
-    if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
-        from(libcxxSourceFile)
-    }
-    into(destDir)
-
-    // Declare inputs and outputs for proper up-to-date checking
-    inputs.file(sourceSoFile)
-    if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
-        inputs.file(libcxxSourceFile)
-    }
-    outputs.file(destSoFile)
-    outputs.file(destLibcxxFile)
-}
+registerRustAndroidCopyTask(
+    taskName = "copyRustAndroidDebug",
+    buildTaskName = "buildRustAndroidDebug",
+    sourceLibPath = "target/$targetRustTriple/debug/libdaybook_ffi.so",
+)
 
 // Release variant: build Rust in release mode
 tasks.register<Exec>("buildRustAndroidRelease") {
@@ -410,44 +440,64 @@ tasks.register<Exec>("buildRustAndroidRelease") {
     }
 }
 
-// Copy task for release variant
-tasks.register<Copy>("copyRustAndroidRelease") {
+registerRustAndroidCopyTask(
+    taskName = "copyRustAndroidRelease",
+    buildTaskName = "buildRustAndroidRelease",
+    sourceLibPath = "target/$targetRustTriple/release/libdaybook_ffi.so",
+)
+
+val hostOsForNativePackaging = org.gradle.internal.os.OperatingSystem.current()!!
+val hostArchForNativePackaging = System.getProperty("os.arch")
+val resourcesDirNameForNativePackaging = when {
+    hostOsForNativePackaging.isLinux && hostArchForNativePackaging in setOf("amd64", "x86_64") -> "linux-x64"
+    hostOsForNativePackaging.isLinux && hostArchForNativePackaging in setOf("aarch64", "arm64") -> "linux-arm64"
+    else -> "unsupported"
+}
+
+tasks.register<Copy>("copyRustDesktopDebugToComposeApp") {
     group = "build"
-    description = "Copy Rust daybook_ffi (release) to jniLibs"
+    description = "Copy desktop debug Rust FFI library to Compose desktop app directory"
+    dependsOn("buildRustDesktopDebug")
 
-    dependsOn("buildRustAndroidRelease")
+    val sourceLibFile = File(repoRoot, "target/debug/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}")
+    val destLibDir = File(desktopComposeAppDir(false), "lib/app")
+    val destLibFile = File(destLibDir, sourceLibFile.name)
 
-    val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
-    val sourceSoFile = File(repoRoot, "target/$targetRustTriple/release/libdaybook_ffi.so")
-    val androidNdkRoot = System.getenv("ANDROID_NDK_ROOT")
-    val libcxxSourceFile = if (!androidNdkRoot.isNullOrBlank()) ndkLibCppSharedForAbi(targetAbi, androidNdkRoot) else null
-    val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
-    val destSoFile = File(destDir, "libdaybook_ffi.so")
-    val destLibcxxFile = File(destDir, "libc++_shared.so")
-
-    // Only copy if source is newer than destination
-    onlyIf {
-        val needsRustCopy = !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
-        val needsLibcxxCopy =
-            libcxxSourceFile?.let { source ->
-                !destLibcxxFile.exists() || source.lastModified() > destLibcxxFile.lastModified()
-            } ?: false
-        needsRustCopy || needsLibcxxCopy
+    doFirst {
+        if (!sourceLibFile.exists()) {
+            throw GradleException("Missing desktop debug Rust library: ${sourceLibFile.absolutePath}")
+        }
+        destLibDir.mkdirs()
     }
 
-    from(sourceSoFile)
-    if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
-        from(libcxxSourceFile)
-    }
-    into(destDir)
+    from(sourceLibFile)
+    into(destLibDir)
 
-    // Declare inputs and outputs for proper up-to-date checking
-    inputs.file(sourceSoFile)
-    if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
-        inputs.file(libcxxSourceFile)
+    inputs.file(sourceLibFile)
+    outputs.file(destLibFile)
+}
+
+tasks.register<Copy>("copyRustDesktopReleaseToComposeApp") {
+    group = "build"
+    description = "Copy desktop release Rust FFI library to Compose desktop app directory"
+    dependsOn("buildRustDesktopRelease")
+
+    val sourceLibFile = File(repoRoot, "target/release/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}")
+    val destLibDir = File(desktopComposeAppDir(true), "lib/app")
+    val destLibFile = File(destLibDir, sourceLibFile.name)
+
+    doFirst {
+        if (!sourceLibFile.exists()) {
+            throw GradleException("Missing desktop release Rust library: ${sourceLibFile.absolutePath}")
+        }
+        destLibDir.mkdirs()
     }
-    outputs.file(destSoFile)
-    outputs.file(destLibcxxFile)
+
+    from(sourceLibFile)
+    into(destLibDir)
+
+    inputs.file(sourceLibFile)
+    outputs.file(destLibFile)
 }
 
 // Wire tasks to Android variants
@@ -480,6 +530,7 @@ tasks.matching {
         )
 }.configureEach {
     dependsOn("buildRustDesktopDebug")
+    dependsOn("copyRustDesktopDebugToComposeApp")
 }
 
 tasks.matching {
@@ -493,8 +544,8 @@ tasks.matching {
         )
 }.configureEach {
     dependsOn("buildRustDesktopRelease")
+    dependsOn("copyRustDesktopReleaseToComposeApp")
     doFirst {
-        val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
         val rustDesktopReleaseLib = File(
             repoRoot,
             "target/release/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}"
@@ -506,14 +557,6 @@ tasks.matching {
             )
         }
     }
-}
-
-val hostOsForNativePackaging = org.gradle.internal.os.OperatingSystem.current()!!
-val hostArchForNativePackaging = System.getProperty("os.arch")
-val resourcesDirNameForNativePackaging = when {
-    hostOsForNativePackaging.isLinux && hostArchForNativePackaging in setOf("amd64", "x86_64") -> "linux-x64"
-    hostOsForNativePackaging.isLinux && hostArchForNativePackaging in setOf("aarch64", "arm64") -> "linux-arm64"
-    else -> "unsupported"
 }
 
 tasks.register<Exec>("buildNativeImageDayb") {

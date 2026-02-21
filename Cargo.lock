@@ -1990,6 +1990,7 @@ dependencies = [
  "displaydoc",
  "futures",
  "garde",
+ "mltools",
  "nokhwa",
  "once_cell",
  "parking_lot",

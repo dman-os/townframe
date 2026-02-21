@@ -21,6 +21,7 @@ path = "lib.rs"
 utils_rs = { workspace = true, features = ["hash"] }
 daybook_core = { workspace = true, features = ["uniffi"] }
 daybook_types = { workspace = true, features = ["uniffi"] }
+mltools = { workspace = true, features = ["hf_hub"] }
 
 # serde
 serde.workspace = true

@@ -9,6 +9,8 @@ mod fails_until_told;
 #[cfg(any(test, feature = "test-harness"))]
 #[allow(unused)]
 mod keyvalue_plugin;
+#[cfg(test)]
+mod recover_from_log;
 
 use wash_runtime::{host::HostApi, plugin, types, wit::WitInterface};
 use wflow_core::kvstore::log::KvStoreLog;
