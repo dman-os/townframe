@@ -59,6 +59,9 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
     private val _selectedDoc = MutableStateFlow<Doc?>(null)
     val selectedDoc = _selectedDoc.asStateFlow()
 
+    private val _error = MutableStateFlow<FfiException?>(null)
+    val error = _error.asStateFlow()
+
     // Internal access for optimistic updates
     internal val _selectedDocMutable = _selectedDoc
 
@@ -139,6 +142,10 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
 
     fun isDocLoading(id: String): Boolean = _loadingDocs.value.contains(id)
 
+    private fun emitError(error: FfiException) {
+        _error.value = error
+    }
+
     fun selectDoc(id: String?) {
         _selectedDocId.value = id
         if (id != null) {
@@ -206,7 +213,7 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
                         loaded[id] = doc
                     }
                 } catch (e: FfiException) {
-                    println("Error loading document $id: ${e.message}")
+                    emitError(e)
                 }
             }
 
@@ -226,7 +233,7 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
                 _loadedDocs.value = _loadedDocs.value + (id to doc)
             }
         } catch (e: FfiException) {
-            println("Error loading document $id: ${e.message}")
+            emitError(e)
         }
     }
 
@@ -240,7 +247,7 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
                 try {
                     drawerRepo.updateBatch(listOf(UpdateDocArgsV2("main", null, patch)))
                 } catch (e: FfiException) {
-                    println("Error updating document: ${e.message}")
+                    emitError(e)
                 }
             }
     }
@@ -250,7 +257,7 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
             try {
                 drawerRepo.updateBatch(patches.map { UpdateDocArgsV2("main", null, it) })
             } catch (e: FfiException) {
-                println("Error updating documents: ${e.message}")
+                emitError(e)
             }
         }
     }

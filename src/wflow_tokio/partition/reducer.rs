@@ -176,15 +176,19 @@ impl TokioPartitionReducer {
         if self.did_reschedule_after_replay {
             return Ok(());
         }
-        let effects_map = self.state.read_effects().await;
-        for effect_id in effects_map.keys() {
-            let effect_id = effect_id.clone();
-            let is_run_job = {
-                effects_map
-                    .get(&effect_id)
-                    .map(|eff| matches!(eff.deets, effects::PartitionEffectDeets::RunJob(..)))
-                    .unwrap_or(false)
-            };
+        let effects_to_reschedule = {
+            let effects_map = self.state.read_effects().await;
+            effects_map
+                .iter()
+                .map(|(effect_id, effect)| {
+                    (
+                        effect_id.clone(),
+                        matches!(effect.deets, effects::PartitionEffectDeets::RunJob(..)),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for (effect_id, is_run_job) in effects_to_reschedule {
             if is_run_job {
                 let cancel_token = CancellationToken::new();
                 self.effect_cancel_tokens

@@ -500,6 +500,24 @@ tasks.register<Copy>("copyRustDesktopReleaseToComposeApp") {
     outputs.file(destLibFile)
 }
 
+// Compose desktop packaging regenerates the app directory during packaging tasks.
+// Ensure our Rust .so copy runs after those generation steps so it is not overwritten.
+tasks.named("copyRustDesktopDebugToComposeApp").configure {
+    mustRunAfter(
+        "prepareAppResources",
+        "unpackDefaultComposeDesktopJvmApplicationResources",
+        "createRuntimeImage",
+    )
+}
+
+tasks.named("copyRustDesktopReleaseToComposeApp").configure {
+    mustRunAfter(
+        "prepareAppResources",
+        "unpackDefaultComposeDesktopJvmApplicationResources",
+        "createRuntimeImage",
+    )
+}
+
 // Wire tasks to Android variants
 tasks.matching { it.name == "preDebugBuild" }.configureEach {
     dependsOn("copyRustAndroidDebug")
@@ -558,6 +576,7 @@ tasks.matching {
         }
     }
 }
+
 
 tasks.register<Exec>("buildNativeImageDayb") {
     group = "distribution"

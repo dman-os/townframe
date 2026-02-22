@@ -2,6 +2,8 @@
 use crate::interlude::*;
 
 #[cfg(feature = "automerge-repo")]
+use automerge::ReadDoc;
+#[cfg(feature = "automerge-repo")]
 use autosurgeon::Prop;
 #[cfg(feature = "automerge-repo")]
 use samod::DocumentId;
@@ -179,8 +181,23 @@ impl ChangeListenerManager {
                     break;
                 };
                 let (new_heads, all_changes) = handle.with_document(|doc| {
+                    let mut event_hashes =
+                        std::collections::HashSet::<automerge::ChangeHash>::new();
+                    let mut stack = changes.new_heads.clone();
+                    while let Some(hash) = stack.pop() {
+                        if !event_hashes.insert(hash) {
+                            continue;
+                        }
+                        if let Some(change) = doc.get_change_by_hash(&hash) {
+                            stack.extend(change.deps().iter().copied());
+                        }
+                    }
+
                     let mut actor_ids: Vec<automerge::ActorId> = vec![];
                     for change in doc.get_changes(&heads) {
+                        if !event_hashes.contains(&change.hash()) {
+                            continue;
+                        }
                         if !actor_ids.iter().any(|id| id == change.actor_id()) {
                             actor_ids.push(change.actor_id().clone());
                         }

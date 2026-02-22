@@ -1,5 +1,9 @@
 # duck-log
 
+## 2026-02-22 | REPL for LLMS
+
+- Use wflow to implement Jupyter like notebooks?
+
 ## 2026-02-22 | bed time thoughts
 
 - Non-server stored documents/blobs.

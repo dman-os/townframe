@@ -51,6 +51,13 @@ impl Drop for SwitchWorkerHandle {
     }
 }
 
+fn switch_worker_is_shutting_down(
+    worker_cancel_token: &tokio_util::sync::CancellationToken,
+    rt_cancel_token: &tokio_util::sync::CancellationToken,
+) -> bool {
+    worker_cancel_token.is_cancelled() || rt_cancel_token.is_cancelled()
+}
+
 #[derive(Debug, Clone)]
 pub enum SwitchEvent {
     Drawer(Arc<DrawerEvent>),
@@ -226,8 +233,10 @@ pub async fn spawn_switch_worker(
     }
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
+    let rt_cancel_token = worker.rt.cancel_token.clone();
     let fut = {
         let cancel_token = cancel_token.clone();
+        let rt_cancel_token = rt_cancel_token.clone();
         async move {
             loop {
                 tokio::select! {
@@ -241,14 +250,14 @@ pub async fn spawn_switch_worker(
                             break;
                         };
                         if let Err(error) = worker.track_event_heads(&SwitchEvent::Plugs(Arc::clone(&event))).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
                             return Err(error);
                         }
                         if let Err(error) = worker.dispatch_to_listeners(&SwitchEvent::Plugs(event)).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
@@ -260,14 +269,14 @@ pub async fn spawn_switch_worker(
                             break;
                         };
                         if let Err(error) = worker.track_event_heads(&SwitchEvent::Config(Arc::clone(&event))).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
                             return Err(error);
                         }
                         if let Err(error) = worker.dispatch_to_listeners(&SwitchEvent::Config(event)).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
@@ -279,14 +288,14 @@ pub async fn spawn_switch_worker(
                             break;
                         };
                         if let Err(error) = worker.track_event_heads(&SwitchEvent::Drawer(Arc::clone(&event))).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
                             return Err(error);
                         }
                         if let Err(error) = worker.dispatch_to_listeners(&SwitchEvent::Drawer(event)).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
@@ -298,14 +307,14 @@ pub async fn spawn_switch_worker(
                             break;
                         };
                         if let Err(error) = worker.track_event_heads(&SwitchEvent::Dispatch(Arc::clone(&event))).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
                             return Err(error);
                         }
                         if let Err(error) = worker.dispatch_to_listeners(&SwitchEvent::Dispatch(event)).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
@@ -317,9 +326,11 @@ pub async fn spawn_switch_worker(
             eyre::Ok(())
         }
     };
+    let join_cancel_token = cancel_token.clone();
+    let join_rt_cancel_token = rt_cancel_token.clone();
     let join_handle = tokio::spawn(async move {
         if let Err(err) = fut.await {
-            if err.to_string().contains("rt is shutting down") {
+            if switch_worker_is_shutting_down(&join_cancel_token, &join_rt_cancel_token) {
                 debug!(?err, "SwitchWorker exiting during shutdown");
             } else {
                 error!(?err, "SwitchWorker failed");

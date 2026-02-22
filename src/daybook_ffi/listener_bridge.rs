@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 pub fn register_uniffi_listener<R, E, F>(
     repo: &R,
@@ -17,7 +18,7 @@ where
     let registration = handle.registration();
     let dropped_warned = Arc::new(AtomicBool::new(false));
 
-    std::thread::spawn(move || loop {
+    let join_handle = std::thread::spawn(move || loop {
         match handle.recv_lossy_blocking() {
             Ok(event) => on_event(event),
             Err(daybook_core::repos::RecvError::Dropped { .. }) => {
@@ -29,6 +30,19 @@ where
             Err(daybook_core::repos::RecvError::Closed) => break,
         }
     });
+    let join_handle = Arc::new(Mutex::new(Some(join_handle)));
+    registration.add_on_unregister(Arc::new(move || {
+        let Some(join_handle) = join_handle
+            .lock()
+            .expect("listener join mutex poisoned")
+            .take()
+        else {
+            return;
+        };
+        if let Err(error) = join_handle.join() {
+            warn!(?error, "uniffi listener thread panicked while joining");
+        }
+    }));
 
     registration
 }

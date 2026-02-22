@@ -1863,8 +1863,7 @@ pub mod dmeta {
     };
 
     fn dmeta_key() -> String {
-        // FIXME: make it const or make as_str const
-        format!("{}/main", WellKnownFacetTag::Dmeta.as_str())
+        [WellKnownFacetTag::Dmeta.as_str(), "/main"].concat()
     }
 
     fn timestamp_scalar(now: Timestamp) -> automerge::ScalarValue {

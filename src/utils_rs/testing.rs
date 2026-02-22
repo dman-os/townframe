@@ -22,6 +22,7 @@ fn setup_tracing() -> Res<()> {
     #[cfg(target_arch = "wasm32")]
     let filter: Option<String> = None;
 
+    #[allow(clippy::unnecessary_literal_unwrap)]
     let filter = filter.unwrap_or_else(|| "info,ort::logging=warn".into());
 
     // #[cfg(test)]

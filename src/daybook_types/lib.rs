@@ -184,7 +184,7 @@ macro_rules! define_enum_and_tag {
                 ),)*
             ];
 
-            pub fn as_str(&self) -> &'static str {
+            pub const fn as_str(&self) -> &'static str {
                 match self {
                     $(
                         Self::$key =>

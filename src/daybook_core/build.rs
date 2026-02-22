@@ -1,11 +1,9 @@
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    return Ok(());
-
     let cwd = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
-    let target = std::env::var("TARGET")?;
+    // let target = std::env::var("TARGET")?;
     println!(
         "cargo:rerun-if-changed={}",
         cwd.join("../daybook_wflows/")
@@ -41,30 +39,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap()
             .to_string_lossy()
     );
-
-    let wasm_path = cwd.join("../../target/wasm32-wasip2/debug/daybook_wflows.wasm");
     // TODO: use wasmtools on resulting wasm
     assert!(
         std::process::Command::new("cargo")
-            .args(["build", "-p", "daybook_wflows", "--target", "wasm32-wasip2"])
-            .current_dir(cwd.join("../../"))
-            .spawn()
-            .expect("error spawning cargo")
-            .wait()
-            .expect("error building wasm")
-            .success(),
-        "error building daybook_wflows wasm"
-    );
-    let cwasm_path = out_dir.join("daybook_wflows.cwasm");
-    assert!(
-        std::process::Command::new("wasmtime")
             .args([
-                "compile",
-                "-o",
-                &cwasm_path.as_os_str().to_string_lossy(),
+                "build",
+                "-p",
+                "daybook_wflows",
+                "--release",
                 "--target",
-                &target,
-                &wasm_path.as_os_str().to_string_lossy()
+                "wasm32-wasip2"
             ])
             .current_dir(cwd.join("../../"))
             .spawn()
@@ -74,6 +58,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .success(),
         "error building daybook_wflows wasm"
     );
+    // let cwasm_path = out_dir.join("daybook_wflows.cwasm");
+    // assert!(
+    //     std::process::Command::new("wasmtime")
+    //         .args([
+    //             "compile",
+    //             "-o",
+    //             &cwasm_path.as_os_str().to_string_lossy(),
+    //             "--target",
+    //             &target,
+    //             &wasm_path.as_os_str().to_string_lossy()
+    //         ])
+    //         .current_dir(cwd.join("../../"))
+    //         .spawn()
+    //         .expect("error spawning cargo")
+    //         .wait()
+    //         .expect("error building wasm")
+    //         .success(),
+    //     "error building daybook_wflows wasm"
+    // );
 
     // let engine = wasmtime::Engine::new(
     //     wasmtime::Config::new()
@@ -100,17 +103,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     .serialize()
     //     .map_err(|err| format!("error serializing component: {err}"))?;
 
-    let cwasm_bytes = std::fs::read(cwasm_path)?;
+    let wasm_path = cwd
+        .join("../../target/wasm32-wasip2/release/daybook_wflows.wasm")
+        .canonicalize()
+        .unwrap();
+    println!("cargo:info=bundling wasm at {:?}", wasm_path);
+    let wasm_bytes = std::fs::read(wasm_path)?;
     zstd::stream::copy_encode(
-        &cwasm_bytes[..],
-        std::fs::File::create(out_dir.join("daybook_wflows.cwasm.zst"))
-            .map_err(|err| format!("error creating daybook_wflows.cwasm.zst: {err}"))?,
+        &wasm_bytes[..],
+        std::fs::File::create(out_dir.join("daybook_wflows.wasm.zst"))
+            .map_err(|err| format!("error creating daybook_wflows.wasm.zst: {err}"))?,
         if std::env::var("PROFILE")? == "release" {
             19
         } else {
             1
         },
     )
-    .map_err(|err| format!("error compress writing daybook_wflows.cwasm.zst: {err}"))?;
+    .map_err(|err| format!("error compress writing daybook_wflows.wasm.zst: {err}"))?;
     Ok(())
 }

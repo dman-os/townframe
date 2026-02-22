@@ -211,6 +211,7 @@ pub struct ListenerRegistration {
     pub registry: std::sync::Weak<ListenersRegistry>,
     pub id: Uuid,
     pub on_unregister: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+    on_unregister_extra: std::sync::Mutex<Vec<Arc<dyn Fn() + Send + Sync + 'static>>>,
     is_unregistered: AtomicBool,
 }
 
@@ -223,8 +224,19 @@ impl ListenerRegistration {
             registry,
             id: Uuid::new_v4(),
             on_unregister,
+            on_unregister_extra: std::sync::Mutex::new(Vec::new()),
             is_unregistered: AtomicBool::new(false),
         }
+    }
+
+    pub fn add_on_unregister(&self, cb: Arc<dyn Fn() + Send + Sync + 'static>) {
+        let mut callbacks = self.on_unregister_extra.lock().expect(ERROR_MUTEX);
+        if self.is_unregistered.load(Ordering::Acquire) {
+            drop(callbacks);
+            cb();
+            return;
+        }
+        callbacks.push(cb);
     }
 
     fn unregister_impl(&self) {
@@ -240,6 +252,11 @@ impl ListenerRegistration {
 
         if let Some(on_unregister) = &self.on_unregister {
             on_unregister();
+        }
+
+        let extra_callbacks = self.on_unregister_extra.lock().expect(ERROR_MUTEX).clone();
+        for callback in extra_callbacks {
+            callback();
         }
     }
 }
@@ -375,6 +392,8 @@ where
 
     pub async fn recv_async(&self) -> Result<Arc<E>, RecvError> {
         loop {
+            let notified = self.state.notify.notified();
+
             if let Some(dropped_count) = self.take_drop_error() {
                 return Err(RecvError::Dropped { dropped_count });
             }
@@ -387,12 +406,14 @@ where
                 return Err(RecvError::Closed);
             }
 
-            self.state.notify.notified().await;
+            notified.await;
         }
     }
 
     pub async fn recv_lossy_async(&self) -> Result<Arc<E>, RecvError> {
         loop {
+            let notified = self.state.notify.notified();
+
             if let Some(ev) = self.state.pop_now() {
                 return Ok(ev);
             }
@@ -401,7 +422,7 @@ where
                 return Err(RecvError::Closed);
             }
 
-            self.state.notify.notified().await;
+            notified.await;
         }
     }
 
@@ -525,6 +546,7 @@ mod tests {
                 let state = Arc::clone(&state);
                 Arc::new(move || state.close())
             }),
+            on_unregister_extra: std::sync::Mutex::new(Vec::new()),
             is_unregistered: AtomicBool::new(false),
         });
         ListenerHandle::new(state, reg)

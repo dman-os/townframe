@@ -228,7 +228,7 @@ impl Rt {
             .wrap_err("error creating utils plugin")?;
         let mltools_plugin =
             wash_plugin_mltools::MltoolsPlugin::new(wash_plugin_mltools::Config {})
-                .wrap_err("error creating utils plugin")?;
+                .wrap_err("error creating mltools plugin")?;
 
         let wash_host = wflow::build_wash_host(vec![
             #[allow(clippy::clone_on_ref_ptr)]
