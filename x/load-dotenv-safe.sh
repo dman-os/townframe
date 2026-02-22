@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 load_dotenv_safe_file() {
   local dotenv_path="$1"
   local line key value

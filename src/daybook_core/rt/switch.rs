@@ -9,6 +9,8 @@ use crate::rt::Rt;
 use daybook_types::doc::BranchPath;
 use daybook_types::doc::{Doc, DocId, FacetKey};
 
+const SUBSCRIPTION_CAPACITY: usize = 256;
+
 #[derive(Default, Debug, Reconcile, Hydrate, Serialize, Deserialize)]
 pub struct SwitchStateStore {
     pub drawer_heads: Option<ChangeHashSet>,
@@ -122,10 +124,18 @@ pub async fn spawn_switch_worker(
         rt.local_actor_id.clone(),
     );
 
-    let drawer_listener = rt.drawer.subscribe(SubscribeOpts::new(256));
-    let plug_listener = rt.plugs_repo.subscribe(SubscribeOpts::new(256));
-    let config_listener = rt.config_repo.subscribe(SubscribeOpts::new(256));
-    let dispatch_listener = rt.dispatch_repo.subscribe(SubscribeOpts::new(256));
+    let drawer_listener = rt
+        .drawer
+        .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
+    let plug_listener = rt
+        .plugs_repo
+        .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
+    let config_listener = rt
+        .config_repo
+        .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
+    let dispatch_listener = rt
+        .dispatch_repo
+        .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
 
     // Catch up on missed events
     let (initial_drawer_heads, initial_dispatch_heads, initial_plug_heads, initial_config_heads) =
@@ -246,8 +256,12 @@ pub async fn spawn_switch_worker(
                         break;
                     }
                     event = plug_listener.recv_lossy_async() => {
-                        let Ok(event) = event else {
-                            break;
+                        let event = match event {
+                            Ok(event) => event,
+                            Err(error) => {
+                                trace!(?error, "SwitchWorker plug_listener recv closed");
+                                break;
+                            }
                         };
                         if let Err(error) = worker.track_event_heads(&SwitchEvent::Plugs(Arc::clone(&event))).await {
                             if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
@@ -265,8 +279,12 @@ pub async fn spawn_switch_worker(
                         }
                     }
                     event = config_listener.recv_lossy_async() => {
-                        let Ok(event) = event else {
-                            break;
+                        let event = match event {
+                            Ok(event) => event,
+                            Err(error) => {
+                                trace!(?error, "SwitchWorker config_listener recv closed");
+                                break;
+                            }
                         };
                         if let Err(error) = worker.track_event_heads(&SwitchEvent::Config(Arc::clone(&event))).await {
                             if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
@@ -284,8 +302,12 @@ pub async fn spawn_switch_worker(
                         }
                     }
                     event = drawer_listener.recv_lossy_async() => {
-                        let Ok(event) = event else {
-                            break;
+                        let event = match event {
+                            Ok(event) => event,
+                            Err(error) => {
+                                trace!(?error, "SwitchWorker drawer_listener recv closed");
+                                break;
+                            }
                         };
                         if let Err(error) = worker.track_event_heads(&SwitchEvent::Drawer(Arc::clone(&event))).await {
                             if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
@@ -303,8 +325,12 @@ pub async fn spawn_switch_worker(
                         }
                     }
                     event = dispatch_listener.recv_lossy_async() => {
-                        let Ok(event) = event else {
-                            break;
+                        let event = match event {
+                            Ok(event) => event,
+                            Err(error) => {
+                                trace!(?error, "SwitchWorker dispatch_listener recv closed");
+                                break;
+                            }
                         };
                         if let Err(error) = worker.track_event_heads(&SwitchEvent::Dispatch(Arc::clone(&event))).await {
                             if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {

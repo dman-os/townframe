@@ -39,6 +39,24 @@ where
         else {
             return;
         };
+        let current_thread_id = std::thread::current().id();
+        let listener_thread_id = join_handle.thread().id();
+        if current_thread_id == listener_thread_id {
+            if let Err(error) = std::thread::Builder::new()
+                .name("uniffi-listener-join".to_string())
+                .spawn(move || {
+                    if let Err(error) = join_handle.join() {
+                        warn!(?error, "uniffi listener thread panicked while joining");
+                    }
+                })
+            {
+                warn!(
+                    ?error,
+                    "failed to offload uniffi listener join from listener thread"
+                );
+            }
+            return;
+        }
         if let Err(error) = join_handle.join() {
             warn!(?error, "uniffi listener thread panicked while joining");
         }

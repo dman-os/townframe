@@ -902,6 +902,7 @@ impl PlugsRepo {
                                 hash
                             ))?;
                         }
+                        crate::blobs::BLOB_SCHEME => {}
                         _ => eyre::bail!("unsupported component_url scheme: {url}"),
                     }
                 }
