@@ -15,10 +15,14 @@ on:
         required: false
         default: false
 
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
+  OLLAMA_USERNAME: ${{ secrets.OLLAMA_USERNAME }}
+  OLLAMA_PASSWORD: ${{ secrets.OLLAMA_PASSWORD }}
 
 jobs:
   checks:
@@ -67,7 +71,4 @@ jobs:
         env:
           RUST_BACKTRACE: 1
           # RUST_LOG_TEST: debug
-          OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
-          OLLAMA_USERNAME: ${{ secrets.OLLAMA_USERNAME }}
-          OLLAMA_PASSWORD: ${{ secrets.OLLAMA_PASSWORD }}
           OLLAMA_MODEL: gemma3 

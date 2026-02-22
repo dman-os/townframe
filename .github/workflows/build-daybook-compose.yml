@@ -20,6 +20,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
+  OLLAMA_USERNAME: ${{ secrets.OLLAMA_USERNAME }}
+  OLLAMA_PASSWORD: ${{ secrets.OLLAMA_PASSWORD }}
+
 jobs:
   linux-appimage:
     runs-on: ubuntu-latest
