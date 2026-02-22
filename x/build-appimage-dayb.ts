@@ -106,7 +106,7 @@ async function ensureUbuntuDeps() {
 }
 
 await ensureUbuntuDeps();
-await $`./gradlew :composeApp:packageAppImage --no-daemon --no-configuration-cache`
+await $`./gradlew :composeApp:prepareLinuxdeployComposeAppDirDayb --no-daemon --no-configuration-cache`
   .cwd(composeRoot)
   .env({
     LD_LIBRARY_PATH: "",
@@ -178,21 +178,35 @@ if (await outputPath.exists()) {
   await outputPath.remove();
 }
 const outputValue = outputPath.toString();
-await $`${linuxdeployToolPath}
-  --appdir ${stageAppDir}
-  --desktop-file ${stageDesktopPath}
-  --icon-file ${stageIconPath}
-  --icon-filename ${desktopId}
-  --deploy-deps-only ${stagedMainExecutablePath}
-  --deploy-deps-only ${stageLibexecDir.join("lib")}
-  --deploy-deps-only ${stageLibexecDir.join("lib", "app")}
-  --deploy-deps-only ${stageLibexecDir.join("lib", "runtime", "lib")}
-  --output appimage`.env({
+const useAppimageRun =
+  Deno.build.os === "linux" &&
+  (await $`bash -lc "command -v appimage-run"`.noThrow()).code === 0;
+
+const linuxdeployArgs = [
+  "--appdir", stageAppDir.toString(),
+  "--desktop-file", stageDesktopPath.toString(),
+  "--icon-file", stageIconPath.toString(),
+  "--icon-filename", desktopId,
+  "--deploy-deps-only", stagedMainExecutablePath.toString(),
+  "--deploy-deps-only", stageLibexecDir.join("lib").toString(),
+  "--deploy-deps-only", stageLibexecDir.join("lib", "app").toString(),
+  "--deploy-deps-only", stageLibexecDir.join("lib", "runtime", "lib").toString(),
+  "--output", "appimage",
+];
+
+const linuxdeployEnv = {
   APPIMAGE_EXTRACT_AND_RUN: "1",
   LDAI_OUTPUT: outputValue,
   OUTPUT: outputValue,
   LD_LIBRARY_PATH: "",
   DYLD_LIBRARY_PATH: "",
-});
+};
+
+if (useAppimageRun) {
+  console.log("Running linuxdeploy via appimage-run");
+  await $`appimage-run ${linuxdeployToolPath} ${linuxdeployArgs}`.env(linuxdeployEnv);
+} else {
+  await $`${linuxdeployToolPath} ${linuxdeployArgs}`.env(linuxdeployEnv);
+}
 
 console.log(`Created AppImage: ${outputPath}`);

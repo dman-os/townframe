@@ -65,7 +65,7 @@ impl DrawerRepoFfi {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self), ret)]
+    #[tracing::instrument(skip(self))]
     async fn list(self: Arc<Self>) -> Vec<DocNBranches> {
         let this = Arc::clone(&self);
         self.fcx
@@ -74,7 +74,7 @@ impl DrawerRepoFfi {
             .expect("error listing docs")
     }
 
-    #[tracing::instrument(err, skip(self), ret)]
+    #[tracing::instrument(err, skip(self))]
     async fn get(self: Arc<Self>, id: DocId, branch_path: String) -> Result<Option<Doc>, FfiError> {
         let this = Arc::clone(&self);
         let branch_path = daybook_types::doc::BranchPath::from(branch_path);

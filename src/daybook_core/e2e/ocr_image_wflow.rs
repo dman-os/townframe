@@ -12,8 +12,8 @@ async fn test_ocr_image_workflow() -> Res<()> {
     )
     .await?;
 
-    let image_bytes = tokio::fs::read("/tmp/sample.jpg").await?;
-    let blob_hash = test_cx.rt.blobs_repo.put(&image_bytes).await?;
+    let image_bytes = include_bytes!("./sample.jpg");
+    let blob_hash = test_cx.rt.blobs_repo.put(image_bytes).await?;
 
     let blob_facet = Blob {
         mime: "image/jpeg".to_string(),

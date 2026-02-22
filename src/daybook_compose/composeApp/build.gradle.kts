@@ -192,11 +192,18 @@ dependencies {
 compose.desktop {
     application {
         mainClass = "org.example.daybook.MainKt"
+        jvmArgs(
+            // UniFFI/JNA loads "daybook_ffi" by library name, so point the JVM/JNA
+            // native search path at the packaged lib/app directory.
+            "-Djava.library.path=\$APPDIR",
+            "-Djna.library.path=\$APPDIR",
+        )
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.AppImage)
             packageName = "org.example.daybook"
             packageVersion = "1.0.0"
+            modules("jdk.security.auth")
         }
         buildTypes {
             release {
@@ -556,12 +563,6 @@ tasks.matching {
     dependsOn("copyRustDesktopDebugToComposeApp")
 }
 
-tasks.matching { it.name == "packageAppImage" }.configureEach {
-    // Our custom linuxdeploy script copies the Compose app dir after this task completes.
-    // Re-copy to restore libdaybook_ffi.so if Compose rewrites lib/app during packaging.
-    finalizedBy("copyRustDesktopDebugToComposeApp")
-}
-
 tasks.matching {
     it.name in
         setOf(
@@ -588,7 +589,33 @@ tasks.matching {
 }
 
 tasks.matching { it.name == "packageReleaseAppImage" }.configureEach {
-    finalizedBy("copyRustDesktopReleaseToComposeApp")
+    dependsOn("buildRustDesktopRelease")
+    dependsOn("copyRustDesktopReleaseToComposeApp")
+}
+
+tasks.register("prepareLinuxdeployComposeAppDirDayb") {
+    group = "distribution"
+    description = "Prepare Compose desktop app dir for custom linuxdeploy packaging and copy Rust FFI library last"
+
+    val sourceLibFile = File(repoRoot, "target/debug/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}")
+    val destLibDir = File(desktopComposeAppDir(false), "lib/app")
+    val destLibFile = File(destLibDir, sourceLibFile.name)
+
+    dependsOn("createDistributable")
+    dependsOn("buildRustDesktopDebug")
+
+    inputs.file(sourceLibFile)
+    outputs.file(destLibFile)
+
+    doLast {
+        if (!sourceLibFile.exists()) {
+            throw GradleException("Missing desktop debug Rust library: ${sourceLibFile.absolutePath}")
+        }
+        if (!destLibDir.exists()) {
+            destLibDir.mkdirs()
+        }
+        sourceLibFile.copyTo(destLibFile, overwrite = true)
+    }
 }
 
 

@@ -7,10 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target_dir = if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
         PathBuf::from(dir)
     } else {
-        cwd.parent()
-            .and_then(|parent_dir| parent_dir.parent())
-            .map(|workspace_dir| workspace_dir.join("target"))
-            .unwrap_or_else(|| PathBuf::from("target"))
+        cwd.join("../../target/").canonicalize().unwrap()
     };
     // let target = std::env::var("TARGET")?;
     println!(
