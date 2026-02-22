@@ -1,0 +1,110 @@
+---
+source: src/wflow/test.rs
+assertion_line: 483
+expression: log_snapshot
+---
+- - 1
+  - JobInit:
+      job_id: test-fails-until-told-1
+      timestamp: "[timestamp]"
+      args_json: "{\"key\":\"test-flag\"}"
+      override_wflow_retry_policy: ~
+      wflow:
+        key: fails_until_told
+        service:
+          wasmcloud:
+            workload_id: workload_123
+- - 2
+  - JobPartitionEffects:
+      source_entry_id: 1
+      effects:
+        - job_id: test-fails-until-told-1
+          deets:
+            RunJob:
+              run_id: 0
+- - 3
+  - JobEffectResult:
+      job_id: test-fails-until-told-1
+      timestamp: "[timestamp]"
+      effect_id:
+        entry_id: 2
+        effect_idx: 0
+      run_id: 0
+      start_at: "[timestamp]"
+      end_at: "[timestamp]"
+      result:
+        WflowErr:
+          Transient:
+            error_json: "{\"msg\":\"waiting for flag to be set\\n\\[location]\"}"
+            retry_policy: ~
+- - 4
+  - JobPartitionEffects:
+      source_entry_id: 3
+      effects:
+        - job_id: test-fails-until-told-1
+          deets:
+            RunJob:
+              run_id: 1
+- - 5
+  - JobEffectResult:
+      job_id: test-fails-until-told-1
+      timestamp: "[timestamp]"
+      effect_id:
+        entry_id: 4
+        effect_idx: 0
+      run_id: 1
+      start_at: "[timestamp]"
+      end_at: "[timestamp]"
+      result:
+        WflowErr:
+          Transient:
+            error_json: "{\"msg\":\"waiting for flag to be set\\n\\[location]\"}"
+            retry_policy: ~
+- - 6
+  - JobPartitionEffects:
+      source_entry_id: 5
+      effects:
+        - job_id: test-fails-until-told-1
+          deets:
+            RunJob:
+              run_id: 2
+- - 7
+  - JobEffectResult:
+      job_id: test-fails-until-told-1
+      timestamp: "[timestamp]"
+      effect_id:
+        entry_id: 6
+        effect_idx: 0
+      run_id: 2
+      start_at: "[timestamp]"
+      end_at: "[timestamp]"
+      result:
+        StepEffect:
+          step_id: 0
+          attempt_id: 0
+          start_at: "[timestamp]"
+          end_at: "[timestamp]"
+          deets:
+            Success:
+              value_json: "null"
+- - 8
+  - JobPartitionEffects:
+      source_entry_id: 7
+      effects:
+        - job_id: test-fails-until-told-1
+          deets:
+            RunJob:
+              run_id: 3
+- - 9
+  - JobEffectResult:
+      job_id: test-fails-until-told-1
+      timestamp: "[timestamp]"
+      effect_id:
+        entry_id: 8
+        effect_idx: 0
+      run_id: 3
+      start_at: "[timestamp]"
+      end_at: "[timestamp]"
+      result:
+        Success:
+          value_json: "null"
