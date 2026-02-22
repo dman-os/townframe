@@ -557,7 +557,7 @@ tasks.matching {
     dependsOn("copyRustDesktopDebugToComposeApp")
 }
 
-tasks.named("packageAppImage").configure {
+tasks.matching { it.name == "packageAppImage" }.configureEach {
     // Our custom linuxdeploy script copies the Compose app dir after this task completes.
     // Re-copy to restore libdaybook_ffi.so if Compose rewrites lib/app during packaging.
     finalizedBy("copyRustDesktopDebugToComposeApp")

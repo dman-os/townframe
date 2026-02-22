@@ -26,7 +26,6 @@ env:
 
 jobs:
   checks:
-    environment: dev
     runs-on: ubuntu-latest
     steps:
       - name: Setup tmate session
