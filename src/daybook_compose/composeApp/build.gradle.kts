@@ -536,6 +536,13 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
 
 // Wire desktop tasks to Rust desktop builds with nokhwa enabled
 tasks.matching {
+    it.name in setOf("desktopRun", "desktopRunHot")
+}.configureEach {
+    dependsOn("buildRustDesktopDebug")
+    dependsOn("copyRustDesktopDebugToComposeApp")
+}
+
+tasks.matching {
     it.name in
         setOf(
             "createDistributable",
@@ -544,12 +551,16 @@ tasks.matching {
             "packageDmg",
             "packageMsi",
             "packageDistributionForCurrentOS",
-            "desktopRun",
-            "desktopRunHot",
         )
 }.configureEach {
     dependsOn("buildRustDesktopDebug")
     dependsOn("copyRustDesktopDebugToComposeApp")
+}
+
+tasks.named("packageAppImage").configure {
+    // Our custom linuxdeploy script copies the Compose app dir after this task completes.
+    // Re-copy to restore libdaybook_ffi.so if Compose rewrites lib/app during packaging.
+    finalizedBy("copyRustDesktopDebugToComposeApp")
 }
 
 tasks.matching {
@@ -576,6 +587,10 @@ tasks.matching {
             )
         }
     }
+}
+
+tasks.matching { it.name == "packageReleaseAppImage" }.configureEach {
+    finalizedBy("copyRustDesktopReleaseToComposeApp")
 }
 
 

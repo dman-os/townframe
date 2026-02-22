@@ -23,6 +23,9 @@
 
 ## Stack
 
+
+- [ ] Make automerge json codec minimal
+- [ ] use a env var or an env! var to set global multipliers for our test timeouts
 - [ ] File locks on repo
 - [ ] Store plugin info in drawer??
 - [ ] Js execution

@@ -126,7 +126,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             wasm_path.display()
         )
     })?;
-    println!("cargo:info=bundling wasm at {:?}", wasm_path);
     let wasm_bytes = std::fs::read(wasm_path)?;
     zstd::stream::copy_encode(
         &wasm_bytes[..],
