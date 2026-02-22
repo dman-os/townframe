@@ -132,7 +132,7 @@ pub fn setup_tracing() -> Res<()> {
     #[cfg(target_arch = "wasm32")]
     let filter: Option<String> = None;
 
-    let filter = filter.unwrap_or_else(|| "info,samod_core=warn".into());
+    let filter = filter.unwrap_or_else(|| "info,samod_core=warn,ort::logging=warn".into());
 
     use tracing_subscriber::prelude::*;
     let registry = tracing_subscriber::registry()

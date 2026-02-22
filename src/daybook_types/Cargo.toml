@@ -23,8 +23,15 @@ schemars = ["dep:schemars"]
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
+data-encoding.workspace = true
 struct-patch.workspace = true
-schemars = { version = "1", features = ["uuid1", "jiff02"], optional = true }
+schemars = { version = "1.2", features = [
+    "uuid1",
+    "semver1",
+    "url2",
+    "jiff02",
+    "indexmap2",
+], optional = true }
 
 # internal
 api_utils_rs = { workspace = true, default-features = false }

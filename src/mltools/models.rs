@@ -3,7 +3,7 @@ use crate::{
     OcrConfig,
 };
 use fs4::fs_std::FileExt;
-use hf_hub::{api::tokio::ApiBuilder, Cache};
+use hf_hub::{api::tokio::ApiBuilder, Cache, Repo};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -229,9 +229,20 @@ impl hf_hub::api::tokio::Progress for HfHubProgress {
 
 async fn hf_download_with_progress(
     model_repo: &hf_hub::api::tokio::ApiRepo,
+    cache_repo: &hf_hub::CacheRepo,
     file: &str,
     observer: Option<&MobileDefaultObserver>,
 ) -> Res<PathBuf> {
+    if let Some(path) = cache_repo.get(file) {
+        if let Some(observer) = observer {
+            observer.emit(MobileDefaultEvent::DownloadCompleted {
+                source: "hf-hub".to_string(),
+                file: file.to_string(),
+            });
+        }
+        return Ok(path);
+    }
+
     let progress = HfHubProgress::new(observer.cloned(), file.to_string());
     let result = model_repo
         .download_with_progress(file, progress)
@@ -296,16 +307,30 @@ pub async fn mobile_default_with_observer(
     let api = ApiBuilder::from_cache(Cache::new(hf_cache_dir))
         .with_progress(true)
         .build()?;
+    let cache_repo = Cache::new(download_dir.join("hf")).repo(Repo::model(NOMIC_MODEL_ID.into()));
     let model_repo = api.model(NOMIC_MODEL_ID.to_string());
 
-    let onnx_path =
-        hf_download_with_progress(&model_repo, "onnx/model_quantized.onnx", observer).await?;
-    let tokenizer_path = hf_download_with_progress(&model_repo, "tokenizer.json", observer).await?;
-    let config_path = hf_download_with_progress(&model_repo, "config.json", observer).await?;
-    let special_tokens_map_path =
-        hf_download_with_progress(&model_repo, "special_tokens_map.json", observer).await?;
+    let onnx_path = hf_download_with_progress(
+        &model_repo,
+        &cache_repo,
+        "onnx/model_quantized.onnx",
+        observer,
+    )
+    .await?;
+    let tokenizer_path =
+        hf_download_with_progress(&model_repo, &cache_repo, "tokenizer.json", observer).await?;
+    let config_path =
+        hf_download_with_progress(&model_repo, &cache_repo, "config.json", observer).await?;
+    let special_tokens_map_path = hf_download_with_progress(
+        &model_repo,
+        &cache_repo,
+        "special_tokens_map.json",
+        observer,
+    )
+    .await?;
     let tokenizer_config_path =
-        hf_download_with_progress(&model_repo, "tokenizer_config.json", observer).await?;
+        hf_download_with_progress(&model_repo, &cache_repo, "tokenizer_config.json", observer)
+            .await?;
 
     Ok(Config {
         ocr: OcrConfig {

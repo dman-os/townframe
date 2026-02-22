@@ -52,11 +52,37 @@ async fn test_cancel_job() -> Res<()> {
         .cancel_job(Arc::clone(&job_id), "test requested cancel".to_string())
         .await?;
 
-    test_cx.wait_until_no_active_jobs(10).await?;
-
+    // Verify the cancel command was persisted for this job.
     test_cx
-        .assert_partition_log_snapshot("cancel_job_partition_log")
+        .wait_until_entry(0, 10, |_entry_id, entry| {
+            use wflow_core::partition::log::PartitionLogEntry;
+
+            if let PartitionLogEntry::JobCancel(event) = entry {
+                return event.job_id == job_id && event.reason.as_ref() == "test requested cancel";
+            }
+            false
+        })
         .await?;
+
+    // Verify reducer emitted an abort effect for this job.
+    test_cx
+        .wait_until_entry(0, 10, |_entry_id, entry| {
+            use wflow_core::partition::log::PartitionLogEntry;
+
+            let PartitionLogEntry::JobPartitionEffects(event) = entry else {
+                return false;
+            };
+            event.effects.iter().any(|effect| {
+                effect.job_id == job_id
+                    && matches!(
+                        effect.deets,
+                        wflow_core::partition::effects::PartitionEffectDeets::AbortRun { .. }
+                    )
+            })
+        })
+        .await?;
+
+    test_cx.wait_until_no_active_jobs(10).await?;
 
     test_cx.stop().await?;
     tracing::info!("test complete");
