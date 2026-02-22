@@ -12,12 +12,17 @@ pub struct UserMeta {
     pub seen_at: Timestamp,
 }
 
+#[derive(Clone, Reconcile, Hydrate)]
+pub struct VersionedConfigSection<T> {
+    pub version: Uuid,
+    pub payload: T,
+}
+
 #[derive(Reconcile, Hydrate, Clone)]
 pub struct ConfigStore {
-    pub version: Uuid,
-    pub facet_display: HashMap<String, ThroughJson<FacetDisplayHint>>,
-    pub users: HashMap<String, ThroughJson<UserMeta>>,
-    pub mltools: ThroughJson<mltools::Config>,
+    pub facet_display: VersionedConfigSection<HashMap<String, ThroughJson<FacetDisplayHint>>>,
+    pub users: VersionedConfigSection<HashMap<String, ThroughJson<UserMeta>>>,
+    pub mltools: VersionedConfigSection<ThroughJson<mltools::Config>>,
 }
 
 impl Default for ConfigStore {
@@ -50,15 +55,23 @@ impl Default for ConfigStore {
         );
 
         Self {
-            version: Uuid::nil(),
-            facet_display: key_configs,
-            users: HashMap::new(),
-            mltools: mltools::Config {
-                ocr: mltools::OcrConfig { backends: vec![] },
-                embed: mltools::EmbedConfig { backends: vec![] },
-                llm: mltools::LlmConfig { backends: vec![] },
-            }
-            .into(),
+            facet_display: VersionedConfigSection {
+                version: Uuid::nil(),
+                payload: key_configs,
+            },
+            users: VersionedConfigSection {
+                version: Uuid::nil(),
+                payload: HashMap::new(),
+            },
+            mltools: VersionedConfigSection {
+                version: Uuid::nil(),
+                payload: mltools::Config {
+                    ocr: mltools::OcrConfig { backends: vec![] },
+                    embed: mltools::EmbedConfig { backends: vec![] },
+                    llm: mltools::LlmConfig { backends: vec![] },
+                }
+                .into(),
+            },
         }
     }
 }
@@ -123,8 +136,8 @@ impl ConfigRepo {
         let current_path = local_user_path.clone();
         store
             .mutate_sync(move |store| {
-                store.version = Uuid::new_v4();
-                store.users.entry(actor_id_str).or_insert_with(|| {
+                store.users.version = Uuid::new_v4();
+                store.users.payload.entry(actor_id_str).or_insert_with(|| {
                     UserMeta {
                         user_path: current_path,
                         seen_at: Timestamp::now(),
@@ -216,10 +229,8 @@ impl ConfigRepo {
             let mut last_heads = None;
             for notif in notifs {
                 last_heads = Some(ChangeHashSet(Arc::clone(&notif.heads)));
-                if let Some(actor_id) = utils_rs::am::get_actor_id_from_patch(&notif.patch) {
-                    if actor_id == self.local_actor_id {
-                        continue;
-                    }
+                if notif.is_local_only(&self.local_actor_id) {
+                    continue;
                 }
                 self.events_for_patch(&notif.patch, &notif.heads, &mut events)
                     .await?;
@@ -240,7 +251,6 @@ impl ConfigRepo {
 
                 self.store
                     .mutate_sync(|store| {
-                        store.version = new_store.version;
                         store.facet_display = new_store.facet_display;
                         store.users = new_store.users;
                         store.mltools = new_store.mltools;
@@ -291,13 +301,14 @@ impl ConfigRepo {
 
         match &patch.action {
             automerge::PatchAction::PutMap { key, .. }
-                if patch.path.len() == 1 && key == "version" =>
+                if patch.path.len() == 2 && key == "version" =>
             {
-                out.push(ConfigEvent::Changed { heads });
-            }
-            // For other changes inside the config, also notify
-            _ if patch.path.len() > 1 => {
-                out.push(ConfigEvent::Changed { heads });
+                let Some((_obj, automerge::Prop::Map(section_key))) = patch.path.get(1) else {
+                    return Ok(());
+                };
+                if matches!(section_key.as_ref(), "facet_display" | "users" | "mltools") {
+                    out.push(ConfigEvent::Changed { heads });
+                }
             }
             _ => {}
         }
@@ -317,7 +328,7 @@ impl ConfigRepo {
     pub async fn get_facet_display_hint(&self, key: String) -> Option<FacetDisplayHint> {
         let hint = self
             .store
-            .query_sync(|store| store.facet_display.get(&key).cloned())
+            .query_sync(|store| store.facet_display.payload.get(&key).cloned())
             .await;
         if let Some(hint) = hint {
             return Some(hint.0);
@@ -339,7 +350,7 @@ impl ConfigRepo {
 
         self.store
             .query_sync(move |store| {
-                for (key, val) in &store.facet_display {
+                for (key, val) in &store.facet_display.payload {
                     defaults.insert(key.clone(), val.0.clone());
                 }
                 defaults
@@ -353,15 +364,17 @@ impl ConfigRepo {
         }
         self.store
             .mutate_sync(move |store| {
-                store.version = Uuid::new_v4();
-                store.facet_display.insert(key, hint.into());
+                store.facet_display.version = Uuid::new_v4();
+                store.facet_display.payload.insert(key, hint.into());
             })
             .await?;
         Ok(())
     }
 
     pub async fn get_mltools_config(&self) -> mltools::Config {
-        self.store.query_sync(|store| store.mltools.0.clone()).await
+        self.store
+            .query_sync(|store| store.mltools.payload.0.clone())
+            .await
     }
 
     pub async fn set_mltools_config(&self, config: mltools::Config) -> Res<()> {
@@ -371,8 +384,8 @@ impl ConfigRepo {
 
         self.store
             .mutate_sync(move |store| {
-                store.version = Uuid::new_v4();
-                store.mltools = config.into();
+                store.mltools.version = Uuid::new_v4();
+                store.mltools.payload = config.into();
             })
             .await?;
         Ok(())
@@ -395,6 +408,7 @@ impl ConfigRepo {
             .query_sync(move |store| {
                 store
                     .users
+                    .payload
                     .get(&actor_id_str)
                     .map(|doc| doc.0.user_path.clone())
             })

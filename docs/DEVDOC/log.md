@@ -1,5 +1,39 @@
 # duck-log
 
+## 2026-02-22 | bed time thoughts
+
+- Non-server stored documents/blobs.
+  - You tag them with a special dpath that is excluded from server/host storage.
+    - Or more accurately, they're kept on devices that you specifically opt them into.
+  - Usecase: replacing syncthing.
+- Trapwires.
+  - Repo state that triggers actions will set a trap if it requires user confirmation.
+    - An event wait in wflows?
+- Andy's swiping browsing
+
+## 2026-02-22 | rotating headers
+
+I need a good way to show avail headers in a document without occpuying horizontal space.
+Portrait screens are the main target afterall.
+
+here's an idea to try out, at the bottom/top of the screen, you get small palettes that lay out in a row. as soon as you reach the next header, the left/right most item pops from the row into the screen. the more distant you are from the screen, the less we can show for a header. essentially, it's like the headers are travelling across edges of the screen. think of it like offscreen target indicators in games that hug the edge.
+
+## 2026-02-22 | wasm compilation
+
+So I decided to spend some time mending some broken windows today.
+I've had a bunch of flakey tests plaguing me for months now.
+A bunch of bugs were fixed to improve this but one of the main culprits turned out to be wasm JIT for our daybook_wflows.wasm payload leading to timeout issues.
+I increased the timeouts substantially which helps ofc.
+I should bring wasm-opt and release builds for wasm artifacts into scope too.
+
+---
+
+Wow, debug build wasm artifacts are 101MiB.
+Release mode? 900KiB.
+Are they not doing any dead-code elimination? 
+That has to be lack of dead-code elimination, right?
+It surely can't fucking be unoptimzed code-gen.
+
 ## 2026-02-17 | the missing research
 
 I should sit down and study more prior art.

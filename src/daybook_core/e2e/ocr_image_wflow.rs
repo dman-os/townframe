@@ -36,7 +36,7 @@ async fn test_ocr_image_workflow() -> Res<()> {
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;
 
     let mut dispatch_id: Option<String> = None;
-    for _ in 0..300 {
+    for _ in 0..600 {
         let dispatches = test_cx.dispatch_repo.list().await;
         if let Some((found_dispatch_id, _dispatch)) = dispatches.iter().find(|(_, dispatch)| {
             matches!(

@@ -197,7 +197,6 @@ impl Rt {
         local_state_root: PathBuf,
     ) -> Res<(Arc<Self>, RtStopToken)> {
         let wcx = wflow::Ctx::init(&wflow_db_url).await?;
-        drawer.set_plugs_repo(Arc::clone(&plugs_repo));
         let (sqlite_local_state_repo, sqlite_local_state_stop) =
             SqliteLocalStateRepo::boot(local_state_root).await?;
 

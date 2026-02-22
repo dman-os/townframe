@@ -360,6 +360,7 @@ struct SwitchWorker {
 }
 
 impl SwitchWorker {
+    #[tracing::instrument(skip(self))]
     async fn dispatch_to_listeners(&mut self, event: &SwitchEvent) -> Res<()> {
         let ctx = SwitchSinkCtx {
             rt: Some(&self.rt),
@@ -484,7 +485,6 @@ impl SwitchWorker {
             }
             SwitchEvent::Plugs(event) => {
                 let plug_heads = match &**event {
-                    PlugsEvent::ListChanged { heads } => heads.clone(),
                     PlugsEvent::PlugAdded { heads, .. } => heads.clone(),
                     PlugsEvent::PlugChanged { heads, .. } => heads.clone(),
                     PlugsEvent::PlugDeleted { heads, .. } => heads.clone(),
@@ -498,8 +498,6 @@ impl SwitchWorker {
             SwitchEvent::Dispatch(event) => {
                 let dispatch_heads = match &**event {
                     DispatchEvent::DispatchAdded { heads, .. } => heads.clone(),
-                    DispatchEvent::ListChanged { heads } => heads.clone(),
-                    DispatchEvent::DispatchUpdated { heads, .. } => heads.clone(),
                     DispatchEvent::DispatchDeleted { heads, .. } => heads.clone(),
                 };
                 self.store
@@ -819,7 +817,8 @@ mod tests {
         let mut runtime_listeners = prepare_sinks(listeners);
         dispatch_test_event(
             &mut runtime_listeners,
-            &SwitchEvent::Dispatch(Arc::new(DispatchEvent::ListChanged {
+            &SwitchEvent::Dispatch(Arc::new(DispatchEvent::DispatchDeleted {
+                id: "hello".into(),
                 heads: ChangeHashSet(Vec::new().into()),
             })),
         )
@@ -871,7 +870,8 @@ mod tests {
         let mut runtime_listeners = prepare_sinks(listeners);
         dispatch_test_event(
             &mut runtime_listeners,
-            &SwitchEvent::Dispatch(Arc::new(DispatchEvent::ListChanged {
+            &SwitchEvent::Dispatch(Arc::new(DispatchEvent::DispatchDeleted {
+                id: "hello".into(),
                 heads: ChangeHashSet(Vec::new().into()),
             })),
         )
@@ -912,7 +912,8 @@ mod tests {
         let mut runtime_listeners = prepare_sinks(listeners);
         dispatch_test_event(
             &mut runtime_listeners,
-            &SwitchEvent::Plugs(Arc::new(PlugsEvent::ListChanged {
+            &SwitchEvent::Plugs(Arc::new(PlugsEvent::PlugAdded {
+                id: "id".into(),
                 heads: ChangeHashSet(Vec::new().into()),
             })),
         )

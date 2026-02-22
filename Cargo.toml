@@ -99,6 +99,7 @@ multihash = "0.19.3"
 data-encoding = "2.10"
 bs58 = "0.5.1"
 blake3 = "1.8"
+zstd = "0.13"
 
 # web
 leptos = { version = "0.8", default-features = false }

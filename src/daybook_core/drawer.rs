@@ -1,6 +1,7 @@
 // FIXME: use nested ids for facet keys
 
 use crate::interlude::*;
+use crate::plugs::PlugsRepo;
 
 pub mod lru;
 pub mod types;
@@ -17,305 +18,6 @@ use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
 mod facet_recovery;
 
 // FIXME: refactor by hand?
-pub mod dmeta {
-    use crate::interlude::*;
-    use automerge::transaction::Transactable;
-    use automerge::ReadDoc;
-    use daybook_types::doc::{
-        ChangeHashSet, FacetKey, FacetMeta, WellKnownFacet, WellKnownFacetTag,
-    };
-
-    fn dmeta_key() -> String {
-        // FIXME: make it const or make as_str const
-        format!("{}/main", WellKnownFacetTag::Dmeta.as_str())
-    }
-
-    fn timestamp_scalar(now: Timestamp) -> automerge::ScalarValue {
-        automerge::ScalarValue::Timestamp(now.as_second())
-    }
-
-    pub fn facet_meta_obj<D: ReadDoc>(
-        doc: &D,
-        facet_key: &FacetKey,
-    ) -> Res<Option<automerge::ObjId>> {
-        let facets_obj = match doc.get(automerge::ROOT, "facets")? {
-            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-            _ => return Ok(None),
-        };
-
-        let key = dmeta_key();
-        let dmeta_obj = match doc.get(&facets_obj, &key)? {
-            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-            _ => return Ok(None),
-        };
-
-        let dmeta_facets_obj = match doc.get(&dmeta_obj, "facets")? {
-            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-            _ => return Ok(None),
-        };
-
-        let facet_key_str = facet_key.to_string();
-        match doc.get(&dmeta_facets_obj, facet_key_str)? {
-            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => Ok(Some(id)),
-            _ => Ok(None),
-        }
-    }
-
-    pub fn facet_uuid_for_key<D: ReadDoc + autosurgeon::ReadDoc>(
-        doc: &D,
-        facet_key: &FacetKey,
-    ) -> Res<Option<Uuid>> {
-        let Some(facet_meta_obj) = facet_meta_obj(doc, facet_key)? else {
-            return Ok(None);
-        };
-        match autosurgeon::hydrate_prop::<_, Option<Vec<Uuid>>, _, _>(doc, &facet_meta_obj, "uuid")
-        {
-            Ok(Some(uuids)) => Ok(uuids.into_iter().next()),
-            _ => Ok(None),
-        }
-    }
-
-    pub fn facet_heads_for_key(
-        doc: &automerge::Automerge,
-        facet_key: &FacetKey,
-    ) -> Res<ChangeHashSet> {
-        let heads = super::facet_recovery::recover_facet_heads(doc, facet_key)?;
-        Ok(ChangeHashSet(Arc::from(heads)))
-    }
-
-    fn load_dmeta(
-        tx: &mut automerge::transaction::Transaction,
-        facets_obj: &automerge::ObjId,
-    ) -> Res<(automerge::ObjId, automerge::ObjId, automerge::ObjId)> {
-        let key = dmeta_key();
-        let dmeta_obj = match tx.get(facets_obj, &key)? {
-            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-            _ => eyre::bail!("dmeta facet map not found"),
-        };
-        let dmeta_facets_obj = match tx.get(&dmeta_obj, "facets")? {
-            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-            _ => eyre::bail!("dmeta.facets map not found"),
-        };
-        let dmeta_facet_uuids_obj = match tx.get(&dmeta_obj, "facetUuids")? {
-            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-            _ => eyre::bail!("dmeta.facetUuids map not found"),
-        };
-        Ok((dmeta_obj, dmeta_facets_obj, dmeta_facet_uuids_obj))
-    }
-
-    fn set_updated_at_list(
-        tx: &mut automerge::transaction::Transaction,
-        obj: &automerge::ObjId,
-        prop: &str,
-        now: Timestamp,
-    ) -> Res<()> {
-        let updated_at_list = match tx.get(obj, prop)? {
-            Some((automerge::Value::Object(automerge::ObjType::List), id)) => id,
-            _ => eyre::bail!("missing or invalid {prop} list"),
-        };
-
-        let len = tx.length(&updated_at_list);
-        for _ in 0..len {
-            tx.delete(&updated_at_list, 0)?;
-        }
-        tx.insert(&updated_at_list, 0, timestamp_scalar(now))?;
-        Ok(())
-    }
-
-    pub fn ensure_for_add(
-        tx: &mut automerge::transaction::Transaction,
-        facets_obj: &automerge::ObjId,
-        facet_keys: &[FacetKey],
-        now: Timestamp,
-    ) -> Res<()> {
-        let key = dmeta_key();
-        let doc_id = match tx.get(automerge::ROOT, "id")? {
-            Some((automerge::Value::Scalar(doc_id_scalar), _)) => {
-                if let automerge::ScalarValue::Str(doc_id_str) = doc_id_scalar.as_ref() {
-                    doc_id_str.to_string()
-                } else {
-                    eyre::bail!("content doc id is not a string");
-                }
-            }
-            _ => eyre::bail!("content doc id not found"),
-        };
-        let mut facet_uuids = HashMap::new();
-        let mut facets = HashMap::new();
-        for facet_key in facet_keys {
-            let facet_uuid = Uuid::new_v4();
-            facet_uuids.insert(facet_uuid, facet_key.clone());
-            facets.insert(
-                facet_key.clone(),
-                FacetMeta {
-                    created_at: now,
-                    uuid: vec![facet_uuid],
-                    updated_at: vec![now],
-                },
-            );
-        }
-        autosurgeon::reconcile_prop(
-            tx,
-            facets_obj,
-            &*key,
-            ThroughJson(WellKnownFacet::Dmeta(daybook_types::doc::Dmeta {
-                id: doc_id,
-                created_at: now,
-                updated_at: vec![now],
-                facet_uuids,
-                facets,
-            })),
-        )?;
-
-        Ok(())
-    }
-
-    fn remove_facet_meta(
-        tx: &mut automerge::transaction::Transaction,
-        dmeta_facets_obj: &automerge::ObjId,
-        dmeta_facet_uuids_obj: &automerge::ObjId,
-        key_str: &str,
-    ) -> Res<Vec<Uuid>> {
-        let mut invalidated_uuids = Vec::new();
-        if let Some((automerge::Value::Object(automerge::ObjType::Map), facet_meta_obj)) =
-            tx.get(dmeta_facets_obj, key_str)?
-        {
-            if let Some((automerge::Value::Object(automerge::ObjType::List), uuid_list)) =
-                tx.get(&facet_meta_obj, "uuid")?
-            {
-                let len = tx.length(&uuid_list);
-                for ii in 0..len {
-                    if let Some((automerge::Value::Scalar(uuid_scalar), _)) =
-                        tx.get(&uuid_list, ii)?
-                    {
-                        if let automerge::ScalarValue::Str(uuid_str) = uuid_scalar.as_ref() {
-                            if let Ok(uuid) = Uuid::parse_str(uuid_str) {
-                                invalidated_uuids.push(uuid);
-                                tx.delete(dmeta_facet_uuids_obj, uuid.to_string())?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        tx.delete(dmeta_facets_obj, key_str)?;
-        Ok(invalidated_uuids)
-    }
-
-    fn touch_facet_meta(
-        tx: &mut automerge::transaction::Transaction,
-        dmeta_facets_obj: &automerge::ObjId,
-        dmeta_facet_uuids_obj: &automerge::ObjId,
-        key_str: &str,
-        now: Timestamp,
-    ) -> Res<Uuid> {
-        let (facet_meta_obj, is_new_meta) = match tx.get(dmeta_facets_obj, key_str)? {
-            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => (id, false),
-            _ => (
-                tx.put_object(dmeta_facets_obj, key_str, automerge::ObjType::Map)?,
-                true,
-            ),
-        };
-
-        if is_new_meta {
-            tx.put(&facet_meta_obj, "createdAt", timestamp_scalar(now))?;
-        } else if tx.get(&facet_meta_obj, "createdAt")?.is_none() {
-            eyre::bail!("facet meta missing createdAt for key {key_str}");
-        }
-
-        let updated_at_list = match tx.get(&facet_meta_obj, "updatedAt")? {
-            Some((automerge::Value::Object(automerge::ObjType::List), id)) => id,
-            _ if is_new_meta => {
-                tx.put_object(&facet_meta_obj, "updatedAt", automerge::ObjType::List)?
-            }
-            _ => eyre::bail!("facet meta missing updatedAt list for key {key_str}"),
-        };
-
-        let uuid_list = match tx.get(&facet_meta_obj, "uuid")? {
-            Some((automerge::Value::Object(automerge::ObjType::List), id)) => id,
-            _ if is_new_meta => tx.put_object(&facet_meta_obj, "uuid", automerge::ObjType::List)?,
-            _ => eyre::bail!("facet meta missing uuid list for key {key_str}"),
-        };
-        let facet_uuid = if tx.length(&uuid_list) > 0 {
-            match tx.get(&uuid_list, 0)? {
-                Some((automerge::Value::Scalar(uuid_scalar), _)) => {
-                    if let automerge::ScalarValue::Str(uuid_str) = uuid_scalar.as_ref() {
-                        Uuid::parse_str(uuid_str)?
-                    } else {
-                        eyre::bail!("facet meta uuid is not a string for key {key_str}")
-                    }
-                }
-                _ => eyre::bail!("facet meta uuid entry missing for key {key_str}"),
-            }
-        } else if is_new_meta {
-            let uuid = Uuid::new_v4();
-            tx.insert(&uuid_list, 0, uuid.to_string())?;
-            uuid
-        } else {
-            eyre::bail!("facet meta uuid list empty for key {key_str}");
-        };
-        tx.put(dmeta_facet_uuids_obj, facet_uuid.to_string(), key_str)?;
-
-        let len = tx.length(&updated_at_list);
-        for _ in 0..len {
-            tx.delete(&updated_at_list, 0)?;
-        }
-        tx.insert(&updated_at_list, 0, timestamp_scalar(now))?;
-
-        Ok(facet_uuid)
-    }
-
-    pub fn apply_update(
-        tx: &mut automerge::transaction::Transaction,
-        facets_obj: &automerge::ObjId,
-        facet_keys_set: &[FacetKey],
-        facet_keys_remove: &[FacetKey],
-        now: Timestamp,
-    ) -> Res<Vec<Uuid>> {
-        let (dmeta_obj, dmeta_facets_obj, dmeta_facet_uuids_obj) = load_dmeta(tx, facets_obj)?;
-        set_updated_at_list(tx, &dmeta_obj, "updatedAt", now)?;
-        let mut invalidated_uuids = Vec::new();
-
-        for key in facet_keys_remove {
-            let key_str = key.to_string();
-            invalidated_uuids.extend(remove_facet_meta(
-                tx,
-                &dmeta_facets_obj,
-                &dmeta_facet_uuids_obj,
-                &key_str,
-            )?);
-        }
-
-        for key in facet_keys_set {
-            let key_str = key.to_string();
-            let facet_uuid =
-                touch_facet_meta(tx, &dmeta_facets_obj, &dmeta_facet_uuids_obj, &key_str, now)?;
-            invalidated_uuids.push(facet_uuid);
-        }
-
-        Ok(invalidated_uuids)
-    }
-
-    pub fn apply_merge(
-        tx: &mut automerge::transaction::Transaction,
-        facets_obj: &automerge::ObjId,
-        modified_facet_key_strs: &std::collections::HashSet<String>,
-        now: Timestamp,
-    ) -> Res<Vec<Uuid>> {
-        if modified_facet_key_strs.is_empty() {
-            return Ok(Vec::new());
-        }
-        let (dmeta_obj, dmeta_facets_obj, dmeta_facet_uuids_obj) = load_dmeta(tx, facets_obj)?;
-        set_updated_at_list(tx, &dmeta_obj, "updatedAt", now)?;
-        let mut invalidated_uuids = Vec::new();
-        for key_str in modified_facet_key_strs {
-            let facet_uuid =
-                touch_facet_meta(tx, &dmeta_facets_obj, &dmeta_facet_uuids_obj, key_str, now)?;
-            invalidated_uuids.push(facet_uuid);
-        }
-        Ok(invalidated_uuids)
-    }
-}
-
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -377,7 +79,7 @@ pub struct DrawerRepo {
     _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
     current_heads: std::sync::RwLock<ChangeHashSet>,
     drawer_am_handle: samod::DocHandle,
-    plugs_repo: std::sync::RwLock<Option<Arc<crate::plugs::PlugsRepo>>>,
+    plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
 }
 
 struct FacetCacheState {
@@ -518,6 +220,8 @@ impl DrawerRepo {
         local_actor_id: automerge::ActorId,
         entry_pool: SharedKeyedLruPool<DocId>,
         doc_pool: SharedKeyedLruPool<FacetCacheKey>,
+        #[cfg(not(test))] plugs_repo: Arc<PlugsRepo>,
+        #[cfg(test)] plugs_repo: Option<Arc<PlugsRepo>>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let drawer_am_handle = acx
             .find_doc(&drawer_doc_id)
@@ -566,7 +270,10 @@ impl DrawerRepo {
             _change_listener_tickets: vec![ticket],
             current_heads: std::sync::RwLock::new(initial_heads),
             drawer_am_handle,
-            plugs_repo: std::sync::RwLock::new(None),
+            #[cfg(not(test))]
+            plugs_repo: Some(plugs_repo),
+            #[cfg(test)]
+            plugs_repo,
         });
 
         let worker_handle = tokio::spawn({
@@ -613,11 +320,8 @@ impl DrawerRepo {
             for notif in notifs {
                 last_heads = Some(ChangeHashSet(Arc::clone(&notif.heads)));
 
-                // Skip local changes
-                if let Some(actor_id) = utils_rs::am::get_actor_id_from_patch(&notif.patch) {
-                    if actor_id == self.local_actor_id {
-                        continue;
-                    }
+                if notif.is_local_only(&self.local_actor_id) {
+                    continue;
                 }
 
                 if let Err(err) = self
@@ -660,32 +364,32 @@ impl DrawerRepo {
         Ok(())
     }
 
-    pub fn set_plugs_repo(&self, plugs_repo: Arc<crate::plugs::PlugsRepo>) {
-        *self.plugs_repo.write().unwrap() = Some(plugs_repo);
-    }
-
     async fn facet_manifest_for_tag(
         &self,
         facet_tag: &str,
     ) -> Option<crate::plugs::manifest::FacetManifest> {
-        let plugs_repo = self.plugs_repo.read().unwrap().clone();
-        if let Some(plugs_repo) = plugs_repo {
+        if let Some(plugs_repo) = &self.plugs_repo {
             return plugs_repo.get_facet_manifest_by_tag(facet_tag).await;
         }
 
-        static SYSTEM_FACET_MANIFESTS: std::sync::OnceLock<
-            HashMap<String, crate::plugs::manifest::FacetManifest>,
-        > = std::sync::OnceLock::new();
-        let system_facet_manifests = SYSTEM_FACET_MANIFESTS.get_or_init(|| {
-            let mut out = HashMap::new();
-            for plug_manifest in crate::plugs::system_plugs() {
-                for facet_manifest in plug_manifest.facets {
-                    out.insert(facet_manifest.key_tag.to_string(), facet_manifest);
+        // FIXME: I hate this
+        if cfg!(test) {
+            static SYSTEM_FACET_MANIFESTS: std::sync::OnceLock<
+                HashMap<String, crate::plugs::manifest::FacetManifest>,
+            > = std::sync::OnceLock::new();
+            let system_facet_manifests = SYSTEM_FACET_MANIFESTS.get_or_init(|| {
+                let mut out = HashMap::new();
+                for plug_manifest in crate::plugs::system_plugs() {
+                    for facet_manifest in plug_manifest.facets {
+                        out.insert(facet_manifest.key_tag.to_string(), facet_manifest);
+                    }
                 }
-            }
-            out
-        });
-        system_facet_manifests.get(facet_tag).cloned()
+                out
+            });
+            system_facet_manifests.get(facet_tag).cloned()
+        } else {
+            None
+        }
     }
 
     pub async fn validate_facets(
@@ -2150,6 +1854,305 @@ impl crate::repos::Repo for DrawerRepo {
     }
 }
 
+pub mod dmeta {
+    use crate::interlude::*;
+    use automerge::transaction::Transactable;
+    use automerge::ReadDoc;
+    use daybook_types::doc::{
+        ChangeHashSet, FacetKey, FacetMeta, WellKnownFacet, WellKnownFacetTag,
+    };
+
+    fn dmeta_key() -> String {
+        // FIXME: make it const or make as_str const
+        format!("{}/main", WellKnownFacetTag::Dmeta.as_str())
+    }
+
+    fn timestamp_scalar(now: Timestamp) -> automerge::ScalarValue {
+        automerge::ScalarValue::Timestamp(now.as_second())
+    }
+
+    pub fn facet_meta_obj<D: ReadDoc>(
+        doc: &D,
+        facet_key: &FacetKey,
+    ) -> Res<Option<automerge::ObjId>> {
+        let facets_obj = match doc.get(automerge::ROOT, "facets")? {
+            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+            _ => return Ok(None),
+        };
+
+        let key = dmeta_key();
+        let dmeta_obj = match doc.get(&facets_obj, &key)? {
+            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+            _ => return Ok(None),
+        };
+
+        let dmeta_facets_obj = match doc.get(&dmeta_obj, "facets")? {
+            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+            _ => return Ok(None),
+        };
+
+        let facet_key_str = facet_key.to_string();
+        match doc.get(&dmeta_facets_obj, facet_key_str)? {
+            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => Ok(Some(id)),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn facet_uuid_for_key<D: ReadDoc + autosurgeon::ReadDoc>(
+        doc: &D,
+        facet_key: &FacetKey,
+    ) -> Res<Option<Uuid>> {
+        let Some(facet_meta_obj) = facet_meta_obj(doc, facet_key)? else {
+            return Ok(None);
+        };
+        match autosurgeon::hydrate_prop::<_, Option<Vec<Uuid>>, _, _>(doc, &facet_meta_obj, "uuid")
+        {
+            Ok(Some(uuids)) => Ok(uuids.into_iter().next()),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn facet_heads_for_key(
+        doc: &automerge::Automerge,
+        facet_key: &FacetKey,
+    ) -> Res<ChangeHashSet> {
+        let heads = super::facet_recovery::recover_facet_heads(doc, facet_key)?;
+        Ok(ChangeHashSet(Arc::from(heads)))
+    }
+
+    fn load_dmeta(
+        tx: &mut automerge::transaction::Transaction,
+        facets_obj: &automerge::ObjId,
+    ) -> Res<(automerge::ObjId, automerge::ObjId, automerge::ObjId)> {
+        let key = dmeta_key();
+        let dmeta_obj = match tx.get(facets_obj, &key)? {
+            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+            _ => eyre::bail!("dmeta facet map not found"),
+        };
+        let dmeta_facets_obj = match tx.get(&dmeta_obj, "facets")? {
+            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+            _ => eyre::bail!("dmeta.facets map not found"),
+        };
+        let dmeta_facet_uuids_obj = match tx.get(&dmeta_obj, "facetUuids")? {
+            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+            _ => eyre::bail!("dmeta.facetUuids map not found"),
+        };
+        Ok((dmeta_obj, dmeta_facets_obj, dmeta_facet_uuids_obj))
+    }
+
+    fn set_updated_at_list(
+        tx: &mut automerge::transaction::Transaction,
+        obj: &automerge::ObjId,
+        prop: &str,
+        now: Timestamp,
+    ) -> Res<()> {
+        let updated_at_list = match tx.get(obj, prop)? {
+            Some((automerge::Value::Object(automerge::ObjType::List), id)) => id,
+            _ => eyre::bail!("missing or invalid {prop} list"),
+        };
+
+        let len = tx.length(&updated_at_list);
+        for _ in 0..len {
+            tx.delete(&updated_at_list, 0)?;
+        }
+        tx.insert(&updated_at_list, 0, timestamp_scalar(now))?;
+        Ok(())
+    }
+
+    pub fn ensure_for_add(
+        tx: &mut automerge::transaction::Transaction,
+        facets_obj: &automerge::ObjId,
+        facet_keys: &[FacetKey],
+        now: Timestamp,
+    ) -> Res<()> {
+        let key = dmeta_key();
+        let doc_id = match tx.get(automerge::ROOT, "id")? {
+            Some((automerge::Value::Scalar(doc_id_scalar), _)) => {
+                if let automerge::ScalarValue::Str(doc_id_str) = doc_id_scalar.as_ref() {
+                    doc_id_str.to_string()
+                } else {
+                    eyre::bail!("content doc id is not a string");
+                }
+            }
+            _ => eyre::bail!("content doc id not found"),
+        };
+        let mut facet_uuids = HashMap::new();
+        let mut facets = HashMap::new();
+        for facet_key in facet_keys {
+            let facet_uuid = Uuid::new_v4();
+            facet_uuids.insert(facet_uuid, facet_key.clone());
+            facets.insert(
+                facet_key.clone(),
+                FacetMeta {
+                    created_at: now,
+                    uuid: vec![facet_uuid],
+                    updated_at: vec![now],
+                },
+            );
+        }
+        autosurgeon::reconcile_prop(
+            tx,
+            facets_obj,
+            &*key,
+            ThroughJson(WellKnownFacet::Dmeta(daybook_types::doc::Dmeta {
+                id: doc_id,
+                created_at: now,
+                updated_at: vec![now],
+                facet_uuids,
+                facets,
+            })),
+        )?;
+
+        Ok(())
+    }
+
+    fn remove_facet_meta(
+        tx: &mut automerge::transaction::Transaction,
+        dmeta_facets_obj: &automerge::ObjId,
+        dmeta_facet_uuids_obj: &automerge::ObjId,
+        key_str: &str,
+    ) -> Res<Vec<Uuid>> {
+        let mut invalidated_uuids = Vec::new();
+        if let Some((automerge::Value::Object(automerge::ObjType::Map), facet_meta_obj)) =
+            tx.get(dmeta_facets_obj, key_str)?
+        {
+            if let Some((automerge::Value::Object(automerge::ObjType::List), uuid_list)) =
+                tx.get(&facet_meta_obj, "uuid")?
+            {
+                let len = tx.length(&uuid_list);
+                for ii in 0..len {
+                    if let Some((automerge::Value::Scalar(uuid_scalar), _)) =
+                        tx.get(&uuid_list, ii)?
+                    {
+                        if let automerge::ScalarValue::Str(uuid_str) = uuid_scalar.as_ref() {
+                            if let Ok(uuid) = Uuid::parse_str(uuid_str) {
+                                invalidated_uuids.push(uuid);
+                                tx.delete(dmeta_facet_uuids_obj, uuid.to_string())?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        tx.delete(dmeta_facets_obj, key_str)?;
+        Ok(invalidated_uuids)
+    }
+
+    fn touch_facet_meta(
+        tx: &mut automerge::transaction::Transaction,
+        dmeta_facets_obj: &automerge::ObjId,
+        dmeta_facet_uuids_obj: &automerge::ObjId,
+        key_str: &str,
+        now: Timestamp,
+    ) -> Res<Uuid> {
+        let (facet_meta_obj, is_new_meta) = match tx.get(dmeta_facets_obj, key_str)? {
+            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => (id, false),
+            _ => (
+                tx.put_object(dmeta_facets_obj, key_str, automerge::ObjType::Map)?,
+                true,
+            ),
+        };
+
+        if is_new_meta {
+            tx.put(&facet_meta_obj, "createdAt", timestamp_scalar(now))?;
+        } else if tx.get(&facet_meta_obj, "createdAt")?.is_none() {
+            eyre::bail!("facet meta missing createdAt for key {key_str}");
+        }
+
+        let updated_at_list = match tx.get(&facet_meta_obj, "updatedAt")? {
+            Some((automerge::Value::Object(automerge::ObjType::List), id)) => id,
+            _ if is_new_meta => {
+                tx.put_object(&facet_meta_obj, "updatedAt", automerge::ObjType::List)?
+            }
+            _ => eyre::bail!("facet meta missing updatedAt list for key {key_str}"),
+        };
+
+        let uuid_list = match tx.get(&facet_meta_obj, "uuid")? {
+            Some((automerge::Value::Object(automerge::ObjType::List), id)) => id,
+            _ if is_new_meta => tx.put_object(&facet_meta_obj, "uuid", automerge::ObjType::List)?,
+            _ => eyre::bail!("facet meta missing uuid list for key {key_str}"),
+        };
+        let facet_uuid = if tx.length(&uuid_list) > 0 {
+            match tx.get(&uuid_list, 0)? {
+                Some((automerge::Value::Scalar(uuid_scalar), _)) => {
+                    if let automerge::ScalarValue::Str(uuid_str) = uuid_scalar.as_ref() {
+                        Uuid::parse_str(uuid_str)?
+                    } else {
+                        eyre::bail!("facet meta uuid is not a string for key {key_str}")
+                    }
+                }
+                _ => eyre::bail!("facet meta uuid entry missing for key {key_str}"),
+            }
+        } else if is_new_meta {
+            let uuid = Uuid::new_v4();
+            tx.insert(&uuid_list, 0, uuid.to_string())?;
+            uuid
+        } else {
+            eyre::bail!("facet meta uuid list empty for key {key_str}");
+        };
+        tx.put(dmeta_facet_uuids_obj, facet_uuid.to_string(), key_str)?;
+
+        let len = tx.length(&updated_at_list);
+        for _ in 0..len {
+            tx.delete(&updated_at_list, 0)?;
+        }
+        tx.insert(&updated_at_list, 0, timestamp_scalar(now))?;
+
+        Ok(facet_uuid)
+    }
+
+    pub fn apply_update(
+        tx: &mut automerge::transaction::Transaction,
+        facets_obj: &automerge::ObjId,
+        facet_keys_set: &[FacetKey],
+        facet_keys_remove: &[FacetKey],
+        now: Timestamp,
+    ) -> Res<Vec<Uuid>> {
+        let (dmeta_obj, dmeta_facets_obj, dmeta_facet_uuids_obj) = load_dmeta(tx, facets_obj)?;
+        set_updated_at_list(tx, &dmeta_obj, "updatedAt", now)?;
+        let mut invalidated_uuids = Vec::new();
+
+        for key in facet_keys_remove {
+            let key_str = key.to_string();
+            invalidated_uuids.extend(remove_facet_meta(
+                tx,
+                &dmeta_facets_obj,
+                &dmeta_facet_uuids_obj,
+                &key_str,
+            )?);
+        }
+
+        for key in facet_keys_set {
+            let key_str = key.to_string();
+            let facet_uuid =
+                touch_facet_meta(tx, &dmeta_facets_obj, &dmeta_facet_uuids_obj, &key_str, now)?;
+            invalidated_uuids.push(facet_uuid);
+        }
+
+        Ok(invalidated_uuids)
+    }
+
+    pub fn apply_merge(
+        tx: &mut automerge::transaction::Transaction,
+        facets_obj: &automerge::ObjId,
+        modified_facet_key_strs: &std::collections::HashSet<String>,
+        now: Timestamp,
+    ) -> Res<Vec<Uuid>> {
+        if modified_facet_key_strs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (dmeta_obj, dmeta_facets_obj, dmeta_facet_uuids_obj) = load_dmeta(tx, facets_obj)?;
+        set_updated_at_list(tx, &dmeta_obj, "updatedAt", now)?;
+        let mut invalidated_uuids = Vec::new();
+        for key_str in modified_facet_key_strs {
+            let facet_uuid =
+                touch_facet_meta(tx, &dmeta_facets_obj, &dmeta_facet_uuids_obj, key_str, now)?;
+            invalidated_uuids.push(facet_uuid);
+        }
+        Ok(invalidated_uuids)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2188,6 +2191,7 @@ mod tests {
             automerge::ActorId::random(),
             entry_pool,
             doc_pool,
+            None,
         )
         .await?;
 
@@ -2286,6 +2290,7 @@ mod tests {
             automerge::ActorId::random(),
             entry_pool,
             doc_pool,
+            None,
         )
         .await?;
 
@@ -2418,6 +2423,7 @@ mod tests {
             automerge::ActorId::random(),
             Arc::clone(&entry_pool),
             Arc::clone(&doc_pool),
+            None,
         )
         .await?;
         let (server_repo, server_stop) = DrawerRepo::load(
@@ -2426,6 +2432,7 @@ mod tests {
             automerge::ActorId::random(),
             Arc::clone(&entry_pool),
             Arc::clone(&doc_pool),
+            None,
         )
         .await?;
 
@@ -2509,6 +2516,7 @@ mod tests {
             automerge::ActorId::random(),
             entry_pool,
             doc_pool,
+            None,
         )
         .await?;
 
@@ -2654,6 +2662,7 @@ mod tests {
             automerge::ActorId::random(),
             entry_pool,
             doc_pool,
+            None,
         )
         .await?;
 
@@ -2799,6 +2808,7 @@ mod tests {
             automerge::ActorId::random(),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+            None,
         )
         .await?;
 
@@ -2869,6 +2879,7 @@ mod tests {
             automerge::ActorId::random(),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+            None,
         )
         .await?;
 
@@ -3030,6 +3041,7 @@ mod tests {
             automerge::ActorId::random(),
             entry_pool,
             doc_pool,
+            None,
         )
         .await?;
 
@@ -3146,6 +3158,7 @@ mod tests {
             automerge::ActorId::random(),
             entry_pool,
             doc_pool,
+            None,
         )
         .await?;
 
@@ -3310,6 +3323,7 @@ mod tests {
             automerge::ActorId::random(),
             Arc::clone(&entry_pool),
             Arc::clone(&doc_pool),
+            None,
         )
         .await?;
         let (repo_b, stop_b) = DrawerRepo::load(
@@ -3318,6 +3332,7 @@ mod tests {
             automerge::ActorId::random(),
             Arc::clone(&entry_pool),
             Arc::clone(&doc_pool),
+            None,
         )
         .await?;
 
@@ -3381,6 +3396,7 @@ mod tests {
             automerge::ActorId::random(),
             entry_pool,
             doc_pool,
+            None,
         )
         .await?;
 
@@ -3476,6 +3492,7 @@ mod tests {
             automerge::ActorId::random(),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+            None,
         )
         .await?;
 
@@ -3525,6 +3542,7 @@ mod tests {
             automerge::ActorId::random(),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+            None,
         )
         .await?;
 

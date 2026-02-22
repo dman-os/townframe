@@ -403,7 +403,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         component_urls: vec![{
                             let path = std::path::absolute(
                                 Path::new(env!("CARGO_MANIFEST_DIR"))
-                                    .join("../../target/wasm32-wasip2/debug/daybook_wflows.wasm"),
+                                    .join("../../target/wasm32-wasip2/release/daybook_wflows.wasm"),
                             )
                             .unwrap();
 
@@ -516,7 +516,7 @@ pub struct PlugsRepo {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PlugsEvent {
-    ListChanged { heads: ChangeHashSet },
+    // ListChanged { heads: ChangeHashSet },
     PlugAdded { id: String, heads: ChangeHashSet },
     PlugChanged { id: String, heads: ChangeHashSet },
     PlugDeleted { id: String, heads: ChangeHashSet },
@@ -629,13 +629,8 @@ impl PlugsRepo {
 
             events.clear();
             for notif in notifs {
-                // 1. Extract ActorId from the patch using the new utils_rs::am helper.
-                if let Some(actor_id) = utils_rs::am::get_actor_id_from_patch(&notif.patch) {
-                    // 2. Skip if it matches self.local_actor_id.
-                    if actor_id == self.local_actor_id {
-                        debug!("process_notifs: skipping local change for plug");
-                        continue;
-                    }
+                if notif.is_local_only(&self.local_actor_id) {
+                    continue;
                 }
 
                 // 3. Call events_for_patch (pure-ish).
@@ -678,7 +673,6 @@ impl PlugsRepo {
                             })
                             .await?;
                     }
-                    PlugsEvent::ListChanged { .. } => {}
                 }
             }
             self.registry.notify(events.drain(..));
@@ -766,9 +760,7 @@ impl PlugsRepo {
                     heads,
                 });
             }
-            _ => {
-                out.push(PlugsEvent::ListChanged { heads });
-            }
+            _ => {}
         }
         Ok(())
     }
@@ -887,7 +879,7 @@ impl PlugsRepo {
         // to simplify lookups and ensure uniqueness.
         let plug_id = manifest.id();
 
-        let (_, hash) = self
+        let ((plug_id, is_update), hash) = self
             .store
             .mutate_sync(move |store| {
                 let manifest = manifest;
@@ -912,13 +904,17 @@ impl PlugsRepo {
                 // used to hyper-accelerate validation and routing logic.
                 // We rebuild them here so they're immediately available for subsequent calls.
                 store.rebuild_indices();
+
+                (plug_id, is_update)
             })
             .await?;
-
         let heads = ChangeHashSet(hash.into_iter().collect());
-
         // Notify listeners that the plug list or a specific plug has changed
-        self.registry.notify([PlugsEvent::ListChanged { heads }]);
+        self.registry.notify([if is_update {
+            PlugsEvent::PlugChanged { id: plug_id, heads }
+        } else {
+            PlugsEvent::PlugAdded { id: plug_id, heads }
+        }]);
 
         Ok(())
     }

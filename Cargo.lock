@@ -1976,6 +1976,7 @@ dependencies = [
  "wash_plugin_wflow",
  "wasmtime",
  "wflow",
+ "zstd",
 ]
 
 [[package]]

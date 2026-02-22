@@ -170,30 +170,17 @@ pub async fn test_cx_with_options(
     let temp_dir = tempfile::tempdir()?;
     let blobs = crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs")).await?;
 
-    let (drawer_repo, drawer_stop) = DrawerRepo::load(
-        acx.clone(),
-        drawer_doc_id,
-        local_actor_id.clone(),
-        Arc::new(std::sync::Mutex::new(
-            crate::drawer::lru::KeyedLruPool::new(1000),
-        )),
-        Arc::new(std::sync::Mutex::new(
-            crate::drawer::lru::KeyedLruPool::new(1000),
-        )),
-    )
-    .await?;
-    let (plug_repo, plugs_stop) = PlugsRepo::load(
+    let (plugs_repo, plugs_stop) = PlugsRepo::load(
         acx.clone(),
         Arc::clone(&blobs),
         app_doc_id.clone(),
         local_actor_id.clone(),
     )
     .await?;
-    drawer_repo.set_plugs_repo(Arc::clone(&plug_repo));
     let (config_repo, config_stop) = crate::config::ConfigRepo::load(
         acx.clone(),
         app_doc_id.clone(),
-        Arc::clone(&plug_repo),
+        Arc::clone(&plugs_repo),
         local_user_path.clone(),
     )
     .await?;
@@ -207,8 +194,19 @@ pub async fn test_cx_with_options(
         crate::app::SqlCtx::new("sqlite::memory:").await?.db_pool,
     )
     .await?;
-
-    plug_repo.ensure_system_plugs().await?;
+    let (drawer_repo, drawer_stop) = DrawerRepo::load(
+        acx.clone(),
+        drawer_doc_id,
+        local_actor_id.clone(),
+        Arc::new(std::sync::Mutex::new(
+            crate::drawer::lru::KeyedLruPool::new(1000),
+        )),
+        Arc::new(std::sync::Mutex::new(
+            crate::drawer::lru::KeyedLruPool::new(1000),
+        )),
+        Some(Arc::clone(&plugs_repo)),
+    )
+    .await?;
 
     if options.provision_mltools_models {
         let mltools_config = mltools::models::mobile_default(mltools::models::test_cache_dir())
@@ -231,7 +229,7 @@ pub async fn test_cx_with_options(
         wflow_db_url,
         acx.clone(),
         Arc::clone(&drawer_repo),
-        Arc::clone(&plug_repo),
+        Arc::clone(&plugs_repo),
         Arc::clone(&dispatch_repo),
         Arc::clone(&progress_repo),
         Arc::clone(&blobs),
@@ -240,6 +238,8 @@ pub async fn test_cx_with_options(
         temp_dir.path().join("local_states"),
     )
     .await?;
+
+    plugs_repo.ensure_system_plugs().await?;
 
     Ok(DaybookTestContext {
         _acx: acx,

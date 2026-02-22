@@ -11,7 +11,7 @@ async fn test_fails_once() -> Res<()> {
     // Register the test_wflows workload
     test_cx
         .register_workload(
-            "../../target/wasm32-wasip2/debug/test_wflows.wasm",
+            "../../target/wasm32-wasip2/release/test_wflows.wasm",
             vec!["fails_once".to_string()],
         )
         .await?;
@@ -63,7 +63,7 @@ async fn test_fails_once_sqlite() -> Res<()> {
     // Register the test_wflows workload
     test_cx
         .register_workload(
-            "../../target/wasm32-wasip2/debug/test_wflows.wasm",
+            "../../target/wasm32-wasip2/release/test_wflows.wasm",
             vec!["fails_once".to_string()],
         )
         .await?;

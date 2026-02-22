@@ -26,7 +26,7 @@ async fn test_labeler_workflow() -> Res<()> {
 
     // Find the test-label dispatch and wait for it to complete
     let mut dispatch_id: Option<String> = None;
-    for _ in 0..300 {
+    for _ in 0..600 {
         let dispatches = test_cx.dispatch_repo.list().await;
         if let Some((id, _d)) = dispatches.iter().find(|(_, d)| {
             matches!(
@@ -101,7 +101,7 @@ async fn test_staging_branch_workflow() -> Res<()> {
     let mut dispatch_id: Option<String> = None;
     let mut staging_branch_path: Option<daybook_types::doc::BranchPath> = None;
 
-    for _ in 0..300 {
+    for _ in 0..600 {
         let dispatches = test_cx.dispatch_repo.list().await;
         if let Some((id, dispatch)) = dispatches.iter().find(|(_, d)| {
             matches!(

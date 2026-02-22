@@ -46,10 +46,10 @@ impl DrawerRepoFfi {
                 Arc::new(std::sync::Mutex::new(
                     daybook_core::drawer::lru::KeyedLruPool::new(1000),
                 )),
+                Arc::clone(&plugs_repo.repo),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
-        repo.set_plugs_repo(Arc::clone(&plugs_repo.repo));
         Ok(Arc::new(Self {
             fcx,
             repo,

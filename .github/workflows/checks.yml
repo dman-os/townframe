@@ -61,12 +61,13 @@ jobs:
 
       - name: rust builds
         run: |
-          nix develop .#ci-rust --command cargo --color=always build -p test_wflows -p daybook_wflows --target wasm32-wasip2
-          nix develop .#ci-rust --command cargo --color=always build -p daybook_cli
-          # nix develop .#ci-rust --command cargo --color=always nextest run --workspace --all-features
+          nix develop .#ci-rust --command cargo --color=always build --release -p test_wflows -p daybook_wflows --target wasm32-wasip2
+          # nix develop .#ci-rust --command cargo --color=always build -p daybook_cli
+          nix develop .#ci-rust --command cargo --color=always nextest run --workspace --all-features --no-fail-fast --retries 1
         env:
           RUST_BACKTRACE: 1
-          # RUST_LOG: debug
-          # # FIXME: use real ollama
-          # OLLAMA_URL: http://localhost:11434
-          # OLLAMA_MODEL: gemma3 
+          # RUST_LOG_TEST: debug
+          OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
+          OLLAMA_USERNAME: ${{ secrets.OLLAMA_USERNAME }}
+          OLLAMA_PASSWORD: ${{ secrets.OLLAMA_PASSWORD }}
+          OLLAMA_MODEL: gemma3 

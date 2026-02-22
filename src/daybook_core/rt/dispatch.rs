@@ -79,9 +79,7 @@ pub struct DispatchRepo {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum DispatchEvent {
-    ListChanged { heads: ChangeHashSet },
     DispatchAdded { id: String, heads: ChangeHashSet },
-    DispatchUpdated { id: String, heads: ChangeHashSet },
     DispatchDeleted { id: String, heads: ChangeHashSet },
 }
 
@@ -189,29 +187,19 @@ impl DispatchRepo {
             };
 
             events.clear();
-            let mut last_heads = None;
 
             for notif in notifs {
-                last_heads = Some(ChangeHashSet(Arc::clone(&notif.heads)));
-
-                // 1. Extract ActorId from the patch using the new utils_rs::am helper.
-                if let Some(actor_id) = utils_rs::am::get_actor_id_from_patch(&notif.patch) {
-                    // 2. Skip if it matches self.local_actor_id.
-                    if actor_id == self.local_actor_id {
-                        debug!("process_notifs: skipping local change for dispatch");
-                        continue;
-                    }
+                if notif.is_local_only(&self.local_actor_id) {
+                    continue;
                 }
 
-                // 3. Call events_for_patch (pure-ish).
                 self.events_for_patch(&notif.patch, &notif.heads, &mut events)
                     .await?;
             }
 
             for event in &events {
                 match &event {
-                    DispatchEvent::DispatchAdded { id, heads }
-                    | DispatchEvent::DispatchUpdated { id, heads } => {
+                    DispatchEvent::DispatchAdded { id, heads } => {
                         // Hydrate the new dispatch at heads
                         let (new_versioned, _) = self
                             .acx
@@ -241,17 +229,11 @@ impl DispatchRepo {
                             })
                             .await?;
                     }
-                    DispatchEvent::ListChanged { .. } => {}
                 }
             }
 
             if !events.is_empty() {
-                let heads = last_heads.expect("notifs not empty");
-                self.registry.notify(
-                    events
-                        .drain(..)
-                        .chain(std::iter::once(DispatchEvent::ListChanged { heads })),
-                );
+                self.registry.notify(events.drain(..));
             }
         }
         Ok(())
@@ -297,10 +279,11 @@ impl DispatchRepo {
                         heads: dispatch_heads,
                     }
                 } else {
-                    DispatchEvent::DispatchUpdated {
-                        id: dispatch_id.clone(),
-                        heads: dispatch_heads,
-                    }
+                    panic!("dispatch update detected")
+                    // DispatchEvent::DispatchUpdated {
+                    //     id: dispatch_id.clone(),
+                    //     heads: dispatch_heads,
+                    // }
                 });
             }
             automerge::PatchAction::DeleteMap { key, .. } if patch.path.len() == 2 => {
@@ -387,14 +370,8 @@ impl DispatchRepo {
         let (_, hash) = self
             .store
             .mutate_sync(|store| {
-                let is_update = store.active_dispatches.contains_key(&id);
-
                 let versioned = VersionedDispatch {
-                    version: if is_update {
-                        Uuid::new_v4()
-                    } else {
-                        Uuid::nil()
-                    },
+                    version: Uuid::nil(),
                     payload: Arc::clone(&dispatch),
                 };
 
@@ -403,9 +380,7 @@ impl DispatchRepo {
                         let old = store
                             .wflow_to_dispatch
                             .insert(wflow_job_id.clone(), id.clone());
-                        if !is_update {
-                            assert!(old.is_none(), "fishy");
-                        }
+                        assert!(old.is_none(), "fishy");
                     }
                 }
                 store.cancelled_dispatches.remove(&id);
@@ -413,13 +388,10 @@ impl DispatchRepo {
             })
             .await?;
         let heads = ChangeHashSet(hash.into_iter().collect());
-        self.registry.notify([
-            DispatchEvent::DispatchAdded {
-                id,
-                heads: heads.clone(),
-            },
-            DispatchEvent::ListChanged { heads },
-        ]);
+        self.registry.notify([DispatchEvent::DispatchAdded {
+            id,
+            heads: heads.clone(),
+        }]);
         Ok(())
     }
 
@@ -440,13 +412,10 @@ impl DispatchRepo {
             })
             .await?;
         let heads = ChangeHashSet(hash.into_iter().collect());
-        self.registry.notify([
-            DispatchEvent::DispatchDeleted {
-                id,
-                heads: heads.clone(),
-            },
-            DispatchEvent::ListChanged { heads },
-        ]);
+        self.registry.notify([DispatchEvent::DispatchDeleted {
+            id,
+            heads: heads.clone(),
+        }]);
         Ok(old.map(|disp| disp.payload))
     }
 

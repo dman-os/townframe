@@ -110,6 +110,7 @@ impl From<eyre::Report> for CasError {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn make_dhashmap_cas_guard(
     store: Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>>,
     key: Arc<[u8]>,
@@ -127,7 +128,7 @@ fn make_dhashmap_cas_guard(
             let snapshot = snapshot.clone();
             Box::pin(async move {
                 use dashmap::mapref::entry::Entry;
-                match store.entry(key.clone()) {
+                match store.entry(Arc::clone(&key)) {
                     Entry::Occupied(mut entry) => {
                         let current = Arc::clone(entry.get());
                         if snapshot.as_deref() == Some(current.as_ref()) {

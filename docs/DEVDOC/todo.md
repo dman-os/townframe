@@ -5,6 +5,7 @@
     - [ ] Registry
       - [ ] OCI based
     - [x] Un-previlaged processors should go in their own branch
+  - [ ] Backup ATProto PD
   - [ ] Chatbot
   - [ ] Generated UI
   - [ ] FUSE/dpath
@@ -183,6 +184,7 @@
   - [ ] Windows
   - [ ] macOS
 - [ ] GraalVM for Linux
+- [ ] Cross-device networking features
 
 ## Upstream Issues
 

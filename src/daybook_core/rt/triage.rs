@@ -33,6 +33,7 @@ struct DocProcessorTriageListener {
 }
 
 impl DocProcessorTriageListener {
+    #[tracing::instrument(skip(self, rt))]
     async fn refresh_processors(&mut self, rt: &Arc<Rt>) -> Res<()> {
         let plugs = rt.plugs_repo.list_plugs().await;
         self.cached_processors.clear();

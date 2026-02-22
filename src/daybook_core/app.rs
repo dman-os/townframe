@@ -626,18 +626,6 @@ pub async fn run_repo_init_dance(
     use crate::rt::dispatch::DispatchRepo;
     use crate::tables::TablesRepo;
 
-    let (drawer_repo, drawer_stop) = DrawerRepo::load(
-        acx.clone(),
-        doc_drawer.document_id().clone(),
-        local_actor_id.clone(),
-        Arc::new(std::sync::Mutex::new(
-            crate::drawer::lru::KeyedLruPool::new(1000),
-        )),
-        Arc::new(std::sync::Mutex::new(
-            crate::drawer::lru::KeyedLruPool::new(1000),
-        )),
-    )
-    .await?;
     let blobs_repo = BlobsRepo::new(blobs_root).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         acx.clone(),
@@ -647,7 +635,6 @@ pub async fn run_repo_init_dance(
     )
     .await
     .wrap_err("error loading plugs repo during init dance")?;
-    drawer_repo.set_plugs_repo(Arc::clone(&plugs_repo));
 
     let (_config_repo, config_stop) = ConfigRepo::load(
         acx.clone(),
@@ -666,6 +653,22 @@ pub async fn run_repo_init_dance(
         acx.clone(),
         doc_app.document_id().clone(),
         local_actor_id.clone(),
+    )
+    .await?;
+    let (_drawer_repo, drawer_stop) = DrawerRepo::load(
+        acx.clone(),
+        doc_drawer.document_id().clone(),
+        local_actor_id.clone(),
+        Arc::new(std::sync::Mutex::new(
+            crate::drawer::lru::KeyedLruPool::new(1000),
+        )),
+        Arc::new(std::sync::Mutex::new(
+            crate::drawer::lru::KeyedLruPool::new(1000),
+        )),
+        #[cfg(not(test))]
+        Arc::clone(&plugs_repo),
+        #[cfg(test)]
+        Some(Arc::clone(&plugs_repo)),
     )
     .await?;
 

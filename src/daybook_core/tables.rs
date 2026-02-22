@@ -408,12 +408,16 @@ pub enum TablesEvent {
     ListChanged { heads: ChangeHashSet },
     WindowAdded { id: Uuid, heads: ChangeHashSet },
     WindowChanged { id: Uuid, heads: ChangeHashSet },
+    WindowDeleted { id: Uuid, heads: ChangeHashSet },
     TabAdded { id: Uuid, heads: ChangeHashSet },
     TabChanged { id: Uuid, heads: ChangeHashSet },
+    TabDeleted { id: Uuid, heads: ChangeHashSet },
     PanelAdded { id: Uuid, heads: ChangeHashSet },
     PanelChanged { id: Uuid, heads: ChangeHashSet },
+    PanelDeleted { id: Uuid, heads: ChangeHashSet },
     TableAdded { id: Uuid, heads: ChangeHashSet },
     TableChanged { id: Uuid, heads: ChangeHashSet },
+    TableDeleted { id: Uuid, heads: ChangeHashSet },
 }
 
 impl TablesRepo {
@@ -514,15 +518,10 @@ impl TablesRepo {
 
             events.clear();
             for notif in notifs {
-                // 1. Extract ActorId from the patch using the new utils_rs::am helper.
-                if let Some(actor_id) = utils_rs::am::get_actor_id_from_patch(&notif.patch) {
-                    // 2. Skip if it matches self.local_actor_id.
-                    if actor_id == self.local_actor_id {
-                        continue;
-                    }
+                if notif.is_local_only(&self.local_actor_id) {
+                    continue;
                 }
 
-                // 3. Call events_for_patch (pure-ish).
                 self.events_for_patch(&notif.patch, &notif.heads, &mut events)
                     .await?;
             }
@@ -552,6 +551,14 @@ impl TablesRepo {
                             })
                             .await?;
                     }
+                    TablesEvent::WindowDeleted { id, .. } => {
+                        self.store
+                            .mutate_sync(|store| {
+                                store.windows.remove(id);
+                                store.rebuild_indices();
+                            })
+                            .await?;
+                    }
                     TablesEvent::TabAdded { id, heads } | TablesEvent::TabChanged { id, heads } => {
                         let (new_tab, _) = self
                             .acx
@@ -570,6 +577,14 @@ impl TablesRepo {
                         self.store
                             .mutate_sync(|store| {
                                 store.tabs.insert(*id, new_tab);
+                                store.rebuild_indices();
+                            })
+                            .await?;
+                    }
+                    TablesEvent::TabDeleted { id, .. } => {
+                        self.store
+                            .mutate_sync(|store| {
+                                store.tabs.remove(id);
                                 store.rebuild_indices();
                             })
                             .await?;
@@ -597,6 +612,14 @@ impl TablesRepo {
                             })
                             .await?;
                     }
+                    TablesEvent::PanelDeleted { id, .. } => {
+                        self.store
+                            .mutate_sync(|store| {
+                                store.panels.remove(id);
+                                store.rebuild_indices();
+                            })
+                            .await?;
+                    }
                     TablesEvent::TableAdded { id, heads }
                     | TablesEvent::TableChanged { id, heads } => {
                         let (new_table, _) = self
@@ -620,11 +643,19 @@ impl TablesRepo {
                             })
                             .await?;
                     }
+                    TablesEvent::TableDeleted { id, .. } => {
+                        self.store
+                            .mutate_sync(|store| {
+                                store.tables.remove(id);
+                                store.rebuild_indices();
+                            })
+                            .await?;
+                    }
                     TablesEvent::ListChanged { .. } => {}
                 }
             }
-            for evt in events.drain(..) {
-                self.registry.notify([evt]);
+            if !events.is_empty() {
+                self.registry.notify(events.drain(..));
             }
         }
         Ok(())
@@ -707,15 +738,19 @@ impl TablesRepo {
                     } else {
                         TablesEvent::PanelChanged { id: item_id, heads }
                     }),
-                    _ => out.push(TablesEvent::ListChanged { heads }),
+                    _ => {}
                 }
             }
-            automerge::PatchAction::DeleteMap { .. } if patch.path.len() == 2 => {
+            automerge::PatchAction::DeleteMap { key } if patch.path.len() == 2 => {
                 if let automerge::Prop::Map(path_key) = &patch.path[1].1 {
+                    let Ok(item_id) = Uuid::parse_str(key) else {
+                        return Ok(());
+                    };
                     match path_key.as_ref() {
-                        "windows" | "tables" | "tabs" | "panels" => {
-                            out.push(TablesEvent::ListChanged { heads });
-                        }
+                        "windows" => out.push(TablesEvent::WindowDeleted { id: item_id, heads }),
+                        "tables" => out.push(TablesEvent::TableDeleted { id: item_id, heads }),
+                        "tabs" => out.push(TablesEvent::TabDeleted { id: item_id, heads }),
+                        "panels" => out.push(TablesEvent::PanelDeleted { id: item_id, heads }),
                         _ => {}
                     }
                 }

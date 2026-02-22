@@ -110,8 +110,16 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     // configured repo is Initialized since `init`
     // initializes the repo
     let ctx = context::open_repo_ctx(&conf, false, None).await?;
+    let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone()).await?;
+    let (plugs_repo, plugs_stop) = PlugsRepo::load(
+        ctx.acx.clone(),
+        Arc::clone(&blobs_repo),
+        ctx.doc_app.document_id().clone(),
+        ctx.local_actor_id.clone(),
+    )
+    .await?;
     let drawer_doc_id = ctx.doc_drawer.document_id().clone();
-    let (drawer, drawer_stop) = DrawerRepo::load(
+    let (drawer_repo, drawer_stop) = DrawerRepo::load(
         ctx.acx.clone(),
         drawer_doc_id,
         ctx.local_actor_id.clone(),
@@ -121,6 +129,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         Arc::new(std::sync::Mutex::new(
             daybook_core::drawer::lru::KeyedLruPool::new(1000),
         )),
+        Arc::clone(&plugs_repo),
     )
     .await?;
 
@@ -173,7 +182,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             )
         }
         StaticCommands::Ls => {
-            let doc_entries = drawer.list().await?;
+            let doc_entries = drawer_repo.list().await?;
 
             let mut docs = Vec::new();
             for entry in &doc_entries {
@@ -181,7 +190,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     warn!(doc_id = ?entry.doc_id,"no branches found on doc");
                     continue;
                 };
-                if let Some(doc) = drawer
+                if let Some(doc) = drawer_repo
                     .get_doc_with_facets_at_branch(&entry.doc_id, &main_branch, None)
                     .await?
                 {
@@ -226,7 +235,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             println!("{table}");
         }
         StaticCommands::Cat { id, branch } => {
-            let Ok(Some(branches)) = drawer.get_doc_branches(&id).await else {
+            let Ok(Some(branches)) = drawer_repo.get_doc_branches(&id).await else {
                 error!("document not found: {id}");
                 return Ok(ExitCode::FAILURE);
             };
@@ -246,7 +255,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     branch
                 }
             };
-            let doc = drawer
+            let doc = drawer_repo
                 .get_doc_with_facets_at_branch(&id, &branch_path, None)
                 .await?
                 .expect("document from entry missing");
@@ -268,12 +277,12 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     ctx.local_user_path.clone(),
                 )),
             };
-            let id = drawer.add(doc).await?;
+            let id = drawer_repo.add(doc).await?;
             info!(id, "created document");
             println!("{id}");
         }
         StaticCommands::Ed { id, branch } => {
-            let Ok(Some(branches)) = drawer.get_doc_branches(&id).await else {
+            let Ok(Some(branches)) = drawer_repo.get_doc_branches(&id).await else {
                 error!("document not found: {id}");
                 return Ok(ExitCode::FAILURE);
             };
@@ -293,7 +302,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     branch
                 }
             };
-            let Some((doc, heads)) = drawer.get_with_heads(&id, &branch_path, None).await? else {
+            let Some((doc, heads)) = drawer_repo.get_with_heads(&id, &branch_path, None).await?
+            else {
                 eyre::bail!("Document not found: {id}");
             };
 
@@ -323,7 +333,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 println!("No changes detected.");
             } else {
                 patch.id = id.clone();
-                drawer
+                drawer_repo
                     .update_at_heads(patch, "main".into(), Some(heads))
                     .await?;
                 println!("Updated document: {id}");
@@ -346,7 +356,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     branch_path: daybook_types::doc::BranchPath::from("main"),
                     poll_interval: std::time::Duration::from_millis(250),
                 },
-                Arc::clone(&drawer),
+                Arc::clone(&drawer_repo),
             );
 
             match command {
@@ -404,6 +414,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         }
     }
     drawer_stop.stop().await?;
+    plugs_stop.stop().await?;
     if let Some(stop) = ctx.acx_stop.lock().await.take() {
         stop.stop().await?;
     }
@@ -457,6 +468,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             Arc::new(std::sync::Mutex::new(
                 daybook_core::drawer::lru::KeyedLruPool::new(1000)
             )),
+            Arc::clone(&plugs_repo)
         ),
         DispatchRepo::load(
             ctx.acx.clone(),
@@ -471,7 +483,6 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
         )
     )?;
-    drawer.set_plugs_repo(Arc::clone(&plugs_repo));
 
     macro_rules! do_cleanup {
         () => {

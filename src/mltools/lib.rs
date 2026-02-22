@@ -103,6 +103,7 @@ pub enum EmbedBackendConfig {
     CloudOllama {
         url: String,
         model: String,
+        auth: Option<CloudAuth>,
     },
 }
 
@@ -157,8 +158,8 @@ pub async fn embed_text(ctx: &Ctx, text: &str) -> Res<EmbedResult> {
     };
     match backend_config {
         EmbedBackendConfig::LocalFastembed { .. } => local::embed_text(backend_config, text).await,
-        EmbedBackendConfig::CloudOllama { url, model } => {
-            cloud::embed_text_ollama(url, model, text).await
+        EmbedBackendConfig::CloudOllama { url, model, auth } => {
+            cloud::embed_text_ollama(url, model, text, auth.as_ref()).await
         }
     }
 }
@@ -394,23 +395,56 @@ mod local {
 mod cloud {
     use super::*;
 
-    pub async fn embed_text_ollama(url: &str, model: &str, text: &str) -> Res<EmbedResult> {
+    fn ollama_new(url: &str, auth: Option<&CloudAuth>) -> Res<ollama_rs::Ollama> {
         let parsed_url =
             url::Url::parse(url).wrap_err_with(|| format!("invalid Ollama url: {url}"))?;
         let host = parsed_url
             .host_str()
             .ok_or_eyre("Ollama url missing host")?;
         let scheme = parsed_url.scheme();
-        let port = parsed_url.port().unwrap_or(11434);
+        let port = parsed_url.port().unwrap_or(match scheme {
+            "https" => 443,
+            _ => 80,
+        });
 
-        let ollama = ollama_rs::Ollama::new(format!("{scheme}://{host}"), port);
+        let ollama = ollama_rs::Ollama::new_with_client(
+            format!("{scheme}://{host}"),
+            port,
+            match auth {
+                Some(CloudAuth::Basic { username, password }) => reqwest::Client::builder()
+                    .default_headers({
+                        let mut headers = reqwest::header::HeaderMap::new();
+                        let mut token = "Basic ".to_string();
+                        data_encoding::BASE64
+                            .encode_append(format!("{username}:{password}").as_bytes(), &mut token);
+                        let mut token: reqwest::header::HeaderValue =
+                            token.parse().wrap_err("error formatting Auth header")?;
+                        token.set_sensitive(true);
+                        headers.insert(reqwest::header::AUTHORIZATION, token);
+                        headers
+                    })
+                    .build()?,
+                None => reqwest::Client::builder().build()?,
+            },
+        );
+        Ok(ollama)
+    }
+
+    pub async fn embed_text_ollama(
+        url: &str,
+        model: &str,
+        text: &str,
+        auth: Option<&CloudAuth>,
+    ) -> Res<EmbedResult> {
+        let ollama = ollama_new(url, auth)?;
+
         use ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest;
 
         let request = GenerateEmbeddingsRequest::new(model.to_owned(), text.into());
         let mut response = ollama
             .generate_embeddings(request)
             .await
-            .map_err(|error| eyre::eyre!("ollama embedding error: {error}"))?;
+            .map_err(|error| eyre::eyre!("ollama embedding error: {error:?}"))?;
         if response.embeddings.is_empty() {
             eyre::bail!("ollama embedding response is empty");
         }
@@ -432,42 +466,14 @@ mod cloud {
         text: &str,
         auth: Option<&CloudAuth>,
     ) -> Res<LlmChatResult> {
-        let parsed_url =
-            url::Url::parse(url).wrap_err_with(|| format!("invalid Ollama url: {url}"))?;
-        let host = parsed_url
-            .host_str()
-            .ok_or_eyre("Ollama url missing host")?;
-        let scheme = parsed_url.scheme();
-        let port = parsed_url.port().unwrap_or(80);
-
-        let ollama = ollama_rs::Ollama::new_with_client(
-            format!("{scheme}://{host}"),
-            port,
-            match auth {
-                Some(CloudAuth::Basic { username, password }) => reqwest::Client::builder()
-                    .default_headers({
-                        let mut headers = reqwest::header::HeaderMap::new();
-                        let mut token = "Basic ".to_string();
-                        data_encoding::BASE64.encode_append(username.as_bytes(), &mut token);
-                        data_encoding::BASE64.encode_append(b":", &mut token);
-                        data_encoding::BASE64.encode_append(password.as_bytes(), &mut token);
-                        headers.insert(
-                            reqwest::header::AUTHORIZATION,
-                            token.parse().wrap_err("error formatting Auth header")?,
-                        );
-                        headers
-                    })
-                    .build()?,
-                None => reqwest::Client::builder().build()?,
-            },
-        );
+        let ollama = ollama_new(url, auth)?;
         use ollama_rs::generation::completion::request::GenerationRequest;
 
         let generation_request = GenerationRequest::new(model.to_owned(), text.to_owned());
         let response = ollama
             .generate(generation_request)
             .await
-            .map_err(|error| eyre::eyre!("ollama error: {error}"))?;
+            .map_err(|error| eyre::eyre!("ollama error: {error:?}"))?;
 
         Ok(LlmChatResult {
             text: response.response,
@@ -630,6 +636,10 @@ mod tests {
                 vec![EmbedBackendConfig::CloudOllama {
                     url: test_ollama_url(),
                     model: embed_model_name.clone(),
+                    auth: Some(crate::CloudAuth::Basic {
+                        username: crate::models::OLLAMA_USERNAME.to_string(),
+                        password: crate::models::OLLAMA_PASSWORD.to_string(),
+                    }),
                 }],
                 vec![],
             );
@@ -658,7 +668,10 @@ mod tests {
                 vec![LlmBackendConfig::CloudOllama {
                     url: test_ollama_url(),
                     model: llm_model_name,
-                    auth: None,
+                    auth: Some(crate::CloudAuth::Basic {
+                        username: crate::models::OLLAMA_USERNAME.to_string(),
+                        password: crate::models::OLLAMA_PASSWORD.to_string(),
+                    }),
                 }],
             );
 
