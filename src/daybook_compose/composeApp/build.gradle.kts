@@ -546,7 +546,6 @@ tasks.matching {
     it.name in
         setOf(
             "createDistributable",
-            "packageAppImage",
             "packageDeb",
             "packageDmg",
             "packageMsi",
@@ -566,7 +565,6 @@ tasks.matching { it.name == "packageAppImage" }.configureEach {
 tasks.matching {
     it.name in
         setOf(
-            "packageReleaseAppImage",
             "packageReleaseDeb",
             "packageReleaseDmg",
             "packageReleaseMsi",
