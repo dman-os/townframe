@@ -69,7 +69,7 @@ jobs:
 
       - name: kotlin tests
         run: |
-          nix develop .#ci-android --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew :composeApp:desktopTest --no-daemon --no-configuration-cache'
+          nix develop .#ci-desktop --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew :composeApp:desktopTest --no-daemon --no-configuration-cache'
 
       - uses: actions/upload-artifact@v6
         if: always()
