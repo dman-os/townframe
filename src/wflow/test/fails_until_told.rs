@@ -9,7 +9,7 @@ async fn test_fails_until_told() -> Res<()> {
     // First run: job will fail transiently
     let test_cx = WflowTestContext::builder()
         .initial_workloads(vec![InitialWorkload {
-            wasm_path: "../../target/wasm32-wasip2/release/test_wflows.wasm".into(),
+            wasm_path: "../../target/wasm32-wasip2/debug/test_wflows.wasm".into(),
             wflow_keys: vec!["fails_until_told".to_string()],
         }])
         .build()
@@ -80,7 +80,7 @@ async fn test_fails_until_told() -> Res<()> {
         .with_snapstore(snap_store)
         .with_keyvalue_plugin(shared_keyvalue)
         .initial_workloads(vec![InitialWorkload {
-            wasm_path: "../../target/wasm32-wasip2/release/test_wflows.wasm".into(),
+            wasm_path: "../../target/wasm32-wasip2/debug/test_wflows.wasm".into(),
             wflow_keys: vec!["fails_until_told".to_string()],
         }])
         .build()

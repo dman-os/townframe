@@ -82,6 +82,8 @@
 
 - [ ] Cleanup for public pre-alpha
 
+- [ ] Tutorial
+- [ ] Replace Path with camino at certain places
 - [ ] Explore multi doc drawer
   - [ ] Drawer doc migration where a drawer is marked as deprecated and all devices that have seen it must merge it into the active docs. This allows eventually consistent garbage collection
 - [ ] Redirects/Docmerging/Redactions
@@ -173,7 +175,6 @@
   - [ ] Follow bubble behavior from android
   - [ ] Status bar/Gesture bar insets for puck and widgets
   - [ ] Puck drop required to be on center bug
-- [ ] Tutorial
 - [ ] WYSIWYG editor
 - [ ] FUSE
   - [ ] Make it feature complete
@@ -196,9 +197,12 @@
   - [ ] macOS
 - [ ] GraalVM for Linux
 - [ ] Cross-device networking features
-- [ ] The big lifts
-  - [ ] Good text editor
-  - [ ] Camera stack
-    - [ ] Fully featured Camera2 impl on Android
-    - [ ] Filters
-  - [ ] Screen recording
+
+### The Big Lifts
+
+- [ ] Good text editor
+- [ ] Camera stack
+  - [ ] Fully featured Camera2 impl on Android
+  - [ ] Filters
+- [ ] Screen recording
+- [ ] Agent OS
