@@ -178,20 +178,28 @@ if (await outputPath.exists()) {
   await outputPath.remove();
 }
 const outputValue = outputPath.toString();
-const useAppimageRun =
-  Deno.build.os === "linux" &&
+const useAppimageRun = Deno.build.os === "linux" &&
   (await $`bash -lc "command -v appimage-run"`.noThrow()).code === 0;
 
 const linuxdeployArgs = [
-  "--appdir", stageAppDir.toString(),
-  "--desktop-file", stageDesktopPath.toString(),
-  "--icon-file", stageIconPath.toString(),
-  "--icon-filename", desktopId,
-  "--deploy-deps-only", stagedMainExecutablePath.toString(),
-  "--deploy-deps-only", stageLibexecDir.join("lib").toString(),
-  "--deploy-deps-only", stageLibexecDir.join("lib", "app").toString(),
-  "--deploy-deps-only", stageLibexecDir.join("lib", "runtime", "lib").toString(),
-  "--output", "appimage",
+  "--appdir",
+  stageAppDir.toString(),
+  "--desktop-file",
+  stageDesktopPath.toString(),
+  "--icon-file",
+  stageIconPath.toString(),
+  "--icon-filename",
+  desktopId,
+  "--deploy-deps-only",
+  stagedMainExecutablePath.toString(),
+  "--deploy-deps-only",
+  stageLibexecDir.join("lib").toString(),
+  "--deploy-deps-only",
+  stageLibexecDir.join("lib", "app").toString(),
+  "--deploy-deps-only",
+  stageLibexecDir.join("lib", "runtime", "lib").toString(),
+  "--output",
+  "appimage",
 ];
 
 const linuxdeployEnv = {
@@ -204,7 +212,9 @@ const linuxdeployEnv = {
 
 if (useAppimageRun) {
   console.log("Running linuxdeploy via appimage-run");
-  await $`appimage-run ${linuxdeployToolPath} ${linuxdeployArgs}`.env(linuxdeployEnv);
+  await $`appimage-run ${linuxdeployToolPath} ${linuxdeployArgs}`.env(
+    linuxdeployEnv,
+  );
 } else {
   await $`${linuxdeployToolPath} ${linuxdeployArgs}`.env(linuxdeployEnv);
 }
