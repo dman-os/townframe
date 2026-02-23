@@ -1,5 +1,16 @@
 # duck-log
 
+## 2026-02-23 | Relocatable processing
+
+Heterogenus devices with different capabilities.
+I'd like to avoid/defer heavy processing of documents on a phone on the go.
+Either send it to my homelab, wait until it's charging, or even a server.
+
+If we define well what inputs a process will need (think pinning it to a specific version of a document and the index and so on), should make it pretty possible.
+
+AHH...local state.
+I guesss this is a special case anyways.
+
 ## 2026-02-23 | Cheap mass imports
 
 Right now, each doc added to a drawer creates permanent records in the automerge document and triggers work for the pipeline that processes these events.

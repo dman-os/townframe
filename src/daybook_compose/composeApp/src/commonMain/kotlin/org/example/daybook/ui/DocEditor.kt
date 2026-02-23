@@ -19,6 +19,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -133,10 +135,18 @@ fun DocEditor(
                     }
 
                     state.contentFacetViews.forEachIndexed { index, descriptor ->
+                        val bringIntoViewRequester = remember(descriptor.facetKey) { BringIntoViewRequester() }
+                        LaunchedEffect(state.scrollToFacetRequest?.seq, descriptor.facetKey) {
+                            val request = state.scrollToFacetRequest ?: return@LaunchedEffect
+                            if (request.facetKey == descriptor.facetKey) {
+                                bringIntoViewRequester.bringIntoView()
+                            }
+                        }
                         FacetListItem(
                             descriptor = descriptor,
                             doc = state.doc,
                             controller = controller,
+                            modifier = Modifier.bringIntoViewRequester(bringIntoViewRequester),
                             canShowMenu = state.docId != null,
                             noteDraft = state.noteEditors[descriptor.facetKey]?.draft,
                             noteEditable = state.noteEditors[descriptor.facetKey]?.editable ?: false,
@@ -167,11 +177,12 @@ fun DocEditor(
                             style = MaterialTheme.typography.titleSmall,
                             modifier = Modifier.padding(bottom = 8.dp)
                         )
-                        DocDetailsSidebar(
-                            doc = state.doc,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
+                    DocDetailsSidebar(
+                        doc = state.doc,
+                        warnings = state.docWarnings,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
                 }
             }
         }
@@ -188,6 +199,7 @@ private fun FacetListItem(
     descriptor: FacetViewDescriptor,
     doc: Doc?,
     controller: EditorSessionController,
+    modifier: Modifier = Modifier,
     canShowMenu: Boolean,
     noteDraft: String?,
     noteEditable: Boolean,
@@ -197,7 +209,7 @@ private fun FacetListItem(
     noteMinHeight: androidx.compose.ui.unit.Dp,
     onUiError: (String) -> Unit,
 ) {
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = modifier.fillMaxWidth()) {
         FacetHeader(
             descriptor = descriptor,
             canShowMenu = canShowMenu,
@@ -497,22 +509,47 @@ fun DocFacetSidebar(
             style = MaterialTheme.typography.titleSmall,
             modifier = Modifier.padding(bottom = 8.dp)
         )
-        DocDetailsSidebar(doc = state.doc, modifier = Modifier.fillMaxSize())
+        DocDetailsSidebar(doc = state.doc, warnings = state.docWarnings, modifier = Modifier.fillMaxSize())
     }
 }
 
 @Composable
 private fun DocDetailsSidebar(
     doc: Doc?,
+    warnings: List<String> = emptyList(),
     modifier: Modifier = Modifier,
 ) {
-    val dmetaDetails =
-        run {
-            val raw = doc?.facets?.get(dmetaFacetKey()) ?: return@run null
-            parseDmetaSidebarDetails(raw).getOrElse { return@run null }
+    val dmetaParseWarning = mutableListOf<String>()
+    val dmetaDetails = run {
+        val raw = doc?.facets?.get(dmetaFacetKey()) ?: return@run null
+        val parsed = parseDmetaSidebarDetails(raw)
+        if (parsed.isFailure) {
+            val message = parsed.exceptionOrNull()?.message ?: "unknown error"
+            dmetaParseWarning += "Failed to parse dmeta facet details. $message"
+            return@run null
         }
+        parsed.getOrThrow()
+    }
+    val allWarnings = warnings + dmetaParseWarning
 
     Column(modifier = modifier) {
+        if (allWarnings.isNotEmpty()) {
+            Text(
+                text = "Warnings",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(bottom = 4.dp),
+            )
+            allWarnings.forEach { warning ->
+                Text(
+                    text = "• $warning",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(bottom = 4.dp),
+                )
+            }
+            HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+        }
         DetailRow("Doc ID", doc?.id ?: "Unsaved")
         DetailRow("Created", dmetaDetails?.createdAt ?: "Unknown")
         DetailRow("Last modified", dmetaDetails?.lastModifiedAt ?: "Unknown")

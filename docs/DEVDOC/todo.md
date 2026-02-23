@@ -196,3 +196,9 @@
   - [ ] macOS
 - [ ] GraalVM for Linux
 - [ ] Cross-device networking features
+- [ ] The big lifts
+  - [ ] Good text editor
+  - [ ] Camera stack
+    - [ ] Fully featured Camera2 impl on Android
+    - [ ] Filters
+  - [ ] Screen recording

@@ -51,6 +51,11 @@ data class FacetViewDescriptor(
     val isPrimary: Boolean = false,
 )
 
+data class ScrollToFacetRequest(
+    val facetKey: FacetKey,
+    val seq: Long,
+)
+
 data class EditorSessionState(
     val doc: Doc?,
     val docId: String?,
@@ -60,6 +65,8 @@ data class EditorSessionState(
     val noteEditors: Map<FacetKey, NoteFacetEditorState>,
     val facetRows: List<Pair<FacetKey, String>>,
     val contentFacetViews: List<FacetViewDescriptor>,
+    val docWarnings: List<String>,
+    val scrollToFacetRequest: ScrollToFacetRequest?,
     val isDirty: Boolean,
     val isSaving: Boolean,
     val saveError: String?,
@@ -87,6 +94,8 @@ class EditorSessionController(
                 contentFacetViews = listOf(
                     FacetViewDescriptor(noteFacetKey(), FacetEditorKind.Note, "")
                 ),
+                docWarnings = emptyList(),
+                scrollToFacetRequest = null,
                 isDirty = false,
                 isSaving = false,
                 saveError = null,
@@ -95,6 +104,7 @@ class EditorSessionController(
     val state: StateFlow<EditorSessionState> = _state.asStateFlow()
 
     private var saveDebounceJob: Job? = null
+    private var nextScrollRequestSeq: Long = 1
 
     fun bindDoc(doc: Doc?, entry: DocEntry? = null) {
         persistedDocSnapshot = doc
@@ -271,13 +281,19 @@ class EditorSessionController(
             noteEditors = noteEditors,
             facetRows = buildSupportedFacetRows(doc),
             contentFacetViews = buildContentFacetViews(doc),
+            docWarnings = collectDocWarnings(doc),
+            scrollToFacetRequest = null,
             isDirty = false,
             isSaving = false,
             saveError = null,
         )
     }
 
-    private fun updateLocalDoc(nextDoc: Doc, nextNoteEditors: Map<FacetKey, NoteFacetEditorState>) {
+    private fun updateLocalDoc(
+        nextDoc: Doc,
+        nextNoteEditors: Map<FacetKey, NoteFacetEditorState>,
+        scrollToFacetKey: FacetKey? = null,
+    ) {
         _state.update { current ->
             current.copy(
                 doc = nextDoc,
@@ -285,6 +301,8 @@ class EditorSessionController(
                 noteEditors = nextNoteEditors,
                 facetRows = buildSupportedFacetRows(nextDoc),
                 contentFacetViews = buildContentFacetViews(nextDoc),
+                docWarnings = collectDocWarnings(nextDoc),
+                scrollToFacetRequest = scrollToFacetKey?.let(::newScrollToFacetRequest),
                 isDirty = true,
                 saveError = null,
             )
@@ -385,8 +403,86 @@ class EditorSessionController(
 
     private fun decodeBodyOrderUrls(doc: Doc): List<String>? {
         val raw = doc.facets[bodyFacetKey()] ?: return null
-        val body = decodeWellKnownFacet<WellKnownFacet.Body>(raw).getOrNull()?.v1 ?: return null
+        val decoded = decodeWellKnownFacet<WellKnownFacet.Body>(raw)
+        if (decoded.isFailure) {
+            println(
+                "Failed to decode Body facet in editor ordering: docId=${doc.id} facetKey=${bodyFacetKey()} error=${decoded.exceptionOrNull()}"
+            )
+            return null
+        }
+        val body = decoded.getOrThrow().v1
         return body.order.filter { it.isNotBlank() }
+    }
+
+    private fun collectDocWarnings(doc: Doc?): List<String> {
+        if (doc == null) return emptyList()
+        val warnings = mutableListOf<String>()
+
+        val titleRaw = doc.facets[titleFacetKey()]
+        if (titleRaw != null) {
+            val decodedTitle = decodeJsonString(titleRaw)
+            if (decodedTitle.isFailure) {
+                val message = decodedTitle.exceptionOrNull()?.message ?: "unknown error"
+                warnings += "Failed to parse title facet. $message"
+            }
+        }
+
+        val bodyRaw = doc.facets[bodyFacetKey()]
+        if (bodyRaw != null) {
+            val decoded = decodeWellKnownFacet<WellKnownFacet.Body>(bodyRaw)
+            if (decoded.isFailure) {
+                val message = decoded.exceptionOrNull()?.message ?: "unknown error"
+                warnings += "Failed to parse Body facet; facet ordering actions will fall back. $message"
+            }
+        }
+
+        for ((facetKey, rawValue) in doc.facets.entries.sortedBy { (key, _) -> facetKeyString(key) }) {
+            when ((facetKey.tag as? FacetTag.WellKnown)?.v1) {
+                WellKnownFacetTag.NOTE -> {
+                    val decoded = decodeWellKnownFacet<WellKnownFacet.Note>(rawValue)
+                    if (decoded.isFailure) {
+                        val message = decoded.exceptionOrNull()?.message ?: "unknown error"
+                        warnings += "Failed to parse note facet '${facetKeyString(facetKey)}'. $message"
+                    }
+                }
+
+                WellKnownFacetTag.IMAGE_METADATA -> {
+                    val imageDecoded = decodeWellKnownFacet<WellKnownFacet.ImageMetadata>(rawValue)
+                    if (imageDecoded.isFailure) {
+                        val message = imageDecoded.exceptionOrNull()?.message ?: "unknown error"
+                        warnings +=
+                            "Failed to parse image metadata facet '${facetKeyString(facetKey)}'. $message"
+                        continue
+                    }
+                    val imageMeta = imageDecoded.getOrThrow().v1
+                    val blobKey =
+                        doc.facets.keys.firstOrNull { key ->
+                            stripFacetRefFragment(buildSelfFacetRefUrl(key)) ==
+                                stripFacetRefFragment(imageMeta.facetRef)
+                        }
+                    if (blobKey == null) {
+                        warnings +=
+                            "Image facet '${facetKeyString(facetKey)}' references missing blob facet."
+                        continue
+                    }
+                    val blobRaw = doc.facets[blobKey]
+                    if (blobRaw == null) {
+                        warnings +=
+                            "Image facet '${facetKeyString(facetKey)}' references missing blob facet payload."
+                        continue
+                    }
+                    val blobDecoded = decodeWellKnownFacet<WellKnownFacet.Blob>(blobRaw)
+                    if (blobDecoded.isFailure) {
+                        val message = blobDecoded.exceptionOrNull()?.message ?: "unknown error"
+                        warnings +=
+                            "Failed to parse referenced blob facet '${facetKeyString(blobKey)}' for image '${facetKeyString(facetKey)}'. $message"
+                    }
+                }
+
+                else -> Unit
+            }
+        }
+        return warnings
     }
 
     private fun primaryFacetKeyForDisplay(
@@ -450,7 +546,7 @@ class EditorSessionController(
 
         writeBodyOrder(nextFacets, reordered)
         val nextDoc = doc.copy(facets = nextFacets)
-        updateLocalDoc(nextDoc, snapshot.noteEditors)
+        updateLocalDoc(nextDoc, snapshot.noteEditors, scrollToFacetKey = facetKey)
         scheduleSave()
     }
 
@@ -476,6 +572,9 @@ class EditorSessionController(
             userPath = null,
         )
     }
+
+    private fun newScrollToFacetRequest(facetKey: FacetKey): ScrollToFacetRequest =
+        ScrollToFacetRequest(facetKey = facetKey, seq = nextScrollRequestSeq++)
 }
 
 private fun bs58UuidId(): String = encodeBase58(Uuid.random().toByteArray())
