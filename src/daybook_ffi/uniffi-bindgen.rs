@@ -71,7 +71,9 @@ fn apply_kotlin_modifications(out_dir: &str) {
             .expect("invalid regex");
     let import_re = Regex::new(r"(?m)^import .+\n").expect("invalid regex");
     let package_re = Regex::new(r"(?m)^package .+\n").expect("invalid regex");
-    let serializable_types: HashSet<&str> = ["Blob", "Note", "ImageMetadata"].into_iter().collect();
+    let serializable_types: HashSet<&str> = ["Blob", "Note", "ImageMetadata", "Body"]
+        .into_iter()
+        .collect();
 
     for path in kotlin_files {
         match fs::read_to_string(&path) {

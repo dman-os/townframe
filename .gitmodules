@@ -1,9 +1,6 @@
-[submodule "src/samod"]
-	path = src/samod
-	url = https://github.com/dman-os/samod
-[submodule "src/autosurgeon"]
-	path = src/autosurgeon
-	url = https://github.com/dman-os/autosurgeon
-[submodule "src/sdk-shared-core"]
-	path = src/sdk-shared-core
-	url = https://github.com/dman-os/sdk-shared-core
+; [submodule "src/samod"]
+; 	path = src/samod
+; 	url = https://github.com/dman-os/samod
+; [submodule "src/autosurgeon"]
+; 	path = src/autosurgeon
+; 	url = https://github.com/dman-os/autosurgeon

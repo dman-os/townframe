@@ -28,10 +28,14 @@ import org.example.daybook.TablesViewModel
 import org.example.daybook.capture.DaybookCameraPreview
 import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.ui.DocEditor
+import org.example.daybook.ui.buildBodyFacet
+import org.example.daybook.ui.buildSelfFacetRefUrl
 import org.example.daybook.ui.buildBlobFacetFromDigest
 import org.example.daybook.ui.buildImageMetadataFacet
 import org.example.daybook.ui.putWellKnownFacet
+import org.example.daybook.ui.withFacetRefCommitHeads
 import org.example.daybook.ui.editor.EditorSessionController
+import org.example.daybook.ui.editor.bodyFacetKey
 import org.example.daybook.ui.editor.blobFacetKey
 import org.example.daybook.ui.editor.imageMetadataFacetKey
 import org.example.daybook.uniffi.DrawerEventListener
@@ -120,6 +124,19 @@ class CaptureScreenViewModel(
                     facets = facets,
                     key = imageMetadataFacetKey(),
                     facet = buildImageMetadataFacet("image/jpeg", widthPx = 0UL, heightPx = 0UL),
+                )
+                putWellKnownFacet(
+                    facets = facets,
+                    key = bodyFacetKey(),
+                    facet =
+                        buildBodyFacet(
+                            listOf(
+                                withFacetRefCommitHeads(
+                                    buildSelfFacetRefUrl(imageMetadataFacetKey()),
+                                    emptyList(),
+                                )
+                            )
+                        ),
                 )
 
                 // Create AddDocArgs

@@ -67,6 +67,16 @@ jobs:
         run: |
           nix develop .#ci-rust --command cargo --color=always build --release -p test_wflows -p daybook_wflows --target wasm32-wasip2
 
+      - name: kotlin tests
+        run: |
+          nix develop .#ci-desktop --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew :composeApp:desktopTest --no-daemon --no-configuration-cache'
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: gradle-test-reports
+          path: src/daybook_compose/composeApp/build/reports/tests/
+
       - name: rust tests
         run: |
           nix develop .#ci-rust --command cargo --color=always nextest run --workspace --all-features --no-fail-fast --retries 1

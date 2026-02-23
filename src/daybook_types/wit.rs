@@ -10,6 +10,12 @@ pub mod doc {
         pub key: String,
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Body {
+        pub order: Vec<String>,
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde_with::serde_as]
     pub struct FacetMeta {
@@ -43,6 +49,7 @@ pub mod doc {
         OcrResult(OcrResult),
         Embedding(Embedding),
         Pending(Pending),
+        Body(Body),
         Dmeta(Dmeta),
         Note(Note),
         Blob(Blob),
@@ -242,6 +249,9 @@ pub mod doc {
                 root_doc::WellKnownFacet::Pending(pending) => Self::Pending(Pending {
                     key: pending.key.to_string(),
                 }),
+                root_doc::WellKnownFacet::Body(body) => Self::Body(Body {
+                    order: body.order.into_iter().map(|url| url.to_string()).collect(),
+                }),
                 root_doc::WellKnownFacet::Dmeta(dmeta) => Self::Dmeta(Dmeta {
                     id: dmeta.id,
                     created_at: dmeta.created_at.into(),
@@ -345,6 +355,13 @@ pub mod doc {
                 }),
                 WellKnownFacet::Pending(val) => Self::Pending(crate::doc::Pending {
                     key: val.key.into(),
+                }),
+                WellKnownFacet::Body(body) => Self::Body(root_doc::Body {
+                    order: body
+                        .order
+                        .into_iter()
+                        .map(|url| url.parse())
+                        .collect::<Result<_, _>>()?,
                 }),
                 WellKnownFacet::Dmeta(dmeta) => Self::Dmeta(root_doc::Dmeta {
                     id: dmeta.id,

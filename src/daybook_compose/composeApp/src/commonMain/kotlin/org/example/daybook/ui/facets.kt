@@ -3,9 +3,15 @@ package org.example.daybook.ui
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import org.example.daybook.uniffi.types.Blob
+import org.example.daybook.uniffi.types.Body
 import org.example.daybook.uniffi.types.FacetKey
+import org.example.daybook.uniffi.types.FacetTag
 import org.example.daybook.uniffi.types.ImageMetadata
 import org.example.daybook.uniffi.types.Note
 import org.example.daybook.uniffi.types.WellKnownFacet
@@ -32,6 +38,7 @@ fun encodeWellKnownFacet(facet: WellKnownFacet): String =
         is WellKnownFacet.TitleGeneric -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.PathGeneric -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.Pending -> facetJsonCodec.encodeToString(facet.v1)
+        is WellKnownFacet.Body -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.Note -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.Blob -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.ImageMetadata -> facetJsonCodec.encodeToString(facet.v1)
@@ -58,6 +65,8 @@ inline fun <reified T : WellKnownFacet> decodeWellKnownFacet(value: String): Res
                     WellKnownFacet.PathGeneric(facetJsonCodec.decodeFromString(value))
                 WellKnownFacet.Pending::class ->
                     WellKnownFacet.Pending(facetJsonCodec.decodeFromString(value))
+                WellKnownFacet.Body::class ->
+                    WellKnownFacet.Body(facetJsonCodec.decodeFromString(value))
                 WellKnownFacet.Note::class ->
                     WellKnownFacet.Note(facetJsonCodec.decodeFromString(value))
                 WellKnownFacet.Blob::class ->
@@ -83,6 +92,42 @@ fun putWellKnownFacet(
 
 fun buildNoteFacet(content: String, mime: String = "text/plain"): WellKnownFacet.Note =
     WellKnownFacet.Note(Note(mime = mime, content = content))
+
+fun buildBodyFacet(order: List<String>): WellKnownFacet.Body =
+    WellKnownFacet.Body(Body(order = order))
+
+fun buildSelfFacetRefUrl(key: FacetKey): String {
+    val tagString =
+        when (val tag = key.tag) {
+            is FacetTag.WellKnown -> when (tag.v1) {
+                org.example.daybook.uniffi.types.WellKnownFacetTag.DMETA -> "org.example.daybook.dmeta"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.REF_GENERIC -> "org.example.daybook.refgeneric"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.LABEL_GENERIC -> "org.example.daybook.labelgeneric"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.PSEUDO_LABEL -> "org.example.daybook.pseudolabel"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.TITLE_GENERIC -> "org.example.daybook.titlegeneric"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.PATH_GENERIC -> "org.example.daybook.pathgeneric"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.PENDING -> "org.example.daybook.pending"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.BODY -> "org.example.daybook.body"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.NOTE -> "org.example.daybook.note"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.BLOB -> "org.example.daybook.blob"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.IMAGE_METADATA -> "org.example.daybook.imagemetadata"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.OCR_RESULT -> "org.example.daybook.ocrresult"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.EMBEDDING -> "org.example.daybook.embedding"
+            }
+            is FacetTag.Any -> tag.v1
+        }
+    return "db+facet:///self/$tagString/${key.id}"
+}
+
+fun stripFacetRefFragment(url: String): String = url.substringBefore('#')
+
+fun withFacetRefCommitHeads(url: String, heads: List<String>): String {
+    val base = stripFacetRefFragment(url)
+    if (heads.isEmpty()) {
+        return "$base#"
+    }
+    return "$base#${heads.joinToString("|")}"
+}
 
 fun buildBlobFacetFromDigest(
     digest: String,
@@ -120,3 +165,28 @@ fun previewFacetValue(json: String): String {
     val primitive = parsed as? JsonPrimitive ?: return json.take(120)
     return if (primitive.isString) primitive.content.take(120) else json.take(120)
 }
+
+data class DmetaSidebarDetails(
+    val createdAt: String?,
+    val lastModifiedAt: String?,
+)
+
+fun parseDmetaSidebarDetails(raw: String): Result<DmetaSidebarDetails> =
+    runCatching {
+        val root =
+            facetJsonCodec.parseToJsonElement(raw) as? JsonObject
+                ?: error("dmeta must be a JSON object")
+        val createdAt = root["createdAt"]?.jsonPrimitive?.contentOrNull
+        val facets = root["facets"] as? JsonObject
+        val lastModifiedAt =
+            facets?.values
+                ?.asSequence()
+                ?.mapNotNull { it as? JsonObject }
+                ?.flatMap { facetMeta ->
+                    val updatedAt = facetMeta["updatedAt"] as? JsonArray
+                    (updatedAt?.asSequence() ?: emptySequence())
+                }
+                ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                ?.maxOrNull()
+        DmetaSidebarDetails(createdAt = createdAt, lastModifiedAt = lastModifiedAt)
+    }

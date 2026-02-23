@@ -544,6 +544,13 @@ impl DrawerRepo {
                     .map(ToString::to_string)
                     .collect();
                 if commit_head_strings.is_empty() {
+                    if referenced_facet.doc_id == FACET_SELF_DOC_ID
+                        && resulting_facet_keys.contains(&referenced_facet.facet_key)
+                    {
+                        // Empty fragment means "self in this validated facet set" for URL refs
+                        // when at_commit_json_path is omitted (e.g. Body.order).
+                        continue;
+                    }
                     eyre::bail!(
                         "facet '{}' reference '{}' has empty commit-head fragment",
                         origin_facet_key,
@@ -2158,7 +2165,7 @@ mod tests {
 
     use crate::drawer::lru::KeyedLruPool;
     use crate::repos::Repo;
-    use daybook_types::doc::{FacetKey, UserPath, WellKnownFacet, WellKnownFacetTag};
+    use daybook_types::doc::{Body, FacetKey, UserPath, WellKnownFacet, WellKnownFacetTag};
     use daybook_types::url::build_facet_ref;
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3569,6 +3576,74 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("self-reference target"));
+
+        stop_token.stop().await?;
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_target() -> Res<()>
+    {
+        utils_rs::testing::setup_tracing_once();
+        let (acx, acx_stop) = AmCtx::boot(
+            utils_rs::am::Config {
+                peer_id: "test-v2-body-empty-fragment-self".into(),
+                storage: utils_rs::am::StorageConfig::Memory,
+            },
+            Some(samod::AlwaysAnnounce),
+        )
+        .await?;
+
+        let drawer_doc_id = {
+            let mut doc = automerge::Automerge::new();
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+            let handle = acx.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+
+        let (repo, stop_token) = DrawerRepo::load(
+            acx,
+            drawer_doc_id,
+            automerge::ActorId::random(),
+            Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+            Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+            None,
+        )
+        .await?;
+
+        let note_facet_key = FacetKey::from(WellKnownFacetTag::Note);
+        let body_facet_key = FacetKey::from(WellKnownFacetTag::Body);
+        let note_ref = format!(
+            "{}#",
+            build_facet_ref(daybook_types::url::FACET_SELF_DOC_ID, &note_facet_key)?
+        )
+        .parse()?;
+
+        let add_result = repo
+            .add(AddDocArgs {
+                branch_path: "main".into(),
+                facets: [
+                    (
+                        note_facet_key.clone(),
+                        WellKnownFacet::Note("hello".into()).into(),
+                    ),
+                    (
+                        body_facet_key,
+                        WellKnownFacet::Body(Body {
+                            order: vec![note_ref],
+                        })
+                        .into(),
+                    ),
+                ]
+                .into(),
+                user_path: None,
+            })
+            .await;
+
+        assert!(add_result.is_ok(), "{add_result:?}");
 
         stop_token.stop().await?;
         acx_stop.stop().await?;

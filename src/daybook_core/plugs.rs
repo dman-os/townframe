@@ -88,6 +88,16 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     display_config: default(),
                     references: default(),
                 },
+                FacetManifest {
+                    key_tag: WellKnownFacetTag::Body.into(),
+                    value_schema: schemars::schema_for!(Body),
+                    display_config: default(),
+                    references: vec![FacetReferenceManifest {
+                        reference_kind: FacetReferenceKind::UrlFacet,
+                        json_path: "/order".into(),
+                        at_commit_json_path: None,
+                    }],
+                },
             ],
         },
         PlugManifest {

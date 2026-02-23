@@ -2720,26 +2720,7 @@ public object FfiConverterTypeDateTimeFacetDisplayType: FfiConverterRustBuffer<D
 
 sealed class DispatchEvent {
     
-    data class ListChanged(
-        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : DispatchEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
     data class DispatchAdded(
-        val `id`: kotlin.String, 
-        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : DispatchEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class DispatchUpdated(
         val `id`: kotlin.String, 
         val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : DispatchEvent()
         
@@ -2775,18 +2756,11 @@ sealed class DispatchEvent {
 public object FfiConverterTypeDispatchEvent : FfiConverterRustBuffer<DispatchEvent>{
     override fun read(buf: ByteBuffer): DispatchEvent {
         return when(buf.getInt()) {
-            1 -> DispatchEvent.ListChanged(
-                FfiConverterTypeChangeHashSet.read(buf),
-                )
-            2 -> DispatchEvent.DispatchAdded(
+            1 -> DispatchEvent.DispatchAdded(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
-            3 -> DispatchEvent.DispatchUpdated(
-                FfiConverterString.read(buf),
-                FfiConverterTypeChangeHashSet.read(buf),
-                )
-            4 -> DispatchEvent.DispatchDeleted(
+            2 -> DispatchEvent.DispatchDeleted(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
@@ -2795,22 +2769,7 @@ public object FfiConverterTypeDispatchEvent : FfiConverterRustBuffer<DispatchEve
     }
 
     override fun allocationSize(value: DispatchEvent) = when(value) {
-        is DispatchEvent.ListChanged -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
-            )
-        }
         is DispatchEvent.DispatchAdded -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.`id`)
-                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
-            )
-        }
-        is DispatchEvent.DispatchUpdated -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
@@ -2830,25 +2789,14 @@ public object FfiConverterTypeDispatchEvent : FfiConverterRustBuffer<DispatchEve
 
     override fun write(value: DispatchEvent, buf: ByteBuffer) {
         when(value) {
-            is DispatchEvent.ListChanged -> {
-                buf.putInt(1)
-                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
-                Unit
-            }
             is DispatchEvent.DispatchAdded -> {
-                buf.putInt(2)
-                FfiConverterString.write(value.`id`, buf)
-                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
-                Unit
-            }
-            is DispatchEvent.DispatchUpdated -> {
-                buf.putInt(3)
+                buf.putInt(1)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
             is DispatchEvent.DispatchDeleted -> {
-                buf.putInt(4)
+                buf.putInt(2)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
@@ -3133,15 +3081,6 @@ public object FfiConverterTypeFacetKeyDisplayDeets : FfiConverterRustBuffer<Face
 
 sealed class PlugsEvent {
     
-    data class ListChanged(
-        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : PlugsEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
     data class PlugAdded(
         val `id`: kotlin.String, 
         val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : PlugsEvent()
@@ -3188,18 +3127,15 @@ sealed class PlugsEvent {
 public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
     override fun read(buf: ByteBuffer): PlugsEvent {
         return when(buf.getInt()) {
-            1 -> PlugsEvent.ListChanged(
-                FfiConverterTypeChangeHashSet.read(buf),
-                )
-            2 -> PlugsEvent.PlugAdded(
+            1 -> PlugsEvent.PlugAdded(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
-            3 -> PlugsEvent.PlugChanged(
+            2 -> PlugsEvent.PlugChanged(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
-            4 -> PlugsEvent.PlugDeleted(
+            3 -> PlugsEvent.PlugDeleted(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
@@ -3208,13 +3144,6 @@ public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
     }
 
     override fun allocationSize(value: PlugsEvent) = when(value) {
-        is PlugsEvent.ListChanged -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
-            )
-        }
         is PlugsEvent.PlugAdded -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
@@ -3243,25 +3172,20 @@ public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
 
     override fun write(value: PlugsEvent, buf: ByteBuffer) {
         when(value) {
-            is PlugsEvent.ListChanged -> {
-                buf.putInt(1)
-                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
-                Unit
-            }
             is PlugsEvent.PlugAdded -> {
-                buf.putInt(2)
+                buf.putInt(1)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
             is PlugsEvent.PlugChanged -> {
-                buf.putInt(3)
+                buf.putInt(2)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
             is PlugsEvent.PlugDeleted -> {
-                buf.putInt(4)
+                buf.putInt(3)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
@@ -3912,6 +3836,16 @@ sealed class TablesEvent {
         companion object
     }
     
+    data class WindowDeleted(
+        val `id`: org.example.daybook.uniffi.core.Uuid, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
     data class TabAdded(
         val `id`: org.example.daybook.uniffi.core.Uuid, 
         val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
@@ -3923,6 +3857,16 @@ sealed class TablesEvent {
     }
     
     data class TabChanged(
+        val `id`: org.example.daybook.uniffi.core.Uuid, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class TabDeleted(
         val `id`: org.example.daybook.uniffi.core.Uuid, 
         val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
         
@@ -3952,6 +3896,16 @@ sealed class TablesEvent {
         companion object
     }
     
+    data class PanelDeleted(
+        val `id`: org.example.daybook.uniffi.core.Uuid, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
     data class TableAdded(
         val `id`: org.example.daybook.uniffi.core.Uuid, 
         val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
@@ -3963,6 +3917,16 @@ sealed class TablesEvent {
     }
     
     data class TableChanged(
+        val `id`: org.example.daybook.uniffi.core.Uuid, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class TableDeleted(
         val `id`: org.example.daybook.uniffi.core.Uuid, 
         val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : TablesEvent()
         
@@ -3999,27 +3963,43 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
                 FfiConverterTypeUuid.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
-            4 -> TablesEvent.TabAdded(
+            4 -> TablesEvent.WindowDeleted(
                 FfiConverterTypeUuid.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
-            5 -> TablesEvent.TabChanged(
+            5 -> TablesEvent.TabAdded(
                 FfiConverterTypeUuid.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
-            6 -> TablesEvent.PanelAdded(
+            6 -> TablesEvent.TabChanged(
                 FfiConverterTypeUuid.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
-            7 -> TablesEvent.PanelChanged(
+            7 -> TablesEvent.TabDeleted(
                 FfiConverterTypeUuid.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
-            8 -> TablesEvent.TableAdded(
+            8 -> TablesEvent.PanelAdded(
                 FfiConverterTypeUuid.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
-            9 -> TablesEvent.TableChanged(
+            9 -> TablesEvent.PanelChanged(
+                FfiConverterTypeUuid.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            10 -> TablesEvent.PanelDeleted(
+                FfiConverterTypeUuid.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            11 -> TablesEvent.TableAdded(
+                FfiConverterTypeUuid.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            12 -> TablesEvent.TableChanged(
+                FfiConverterTypeUuid.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            13 -> TablesEvent.TableDeleted(
                 FfiConverterTypeUuid.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 )
@@ -4051,6 +4031,14 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
                 + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
+        is TablesEvent.WindowDeleted -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeUuid.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+            )
+        }
         is TablesEvent.TabAdded -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
@@ -4060,6 +4048,14 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
             )
         }
         is TablesEvent.TabChanged -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeUuid.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+            )
+        }
+        is TablesEvent.TabDeleted -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
@@ -4083,6 +4079,14 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
                 + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
             )
         }
+        is TablesEvent.PanelDeleted -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeUuid.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+            )
+        }
         is TablesEvent.TableAdded -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
@@ -4092,6 +4096,14 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
             )
         }
         is TablesEvent.TableChanged -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeUuid.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+            )
+        }
+        is TablesEvent.TableDeleted -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
@@ -4120,38 +4132,62 @@ public object FfiConverterTypeTablesEvent : FfiConverterRustBuffer<TablesEvent>{
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
-            is TablesEvent.TabAdded -> {
+            is TablesEvent.WindowDeleted -> {
                 buf.putInt(4)
                 FfiConverterTypeUuid.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
-            is TablesEvent.TabChanged -> {
+            is TablesEvent.TabAdded -> {
                 buf.putInt(5)
                 FfiConverterTypeUuid.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
-            is TablesEvent.PanelAdded -> {
+            is TablesEvent.TabChanged -> {
                 buf.putInt(6)
                 FfiConverterTypeUuid.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
-            is TablesEvent.PanelChanged -> {
+            is TablesEvent.TabDeleted -> {
                 buf.putInt(7)
                 FfiConverterTypeUuid.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
-            is TablesEvent.TableAdded -> {
+            is TablesEvent.PanelAdded -> {
                 buf.putInt(8)
                 FfiConverterTypeUuid.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
             }
-            is TablesEvent.TableChanged -> {
+            is TablesEvent.PanelChanged -> {
                 buf.putInt(9)
+                FfiConverterTypeUuid.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                Unit
+            }
+            is TablesEvent.PanelDeleted -> {
+                buf.putInt(10)
+                FfiConverterTypeUuid.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                Unit
+            }
+            is TablesEvent.TableAdded -> {
+                buf.putInt(11)
+                FfiConverterTypeUuid.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                Unit
+            }
+            is TablesEvent.TableChanged -> {
+                buf.putInt(12)
+                FfiConverterTypeUuid.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                Unit
+            }
+            is TablesEvent.TableDeleted -> {
+                buf.putInt(13)
                 FfiConverterTypeUuid.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
                 Unit
