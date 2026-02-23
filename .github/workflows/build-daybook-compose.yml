@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
@@ -14,20 +16,95 @@ on:
           Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate).
         required: false
         default: false
-
+      build_profile:
+        type: choice
+        description: Override build profile for testing. "auto" uses release on main/v* and debug otherwise.
+        required: false
+        default: auto
+        options:
+          - auto
+          - debug
+          - release
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 env:
   OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
   OLLAMA_USERNAME: ${{ secrets.OLLAMA_USERNAME }}
   OLLAMA_PASSWORD: ${{ secrets.OLLAMA_PASSWORD }}
+  DAYBOOK_RELEASE_KIND: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) && 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'prerelease' || 'none' }}
+  DAYBOOK_IS_RELEASE_BUILD: ${{ (github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'))) && '1' || '0' }}
+  DAYBOOK_COMPOSE_PROFILE: ${{ (github.event_name == 'workflow_dispatch' && inputs.build_profile == 'release') && 'release' || (github.event_name == 'workflow_dispatch' && inputs.build_profile == 'debug') && 'debug' || ((github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'))) && 'release' || 'debug') }}
+  DAYBOOK_ANDROID_GRADLE_TASK: ${{ ((github.event_name == 'workflow_dispatch' && inputs.build_profile == 'release') || (github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'))) && ':composeApp:assembleRelease' || ':composeApp:assembleDebug' }}
+  DAYBOOK_WINDOWS_GRADLE_TASK: ${{ ((github.event_name == 'workflow_dispatch' && inputs.build_profile == 'release') || (github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'))) && ':composeApp:packageReleaseMsi' || ':composeApp:packageMsi' }}
+  DAYBOOK_MACOS_GRADLE_TASK: ${{ ((github.event_name == 'workflow_dispatch' && inputs.build_profile == 'release') || (github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'))) && ':composeApp:packageReleaseDmg' || ':composeApp:packageDmg' }}
+  DAYBOOK_PRERELEASE_TAG: daybook-compose-pre-release
 
 jobs:
+  resolve-release-meta:
+    runs-on: ubuntu-latest
+    outputs:
+      cargo_version: ${{ steps.meta.outputs.cargo_version }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+      release_kind: ${{ steps.meta.outputs.release_kind }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        name: resolve release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo_version="$(
+            python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])'
+          )"
+
+          release_tag=""
+          release_name=""
+          is_prerelease="false"
+
+          case "${DAYBOOK_RELEASE_KIND}" in
+            release)
+              expected_tag="v${cargo_version}"
+              if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+                echo "Tag/version mismatch: pushed tag=${GITHUB_REF_NAME}, Cargo.toml version=${cargo_version} (expected ${expected_tag})" >&2
+                exit 1
+              fi
+              release_tag="${expected_tag}"
+              release_name="${expected_tag}"
+              is_prerelease="false"
+              ;;
+            prerelease)
+              release_tag="${DAYBOOK_PRERELEASE_TAG}"
+              release_name="Daybook Compose pre-release (v${cargo_version})"
+              is_prerelease="true"
+              ;;
+            none)
+              ;;
+            *)
+              echo "Unsupported DAYBOOK_RELEASE_KIND=${DAYBOOK_RELEASE_KIND}" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "cargo_version=${cargo_version}"
+            echo "release_tag=${release_tag}"
+            echo "release_name=${release_name}"
+            echo "release_kind=${DAYBOOK_RELEASE_KIND}"
+            echo "is_prerelease=${is_prerelease}"
+          } >> "${GITHUB_OUTPUT}"
+
   linux-appimage:
     runs-on: ubuntu-latest
+    needs: resolve-release-meta
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,18 +131,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libarchive-tools
 
-      - name: debug build 
+      - name: build appimage
         run: |
           export PROTOC="$(command -v protoc)"
           deno run -A ./x/build-appimage-dayb.ts
 
       - uses: actions/upload-artifact@v6
+        if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
-          name: daybook-appimage
+          name: daybook-appimage-${{ env.DAYBOOK_COMPOSE_PROFILE }}
           path: ./target/appimage/
+
+      - name: upload appimage to github release
+        if: needs.resolve-release-meta.outputs.release_kind != 'none'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-release-meta.outputs.release_tag }}
+          name: ${{ needs.resolve-release-meta.outputs.release_name }}
+          prerelease: ${{ needs.resolve-release-meta.outputs.is_prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
+          files: ./target/appimage/*.AppImage
+          fail_on_unmatched_files: true
+          overwrite_files: true
 
   android-apk:
     runs-on: ubuntu-latest
+    needs: resolve-release-meta
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,17 +168,31 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: debug build
+      - name: build android apk
         run: |
-          nix develop .#ci-android --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew :composeApp:assembleDebug --no-daemon --no-configuration-cache'
+          nix develop .#ci-android --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew $DAYBOOK_ANDROID_GRADLE_TASK -PdaybookProfile=$DAYBOOK_COMPOSE_PROFILE --no-daemon --no-configuration-cache'
 
       - uses: actions/upload-artifact@v6
+        if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
-          name: daybook-android-debug
+          name: daybook-android-${{ env.DAYBOOK_COMPOSE_PROFILE }}
           path: src/daybook_compose/composeApp/build/outputs/apk/
+
+      - name: upload apk to github release
+        if: needs.resolve-release-meta.outputs.release_kind != 'none'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-release-meta.outputs.release_tag }}
+          name: ${{ needs.resolve-release-meta.outputs.release_name }}
+          prerelease: ${{ needs.resolve-release-meta.outputs.is_prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
+          files: src/daybook_compose/composeApp/build/outputs/apk/**/*.apk
+          fail_on_unmatched_files: true
+          overwrite_files: true
 
   windows-msi:
     runs-on: windows-latest
+    needs: resolve-release-meta
     steps:
       - uses: actions/checkout@v4
         with:
@@ -110,22 +215,35 @@ jobs:
         with:
           version: "32.x"
 
-      - name: debug build
+      - name: build windows installer
         shell: pwsh
         run: |
           $env:PROTOC = (Get-Command protoc).Source
-          cargo build -p daybook_ffi
-          .\gradlew.bat :composeApp:packageMsi --no-daemon --no-configuration-cache
+          .\gradlew.bat $env:DAYBOOK_WINDOWS_GRADLE_TASK -PdaybookProfile=$env:DAYBOOK_COMPOSE_PROFILE --no-daemon --no-configuration-cache
         working-directory: src/daybook_compose
 
       - uses: actions/upload-artifact@v6
+        if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
-          name: daybook-windows-installer
+          name: daybook-windows-installer-${{ env.DAYBOOK_COMPOSE_PROFILE }}
           path: |
             src/daybook_compose/composeApp/build/compose/binaries/
 
+      - name: upload msi to github release
+        if: needs.resolve-release-meta.outputs.release_kind != 'none'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-release-meta.outputs.release_tag }}
+          name: ${{ needs.resolve-release-meta.outputs.release_name }}
+          prerelease: ${{ needs.resolve-release-meta.outputs.is_prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
+          files: src/daybook_compose/composeApp/build/compose/binaries/**/*.msi
+          fail_on_unmatched_files: true
+          overwrite_files: true
+
   macos-dmg:
     runs-on: macos-14
+    needs: resolve-release-meta
     steps:
       - uses: actions/checkout@v4
         with:
@@ -148,15 +266,27 @@ jobs:
           brew update
           brew install protobuf
 
-      - name: debug build
+      - name: build macos dmg
         run: |
           set -euo pipefail
           export PROTOC="$(command -v protoc)"
-          cargo build -p daybook_ffi
-          ./gradlew :composeApp:packageDmg --no-daemon --no-configuration-cache
+          ./gradlew "$DAYBOOK_MACOS_GRADLE_TASK" -PdaybookProfile="$DAYBOOK_COMPOSE_PROFILE" --no-daemon --no-configuration-cache
         working-directory: src/daybook_compose
 
       - uses: actions/upload-artifact@v6
+        if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
-          name: daybook-macos-dmg
+          name: daybook-macos-dmg-${{ env.DAYBOOK_COMPOSE_PROFILE }}
           path: src/daybook_compose/composeApp/build/compose/binaries/
+
+      - name: upload dmg to github release
+        if: needs.resolve-release-meta.outputs.release_kind != 'none'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-release-meta.outputs.release_tag }}
+          name: ${{ needs.resolve-release-meta.outputs.release_name }}
+          prerelease: ${{ needs.resolve-release-meta.outputs.is_prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
+          files: src/daybook_compose/composeApp/build/compose/binaries/**/*.dmg
+          fail_on_unmatched_files: true
+          overwrite_files: true

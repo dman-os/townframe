@@ -13,12 +13,21 @@ import { $ } from "./utils.ts";
  */
 
 const composeRoot = $.relativeDir("../src/daybook_compose/");
+const composeProfileRaw = ($.env.DAYBOOK_COMPOSE_PROFILE ?? "debug")
+  .toLowerCase();
+if (!(composeProfileRaw === "debug" || composeProfileRaw === "release")) {
+  throw new Error(
+    `Unsupported DAYBOOK_COMPOSE_PROFILE=${composeProfileRaw}; expected debug or release`,
+  );
+}
+const isReleaseProfile = composeProfileRaw === "release";
+const composeAppVariantDir = isReleaseProfile ? "main-release" : "main";
 const composeAppDir = composeRoot.join(
   "composeApp",
   "build",
   "compose",
   "binaries",
-  "main",
+  composeAppVariantDir,
   "app",
   "org.example.daybook",
 );
@@ -106,7 +115,7 @@ async function ensureUbuntuDeps() {
 }
 
 await ensureUbuntuDeps();
-await $`./gradlew :composeApp:prepareLinuxdeployComposeAppDirDayb --no-daemon --no-configuration-cache`
+await $`./gradlew :composeApp:prepareLinuxdeployComposeAppDirDayb -PdaybookProfile=${composeProfileRaw} --no-daemon --no-configuration-cache`
   .cwd(composeRoot)
   .env({
     LD_LIBRARY_PATH: "",
