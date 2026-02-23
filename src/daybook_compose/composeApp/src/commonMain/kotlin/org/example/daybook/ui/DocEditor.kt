@@ -66,6 +66,7 @@ import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.ui.editor.FacetEditorKind
 import org.example.daybook.ui.editor.FacetViewDescriptor
 import org.example.daybook.ui.editor.dmetaFacetKey
+import org.example.daybook.ui.editor.facetKeyString
 import org.example.daybook.uniffi.types.Blob
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.FacetKey
@@ -449,8 +450,8 @@ private fun ImageFacetView(
                     contentScale = ContentScale.FillWidth,
                 )
 
-                val width = imageMeta?.widthPx?.toString() ?: "?"
-                val height = imageMeta?.heightPx?.toString() ?: "?"
+                val width = imageMeta.widthPx.toString()
+                val height = imageMeta.heightPx.toString()
                 Surface(
                     tonalElevation = 2.dp,
                     shape = MaterialTheme.shapes.small,
@@ -616,13 +617,4 @@ private fun blobHash(blob: Blob): String? {
         return fromUrl
     }
     return blob.digest.ifBlank { null }
-}
-
-private fun facetKeyString(key: FacetKey): String {
-    val tagString =
-        when (val tag = key.tag) {
-            is org.example.daybook.uniffi.types.FacetTag.WellKnown -> tag.v1.name.lowercase()
-            is org.example.daybook.uniffi.types.FacetTag.Any -> tag.v1
-        }
-    return if (key.id == "main") tagString else "$tagString:${key.id}"
 }

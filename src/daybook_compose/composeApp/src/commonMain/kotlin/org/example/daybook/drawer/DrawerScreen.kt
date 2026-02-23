@@ -386,9 +386,18 @@ fun DocList(
 }
 
 private fun drawerMainFacetTypeLabel(doc: Doc): String? {
-    val bodyOrder = doc.facets[bodyFacetKey()]
-        ?.let { raw -> decodeWellKnownFacet<WellKnownFacet.Body>(raw).getOrNull()?.v1?.order }
-        .orEmpty()
+    val bodyOrder =
+        run {
+            val raw = doc.facets[bodyFacetKey()] ?: return@run emptyList()
+            val decoded = decodeWellKnownFacet<WellKnownFacet.Body>(raw)
+            if (decoded.isFailure) {
+                println(
+                    "Failed to decode Body facet for drawer main type: docId=${doc.id} facetKey=${bodyFacetKey()} error=${decoded.exceptionOrNull()}"
+                )
+                return@run emptyList()
+            }
+            decoded.getOrThrow().v1.order
+        }
 
     val facetByRef = doc.facets.keys.associateBy { key -> stripFacetRefFragment(buildSelfFacetRefUrl(key)) }
     for (url in bodyOrder) {

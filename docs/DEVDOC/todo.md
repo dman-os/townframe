@@ -23,7 +23,14 @@
 
 ## Stack
 
-
+- [ ] Good and local document classification
+- [ ] daybook_server
+  - [ ] Decide on wrpc vs json
+- [ ] DrawerScreen
+  - [ ] Search FAB
+  - [ ] Press again to change views
+- [ ] Mltools config should be per device
+- [ ] Processors should only run on device that created the doc
 - [ ] Make automerge json codec minimal
 - [ ] use a env var or an env! var to set global multipliers for our test timeouts
 - [ ] File locks on repo
@@ -31,29 +38,12 @@
 - [ ] Js execution
   - [ ] https://json-render.dev/ based display
 - [ ] DocEditor
-- [ ] DrawerScreen
-  - [ ] Search FAB
-  - [ ] Press again to change views
-- [ ] Progress system
+- [x] Progress system
   - [ ] Blob download
 - [x] Overhaul bottom bar
   - [ ] Change color when in different modes.
   - [ ] Experiment with floating bottom bar
-- [ ] daybook_server
-  - [ ] Decide on wrpc vs json
-- [ ] CI/CD
-  - [ ] Publish
-    - [ ] Docker image
-    - [ ] WASM OCI
-    - [ ] Android APK 
-      - [ ] to F-Droid
-    - [ ] Linux Appimage
-      - [ ] to Flathub
-    - [ ] Windows.exe
-      - [ ] to Scoop.sh
-- [ ] Good and local document classification
 - [ ] Receipt parsing
-- [ ] Pending jobs [LOST]
 - [ ] Repos
   - [ ] Profiles
   - [x] CLI support
@@ -65,7 +55,6 @@
     - Chunks at rest?
 - [ ] P2P
   - [ ] iroh
-- [ ] Penpot design file
 - [ ] Bugs
   - [ ] `WflowNotFound`
     - `HostEvent(WflowRegistered)``?
@@ -74,10 +63,24 @@
   - [ ] Assert samod fsyncs reliably
   - [ ] Notification handling
     - [ ] How to avoid missing triage work?
-- [ ] SQL update path
+- [ ] SQL table schema/data update path
+- [ ] Replace sqlite-vec
+- [ ] CI/CD
+  - [ ] Publish
+    - [ ] Docker image
+    - [ ] WASM OCI
+    - [ ] Android APK 
+      - [ ] to F-Droid
+    - [ ] Linux Appimage
+      - [ ] to Flathub
+    - [ ] Windows.exe
+      - [ ] to Scoop.sh
 
 - [ ] Cleanup for public pre-alpha
 
+- [ ] Explore multi doc drawer
+  - [ ] Drawer doc migration where a drawer is marked as deprecated and all devices that have seen it must merge it into the active docs. This allows eventually consistent garbage collection
+- [ ] Redirects/Docmerging/Redactions
 - [ ] Cross-routine,cross-plugin risk analysis
   - [ ] Can a routine with previlaged outbound access exfiltrate data by coordinating with another that has previlaged read access?
   - [ ] Harsher bounds on data shapes

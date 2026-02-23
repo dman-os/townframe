@@ -336,15 +336,10 @@ class EditorSessionController(
         }
 
         val excludedKeys = setOf(titleFacetKey(), bodyFacetKey(), dmetaFacetKey())
-        val availableByRef = mutableMapOf<String, FacetKey>()
         val displayableKeys = doc.facets.keys
             .filter { key -> key !in excludedKeys }
             .filter(::hasSupportedFacetView)
             .sortedBy(::facetKeyString)
-
-        for (key in displayableKeys) {
-            availableByRef[stripFacetRefFragment(buildSelfFacetRefUrl(key))] = key
-        }
 
         val bodyOrderUrls = decodeBodyOrderUrls(doc).orEmpty()
         val orderedKeys = orderFacetKeysForDisplay(displayableKeys, bodyOrderUrls)
@@ -653,15 +648,6 @@ private fun encodeBase58(bytes: ByteArray): String {
     }
 
     return encoded.concatToString(outputStart, encoded.size)
-}
-
-private fun facetKeyString(key: FacetKey): String {
-    val tagString =
-        when (val tag = key.tag) {
-            is FacetTag.WellKnown -> tag.v1.name.lowercase()
-            is FacetTag.Any -> tag.v1
-        }
-    return if (key.id == "main") tagString else "$tagString:${key.id}"
 }
 
 private fun facetKeyRefPathString(key: FacetKey): String =

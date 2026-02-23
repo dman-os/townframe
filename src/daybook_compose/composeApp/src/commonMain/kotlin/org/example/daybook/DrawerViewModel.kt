@@ -240,7 +240,9 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
                 _selectedDocEntry.value = entry
                 _loadedDocs.value = _loadedDocs.value + (id to doc)
             } else {
+                _selectedDoc.value = null
                 _selectedDocEntry.value = entry
+                _loadedDocs.value = _loadedDocs.value - id
             }
         } catch (e: FfiException) {
             emitError(e)

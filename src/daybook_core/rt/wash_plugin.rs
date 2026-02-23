@@ -144,8 +144,10 @@ mod binds_guest {
     }
 
     #[allow(dead_code)]
-    pub fn wit_to_well_known_facet(value: wit_doc::WellKnownFacet) -> root_doc::WellKnownFacet {
-        match value {
+    pub fn wit_to_well_known_facet(
+        value: wit_doc::WellKnownFacet,
+    ) -> Res<root_doc::WellKnownFacet> {
+        Ok(match value {
             wit_doc::WellKnownFacet::RefGeneric(val) => root_doc::WellKnownFacet::RefGeneric(val),
             wit_doc::WellKnownFacet::LabelGeneric(val) => {
                 root_doc::WellKnownFacet::LabelGeneric(val)
@@ -224,8 +226,12 @@ mod binds_guest {
                 order: body
                     .order
                     .into_iter()
-                    .map(|url| url.parse().unwrap())
-                    .collect(),
+                    .map(|url| {
+                        url.parse().wrap_err_with(|| {
+                            format!("invalid Body.order facet reference URL from guest: {url}")
+                        })
+                    })
+                    .collect::<Res<Vec<_>>>()?,
             }),
             wit_doc::WellKnownFacet::Dmeta(dmeta) => {
                 root_doc::WellKnownFacet::Dmeta(root_doc::Dmeta {
@@ -288,7 +294,7 @@ mod binds_guest {
                 inline: blob.inline,
                 urls: blob.urls,
             }),
-        }
+        })
     }
 
     #[allow(dead_code)]

@@ -1,5 +1,32 @@
 # duck-log
 
+## 2026-02-23 | Cheap mass imports
+
+Right now, each doc added to a drawer creates permanent records in the automerge document and triggers work for the pipeline that processes these events.
+The work itself is not expensive but...consider this scenario.
+I'm adding my photo library to daybook. 
+It containes 10000+ items. 
+That will produce 10000+ events into the docs pipeline and 1M+ into the raw automerge stream.
+But wait...I added the wrong directory?
+I'll want to delete those files now but those 1M+ events? 
+Will always be part of the repo.
+
+I could simply roll back the drawer to a prevoius state. 
+Think git commit graphs.
+But that won't work if there were other events mixed in. 
+
+Garbage collection. I need garbage collection to solve the dead weight.
+
+Can be implemented me thinks by using eventual migration to another drawer doc where the next drawer doc id is deterministic.
+Essentially, a device that inits or sees the next drawer doc as active must make sure to active data to it and forget the old one.
+Out of sync devices can still work on the old doc but as soon as they see the new doc, they merge the state between the two and forget the old.
+At some point, all the connected devices will have migrated and the disconnected ones have completely forked off which is expected.
+
+Garbage collection is only half the pain though.
+1M+ events.
+
+We'll need to beef up batch paths for many things.
+
 ## 2026-02-22 | REPL for LLMS
 
 - Use wflow to implement Jupyter like notebooks?

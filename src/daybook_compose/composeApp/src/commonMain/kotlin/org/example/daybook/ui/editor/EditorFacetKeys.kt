@@ -21,3 +21,12 @@ fun blobFacetKey(): FacetKey =
 
 fun imageMetadataFacetKey(): FacetKey =
     FacetKey(FacetTag.WellKnown(WellKnownFacetTag.IMAGE_METADATA), "main")
+
+fun facetKeyString(key: FacetKey): String {
+    val tagString =
+        when (val tag = key.tag) {
+            is FacetTag.WellKnown -> tag.v1.name.lowercase()
+            is FacetTag.Any -> tag.v1
+        }
+    return if (key.id == "main") tagString else "$tagString:${key.id}"
+}
