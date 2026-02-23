@@ -4,6 +4,7 @@ package org.example.daybook.ui.editor
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import org.example.daybook.ui.buildSelfFacetRefUrl
 import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.FacetTag
@@ -106,6 +107,170 @@ class EditorSessionControllerOrderingTest {
             )
 
         assertEquals(listOf(seenA, unseen, seenC, seenB), result)
+    }
+
+    @Test
+    fun `reorderBodyOrderPreservingUnseen returns null when direction is zero`() {
+        val result =
+            reorderBodyOrderPreservingUnseen(
+                baseUrls = listOf("a"),
+                seenUrls = listOf("a"),
+                selectedRef = "a",
+                direction = 0,
+            )
+        assertNull(result)
+    }
+
+    @Test
+    fun `reorderBodyOrderPreservingUnseen returns null when seen urls are empty`() {
+        val result =
+            reorderBodyOrderPreservingUnseen(
+                baseUrls = listOf("a", "b"),
+                seenUrls = emptyList(),
+                selectedRef = "a",
+                direction = 1,
+            )
+        assertNull(result)
+    }
+
+    @Test
+    fun `reorderBodyOrderPreservingUnseen crystallizes from empty base using seen order`() {
+        val a = "db+facet:///self/org.example.daybook.note/a#ha"
+        val b = "db+facet:///self/org.example.daybook.note/b#hb"
+
+        val result =
+            reorderBodyOrderPreservingUnseen(
+                baseUrls = emptyList(),
+                seenUrls = listOf(a, b),
+                selectedRef = a,
+                direction = 1,
+            )
+
+        assertEquals(listOf(b, a), result)
+    }
+
+    @Test
+    fun `reorderBodyOrderPreservingUnseen returns null for single seen item boundary moves`() {
+        val a = "db+facet:///self/org.example.daybook.note/a#ha"
+
+        assertNull(
+            reorderBodyOrderPreservingUnseen(
+                baseUrls = listOf(a),
+                seenUrls = listOf(a),
+                selectedRef = a,
+                direction = -1,
+            )
+        )
+        assertNull(
+            reorderBodyOrderPreservingUnseen(
+                baseUrls = listOf(a),
+                seenUrls = listOf(a),
+                selectedRef = a,
+                direction = 1,
+            )
+        )
+    }
+
+    @Test
+    fun `reorderBodyOrderPreservingUnseen returns null when selected ref not found after canonicalization`() {
+        val a = "db+facet:///self/org.example.daybook.note/a#ha"
+        val b = "db+facet:///self/org.example.daybook.note/b#hb"
+
+        val result =
+            reorderBodyOrderPreservingUnseen(
+                baseUrls = listOf(a, b),
+                seenUrls = listOf(a, b),
+                selectedRef = "db+facet:///self/org.example.daybook.note/missing#hx",
+                direction = 1,
+            )
+
+        assertNull(result)
+    }
+
+    @Test
+    fun `reorderBodyOrderPreservingUnseen returns null at start and end boundaries`() {
+        val a = "db+facet:///self/org.example.daybook.note/a#ha"
+        val b = "db+facet:///self/org.example.daybook.note/b#hb"
+        val c = "db+facet:///self/org.example.daybook.note/c#hc"
+
+        assertNull(
+            reorderBodyOrderPreservingUnseen(
+                baseUrls = listOf(a, b, c),
+                seenUrls = listOf(a, b, c),
+                selectedRef = a,
+                direction = -1,
+            )
+        )
+        assertNull(
+            reorderBodyOrderPreservingUnseen(
+                baseUrls = listOf(a, b, c),
+                seenUrls = listOf(a, b, c),
+                selectedRef = c,
+                direction = 1,
+            )
+        )
+    }
+
+    @Test
+    fun `reorderBodyOrderPreservingUnseen swaps at start and end boundaries when valid`() {
+        val a = "db+facet:///self/org.example.daybook.note/a#ha"
+        val b = "db+facet:///self/org.example.daybook.note/b#hb"
+        val c = "db+facet:///self/org.example.daybook.note/c#hc"
+
+        val moveStartDown =
+            reorderBodyOrderPreservingUnseen(
+                baseUrls = listOf(a, b, c),
+                seenUrls = listOf(a, b, c),
+                selectedRef = a,
+                direction = 1,
+            )
+        val moveEndUp =
+            reorderBodyOrderPreservingUnseen(
+                baseUrls = listOf(a, b, c),
+                seenUrls = listOf(a, b, c),
+                selectedRef = c,
+                direction = -1,
+            )
+
+        assertEquals(listOf(b, a, c), moveStartDown)
+        assertEquals(listOf(a, c, b), moveEndUp)
+    }
+
+    @Test
+    fun `reorderBodyOrderPreservingUnseen dedupes canonical urls and respects stripFacetRefFragment`() {
+        val aBase = "db+facet:///self/org.example.daybook.note/a#old"
+        val aSeen = "db+facet:///self/org.example.daybook.note/a#new"
+        val bBase = "db+facet:///self/org.example.daybook.note/b#old"
+        val bSeen = "db+facet:///self/org.example.daybook.note/b#new"
+        val unseen = "db+facet:///self/org.example.daybook.embedding/main#hu"
+
+        val result =
+            reorderBodyOrderPreservingUnseen(
+                baseUrls = listOf(aBase, aSeen, unseen, bBase, bSeen),
+                seenUrls = listOf(aSeen, bSeen, aBase),
+                selectedRef = bSeen,
+                direction = -1,
+            )
+
+        assertEquals(listOf(bSeen, unseen, aSeen), result)
+    }
+
+    @Test
+    fun `reorderBodyOrderPreservingUnseen appends missing seen canonicals in original seen order`() {
+        val a = "db+facet:///self/org.example.daybook.note/a#ha"
+        val b = "db+facet:///self/org.example.daybook.note/b#hb"
+        val c = "db+facet:///self/org.example.daybook.note/c#hc"
+        val x = "db+facet:///self/org.example.daybook.embedding/main#hx"
+
+        val result =
+            reorderBodyOrderPreservingUnseen(
+                baseUrls = listOf(a, x),
+                seenUrls = listOf(c, b, a),
+                selectedRef = b,
+                direction = -1,
+            )
+
+        assertEquals(listOf(a, x, b, c), result)
     }
 }
 

@@ -27,6 +27,9 @@ fun facetKeyString(key: FacetKey): String {
         when (val tag = key.tag) {
             is FacetTag.WellKnown -> tag.v1.name.lowercase()
             is FacetTag.Any -> tag.v1
-        }
+    }
     return if (key.id == "main") tagString else "$tagString:${key.id}"
 }
+
+fun facetKeyRefPathString(key: FacetKey): String =
+    org.example.daybook.ui.buildSelfFacetRefUrl(key).removePrefix("db+facet:///self/")

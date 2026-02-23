@@ -177,12 +177,12 @@ fun DocEditor(
                             style = MaterialTheme.typography.titleSmall,
                             modifier = Modifier.padding(bottom = 8.dp)
                         )
-                    DocDetailsSidebar(
-                        doc = state.doc,
-                        warnings = state.docWarnings,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
+                        DocDetailsSidebar(
+                            doc = state.doc,
+                            warnings = state.docWarnings,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
             }
         }

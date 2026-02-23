@@ -748,6 +748,3 @@ private fun encodeBase58(bytes: ByteArray): String {
 
     return encoded.concatToString(outputStart, encoded.size)
 }
-
-private fun facetKeyRefPathString(key: FacetKey): String =
-    buildSelfFacetRefUrl(key).removePrefix("db+facet:///self/")
