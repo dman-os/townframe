@@ -1,6 +1,8 @@
 use crate::{interlude::*, wit};
 
-use crate::doc::{Blob, Doc, FacetKey, FacetRaw, ImageMetadata, WellKnownFacet, WellKnownFacetTag};
+use crate::doc::{
+    Blob, Body, Doc, FacetKey, FacetRaw, ImageMetadata, WellKnownFacet, WellKnownFacetTag,
+};
 use std::collections::HashMap;
 
 fn create_test_doc() -> Doc {
@@ -23,6 +25,16 @@ fn create_test_doc() -> Doc {
     props.insert(
         FacetKey::from(WellKnownFacetTag::Note),
         FacetRaw::from(WellKnownFacet::Note("Test note".into())),
+    );
+    props.insert(
+        FacetKey::from(WellKnownFacetTag::Body),
+        FacetRaw::from(WellKnownFacet::Body(Body {
+            order: vec![crate::url::build_facet_ref(
+                crate::url::FACET_SELF_DOC_ID,
+                &FacetKey::from(WellKnownFacetTag::Note),
+            )
+            .unwrap()],
+        })),
     );
 
     Doc {

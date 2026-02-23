@@ -7,7 +7,6 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import org.junit.Rule
-import org.junit.Test
 import kotlin.test.Test
 import kotlin.test.assertEquals
 

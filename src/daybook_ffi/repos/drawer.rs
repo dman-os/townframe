@@ -4,7 +4,7 @@ use crate::ffi::{FfiError, SharedFfiCtx};
 use crate::repos::plugs::PlugsRepoFfi;
 
 use daybook_core::drawer::types::UpdateDocArgsV2 as UpdateDocArgs;
-use daybook_core::drawer::{DocNBranches, DrawerEvent, DrawerRepo};
+use daybook_core::drawer::{DocEntry, DocNBranches, DrawerEvent, DrawerRepo};
 use daybook_types::doc::{AddDocArgs, ChangeHashSet, Doc, DocId, DocPatch};
 
 #[derive(uniffi::Object)]
@@ -65,7 +65,7 @@ impl DrawerRepoFfi {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self), ret)]
     async fn list(self: Arc<Self>) -> Vec<DocNBranches> {
         let this = Arc::clone(&self);
         self.fcx
@@ -74,7 +74,7 @@ impl DrawerRepoFfi {
             .expect("error listing docs")
     }
 
-    #[tracing::instrument(err, skip(self))]
+    #[tracing::instrument(err, skip(self), ret)]
     async fn get(self: Arc<Self>, id: DocId, branch_path: String) -> Result<Option<Doc>, FfiError> {
         let this = Arc::clone(&self);
         let branch_path = daybook_types::doc::BranchPath::from(branch_path);
@@ -89,7 +89,16 @@ impl DrawerRepoFfi {
             .await?)
     }
 
-    #[tracing::instrument(err, skip(self))]
+    #[tracing::instrument(err, skip(self), ret)]
+    async fn get_entry(self: Arc<Self>, id: DocId) -> Result<Option<DocEntry>, FfiError> {
+        let this = Arc::clone(&self);
+        Ok(self
+            .fcx
+            .do_on_rt(async move { this.repo.get_entry(&id).await })
+            .await?)
+    }
+
+    #[tracing::instrument(err, skip(self), ret)]
     async fn add(self: Arc<Self>, args: AddDocArgs) -> Result<DocId, FfiError> {
         let this = Arc::clone(&self);
         Ok(self

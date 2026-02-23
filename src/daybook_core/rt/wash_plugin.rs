@@ -103,6 +103,9 @@ mod binds_guest {
                     key: pending.key.to_string(),
                 })
             }
+            root_doc::WellKnownFacet::Body(body) => wit_doc::WellKnownFacet::Body(wit_doc::Body {
+                order: body.order.into_iter().map(|url| url.to_string()).collect(),
+            }),
             root_doc::WellKnownFacet::Dmeta(dmeta) => {
                 wit_doc::WellKnownFacet::Dmeta(wit_doc::Dmeta {
                     id: dmeta.id,
@@ -217,6 +220,13 @@ mod binds_guest {
                     key: root_doc::FacetKey::from(pending.key),
                 })
             }
+            wit_doc::WellKnownFacet::Body(body) => root_doc::WellKnownFacet::Body(root_doc::Body {
+                order: body
+                    .order
+                    .into_iter()
+                    .map(|url| url.parse().unwrap())
+                    .collect(),
+            }),
             wit_doc::WellKnownFacet::Dmeta(dmeta) => {
                 root_doc::WellKnownFacet::Dmeta(root_doc::Dmeta {
                     id: dmeta.id,

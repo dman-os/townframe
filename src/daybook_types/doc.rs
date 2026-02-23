@@ -75,6 +75,13 @@ crate::define_enum_and_tag!(
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        Body struct {
+            pub order: Vec<Url>,
+        },
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         Note struct {
             pub mime: MimeType,
             pub content: String,
@@ -880,6 +887,10 @@ mod ser_de {
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
                 WellKnownFacetTag::Pending => Self::Pending(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::Body => Self::Body(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),

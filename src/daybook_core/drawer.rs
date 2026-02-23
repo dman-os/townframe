@@ -544,6 +544,13 @@ impl DrawerRepo {
                     .map(ToString::to_string)
                     .collect();
                 if commit_head_strings.is_empty() {
+                    if referenced_facet.doc_id == FACET_SELF_DOC_ID
+                        && resulting_facet_keys.contains(&referenced_facet.facet_key)
+                    {
+                        // Empty fragment means "self in this validated facet set" for URL refs
+                        // when at_commit_json_path is omitted (e.g. Body.order).
+                        continue;
+                    }
                     eyre::bail!(
                         "facet '{}' reference '{}' has empty commit-head fragment",
                         origin_facet_key,

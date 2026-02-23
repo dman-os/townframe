@@ -10,6 +10,7 @@ import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.core.DrawerEvent
+import org.example.daybook.uniffi.core.DocEntry
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.uniffi.core.UpdateDocArgsV2
 import org.example.daybook.uniffi.types.Doc
@@ -59,6 +60,9 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
     private val _selectedDoc = MutableStateFlow<Doc?>(null)
     val selectedDoc = _selectedDoc.asStateFlow()
 
+    private val _selectedDocEntry = MutableStateFlow<DocEntry?>(null)
+    val selectedDocEntry = _selectedDocEntry.asStateFlow()
+
     private val _error = MutableStateFlow<FfiException?>(null)
     val error = _error.asStateFlow()
 
@@ -106,6 +110,7 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
                             if (event.id == _selectedDocId.value) {
                                 _selectedDocId.value = null
                                 _selectedDoc.value = null
+                                _selectedDocEntry.value = null
                             }
                         }
                     }
@@ -154,6 +159,7 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
             }
         } else {
             _selectedDoc.value = null
+            _selectedDocEntry.value = null
         }
     }
 
@@ -228,9 +234,13 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
     private suspend fun refreshSelectedDoc(id: String) {
         try {
             val doc = drawerRepo.get(id, "main")
+            val entry = drawerRepo.getEntry(id)
             if (doc != null) {
                 _selectedDoc.value = doc
+                _selectedDocEntry.value = entry
                 _loadedDocs.value = _loadedDocs.value + (id to doc)
+            } else {
+                _selectedDocEntry.value = entry
             }
         } catch (e: FfiException) {
             emitError(e)

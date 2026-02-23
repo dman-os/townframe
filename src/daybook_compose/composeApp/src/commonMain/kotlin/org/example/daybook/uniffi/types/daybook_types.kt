@@ -1134,6 +1134,40 @@ public object FfiConverterTypeBlob: FfiConverterRustBuffer<Blob> {
 
 
 
+@Serializable
+data class Body (
+    var `order`: List<Url>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBody: FfiConverterRustBuffer<Body> {
+    override fun read(buf: ByteBuffer): Body {
+        return Body(
+            FfiConverterSequenceTypeUrl.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Body) = (
+            FfiConverterSequenceTypeUrl.allocationSize(value.`order`)
+    )
+
+    override fun write(value: Body, buf: ByteBuffer) {
+            FfiConverterSequenceTypeUrl.write(value.`order`, buf)
+    }
+}
+
+
+
 data class Dmeta (
     var `id`: kotlin.String
     , 
@@ -1954,6 +1988,15 @@ sealed class WellKnownFacet {
         companion object
     }
     
+    data class Body(
+        val v1: org.example.daybook.uniffi.types.Body) : WellKnownFacet()
+        
+    {
+        
+
+        companion object
+    }
+    
     data class Note(
         val v1: org.example.daybook.uniffi.types.Note) : WellKnownFacet()
         
@@ -2036,19 +2079,22 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
             7 -> WellKnownFacet.Pending(
                 FfiConverterTypePending.read(buf),
                 )
-            8 -> WellKnownFacet.Note(
+            8 -> WellKnownFacet.Body(
+                FfiConverterTypeBody.read(buf),
+                )
+            9 -> WellKnownFacet.Note(
                 FfiConverterTypeNote.read(buf),
                 )
-            9 -> WellKnownFacet.Blob(
+            10 -> WellKnownFacet.Blob(
                 FfiConverterTypeBlob.read(buf),
                 )
-            10 -> WellKnownFacet.ImageMetadata(
+            11 -> WellKnownFacet.ImageMetadata(
                 FfiConverterTypeImageMetadata.read(buf),
                 )
-            11 -> WellKnownFacet.OcrResult(
+            12 -> WellKnownFacet.OcrResult(
                 FfiConverterTypeOcrResult.read(buf),
                 )
-            12 -> WellKnownFacet.Embedding(
+            13 -> WellKnownFacet.Embedding(
                 FfiConverterTypeEmbedding.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -2103,6 +2149,13 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
             (
                 4UL
                 + FfiConverterTypePending.allocationSize(value.v1)
+            )
+        }
+        is WellKnownFacet.Body -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeBody.allocationSize(value.v1)
             )
         }
         is WellKnownFacet.Note -> {
@@ -2179,28 +2232,33 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
                 FfiConverterTypePending.write(value.v1, buf)
                 Unit
             }
-            is WellKnownFacet.Note -> {
+            is WellKnownFacet.Body -> {
                 buf.putInt(8)
+                FfiConverterTypeBody.write(value.v1, buf)
+                Unit
+            }
+            is WellKnownFacet.Note -> {
+                buf.putInt(9)
                 FfiConverterTypeNote.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.Blob -> {
-                buf.putInt(9)
+                buf.putInt(10)
                 FfiConverterTypeBlob.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.ImageMetadata -> {
-                buf.putInt(10)
+                buf.putInt(11)
                 FfiConverterTypeImageMetadata.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.OcrResult -> {
-                buf.putInt(11)
+                buf.putInt(12)
                 FfiConverterTypeOcrResult.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.Embedding -> {
-                buf.putInt(12)
+                buf.putInt(13)
                 FfiConverterTypeEmbedding.write(value.v1, buf)
                 Unit
             }
@@ -2222,6 +2280,7 @@ enum class WellKnownFacetTag {
     TITLE_GENERIC,
     PATH_GENERIC,
     PENDING,
+    BODY,
     NOTE,
     BLOB,
     IMAGE_METADATA,
@@ -2614,6 +2673,34 @@ public object FfiConverterSequenceTypeTimestamp: FfiConverterRustBuffer<List<Tim
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeTimestamp.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeUrl: FfiConverterRustBuffer<List<Url>> {
+    override fun read(buf: ByteBuffer): List<Url> {
+        val len = buf.getInt()
+        return List<Url>(len) {
+            FfiConverterTypeUrl.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<Url>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeUrl.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<Url>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeUrl.write(it, buf)
         }
     }
 }

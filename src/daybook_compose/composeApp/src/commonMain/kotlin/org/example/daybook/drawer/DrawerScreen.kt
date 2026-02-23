@@ -33,13 +33,19 @@ import org.example.daybook.TablesViewModel
 import org.example.daybook.tables.DockableRegion
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.DocFacetSidebar
+import org.example.daybook.ui.buildSelfFacetRefUrl
 import org.example.daybook.ui.decodeJsonStringOrRaw
 import org.example.daybook.ui.decodeWellKnownFacet
+import org.example.daybook.ui.stripFacetRefFragment
 import org.example.daybook.ui.editor.EditorSessionController
+import org.example.daybook.ui.editor.bodyFacetKey
 import org.example.daybook.ui.editor.noteFacetKey
 import org.example.daybook.ui.editor.titleFacetKey
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.*
+import org.example.daybook.uniffi.types.Doc
+import org.example.daybook.uniffi.types.FacetKey
+import org.example.daybook.uniffi.types.FacetTag
 import org.example.daybook.uniffi.types.WellKnownFacet
 
 class DrawerScreenViewModel(
@@ -123,8 +129,9 @@ fun DrawerScreen(contentType: DaybookContentType, modifier: Modifier = Modifier)
 
     val selectedDocId by drawerVm.selectedDocId.collectAsState()
     val selectedDoc by drawerVm.selectedDoc.collectAsState()
-    LaunchedEffect(selectedDoc?.id) {
-        vm.editorController.bindDoc(selectedDoc)
+    val selectedDocEntry by drawerVm.selectedDocEntry.collectAsState()
+    LaunchedEffect(selectedDoc?.id, selectedDocEntry) {
+        vm.editorController.bindDoc(selectedDoc, selectedDocEntry)
     }
 
     if (contentType == DaybookContentType.LIST_AND_DETAIL) {
@@ -278,6 +285,7 @@ fun DocList(
 
                         if (doc != null) {
                             // Document is loaded, show it
+                            val mainType = drawerMainFacetTypeLabel(doc)
                             val draw = @Composable {
                                 ListItem(
                                     headlineContent = {
@@ -302,7 +310,9 @@ fun DocList(
                                         )
                                     },
                                     supportingContent = {
-                                        Text("ID: ${doc.id.take(8)}...")
+                                        val suffix =
+                                            mainType?.let { type -> " • $type" } ?: ""
+                                        Text("ID: ${doc.id.take(8)}...$suffix")
                                     }
                                 )
                             }
@@ -374,3 +384,35 @@ fun DocList(
         }
     }
 }
+
+private fun drawerMainFacetTypeLabel(doc: Doc): String? {
+    val bodyOrder = doc.facets[bodyFacetKey()]
+        ?.let { raw -> decodeWellKnownFacet<WellKnownFacet.Body>(raw).getOrNull()?.v1?.order }
+        .orEmpty()
+
+    val facetByRef = doc.facets.keys.associateBy { key -> stripFacetRefFragment(buildSelfFacetRefUrl(key)) }
+    for (url in bodyOrder) {
+        val key = facetByRef[stripFacetRefFragment(url)] ?: continue
+        if (key == titleFacetKey() || key == bodyFacetKey()) {
+            continue
+        }
+        return drawerFacetTypeLabel(key)
+    }
+
+    return doc.facets.keys
+        .filter { key -> key != titleFacetKey() && key != bodyFacetKey() }
+        .sortedBy(::drawerFacetSortKey)
+        .firstOrNull()
+        ?.let(::drawerFacetTypeLabel)
+}
+
+private fun drawerFacetTypeLabel(key: FacetKey): String {
+    val tagString =
+        when (val tag = key.tag) {
+            is FacetTag.WellKnown -> tag.v1.name.lowercase()
+            is FacetTag.Any -> tag.v1
+        }
+    return if (key.id == "main") tagString else "$tagString:${key.id}"
+}
+
+private fun drawerFacetSortKey(key: FacetKey): String = drawerFacetTypeLabel(key)

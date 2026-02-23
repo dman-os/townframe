@@ -244,6 +244,10 @@ class TablesViewModel(val tablesRepo: TablesRepoFfi) : ViewModel() {
                     is TablesEvent.TableAdded -> refreshRunner.submit(TablesRefreshIntent.Full)
                     is TablesEvent.TableChanged ->
                         refreshRunner.submit(TablesRefreshIntent(tables = setOf(event.id)))
+                    is TablesEvent.WindowDeleted -> refreshRunner.submit(TablesRefreshIntent.Full)
+                    is TablesEvent.TabDeleted -> refreshRunner.submit(TablesRefreshIntent.Full)
+                    is TablesEvent.PanelDeleted -> refreshRunner.submit(TablesRefreshIntent.Full)
+                    is TablesEvent.TableDeleted -> refreshRunner.submit(TablesRefreshIntent.Full)
                 }
             }
         }

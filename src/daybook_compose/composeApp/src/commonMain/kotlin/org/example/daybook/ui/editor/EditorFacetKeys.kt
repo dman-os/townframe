@@ -10,6 +10,12 @@ fun titleFacetKey(): FacetKey =
 fun noteFacetKey(): FacetKey =
     FacetKey(FacetTag.WellKnown(WellKnownFacetTag.NOTE), "main")
 
+fun bodyFacetKey(): FacetKey =
+    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.BODY), "main")
+
+fun dmetaFacetKey(): FacetKey =
+    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.DMETA), "main")
+
 fun blobFacetKey(): FacetKey =
     FacetKey(FacetTag.WellKnown(WellKnownFacetTag.BLOB), "main")
 
