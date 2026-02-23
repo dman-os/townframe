@@ -5,6 +5,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
 import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.Exec
+import org.gradle.process.CommandLineArgumentProvider
 import java.io.File
 
 plugins {
@@ -191,11 +192,18 @@ dependencies {
 compose.desktop {
     application {
         mainClass = "org.example.daybook.MainKt"
+        jvmArgs(
+            // UniFFI/JNA loads "daybook_ffi" by library name, so point the JVM/JNA
+            // native search path at the packaged lib/app directory.
+            "-Djava.library.path=\$APPDIR",
+            "-Djna.library.path=\$APPDIR",
+        )
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.AppImage)
             packageName = "org.example.daybook"
             packageVersion = "1.0.0"
+            modules("jdk.security.auth")
         }
         buildTypes {
             release {
@@ -500,6 +508,24 @@ tasks.register<Copy>("copyRustDesktopReleaseToComposeApp") {
     outputs.file(destLibFile)
 }
 
+// Compose desktop packaging regenerates the app directory during packaging tasks.
+// Ensure our Rust .so copy runs after those generation steps so it is not overwritten.
+tasks.named("copyRustDesktopDebugToComposeApp").configure {
+    mustRunAfter(
+        "prepareAppResources",
+        "unpackDefaultComposeDesktopJvmApplicationResources",
+        "createRuntimeImage",
+    )
+}
+
+tasks.named("copyRustDesktopReleaseToComposeApp").configure {
+    mustRunAfter(
+        "prepareAppResources",
+        "unpackDefaultComposeDesktopJvmApplicationResources",
+        "createRuntimeImage",
+    )
+}
+
 // Wire tasks to Android variants
 tasks.matching { it.name == "preDebugBuild" }.configureEach {
     dependsOn("copyRustAndroidDebug")
@@ -517,16 +543,20 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
 
 // Wire desktop tasks to Rust desktop builds with nokhwa enabled
 tasks.matching {
+    it.name in setOf("desktopRun", "desktopRunHot")
+}.configureEach {
+    dependsOn("buildRustDesktopDebug")
+    dependsOn("copyRustDesktopDebugToComposeApp")
+}
+
+tasks.matching {
     it.name in
         setOf(
             "createDistributable",
-            "packageAppImage",
             "packageDeb",
             "packageDmg",
             "packageMsi",
             "packageDistributionForCurrentOS",
-            "desktopRun",
-            "desktopRunHot",
         )
 }.configureEach {
     dependsOn("buildRustDesktopDebug")
@@ -536,7 +566,6 @@ tasks.matching {
 tasks.matching {
     it.name in
         setOf(
-            "packageReleaseAppImage",
             "packageReleaseDeb",
             "packageReleaseDmg",
             "packageReleaseMsi",
@@ -559,6 +588,37 @@ tasks.matching {
     }
 }
 
+tasks.matching { it.name == "packageReleaseAppImage" }.configureEach {
+    dependsOn("buildRustDesktopRelease")
+    dependsOn("copyRustDesktopReleaseToComposeApp")
+}
+
+tasks.register("prepareLinuxdeployComposeAppDirDayb") {
+    group = "distribution"
+    description = "Prepare Compose desktop app dir for custom linuxdeploy packaging and copy Rust FFI library last"
+
+    val sourceLibFile = File(repoRoot, "target/debug/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}")
+    val destLibDir = File(desktopComposeAppDir(false), "lib/app")
+    val destLibFile = File(destLibDir, sourceLibFile.name)
+
+    dependsOn("createDistributable")
+    dependsOn("buildRustDesktopDebug")
+
+    inputs.file(sourceLibFile)
+    outputs.file(destLibFile)
+
+    doLast {
+        if (!sourceLibFile.exists()) {
+            throw GradleException("Missing desktop debug Rust library: ${sourceLibFile.absolutePath}")
+        }
+        if (!destLibDir.exists()) {
+            destLibDir.mkdirs()
+        }
+        sourceLibFile.copyTo(destLibFile, overwrite = true)
+    }
+}
+
+
 tasks.register<Exec>("buildNativeImageDayb") {
     group = "distribution"
     description = "Build a Linux native image for Daybook from the uber jar"
@@ -566,8 +626,16 @@ tasks.register<Exec>("buildNativeImageDayb") {
     val outputDir = file("build/compose/native/$resourcesDirNameForNativePackaging")
     val outputFile = File(outputDir, "daybook")
     val reachabilityDir = file("reachability-metadata/linux")
-    val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
     val rustLibFile = File(repoRoot, "target/release/libdaybook_ffi.so")
+    val nativeImageCmd = System.getenv("NATIVE_IMAGE_BIN") ?: "native-image"
+
+    fun findUberJar(resourcesDirName: String): File {
+        val jarCandidates = fileTree("build/compose/jars") {
+            include("org.example.daybook-$resourcesDirName-*.jar")
+        }.files.sortedBy { it.name }
+        return jarCandidates.lastOrNull()
+            ?: throw GradleException("Missing uber jar for $resourcesDirName in build/compose/jars")
+    }
 
     dependsOn("packageUberJarForCurrentOS")
     dependsOn("buildRustDesktopRelease")
@@ -577,35 +645,10 @@ tasks.register<Exec>("buildNativeImageDayb") {
     inputs.dir(reachabilityDir)
     outputs.file(outputFile)
     notCompatibleWithConfigurationCache("experimental native-image packaging task")
-
-    doFirst {
-        if (!hostOsForNativePackaging.isLinux || resourcesDirNameForNativePackaging == "unsupported") {
-            throw GradleException("buildNativeImageDayb currently supports Linux only")
-        }
-        if (!rustLibFile.exists()) {
-            throw GradleException("Missing Rust desktop library: ${rustLibFile.absolutePath}")
-        }
-        if (!reachabilityDir.exists()) {
-            throw GradleException("Missing reachability metadata dir: ${reachabilityDir.absolutePath}")
-        }
-
-        val jarCandidates = fileTree("build/compose/jars") {
-            include("org.example.daybook-$resourcesDirNameForNativePackaging-*.jar")
-        }.files.sortedBy { it.name }
-        val jarFile = jarCandidates.lastOrNull()
-            ?: throw GradleException("Missing uber jar for $resourcesDirNameForNativePackaging in build/compose/jars")
-
-        outputDir.mkdirs()
-        val nativeImageCmd = System.getenv("NATIVE_IMAGE_BIN") ?: "native-image"
-
-        val existingLibraryPath = System.getenv("LIBRARY_PATH").orEmpty()
-        val joinedLibraryPath = listOf(rustLibFile.parentFile.absolutePath, existingLibraryPath)
-            .filter { it.isNotBlank() }
-            .joinToString(":")
-        environment("LIBRARY_PATH", joinedLibraryPath)
-
-        commandLine(
-            nativeImageCmd,
+    executable = nativeImageCmd
+    argumentProviders.add(CommandLineArgumentProvider {
+        val jarFile = findUberJar(resourcesDirNameForNativePackaging)
+        listOf(
             "--no-fallback",
             "--enable-native-access=ALL-UNNAMED",
             "--add-modules=java.desktop,jdk.unsupported",
@@ -622,6 +665,28 @@ tasks.register<Exec>("buildNativeImageDayb") {
             "-o",
             outputFile.absolutePath,
         )
+    })
+
+    doFirst {
+        if (!hostOsForNativePackaging.isLinux || resourcesDirNameForNativePackaging == "unsupported") {
+            throw GradleException("buildNativeImageDayb currently supports Linux only")
+        }
+        if (!rustLibFile.exists()) {
+            throw GradleException("Missing Rust desktop library: ${rustLibFile.absolutePath}")
+        }
+        if (!reachabilityDir.exists()) {
+            throw GradleException("Missing reachability metadata dir: ${reachabilityDir.absolutePath}")
+        }
+
+        findUberJar(resourcesDirNameForNativePackaging)
+
+        outputDir.mkdirs()
+
+        val existingLibraryPath = System.getenv("LIBRARY_PATH").orEmpty()
+        val joinedLibraryPath = listOf(rustLibFile.parentFile.absolutePath, existingLibraryPath)
+            .filter { it.isNotBlank() }
+            .joinToString(":")
+        environment("LIBRARY_PATH", joinedLibraryPath)
     }
 
     doLast {
@@ -629,11 +694,7 @@ tasks.register<Exec>("buildNativeImageDayb") {
         libDir.mkdirs()
         rustLibFile.copyTo(File(libDir, rustLibFile.name), overwrite = true)
 
-        val jarCandidates = fileTree("build/compose/jars") {
-            include("org.example.daybook-$resourcesDirNameForNativePackaging-*.jar")
-        }.files.sortedBy { it.name }
-        val jarFile = jarCandidates.lastOrNull()
-            ?: throw GradleException("Missing uber jar for $resourcesDirNameForNativePackaging in build/compose/jars")
+        val jarFile = findUberJar(resourcesDirNameForNativePackaging)
 
         val jarEntriesToExtract = when (resourcesDirNameForNativePackaging) {
             "linux-x64" -> arrayOf(

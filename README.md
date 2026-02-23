@@ -26,10 +26,9 @@ Specifically, daybook design is informed by tech I find shiny, gaps I see in the
 
 - Shiny tech
   - Everything that is and around LLMs.
-  - Uses Automerge for an offline and local-first experience
-    - With futue expectations around collaborative grounding
-  - Uses Compose Multiplatform for a reliable experience on Android and Desktop
-  - Tries to leverage WASM as a plugin system. 
+  - Uses Automerge for an offline and local-first experience.
+  - Uses Compose Multiplatform for a reliable experience on Android and Desktop.
+  - Leverage WASM for a plugins. 
 - Gaps
   - Emacs/Vim
     - State of the art editing experience

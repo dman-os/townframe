@@ -126,6 +126,16 @@ crate::define_enum_and_tag!(
             pub model_tag: String,
             // FIXME: double check these types
             /// little-endian
+            /// check that this does translate to bytes
+            #[serde(rename = "vectorBase64", alias = "vector")]
+            #[serde(
+                serialize_with = "serialize_bytes_as_base64",
+                deserialize_with = "deserialize_bytes_from_base64"
+            )]
+            #[cfg_attr(
+                feature = "schemars",
+                schemars(schema_with = "base64_string_json_schema")
+            )]
             pub vector: Vec<u8>,
             pub dim: u32,
             pub dtype: EmbeddingDtype,
@@ -176,6 +186,47 @@ pub fn embedding_f32_slice_to_le_bytes(values: &[f32]) -> Vec<u8> {
         .iter()
         .flat_map(|value| value.to_le_bytes())
         .collect::<Vec<u8>>()
+}
+
+fn serialize_bytes_as_base64<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&data_encoding::BASE64.encode(bytes))
+}
+
+fn deserialize_bytes_from_base64<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BytesRepr {
+        Base64(String),
+        Raw(Vec<u8>),
+    }
+
+    match BytesRepr::deserialize(deserializer)? {
+        BytesRepr::Base64(encoded) => data_encoding::BASE64
+            .decode(encoded.as_bytes())
+            .or_else(|_| data_encoding::BASE64_NOPAD.decode(encoded.as_bytes()))
+            .map_err(serde::de::Error::custom),
+        BytesRepr::Raw(bytes) => Ok(bytes),
+    }
+}
+
+#[cfg(feature = "schemars")]
+fn base64_string_json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "type".to_string(),
+        serde_json::Value::String("string".into()),
+    );
+    map.insert(
+        "contentEncoding".to_string(),
+        serde_json::Value::String("base64".into()),
+    );
+    map.into()
 }
 
 impl<T> From<T> for Note

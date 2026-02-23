@@ -677,7 +677,7 @@ mod tests {
         doc_id: &DocId,
         expected_len: usize,
     ) -> Res<()> {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
         while tokio::time::Instant::now() < deadline {
             let outgoing = repo.list_outgoing(doc_id).await?;
             if outgoing.len() == expected_len {

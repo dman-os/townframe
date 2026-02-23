@@ -72,6 +72,8 @@ pub fn start_tokio_partition_reducer(
                 .latest_idx()
                 .await
                 .wrap_err("error getting latest id from log")?;
+            let replay_is_empty =
+                latest_entry_id_at_start == 0 || start_offset > latest_entry_id_at_start;
 
             let mut worker = TokioPartitionReducer {
                 log: pcx.log_ref(),
@@ -99,45 +101,11 @@ pub fn start_tokio_partition_reducer(
             let mut snapshot_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
             snapshot_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-            let mut cur_entry_id = start_offset;
-
             debug!("starting");
+            if replay_is_empty {
+                worker.reschedule_effects_after_replay().await?;
+            }
             loop {
-                // schedule any active effects found in the effect state
-                // but only after we process and pending effects at start
-                // in case there were effect resutls we haven't observed
-                // FIXME: not elegant!
-                // there has to be a better way to configure this log approach
-                // to avoid such errors
-                if cur_entry_id == latest_entry_id_at_start && !worker.did_reschedule_after_replay {
-                    let effects_map = worker.state.read_effects().await;
-                    for effect_id in effects_map.keys() {
-                        let effect_id = effect_id.clone();
-                        let is_run_job = {
-                            effects_map
-                                .get(&effect_id)
-                                .map(|eff| {
-                                    matches!(eff.deets, effects::PartitionEffectDeets::RunJob(..))
-                                })
-                                .unwrap_or(false)
-                        };
-                        if is_run_job {
-                            let cancel_token = CancellationToken::new();
-                            worker
-                                .effect_cancel_tokens
-                                .lock()
-                                .await
-                                .insert(effect_id.clone(), cancel_token);
-                        }
-                        info!(?effect_id, "rescheduling effect back after re-boot");
-                        worker
-                            .effect_tx
-                            .send(effect_id.clone())
-                            .await
-                            .wrap_err("failed to schedule effect at startup")?;
-                    }
-                    worker.did_reschedule_after_replay = true;
-                }
                 // Poll the stream with cancellation check
                 tokio::select! {
                     biased;
@@ -159,7 +127,9 @@ pub fn start_tokio_partition_reducer(
                         let (idx, entry) = entry?;
                         if let Some(entry) = entry {
                             worker.reduce(idx, entry).await?;
-                            cur_entry_id = idx;
+                            if !replay_is_empty && idx >= latest_entry_id_at_start && !worker.did_reschedule_after_replay {
+                                worker.reschedule_effects_after_replay().await?;
+                            }
                         };
                     }
                 }
@@ -202,6 +172,40 @@ struct TokioPartitionReducer {
 }
 
 impl TokioPartitionReducer {
+    async fn reschedule_effects_after_replay(&mut self) -> Res<()> {
+        if self.did_reschedule_after_replay {
+            return Ok(());
+        }
+        let effects_to_reschedule = {
+            let effects_map = self.state.read_effects().await;
+            effects_map
+                .iter()
+                .map(|(effect_id, effect)| {
+                    (
+                        effect_id.clone(),
+                        matches!(effect.deets, effects::PartitionEffectDeets::RunJob(..)),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for (effect_id, is_run_job) in effects_to_reschedule {
+            if is_run_job {
+                let cancel_token = CancellationToken::new();
+                self.effect_cancel_tokens
+                    .lock()
+                    .await
+                    .insert(effect_id.clone(), cancel_token);
+            }
+            info!(?effect_id, "rescheduling effect back after re-boot");
+            self.effect_tx
+                .send(effect_id.clone())
+                .await
+                .wrap_err("failed to schedule effect at startup")?;
+        }
+        self.did_reschedule_after_replay = true;
+        Ok(())
+    }
+
     async fn index_existing_effect_sources(
         &mut self,
         start_offset: u64,

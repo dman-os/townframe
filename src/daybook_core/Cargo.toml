@@ -32,6 +32,7 @@ wash_plugin_mltools.workspace = true
 # encoding
 serde.workspace = true
 serde_json.workspace = true
+zstd.workspace = true
 
 # error
 color-eyre.workspace = true
@@ -103,6 +104,8 @@ jsonschema = { version = "0.42.0", default-features = false }
 
 [build-dependencies]
 uniffi = { workspace = true, features = ["build"], optional = true }
+zstd.workspace = true
+# wasmtime.workspace = true
 
 [dev-dependencies]
 tokio-stream = "0.1.17"
@@ -111,3 +114,4 @@ wflow = { workspace = true, features = ["test-harness"] }
 insta = { workspace = true, features = ["json"] }
 wash_plugin_am_repo.workspace = true
 tempfile.workspace = true
+loom = "0.7.2"

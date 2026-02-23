@@ -58,6 +58,9 @@ resource "kubernetes_manifest" "ollama_route" {
       ]
       rules = [
         {
+          timeouts = {
+            request = "5m"
+          }
           matches = [
             {
               path = {

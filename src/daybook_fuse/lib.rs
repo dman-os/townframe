@@ -463,17 +463,20 @@ async fn apply_effect(ctx: &mut DaybookFuseCtx, effect: pauperfuse::Effect) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use daybook_core::drawer::lru::KeyedLruPool;
+    use daybook_core::{blobs::BlobsRepo, drawer::lru::KeyedLruPool, plugs::PlugsRepo};
     use daybook_types::doc::{AddDocArgs, FacetKey, WellKnownFacet, WellKnownFacetTag};
 
     struct TestHarness {
         drawer_repo: Arc<DrawerRepo>,
         drawer_stop: Option<daybook_core::repos::RepoStopToken>,
+        plugs_repo: Arc<PlugsRepo>,
+        plugs_stop: Option<daybook_core::repos::RepoStopToken>,
         acx_stop: Option<utils_rs::am::AmCtxStopToken>,
         temp_dir: tempfile::TempDir,
     }
 
     impl TestHarness {
+        // FIXME: use core::app for repo init
         async fn new() -> Res<Self> {
             let temp_dir = tempfile::tempdir()?;
             let am_path = temp_dir.path().join("samod");
@@ -501,6 +504,14 @@ mod tests {
             let local_actor_id = daybook_types::doc::user_path::to_actor_id(
                 &daybook_types::doc::UserPath::from("/test-device"),
             );
+            let blobs_repo = BlobsRepo::new(temp_dir.path().join("blobs")).await?;
+            let (plugs_repo, plugs_stop) = PlugsRepo::load(
+                acx.clone(),
+                blobs_repo,
+                doc_app.get().unwrap().document_id().clone(),
+                local_actor_id.clone(),
+            )
+            .await?;
 
             let (drawer_repo, drawer_stop) = DrawerRepo::load(
                 acx,
@@ -512,10 +523,15 @@ mod tests {
                 local_actor_id,
                 Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
                 Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+                Arc::clone(&plugs_repo),
             )
             .await?;
 
+            plugs_repo.ensure_system_plugs().await?;
+
             Ok(Self {
+                plugs_repo,
+                plugs_stop: Some(plugs_stop),
                 drawer_repo,
                 drawer_stop: Some(drawer_stop),
                 acx_stop: Some(acx_stop),
@@ -525,6 +541,9 @@ mod tests {
 
         async fn shutdown(mut self) -> Res<()> {
             if let Some(stop) = self.drawer_stop.take() {
+                stop.stop().await?;
+            }
+            if let Some(stop) = self.plugs_stop.take() {
                 stop.stop().await?;
             }
             if let Some(stop) = self.acx_stop.take() {

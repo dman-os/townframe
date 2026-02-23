@@ -2,6 +2,8 @@
 use crate::interlude::*;
 
 #[cfg(feature = "automerge-repo")]
+use automerge::ReadDoc;
+#[cfg(feature = "automerge-repo")]
 use autosurgeon::Prop;
 #[cfg(feature = "automerge-repo")]
 use samod::DocumentId;
@@ -17,6 +19,14 @@ use tokio_util::sync::CancellationToken;
 pub struct ChangeNotification {
     pub patch: Arc<automerge::Patch>,
     pub heads: Arc<[automerge::ChangeHash]>,
+    pub actor_ids: Arc<[automerge::ActorId]>,
+}
+
+#[cfg(feature = "automerge-repo")]
+impl ChangeNotification {
+    pub fn is_local_only(&self, local_actor_id: &automerge::ActorId) -> bool {
+        self.actor_ids.len() == 1 && self.actor_ids.first() == Some(local_actor_id)
+    }
 }
 
 #[cfg(feature = "automerge-repo")]
@@ -171,8 +181,32 @@ impl ChangeListenerManager {
                     break;
                 };
                 let (new_heads, all_changes) = handle.with_document(|doc| {
+                    let mut event_hashes =
+                        std::collections::HashSet::<automerge::ChangeHash>::new();
+                    let mut stack = changes.new_heads.clone();
+                    while let Some(hash) = stack.pop() {
+                        if !event_hashes.insert(hash) {
+                            continue;
+                        }
+                        if let Some(change) = doc.get_change_by_hash(&hash) {
+                            stack.extend(change.deps().iter().copied());
+                        }
+                    }
+
+                    let mut actor_ids: Vec<automerge::ActorId> = vec![];
+                    for change in doc.get_changes(&heads) {
+                        if !event_hashes.contains(&change.hash()) {
+                            continue;
+                        }
+                        if !actor_ids.iter().any(|id| id == change.actor_id()) {
+                            actor_ids.push(change.actor_id().clone());
+                        }
+                    }
+                    actor_ids.sort_by_key(|id| id.to_string());
+
                     let patches = doc.diff(&heads, &changes.new_heads[..]);
                     let new_heads: Arc<[automerge::ChangeHash]> = Arc::from(&changes.new_heads[..]);
+                    let actor_ids: Arc<[automerge::ActorId]> = Arc::from(actor_ids);
 
                     let collected_changes = patches
                         .into_iter()
@@ -181,6 +215,7 @@ impl ChangeListenerManager {
                             ChangeNotification {
                                 patch,
                                 heads: Arc::clone(&new_heads),
+                                actor_ids: Arc::clone(&actor_ids),
                             }
                         })
                         .collect::<Vec<_>>();
@@ -188,7 +223,7 @@ impl ChangeListenerManager {
                     (new_heads, collected_changes)
                 });
 
-                debug!(?all_changes, "XXX changes observed");
+                trace!(?all_changes, "XXX changes observed");
 
                 // Notify listeners about changes
                 if !all_changes.is_empty() {

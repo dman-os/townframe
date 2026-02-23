@@ -195,6 +195,7 @@
           rustLintInputs = with pkgs; [
             cargo-udeps
             prek
+            cargo-nextest
           ];
 
           kotliLintTools = with pkgs; [
@@ -227,7 +228,6 @@
             terragrunt
             tokio-console
             infisical
-            cargo-nextest
             cargo-ndk
             wac-cli
             wasmtime
@@ -331,6 +331,9 @@
                   export DYLD_LIBRARY_PATH="$LD_LIBRARY_PATH"
                 fi
                 export PATH=$PATH:$PWD/x/
+                if [ -e .env ]; then
+                  source "$PWD/x/load-dotenv-safe.sh" .env
+                fi
                 if [[ -t 0 ]]; then
                   exec $(getent passwd $USER | cut -d: -f7)
                 fi

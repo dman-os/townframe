@@ -20,6 +20,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
+  OLLAMA_USERNAME: ${{ secrets.OLLAMA_USERNAME }}
+  OLLAMA_PASSWORD: ${{ secrets.OLLAMA_PASSWORD }}
+
 jobs:
   linux-appimage:
     runs-on: ubuntu-latest
@@ -38,7 +43,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: nightly-2026-01-01
-          target: wasm32-wasip2,wasm32-unknown-unknown,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+          target: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
 
@@ -57,7 +62,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: daybook-appimage
-          path: ./target/appimage/*tar*
+          path: ./target/appimage/
 
   android-apk:
     runs-on: ubuntu-latest

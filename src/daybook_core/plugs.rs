@@ -400,17 +400,20 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             "index-embedding".into(),
                         ],
                         // FIXME: make this more generic
-                        component_urls: vec![{
-                            let path = std::path::absolute(
-                                Path::new(env!("CARGO_MANIFEST_DIR"))
-                                    .join("../../target/wasm32-wasip2/debug/daybook_wflows.wasm"),
-                            )
-                            .unwrap();
+                        component_urls: vec![
+                            "static:daybook_wflows.wasm.zst".parse().unwrap(),
+                            /*{
+                                let path = std::path::absolute(
+                                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                                        .join("../../target/wasm32-wasip2/release/daybook_wflows.wasm"),
+                                )
+                                .unwrap();
 
-                            format!("file://{path}", path = path.to_string_lossy())
-                                .parse()
-                                .unwrap()
-                        }],
+                                format!("file://{path}", path = path.to_string_lossy())
+                                    .parse()
+                                    .unwrap()
+                            }*/
+                        ],
                     }
                     .into(),
                 ),
@@ -516,7 +519,7 @@ pub struct PlugsRepo {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PlugsEvent {
-    ListChanged { heads: ChangeHashSet },
+    // ListChanged { heads: ChangeHashSet },
     PlugAdded { id: String, heads: ChangeHashSet },
     PlugChanged { id: String, heads: ChangeHashSet },
     PlugDeleted { id: String, heads: ChangeHashSet },
@@ -629,13 +632,8 @@ impl PlugsRepo {
 
             events.clear();
             for notif in notifs {
-                // 1. Extract ActorId from the patch using the new utils_rs::am helper.
-                if let Some(actor_id) = utils_rs::am::get_actor_id_from_patch(&notif.patch) {
-                    // 2. Skip if it matches self.local_actor_id.
-                    if actor_id == self.local_actor_id {
-                        debug!("process_notifs: skipping local change for plug");
-                        continue;
-                    }
+                if notif.is_local_only(&self.local_actor_id) {
+                    continue;
                 }
 
                 // 3. Call events_for_patch (pure-ish).
@@ -678,7 +676,6 @@ impl PlugsRepo {
                             })
                             .await?;
                     }
-                    PlugsEvent::ListChanged { .. } => {}
                 }
             }
             self.registry.notify(events.drain(..));
@@ -766,9 +763,7 @@ impl PlugsRepo {
                     heads,
                 });
             }
-            _ => {
-                out.push(PlugsEvent::ListChanged { heads });
-            }
+            _ => {}
         }
         Ok(())
     }
@@ -866,16 +861,49 @@ impl PlugsRepo {
             for bundle in manifest.wflow_bundles.values_mut() {
                 let bundle = Arc::make_mut(bundle);
                 for url in bundle.component_urls.iter_mut() {
-                    if url.scheme() == "file" {
-                        let path = url
-                            .to_file_path()
-                            .map_err(|_| eyre::eyre!("invalid file path in url: {}", url))?;
-                        let data = tokio::fs::read(&path).await.wrap_err_with(|| {
-                            format!("failed to read component file: {}", path.display())
-                        })?;
-                        let hash = self.blobs.put(&data).await?;
-                        *url =
-                            url::Url::parse(&format!("{}:///{}", crate::blobs::BLOB_SCHEME, hash))?;
+                    match url.scheme() {
+                        "file" => {
+                            let path = url.to_file_path().map_err(|err| {
+                                eyre::eyre!("invalid path in url {url:?} {err:?}")
+                            })?;
+                            let data = tokio::fs::read(&path).await.wrap_err_with(|| {
+                                format!("failed to read component file: {}", path.display())
+                            })?;
+                            let hash = self.blobs.put(&data).await?;
+                            *url = url::Url::parse(&format!(
+                                "{}:///{}",
+                                crate::blobs::BLOB_SCHEME,
+                                hash
+                            ))?;
+                        }
+                        "static" => {
+                            let wasm_zst_bytes = match url.path() {
+                                "daybook_wflows.wasm.zst" => {
+                                    include_bytes!(concat!(
+                                        env!("OUT_DIR"),
+                                        "/daybook_wflows.wasm.zst"
+                                    ))
+                                }
+                                _ => {
+                                    eyre::bail!("unsupported static wasm component_url");
+                                }
+                            };
+                            let data = tokio::task::spawn_blocking(move || {
+                                let mut wasm_bytes = vec![];
+                                zstd::stream::copy_decode(&wasm_zst_bytes[..], &mut wasm_bytes)
+                                    .wrap_err("error decompressing serialized component")?;
+                                eyre::Ok(wasm_bytes)
+                            })
+                            .await??;
+                            let hash = self.blobs.put(&data).await?;
+                            *url = url::Url::parse(&format!(
+                                "{}:///{}",
+                                crate::blobs::BLOB_SCHEME,
+                                hash
+                            ))?;
+                        }
+                        crate::blobs::BLOB_SCHEME => {}
+                        _ => eyre::bail!("unsupported component_url scheme: {url}"),
                     }
                 }
             }
@@ -887,7 +915,7 @@ impl PlugsRepo {
         // to simplify lookups and ensure uniqueness.
         let plug_id = manifest.id();
 
-        let (_, hash) = self
+        let ((plug_id, is_update), hash) = self
             .store
             .mutate_sync(move |store| {
                 let manifest = manifest;
@@ -912,13 +940,17 @@ impl PlugsRepo {
                 // used to hyper-accelerate validation and routing logic.
                 // We rebuild them here so they're immediately available for subsequent calls.
                 store.rebuild_indices();
+
+                (plug_id, is_update)
             })
             .await?;
-
         let heads = ChangeHashSet(hash.into_iter().collect());
-
         // Notify listeners that the plug list or a specific plug has changed
-        self.registry.notify([PlugsEvent::ListChanged { heads }]);
+        self.registry.notify([if is_update {
+            PlugsEvent::PlugChanged { id: plug_id, heads }
+        } else {
+            PlugsEvent::PlugAdded { id: plug_id, heads }
+        }]);
 
         Ok(())
     }
@@ -1158,20 +1190,21 @@ impl PlugsRepo {
                             );
                         }
                     }
+                    "static" => match url.path() {
+                        "daybook_wflows.wasm.zst" => {}
+                        _ => eyre::bail!("Unrecognized static component_url: {url}",),
+                    },
                     scheme if scheme == crate::blobs::BLOB_SCHEME => {
                         let hash = url.path().trim_start_matches('/');
                         if self.blobs.get_path(hash).await.is_err() {
                             eyre::bail!(
-                                "Blob not found in BlobsRepo for bundle '{}': {}",
-                                bundle_name,
-                                hash
+                                "Blob not found in BlobsRepo for bundle {bundle_name:?}: {hash:?}",
                             );
                         }
                     }
                     _ => {
                         eyre::bail!(
-                            "Unsupported URL scheme for bundle '{}': {}",
-                            bundle_name,
+                            "Unsupported URL scheme for bundle {bundle_name:?}: {}",
                             url.scheme()
                         );
                     }

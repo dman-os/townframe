@@ -1890,9 +1890,9 @@ dependencies = [
 
 [[package]]
 name = "data-encoding"
-version = "2.9.0"
+version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a2330da5de22e8a3cb63252ce2abb30116bf5265e89c0e01bc17015ce30a476"
+checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
 name = "daybook_cli"
@@ -1944,6 +1944,7 @@ dependencies = [
  "insta",
  "jsonschema",
  "libsqlite3-sys",
+ "loom",
  "mltools",
  "once_cell",
  "pastey",
@@ -1975,6 +1976,7 @@ dependencies = [
  "wash_plugin_wflow",
  "wasmtime",
  "wflow",
+ "zstd",
 ]
 
 [[package]]
@@ -2036,6 +2038,7 @@ dependencies = [
  "automerge",
  "autosurgeon",
  "blake3",
+ "data-encoding",
  "displaydoc",
  "pastey",
  "schemars 1.2.0",
@@ -4284,12 +4287,14 @@ version = "0.1.0"
 dependencies = [
  "api_utils_rs",
  "bon",
+ "data-encoding",
  "directories",
  "fastembed",
  "fs4",
  "hf-hub",
  "oar-ocr",
  "ollama-rs",
+ "reqwest",
  "serde",
  "tokio",
  "url",

@@ -110,6 +110,52 @@ impl From<eyre::Report> for CasError {
     }
 }
 
+#[allow(clippy::type_complexity)]
+fn make_dhashmap_cas_guard(
+    store: Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>>,
+    key: Arc<[u8]>,
+    snapshot: Option<Arc<[u8]>>,
+) -> CasGuard {
+    let current_cb = {
+        let snapshot = snapshot.clone();
+        move || snapshot.clone()
+    };
+    let key_for_cb = Arc::clone(&key);
+    let swap_cb =
+        move |value: Arc<[u8]>| -> futures::future::BoxFuture<'static, Res<Result<(), CasError>>> {
+            let store = Arc::clone(&store);
+            let key = Arc::clone(&key_for_cb);
+            let snapshot = snapshot.clone();
+            Box::pin(async move {
+                use dashmap::mapref::entry::Entry;
+                match store.entry(Arc::clone(&key)) {
+                    Entry::Occupied(mut entry) => {
+                        let current = Arc::clone(entry.get());
+                        if snapshot.as_deref() == Some(current.as_ref()) {
+                            entry.insert(value);
+                            Ok(Ok(()))
+                        } else {
+                            let new_guard =
+                                make_dhashmap_cas_guard(Arc::clone(&store), key, Some(current));
+                            Ok(Err(CasError::CasFailed(new_guard)))
+                        }
+                    }
+                    Entry::Vacant(entry) => {
+                        if snapshot.is_none() {
+                            entry.insert(value);
+                            Ok(Ok(()))
+                        } else {
+                            let new_guard = make_dhashmap_cas_guard(Arc::clone(&store), key, None);
+                            Ok(Err(CasError::CasFailed(new_guard)))
+                        }
+                    }
+                }
+            })
+        };
+
+    CasGuard::new(current_cb, swap_cb)
+}
+
 #[async_trait]
 impl KvStore for Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>> {
     async fn get(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
@@ -122,80 +168,41 @@ impl KvStore for Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>> {
         Ok(self.remove(key).map(|(_, val)| val))
     }
     async fn increment(&self, key: &[u8], delta: i64) -> Res<i64> {
-        // Use CAS to atomically increment
-        const MAX_CAS_RETRIES: usize = 100;
-        let mut cas = self.new_cas(key).await?;
-        for _attempt in 0..MAX_CAS_RETRIES {
-            let current = cas.current();
-            let current_value = if let Some(bytes) = current {
-                // Try to parse as i64 (little-endian, 8 bytes)
-                if bytes.len() == 8 {
-                    let mut buf = [0u8; 8];
-                    buf.copy_from_slice(&bytes);
-                    i64::from_le_bytes(buf)
-                } else {
+        use dashmap::mapref::entry::Entry;
+
+        let key: Arc<[u8]> = key.into();
+        match self.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let bytes = entry.get();
+                if bytes.len() != 8 {
                     return Err(ferr!(
                         "cannot increment: value is not a valid i64 (expected 8 bytes, got {})",
                         bytes.len()
                     ));
                 }
-            } else {
-                0
-            };
-
-            let new_value = current_value
-                .checked_add(delta)
-                .ok_or_else(|| ferr!("integer overflow in increment"))?;
-
-            // Store new value as little-endian bytes
-            let new_bytes: Arc<[u8]> = new_value.to_le_bytes().into();
-            match cas.swap(new_bytes).await? {
-                Ok(()) => return Ok(new_value),
-                Err(CasError::CasFailed(new_guard)) => {
-                    cas = new_guard;
-                    // Retry with new guard
-                }
-                Err(CasError::StoreError(err)) => return Err(err),
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(bytes.as_ref());
+                let current_value = i64::from_le_bytes(buf);
+                let new_value = current_value
+                    .checked_add(delta)
+                    .ok_or_else(|| ferr!("integer overflow in increment"))?;
+                entry.insert(new_value.to_le_bytes().into());
+                Ok(new_value)
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(delta.to_le_bytes().into());
+                Ok(delta)
             }
         }
-        Err(ferr!(
-            "failed to increment after {MAX_CAS_RETRIES} CAS retries: concurrent modifications",
-        ))
     }
 
     async fn new_cas(&self, key: &[u8]) -> Res<CasGuard> {
-        // Take a snapshot of the current value
         let snapshot = self.get(key).await?;
-        let key: Arc<[u8]> = key.into();
-        let store = Arc::clone(self);
-
-        let current_cb = {
-            let snapshot = snapshot.clone();
-            move || snapshot.clone()
-        };
-
-        let swap_cb = move |value: Arc<[u8]>| -> futures::future::BoxFuture<'static, Res<Result<(), CasError>>> {
-            let store = Arc::clone(&store);
-            let key = Arc::clone(&key);
-            let snapshot = snapshot.clone();
-
-            Box::pin(async move {
-                // Get current value
-                let current = store.get(&key).await?;
-                // Compare with snapshot
-                if current.as_ref().map(|bytes| bytes.as_ref()) == snapshot.as_ref().map(|bytes| bytes.as_ref()) {
-                    // Values match, perform swap
-                    store.set(key, value).await?;
-                    Ok(Ok(()))
-                } else {
-                    // Values don't match, create new guard with updated snapshot
-                    let new_guard = store.new_cas(&key).await?;
-                    Ok(Err(CasError::CasFailed(new_guard)))
-                }
-            })
-        };
-
-        Ok(CasGuard::new(current_cb, swap_cb))
+        Ok(make_dhashmap_cas_guard(
+            Arc::clone(self),
+            key.into(),
+            snapshot,
+        ))
     }
 }
 
@@ -264,8 +271,8 @@ pub mod tests {
 
     pub async fn test_kv_store_concurrency(store: Arc<dyn KvStore + Send + Sync>) -> Res<()> {
         let counter_key: Arc<[u8]> = b"concurrent_counter".to_vec().into();
-        let num_tasks = 10;
-        let increments_per_task = 20;
+        let num_tasks = 32;
+        let increments_per_task = 500;
 
         let mut tasks = Vec::new();
         for _ in 0..num_tasks {
@@ -273,7 +280,8 @@ pub mod tests {
             let key = Arc::clone(&counter_key);
             tasks.push(tokio::spawn(async move {
                 for _ in 0..increments_per_task {
-                    store.increment(&key, 1).await.unwrap();
+                    store.increment(&key, 1).await.expect("increment");
+                    tokio::task::yield_now().await;
                 }
             }));
         }
@@ -310,14 +318,17 @@ pub mod tests {
             let store: Arc<DHashMap<Arc<[u8]>, Arc<[u8]>>> = Arc::new(DHashMap::default());
             let key: Arc<[u8]> = b"loom_counter".to_vec().into();
 
-            let threads: Vec<_> = (0..2)
+            let threads: Vec<_> = (0..4)
                 .map(|_| {
                     let store = Arc::clone(&store);
                     let key = Arc::clone(&key);
                     thread::spawn(move || {
-                        block_on(async {
-                            let _ = store.increment(&key, 1).await;
-                        });
+                        for _ in 0..3 {
+                            block_on(async {
+                                store.increment(&key, 1).await.expect("increment");
+                            });
+                            thread::yield_now();
+                        }
                     })
                 })
                 .collect();
@@ -330,7 +341,7 @@ pub mod tests {
             let mut buf = [0u8; 8];
             buf.copy_from_slice(&final_val);
             let final_count = i64::from_le_bytes(buf);
-            assert_eq!(final_count, 2);
+            assert_eq!(final_count, 12);
         });
     }
 }

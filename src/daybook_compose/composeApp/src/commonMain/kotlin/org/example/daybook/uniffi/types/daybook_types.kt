@@ -1329,6 +1329,7 @@ data class Embedding (
     , 
     /**
      * little-endian
+     * check that this does translate to bytes
      */
     var `vector`: kotlin.ByteArray
     , 

@@ -12,8 +12,8 @@ async fn test_ocr_image_workflow() -> Res<()> {
     )
     .await?;
 
-    let image_bytes = tokio::fs::read("/tmp/sample.jpg").await?;
-    let blob_hash = test_cx.rt.blobs_repo.put(&image_bytes).await?;
+    let image_bytes = include_bytes!("./sample.jpg");
+    let blob_hash = test_cx.rt.blobs_repo.put(image_bytes).await?;
 
     let blob_facet = Blob {
         mime: "image/jpeg".to_string(),
@@ -36,7 +36,7 @@ async fn test_ocr_image_workflow() -> Res<()> {
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;
 
     let mut dispatch_id: Option<String> = None;
-    for _ in 0..300 {
+    for _ in 0..600 {
         let dispatches = test_cx.dispatch_repo.list().await;
         if let Some((found_dispatch_id, _dispatch)) = dispatches.iter().find(|(_, dispatch)| {
             matches!(

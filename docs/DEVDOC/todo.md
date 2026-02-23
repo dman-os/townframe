@@ -5,6 +5,7 @@
     - [ ] Registry
       - [ ] OCI based
     - [x] Un-previlaged processors should go in their own branch
+  - [ ] Backup ATProto PD
   - [ ] Chatbot
   - [ ] Generated UI
   - [ ] FUSE/dpath
@@ -22,6 +23,9 @@
 
 ## Stack
 
+
+- [ ] Make automerge json codec minimal
+- [ ] use a env var or an env! var to set global multipliers for our test timeouts
 - [ ] File locks on repo
 - [ ] Store plugin info in drawer??
 - [ ] Js execution
@@ -183,6 +187,7 @@
   - [ ] Windows
   - [ ] macOS
 - [ ] GraalVM for Linux
+- [ ] Cross-device networking features
 
 ## Upstream Issues
 

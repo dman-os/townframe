@@ -1,3 +1,5 @@
+// FIXME: avoid json rows
+
 use crate::interlude::*;
 use jiff::Timestamp;
 use std::collections::{HashMap, HashSet, VecDeque};

@@ -9,6 +9,8 @@ use crate::rt::Rt;
 use daybook_types::doc::BranchPath;
 use daybook_types::doc::{Doc, DocId, FacetKey};
 
+const SUBSCRIPTION_CAPACITY: usize = 256;
+
 #[derive(Default, Debug, Reconcile, Hydrate, Serialize, Deserialize)]
 pub struct SwitchStateStore {
     pub drawer_heads: Option<ChangeHashSet>,
@@ -49,6 +51,13 @@ impl Drop for SwitchWorkerHandle {
             join_handle.abort()
         }
     }
+}
+
+fn switch_worker_is_shutting_down(
+    worker_cancel_token: &tokio_util::sync::CancellationToken,
+    rt_cancel_token: &tokio_util::sync::CancellationToken,
+) -> bool {
+    worker_cancel_token.is_cancelled() || rt_cancel_token.is_cancelled()
 }
 
 #[derive(Debug, Clone)]
@@ -104,7 +113,7 @@ pub async fn spawn_switch_worker(
     app_doc_id: DocumentId,
     sinks: BTreeMap<String, Box<dyn SwitchSink + Send + Sync>>,
 ) -> Res<SwitchWorkerHandle> {
-    use crate::repos::Repo;
+    use crate::repos::{Repo, SubscribeOpts};
     use crate::stores::Store;
 
     let store = SwitchStateStore::load(&rt.acx, &app_doc_id).await?;
@@ -115,13 +124,18 @@ pub async fn spawn_switch_worker(
         rt.local_actor_id.clone(),
     );
 
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<Arc<DrawerEvent>>();
-    let (plug_event_tx, mut plug_event_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Arc<PlugsEvent>>();
-    let (config_event_tx, mut config_event_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Arc<crate::config::ConfigEvent>>();
-    let (dispatch_event_tx, mut dispatch_event_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Arc<DispatchEvent>>();
+    let drawer_listener = rt
+        .drawer
+        .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
+    let plug_listener = rt
+        .plugs_repo
+        .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
+    let config_listener = rt
+        .config_repo
+        .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
+    let dispatch_listener = rt
+        .dispatch_repo
+        .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
 
     // Catch up on missed events
     let (initial_drawer_heads, initial_dispatch_heads, initial_plug_heads, initial_config_heads) =
@@ -141,32 +155,6 @@ pub async fn spawn_switch_worker(
     let dispatch_heads_now = rt.dispatch_repo.get_dispatch_heads();
     let plug_heads_now = rt.plugs_repo.get_plugs_heads();
     let config_heads_now = ChangeHashSet(rt.config_repo.get_config_heads().await?);
-
-    let listener = rt.drawer.register_listener({
-        let event_tx = event_tx.clone();
-        move |event| event_tx.send(event).expect(ERROR_CHANNEL)
-    });
-
-    let plug_listener = rt.plugs_repo.register_listener({
-        let plug_event_tx = plug_event_tx.clone();
-        move |event| {
-            plug_event_tx.send(event).expect(ERROR_CHANNEL);
-        }
-    });
-
-    let config_listener = rt.config_repo.register_listener({
-        let config_event_tx = config_event_tx.clone();
-        move |event| {
-            config_event_tx.send(event).expect(ERROR_CHANNEL);
-        }
-    });
-
-    let dispatch_listener = rt.dispatch_repo.register_listener({
-        let dispatch_event_tx = dispatch_event_tx.clone();
-        move |event| {
-            dispatch_event_tx.send(event).expect(ERROR_CHANNEL);
-        }
-    });
 
     let mut worker = SwitchWorker {
         store,
@@ -255,15 +243,11 @@ pub async fn spawn_switch_worker(
     }
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
+    let rt_cancel_token = worker.rt.cancel_token.clone();
     let fut = {
         let cancel_token = cancel_token.clone();
+        let rt_cancel_token = rt_cancel_token.clone();
         async move {
-            // NOTE: we don't want to drop the listeners before we're done
-            let _listener = listener;
-            let _plug_listener = plug_listener;
-            let _config_listener = config_listener;
-            let _dispatch_listener = dispatch_listener;
-
             loop {
                 tokio::select! {
                     biased;
@@ -271,76 +255,92 @@ pub async fn spawn_switch_worker(
                         debug!("SwitchWorker cancelled");
                         break;
                     }
-                    event = plug_event_rx.recv() => {
-                        let Some(event) = event  else{
-                            break;
+                    event = plug_listener.recv_lossy_async() => {
+                        let event = match event {
+                            Ok(event) => event,
+                            Err(error) => {
+                                trace!(?error, "SwitchWorker plug_listener recv closed");
+                                break;
+                            }
                         };
                         if let Err(error) = worker.track_event_heads(&SwitchEvent::Plugs(Arc::clone(&event))).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
                             return Err(error);
                         }
                         if let Err(error) = worker.dispatch_to_listeners(&SwitchEvent::Plugs(event)).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
                             return Err(error);
                         }
                     }
-                    event = config_event_rx.recv() => {
-                        let Some(event) = event else {
-                            break;
+                    event = config_listener.recv_lossy_async() => {
+                        let event = match event {
+                            Ok(event) => event,
+                            Err(error) => {
+                                trace!(?error, "SwitchWorker config_listener recv closed");
+                                break;
+                            }
                         };
                         if let Err(error) = worker.track_event_heads(&SwitchEvent::Config(Arc::clone(&event))).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
                             return Err(error);
                         }
                         if let Err(error) = worker.dispatch_to_listeners(&SwitchEvent::Config(event)).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
                             return Err(error);
                         }
                     }
-                    event = event_rx.recv() => {
-                        let Some(event) = event else {
-                            break;
+                    event = drawer_listener.recv_lossy_async() => {
+                        let event = match event {
+                            Ok(event) => event,
+                            Err(error) => {
+                                trace!(?error, "SwitchWorker drawer_listener recv closed");
+                                break;
+                            }
                         };
                         if let Err(error) = worker.track_event_heads(&SwitchEvent::Drawer(Arc::clone(&event))).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
                             return Err(error);
                         }
                         if let Err(error) = worker.dispatch_to_listeners(&SwitchEvent::Drawer(event)).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
                             return Err(error);
                         }
                     }
-                    event = dispatch_event_rx.recv() => {
-                        let Some(event) = event else {
-                            break;
+                    event = dispatch_listener.recv_lossy_async() => {
+                        let event = match event {
+                            Ok(event) => event,
+                            Err(error) => {
+                                trace!(?error, "SwitchWorker dispatch_listener recv closed");
+                                break;
+                            }
                         };
                         if let Err(error) = worker.track_event_heads(&SwitchEvent::Dispatch(Arc::clone(&event))).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
                             return Err(error);
                         }
                         if let Err(error) = worker.dispatch_to_listeners(&SwitchEvent::Dispatch(event)).await {
-                            if error.to_string().contains("rt is shutting down") {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
                                 debug!(?error, "SwitchWorker exiting during shutdown");
                                 break;
                             }
@@ -352,9 +352,11 @@ pub async fn spawn_switch_worker(
             eyre::Ok(())
         }
     };
+    let join_cancel_token = cancel_token.clone();
+    let join_rt_cancel_token = rt_cancel_token.clone();
     let join_handle = tokio::spawn(async move {
         if let Err(err) = fut.await {
-            if err.to_string().contains("rt is shutting down") {
+            if switch_worker_is_shutting_down(&join_cancel_token, &join_rt_cancel_token) {
                 debug!(?err, "SwitchWorker exiting during shutdown");
             } else {
                 error!(?err, "SwitchWorker failed");
@@ -395,6 +397,7 @@ struct SwitchWorker {
 }
 
 impl SwitchWorker {
+    #[tracing::instrument(skip(self))]
     async fn dispatch_to_listeners(&mut self, event: &SwitchEvent) -> Res<()> {
         let ctx = SwitchSinkCtx {
             rt: Some(&self.rt),
@@ -519,7 +522,6 @@ impl SwitchWorker {
             }
             SwitchEvent::Plugs(event) => {
                 let plug_heads = match &**event {
-                    PlugsEvent::ListChanged { heads } => heads.clone(),
                     PlugsEvent::PlugAdded { heads, .. } => heads.clone(),
                     PlugsEvent::PlugChanged { heads, .. } => heads.clone(),
                     PlugsEvent::PlugDeleted { heads, .. } => heads.clone(),
@@ -533,8 +535,6 @@ impl SwitchWorker {
             SwitchEvent::Dispatch(event) => {
                 let dispatch_heads = match &**event {
                     DispatchEvent::DispatchAdded { heads, .. } => heads.clone(),
-                    DispatchEvent::ListChanged { heads } => heads.clone(),
-                    DispatchEvent::DispatchUpdated { heads, .. } => heads.clone(),
                     DispatchEvent::DispatchDeleted { heads, .. } => heads.clone(),
                 };
                 self.store
@@ -854,7 +854,8 @@ mod tests {
         let mut runtime_listeners = prepare_sinks(listeners);
         dispatch_test_event(
             &mut runtime_listeners,
-            &SwitchEvent::Dispatch(Arc::new(DispatchEvent::ListChanged {
+            &SwitchEvent::Dispatch(Arc::new(DispatchEvent::DispatchDeleted {
+                id: "hello".into(),
                 heads: ChangeHashSet(Vec::new().into()),
             })),
         )
@@ -906,7 +907,8 @@ mod tests {
         let mut runtime_listeners = prepare_sinks(listeners);
         dispatch_test_event(
             &mut runtime_listeners,
-            &SwitchEvent::Dispatch(Arc::new(DispatchEvent::ListChanged {
+            &SwitchEvent::Dispatch(Arc::new(DispatchEvent::DispatchDeleted {
+                id: "hello".into(),
                 heads: ChangeHashSet(Vec::new().into()),
             })),
         )
@@ -947,7 +949,8 @@ mod tests {
         let mut runtime_listeners = prepare_sinks(listeners);
         dispatch_test_event(
             &mut runtime_listeners,
-            &SwitchEvent::Plugs(Arc::new(PlugsEvent::ListChanged {
+            &SwitchEvent::Plugs(Arc::new(PlugsEvent::PlugAdded {
+                id: "id".into(),
                 heads: ChangeHashSet(Vec::new().into()),
             })),
         )

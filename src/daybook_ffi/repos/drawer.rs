@@ -46,10 +46,10 @@ impl DrawerRepoFfi {
                 Arc::new(std::sync::Mutex::new(
                     daybook_core::drawer::lru::KeyedLruPool::new(1000),
                 )),
+                Arc::clone(&plugs_repo.repo),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
-        repo.set_plugs_repo(Arc::clone(&plugs_repo.repo));
         Ok(Arc::new(Self {
             fcx,
             repo,
@@ -65,7 +65,6 @@ impl DrawerRepoFfi {
         Ok(())
     }
 
-    // old FFI wrappers for contains/insert/remove removed; use `ffi_get`, `ffi_add`, `ffi_update`, `ffi_del` instead
     #[tracing::instrument(skip(self))]
     async fn list(self: Arc<Self>) -> Vec<DocNBranches> {
         let this = Arc::clone(&self);

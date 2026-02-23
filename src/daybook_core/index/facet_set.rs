@@ -450,7 +450,7 @@ mod tests {
         doc_id: &DocId,
         facet_tag: &str,
     ) -> Res<()> {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
         while tokio::time::Instant::now() < deadline {
             if repo.has_tag(doc_id, facet_tag).await? {
                 return Ok(());

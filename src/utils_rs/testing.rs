@@ -22,11 +22,12 @@ fn setup_tracing() -> Res<()> {
     #[cfg(target_arch = "wasm32")]
     let filter: Option<String> = None;
 
-    let filter = filter.unwrap_or_else(|| "info".into());
+    #[allow(clippy::unnecessary_literal_unwrap)]
+    let filter = filter.unwrap_or_else(|| "info,ort::logging=warn".into());
 
-    // #[cfg(feature = "console-subscriber")]
+    // #[cfg(test)]
     // console_subscriber::init();
-    // #[cfg(feature = "console-subscriber")]
+    // #[cfg(test)]
     // return Ok(());
 
     use tracing_subscriber::prelude::*;

@@ -5,6 +5,23 @@ use automerge::ObjId;
 use automerge::*;
 use autosurgeon::{Hydrate, HydrateError, Prop, ReadDoc, Reconciler};
 
+const BASE64_FIELD_SUFFIX: &str = "Base64";
+
+fn decode_base64_field(value: &str) -> Option<Vec<u8>> {
+    data_encoding::BASE64
+        .decode(value.as_bytes())
+        .ok()
+        .or_else(|| data_encoding::BASE64_NOPAD.decode(value.as_bytes()).ok())
+}
+
+fn encode_base64_field(value: &[u8]) -> String {
+    data_encoding::BASE64.encode(value)
+}
+
+fn is_base64_field(key: &str) -> bool {
+    key.ends_with(BASE64_FIELD_SUFFIX)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(transparent)]
 pub struct ThroughJson<T>(pub T);
@@ -91,6 +108,15 @@ pub fn reconcile_value<R: Reconciler>(
             }
             // Put or update entries
             for (key, value) in val {
+                if is_base64_field(key) {
+                    if let serde_json::Value::String(encoded) = value {
+                        if let Some(bytes) = decode_base64_field(encoded) {
+                            map_reconciler.put(key, autosurgeon::bytes::ByteVec::from(bytes))?;
+                            continue;
+                        }
+                        warn!(key, "invalid base64 payload, storing as string");
+                    }
+                }
                 map_reconciler.put(key, ThroughJson(value))?;
             }
             Ok(())
@@ -238,7 +264,17 @@ where
         let value = {
             let mut map = serde_json::Map::new();
             for item in doc.map_range(obj, ..) {
-                let value = hydrate_value(doc, obj, autosurgeon::Prop::Key(item.key.clone()))?;
+                let value = match doc.get(obj, item.key.clone())? {
+                    Some((automerge::Value::Scalar(scalar), _)) if is_base64_field(&item.key) => {
+                        match scalar.as_ref() {
+                            automerge::ScalarValue::Bytes(bytes) => {
+                                serde_json::Value::String(encode_base64_field(bytes))
+                            }
+                            _ => hydrate_value(doc, obj, autosurgeon::Prop::Key(item.key.clone()))?,
+                        }
+                    }
+                    _ => hydrate_value(doc, obj, autosurgeon::Prop::Key(item.key.clone()))?,
+                };
                 map.insert(item.key.to_string(), value);
             }
             serde_json::Value::Object(map)
@@ -512,6 +548,42 @@ mod tests {
             commited
         };
 
+        Ok(())
+    }
+
+    #[test]
+    fn base64_suffix_round_trips_as_automerge_bytes() -> Res<()> {
+        let mut doc = automerge::AutoCommit::new();
+        let payload = serde_json::json!({
+            "vectorBase64": "AQIDBA=="
+        });
+
+        autosurgeon::reconcile_prop(
+            &mut doc,
+            automerge::ROOT,
+            "facet",
+            ThroughJson(payload.clone()),
+        )?;
+
+        let facet_obj = doc
+            .get(&automerge::ROOT, "facet")?
+            .ok_or_else(|| ferr!("facet not found"))?
+            .1;
+        let stored = doc
+            .get(&facet_obj, "vectorBase64")?
+            .ok_or_else(|| ferr!("vectorBase64 not found"))?
+            .0;
+        match stored {
+            automerge::Value::Scalar(scalar) => match scalar.as_ref() {
+                automerge::ScalarValue::Bytes(bytes) => assert_eq!(bytes.as_slice(), &[1, 2, 3, 4]),
+                other => panic!("expected bytes scalar, found {other:?}"),
+            },
+            other => panic!("expected scalar value, found {other:?}"),
+        }
+
+        let hydrated: ThroughJson<serde_json::Value> =
+            autosurgeon::hydrate_prop(&doc, automerge::ROOT, "facet")?;
+        assert_eq!(hydrated.0, payload);
         Ok(())
     }
 }

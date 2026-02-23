@@ -1,6 +1,5 @@
 ---
 source: src/wflow/test.rs
-assertion_line: 481
 expression: log_snapshot
 ---
 - - 1
@@ -38,6 +37,11 @@ expression: log_snapshot
             error_json: "{\"msg\":\"waiting for flag to be set\\n\\[location]\"}"
             retry_policy: ~
 - - 4
+  - JobCancel:
+      job_id: test-cancel-job-1
+      timestamp: "[timestamp]"
+      reason: test requested cancel
+- - 5
   - JobPartitionEffects:
       source_entry_id: 3
       effects:
@@ -45,14 +49,9 @@ expression: log_snapshot
           deets:
             RunJob:
               run_id: 1
-- - 5
-  - JobCancel:
-      job_id: test-cancel-job-1
-      timestamp: "[timestamp]"
-      reason: test requested cancel
 - - 6
   - JobPartitionEffects:
-      source_entry_id: 5
+      source_entry_id: 4
       effects:
         - job_id: test-cancel-job-1
           deets:
@@ -63,7 +62,7 @@ expression: log_snapshot
       job_id: test-cancel-job-1
       timestamp: "[timestamp]"
       effect_id:
-        entry_id: 4
+        entry_id: 5
         effect_idx: 0
       run_id: 1
       start_at: "[timestamp]"

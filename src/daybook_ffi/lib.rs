@@ -21,6 +21,7 @@ uniffi::setup_scaffolding!();
 
 mod camera;
 mod ffi;
+mod listener_bridge;
 mod macros;
 mod repos;
 mod rt;

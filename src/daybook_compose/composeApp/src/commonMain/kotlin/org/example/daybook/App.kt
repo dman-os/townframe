@@ -183,6 +183,27 @@ sealed interface TablesState {
     object Loading : TablesState
 }
 
+private data class TablesRefreshIntent(
+    val refreshAll: Boolean = false,
+    val windows: Set<Uuid> = emptySet(),
+    val tabs: Set<Uuid> = emptySet(),
+    val panels: Set<Uuid> = emptySet(),
+    val tables: Set<Uuid> = emptySet()
+) {
+    fun merge(other: TablesRefreshIntent): TablesRefreshIntent =
+        TablesRefreshIntent(
+            refreshAll = refreshAll || other.refreshAll,
+            windows = windows + other.windows,
+            tabs = tabs + other.tabs,
+            panels = panels + other.panels,
+            tables = tables + other.tables
+        )
+
+    companion object {
+        val Full = TablesRefreshIntent(refreshAll = true)
+    }
+}
+
 class TablesViewModel(val tablesRepo: TablesRepoFfi) : ViewModel() {
     private val _tablesState = MutableStateFlow(TablesState.Loading as TablesState)
     val tablesState = _tablesState.asStateFlow()
@@ -194,34 +215,63 @@ class TablesViewModel(val tablesRepo: TablesRepoFfi) : ViewModel() {
     // Registration handle to auto-unregister
     private var listenerRegistration: ListenerRegistration? = null
 
+    private val refreshRunner =
+        CoalescingIntentRunner<TablesRefreshIntent>(
+            scope = viewModelScope,
+            debounceMs = 60,
+            merge = { left: TablesRefreshIntent, right: TablesRefreshIntent -> left.merge(right) },
+            onIntent = { intent: TablesRefreshIntent -> applyRefreshIntent(intent) }
+        )
+
     // Listener instance implemented on Kotlin side
     private val listener =
         object : TablesEventListener {
             override fun onTablesEvent(event: TablesEvent) {
-                // Ensure UI updates happen on main thread
-                viewModelScope.launch {
-                    when (event) {
-                        is TablesEvent.ListChanged -> refreshTables()
-                        is TablesEvent.WindowAdded -> refreshTables()
-                        is TablesEvent.WindowChanged -> updateWindow(event.id)
-                        is TablesEvent.TabAdded -> refreshTables()
-                        is TablesEvent.TabChanged -> updateTab(event.id)
-                        is TablesEvent.PanelAdded -> refreshTables()
-                        is TablesEvent.PanelChanged -> updatePanel(event.id)
-                        is TablesEvent.TableAdded -> refreshTables()
-                        is TablesEvent.TableChanged -> updateTable(event.id)
-                    }
+                when (event) {
+                    is TablesEvent.ListChanged -> refreshRunner.submit(TablesRefreshIntent.Full)
+                    is TablesEvent.WindowAdded -> refreshRunner.submit(TablesRefreshIntent.Full)
+                    is TablesEvent.WindowChanged ->
+                        refreshRunner.submit(TablesRefreshIntent(windows = setOf(event.id)))
+
+                    is TablesEvent.TabAdded -> refreshRunner.submit(TablesRefreshIntent.Full)
+                    is TablesEvent.TabChanged ->
+                        refreshRunner.submit(TablesRefreshIntent(tabs = setOf(event.id)))
+
+                    is TablesEvent.PanelAdded -> refreshRunner.submit(TablesRefreshIntent.Full)
+                    is TablesEvent.PanelChanged ->
+                        refreshRunner.submit(TablesRefreshIntent(panels = setOf(event.id)))
+
+                    is TablesEvent.TableAdded -> refreshRunner.submit(TablesRefreshIntent.Full)
+                    is TablesEvent.TableChanged ->
+                        refreshRunner.submit(TablesRefreshIntent(tables = setOf(event.id)))
                 }
             }
         }
 
     init {
-        // Initial load
-        loadTables()
+        refreshRunner.submit(TablesRefreshIntent.Full)
         // Register listener
         viewModelScope.launch {
             listenerRegistration = tablesRepo.ffiRegisterListener(listener)
         }
+    }
+
+    private suspend fun applyRefreshIntent(intent: TablesRefreshIntent) {
+        val hasTargetedUpdates =
+            intent.windows.isNotEmpty() ||
+                intent.tabs.isNotEmpty() ||
+                intent.panels.isNotEmpty() ||
+                intent.tables.isNotEmpty()
+
+        if (intent.refreshAll || _tablesState.value !is TablesState.Data || !hasTargetedUpdates) {
+            refreshTables()
+            return
+        }
+
+        intent.windows.forEach { updateWindow(it) }
+        intent.tabs.forEach { updateTab(it) }
+        intent.panels.forEach { updatePanel(it) }
+        intent.tables.forEach { updateTable(it) }
     }
 
     private suspend fun refreshTables() {
@@ -422,6 +472,7 @@ class TablesViewModel(val tablesRepo: TablesRepoFfi) : ViewModel() {
     }
 
     override fun onCleared() {
+        refreshRunner.cancel()
         // Clean up registration
         listenerRegistration?.unregister()
         super.onCleared()
