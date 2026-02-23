@@ -24,6 +24,8 @@
 ## Stack
 
 - [ ] Good and local document classification
+  - [ ] Receipt parsing
+  - [ ] Collators
 - [ ] daybook_server
   - [ ] Decide on wrpc vs json
 - [ ] DrawerScreen
@@ -43,7 +45,6 @@
 - [x] Overhaul bottom bar
   - [ ] Change color when in different modes.
   - [ ] Experiment with floating bottom bar
-- [ ] Receipt parsing
 - [ ] Repos
   - [ ] Profiles
   - [x] CLI support
@@ -66,6 +67,9 @@
 - [ ] SQL table schema/data update path
 - [ ] Replace sqlite-vec
 - [ ] CI/CD
+  - [ ] Kotlin tests
+  - [ ] Version tagging and releases
+  - [ ] Continuius builds on push to main
   - [ ] Publish
     - [ ] Docker image
     - [ ] WASM OCI
@@ -87,11 +91,11 @@
   - [ ] LLM auidted registry subset
     - Open-source
 - [ ] Screenshots and screen recording
-  - [ ] How to make it cross platform?
+  - [ ] How to make it cross platform easily?
 - [ ] Publishing
   - [ ] ATProto
   - [ ] Apub
-  - [ ] micro.blog?
+  - [ ] POSSE
 - [ ] wrpc + iroh
 - [ ] `mltools`
   - [ ] OCR
@@ -183,6 +187,7 @@
     - [ ] Fork with context generic programming?
     - So I've implemented ThroughJson as a solution for this
 - [ ] Lints and pre-commit hooks
+  - [ ] Kotlin formats & lints
   - [ ] Triple X comment detector
 - [ ] UI tests
 - [ ] Cross-platform testing
@@ -191,7 +196,3 @@
   - [ ] macOS
 - [ ] GraalVM for Linux
 - [ ] Cross-device networking features
-
-## Upstream Issues
-
-- [ ] Get cargo-doc-md to work reliably
