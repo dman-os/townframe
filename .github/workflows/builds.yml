@@ -38,7 +38,7 @@ env:
   OLLAMA_USERNAME: ${{ secrets.OLLAMA_USERNAME }}
   OLLAMA_PASSWORD: ${{ secrets.OLLAMA_PASSWORD }}
   DAYBOOK_ANDROID_CLI_TARGET: aarch64-linux-android
-  DAYBOOK_PRERELEASE_TAG: daybook-compose-pre-release
+  DAYBOOK_PRERELEASE_TAG: dev
 
 jobs:
   resolve-release-meta:
