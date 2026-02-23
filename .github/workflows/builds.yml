@@ -108,7 +108,7 @@ jobs:
             is_release_build="1"
           fi
 
-          compose_profile="release"
+          compose_profile="debug"
           if [[ "${manual_build_profile}" == "release" || "${manual_build_profile}" == "debug" ]]; then
             compose_profile="${manual_build_profile}"
           elif [[ "${is_release_build}" == "1" ]]; then
@@ -473,8 +473,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path $archiveDir | Out-Null
           Copy-Item -Recurse -Force "src/daybook_compose/composeApp/build/compose/binaries/*" "$composeStageDir/binaries/"
           Copy-Item -Force "target/$env:DAYBOOK_RUST_PROFILE_DIR/daybook_cli.exe" "$cliStageDir/"
-          7z a -t7z -mx=9 -m0=lzma2 $composeArchivePath "$composeStageDir\\*"
-          7z a -t7z -mx=9 -m0=lzma2 $cliArchivePath "$cliStageDir\\*"
+          if (-not (Test-Path "$composeStageDir/binaries")) { throw "Missing compose stage dir: $composeStageDir\\binaries" }
+          if (-not (Test-Path "$cliStageDir/daybook_cli.exe")) { throw "Missing CLI exe in stage dir: $cliStageDir" }
+          Push-Location $composeStageDir
+          try {
+            7z a -t7z -mx=9 -m0=lzma2 "..\\..\\release-archives\\daybook-compose-windows-x64-$env:DAYBOOK_COMPOSE_PROFILE.7z" ".\\*"
+          } finally {
+            Pop-Location
+          }
+          Push-Location $cliStageDir
+          try {
+            7z a -t7z -mx=9 -m0=lzma2 "..\\..\\release-archives\\daybook-cli-windows-x64-$env:DAYBOOK_COMPOSE_PROFILE.7z" ".\\*"
+          } finally {
+            Pop-Location
+          }
           "compose_archive_path=$composeArchivePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "cli_archive_path=$cliArchivePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
