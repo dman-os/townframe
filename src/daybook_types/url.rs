@@ -51,3 +51,52 @@ pub fn parse_facet_ref(url: &Url) -> Res<FacetRef> {
         facet_key: FacetKey::from(format!("{tag}/{id}")),
     })
 }
+
+pub fn parse_facet_ref_str(url: &str) -> Res<FacetRef> {
+    parse_facet_ref(&Url::parse(url)?)
+}
+
+pub fn facet_ref_targets_tag(url: &Url, target_tag: &crate::doc::FacetTag) -> Res<bool> {
+    Ok(parse_facet_ref(url)?.facet_key.tag == *target_tag)
+}
+
+pub fn facet_ref_str_targets_tag(url: &str, target_tag: &crate::doc::FacetTag) -> Res<bool> {
+    Ok(parse_facet_ref_str(url)?.facet_key.tag == *target_tag)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doc::{FacetTag, WellKnownFacetTag};
+
+    #[test]
+    fn parses_facet_ref_str() {
+        let parsed = parse_facet_ref_str("db+facet:///self/org.example.daybook.blob/main").unwrap();
+        assert_eq!(parsed.doc_id, FACET_SELF_DOC_ID);
+        assert_eq!(
+            parsed.facet_key.tag,
+            FacetTag::WellKnown(WellKnownFacetTag::Blob)
+        );
+        assert_eq!(parsed.facet_key.id, "main");
+    }
+
+    #[test]
+    fn facet_ref_targets_tag_matches() {
+        let is_blob = facet_ref_str_targets_tag(
+            "db+facet:///self/org.example.daybook.blob/main",
+            &FacetTag::WellKnown(WellKnownFacetTag::Blob),
+        )
+        .unwrap();
+        assert!(is_blob);
+    }
+
+    #[test]
+    fn facet_ref_targets_tag_mismatch() {
+        let is_note = facet_ref_str_targets_tag(
+            "db+facet:///self/org.example.daybook.blob/main",
+            &FacetTag::WellKnown(WellKnownFacetTag::Note),
+        )
+        .unwrap();
+        assert!(!is_note);
+    }
+}

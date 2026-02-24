@@ -182,14 +182,14 @@ pub async fn embed_text(ctx: &Ctx, text: &str) -> Res<EmbedResult> {
     }
 }
 
-pub async fn embed_image(ctx: &Ctx, image: &Path) -> Res<EmbedResult> {
+pub async fn embed_image(ctx: &Ctx, image: &Path, mime: Option<&str>) -> Res<EmbedResult> {
     let Some(backend_config) = ctx.config.image_embed.backends.first() else {
         eyre::bail!("no image embed backend configured");
     };
 
     match backend_config {
         ImageEmbedBackendConfig::LocalFastembed { .. } => {
-            local::embed_image(backend_config, image).await
+            local::embed_image(backend_config, image, mime).await
         }
     }
 }
@@ -243,40 +243,29 @@ mod local {
     }
 
     fn l2_normalize_in_place(vector: &mut [f32]) {
-        let norm = vector
-            .iter()
-            .map(|value| {
-                let value = f64::from(*value);
-                value * value
-            })
-            .sum::<f64>()
-            .sqrt();
+        let mut data = nalgebra::DVector::<f32>::from_column_slice(vector);
+        let norm = data.norm();
         if norm == 0.0 {
             return;
         }
-        for value in vector {
-            *value = (f64::from(*value) / norm) as f32;
-        }
+        data /= norm;
+        vector.copy_from_slice(data.as_slice());
     }
 
     fn layer_norm_in_place(vector: &mut [f32]) {
         if vector.is_empty() {
             return;
         }
-        let len = vector.len() as f64;
-        let mean = vector.iter().map(|value| f64::from(*value)).sum::<f64>() / len;
-        let variance = vector
-            .iter()
-            .map(|value| {
-                let centered = f64::from(*value) - mean;
-                centered * centered
-            })
-            .sum::<f64>()
-            / len;
-        let inv_std = 1.0 / (variance + 1e-5_f64).sqrt();
-        for value in vector {
-            *value = ((f64::from(*value) - mean) * inv_std) as f32;
+        let len = vector.len() as f32;
+        let mut data = nalgebra::DVector::<f32>::from_column_slice(vector);
+        let mean = data.iter().copied().sum::<f32>() / len;
+        for value in data.iter_mut() {
+            *value -= mean;
         }
+        let variance = data.norm_squared() / len;
+        let inv_std = 1.0_f32 / (variance + 1e-5_f32).sqrt();
+        data *= inv_std;
+        vector.copy_from_slice(data.as_slice());
     }
 
     pub async fn embed_text(backend_config: &EmbedBackendConfig, text: &str) -> Res<EmbedResult> {
@@ -474,6 +463,7 @@ mod local {
     pub async fn embed_image(
         backend_config: &ImageEmbedBackendConfig,
         image: &Path,
+        mime: Option<&str>,
     ) -> Res<EmbedResult> {
         let (onnx_path, preprocessor_config_path, model_id) = match backend_config {
             ImageEmbedBackendConfig::LocalFastembed {
@@ -507,7 +497,19 @@ mod local {
             None
         }
 
+        fn extension_from_mime(mime: &str) -> Option<&'static str> {
+            match mime.split(';').next().map(str::trim) {
+                Some("image/jpeg" | "image/jpg") => Some("jpg"),
+                Some("image/png") => Some("png"),
+                Some("image/gif") => Some("gif"),
+                Some("image/bmp") => Some("bmp"),
+                Some("image/webp") => Some("webp"),
+                _ => None,
+            }
+        }
+
         let image_path = image.to_path_buf();
+        let image_mime = mime.map(str::to_string);
         if !image_path.exists() {
             eyre::bail!("missing image file: {}", image_path.display());
         }
@@ -548,13 +550,15 @@ mod local {
                 let image_bytes = std::fs::read(&image_path).wrap_err_with(|| {
                     format!("failed reading image bytes {}", image_path.display())
                 })?;
-                let ext = sniff_extension(&image_bytes).ok_or_else(|| {
-                    eyre::eyre!("unsupported image format for {}", image_path.display())
-                })?;
-                let unique = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("system time must be after unix epoch")
-                    .as_nanos();
+                let ext = image_mime
+                    .as_deref()
+                    .and_then(extension_from_mime)
+                    .or_else(|| sniff_extension(&image_bytes))
+                    .ok_or_else(|| {
+                        eyre::eyre!("unsupported image format for {}", image_path.display())
+                    })?;
+                let now = jiff::Timestamp::now();
+                let unique = format!("{}-{}", now.as_second(), now.subsec_nanosecond());
                 let path = std::env::temp_dir().join(format!(
                     "mltools-fastembed-image-{}-{}.{}",
                     std::process::id(),
@@ -829,7 +833,7 @@ mod tests {
             .build()?;
         let context = context_with(vec![], vec![], vec![]);
         let image_path = PathBuf::from("/tmp/does_not_matter.jpg");
-        let result = runtime.block_on(async { embed_image(&context, &image_path).await });
+        let result = runtime.block_on(async { embed_image(&context, &image_path, None).await });
         expect_error_message_contains(result, "no image embed backend configured");
         Ok(())
     }

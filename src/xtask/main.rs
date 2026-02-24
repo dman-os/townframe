@@ -141,10 +141,11 @@ async fn main_main() -> Res<()> {
                 let image = image.ok_or_eyre(
                     "embed-similarity-demo requires --image when --image-compare is provided",
                 )?;
-                let image_a = mltools::embed_image(ctx.as_ref(), &image).await?;
-                let image_a_again = mltools::embed_image(ctx.as_ref(), &image).await?;
-                let image_b = mltools::embed_image(ctx.as_ref(), &image_compare).await?;
-                let image_b_again = mltools::embed_image(ctx.as_ref(), &image_compare).await?;
+                let image_a = mltools::embed_image(ctx.as_ref(), &image, None).await?;
+                let image_a_again = mltools::embed_image(ctx.as_ref(), &image, None).await?;
+                let image_b = mltools::embed_image(ctx.as_ref(), &image_compare, None).await?;
+                let image_b_again =
+                    mltools::embed_image(ctx.as_ref(), &image_compare, None).await?;
 
                 let image_image_similarity =
                     sqlite_vec_cosine_similarity(&image_a.vector, &image_b.vector).await?;
@@ -202,8 +203,9 @@ async fn main_main() -> Res<()> {
                 let image = image.ok_or_eyre(
                     "embed-similarity-demo requires --image unless --text-compare is provided",
                 )?;
-                let image_embedding = mltools::embed_image(ctx.as_ref(), &image).await?;
-                let image_embedding_again = mltools::embed_image(ctx.as_ref(), &image).await?;
+                let image_embedding = mltools::embed_image(ctx.as_ref(), &image, None).await?;
+                let image_embedding_again =
+                    mltools::embed_image(ctx.as_ref(), &image, None).await?;
                 let (builtin_image_embedding, builtin_text_embedding) =
                     fastembed_builtin_nomic_cross_modal_embeddings(
                         &image,

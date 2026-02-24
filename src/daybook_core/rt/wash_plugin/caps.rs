@@ -190,6 +190,89 @@ impl capabilities::HostFacetTokenRo for SharedWashCtx {
     }
 }
 
+pub(super) async fn get_facet_raw_from_token_ro(
+    ctx: &mut SharedWashCtx,
+    handle: &wasmtime::component::Resource<capabilities::FacetTokenRo>,
+) -> wasmtime::Result<Result<(daybook_types::doc::FacetKey, daybook_types::doc::FacetRaw), String>>
+{
+    let plugin = DaybookPlugin::from_ctx(ctx);
+    let (doc_id, heads, facet_key) = {
+        let token = ctx
+            .table
+            .get(handle)
+            .context("error locating facet token")
+            .to_anyhow()?;
+        (
+            token.doc_id.clone(),
+            token.heads.clone(),
+            token.facet_key.clone(),
+        )
+    };
+
+    let Some(doc) = plugin.get_doc(&doc_id, &heads).await.to_anyhow()? else {
+        return Ok(Err(format!("doc not found: {doc_id}")));
+    };
+    let Some(facet_raw) = doc.facets.get(&facet_key) else {
+        return Ok(Err(format!("facet not found: {}", facet_key)));
+    };
+    Ok(Ok((facet_key, facet_raw.clone())))
+}
+
+pub(super) async fn get_blob_facet_from_token_ro(
+    ctx: &mut SharedWashCtx,
+    handle: &wasmtime::component::Resource<capabilities::FacetTokenRo>,
+) -> wasmtime::Result<Result<daybook_types::doc::Blob, String>> {
+    let (_facet_key, facet_raw) = match get_facet_raw_from_token_ro(ctx, handle).await? {
+        Ok(value) => value,
+        Err(err) => return Ok(Err(err)),
+    };
+    let blob_facet_value = match daybook_types::doc::WellKnownFacet::from_json(
+        facet_raw,
+        daybook_types::doc::WellKnownFacetTag::Blob,
+    ) {
+        Ok(value) => value,
+        Err(err) => return Ok(Err(err.to_string())),
+    };
+    let daybook_types::doc::WellKnownFacet::Blob(blob) = blob_facet_value else {
+        return Ok(Err("facet is not a blob".to_string()));
+    };
+    Ok(Ok(blob))
+}
+
+pub(super) async fn resolve_blob_path_from_blob_facet(
+    plugin: &DaybookPlugin,
+    blob: &daybook_types::doc::Blob,
+) -> Result<std::path::PathBuf, String> {
+    let Some(urls) = blob.urls.as_ref() else {
+        return Err("blob facet is missing urls".to_string());
+    };
+    let Some(first_url) = urls.first() else {
+        return Err("blob facet urls is empty".to_string());
+    };
+
+    let parsed_url = url::Url::parse(first_url).map_err(|err| err.to_string())?;
+    if parsed_url.scheme() != crate::blobs::BLOB_SCHEME {
+        return Err(format!(
+            "unsupported blob url scheme '{}'",
+            parsed_url.scheme()
+        ));
+    }
+    if parsed_url.host_str().is_some() {
+        return Err("blob url authority must be empty".to_string());
+    }
+
+    let hash = parsed_url.path().trim_start_matches('/');
+    if hash.is_empty() {
+        return Err("blob url path is missing hash".to_string());
+    }
+
+    plugin
+        .blobs_repo
+        .get_path(hash)
+        .await
+        .map_err(|err| err.to_string())
+}
+
 pub struct FacetTokenRw {
     pub doc_id: DocId,
     pub branch_path: daybook_types::doc::BranchPath,

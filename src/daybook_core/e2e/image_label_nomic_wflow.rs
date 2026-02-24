@@ -12,10 +12,8 @@ async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
     )
     .await?;
 
-    let image_path = std::path::Path::new("/tmp/sample.jpg");
-    let image_bytes = std::fs::read(&image_path)
-        .wrap_err_with(|| format!("error reading {}", image_path.display()))?;
-    let blob_hash = test_cx.rt.blobs_repo.put(&image_bytes).await?;
+    let image_bytes = include_bytes!("./sample-receipt.jpg");
+    let blob_hash = test_cx.rt.blobs_repo.put(image_bytes).await?;
 
     let blob_facet = Blob {
         mime: "image/jpeg".to_string(),

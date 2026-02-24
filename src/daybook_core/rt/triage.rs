@@ -1,5 +1,4 @@
 use crate::interlude::*;
-use crate::plugs::reference::select_json_path_values;
 
 use crate::drawer::DrawerEvent;
 use crate::rt::dispatch::DispatchEvent;
@@ -12,8 +11,9 @@ use daybook_types::doc::BranchPath;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacetTag};
 
 use crate::plugs::manifest::{
-    FacetReferenceKind, FacetReferenceManifest, KeyGeneric, ProcessorDeets, ProcessorManifest,
-    RoutineManifest, RoutineManifestDeets,
+    DocPredicateEvalMode, DocPredicateEvalRequirement, DocPredicateEvalResolved,
+    FacetReferenceManifest, KeyGeneric, ProcessorDeets, ProcessorManifest, RoutineManifest,
+    RoutineManifestDeets,
 };
 
 struct PreparedProcessor {
@@ -32,7 +32,9 @@ struct DocProcessorTriageListener {
     cached_processors: Vec<PreparedProcessor>,
     triage_read_tags: HashSet<String>,
     triage_read_keys: HashSet<FacetKey>,
-    facet_reference_specs: HashMap<String, Vec<FacetReferenceManifest>>,
+    facet_reference_specs: Arc<HashMap<String, Vec<FacetReferenceManifest>>>,
+    predicate_requirements: HashSet<DocPredicateEvalRequirement>,
+    predicate_resolved: HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
 }
 
 impl DocProcessorTriageListener {
@@ -93,7 +95,7 @@ impl DocProcessorTriageListener {
         }
         self.triage_read_tags = triage_read_tags;
         self.triage_read_keys = triage_read_keys;
-        self.facet_reference_specs = facet_reference_specs;
+        self.facet_reference_specs = Arc::new(facet_reference_specs);
         Ok(())
     }
 
@@ -128,7 +130,18 @@ impl DocProcessorTriageListener {
             let predicate = match &processor.processor_manifest.deets {
                 ProcessorDeets::DocProcessor { predicate, .. } => predicate,
             };
-            let predicate_doc = if predicate_contains_reference_clause(predicate) {
+            self.predicate_requirements.clear();
+            predicate.append_requirements(&mut self.predicate_requirements);
+
+            let needs_full_doc = self.predicate_requirements.iter().any(|req| {
+                matches!(
+                    req,
+                    DocPredicateEvalRequirement::FullDoc
+                        | DocPredicateEvalRequirement::FacetsOfTag(_)
+                )
+            });
+
+            let predicate_doc = if needs_full_doc {
                 if full_doc_for_reference_predicates.is_none() {
                     full_doc_for_reference_predicates = Some(
                         rt.drawer
@@ -147,10 +160,43 @@ impl DocProcessorTriageListener {
             } else {
                 doc
             };
-            let predicate_match = doc_predicate_matches_with_reference_specs(
-                predicate,
+
+            self.predicate_resolved.clear();
+            for requirement in &self.predicate_requirements {
+                match requirement {
+                    DocPredicateEvalRequirement::FullDoc => {
+                        self.predicate_resolved.insert(
+                            requirement.clone(),
+                            DocPredicateEvalResolved::FullDoc(Arc::new(predicate_doc.clone())),
+                        );
+                    }
+                    DocPredicateEvalRequirement::FacetsOfTag(tag) => {
+                        let facets = predicate_doc
+                            .facets
+                            .iter()
+                            .filter(|(facet_key, _)| facet_key.tag.to_string() == tag.0)
+                            .map(|(facet_key, facet_raw)| (facet_key.clone(), facet_raw.clone()))
+                            .collect();
+                        self.predicate_resolved.insert(
+                            requirement.clone(),
+                            DocPredicateEvalResolved::FacetsOfTag(facets),
+                        );
+                    }
+                    DocPredicateEvalRequirement::FacetManifest => {
+                        self.predicate_resolved.insert(
+                            requirement.clone(),
+                            DocPredicateEvalResolved::FacetManifest(Arc::clone(
+                                &self.facet_reference_specs,
+                            )),
+                        );
+                    }
+                }
+            }
+
+            let predicate_match = predicate.evaluate(
                 predicate_doc,
-                &self.facet_reference_specs,
+                DocPredicateEvalMode::Exact,
+                &self.predicate_resolved,
             );
             if !predicate_match {
                 continue;
@@ -359,7 +405,6 @@ impl SwitchSink for DocProcessorTriageListener {
         Ok(SwitchSinkOutcome::default())
     }
 }
-
 /// Returns true if any changed key matches this processor's read set (by tag or by full key).
 fn changed_intersects_read_set(
     changed: &HashSet<FacetKey>,
@@ -369,116 +414,6 @@ fn changed_intersects_read_set(
     changed
         .iter()
         .any(|key| read_tags.contains(&key.tag.to_string()) || read_keys.contains(key))
-}
-
-fn doc_predicate_matches_with_reference_specs(
-    predicate: &crate::plugs::manifest::DocPredicateClause,
-    doc: &Doc,
-    facet_reference_specs: &HashMap<String, Vec<FacetReferenceManifest>>,
-) -> bool {
-    use crate::plugs::manifest::DocPredicateClause;
-
-    match predicate {
-        DocPredicateClause::HasTag(tag) => {
-            doc.facets.keys().any(|key| key.tag.to_string() == tag.0)
-        }
-        DocPredicateClause::HasReferenceToTag {
-            source_tag,
-            target_tag,
-        } => doc_has_manifest_declared_reference_to_tag(
-            doc,
-            &source_tag.0,
-            &target_tag.0,
-            facet_reference_specs,
-        ),
-        DocPredicateClause::Or(clauses) => clauses.iter().any(|clause| {
-            doc_predicate_matches_with_reference_specs(clause, doc, facet_reference_specs)
-        }),
-        DocPredicateClause::And(clauses) => clauses.iter().all(|clause| {
-            doc_predicate_matches_with_reference_specs(clause, doc, facet_reference_specs)
-        }),
-        DocPredicateClause::Not(clause) => {
-            !doc_predicate_matches_with_reference_specs(clause, doc, facet_reference_specs)
-        }
-    }
-}
-
-fn predicate_contains_reference_clause(
-    predicate: &crate::plugs::manifest::DocPredicateClause,
-) -> bool {
-    use crate::plugs::manifest::DocPredicateClause;
-    match predicate {
-        DocPredicateClause::HasReferenceToTag { .. } => true,
-        DocPredicateClause::HasTag(_) => false,
-        DocPredicateClause::Or(clauses) | DocPredicateClause::And(clauses) => {
-            clauses.iter().any(predicate_contains_reference_clause)
-        }
-        DocPredicateClause::Not(clause) => predicate_contains_reference_clause(clause),
-    }
-}
-
-fn doc_has_manifest_declared_reference_to_tag(
-    doc: &Doc,
-    source_tag: &str,
-    target_tag: &str,
-    facet_reference_specs: &HashMap<String, Vec<FacetReferenceManifest>>,
-) -> bool {
-    let Some(reference_specs) = facet_reference_specs.get(source_tag) else {
-        return false;
-    };
-
-    for (facet_key, facet_raw) in &doc.facets {
-        if facet_key.tag.to_string() != source_tag {
-            continue;
-        }
-        if facet_has_reference_to_tag(facet_raw, target_tag, reference_specs) {
-            return true;
-        }
-    }
-    false
-}
-
-fn facet_has_reference_to_tag(
-    facet_raw: &serde_json::Value,
-    target_tag: &str,
-    reference_specs: &[FacetReferenceManifest],
-) -> bool {
-    for reference_spec in reference_specs {
-        match reference_spec.reference_kind {
-            FacetReferenceKind::UrlFacet => {}
-        }
-
-        let selected_values = match select_json_path_values(facet_raw, &reference_spec.json_path) {
-            Ok(values) => values,
-            Err(err) => {
-                debug!(error = %err, json_path = %reference_spec.json_path, "invalid facet reference json_path");
-                continue;
-            }
-        };
-
-        for selected in selected_values {
-            let url_strings: Vec<&str> = match selected {
-                serde_json::Value::String(value) => vec![value.as_str()],
-                serde_json::Value::Array(items) => {
-                    items.iter().filter_map(|item| item.as_str()).collect()
-                }
-                _ => Vec::new(),
-            };
-
-            for url_str in url_strings {
-                let Ok(parsed_url) = url::Url::parse(url_str) else {
-                    continue;
-                };
-                let Ok(parsed_ref) = daybook_types::url::parse_facet_ref(&parsed_url) else {
-                    continue;
-                };
-                if parsed_ref.facet_key.tag.to_string() == target_tag {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 pub fn doc_processor_triage_listener() -> Box<dyn SwitchSink + Send + Sync> {
