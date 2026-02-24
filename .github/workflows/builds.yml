@@ -278,7 +278,7 @@ jobs:
           path: ${{ steps.archive-linux.outputs.cli_archive_path }}
 
       - name: upload appimage to github release
-        if: needs.resolve-release-meta.outputs.release_kind != 'none'
+        if: needs.resolve-release-meta.outputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve-release-meta.outputs.release_tag }}
@@ -381,7 +381,7 @@ jobs:
           path: ${{ steps.archive-android.outputs.cli_archive_path }}
 
       - name: upload apk to github release
-        if: needs.resolve-release-meta.outputs.release_kind != 'none'
+        if: needs.resolve-release-meta.outputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve-release-meta.outputs.release_tag }}
@@ -503,7 +503,7 @@ jobs:
           path: ${{ steps.archive-windows.outputs.cli_archive_path }}
 
       - name: upload msi to github release
-        if: needs.resolve-release-meta.outputs.release_kind != 'none'
+        if: needs.resolve-release-meta.outputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve-release-meta.outputs.release_tag }}
@@ -627,7 +627,7 @@ jobs:
           path: ${{ steps.archive-macos.outputs.cli_archive_path }}
 
       - name: upload dmg to github release
-        if: needs.resolve-release-meta.outputs.release_kind != 'none'
+        if: needs.resolve-release-meta.outputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve-release-meta.outputs.release_tag }}

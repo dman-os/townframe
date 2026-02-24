@@ -81,7 +81,3 @@ More details can be found in the [design docs](./docs/DEVDOC/design.md) but acti
   - A lot of solutions here rely on webtech to support maximum programmability.
     - How to adapt that while previous constraints hold?
   - One early intiution is that we shouldn't adapt a single document format like markdown as a default and allow generic documents.
-
-## Want to hack on this?
-
-Feel free to throw yourself or tokens at the code though I'd personally appreciate help the most in the design and research aspect.

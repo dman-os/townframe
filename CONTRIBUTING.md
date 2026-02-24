@@ -1,7 +1,6 @@
 # CONTRIBUTING
 
-- Avoid adding dependencies if possible
-  - `wc -l Cargo.lock` is around 10k lines. Let's keep it that way.
+Feel free to throw yourself or tokens at the code though I'd personally appreciate help the most in the design and research aspect.
 
 ## Repo guide
 
@@ -83,11 +82,20 @@
   - I.e. avoid making tests in crate_root::tests.
 - Git submodules? I'm using `jj` :'/
 
+- Avoid adding dependencies if possible
+  - `wc -l Cargo.lock` is around 10k lines. Let's keep it that way.
+
 ## Useful command snippets
 
 ```bash
+# enter nix devShell (large, provisions android studio)
+nix develop .
+# show alternative dev shells
+nix flake show
 # run a hot reload instance daybook desktop
 ./x/dev-d-dayb.ts
+# build and install to connected android device
+./x/build-a-dayb.ts
 # run the daybook cli
 DAYB_REPO_PATH=/tmp/repo1 cargo r -p daybook_cli --help
 # run the xtask CLI
