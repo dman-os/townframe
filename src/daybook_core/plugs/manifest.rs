@@ -389,6 +389,12 @@ pub enum ProcessorDeets {
 #[serde(rename_all = "camelCase")]
 pub enum DocPredicateClause {
     HasTag(#[garde(dive)] FacetTag),
+    HasReferenceToTag {
+        #[garde(dive)]
+        source_tag: FacetTag,
+        #[garde(dive)]
+        target_tag: FacetTag,
+    },
     Or(#[garde(dive)] Vec<Self>),
     And(#[garde(dive)] Vec<Self>),
     Not(#[garde(dive)] Box<Self>),
@@ -398,6 +404,8 @@ impl DocPredicateClause {
     pub fn matches(&self, doc: &daybook_types::doc::Doc) -> bool {
         match self {
             Self::HasTag(tag) => doc.facets.keys().any(|key| key.tag.to_string() == tag.0),
+            // Requires facet-manifest reference metadata and is evaluated in triage.
+            Self::HasReferenceToTag { .. } => false,
             Self::Or(clauses) => clauses.iter().any(|clause| clause.matches(doc)),
             Self::And(clauses) => clauses.iter().all(|clause| clause.matches(doc)),
             Self::Not(clause) => !clause.matches(doc),
@@ -415,6 +423,13 @@ impl DocPredicateClause {
         match self {
             Self::HasTag(tag) => {
                 out.insert(tag.clone());
+            }
+            Self::HasReferenceToTag {
+                source_tag,
+                target_tag,
+            } => {
+                out.insert(source_tag.clone());
+                out.insert(target_tag.clone());
             }
             Self::Or(clauses) | Self::And(clauses) => {
                 for clause in clauses {

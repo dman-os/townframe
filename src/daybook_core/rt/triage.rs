@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use crate::plugs::reference::select_json_path_values;
 
 use crate::drawer::DrawerEvent;
 use crate::rt::dispatch::DispatchEvent;
@@ -11,7 +12,8 @@ use daybook_types::doc::BranchPath;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacetTag};
 
 use crate::plugs::manifest::{
-    KeyGeneric, ProcessorDeets, ProcessorManifest, RoutineManifest, RoutineManifestDeets,
+    FacetReferenceKind, FacetReferenceManifest, KeyGeneric, ProcessorDeets, ProcessorManifest,
+    RoutineManifest, RoutineManifestDeets,
 };
 
 struct PreparedProcessor {
@@ -30,6 +32,7 @@ struct DocProcessorTriageListener {
     cached_processors: Vec<PreparedProcessor>,
     triage_read_tags: HashSet<String>,
     triage_read_keys: HashSet<FacetKey>,
+    facet_reference_specs: HashMap<String, Vec<FacetReferenceManifest>>,
 }
 
 impl DocProcessorTriageListener {
@@ -39,8 +42,19 @@ impl DocProcessorTriageListener {
         self.cached_processors.clear();
         let mut triage_read_tags = HashSet::new();
         let mut triage_read_keys = HashSet::new();
+        let mut facet_reference_specs: HashMap<String, Vec<FacetReferenceManifest>> =
+            HashMap::new();
         for plug in plugs {
             let plug_id = plug.id();
+            for facet in &plug.facets {
+                if facet.references.is_empty() {
+                    continue;
+                }
+                facet_reference_specs
+                    .entry(facet.key_tag.to_string())
+                    .or_default()
+                    .extend(facet.references.iter().cloned());
+            }
             for processor in plug.processors.values() {
                 match &processor.deets {
                     ProcessorDeets::DocProcessor {
@@ -79,6 +93,7 @@ impl DocProcessorTriageListener {
         }
         self.triage_read_tags = triage_read_tags;
         self.triage_read_keys = triage_read_keys;
+        self.facet_reference_specs = facet_reference_specs;
         Ok(())
     }
 
@@ -102,6 +117,7 @@ impl DocProcessorTriageListener {
             processor_count = self.cached_processors.len(),
             "triaging doc"
         );
+        let mut full_doc_for_reference_predicates: Option<Option<Arc<Doc>>> = None;
         for processor in &self.cached_processors {
             if let Some(changed) = changed_facet_keys {
                 if !changed_intersects_read_set(changed, &processor.read_tags, &processor.read_keys)
@@ -112,7 +128,31 @@ impl DocProcessorTriageListener {
             let predicate = match &processor.processor_manifest.deets {
                 ProcessorDeets::DocProcessor { predicate, .. } => predicate,
             };
-            if !predicate.matches(doc) {
+            let predicate_doc = if predicate_contains_reference_clause(predicate) {
+                if full_doc_for_reference_predicates.is_none() {
+                    full_doc_for_reference_predicates = Some(
+                        rt.drawer
+                            .get_if_latest(doc_id, &branch_path, doc_heads, None)
+                            .await
+                            .wrap_err("error loading full doc for reference predicate")?,
+                    );
+                }
+                match full_doc_for_reference_predicates
+                    .as_ref()
+                    .and_then(|opt| opt.as_deref())
+                {
+                    Some(doc) => doc,
+                    None => continue,
+                }
+            } else {
+                doc
+            };
+            let predicate_match = doc_predicate_matches_with_reference_specs(
+                predicate,
+                predicate_doc,
+                &self.facet_reference_specs,
+            );
+            if !predicate_match {
                 continue;
             }
             info!(
@@ -259,27 +299,34 @@ impl SwitchSink for DocProcessorTriageListener {
                         .changed_facet_keys
                         .iter()
                         .any(|facet_key| facet_key != &dmeta_key);
-                    if !has_non_dmeta_change {
+                    let moved_main = diff.moved_branch_names.iter().any(|name| name == "main");
+                    let changed_facet_keys_set: Option<HashSet<FacetKey>> = if has_non_dmeta_change
+                    {
+                        let changed_set: HashSet<FacetKey> =
+                            diff.changed_facet_keys.iter().cloned().collect();
+                        if !changed_intersects_read_set(
+                            &changed_set,
+                            &self.triage_read_tags,
+                            &self.triage_read_keys,
+                        ) {
+                            return Ok(SwitchSinkOutcome::default());
+                        }
+                        Some(changed_set)
+                    } else if moved_main {
+                        None
+                    } else {
                         return Ok(SwitchSinkOutcome::default());
-                    }
-                    let changed_facet_keys_set: HashSet<FacetKey> =
-                        diff.changed_facet_keys.iter().cloned().collect();
-                    if !changed_intersects_read_set(
-                        &changed_facet_keys_set,
-                        &self.triage_read_tags,
-                        &self.triage_read_keys,
-                    ) {
-                        return Ok(SwitchSinkOutcome::default());
-                    }
+                    };
                     for (branch_name, heads) in &entry.branches {
                         let branch_path = BranchPath::from(branch_name.as_str());
                         if branch_path.to_string_lossy().starts_with("/tmp/") {
                             continue;
                         }
-                        if !diff
-                            .moved_branch_names
-                            .iter()
-                            .any(|name| name == branch_name)
+                        if branch_name != "main"
+                            && !diff
+                                .moved_branch_names
+                                .iter()
+                                .any(|name| name == branch_name)
                         {
                             continue;
                         }
@@ -301,7 +348,7 @@ impl SwitchSink for DocProcessorTriageListener {
                             heads,
                             &meta_doc,
                             branch_path,
-                            Some(&changed_facet_keys_set),
+                            changed_facet_keys_set.as_ref(),
                         )
                         .await
                         .wrap_err("error triaging doc")?;
@@ -322,6 +369,116 @@ fn changed_intersects_read_set(
     changed
         .iter()
         .any(|key| read_tags.contains(&key.tag.to_string()) || read_keys.contains(key))
+}
+
+fn doc_predicate_matches_with_reference_specs(
+    predicate: &crate::plugs::manifest::DocPredicateClause,
+    doc: &Doc,
+    facet_reference_specs: &HashMap<String, Vec<FacetReferenceManifest>>,
+) -> bool {
+    use crate::plugs::manifest::DocPredicateClause;
+
+    match predicate {
+        DocPredicateClause::HasTag(tag) => {
+            doc.facets.keys().any(|key| key.tag.to_string() == tag.0)
+        }
+        DocPredicateClause::HasReferenceToTag {
+            source_tag,
+            target_tag,
+        } => doc_has_manifest_declared_reference_to_tag(
+            doc,
+            &source_tag.0,
+            &target_tag.0,
+            facet_reference_specs,
+        ),
+        DocPredicateClause::Or(clauses) => clauses.iter().any(|clause| {
+            doc_predicate_matches_with_reference_specs(clause, doc, facet_reference_specs)
+        }),
+        DocPredicateClause::And(clauses) => clauses.iter().all(|clause| {
+            doc_predicate_matches_with_reference_specs(clause, doc, facet_reference_specs)
+        }),
+        DocPredicateClause::Not(clause) => {
+            !doc_predicate_matches_with_reference_specs(clause, doc, facet_reference_specs)
+        }
+    }
+}
+
+fn predicate_contains_reference_clause(
+    predicate: &crate::plugs::manifest::DocPredicateClause,
+) -> bool {
+    use crate::plugs::manifest::DocPredicateClause;
+    match predicate {
+        DocPredicateClause::HasReferenceToTag { .. } => true,
+        DocPredicateClause::HasTag(_) => false,
+        DocPredicateClause::Or(clauses) | DocPredicateClause::And(clauses) => {
+            clauses.iter().any(predicate_contains_reference_clause)
+        }
+        DocPredicateClause::Not(clause) => predicate_contains_reference_clause(clause),
+    }
+}
+
+fn doc_has_manifest_declared_reference_to_tag(
+    doc: &Doc,
+    source_tag: &str,
+    target_tag: &str,
+    facet_reference_specs: &HashMap<String, Vec<FacetReferenceManifest>>,
+) -> bool {
+    let Some(reference_specs) = facet_reference_specs.get(source_tag) else {
+        return false;
+    };
+
+    for (facet_key, facet_raw) in &doc.facets {
+        if facet_key.tag.to_string() != source_tag {
+            continue;
+        }
+        if facet_has_reference_to_tag(facet_raw, target_tag, reference_specs) {
+            return true;
+        }
+    }
+    false
+}
+
+fn facet_has_reference_to_tag(
+    facet_raw: &serde_json::Value,
+    target_tag: &str,
+    reference_specs: &[FacetReferenceManifest],
+) -> bool {
+    for reference_spec in reference_specs {
+        match reference_spec.reference_kind {
+            FacetReferenceKind::UrlFacet => {}
+        }
+
+        let selected_values = match select_json_path_values(facet_raw, &reference_spec.json_path) {
+            Ok(values) => values,
+            Err(err) => {
+                debug!(error = %err, json_path = %reference_spec.json_path, "invalid facet reference json_path");
+                continue;
+            }
+        };
+
+        for selected in selected_values {
+            let url_strings: Vec<&str> = match selected {
+                serde_json::Value::String(value) => vec![value.as_str()],
+                serde_json::Value::Array(items) => {
+                    items.iter().filter_map(|item| item.as_str()).collect()
+                }
+                _ => Vec::new(),
+            };
+
+            for url_str in url_strings {
+                let Ok(parsed_url) = url::Url::parse(url_str) else {
+                    continue;
+                };
+                let Ok(parsed_ref) = daybook_types::url::parse_facet_ref(&parsed_url) else {
+                    continue;
+                };
+                if parsed_ref.facet_key.tag.to_string() == target_tag {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 pub fn doc_processor_triage_listener() -> Box<dyn SwitchSink + Send + Sync> {

@@ -119,6 +119,10 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     "doc-facet-ref-index".into(),
                     Arc::new(LocalStateManifest::SqliteFile {}),
                 ),
+                (
+                    "image-label-classifier".into(),
+                    Arc::new(LocalStateManifest::SqliteFile {}),
+                ),
             ]
             .into(),
             dependencies: [
@@ -204,6 +208,34 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     .into(),
                 ),
                 (
+                    "embed-image".into(),
+                    RoutineManifest {
+                        r#impl: RoutineImpl::Wflow {
+                            key: "embed-image".into(),
+                            bundle: "daybook_wflows".into(),
+                        },
+                        deets: RoutineManifestDeets::DocFacet {
+                            working_facet_tag: WellKnownFacetTag::Embedding.into(),
+                        },
+                        facet_acl: vec![
+                            RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Blob.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                            },
+                            RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Embedding.into(),
+                                key_id: None,
+                                read: true,
+                                write: true,
+                            },
+                        ],
+                        local_state_acl: vec![],
+                    }
+                    .into(),
+                ),
+                (
                     "embed-text".into(),
                     RoutineManifest {
                         r#impl: RoutineImpl::Wflow {
@@ -228,6 +260,43 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             },
                         ],
                         local_state_acl: vec![],
+                    }
+                    .into(),
+                ),
+                (
+                    "classify-image-label".into(),
+                    RoutineManifest {
+                        r#impl: RoutineImpl::Wflow {
+                            key: "classify-image-label".into(),
+                            bundle: "daybook_wflows".into(),
+                        },
+                        deets: RoutineManifestDeets::DocFacet {
+                            working_facet_tag: WellKnownFacetTag::LabelGeneric.into(),
+                        },
+                        facet_acl: vec![
+                            RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Blob.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                            },
+                            RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Embedding.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                            },
+                            RoutineFacetAccess {
+                                tag: WellKnownFacetTag::LabelGeneric.into(),
+                                key_id: None,
+                                read: true,
+                                write: true,
+                            },
+                        ],
+                        local_state_acl: vec![RoutineLocalStateAccess {
+                            plug_id: "@daybook/wip".into(),
+                            local_state_key: "image-label-classifier".into(),
+                        }],
                     }
                     .into(),
                 ),
@@ -289,11 +358,31 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     .into(),
                 ),
                 (
+                    "embed-image".into(),
+                    CommandManifest {
+                        desc: "Embed image blob and write embedding facet".into(),
+                        deets: CommandDeets::DocCommand {
+                            routine_name: "embed-image".into(),
+                        },
+                    }
+                    .into(),
+                ),
+                (
                     "embed-text".into(),
                     CommandManifest {
                         desc: "Embed note text and write embedding facet".into(),
                         deets: CommandDeets::DocCommand {
                             routine_name: "embed-text".into(),
+                        },
+                    }
+                    .into(),
+                ),
+                (
+                    "classify-image-label".into(),
+                    CommandManifest {
+                        desc: "Classify image embedding into a label using local state KNN".into(),
+                        deets: CommandDeets::DocCommand {
+                            routine_name: "classify-image-label".into(),
                         },
                     }
                     .into(),
@@ -328,7 +417,12 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         desc: "Use LLM to label the document content".into(),
                         deets: ProcessorDeets::DocProcessor {
                             routine_name: "pseudo-label".into(),
-                            predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
+                            predicate: DocPredicateClause::And(vec![
+                                DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
+                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                    WellKnownFacetTag::Blob.into(),
+                                ))),
+                            ]),
                         },
                     }
                     .into(),
@@ -350,6 +444,25 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     .into(),
                 ),
                 (
+                    "embed-image".into(),
+                    ProcessorManifest {
+                        desc: "Compute image embedding facet from image blob".into(),
+                        deets: ProcessorDeets::DocProcessor {
+                            routine_name: "embed-image".into(),
+                            predicate: DocPredicateClause::And(vec![
+                                DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),
+                                DocPredicateClause::Not(Box::new(
+                                    DocPredicateClause::HasReferenceToTag {
+                                        source_tag: WellKnownFacetTag::Embedding.into(),
+                                        target_tag: WellKnownFacetTag::Blob.into(),
+                                    },
+                                )),
+                            ]),
+                        },
+                    }
+                    .into(),
+                ),
+                (
                     "embed-text".into(),
                     ProcessorManifest {
                         desc: "Compute embedding facet from note content".into(),
@@ -358,9 +471,26 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             predicate: DocPredicateClause::And(vec![
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
                                 DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                    WellKnownFacetTag::Blob.into(),
+                                ))),
+                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
                                     WellKnownFacetTag::Embedding.into(),
                                 ))),
                             ]),
+                        },
+                    }
+                    .into(),
+                ),
+                (
+                    "classify-image-label".into(),
+                    ProcessorManifest {
+                        desc: "Classify image embeddings into local fallback labels".into(),
+                        deets: ProcessorDeets::DocProcessor {
+                            routine_name: "classify-image-label".into(),
+                            predicate: DocPredicateClause::HasReferenceToTag {
+                                source_tag: WellKnownFacetTag::Embedding.into(),
+                                target_tag: WellKnownFacetTag::Blob.into(),
+                            },
                         },
                     }
                     .into(),
@@ -388,6 +518,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             predicate: DocPredicateClause::And(vec![
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
                                 DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                    WellKnownFacetTag::Blob.into(),
+                                ))),
+                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
                                     WellKnownFacetTag::LabelGeneric.into(),
                                 ))),
                             ]),
@@ -406,8 +539,10 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             "pseudo-label".into(),
                             "test-label".into(),
                             "ocr-image".into(),
+                            "embed-image".into(),
                             "embed-text".into(),
                             "index-embedding".into(),
+                            "classify-image-label".into(),
                         ],
                         // FIXME: make this more generic
                         component_urls: vec![

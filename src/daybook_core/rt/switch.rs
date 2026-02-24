@@ -441,6 +441,34 @@ impl SwitchWorker {
         event: &Arc<DrawerEvent>,
         listener: &PreparedSwitchSink,
     ) -> Res<bool> {
+        fn predicate_matches_meta_doc_for_interest(
+            predicate: &crate::plugs::manifest::DocPredicateClause,
+            doc: &Doc,
+        ) -> bool {
+            use crate::plugs::manifest::DocPredicateClause;
+            match predicate {
+                DocPredicateClause::HasTag(tag) => {
+                    doc.facets.keys().any(|key| key.tag.to_string() == tag.0)
+                }
+                // Reference predicates require facet values + manifest metadata. For switch-level
+                // interest filtering, conservatively approximate by source-tag presence so triage
+                // still gets a chance to do the exact evaluation.
+                DocPredicateClause::HasReferenceToTag { source_tag, .. } => doc
+                    .facets
+                    .keys()
+                    .any(|key| key.tag.to_string() == source_tag.0),
+                DocPredicateClause::Or(clauses) => clauses
+                    .iter()
+                    .any(|clause| predicate_matches_meta_doc_for_interest(clause, doc)),
+                DocPredicateClause::And(clauses) => clauses
+                    .iter()
+                    .all(|clause| predicate_matches_meta_doc_for_interest(clause, doc)),
+                DocPredicateClause::Not(clause) => {
+                    !predicate_matches_meta_doc_for_interest(clause, doc)
+                }
+            }
+        }
+
         let Some(predicate) = listener.drawer_predicate.as_ref() else {
             return Ok(true);
         };
@@ -464,7 +492,10 @@ impl SwitchWorker {
                 else {
                     return Ok(false);
                 };
-                Ok(predicate.matches(&facet_keys_set_to_meta_doc(id, &facet_keys_set)))
+                Ok(predicate_matches_meta_doc_for_interest(
+                    predicate,
+                    &facet_keys_set_to_meta_doc(id, &facet_keys_set),
+                ))
             }
             DrawerEvent::DocUpdated {
                 id,
@@ -500,7 +531,10 @@ impl SwitchWorker {
                 else {
                     return Ok(false);
                 };
-                Ok(predicate.matches(&facet_keys_set_to_meta_doc(id, &facet_keys_set)))
+                Ok(predicate_matches_meta_doc_for_interest(
+                    predicate,
+                    &facet_keys_set_to_meta_doc(id, &facet_keys_set),
+                ))
             }
         }
     }

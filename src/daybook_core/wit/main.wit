@@ -102,9 +102,11 @@ interface mltools-ocr {
 }
 
 interface mltools-embed {
+    use capabilities.{facet-token-ro};
     use townframe:mltools/embed.{embed-result};
 
     embed-text: func(text: string) -> result<embed-result, string>;
+    embed-image: func(blob-facet: facet-token-ro) -> result<embed-result, string>;
 }
 
 interface mltools-llm-chat {

@@ -58,6 +58,8 @@ use interlude::*;
 pub struct Config {
     pub ocr: OcrConfig,
     pub embed: EmbedConfig,
+    #[serde(default)]
+    pub image_embed: ImageEmbedConfig,
     pub llm: LlmConfig,
 }
 
@@ -89,6 +91,12 @@ pub struct EmbedConfig {
     pub backends: Vec<EmbedBackendConfig>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageEmbedConfig {
+    pub backends: Vec<ImageEmbedBackendConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum EmbedBackendConfig {
@@ -104,6 +112,16 @@ pub enum EmbedBackendConfig {
         url: String,
         model: String,
         auth: Option<CloudAuth>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ImageEmbedBackendConfig {
+    LocalFastembed {
+        onnx_path: PathBuf,
+        preprocessor_config_path: PathBuf,
+        model_id: String,
     },
 }
 
@@ -164,6 +182,18 @@ pub async fn embed_text(ctx: &Ctx, text: &str) -> Res<EmbedResult> {
     }
 }
 
+pub async fn embed_image(ctx: &Ctx, image: &Path) -> Res<EmbedResult> {
+    let Some(backend_config) = ctx.config.image_embed.backends.first() else {
+        eyre::bail!("no image embed backend configured");
+    };
+
+    match backend_config {
+        ImageEmbedBackendConfig::LocalFastembed { .. } => {
+            local::embed_image(backend_config, image).await
+        }
+    }
+}
+
 pub struct OcrResult {
     pub text: String,
     pub regions: Vec<TextRegion>,
@@ -205,6 +235,49 @@ pub async fn llm_chat(ctx: &Ctx, text: &str) -> Res<LlmChatResult> {
 /// local execution of ML tools.
 mod local {
     use super::*;
+
+    const NOMIC_EMBED_TEXT_V15_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
+
+    fn is_nomic_embed_text_v15(model_id: &str) -> bool {
+        model_id.eq_ignore_ascii_case(NOMIC_EMBED_TEXT_V15_MODEL_ID)
+    }
+
+    fn l2_normalize_in_place(vector: &mut [f32]) {
+        let norm = vector
+            .iter()
+            .map(|value| {
+                let value = f64::from(*value);
+                value * value
+            })
+            .sum::<f64>()
+            .sqrt();
+        if norm == 0.0 {
+            return;
+        }
+        for value in vector {
+            *value = (f64::from(*value) / norm) as f32;
+        }
+    }
+
+    fn layer_norm_in_place(vector: &mut [f32]) {
+        if vector.is_empty() {
+            return;
+        }
+        let len = vector.len() as f64;
+        let mean = vector.iter().map(|value| f64::from(*value)).sum::<f64>() / len;
+        let variance = vector
+            .iter()
+            .map(|value| {
+                let centered = f64::from(*value) - mean;
+                centered * centered
+            })
+            .sum::<f64>()
+            / len;
+        let inv_std = 1.0 / (variance + 1e-5_f64).sqrt();
+        for value in vector {
+            *value = ((f64::from(*value) - mean) * inv_std) as f32;
+        }
+    }
 
     pub async fn embed_text(backend_config: &EmbedBackendConfig, text: &str) -> Res<EmbedResult> {
         let (
@@ -250,11 +323,11 @@ mod local {
         let input_text = text.to_string();
         tokio::task::spawn_blocking(move || -> Res<EmbedResult> {
             use fastembed::{
-                InitOptionsUserDefined, QuantizationMode, TextEmbedding, TokenizerFiles,
+                InitOptionsUserDefined, Pooling, QuantizationMode, TextEmbedding, TokenizerFiles,
                 UserDefinedEmbeddingModel,
             };
 
-            let user_model = UserDefinedEmbeddingModel::new(
+            let mut user_model = UserDefinedEmbeddingModel::new(
                 std::fs::read(&onnx_path)
                     .wrap_err_with(|| format!("failed reading {}", onnx_path.display()))?,
                 TokenizerFiles {
@@ -272,6 +345,9 @@ mod local {
                 },
             )
             .with_quantization(QuantizationMode::Dynamic);
+            if is_nomic_embed_text_v15(&model_id) {
+                user_model = user_model.with_pooling(Pooling::Mean);
+            }
 
             let mut embedder =
                 TextEmbedding::try_new_from_user_defined(user_model, InitOptionsUserDefined::new())
@@ -279,9 +355,14 @@ mod local {
             let mut vectors = embedder
                 .embed(vec![input_text], None)
                 .map_err(|err| eyre::eyre!("failed to embed text: {err}"))?;
-            let Some(vector) = vectors.pop() else {
+            let Some(mut vector) = vectors.pop() else {
                 eyre::bail!("embedding backend returned no vector");
             };
+            if is_nomic_embed_text_v15(&model_id) {
+                // Reference Nomic text usage applies layer_norm then L2 normalization.
+                layer_norm_in_place(&mut vector);
+                l2_normalize_in_place(&mut vector);
+            }
             let dimensions = vector.len() as u32;
 
             Ok(EmbedResult {
@@ -388,6 +469,123 @@ mod local {
         })
         .await
         .wrap_err("ocr task failed to join")?
+    }
+
+    pub async fn embed_image(
+        backend_config: &ImageEmbedBackendConfig,
+        image: &Path,
+    ) -> Res<EmbedResult> {
+        let (onnx_path, preprocessor_config_path, model_id) = match backend_config {
+            ImageEmbedBackendConfig::LocalFastembed {
+                onnx_path,
+                preprocessor_config_path,
+                model_id,
+            } => (
+                onnx_path.clone(),
+                preprocessor_config_path.clone(),
+                model_id.clone(),
+            ),
+        };
+
+        fn sniff_extension(bytes: &[u8]) -> Option<&'static str> {
+            if bytes.len() >= 3 && bytes[..3] == [0xFF, 0xD8, 0xFF] {
+                return Some("jpg");
+            }
+            if bytes.len() >= 8 && bytes[..8] == [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n']
+            {
+                return Some("png");
+            }
+            if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
+                return Some("gif");
+            }
+            if bytes.len() >= 2 && &bytes[..2] == b"BM" {
+                return Some("bmp");
+            }
+            if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+                return Some("webp");
+            }
+            None
+        }
+
+        let image_path = image.to_path_buf();
+        if !image_path.exists() {
+            eyre::bail!("missing image file: {}", image_path.display());
+        }
+        for required_path in [&onnx_path, &preprocessor_config_path] {
+            if !required_path.exists() {
+                eyre::bail!(
+                    "missing image embedding model file: {}",
+                    required_path.display()
+                );
+            }
+        }
+
+        tokio::task::spawn_blocking(move || -> Res<EmbedResult> {
+            use fastembed::{
+                ImageEmbedding, ImageInitOptionsUserDefined, UserDefinedImageEmbeddingModel,
+            };
+
+            let user_model = UserDefinedImageEmbeddingModel::new(
+                std::fs::read(&onnx_path)
+                    .wrap_err_with(|| format!("failed reading {}", onnx_path.display()))?,
+                std::fs::read(&preprocessor_config_path).wrap_err_with(|| {
+                    format!("failed reading {}", preprocessor_config_path.display())
+                })?,
+            );
+
+            let mut embedder = ImageEmbedding::try_new_from_user_defined(
+                user_model,
+                ImageInitOptionsUserDefined::new(),
+            )
+            .map_err(|err| eyre::eyre!("failed to initialize image embed model: {err}"))?;
+
+            // Blob store paths usually have no extension. fastembed's image loader relies on
+            // extension-based format selection for some paths, so create a temporary suffixed copy.
+            let mut temp_image_path: Option<std::path::PathBuf> = None;
+            let image_path_for_embed = if image_path.extension().is_some() {
+                image_path.clone()
+            } else {
+                let image_bytes = std::fs::read(&image_path).wrap_err_with(|| {
+                    format!("failed reading image bytes {}", image_path.display())
+                })?;
+                let ext = sniff_extension(&image_bytes).ok_or_else(|| {
+                    eyre::eyre!("unsupported image format for {}", image_path.display())
+                })?;
+                let unique = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system time must be after unix epoch")
+                    .as_nanos();
+                let path = std::env::temp_dir().join(format!(
+                    "mltools-fastembed-image-{}-{}.{}",
+                    std::process::id(),
+                    unique,
+                    ext
+                ));
+                std::fs::write(&path, image_bytes)
+                    .wrap_err_with(|| format!("failed writing temp image {}", path.display()))?;
+                temp_image_path = Some(path.clone());
+                path
+            };
+
+            let mut vectors = embedder
+                .embed(vec![image_path_for_embed], None)
+                .map_err(|err| eyre::eyre!("failed to embed image: {err}"))?;
+            if let Some(path) = temp_image_path {
+                let _ = std::fs::remove_file(path);
+            }
+            let Some(vector) = vectors.pop() else {
+                eyre::bail!("image embedding backend returned no vector");
+            };
+            let dimensions = vector.len() as u32;
+
+            Ok(EmbedResult {
+                vector,
+                dimensions,
+                model_id,
+            })
+        })
+        .await
+        .wrap_err("image embed task failed to join")?
     }
 }
 
@@ -514,6 +712,7 @@ mod tests {
                 embed: EmbedConfig {
                     backends: embed_backends,
                 },
+                image_embed: ImageEmbedConfig::default(),
                 llm: LlmConfig {
                     backends: llm_backends,
                 },
@@ -624,6 +823,18 @@ mod tests {
     }
 
     #[test]
+    fn test_embed_image_api_contract_rejects_missing_backend() -> Res<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let context = context_with(vec![], vec![], vec![]);
+        let image_path = PathBuf::from("/tmp/does_not_matter.jpg");
+        let result = runtime.block_on(async { embed_image(&context, &image_path).await });
+        expect_error_message_contains(result, "no image embed backend configured");
+        Ok(())
+    }
+
+    #[test]
     fn test_embed_text_cloud_router_roundtrip() -> Res<()> {
         let embed_model_name =
             std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "embeddinggemma".to_string());
@@ -694,6 +905,7 @@ mod tests {
 
             assert_eq!(config.ocr.backends.len(), 1);
             assert_eq!(config.embed.backends.len(), 2);
+            assert_eq!(config.image_embed.backends.len(), 1);
             assert_eq!(config.llm.backends.len(), 1);
 
             let EmbedBackendConfig::LocalFastembed {
@@ -714,6 +926,16 @@ mod tests {
             assert!(config_path.exists());
             assert!(special_tokens_map_path.exists());
             assert!(tokenizer_config_path.exists());
+
+            let ImageEmbedBackendConfig::LocalFastembed {
+                onnx_path,
+                preprocessor_config_path,
+                model_id,
+            } = &config.image_embed.backends[0];
+
+            assert_eq!(model_id, "nomic-ai/nomic-embed-vision-v1.5");
+            assert!(onnx_path.exists());
+            assert!(preprocessor_config_path.exists());
 
             Ok(())
         })

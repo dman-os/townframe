@@ -1,6 +1,6 @@
 use crate::{
-    Config, EmbedBackendConfig, EmbedConfig, LlmBackendConfig, LlmConfig, OcrBackendConfig,
-    OcrConfig,
+    Config, EmbedBackendConfig, EmbedConfig, ImageEmbedBackendConfig, ImageEmbedConfig,
+    LlmBackendConfig, LlmConfig, OcrBackendConfig, OcrConfig,
 };
 use fs4::fs_std::FileExt;
 use hf_hub::{api::tokio::ApiBuilder, Cache, Repo};
@@ -18,7 +18,8 @@ pub(crate) const OLLAMA_USERNAME: &str = env!("OLLAMA_USERNAME");
 pub(crate) const OLLAMA_PASSWORD: &str = env!("OLLAMA_PASSWORD");
 const OLLAMA_EMBED_MODEL_DEFAULT: &str = "embeddinggemma";
 const OLLAMA_LLM_MODEL_DEFAULT: &str = "gemma3";
-const NOMIC_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
+const NOMIC_TEXT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
+const NOMIC_VISION_MODEL_ID: &str = "nomic-ai/nomic-embed-vision-v1.5";
 const OAR_RELEASE_BASE_URL: &str = "https://github.com/GreatV/oar-ocr/releases/download/v0.3.0";
 
 #[derive(Debug, Clone)]
@@ -228,6 +229,7 @@ impl hf_hub::api::tokio::Progress for HfHubProgress {
 }
 
 async fn hf_download_with_progress(
+    model_id: &str,
     model_repo: &hf_hub::api::tokio::ApiRepo,
     cache_repo: &hf_hub::CacheRepo,
     file: &str,
@@ -247,7 +249,7 @@ async fn hf_download_with_progress(
     let result = model_repo
         .download_with_progress(file, progress)
         .await
-        .wrap_err_with(|| format!("error downloading {file} from {NOMIC_MODEL_ID}"));
+        .wrap_err_with(|| format!("error downloading {file} from {model_id}"));
     if let Err(err) = &result {
         if let Some(observer) = observer {
             observer.emit(MobileDefaultEvent::DownloadFailed {
@@ -307,30 +309,70 @@ pub async fn mobile_default_with_observer(
     let api = ApiBuilder::from_cache(Cache::new(hf_cache_dir))
         .with_progress(true)
         .build()?;
-    let cache_repo = Cache::new(download_dir.join("hf")).repo(Repo::model(NOMIC_MODEL_ID.into()));
-    let model_repo = api.model(NOMIC_MODEL_ID.to_string());
+    let text_cache_repo =
+        Cache::new(download_dir.join("hf")).repo(Repo::model(NOMIC_TEXT_MODEL_ID.into()));
+    let text_model_repo = api.model(NOMIC_TEXT_MODEL_ID.to_string());
 
     let onnx_path = hf_download_with_progress(
-        &model_repo,
-        &cache_repo,
+        NOMIC_TEXT_MODEL_ID,
+        &text_model_repo,
+        &text_cache_repo,
         "onnx/model_quantized.onnx",
         observer,
     )
     .await?;
-    let tokenizer_path =
-        hf_download_with_progress(&model_repo, &cache_repo, "tokenizer.json", observer).await?;
-    let config_path =
-        hf_download_with_progress(&model_repo, &cache_repo, "config.json", observer).await?;
+    let tokenizer_path = hf_download_with_progress(
+        NOMIC_TEXT_MODEL_ID,
+        &text_model_repo,
+        &text_cache_repo,
+        "tokenizer.json",
+        observer,
+    )
+    .await?;
+    let config_path = hf_download_with_progress(
+        NOMIC_TEXT_MODEL_ID,
+        &text_model_repo,
+        &text_cache_repo,
+        "config.json",
+        observer,
+    )
+    .await?;
     let special_tokens_map_path = hf_download_with_progress(
-        &model_repo,
-        &cache_repo,
+        NOMIC_TEXT_MODEL_ID,
+        &text_model_repo,
+        &text_cache_repo,
         "special_tokens_map.json",
         observer,
     )
     .await?;
-    let tokenizer_config_path =
-        hf_download_with_progress(&model_repo, &cache_repo, "tokenizer_config.json", observer)
-            .await?;
+    let tokenizer_config_path = hf_download_with_progress(
+        NOMIC_TEXT_MODEL_ID,
+        &text_model_repo,
+        &text_cache_repo,
+        "tokenizer_config.json",
+        observer,
+    )
+    .await?;
+
+    let vision_cache_repo =
+        Cache::new(download_dir.join("hf")).repo(Repo::model(NOMIC_VISION_MODEL_ID.into()));
+    let vision_model_repo = api.model(NOMIC_VISION_MODEL_ID.to_string());
+    let vision_onnx_path = hf_download_with_progress(
+        NOMIC_VISION_MODEL_ID,
+        &vision_model_repo,
+        &vision_cache_repo,
+        "onnx/model.onnx",
+        observer,
+    )
+    .await?;
+    let vision_preprocessor_config_path = hf_download_with_progress(
+        NOMIC_VISION_MODEL_ID,
+        &vision_model_repo,
+        &vision_cache_repo,
+        "preprocessor_config.json",
+        observer,
+    )
+    .await?;
 
     Ok(Config {
         ocr: OcrConfig {
@@ -352,7 +394,7 @@ pub async fn mobile_default_with_observer(
                     config_path,
                     special_tokens_map_path,
                     tokenizer_config_path,
-                    model_id: NOMIC_MODEL_ID.to_string(),
+                    model_id: NOMIC_TEXT_MODEL_ID.to_string(),
                 },
                 EmbedBackendConfig::CloudOllama {
                     url: OLLAMA_URL_DEFAULT.to_string(),
@@ -363,6 +405,13 @@ pub async fn mobile_default_with_observer(
                     }),
                 },
             ],
+        },
+        image_embed: ImageEmbedConfig {
+            backends: vec![ImageEmbedBackendConfig::LocalFastembed {
+                onnx_path: vision_onnx_path,
+                preprocessor_config_path: vision_preprocessor_config_path,
+                model_id: NOMIC_VISION_MODEL_ID.to_string(),
+            }],
         },
         llm: LlmConfig {
             backends: vec![LlmBackendConfig::CloudOllama {

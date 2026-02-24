@@ -68,6 +68,7 @@ impl Default for ConfigStore {
                 payload: mltools::Config {
                     ocr: mltools::OcrConfig { backends: vec![] },
                     embed: mltools::EmbedConfig { backends: vec![] },
+                    image_embed: mltools::ImageEmbedConfig { backends: vec![] },
                     llm: mltools::LlmConfig { backends: vec![] },
                 }
                 .into(),
