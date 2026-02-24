@@ -15,6 +15,16 @@ const abi = $.env.DAYBOOK_ANDROID_ABI ?? "arm64-v8a";
 const triple = abiToTriple[abi as keyof typeof abiToTriple];
 if (!triple) throw new Error(`Unsupported DAYBOOK_ANDROID_ABI=${abi}`);
 
+const composeProfile = ($.env.DAYBOOK_COMPOSE_PROFILE ?? "debug").toLowerCase();
+if (!(composeProfile === "debug" || composeProfile === "release")) {
+  throw new Error(
+    `Unsupported DAYBOOK_COMPOSE_PROFILE=${composeProfile}; expected debug or release`,
+  );
+}
+const gradleVariant = composeProfile === "release" ? "Release" : "Debug";
+const ortBuildConfig = $.env.ORT_BUILD_CONFIG ??
+  (composeProfile === "release" ? "Release" : "Debug");
+
 const ortSourceTag = $.env.ORT_SOURCE_TAG ?? "v1.24.1";
 const androidApiLevel = $.env.ANDROID_API_LEVEL ?? "31";
 const androidNdkRoot = $.env.ANDROID_NDK_ROOT;
@@ -24,7 +34,9 @@ const ortRootDir = $.relativeDir("../target/ort");
 const sourceArchivePath = ortRootDir.join(`onnxruntime-${ortSourceTag}.tar.gz`);
 const sourceDir = ortRootDir.join("onnxruntime-src");
 const sourceCompleteFile = ortRootDir.join(`.source-${ortSourceTag}.complete`);
-const buildCompleteFile = ortRootDir.join(`.build-${triple}.complete`);
+const buildCompleteFile = ortRootDir.join(
+  `.build-${triple}-${ortBuildConfig.toLowerCase()}.complete`,
+);
 const libDirFile = ortRootDir.join(`ort-lib-location-${triple}.txt`);
 
 await ortRootDir.ensureDir();
@@ -42,19 +54,19 @@ if (!(await sourceCompleteFile.exists())) {
 }
 
 if (!(await buildCompleteFile.exists())) {
-  await $`bash ./build.sh --update --build --config Release --parallel --compile_no_warning_as_error --skip_submodule_sync --android --android_abi=${abi} --android_api=${androidApiLevel} --android_ndk_path=${androidNdkRoot}`
+  await $`bash ./build.sh --update --build --config ${ortBuildConfig} --parallel --compile_no_warning_as_error --skip_submodule_sync --android --android_abi=${abi} --android_api=${androidApiLevel} --android_ndk_path=${androidNdkRoot}`
     .cwd(
       sourceDir,
     );
   await libDirFile.writeText(
-    `${sourceDir.join("build", "Android", "Release")}\n`,
+    `${sourceDir.join("build", "Android", ortBuildConfig)}\n`,
   );
   await buildCompleteFile.writeText("ok\n");
 }
 
-await $`./gradlew installDebug`
+await $`./gradlew install${gradleVariant} -PdaybookProfile=${composeProfile}`
   .cwd($.relativeDir("../src/daybook_compose/"))
   .env({
     ORT_LIB_LOCATION: (await libDirFile.readText()).trim(),
-    ORT_LIB_PROFILE: $.env.ORT_LIB_PROFILE ?? "Release",
+    ORT_LIB_PROFILE: $.env.ORT_LIB_PROFILE ?? ortBuildConfig,
   });

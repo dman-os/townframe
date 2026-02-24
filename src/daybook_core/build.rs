@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         cwd.join("../../target/").canonicalize().unwrap()
     };
+    let wflows_target_dir = target_dir.join("wasm");
     // let target = std::env::var("TARGET")?;
     println!(
         "cargo:rerun-if-changed={}",
@@ -56,7 +57,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--target",
             "wasm32-wasip2",
         ])
-        .current_dir(cwd.join("../../"));
+        .current_dir(cwd.join("../../"))
+        .env("CARGO_TARGET_DIR", &wflows_target_dir);
     append_tokio_unstable_rustflags(&mut build_wflows);
     assert!(
         build_wflows
@@ -113,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     .map_err(|err| format!("error serializing component: {err}"))?;
 
     let wflows_build_profile = "release";
-    let wasm_path = target_dir
+    let wasm_path = wflows_target_dir
         .join("wasm32-wasip2")
         .join(wflows_build_profile)
         .join("daybook_wflows.wasm");

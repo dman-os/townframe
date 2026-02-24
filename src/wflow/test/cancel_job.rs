@@ -8,7 +8,7 @@ async fn test_cancel_job() -> Res<()> {
 
     let test_cx = WflowTestContext::builder()
         .initial_workloads(vec![InitialWorkload {
-            wasm_path: "../../target/wasm32-wasip2/release/test_wflows.wasm".into(),
+            wasm_path: "../../target/wasm32-wasip2/debug/test_wflows.wasm".into(),
             wflow_keys: vec!["fails_until_told".to_string()],
         }])
         .build()

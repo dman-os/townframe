@@ -246,6 +246,27 @@
             gh
           ];
 
+          desktopRuntimeLibPackages = with pkgs; [
+            sqlite.dev
+            llvmPackages.libclang
+            libxrender
+            libxext
+            libxtst
+            libx11
+            libxi
+            libxrandr
+            libxcb
+            libxkbcommon
+            freetype
+            fontconfig
+            libglvnd
+            vulkan-loader
+          ];
+
+          desktopRuntimeLibraryPath = pkgs.lib.makeLibraryPath (
+            pkgs.lib.map (packageValue: pkgs.lib.getLib packageValue) desktopRuntimeLibPackages
+          );
+
           devShellBuildInputs =
             baseBuildInputs
             ++ rustLintInputs
@@ -289,6 +310,12 @@
           ciDesktopShell = pkgs.mkShell ({
             name = "ci-desktop";
             buildInputs = baseBuildInputs ++ dioxusBuildInputs ++ desktopBuildInputs ++ [ rustRust ];
+            shellHook = ''
+              export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${desktopRuntimeLibraryPath}"
+              if [ "$(uname -s)" = "Darwin" ]; then
+                export DYLD_LIBRARY_PATH="$LD_LIBRARY_PATH"
+              fi
+            '';
           } // ghjkMainEnv);
 
           ciComposeShell = pkgs.mkShell ({
@@ -307,23 +334,7 @@
                 export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${self}/target/debug/:${
                   pkgs.lib.makeLibraryPath (
                     pkgs.lib.map (packageValue: pkgs.lib.getLib packageValue) (
-                      devShellBuildInputs
-                      ++ (with pkgs; [
-                        sqlite.dev
-                        llvmPackages.libclang
-                        libxrender
-                        libxext
-                        libxtst
-                        libx11
-                        libxi
-                        libxrandr
-                        libxcb
-                        libxkbcommon
-                        freetype
-                        fontconfig
-                        libglvnd
-                        vulkan-loader
-                      ])
+                      devShellBuildInputs ++ desktopRuntimeLibPackages
                     )
                   )
                 }"

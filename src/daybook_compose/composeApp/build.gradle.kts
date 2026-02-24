@@ -263,6 +263,23 @@ data class AndroidRustToolchain(
 
 val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
 
+fun resolveDaybookComposeProfile(): String {
+    val rawProfile =
+        (findProperty("daybookProfile") as String?)
+            ?: System.getenv("DAYBOOK_COMPOSE_PROFILE")
+            ?: "debug"
+    return when (rawProfile.lowercase()) {
+        "debug" -> "debug"
+        "release" -> "release"
+        else -> throw GradleException(
+            "Unsupported daybook profile '$rawProfile'. Expected 'debug' or 'release'."
+        )
+    }
+}
+
+val daybookComposeProfile = resolveDaybookComposeProfile()
+val daybookComposeIsReleaseProfile = daybookComposeProfile == "release"
+
 // Desktop Rust builds
 tasks.register<Exec>("buildRustDesktopDebug") {
     group = "build"
@@ -537,7 +554,7 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
     val isCheckTask = taskNames.contains("check")
     // Skip release Rust build during check - we only need debug for testing
     if (!isCheckTask) {
-        dependsOn("buildRustAndroidRelease")
+        dependsOn("copyRustAndroidRelease")
     }
 }
 
@@ -595,21 +612,34 @@ tasks.matching { it.name == "packageReleaseAppImage" }.configureEach {
 
 tasks.register("prepareLinuxdeployComposeAppDirDayb") {
     group = "distribution"
-    description = "Prepare Compose desktop app dir for custom linuxdeploy packaging and copy Rust FFI library last"
+    description =
+        "Prepare Compose desktop app dir for custom linuxdeploy packaging and copy Rust FFI library last (profile-aware)"
 
-    val sourceLibFile = File(repoRoot, "target/debug/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}")
-    val destLibDir = File(desktopComposeAppDir(false), "lib/app")
+    val sourceLibFile =
+        File(
+            repoRoot,
+            "target/${if (daybookComposeIsReleaseProfile) "release" else "debug"}/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}",
+        )
+    val destLibDir = File(desktopComposeAppDir(daybookComposeIsReleaseProfile), "lib/app")
     val destLibFile = File(destLibDir, sourceLibFile.name)
 
-    dependsOn("createDistributable")
-    dependsOn("buildRustDesktopDebug")
+    if (daybookComposeIsReleaseProfile) {
+        dependsOn("packageReleaseDistributionForCurrentOS")
+        dependsOn("buildRustDesktopRelease")
+    } else {
+        dependsOn("createDistributable")
+        dependsOn("buildRustDesktopDebug")
+    }
 
     inputs.file(sourceLibFile)
     outputs.file(destLibFile)
 
     doLast {
+        logger.lifecycle("Preparing linuxdeploy app dir using Daybook profile: $daybookComposeProfile")
         if (!sourceLibFile.exists()) {
-            throw GradleException("Missing desktop debug Rust library: ${sourceLibFile.absolutePath}")
+            throw GradleException(
+                "Missing desktop $daybookComposeProfile Rust library: ${sourceLibFile.absolutePath}",
+            )
         }
         if (!destLibDir.exists()) {
             destLibDir.mkdirs()
