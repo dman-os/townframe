@@ -6,6 +6,8 @@ on:
       - main
     tags:
       - "v*"
+  schedule:
+    - cron: "0 4 * * *"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
@@ -219,6 +221,8 @@ jobs:
           target: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: denoland/setup-deno@v2
 
@@ -331,6 +335,8 @@ jobs:
       - uses: DeterminateSystems/flakehub-cache-action@v3
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: install archive tools
         run: |
@@ -426,6 +432,8 @@ jobs:
           target: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: set up protoc
         uses: arduino/setup-protoc@v3
@@ -563,6 +571,8 @@ jobs:
           target: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: install deps
         run: |
