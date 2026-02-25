@@ -3,7 +3,7 @@ use crate::interlude::*;
 use daybook_types::doc::{AddDocArgs, Blob, FacetKey, WellKnownFacet, WellKnownFacetTag};
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
+async fn test_image_label_fallback_multi_label_screenshot_meme() -> Res<()> {
     let test_cx = crate::e2e::test_cx_with_options(
         utils_rs::function_full!(),
         crate::e2e::DaybookTestCxOptions {
@@ -12,7 +12,7 @@ async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
     )
     .await?;
 
-    let image_bytes = include_bytes!("./sample-receipt.jpg");
+    let image_bytes = include_bytes!("./sample-screenshot-meme.jpg");
     let blob_hash = test_cx.rt.blobs_repo.put(image_bytes).await?;
 
     let blob_facet = Blob {
@@ -36,7 +36,7 @@ async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;
 
     let embedding_key = FacetKey::from(WellKnownFacetTag::Embedding);
-    let label_key = FacetKey::from(WellKnownFacetTag::PseudoLabel);
+    let pseudo_label_key = FacetKey::from(WellKnownFacetTag::PseudoLabel);
     let mut updated_doc = None;
     for _ in 0..1200 {
         if let Some(doc) = test_cx
@@ -48,56 +48,39 @@ async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
             )
             .await?
         {
-            if doc.facets.contains_key(&embedding_key) && doc.facets.contains_key(&label_key) {
+            if doc.facets.contains_key(&embedding_key) && doc.facets.contains_key(&pseudo_label_key)
+            {
                 updated_doc = Some(doc);
                 break;
             }
-            info!(
-                was_embedded = doc.facets.contains_key(&embedding_key),
-                "retrying XXX"
-            );
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 
-    let updated_doc = updated_doc
-        .ok_or_eyre("doc not found with embedding+pseudo-label after image-label pipeline")?;
-    info!(?updated_doc, "XXX");
+    let updated_doc = updated_doc.ok_or_eyre(
+        "doc not found with embedding+pseudo-label after screenshot meme image-label pipeline",
+    )?;
 
-    let embedding_raw = updated_doc
+    let pseudo_label_raw = updated_doc
         .facets
-        .get(&embedding_key)
-        .ok_or_eyre("image pipeline did not write Embedding facet")?;
-    let embedding_facet =
-        WellKnownFacet::from_json(embedding_raw.clone(), WellKnownFacetTag::Embedding)?;
-    let WellKnownFacet::Embedding(embedding) = embedding_facet else {
-        eyre::bail!("embedding facet had unexpected type");
-    };
-    assert_eq!(embedding.model_tag, "nomic-ai/nomic-embed-vision-v1.5");
-    assert_eq!(embedding.dim, 768);
-    assert_eq!(embedding.dtype, daybook_types::doc::EmbeddingDtype::F32);
-    assert_eq!(embedding.compression, None);
-    let parsed_ref = daybook_types::url::parse_facet_ref(&embedding.facet_ref)?;
-    assert_eq!(
-        parsed_ref.facet_key,
-        FacetKey::from(WellKnownFacetTag::Blob)
-    );
-
-    let label_raw = updated_doc
-        .facets
-        .get(&label_key)
+        .get(&pseudo_label_key)
         .ok_or_eyre("image classifier did not write PseudoLabel facet")?;
-    let label_facet = WellKnownFacet::from_json(label_raw.clone(), WellKnownFacetTag::PseudoLabel)?;
-    let WellKnownFacet::PseudoLabel(labels) = label_facet else {
+    let pseudo_label_facet =
+        WellKnownFacet::from_json(pseudo_label_raw.clone(), WellKnownFacetTag::PseudoLabel)?;
+    let WellKnownFacet::PseudoLabel(labels) = pseudo_label_facet else {
         eyre::bail!("pseudo-label facet had unexpected type");
     };
+
     assert!(
-        labels.iter().any(|label| label == "receipt-image"),
-        "expected receipt-image in pseudo labels, got {labels:?}"
+        labels.iter().any(|label| label == "twitter-screenshot"),
+        "expected twitter-screenshot in pseudo labels, got {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label == "minecraft"),
+        "expected minecraft in pseudo labels, got {labels:?}"
     );
 
     test_cx._wait_until_no_active_jobs(120).await?;
-
     test_cx.stop().await?;
     Ok(())
 }

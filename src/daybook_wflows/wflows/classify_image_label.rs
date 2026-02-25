@@ -4,13 +4,90 @@ use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
 const NOMIC_VISION_MODEL_ID: &str = "nomic-ai/nomic-embed-vision-v1.5";
 const NOMIC_TEXT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
-const IMAGE_LABEL_CANONICAL: &str = "receipt-image";
+const IMAGE_LABEL_RECEIPT: &str = "receipt-image";
+const IMAGE_LABEL_TWITTER_SCREENSHOT: &str = "twitter-screenshot";
+const IMAGE_LABEL_MINECRAFT: &str = "minecraft";
 const IMAGE_LABEL_LOCAL_STATE_KEY: &str = "@daybook/wip/image-label-classifier";
+const PROMPT_HIT_MIN_SCORE: f64 = 0.040;
 const PROMPT_MAX_MIN_SCORE: f64 = 0.045;
-const PROMPT_ENSEMBLE_MIN_SCORE: f64 = 0.040;
-const PROMPT_ENSEMBLE_MIN_HITS: usize = 1;
+const PROMPT_TOP2_MEAN_MIN_SCORE: f64 = 0.040;
+const PROMPT_HIT_RATIO_MIN: f64 = 0.34;
 const NULL_MARGIN_MIN: f64 = 0.000;
+const NEGATIVE_PROMPT_MARGIN_MIN: f64 = 0.000;
 const CENTROID_MIN_SCORE: f64 = 0.040;
+const COMPOSITE_MIN_SCORE: f64 = 0.040;
+const MAX_LABEL_CANDIDATES_TO_GAUNTLET: usize = 8;
+const LABEL_SYNONYM_CENTROID_SIM_MAX: f64 = 0.97;
+const MAX_MULTI_LABEL_OUTPUTS: usize = 4;
+
+#[derive(Debug, Clone)]
+struct SeedRow {
+    row_kind: &'static str,
+    label: Option<&'static str>,
+    description: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct LabelGauntletThresholds {
+    prompt_max_min_score: f64,
+    prompt_top2_mean_min_score: f64,
+    prompt_hit_ratio_min: f64,
+    centroid_min_score: f64,
+    null_margin_min: f64,
+    negative_prompt_margin_min: f64,
+    composite_min_score: f64,
+}
+
+#[derive(Debug, Clone)]
+struct LabelCandidateMetrics {
+    label: String,
+    prompt_count: usize,
+    prompt_max: f64,
+    prompt_top2_mean: f64,
+    prompt_hit_ratio: f64,
+    centroid_score: f64,
+    null_margin: f64,
+    negative_prompt_margin: f64,
+    composite_score: f64,
+}
+
+#[derive(Debug, Clone)]
+struct LabelGauntletOutcome {
+    passed: bool,
+}
+
+impl LabelGauntletThresholds {
+    fn defaults() -> Self {
+        Self {
+            prompt_max_min_score: PROMPT_MAX_MIN_SCORE,
+            prompt_top2_mean_min_score: PROMPT_TOP2_MEAN_MIN_SCORE,
+            prompt_hit_ratio_min: PROMPT_HIT_RATIO_MIN,
+            centroid_min_score: CENTROID_MIN_SCORE,
+            null_margin_min: NULL_MARGIN_MIN,
+            negative_prompt_margin_min: NEGATIVE_PROMPT_MARGIN_MIN,
+            composite_min_score: COMPOSITE_MIN_SCORE,
+        }
+    }
+}
+
+fn thresholds_for_label(_label: &str) -> LabelGauntletThresholds {
+    LabelGauntletThresholds::defaults()
+}
+
+fn run_label_gauntlet(
+    metrics: &LabelCandidateMetrics,
+    thresholds: &LabelGauntletThresholds,
+) -> LabelGauntletOutcome {
+    let passed = metrics.prompt_count > 0
+        && metrics.prompt_max >= thresholds.prompt_max_min_score
+        && metrics.prompt_top2_mean >= thresholds.prompt_top2_mean_min_score
+        && metrics.prompt_hit_ratio >= thresholds.prompt_hit_ratio_min
+        && metrics.centroid_score >= thresholds.centroid_min_score
+        && metrics.null_margin >= thresholds.null_margin_min
+        && metrics.negative_prompt_margin >= thresholds.negative_prompt_margin_min
+        && metrics.composite_score >= thresholds.composite_min_score;
+    LabelGauntletOutcome { passed }
+}
 
 pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::facet_routine;
@@ -207,8 +284,8 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
 
         #[derive(Default)]
         struct LabelAgg {
-            prompt_max: f64,
-            prompt_hits: usize,
+            prompt_scores: Vec<f64>,
+            negative_prompt_max: f64,
             prompt_vectors: Vec<Vec<f32>>,
         }
 
@@ -227,13 +304,20 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             let Some(label) = row.label.as_ref() else {
                 continue;
             };
-            let agg = by_label.entry(label.clone()).or_default();
-            if score > agg.prompt_max {
-                agg.prompt_max = score;
+            let agg = by_label.entry(label.clone()).or_insert_with(|| LabelAgg {
+                negative_prompt_max: f64::NEG_INFINITY,
+                ..Default::default()
+            });
+            if row.row_kind == "negative_prompt" {
+                if score > agg.negative_prompt_max {
+                    agg.negative_prompt_max = score;
+                }
+                continue;
             }
-            if score >= PROMPT_ENSEMBLE_MIN_SCORE {
-                agg.prompt_hits += 1;
+            if row.row_kind != "label_prompt" {
+                continue;
             }
+            agg.prompt_scores.push(score);
             agg.prompt_vectors.push(row.embedding_vec.clone());
             let _ = &row.description;
         }
@@ -242,55 +326,137 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             return Ok(Json(()));
         }
 
-        let mut best_label: Option<String> = None;
-        let mut best_prompt_max = f64::NEG_INFINITY;
-        for (label, agg) in &by_label {
-            if agg.prompt_max > best_prompt_max {
-                best_prompt_max = agg.prompt_max;
-                best_label = Some(label.clone());
-            }
-        }
-        let Some(best_label) = best_label else {
-            return Ok(Json(()));
-        };
-        let best_agg = by_label
-            .get(&best_label)
-            .ok_or_else(|| JobErrorX::Terminal(ferr!("missing best label aggregate")))?;
-
         let mut centroid_scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        let mut centroids_by_label: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::new();
         for (label, agg) in &by_label {
             let centroid = mean_normalized(&agg.prompt_vectors)
                 .ok_or_else(|| JobErrorX::Terminal(ferr!("cannot compute centroid for label '{}'", label)))?;
             let score = cosine_similarity_f32(&image_vec, &centroid)
                 .ok_or_else(|| JobErrorX::Terminal(ferr!("invalid centroid dims for '{}'", label)))?;
+            centroids_by_label.insert(label.clone(), centroid);
             centroid_scores.insert(label.clone(), score);
         }
-        let (centroid_best_label, centroid_best_score) = centroid_scores
-            .iter()
-            .max_by(|left_entry, right_entry| {
-                left_entry
-                    .1
-                    .partial_cmp(right_entry.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|(label, score)| (label.clone(), *score))
-            .ok_or_else(|| JobErrorX::Terminal(ferr!("missing centroid scores")))?;
 
-        let prompt_max_pass = best_agg.prompt_max >= PROMPT_MAX_MIN_SCORE;
-        let prompt_ensemble_pass = best_agg.prompt_hits >= PROMPT_ENSEMBLE_MIN_HITS;
-        let _null_anchor_pass = best_agg.prompt_max.is_finite()
-            && null_max.is_finite()
-            && (best_agg.prompt_max - null_max) >= NULL_MARGIN_MIN;
-        let _centroid_agreement_pass =
-            centroid_best_label == best_label && centroid_best_score >= CENTROID_MIN_SCORE;
-        // v1 fallback: prefer recall over strict precision, server-side classification remains primary.
-        let is_match = prompt_max_pass && prompt_ensemble_pass;
-        if !is_match || best_label != IMAGE_LABEL_CANONICAL {
+        let mut candidates = Vec::new();
+        for (label, agg) in &by_label {
+            let prompt_count = agg.prompt_scores.len();
+            if prompt_count == 0 {
+                continue;
+            }
+            let centroid_score = *centroid_scores
+                .get(label)
+                .ok_or_else(|| JobErrorX::Terminal(ferr!("missing centroid score for '{}'", label)))?;
+            let prompt_max = agg
+                .prompt_scores
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let prompt_top2_mean = top_k_mean(&agg.prompt_scores, 2)
+                .ok_or_else(|| JobErrorX::Terminal(ferr!("missing prompt scores for '{label}'")))?;
+            let prompt_hits = agg
+                .prompt_scores
+                .iter()
+                .filter(|score| **score >= PROMPT_HIT_MIN_SCORE)
+                .count();
+            let prompt_hit_ratio = (prompt_hits as f64) / (prompt_count as f64);
+            let label_negative_max = if agg.negative_prompt_max.is_finite() {
+                agg.negative_prompt_max
+            } else {
+                f64::NEG_INFINITY
+            };
+            let null_margin = if prompt_max.is_finite() && null_max.is_finite() {
+                prompt_max - null_max
+            } else {
+                f64::NEG_INFINITY
+            };
+            let negative_prompt_margin = if prompt_max.is_finite() && label_negative_max.is_finite() {
+                prompt_max - label_negative_max
+            } else {
+                f64::INFINITY
+            };
+            let composite_score = (0.35 * prompt_top2_mean)
+                + (0.20 * prompt_max)
+                + (0.20 * centroid_score)
+                + (0.15 * prompt_hit_ratio)
+                + (0.05 * negative_prompt_margin.min(1.0))
+                + (0.05 * null_margin.min(1.0));
+            candidates.push(LabelCandidateMetrics {
+                label: label.clone(),
+                prompt_count,
+                prompt_max,
+                prompt_top2_mean,
+                prompt_hit_ratio,
+                centroid_score,
+                null_margin,
+                negative_prompt_margin,
+                composite_score,
+            });
+        }
+
+        candidates.sort_by(|left_candidate, right_candidate| {
+            right_candidate
+                .composite_score
+                .partial_cmp(&left_candidate.composite_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if candidates.is_empty() {
             return Ok(Json(()));
         }
 
-        let new_facet: daybook_types::doc::FacetRaw =
-            WellKnownFacet::LabelGeneric(best_label.clone()).into();
+        let mut shortlisted: Vec<LabelCandidateMetrics> = Vec::new();
+        for candidate in candidates
+            .into_iter()
+            .take(MAX_LABEL_CANDIDATES_TO_GAUNTLET)
+        {
+            let thresholds = thresholds_for_label(&candidate.label);
+            let gauntlet_outcome = run_label_gauntlet(&candidate, &thresholds);
+            if !gauntlet_outcome.passed {
+                continue;
+            }
+
+            let candidate_centroid = centroids_by_label.get(&candidate.label).ok_or_else(|| {
+                JobErrorX::Terminal(ferr!("missing centroid vector for '{}'", candidate.label))
+            })?;
+
+            let mut suppressed_as_synonym = false;
+            for kept in &shortlisted {
+                let kept_centroid = centroids_by_label.get(&kept.label).ok_or_else(|| {
+                    JobErrorX::Terminal(ferr!("missing centroid vector for '{}'", kept.label))
+                })?;
+                let centroid_similarity = cosine_similarity_f32(candidate_centroid, kept_centroid)
+                    .ok_or_else(|| {
+                        JobErrorX::Terminal(ferr!(
+                            "invalid centroid dims comparing '{}' and '{}'",
+                            candidate.label,
+                            kept.label
+                        ))
+                    })?;
+                if centroid_similarity >= LABEL_SYNONYM_CENTROID_SIM_MAX {
+                    suppressed_as_synonym = true;
+                    break;
+                }
+            }
+            if suppressed_as_synonym {
+                continue;
+            }
+            shortlisted.push(candidate);
+        }
+
+        let Some(best_label) = shortlisted.first().map(|candidate| candidate.label.clone()) else {
+            return Ok(Json(()));
+        };
+
+        let mut output_labels = shortlisted
+            .iter()
+            .take(MAX_MULTI_LABEL_OUTPUTS)
+            .map(|candidate| candidate.label.clone())
+            .collect::<Vec<_>>();
+        if output_labels.is_empty() {
+            output_labels.push(best_label);
+        }
+
+        let new_facet: daybook_types::doc::FacetRaw = WellKnownFacet::PseudoLabel(output_labels).into();
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
         working_facet_token
             .update(&new_facet)
@@ -306,19 +472,95 @@ fn image_label_seed_rows() -> Vec<SeedRow> {
     vec![
         SeedRow {
             row_kind: "label_prompt",
-            label: Some(IMAGE_LABEL_CANONICAL),
+            label: Some(IMAGE_LABEL_RECEIPT),
             description: "a photo of a long printed grocery store receipt",
         },
         SeedRow {
             row_kind: "label_prompt",
-            label: Some(IMAGE_LABEL_CANONICAL),
+            label: Some(IMAGE_LABEL_RECEIPT),
             description: "a photo of a paper receipt with itemized prices",
         },
         SeedRow {
             row_kind: "label_prompt",
-            label: Some(IMAGE_LABEL_CANONICAL),
+            label: Some(IMAGE_LABEL_RECEIPT),
             description: "a close-up photo of a shopping receipt",
         },
+        SeedRow {
+            row_kind: "negative_prompt",
+            label: Some(IMAGE_LABEL_RECEIPT),
+            description: "a shopping app screenshot showing items in a cart",
+        },
+        SeedRow {
+            row_kind: "negative_prompt",
+            label: Some(IMAGE_LABEL_RECEIPT),
+            description: "a printed invoice document with line items",
+        },
+        SeedRow {
+            row_kind: "negative_prompt",
+            label: Some(IMAGE_LABEL_RECEIPT),
+            description: "a restaurant menu with printed prices",
+        },
+        SeedRow {
+            row_kind: "label_prompt",
+            label: Some(IMAGE_LABEL_TWITTER_SCREENSHOT),
+            description: "a screenshot of a tweet in the twitter app interface",
+        },
+        SeedRow {
+            row_kind: "label_prompt",
+            label: Some(IMAGE_LABEL_TWITTER_SCREENSHOT),
+            description: "a social media post screenshot with twitter reply and like counts",
+        },
+        SeedRow {
+            row_kind: "label_prompt",
+            label: Some(IMAGE_LABEL_TWITTER_SCREENSHOT),
+            description: "a screenshot of the x twitter timeline showing a tweet",
+        },
+        SeedRow {
+            row_kind: "negative_prompt",
+            label: Some(IMAGE_LABEL_TWITTER_SCREENSHOT),
+            description: "a messaging app chat screenshot conversation",
+        },
+        SeedRow {
+            row_kind: "negative_prompt",
+            label: Some(IMAGE_LABEL_TWITTER_SCREENSHOT),
+            description: "an email inbox screenshot with messages list",
+        },
+        SeedRow {
+            row_kind: "negative_prompt",
+            label: Some(IMAGE_LABEL_TWITTER_SCREENSHOT),
+            description: "a spreadsheet screenshot with rows and columns",
+        },
+        SeedRow {
+            row_kind: "label_prompt",
+            label: Some(IMAGE_LABEL_MINECRAFT),
+            description: "a minecraft gameplay screenshot with blocky pixelated terrain",
+        },
+        SeedRow {
+            row_kind: "label_prompt",
+            label: Some(IMAGE_LABEL_MINECRAFT),
+            description: "a screenshot from the video game minecraft showing cubic blocks",
+        },
+        SeedRow {
+            row_kind: "label_prompt",
+            label: Some(IMAGE_LABEL_MINECRAFT),
+            description: "minecraft game scene with pixelated block world",
+        },
+        SeedRow {
+            row_kind: "negative_prompt",
+            label: Some(IMAGE_LABEL_MINECRAFT),
+            description: "a realistic first person shooter game screenshot",
+        },
+        SeedRow {
+            row_kind: "negative_prompt",
+            label: Some(IMAGE_LABEL_MINECRAFT),
+            description: "a cartoon mobile game screenshot with flat ui icons",
+        },
+        SeedRow {
+            row_kind: "negative_prompt",
+            label: Some(IMAGE_LABEL_MINECRAFT),
+            description: "a desktop application window screenshot with menus",
+        },
+        // FIXME: these null anchors suck, we'll
         SeedRow {
             row_kind: "null_anchor",
             label: None,
@@ -327,41 +569,24 @@ fn image_label_seed_rows() -> Vec<SeedRow> {
         SeedRow {
             row_kind: "null_anchor",
             label: None,
-            description: "a screenshot of a chat app",
+            description: "a hard to describe and barren room",
         },
         SeedRow {
             row_kind: "null_anchor",
             label: None,
-            description: "a photo of a person portrait",
+            description: "a photo of a random assortment of things",
         },
         SeedRow {
             row_kind: "null_anchor",
             label: None,
-            description: "a photo of an indoor room",
+            description: "a vague picture with no discernable features",
         },
         SeedRow {
             row_kind: "null_anchor",
             label: None,
-            description: "a photo of an outdoor landscape",
-        },
-        SeedRow {
-            row_kind: "null_anchor",
-            label: None,
-            description: "a scanned document page",
-        },
-        SeedRow {
-            row_kind: "null_anchor",
-            label: None,
-            description: "a product photo on a plain background",
+            description: "a photo of an inscrutable poster",
         },
     ]
-}
-
-#[derive(Debug, Clone)]
-struct SeedRow {
-    row_kind: &'static str,
-    label: Option<&'static str>,
-    description: &'static str,
 }
 
 fn sqlite_vec_cosine_similarity(
@@ -465,6 +690,21 @@ fn mean_normalized(vectors: &[Vec<f32>]) -> Option<Vec<f32>> {
         *value = (f64::from(*value) / norm) as f32;
     }
     Some(centroid)
+}
+
+fn top_k_mean(scores: &[f64], top_count: usize) -> Option<f64> {
+    if scores.is_empty() || top_count == 0 {
+        return None;
+    }
+    let mut sorted_scores = scores.to_vec();
+    sorted_scores.sort_by(|left_score, right_score| {
+        right_score
+            .partial_cmp(left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let take_count = sorted_scores.len().min(top_count);
+    let total = sorted_scores.iter().take(take_count).sum::<f64>();
+    Some(total / (take_count as f64))
 }
 
 fn cosine_similarity_f32(left: &[f32], right: &[f32]) -> Option<f64> {

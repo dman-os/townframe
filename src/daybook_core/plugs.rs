@@ -271,7 +271,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             bundle: "daybook_wflows".into(),
                         },
                         deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::LabelGeneric.into(),
+                            working_facet_tag: WellKnownFacetTag::PseudoLabel.into(),
                         },
                         facet_acl: vec![
                             RoutineFacetAccess {
@@ -287,7 +287,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 write: false,
                             },
                             RoutineFacetAccess {
-                                tag: WellKnownFacetTag::LabelGeneric.into(),
+                                tag: WellKnownFacetTag::PseudoLabel.into(),
                                 key_id: None,
                                 read: true,
                                 write: true,

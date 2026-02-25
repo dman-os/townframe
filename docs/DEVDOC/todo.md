@@ -206,3 +206,4 @@
   - [ ] Filters
 - [ ] Screen recording
 - [ ] Agent OS
+- [ ] UI applets

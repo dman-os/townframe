@@ -33,4 +33,3 @@ jniLibs
 .gradle-local
 
 *.log
-src/infra/dev/.htpasswd
