@@ -6,6 +6,8 @@ on:
       - main
     tags:
       - "v*"
+  schedule:
+    - cron: "0 4 * * *"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
@@ -27,7 +29,7 @@ on:
           - release
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -219,6 +221,8 @@ jobs:
           target: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: denoland/setup-deno@v2
 
@@ -270,12 +274,14 @@ jobs:
         with:
           name: daybook-compose-linux-x64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
           path: ${{ steps.archive-linux.outputs.compose_archive_path }}
+          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
       - uses: actions/upload-artifact@v6
         if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
           name: daybook-cli-linux-x64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
           path: ${{ steps.archive-linux.outputs.cli_archive_path }}
+          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
       - name: upload appimage to github release
         if: needs.resolve-release-meta.outputs.release_tag != ''
@@ -331,6 +337,8 @@ jobs:
       - uses: DeterminateSystems/flakehub-cache-action@v3
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: install archive tools
         run: |
@@ -373,12 +381,14 @@ jobs:
         with:
           name: daybook-compose-android-${{ env.DAYBOOK_COMPOSE_PROFILE }}
           path: ${{ steps.archive-android.outputs.compose_archive_path }}
+          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
       - uses: actions/upload-artifact@v6
         if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
           name: daybook-cli-android-termux-aarch64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
           path: ${{ steps.archive-android.outputs.cli_archive_path }}
+          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
       - name: upload apk to github release
         if: needs.resolve-release-meta.outputs.release_tag != ''
@@ -426,6 +436,8 @@ jobs:
           target: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: set up protoc
         uses: arduino/setup-protoc@v3
@@ -495,12 +507,14 @@ jobs:
         with:
           name: daybook-compose-windows-x64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
           path: ${{ steps.archive-windows.outputs.compose_archive_path }}
+          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
       - uses: actions/upload-artifact@v6
         if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
           name: daybook-cli-windows-x64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
           path: ${{ steps.archive-windows.outputs.cli_archive_path }}
+          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
       - name: upload msi to github release
         if: needs.resolve-release-meta.outputs.release_tag != ''
@@ -563,6 +577,8 @@ jobs:
           target: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: install deps
         run: |
@@ -619,12 +635,14 @@ jobs:
         with:
           name: daybook-compose-macos-arm64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
           path: ${{ steps.archive-macos.outputs.compose_archive_path }}
+          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
       - uses: actions/upload-artifact@v6
         if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
           name: daybook-cli-macos-arm64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
           path: ${{ steps.archive-macos.outputs.cli_archive_path }}
+          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
       - name: upload dmg to github release
         if: needs.resolve-release-meta.outputs.release_tag != ''

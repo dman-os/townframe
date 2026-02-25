@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+  schedule:
+    - cron: "0 3 * * *"
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
@@ -16,7 +18,7 @@ on:
         default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -58,6 +60,8 @@ jobs:
       - uses: DeterminateSystems/flakehub-cache-action@v3
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: pre-commit hooks
         run: |
