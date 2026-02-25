@@ -151,6 +151,22 @@ pub struct FacetTokenRo {
 }
 
 impl capabilities::HostFacetTokenRo for SharedWashCtx {
+    async fn exists(
+        &mut self,
+        handle: wasmtime::component::Resource<capabilities::FacetTokenRo>,
+    ) -> wasmtime::Result<bool> {
+        let plugin = DaybookPlugin::from_ctx(self);
+        let token = self
+            .table
+            .get(&handle)
+            .context("error locating token")
+            .to_anyhow()?;
+        let Some(doc) = plugin.get_doc(&token.doc_id, &token.heads).await.to_anyhow()? else {
+            return Ok(false);
+        };
+        Ok(doc.facets.contains_key(&token.facet_key))
+    }
+
     async fn get(
         &mut self,
         handle: wasmtime::component::Resource<capabilities::FacetTokenRo>,
@@ -179,6 +195,18 @@ impl capabilities::HostFacetTokenRo for SharedWashCtx {
             // or communicate with the wflow engine
             None => todo!(),
         }
+    }
+
+    async fn heads(
+        &mut self,
+        handle: wasmtime::component::Resource<capabilities::FacetTokenRo>,
+    ) -> wasmtime::Result<Vec<String>> {
+        let token = self
+            .table
+            .get(&handle)
+            .context("error locating token")
+            .to_anyhow()?;
+        Ok(utils_rs::am::serialize_commit_heads(token.heads.as_ref()))
     }
 
     async fn drop(
@@ -285,6 +313,22 @@ pub struct FacetTokenRw {
 }
 
 impl capabilities::HostFacetTokenRw for SharedWashCtx {
+    async fn exists(
+        &mut self,
+        handle: wasmtime::component::Resource<capabilities::FacetTokenRw>,
+    ) -> wasmtime::Result<bool> {
+        let plugin = DaybookPlugin::from_ctx(self);
+        let token = self
+            .table
+            .get(&handle)
+            .context("error locating token")
+            .to_anyhow()?;
+        let Some(doc) = plugin.get_doc(&token.doc_id, &token.heads).await.to_anyhow()? else {
+            return Ok(false);
+        };
+        Ok(doc.facets.contains_key(&token.facet_key))
+    }
+
     async fn get(
         &mut self,
         handle: wasmtime::component::Resource<capabilities::FacetTokenRw>,
@@ -313,6 +357,18 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             // or communicate with the wflow engine
             None => todo!(),
         }
+    }
+
+    async fn heads(
+        &mut self,
+        handle: wasmtime::component::Resource<capabilities::FacetTokenRw>,
+    ) -> wasmtime::Result<Vec<String>> {
+        let token = self
+            .table
+            .get(&handle)
+            .context("error locating token")
+            .to_anyhow()?;
+        Ok(utils_rs::am::serialize_commit_heads(token.heads.as_ref()))
     }
 
     async fn update(

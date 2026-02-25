@@ -29,6 +29,19 @@ mod binds_guest {
                 wit_doc::WellKnownFacet::LabelGeneric(val)
             }
             root_doc::WellKnownFacet::PseudoLabel(val) => wit_doc::WellKnownFacet::PseudoLabel(val),
+            root_doc::WellKnownFacet::PseudoLabelSet(val) => {
+                wit_doc::WellKnownFacet::PseudoLabelSet(daybook_types::wit::doc::PseudoLabelSetFacet {
+                    labels: val
+                        .labels
+                        .into_iter()
+                        .map(|label| daybook_types::wit::doc::PseudoLabelSetLabel {
+                            label: label.label,
+                            prompts: label.prompts,
+                            negative_prompts: label.negative_prompts,
+                        })
+                        .collect(),
+                })
+            }
             root_doc::WellKnownFacet::TitleGeneric(val) => {
                 wit_doc::WellKnownFacet::TitleGeneric(val)
             }
@@ -153,6 +166,19 @@ mod binds_guest {
                 root_doc::WellKnownFacet::LabelGeneric(val)
             }
             wit_doc::WellKnownFacet::PseudoLabel(val) => root_doc::WellKnownFacet::PseudoLabel(val),
+            wit_doc::WellKnownFacet::PseudoLabelSet(val) => {
+                root_doc::WellKnownFacet::PseudoLabelSet(root_doc::PseudoLabelSetFacet {
+                    labels: val
+                        .labels
+                        .into_iter()
+                        .map(|label| root_doc::PseudoLabelSetLabel {
+                            label: label.label,
+                            prompts: label.prompts,
+                            negative_prompts: label.negative_prompts,
+                        })
+                        .collect(),
+                })
+            }
             wit_doc::WellKnownFacet::TitleGeneric(val) => {
                 root_doc::WellKnownFacet::TitleGeneric(val)
             }
@@ -605,6 +631,7 @@ impl facet_routine::Host for SharedWashCtx {
             branch_path: target_branch_path,
             staging_branch_path,
             facet_acl,
+            config_prop_acl,
             local_state_acl,
         }) = &dispatch.args;
         // Use staging branch path from dispatch (already set when job was created)
@@ -622,6 +649,14 @@ impl facet_routine::Host for SharedWashCtx {
         let mut sqlite_connections: Vec<(
             String,
             wasmtime::component::Resource<sqlite_connection::Connection>,
+        )> = Vec::new();
+        let mut rw_config_facet_tokens: Vec<(
+            String,
+            wasmtime::component::Resource<capabilities::FacetTokenRw>,
+        )> = Vec::new();
+        let mut ro_config_facet_tokens: Vec<(
+            String,
+            wasmtime::component::Resource<capabilities::FacetTokenRo>,
         )> = Vec::new();
 
         for access in facet_acl {
@@ -655,6 +690,52 @@ impl facet_routine::Host for SharedWashCtx {
             }
         }
 
+        if !config_prop_acl.is_empty() {
+            let config_doc_id = dayook_plugin
+                .config_repo
+                .get_or_init_global_props_doc_id(&dayook_plugin.drawer_repo)
+                .await
+                .map_err(|err| anyhow::anyhow!("error getting/initializing global props config doc: {err}"))?;
+            let config_heads = dayook_plugin
+                .drawer_repo
+                .get_doc_branches(&config_doc_id)
+                .await
+                .map_err(|err| anyhow::anyhow!("error getting config doc branches: {err}"))?
+                .and_then(|doc| doc.branches.get("main").cloned())
+                .ok_or_else(|| anyhow::anyhow!("global props config doc missing main branch"))?;
+
+            for access in config_prop_acl {
+                let config_facet_key = access
+                    .key_id
+                    .as_ref()
+                    .map(|id| daybook_types::doc::FacetKey {
+                        tag: daybook_types::doc::FacetTag::from(access.tag.0.as_str()),
+                        id: id.clone(),
+                    })
+                    .unwrap_or_else(|| FacetKey::from(access.tag.0.as_str()));
+                let config_facet_key_str = config_facet_key.to_string();
+
+                if access.write {
+                    let token = self.table.push(caps::FacetTokenRw {
+                        doc_id: config_doc_id.clone(),
+                        heads: config_heads.clone(),
+                        branch_path: daybook_types::doc::BranchPath::from("main"),
+                        target_branch_path: daybook_types::doc::BranchPath::from("main"),
+                        facet_key: config_facet_key.clone(),
+                        facet_acl: vec![],
+                    })?;
+                    rw_config_facet_tokens.push((config_facet_key_str, token));
+                } else if access.read {
+                    let token = self.table.push(caps::FacetTokenRo {
+                        doc_id: config_doc_id.clone(),
+                        heads: config_heads.clone(),
+                        facet_key: config_facet_key.clone(),
+                    })?;
+                    ro_config_facet_tokens.push((config_facet_key_str, token));
+                }
+            }
+        }
+
         for local_state_access in local_state_acl {
             let local_state_id = crate::local_state::SqliteLocalStateRepo::local_state_id(
                 &local_state_access.plug_id,
@@ -680,6 +761,8 @@ impl facet_routine::Host for SharedWashCtx {
             facet_key: facet_key.clone(),
             rw_facet_tokens,
             ro_facet_tokens,
+            rw_config_facet_tokens,
+            ro_config_facet_tokens,
             sqlite_connections,
         })
     }

@@ -36,6 +36,24 @@ pub struct OcrTextRegion {
     pub confidence_score: Option<f32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PseudoLabelSetLabel {
+    pub label: String,
+    pub prompts: Vec<String>,
+    pub negative_prompts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PseudoLabelSetFacet {
+    pub labels: Vec<PseudoLabelSetLabel>,
+}
+
 crate::define_enum_and_tag!(
     "org.example.daybook.",
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,6 +80,7 @@ crate::define_enum_and_tag!(
         RefGeneric type (DocId),
         LabelGeneric type (String),
         PseudoLabel type (Vec<String>),
+        PseudoLabelSet type (PseudoLabelSetFacet),
         TitleGeneric type (String),
         PathGeneric type (PathBuf),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -863,6 +882,10 @@ mod ser_de {
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
                 WellKnownFacetTag::PseudoLabel => Self::PseudoLabel(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::PseudoLabelSet => Self::PseudoLabelSet(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),

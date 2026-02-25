@@ -160,8 +160,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::PseudoLabel.into(),
-                        },
-                        facet_acl: vec![
+                            facet_acl: vec![
                             RoutineFacetAccess {
                                 tag: WellKnownFacetTag::Note.into(),
                                 key_id: None,
@@ -174,7 +173,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 read: true,
                                 write: true,
                             },
-                        ],
+                            ],
+                            config_prop_acl: vec![],
+                        },
                         local_state_acl: vec![],
                     }
                     .into(),
@@ -188,8 +189,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::Note.into(),
-                        },
-                        facet_acl: vec![
+                            facet_acl: vec![
                             RoutineFacetAccess {
                                 tag: WellKnownFacetTag::Blob.into(),
                                 key_id: None,
@@ -202,7 +202,14 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 read: true,
                                 write: true,
                             },
-                        ],
+                            ],
+                            config_prop_acl: vec![RoutineFacetAccess {
+                                tag: WellKnownFacetTag::PseudoLabelSet.into(),
+                                key_id: Some("daybook-wip-image-label-set".into()),
+                                read: true,
+                                write: true,
+                            }],
+                        },
                         local_state_acl: vec![],
                     }
                     .into(),
@@ -216,8 +223,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::Embedding.into(),
-                        },
-                        facet_acl: vec![
+                            facet_acl: vec![
                             RoutineFacetAccess {
                                 tag: WellKnownFacetTag::Blob.into(),
                                 key_id: None,
@@ -230,7 +236,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 read: true,
                                 write: true,
                             },
-                        ],
+                            ],
+                            config_prop_acl: vec![],
+                        },
                         local_state_acl: vec![],
                     }
                     .into(),
@@ -244,8 +252,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::Embedding.into(),
-                        },
-                        facet_acl: vec![
+                            facet_acl: vec![
                             RoutineFacetAccess {
                                 tag: WellKnownFacetTag::Note.into(),
                                 key_id: None,
@@ -258,7 +265,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 read: true,
                                 write: true,
                             },
-                        ],
+                            ],
+                            config_prop_acl: vec![],
+                        },
                         local_state_acl: vec![],
                     }
                     .into(),
@@ -272,8 +281,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::PseudoLabel.into(),
-                        },
-                        facet_acl: vec![
+                            facet_acl: vec![
                             RoutineFacetAccess {
                                 tag: WellKnownFacetTag::Blob.into(),
                                 key_id: None,
@@ -292,7 +300,14 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 read: true,
                                 write: true,
                             },
-                        ],
+                            ],
+                            config_prop_acl: vec![RoutineFacetAccess {
+                                tag: WellKnownFacetTag::PseudoLabelSet.into(),
+                                key_id: Some("daybook-wip-image-label-set".into()),
+                                read: true,
+                                write: true,
+                            }],
+                        },
                         local_state_acl: vec![RoutineLocalStateAccess {
                             plug_id: "@daybook/wip".into(),
                             local_state_key: "image-label-classifier".into(),
@@ -309,13 +324,14 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::Embedding.into(),
+                            facet_acl: vec![RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Embedding.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                            }],
+                            config_prop_acl: vec![],
                         },
-                        facet_acl: vec![RoutineFacetAccess {
-                            tag: WellKnownFacetTag::Embedding.into(),
-                            key_id: None,
-                            read: true,
-                            write: false,
-                        }],
                         local_state_acl: vec![RoutineLocalStateAccess {
                             plug_id: "@daybook/wip".into(),
                             local_state_key: "doc-embedding-index".into(),
@@ -333,13 +349,14 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::LabelGeneric.into(),
+                            facet_acl: vec![RoutineFacetAccess {
+                                tag: WellKnownFacetTag::LabelGeneric.into(),
+                                key_id: None,
+                                read: true,
+                                write: true,
+                            }],
+                            config_prop_acl: vec![],
                         },
-                        facet_acl: vec![RoutineFacetAccess {
-                            tag: WellKnownFacetTag::LabelGeneric.into(),
-                            key_id: None,
-                            read: true,
-                            write: true,
-                        }],
                         local_state_acl: vec![],
                     }
                     .into(),
@@ -569,6 +586,12 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 FacetManifest {
                     key_tag: WellKnownFacetTag::PseudoLabel.into(),
                     value_schema: schemars::schema_for!(Vec<String>),
+                    display_config: default(),
+                    references: default(),
+                },
+                FacetManifest {
+                    key_tag: WellKnownFacetTag::PseudoLabelSet.into(),
+                    value_schema: schemars::schema_for!(daybook_types::doc::PseudoLabelSetFacet),
                     display_config: default(),
                     references: default(),
                 },
@@ -1394,7 +1417,7 @@ impl PlugsRepo {
         }
 
         for (routine_name, routine) in &manifest.routines {
-            for access in &routine.facet_acl {
+            for access in routine.facet_acl() {
                 if !available_tags.contains(&access.tag.to_string()) {
                     eyre::bail!("Invalid ACL in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}", routine_name, access.tag);
                 }
@@ -1413,7 +1436,10 @@ impl PlugsRepo {
             }
 
             // If it's a DocProp routine, the 'working_prop_tag' must also be accessible.
-            if let manifest::RoutineManifestDeets::DocFacet { working_facet_tag } = &routine.deets {
+            if let manifest::RoutineManifestDeets::DocFacet {
+                working_facet_tag, ..
+            } = &routine.deets
+            {
                 if !available_tags.contains(&working_facet_tag.to_string()) {
                     eyre::bail!(
                         "Invalid routine deets for '{}': working_facet_tag '{}' not in scope",
@@ -1751,7 +1777,6 @@ mod tests {
                     bundle: "bundle1".into(),
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
-                facet_acl: vec![],
                 local_state_acl: vec![],
             }
             .into(),
@@ -1839,7 +1864,6 @@ mod tests {
                     bundle: "missing_bundle".into(),
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
-                facet_acl: vec![],
                 local_state_acl: vec![],
             }
             .into(),
@@ -1870,7 +1894,6 @@ mod tests {
                     bundle: "bundle1".into(),
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
-                facet_acl: vec![],
                 local_state_acl: vec![],
             }
             .into(),
@@ -2051,7 +2074,6 @@ mod tests {
                     bundle: "bundle1".into(),
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
-                facet_acl: vec![],
                 local_state_acl: vec![],
             }
             .into(),

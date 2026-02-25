@@ -43,6 +43,7 @@ pub mod doc {
         RefGeneric(DocId),
         LabelGeneric(String),
         PseudoLabel(Vec<String>),
+        PseudoLabelSet(PseudoLabelSetFacet),
         TitleGeneric(String),
         PathGeneric(String),
         ImageMetadata(ImageMetadata),
@@ -53,6 +54,20 @@ pub mod doc {
         Dmeta(Dmeta),
         Note(Note),
         Blob(Blob),
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub struct PseudoLabelSetLabel {
+        pub label: String,
+        pub prompts: Vec<String>,
+        pub negative_prompts: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub struct PseudoLabelSetFacet {
+        pub labels: Vec<PseudoLabelSetLabel>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -194,6 +209,19 @@ pub mod doc {
                 root_doc::WellKnownFacet::RefGeneric(val) => Self::RefGeneric(val),
                 root_doc::WellKnownFacet::LabelGeneric(val) => Self::LabelGeneric(val),
                 root_doc::WellKnownFacet::PseudoLabel(val) => Self::PseudoLabel(val),
+                root_doc::WellKnownFacet::PseudoLabelSet(val) => {
+                    Self::PseudoLabelSet(PseudoLabelSetFacet {
+                        labels: val
+                            .labels
+                            .into_iter()
+                            .map(|label| PseudoLabelSetLabel {
+                                label: label.label,
+                                prompts: label.prompts,
+                                negative_prompts: label.negative_prompts,
+                            })
+                            .collect(),
+                    })
+                }
                 root_doc::WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
                 root_doc::WellKnownFacet::PathGeneric(val) => {
                     Self::PathGeneric(val.to_string_lossy().into_owned())
@@ -297,6 +325,19 @@ pub mod doc {
                 WellKnownFacet::RefGeneric(val) => Self::RefGeneric(val),
                 WellKnownFacet::LabelGeneric(val) => Self::LabelGeneric(val),
                 WellKnownFacet::PseudoLabel(val) => Self::PseudoLabel(val),
+                WellKnownFacet::PseudoLabelSet(val) => {
+                    Self::PseudoLabelSet(root_doc::PseudoLabelSetFacet {
+                        labels: val
+                            .labels
+                            .into_iter()
+                            .map(|label| root_doc::PseudoLabelSetLabel {
+                                label: label.label,
+                                prompts: label.prompts,
+                                negative_prompts: label.negative_prompts,
+                            })
+                            .collect(),
+                    })
+                }
                 WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
                 WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val.into()),
                 WellKnownFacet::ImageMetadata(val) => {

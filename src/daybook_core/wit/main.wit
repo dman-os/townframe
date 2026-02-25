@@ -35,6 +35,7 @@ interface drawer {
 
 interface capabilities {
     use townframe:daybook-types/doc.{doc, doc-patch, facet-raw, doc-id};
+    use types.{heads};
 
     variant update-doc-error {
         invalid-patch(string),
@@ -52,11 +53,15 @@ interface capabilities {
     }
 
     resource facet-token-ro {
+        exists: func() -> bool;
         get: func() -> facet-raw;
+        heads: func() -> heads;
     }
 
     resource facet-token-rw {
+        exists: func() -> bool;
         get: func() -> facet-raw;
+        heads: func() -> heads;
         update: func(patch: facet-raw) -> result<_, update-doc-error>;
     }
 }
@@ -74,6 +79,8 @@ interface facet-routine {
 
         rw-facet-tokens: list<tuple<string, facet-token-rw>>,
         ro-facet-tokens: list<tuple<string, facet-token-ro>>,
+        rw-config-facet-tokens: list<tuple<string, facet-token-rw>>,
+        ro-config-facet-tokens: list<tuple<string, facet-token-ro>>,
         sqlite-connections: list<tuple<string, sqlite-connection-token>>,
     }
 

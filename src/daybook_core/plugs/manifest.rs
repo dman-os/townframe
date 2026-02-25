@@ -247,8 +247,6 @@ pub struct RoutineManifest {
     #[garde(dive)]
     pub deets: RoutineManifestDeets,
     #[garde(dive)]
-    pub facet_acl: Vec<RoutineFacetAccess>,
-    #[garde(dive)]
     #[serde(default)]
     pub local_state_acl: Vec<RoutineLocalStateAccess>,
 }
@@ -265,7 +263,11 @@ impl RoutineManifest {
         use daybook_types::doc::{FacetKey, FacetTag};
         let mut read_tags = std::collections::HashSet::new();
         let mut read_keys = std::collections::HashSet::new();
-        for access in &self.facet_acl {
+        let facet_acl = match &self.deets {
+            RoutineManifestDeets::DocFacet { facet_acl, .. } => facet_acl.as_slice(),
+            _ => &[],
+        };
+        for access in facet_acl {
             if !access.read {
                 continue;
             }
@@ -279,10 +281,29 @@ impl RoutineManifest {
                 read_tags.insert(access.tag.0.clone());
             }
         }
-        if let RoutineManifestDeets::DocFacet { working_facet_tag } = &self.deets {
+        if let RoutineManifestDeets::DocFacet {
+            working_facet_tag, ..
+        } = &self.deets
+        {
             read_tags.insert(working_facet_tag.0.clone());
         }
         (read_tags, read_keys)
+    }
+
+    pub fn facet_acl(&self) -> &[RoutineFacetAccess] {
+        match &self.deets {
+            RoutineManifestDeets::DocFacet { facet_acl, .. } => facet_acl.as_slice(),
+            _ => &[],
+        }
+    }
+
+    pub fn config_prop_acl(&self) -> &[RoutineFacetAccess] {
+        match &self.deets {
+            RoutineManifestDeets::DocFacet {
+                config_prop_acl, ..
+            } => config_prop_acl.as_slice(),
+            _ => &[],
+        }
     }
 }
 
@@ -309,6 +330,12 @@ pub enum RoutineManifestDeets {
     DocFacet {
         #[garde(dive)]
         working_facet_tag: FacetTag,
+        #[garde(dive)]
+        #[serde(default)]
+        facet_acl: Vec<RoutineFacetAccess>,
+        #[garde(dive)]
+        #[serde(default)]
+        config_prop_acl: Vec<RoutineFacetAccess>,
     },
     // DocCollator { predicate },
     // DocPropCollator { predicate },

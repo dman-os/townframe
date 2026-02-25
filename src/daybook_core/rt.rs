@@ -646,7 +646,9 @@ impl Rt {
         use crate::plugs::manifest::RoutineManifestDeets;
         let (dispatch_id, mut args) = match (&routine_man.deets, args) {
             (
-                RoutineManifestDeets::DocFacet { working_facet_tag },
+                RoutineManifestDeets::DocFacet {
+                    working_facet_tag, ..
+                },
                 DispatchArgs::DocFacet {
                     doc_id,
                     heads,
@@ -679,7 +681,8 @@ impl Rt {
                         branch_path,
                         heads,
                         facet_key,
-                        facet_acl: routine_man.facet_acl.clone(),
+                        facet_acl: routine_man.facet_acl().to_vec(),
+                        config_prop_acl: routine_man.config_prop_acl().to_vec(),
                         local_state_acl: routine_man.local_state_acl.clone(),
                         staging_branch_path: daybook_types::doc::BranchPath::from(
                             "/tmp/placeholder",

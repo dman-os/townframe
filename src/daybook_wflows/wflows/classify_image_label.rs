@@ -8,6 +8,8 @@ const IMAGE_LABEL_RECEIPT: &str = "receipt-image";
 const IMAGE_LABEL_TWITTER_SCREENSHOT: &str = "twitter-screenshot";
 const IMAGE_LABEL_MINECRAFT: &str = "minecraft";
 const IMAGE_LABEL_LOCAL_STATE_KEY: &str = "@daybook/wip/image-label-classifier";
+const IMAGE_LABEL_SET_CONFIG_FACET_ID: &str = "daybook-wip-image-label-set";
+const LABEL_SET_CACHE_SCHEMA_VERSION: i64 = 1;
 const PROMPT_HIT_MIN_SCORE: f64 = 0.040;
 const PROMPT_MAX_MIN_SCORE: f64 = 0.045;
 const PROMPT_TOP2_MEAN_MIN_SCORE: f64 = 0.040;
@@ -19,13 +21,6 @@ const COMPOSITE_MIN_SCORE: f64 = 0.040;
 const MAX_LABEL_CANDIDATES_TO_GAUNTLET: usize = 8;
 const LABEL_SYNONYM_CENTROID_SIM_MAX: f64 = 0.97;
 const MAX_MULTI_LABEL_OUTPUTS: usize = 4;
-
-#[derive(Debug, Clone)]
-struct SeedRow {
-    row_kind: &'static str,
-    label: Option<&'static str>,
-    description: &'static str,
-}
 
 #[derive(Debug, Clone)]
 struct LabelGauntletThresholds {
@@ -41,6 +36,7 @@ struct LabelGauntletThresholds {
 #[derive(Debug, Clone)]
 struct LabelCandidateMetrics {
     label: String,
+    centroid_rowid: i64,
     prompt_count: usize,
     prompt_max: f64,
     prompt_top2_mean: f64,
@@ -124,6 +120,18 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     let sqlite_connection = tuple_list_get(&args.sqlite_connections, IMAGE_LABEL_LOCAL_STATE_KEY)
         .or_else(|| args.sqlite_connections.first().map(|(_, token)| token))
         .ok_or_else(|| JobErrorX::Terminal(ferr!("no sqlite connection available")))?;
+    let config_label_set_facet_key = daybook_types::doc::FacetKey {
+        tag: daybook_types::doc::FacetTag::WellKnown(WellKnownFacetTag::PseudoLabelSet),
+        id: IMAGE_LABEL_SET_CONFIG_FACET_ID.into(),
+    }
+    .to_string();
+    let rw_config_label_set_token =
+        tuple_list_get(&args.rw_config_facet_tokens, &config_label_set_facet_key);
+    let ro_config_label_set_token =
+        tuple_list_get(&args.ro_config_facet_tokens, &config_label_set_facet_key);
+    if rw_config_label_set_token.is_none() && ro_config_label_set_token.is_none() {
+        return Ok(());
+    }
 
     let embedding_raw = embedding_facet_token.get();
     let embedding_json: daybook_types::doc::FacetRaw = serde_json::from_str(&embedding_raw)
@@ -163,179 +171,270 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     let image_vec_json = daybook_types::doc::embedding_f32_bytes_to_json(&image_vec_json, 768)
         .map_err(JobErrorX::Terminal)?;
 
-    #[derive(Clone)]
-    struct PreparedSeedRow {
-        row_kind: String,
-        label: Option<String>,
-        description: String,
-        query_text: String,
-        embedding_json: String,
-        model_id: String,
-    }
-
-    let mut prepared_seed_rows = Vec::new();
-    for seed in image_label_seed_rows() {
-        let query_text = format!("search_query: {}", seed.description);
-        let embed_result = mltools_embed::embed_text(&query_text)
-            .map_err(|err| JobErrorX::Terminal(ferr!("error embedding seed text: {err}")))?;
-        if !embed_result
-            .model_id
-            .eq_ignore_ascii_case(NOMIC_TEXT_MODEL_ID)
-            || embed_result.dimensions != 768
-        {
-            return Err(JobErrorX::Terminal(ferr!(
-                "unexpected seed embed model '{}'/dim {}",
-                embed_result.model_id,
-                embed_result.dimensions
-            )));
-        }
-        let embedding_json = embedding_vec_to_json(&embed_result.vector)
-            .map_err(|err| JobErrorX::Terminal(err.wrap_err("error serializing seed embedding")))?;
-        prepared_seed_rows.push(PreparedSeedRow {
-            row_kind: seed.row_kind.to_string(),
-            label: seed.label.map(str::to_string),
-            description: seed.description.to_string(),
-            query_text,
-            embedding_json,
-            model_id: embed_result.model_id,
-        });
-    }
-
     cx.effect(|| {
-        sqlite_connection
-            .query_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS image_label_examples (
-                    row_id INTEGER PRIMARY KEY,
-                    row_kind TEXT NOT NULL,
-                    label TEXT,
-                    description TEXT NOT NULL,
-                    query_text TEXT NOT NULL,
-                    embedding_json TEXT NOT NULL,
-                    embedding_dim INTEGER NOT NULL,
-                    model_tag TEXT NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 1
-                );
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_image_label_examples_unique
-                ON image_label_examples(row_kind, COALESCE(label, ''), query_text);
-                "#,
-            )
-            .map_err(|err| JobErrorX::Terminal(ferr!("error initializing image label db: {err:?}")))?;
-
-        for seed in &prepared_seed_rows {
-            sqlite_connection
-                .query(
-                    "INSERT OR IGNORE INTO image_label_examples (row_kind, label, description, query_text, embedding_json, embedding_dim, model_tag, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
-                    &[
-                        SqlValue::Text(seed.row_kind.clone()),
-                        match &seed.label {
-                            Some(label_value) => SqlValue::Text(label_value.clone()),
-                            None => SqlValue::Null,
-                        },
-                        SqlValue::Text(seed.description.clone()),
-                        SqlValue::Text(seed.query_text.clone()),
-                        SqlValue::Text(seed.embedding_json.clone()),
-                        SqlValue::Integer(768),
-                        SqlValue::Text(seed.model_id.clone()),
-                    ],
-                )
-                .map_err(|err| JobErrorX::Terminal(ferr!("error seeding image labels: {err:?}")))?;
-        }
-
-        let rows = sqlite_connection
-            .query(
-                "SELECT row_kind, label, description, embedding_json FROM image_label_examples WHERE active = 1 AND embedding_dim = 768 AND model_tag = ?1 ORDER BY row_id",
-                &[SqlValue::Text(NOMIC_TEXT_MODEL_ID.to_string())],
-            )
-            .map_err(|err| JobErrorX::Terminal(ferr!("error loading image label seeds: {err:?}")))?;
-
-        #[derive(Clone)]
-        struct CandidateRow {
-            row_kind: String,
-            label: Option<String>,
-            description: String,
-            embedding_json: String,
-            embedding_vec: Vec<f32>,
-        }
-
-        let mut candidate_rows = Vec::new();
-        for row in rows {
-            let row_kind = row_text(&row, "row_kind")
-                .ok_or_else(|| JobErrorX::Terminal(ferr!("seed row missing row_kind")))?;
-            let label = row_opt_text(&row, "label");
-            let description = row_text(&row, "description")
-                .ok_or_else(|| JobErrorX::Terminal(ferr!("seed row missing description")))?;
-            let embedding_json = row_text(&row, "embedding_json")
-                .ok_or_else(|| JobErrorX::Terminal(ferr!("seed row missing embedding_json")))?;
-            let embedding_vec: Vec<f32> = serde_json::from_str(&embedding_json)
-                .map_err(|err| JobErrorX::Terminal(ferr!("invalid seed embedding_json: {err}")))?;
-            candidate_rows.push(CandidateRow {
-                row_kind,
-                label,
-                description,
-                embedding_json,
-                embedding_vec,
-            });
-        }
-
-        if candidate_rows.is_empty() {
-            return Ok(Json(()));
-        }
-
         #[derive(Default)]
         struct LabelAgg {
             prompt_scores: Vec<f64>,
             negative_prompt_max: f64,
-            prompt_vectors: Vec<Vec<f32>>,
+            centroid_score: Option<f64>,
+            centroid_rowid: Option<i64>,
+        }
+
+        let (label_set, config_heads_json) = if let Some(token) = rw_config_label_set_token {
+            let heads_json = serde_json::to_string(&token.heads()).expect(ERROR_JSON);
+            let label_set = if token.exists() {
+                let raw = token.get();
+                let facet_raw: daybook_types::doc::FacetRaw = serde_json::from_str(&raw).map_err(
+                    |err| JobErrorX::Terminal(ferr!("error parsing config label set facet json: {err}")),
+                )?;
+                match WellKnownFacet::from_json(facet_raw, WellKnownFacetTag::PseudoLabelSet)
+                    .map_err(|err| JobErrorX::Terminal(err.wrap_err("config facet is not PseudoLabelSet")))?
+                {
+                    WellKnownFacet::PseudoLabelSet(value) => value,
+                    _ => unreachable!(),
+                }
+            } else {
+                let value = default_image_pseudo_label_set();
+                let facet_raw: daybook_types::doc::FacetRaw =
+                    WellKnownFacet::PseudoLabelSet(value.clone()).into();
+                let facet_raw = serde_json::to_string(&facet_raw).expect(ERROR_JSON);
+                token.update(&facet_raw)
+                    .wrap_err("error writing default PseudoLabelSet config facet")
+                    .map_err(JobErrorX::Terminal)?;
+                value
+            };
+            (label_set, heads_json)
+        } else if let Some(token) = ro_config_label_set_token {
+            if !token.exists() {
+                return Ok(Json(()));
+            }
+            let heads_json = serde_json::to_string(&token.heads()).expect(ERROR_JSON);
+            let raw = token.get();
+            let facet_raw: daybook_types::doc::FacetRaw = serde_json::from_str(&raw)
+                .map_err(|err| JobErrorX::Terminal(ferr!("error parsing config label set facet json: {err}")))?;
+            let value = match WellKnownFacet::from_json(facet_raw, WellKnownFacetTag::PseudoLabelSet)
+                .map_err(|err| JobErrorX::Terminal(err.wrap_err("config facet is not PseudoLabelSet")))?
+            {
+                WellKnownFacet::PseudoLabelSet(value) => value,
+                _ => unreachable!(),
+            };
+            (value, heads_json)
+        } else {
+            return Ok(Json(()));
+        };
+
+        sqlite_connection
+            .query_batch(
+                r#"
+                CREATE VIRTUAL TABLE IF NOT EXISTS image_label_prompt_vec
+                USING vec0(embedding float[768]);
+                CREATE TABLE IF NOT EXISTS image_label_prompt_meta (
+                    rowid INTEGER PRIMARY KEY,
+                    label_set_version_id INTEGER NOT NULL,
+                    row_kind TEXT NOT NULL,
+                    label TEXT,
+                    description TEXT NOT NULL,
+                    query_text TEXT NOT NULL,
+                    model_tag TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE IF NOT EXISTS image_label_label_set_versions (
+                    version_id INTEGER PRIMARY KEY,
+                    facet_key TEXT NOT NULL,
+                    facet_heads_json TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    model_tag TEXT NOT NULL,
+                    embedding_dim INTEGER NOT NULL,
+                    is_current INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_image_label_prompt_meta_version
+                ON image_label_prompt_meta(label_set_version_id, row_kind, label);
+                "#,
+            )
+            .map_err(|err| JobErrorX::Terminal(ferr!("error initializing image label db: {err:?}")))?;
+
+        let current_version_rows = sqlite_connection
+            .query(
+                "SELECT version_id, facet_heads_json FROM image_label_label_set_versions WHERE is_current = 1 ORDER BY version_id DESC LIMIT 1",
+                &[],
+            )
+            .map_err(|err| JobErrorX::Terminal(ferr!("error loading label set cache version: {err:?}")))?;
+        let current_version_row = current_version_rows.first();
+        let current_version_id = current_version_row.and_then(|row| row_i64(row, "version_id"));
+        let current_heads_json = current_version_row.and_then(|row| row_text(row, "facet_heads_json"));
+        let needs_rebuild = current_version_id.is_none()
+            || current_heads_json.as_deref() != Some(&config_heads_json);
+
+        let active_version_id = if needs_rebuild {
+            sqlite_connection
+                .query("UPDATE image_label_label_set_versions SET is_current = 0 WHERE is_current = 1", &[])
+                .map_err(|err| JobErrorX::Terminal(ferr!("error clearing current label set version: {err:?}")))?;
+            sqlite_connection
+                .query(
+                    "INSERT INTO image_label_label_set_versions (facet_key, facet_heads_json, schema_version, model_tag, embedding_dim, is_current) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+                    &[
+                        SqlValue::Text(config_label_set_facet_key.clone()),
+                        SqlValue::Text(config_heads_json.clone()),
+                        SqlValue::Integer(LABEL_SET_CACHE_SCHEMA_VERSION),
+                        SqlValue::Text(NOMIC_TEXT_MODEL_ID.to_string()),
+                        SqlValue::Integer(768),
+                    ],
+                )
+                .map_err(|err| JobErrorX::Terminal(ferr!("error inserting label set version row: {err:?}")))?;
+            let version_rows = sqlite_connection
+                .query("SELECT last_insert_rowid() AS rowid", &[])
+                .map_err(|err| JobErrorX::Terminal(ferr!("error loading label set version rowid: {err:?}")))?;
+            let version_id = version_rows
+                .first()
+                .and_then(|row| row_i64(row, "rowid"))
+                .ok_or_else(|| JobErrorX::Terminal(ferr!("missing label set version rowid")))?;
+
+            let mut cache_rows = Vec::new();
+            for label in &label_set.labels {
+                for prompt in &label.prompts {
+                    cache_rows.push(CacheSeedRow {
+                        row_kind: "label_prompt".into(),
+                        label: Some(label.label.clone()),
+                        description: prompt.clone(),
+                    });
+                }
+                for prompt in &label.negative_prompts {
+                    cache_rows.push(CacheSeedRow {
+                        row_kind: "negative_prompt".into(),
+                        label: Some(label.label.clone()),
+                        description: prompt.clone(),
+                    });
+                }
+            }
+            for prompt in image_label_null_anchor_prompts() {
+                cache_rows.push(CacheSeedRow {
+                    row_kind: "null_anchor".into(),
+                    label: None,
+                    description: (*prompt).into(),
+                });
+            }
+
+            let mut prompt_vectors_by_label: std::collections::HashMap<String, Vec<Vec<f32>>> =
+                std::collections::HashMap::new();
+            let cache_row_count = cache_rows.len();
+            for cache_row in cache_rows {
+                let query_text = format!("search_query: {}", cache_row.description);
+                let embed_result = mltools_embed::embed_text(&query_text)
+                    .map_err(|err| JobErrorX::Terminal(ferr!("error embedding seed text: {err}")))?;
+                if !embed_result.model_id.eq_ignore_ascii_case(NOMIC_TEXT_MODEL_ID)
+                    || embed_result.dimensions != 768
+                {
+                    return Err(JobErrorX::Terminal(ferr!(
+                        "unexpected seed embed model '{}'/dim {}",
+                        embed_result.model_id,
+                        embed_result.dimensions
+                    )));
+                }
+                if cache_row.row_kind == "label_prompt" {
+                    if let Some(label) = &cache_row.label {
+                        prompt_vectors_by_label
+                            .entry(label.clone())
+                            .or_default()
+                            .push(embed_result.vector.clone());
+                    }
+                }
+                insert_cache_embedding_row(
+                    sqlite_connection,
+                    CacheEmbeddingRow {
+                        label_set_version_id: version_id,
+                        row_kind: &cache_row.row_kind,
+                        label: cache_row.label.as_deref(),
+                        description: &cache_row.description,
+                        query_text: &query_text,
+                        model_tag: &embed_result.model_id,
+                        vector: &embed_result.vector,
+                    },
+                )?;
+            }
+
+            for label in &label_set.labels {
+                let Some(prompt_vectors) = prompt_vectors_by_label.get(&label.label) else {
+                    continue;
+                };
+                let centroid = mean_normalized(prompt_vectors).ok_or_else(|| {
+                    JobErrorX::Terminal(ferr!("cannot compute centroid for label '{}'", label.label))
+                })?;
+                let centroid_description = format!("centroid for {}", label.label);
+                let centroid_query = format!("search_query: centroid {}", label.label);
+                insert_cache_embedding_row(
+                    sqlite_connection,
+                    CacheEmbeddingRow {
+                        label_set_version_id: version_id,
+                        row_kind: "label_centroid",
+                        label: Some(&label.label),
+                        description: &centroid_description,
+                        query_text: &centroid_query,
+                        model_tag: NOMIC_TEXT_MODEL_ID,
+                        vector: &centroid,
+                    },
+                )?;
+            }
+            let _ = cache_row_count;
+            version_id
+        } else {
+            current_version_id.expect("version should exist when cache is current")
+        };
+
+        let scored_rows = sqlite_connection
+            .query(
+                "SELECT m.rowid AS rowid, m.row_kind, m.label, m.description, (1.0 - vec_distance_cosine(v.embedding, vec_f32(?1))) AS score \
+                 FROM image_label_prompt_meta m JOIN image_label_prompt_vec v ON v.rowid = m.rowid \
+                 WHERE m.active = 1 AND m.label_set_version_id = ?2 AND m.model_tag = ?3 ORDER BY m.rowid",
+                &[
+                    SqlValue::Text(image_vec_json.clone()),
+                    SqlValue::Integer(active_version_id),
+                    SqlValue::Text(NOMIC_TEXT_MODEL_ID.to_string()),
+                ],
+            )
+            .map_err(|err| JobErrorX::Terminal(ferr!("error loading scored image label rows: {err:?}")))?;
+        if scored_rows.is_empty() {
+            return Ok(Json(()));
         }
 
         let mut by_label: std::collections::HashMap<String, LabelAgg> = std::collections::HashMap::new();
         let mut null_max = f64::NEG_INFINITY;
-
-        for row in &candidate_rows {
-            let score = sqlite_vec_cosine_similarity(sqlite_connection, &image_vec_json, &row.embedding_json)?;
-            if row.row_kind == "null_anchor" {
+        for row in &scored_rows {
+            let row_kind = row_text(row, "row_kind")
+                .ok_or_else(|| JobErrorX::Terminal(ferr!("scored row missing row_kind")))?;
+            let score = row_real(row, "score")
+                .ok_or_else(|| JobErrorX::Terminal(ferr!("scored row missing score")))?;
+            if row_kind == "null_anchor" {
                 if score > null_max {
                     null_max = score;
                 }
                 continue;
             }
-
-            let Some(label) = row.label.as_ref() else {
+            let label = row_opt_text(row, "label");
+            let Some(label) = label else {
                 continue;
             };
-            let agg = by_label.entry(label.clone()).or_insert_with(|| LabelAgg {
+            let agg = by_label.entry(label).or_insert_with(|| LabelAgg {
                 negative_prompt_max: f64::NEG_INFINITY,
                 ..Default::default()
             });
-            if row.row_kind == "negative_prompt" {
+            if row_kind == "negative_prompt" {
                 if score > agg.negative_prompt_max {
                     agg.negative_prompt_max = score;
                 }
                 continue;
             }
-            if row.row_kind != "label_prompt" {
+            if row_kind == "label_centroid" {
+                agg.centroid_score = Some(score);
+                agg.centroid_rowid = row_i64(row, "rowid");
                 continue;
             }
-            agg.prompt_scores.push(score);
-            agg.prompt_vectors.push(row.embedding_vec.clone());
-            let _ = &row.description;
+            if row_kind == "label_prompt" {
+                agg.prompt_scores.push(score);
+            }
         }
 
         if by_label.is_empty() {
             return Ok(Json(()));
-        }
-
-        let mut centroid_scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-        let mut centroids_by_label: std::collections::HashMap<String, Vec<f32>> =
-            std::collections::HashMap::new();
-        for (label, agg) in &by_label {
-            let centroid = mean_normalized(&agg.prompt_vectors)
-                .ok_or_else(|| JobErrorX::Terminal(ferr!("cannot compute centroid for label '{}'", label)))?;
-            let score = cosine_similarity_f32(&image_vec, &centroid)
-                .ok_or_else(|| JobErrorX::Terminal(ferr!("invalid centroid dims for '{}'", label)))?;
-            centroids_by_label.insert(label.clone(), centroid);
-            centroid_scores.insert(label.clone(), score);
         }
 
         let mut candidates = Vec::new();
@@ -344,9 +443,12 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             if prompt_count == 0 {
                 continue;
             }
-            let centroid_score = *centroid_scores
-                .get(label)
-                .ok_or_else(|| JobErrorX::Terminal(ferr!("missing centroid score for '{}'", label)))?;
+            let centroid_score = agg.centroid_score.ok_or_else(|| {
+                JobErrorX::Terminal(ferr!("missing centroid score for '{}'", label))
+            })?;
+            let centroid_rowid = agg.centroid_rowid.ok_or_else(|| {
+                JobErrorX::Terminal(ferr!("missing centroid rowid for '{}'", label))
+            })?;
             let prompt_max = agg
                 .prompt_scores
                 .iter()
@@ -383,6 +485,7 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
                 + (0.05 * null_margin.min(1.0));
             candidates.push(LabelCandidateMetrics {
                 label: label.clone(),
+                centroid_rowid,
                 prompt_count,
                 prompt_max,
                 prompt_top2_mean,
@@ -415,23 +518,13 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
                 continue;
             }
 
-            let candidate_centroid = centroids_by_label.get(&candidate.label).ok_or_else(|| {
-                JobErrorX::Terminal(ferr!("missing centroid vector for '{}'", candidate.label))
-            })?;
-
             let mut suppressed_as_synonym = false;
             for kept in &shortlisted {
-                let kept_centroid = centroids_by_label.get(&kept.label).ok_or_else(|| {
-                    JobErrorX::Terminal(ferr!("missing centroid vector for '{}'", kept.label))
-                })?;
-                let centroid_similarity = cosine_similarity_f32(candidate_centroid, kept_centroid)
-                    .ok_or_else(|| {
-                        JobErrorX::Terminal(ferr!(
-                            "invalid centroid dims comparing '{}' and '{}'",
-                            candidate.label,
-                            kept.label
-                        ))
-                    })?;
+                let centroid_similarity = sqlite_vec_rowid_cosine_similarity(
+                    sqlite_connection,
+                    candidate.centroid_rowid,
+                    kept.centroid_rowid,
+                )?;
                 if centroid_similarity >= LABEL_SYNONYM_CENTROID_SIM_MAX {
                     suppressed_as_synonym = true;
                     break;
@@ -456,7 +549,8 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             output_labels.push(best_label);
         }
 
-        let new_facet: daybook_types::doc::FacetRaw = WellKnownFacet::PseudoLabel(output_labels).into();
+        let new_facet: daybook_types::doc::FacetRaw =
+            WellKnownFacet::PseudoLabel(output_labels).into();
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
         working_facet_token
             .update(&new_facet)
@@ -468,147 +562,141 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     Ok(())
 }
 
-fn image_label_seed_rows() -> Vec<SeedRow> {
-    vec![
-        SeedRow {
-            row_kind: "label_prompt",
-            label: Some(IMAGE_LABEL_RECEIPT),
-            description: "a photo of a long printed grocery store receipt",
-        },
-        SeedRow {
-            row_kind: "label_prompt",
-            label: Some(IMAGE_LABEL_RECEIPT),
-            description: "a photo of a paper receipt with itemized prices",
-        },
-        SeedRow {
-            row_kind: "label_prompt",
-            label: Some(IMAGE_LABEL_RECEIPT),
-            description: "a close-up photo of a shopping receipt",
-        },
-        SeedRow {
-            row_kind: "negative_prompt",
-            label: Some(IMAGE_LABEL_RECEIPT),
-            description: "a shopping app screenshot showing items in a cart",
-        },
-        SeedRow {
-            row_kind: "negative_prompt",
-            label: Some(IMAGE_LABEL_RECEIPT),
-            description: "a printed invoice document with line items",
-        },
-        SeedRow {
-            row_kind: "negative_prompt",
-            label: Some(IMAGE_LABEL_RECEIPT),
-            description: "a restaurant menu with printed prices",
-        },
-        SeedRow {
-            row_kind: "label_prompt",
-            label: Some(IMAGE_LABEL_TWITTER_SCREENSHOT),
-            description: "a screenshot of a tweet in the twitter app interface",
-        },
-        SeedRow {
-            row_kind: "label_prompt",
-            label: Some(IMAGE_LABEL_TWITTER_SCREENSHOT),
-            description: "a social media post screenshot with twitter reply and like counts",
-        },
-        SeedRow {
-            row_kind: "label_prompt",
-            label: Some(IMAGE_LABEL_TWITTER_SCREENSHOT),
-            description: "a screenshot of the x twitter timeline showing a tweet",
-        },
-        SeedRow {
-            row_kind: "negative_prompt",
-            label: Some(IMAGE_LABEL_TWITTER_SCREENSHOT),
-            description: "a messaging app chat screenshot conversation",
-        },
-        SeedRow {
-            row_kind: "negative_prompt",
-            label: Some(IMAGE_LABEL_TWITTER_SCREENSHOT),
-            description: "an email inbox screenshot with messages list",
-        },
-        SeedRow {
-            row_kind: "negative_prompt",
-            label: Some(IMAGE_LABEL_TWITTER_SCREENSHOT),
-            description: "a spreadsheet screenshot with rows and columns",
-        },
-        SeedRow {
-            row_kind: "label_prompt",
-            label: Some(IMAGE_LABEL_MINECRAFT),
-            description: "a minecraft gameplay screenshot with blocky pixelated terrain",
-        },
-        SeedRow {
-            row_kind: "label_prompt",
-            label: Some(IMAGE_LABEL_MINECRAFT),
-            description: "a screenshot from the video game minecraft showing cubic blocks",
-        },
-        SeedRow {
-            row_kind: "label_prompt",
-            label: Some(IMAGE_LABEL_MINECRAFT),
-            description: "minecraft game scene with pixelated block world",
-        },
-        SeedRow {
-            row_kind: "negative_prompt",
-            label: Some(IMAGE_LABEL_MINECRAFT),
-            description: "a realistic first person shooter game screenshot",
-        },
-        SeedRow {
-            row_kind: "negative_prompt",
-            label: Some(IMAGE_LABEL_MINECRAFT),
-            description: "a cartoon mobile game screenshot with flat ui icons",
-        },
-        SeedRow {
-            row_kind: "negative_prompt",
-            label: Some(IMAGE_LABEL_MINECRAFT),
-            description: "a desktop application window screenshot with menus",
-        },
-        // FIXME: these null anchors suck, we'll
-        SeedRow {
-            row_kind: "null_anchor",
-            label: None,
-            description: "a generic photo of an object",
-        },
-        SeedRow {
-            row_kind: "null_anchor",
-            label: None,
-            description: "a hard to describe and barren room",
-        },
-        SeedRow {
-            row_kind: "null_anchor",
-            label: None,
-            description: "a photo of a random assortment of things",
-        },
-        SeedRow {
-            row_kind: "null_anchor",
-            label: None,
-            description: "a vague picture with no discernable features",
-        },
-        SeedRow {
-            row_kind: "null_anchor",
-            label: None,
-            description: "a photo of an inscrutable poster",
-        },
+#[derive(Debug, Clone)]
+struct CacheSeedRow {
+    row_kind: String,
+    label: Option<String>,
+    description: String,
+}
+
+struct CacheEmbeddingRow<'a> {
+    label_set_version_id: i64,
+    row_kind: &'a str,
+    label: Option<&'a str>,
+    description: &'a str,
+    query_text: &'a str,
+    model_tag: &'a str,
+    vector: &'a [f32],
+}
+
+fn default_image_pseudo_label_set() -> daybook_types::doc::PseudoLabelSetFacet {
+    use daybook_types::doc::{PseudoLabelSetFacet, PseudoLabelSetLabel};
+    PseudoLabelSetFacet {
+        labels: vec![
+            PseudoLabelSetLabel {
+                label: IMAGE_LABEL_RECEIPT.to_string(),
+                prompts: vec![
+                    "a photo of a long printed grocery store receipt".into(),
+                    "a photo of a paper receipt with itemized prices".into(),
+                    "a close-up photo of a shopping receipt".into(),
+                ],
+                negative_prompts: vec![
+                    "a shopping app screenshot showing items in a cart".into(),
+                    "a printed invoice document with line items".into(),
+                    "a restaurant menu with printed prices".into(),
+                ],
+            },
+            PseudoLabelSetLabel {
+                label: IMAGE_LABEL_TWITTER_SCREENSHOT.to_string(),
+                prompts: vec![
+                    "a screenshot of a tweet in the twitter app interface".into(),
+                    "a social media post screenshot with twitter reply and like counts".into(),
+                    "a screenshot of the x twitter timeline showing a tweet".into(),
+                ],
+                negative_prompts: vec![
+                    "a messaging app chat screenshot conversation".into(),
+                    "an email inbox screenshot with messages list".into(),
+                    "a spreadsheet screenshot with rows and columns".into(),
+                ],
+            },
+            PseudoLabelSetLabel {
+                label: IMAGE_LABEL_MINECRAFT.to_string(),
+                prompts: vec![
+                    "a minecraft gameplay screenshot with blocky pixelated terrain".into(),
+                    "a screenshot from the video game minecraft showing cubic blocks".into(),
+                    "minecraft game scene with pixelated block world".into(),
+                ],
+                negative_prompts: vec![
+                    "a realistic first person shooter game screenshot".into(),
+                    "a cartoon mobile game screenshot with flat ui icons".into(),
+                    "a desktop application window screenshot with menus".into(),
+                ],
+            },
+        ],
+    }
+}
+
+fn image_label_null_anchor_prompts() -> &'static [&'static str] {
+    &[
+        "a generic photo of an object",
+        "a hard to describe and barren room",
+        "a photo of a random assortment of things",
+        "a vague picture with no discernable features",
+        "a photo of an inscrutable poster",
     ]
 }
 
-fn sqlite_vec_cosine_similarity(
+fn insert_cache_embedding_row(
     sqlite_connection: &crate::wit::townframe::daybook::sqlite_connection::Connection,
-    left_json: &str,
-    right_json: &str,
+    row: CacheEmbeddingRow<'_>,
+) -> Result<i64, JobErrorX> {
+    use crate::wit::townframe::sql::types::SqlValue;
+    let embedding_json = embedding_vec_to_json(row.vector)
+        .map_err(|err| JobErrorX::Terminal(err.wrap_err("error serializing cached embedding")))?;
+    sqlite_connection
+        .query(
+            "INSERT INTO image_label_prompt_vec (embedding) VALUES (?1)",
+            &[SqlValue::Text(embedding_json)],
+        )
+        .map_err(|err| JobErrorX::Terminal(ferr!("error inserting vec cache row: {err:?}")))?;
+    let rowid_rows = sqlite_connection
+        .query("SELECT last_insert_rowid() AS rowid", &[])
+        .map_err(|err| JobErrorX::Terminal(ferr!("error reading cache vec rowid: {err:?}")))?;
+    let rowid = rowid_rows
+        .first()
+        .and_then(|row| row_i64(row, "rowid"))
+        .ok_or_else(|| JobErrorX::Terminal(ferr!("missing cache vec rowid")))?;
+    sqlite_connection
+        .query(
+            "INSERT INTO image_label_prompt_meta (rowid, label_set_version_id, row_kind, label, description, query_text, model_tag, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
+            &[
+                SqlValue::Integer(rowid),
+                SqlValue::Integer(row.label_set_version_id),
+                SqlValue::Text(row.row_kind.to_string()),
+                row.label
+                    .map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string())),
+                SqlValue::Text(row.description.to_string()),
+                SqlValue::Text(row.query_text.to_string()),
+                SqlValue::Text(row.model_tag.to_string()),
+            ],
+        )
+        .map_err(|err| JobErrorX::Terminal(ferr!("error inserting cache meta row: {err:?}")))?;
+    Ok(rowid)
+}
+
+fn sqlite_vec_rowid_cosine_similarity(
+    sqlite_connection: &crate::wit::townframe::daybook::sqlite_connection::Connection,
+    left_rowid: i64,
+    right_rowid: i64,
 ) -> Result<f64, JobErrorX> {
     use crate::wit::townframe::sql::types::SqlValue;
     let rows = sqlite_connection
         .query(
-            "SELECT (1.0 - vec_distance_cosine(vec_f32(?1), vec_f32(?2))) AS score",
-            &[
-                SqlValue::Text(left_json.to_string()),
-                SqlValue::Text(right_json.to_string()),
-            ],
+            "SELECT (1.0 - vec_distance_cosine(v1.embedding, v2.embedding)) AS score \
+             FROM image_label_prompt_vec v1 JOIN image_label_prompt_vec v2 \
+             ON v1.rowid = ?1 AND v2.rowid = ?2",
+            &[SqlValue::Integer(left_rowid), SqlValue::Integer(right_rowid)],
         )
-        .map_err(|err| JobErrorX::Terminal(ferr!("error computing sqlite-vec cosine: {err:?}")))?;
+        .map_err(|err| {
+            JobErrorX::Terminal(ferr!(
+                "error computing sqlite-vec rowid cosine similarity: {err:?}"
+            ))
+        })?;
     let Some(row) = rows.first() else {
-        return Err(JobErrorX::Terminal(ferr!("missing sqlite-vec score row")));
+        return Err(JobErrorX::Terminal(ferr!("missing sqlite-vec rowid score row")));
     };
     row_real(row, "score")
-        .ok_or_else(|| JobErrorX::Terminal(ferr!("missing sqlite-vec score value")))
+        .ok_or_else(|| JobErrorX::Terminal(ferr!("missing sqlite-vec rowid score value")))
 }
 
 fn row_text(row: &crate::wit::townframe::sql::types::ResultRow, name: &str) -> Option<String> {
@@ -639,6 +727,17 @@ fn row_real(row: &crate::wit::townframe::sql::types::ResultRow, name: &str) -> O
             if entry.column_name == name =>
         {
             Some(*value as f64)
+        }
+        _ => None,
+    })
+}
+
+fn row_i64(row: &crate::wit::townframe::sql::types::ResultRow, name: &str) -> Option<i64> {
+    row.iter().find_map(|entry| match &entry.value {
+        crate::wit::townframe::sql::types::SqlValue::Integer(value)
+            if entry.column_name == name =>
+        {
+            Some(*value)
         }
         _ => None,
     })
@@ -705,24 +804,4 @@ fn top_k_mean(scores: &[f64], top_count: usize) -> Option<f64> {
     let take_count = sorted_scores.len().min(top_count);
     let total = sorted_scores.iter().take(take_count).sum::<f64>();
     Some(total / (take_count as f64))
-}
-
-fn cosine_similarity_f32(left: &[f32], right: &[f32]) -> Option<f64> {
-    if left.len() != right.len() || left.is_empty() {
-        return None;
-    }
-    let mut dot = 0.0_f64;
-    let mut left_norm = 0.0_f64;
-    let mut right_norm = 0.0_f64;
-    for (left_value, right_value) in left.iter().zip(right) {
-        let left_value = f64::from(*left_value);
-        let right_value = f64::from(*right_value);
-        dot += left_value * right_value;
-        left_norm += left_value * left_value;
-        right_norm += right_value * right_value;
-    }
-    if left_norm == 0.0 || right_norm == 0.0 {
-        return None;
-    }
-    Some(dot / (left_norm.sqrt() * right_norm.sqrt()))
 }
