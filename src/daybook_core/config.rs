@@ -105,6 +105,7 @@ pub struct ConfigRepo {
     local_user_path: daybook_types::doc::UserPath,
     local_actor_id: automerge::ActorId,
     cancel_token: CancellationToken,
+    global_props_doc_init_lock: tokio::sync::Mutex<()>,
     _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
 }
 
@@ -184,6 +185,7 @@ impl ConfigRepo {
             local_user_path,
             local_actor_id,
             cancel_token: main_cancel_token.child_token(),
+            global_props_doc_init_lock: tokio::sync::Mutex::new(()),
             _change_listener_tickets: vec![ticket],
         };
         let repo = Arc::new(repo);
@@ -424,6 +426,10 @@ impl ConfigRepo {
         &self,
         drawer_repo: &crate::drawer::DrawerRepo,
     ) -> Res<daybook_types::doc::DocId> {
+        if let Some(doc_id) = self.get_global_props_doc_id().await {
+            return Ok(doc_id);
+        }
+        let _guard = self.global_props_doc_init_lock.lock().await;
         if let Some(doc_id) = self.get_global_props_doc_id().await {
             return Ok(doc_id);
         }

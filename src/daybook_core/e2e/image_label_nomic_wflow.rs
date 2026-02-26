@@ -52,17 +52,12 @@ async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
                 updated_doc = Some(doc);
                 break;
             }
-            info!(
-                was_embedded = doc.facets.contains_key(&embedding_key),
-                "retrying XXX"
-            );
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 
     let updated_doc = updated_doc
         .ok_or_eyre("doc not found with embedding+pseudo-label after image-label pipeline")?;
-    info!(?updated_doc, "XXX");
 
     let embedding_raw = updated_doc
         .facets
@@ -97,7 +92,6 @@ async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
     );
 
     test_cx._wait_until_no_active_jobs(120).await?;
-
     test_cx.stop().await?;
     Ok(())
 }

@@ -191,7 +191,10 @@ pub async fn embed_text(ctx: &Ctx, text: &str) -> Res<EmbedResult> {
     }
 }
 
-pub async fn embed_image(ctx: &Ctx, image: &Path, mime: Option<&str>) -> Res<EmbedResult> {
+pub async fn embed_image(ctx: &Ctx, image: &Path, mime: &str) -> Res<EmbedResult> {
+    if mime.trim().is_empty() {
+        eyre::bail!("empty image mime");
+    }
     let Some(backend_config) = ctx.config.image_embed.backends.first() else {
         eyre::bail!("no image embed backend configured");
     };
@@ -495,7 +498,7 @@ mod local {
     pub async fn embed_image(
         backend_config: &ImageEmbedBackendConfig,
         image: &Path,
-        mime: Option<&str>,
+        mime: &str,
     ) -> Res<EmbedResult> {
         let (onnx_path, preprocessor_config_path, model_id) = match backend_config {
             ImageEmbedBackendConfig::LocalFastembed {
@@ -509,26 +512,6 @@ mod local {
             ),
         };
 
-        fn sniff_extension(bytes: &[u8]) -> Option<&'static str> {
-            if bytes.len() >= 3 && bytes[..3] == [0xFF, 0xD8, 0xFF] {
-                return Some("jpg");
-            }
-            if bytes.len() >= 8 && bytes[..8] == [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n']
-            {
-                return Some("png");
-            }
-            if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
-                return Some("gif");
-            }
-            if bytes.len() >= 2 && &bytes[..2] == b"BM" {
-                return Some("bmp");
-            }
-            if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-                return Some("webp");
-            }
-            None
-        }
-
         fn extension_from_mime(mime: &str) -> Option<&'static str> {
             match mime.split(';').next().map(str::trim) {
                 Some("image/jpeg" | "image/jpg") => Some("jpg"),
@@ -541,7 +524,7 @@ mod local {
         }
 
         let image_path = image.to_path_buf();
-        let image_mime = mime.map(str::to_string);
+        let image_mime = mime.to_string();
         if !image_path.exists() {
             eyre::bail!("missing image file: {}", image_path.display());
         }
@@ -582,13 +565,13 @@ mod local {
                 let image_bytes = std::fs::read(&image_path).wrap_err_with(|| {
                     format!("failed reading image bytes {}", image_path.display())
                 })?;
-                let ext = image_mime
-                    .as_deref()
-                    .and_then(extension_from_mime)
-                    .or_else(|| sniff_extension(&image_bytes))
-                    .ok_or_else(|| {
-                        eyre::eyre!("unsupported image format for {}", image_path.display())
-                    })?;
+                let ext = extension_from_mime(&image_mime).ok_or_else(|| {
+                    eyre::eyre!(
+                        "unsupported image mime '{}' for {}",
+                        image_mime,
+                        image_path.display()
+                    )
+                })?;
                 let now = jiff::Timestamp::now();
                 let unique = format!("{}-{}", now.as_second(), now.subsec_nanosecond());
                 let path = std::env::temp_dir().join(format!(
@@ -603,12 +586,13 @@ mod local {
                 path
             };
 
-            let mut vectors = embedder
+            let embed_result = embedder
                 .embed(vec![image_path_for_embed], None)
-                .map_err(|err| eyre::eyre!("failed to embed image: {err}"))?;
-            if let Some(path) = temp_image_path {
+                .map_err(|err| eyre::eyre!("failed to embed image: {err}"));
+            if let Some(path) = temp_image_path.as_ref() {
                 let _ = std::fs::remove_file(path);
             }
+            let mut vectors = embed_result?;
             let Some(vector) = vectors.pop() else {
                 eyre::bail!("image embedding backend returned no vector");
             };
@@ -628,6 +612,43 @@ mod local {
 /// client for cloud token providers.
 mod cloud {
     use super::*;
+    fn genai_client(
+        provider: genai::adapter::AdapterKind,
+        service_url: Option<&str>,
+        auth: Option<&CloudAuth>,
+    ) -> Res<genai::Client> {
+        let mut builder = genai::Client::builder();
+
+        if let Some(service_url) = service_url {
+            let service_url = service_url.to_string();
+            let target_resolver = genai::resolver::ServiceTargetResolver::from_resolver_fn(
+                move |mut service_target: genai::ServiceTarget| {
+                    service_target.endpoint = genai::resolver::Endpoint::from_owned(service_url.clone());
+                    Ok::<_, genai::resolver::Error>(service_target)
+                },
+            );
+            builder = builder.with_service_target_resolver(target_resolver);
+        }
+
+        if let Some(CloudAuth::ApiKey { key }) = auth {
+            let key = key.clone();
+            let auth_resolver = genai::resolver::AuthResolver::from_resolver_fn(
+                move |model_iden: genai::ModelIden| {
+                    if model_iden.adapter_kind == provider {
+                        Ok::<_, genai::resolver::Error>(Some(genai::resolver::AuthData::from_single(
+                            key.clone(),
+                        )))
+                    } else {
+                        Ok::<_, genai::resolver::Error>(None)
+                    }
+                },
+            );
+            builder = builder.with_auth_resolver(auth_resolver);
+        }
+
+        Ok(builder.build())
+    }
+
     fn ollama_http_client(auth: Option<&CloudAuth>) -> Res<reqwest::Client> {
         match auth {
             Some(CloudAuth::Basic { username, password }) => reqwest::Client::builder()
@@ -677,16 +698,10 @@ mod cloud {
             _ => eyre::bail!("unsupported cloud embed backend"),
         };
 
-        if let EmbedBackendConfig::CloudOllama { url, .. } = backend_config {
-            std::env::set_var("OLLAMA_HOST", url);
-        }
-
         let mut embed_options = genai::embed::EmbedOptions::default();
         if let Some(auth) = auth {
             match auth {
-                CloudAuth::ApiKey { key } => {
-                    std::env::set_var("GEMINI_API_KEY", key);
-                }
+                CloudAuth::ApiKey { .. } => {}
                 CloudAuth::Basic { username, password } => {
                     let mut token = "Basic ".to_string();
                     data_encoding::BASE64
@@ -697,7 +712,15 @@ mod cloud {
             }
         }
 
-        let client = genai::Client::default();
+        let client = genai_client(
+            provider,
+            match backend_config {
+                EmbedBackendConfig::CloudOllama { url, .. } => Some(url.as_str()),
+                EmbedBackendConfig::CloudGemini { .. } => None,
+                _ => None,
+            },
+            auth.as_ref(),
+        )?;
         let model_iden = genai::ModelIden::new(provider, model);
         let res = client
             .embed(&model_iden, text, Some(&embed_options))
@@ -727,16 +750,10 @@ mod cloud {
             }
         };
 
-        if let LlmBackendConfig::CloudOllama { url, .. } = backend_config {
-            std::env::set_var("OLLAMA_HOST", url);
-        }
-
         let mut chat_options = genai::chat::ChatOptions::default();
         if let Some(auth) = auth {
             match auth {
-                CloudAuth::ApiKey { key } => {
-                    std::env::set_var("GEMINI_API_KEY", key);
-                }
+                CloudAuth::ApiKey { .. } => {}
                 CloudAuth::Basic { username, password } => {
                     let mut token = "Basic ".to_string();
                     data_encoding::BASE64
@@ -747,7 +764,14 @@ mod cloud {
             }
         }
 
-        let client = genai::Client::default();
+        let client = genai_client(
+            provider,
+            match backend_config {
+                LlmBackendConfig::CloudOllama { url, .. } => Some(url.as_str()),
+                LlmBackendConfig::CloudGemini { .. } => None,
+            },
+            auth.as_ref(),
+        )?;
 
         let chat_req =
             genai::chat::ChatRequest::new(vec![genai::chat::ChatMessage::user(text.to_string())]);
@@ -785,9 +809,7 @@ mod cloud {
                 let chat_options = genai::chat::ChatOptions::default();
                 if let Some(auth) = auth {
                     match auth {
-                        CloudAuth::ApiKey { key } => {
-                            std::env::set_var("GEMINI_API_KEY", key);
-                        }
+                        CloudAuth::ApiKey { .. } => {}
                         CloudAuth::Basic { .. } => {
                             eyre::bail!("basic auth is not supported for Gemini backend")
                         }
@@ -802,7 +824,7 @@ mod cloud {
                 let chat_req = genai::chat::ChatRequest::new(vec![genai::chat::ChatMessage::user(
                     user_content,
                 )]);
-                let client = genai::Client::default();
+                let client = genai_client(genai::adapter::AdapterKind::Gemini, None, auth.as_ref())?;
                 let model_iden = genai::ModelIden::new(genai::adapter::AdapterKind::Gemini, model);
                 let response = client
                     .exec_chat(&model_iden, chat_req, Some(&chat_options))
@@ -1078,7 +1100,8 @@ mod tests {
             .build()?;
         let context = context_with(vec![], vec![], vec![]);
         let image_path = PathBuf::from("/tmp/does_not_matter.jpg");
-        let result = runtime.block_on(async { embed_image(&context, &image_path, None).await });
+        let result =
+            runtime.block_on(async { embed_image(&context, &image_path, "image/jpeg").await });
         expect_error_message_contains(result, "no image embed backend configured");
         Ok(())
     }

@@ -310,11 +310,10 @@ pub async fn mobile_default_with_observer(
     tokio::fs::create_dir_all(&hf_cache_dir)
         .await
         .wrap_err_with(|| format!("error creating {}", hf_cache_dir.display()))?;
-    let api = ApiBuilder::from_cache(Cache::new(hf_cache_dir))
+    let api = ApiBuilder::from_cache(Cache::new(hf_cache_dir.clone()))
         .with_progress(true)
         .build()?;
-    let text_cache_repo =
-        Cache::new(download_dir.join("hf")).repo(Repo::model(NOMIC_TEXT_MODEL_ID.into()));
+    let text_cache_repo = Cache::new(hf_cache_dir.clone()).repo(Repo::model(NOMIC_TEXT_MODEL_ID.into()));
     let text_model_repo = api.model(NOMIC_TEXT_MODEL_ID.to_string());
 
     let onnx_path = hf_download_with_progress(
@@ -359,7 +358,7 @@ pub async fn mobile_default_with_observer(
     .await?;
 
     let vision_cache_repo =
-        Cache::new(download_dir.join("hf")).repo(Repo::model(NOMIC_VISION_MODEL_ID.into()));
+        Cache::new(hf_cache_dir.clone()).repo(Repo::model(NOMIC_VISION_MODEL_ID.into()));
     let vision_model_repo = api.model(NOMIC_VISION_MODEL_ID.to_string());
     let vision_onnx_path = hf_download_with_progress(
         NOMIC_VISION_MODEL_ID,

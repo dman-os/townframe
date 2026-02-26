@@ -74,21 +74,20 @@ interface doc {
         key: string
     }
 
-    record pseudo-label-set-label {
+    record pseudo-label-candidate {
         label: string,
         prompts: list<string>,
         negative-prompts: list<string>,
     }
 
-    record pseudo-label-set-facet {
-        labels: list<pseudo-label-set-label>,
+    record pseudo-label-candidates-facet {
+        labels: list<pseudo-label-candidate>,
     }
 
     variant well-known-facet {
         ref-generic(doc-ref), 
         label-generic(string), 
         pseudo-label(list<string>), 
-        pseudo-label-set(pseudo-label-set-facet),
         title-generic(string), 
         path-generic(string), 
         image-metadata(image-metadata), 
@@ -98,6 +97,7 @@ interface doc {
         note(note),
         blob(blob),
         pending(pending),
+        pseudo-label-candidates(pseudo-label-candidates-facet),
     }
 
     type facet-raw = json;

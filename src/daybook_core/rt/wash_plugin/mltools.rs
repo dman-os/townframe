@@ -88,11 +88,11 @@ impl mltools_embed::Host for SharedWashCtx {
         };
         let mltools_ctx = mltools_ctx_from_config_repo(&plugin).await;
 
-        let result =
-            match mltools::embed_image(&mltools_ctx, &image_path, Some(blob.mime.as_str())).await {
-                Ok(value) => value,
-                Err(err) => return Ok(Err(err.to_string())),
-            };
+        let result = match mltools::embed_image(&mltools_ctx, &image_path, blob.mime.as_str()).await
+        {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
 
         Ok(Ok(mltools_embed::EmbedResult {
             vector: result.vector,

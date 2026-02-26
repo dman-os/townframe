@@ -18,8 +18,7 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             ))
         })?;
 
-    // Extract text content for LLM
-    // Use root types since Doc uses root types (not WIT types)
+    // This test workflow writes a hardcoded label and does not read doc content.
     use daybook_types::doc::WellKnownFacet;
 
     cx.effect(|| {

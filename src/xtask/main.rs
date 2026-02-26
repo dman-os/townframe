@@ -138,14 +138,33 @@ async fn main_main() -> Res<()> {
                 );
                 println!("summary: {}", similarity_summary(similarity));
             } else if let Some(image_compare) = image_compare {
+                let image_mime = |path: &std::path::Path| -> Res<&'static str> {
+                    match path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.to_ascii_lowercase())
+                        .as_deref()
+                    {
+                        Some("jpg" | "jpeg") => Ok("image/jpeg"),
+                        Some("png") => Ok("image/png"),
+                        Some("gif") => Ok("image/gif"),
+                        Some("bmp") => Ok("image/bmp"),
+                        Some("webp") => Ok("image/webp"),
+                        _ => eyre::bail!("unsupported image extension for '{}'", path.display()),
+                    }
+                };
                 let image = image.ok_or_eyre(
                     "embed-similarity-demo requires --image when --image-compare is provided",
                 )?;
-                let image_a = mltools::embed_image(ctx.as_ref(), &image, None).await?;
-                let image_a_again = mltools::embed_image(ctx.as_ref(), &image, None).await?;
-                let image_b = mltools::embed_image(ctx.as_ref(), &image_compare, None).await?;
+                let image_a = mltools::embed_image(ctx.as_ref(), &image, image_mime(&image)?).await?;
+                let image_a_again =
+                    mltools::embed_image(ctx.as_ref(), &image, image_mime(&image)?).await?;
+                let image_b =
+                    mltools::embed_image(ctx.as_ref(), &image_compare, image_mime(&image_compare)?)
+                        .await?;
                 let image_b_again =
-                    mltools::embed_image(ctx.as_ref(), &image_compare, None).await?;
+                    mltools::embed_image(ctx.as_ref(), &image_compare, image_mime(&image_compare)?)
+                        .await?;
 
                 let image_image_similarity =
                     sqlite_vec_cosine_similarity(&image_a.vector, &image_b.vector).await?;
@@ -203,9 +222,22 @@ async fn main_main() -> Res<()> {
                 let image = image.ok_or_eyre(
                     "embed-similarity-demo requires --image unless --text-compare is provided",
                 )?;
-                let image_embedding = mltools::embed_image(ctx.as_ref(), &image, None).await?;
+                let image_mime = match image
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.to_ascii_lowercase())
+                    .as_deref()
+                {
+                    Some("jpg" | "jpeg") => "image/jpeg",
+                    Some("png") => "image/png",
+                    Some("gif") => "image/gif",
+                    Some("bmp") => "image/bmp",
+                    Some("webp") => "image/webp",
+                    _ => eyre::bail!("unsupported image extension for '{}'", image.display()),
+                };
+                let image_embedding = mltools::embed_image(ctx.as_ref(), &image, image_mime).await?;
                 let image_embedding_again =
-                    mltools::embed_image(ctx.as_ref(), &image, None).await?;
+                    mltools::embed_image(ctx.as_ref(), &image, image_mime).await?;
                 let (builtin_image_embedding, builtin_text_embedding) =
                     fastembed_builtin_nomic_cross_modal_embeddings(
                         &image,

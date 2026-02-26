@@ -43,7 +43,7 @@ pub mod doc {
         RefGeneric(DocId),
         LabelGeneric(String),
         PseudoLabel(Vec<String>),
-        PseudoLabelSet(PseudoLabelSetFacet),
+        PseudoLabelCandidates(PseudoLabelCandidatesFacet),
         TitleGeneric(String),
         PathGeneric(String),
         ImageMetadata(ImageMetadata),
@@ -58,7 +58,7 @@ pub mod doc {
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     #[serde(rename_all = "camelCase")]
-    pub struct PseudoLabelSetLabel {
+    pub struct PseudoLabelCandidate {
         pub label: String,
         pub prompts: Vec<String>,
         pub negative_prompts: Vec<String>,
@@ -66,8 +66,8 @@ pub mod doc {
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     #[serde(rename_all = "camelCase")]
-    pub struct PseudoLabelSetFacet {
-        pub labels: Vec<PseudoLabelSetLabel>,
+    pub struct PseudoLabelCandidatesFacet {
+        pub labels: Vec<PseudoLabelCandidate>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -209,12 +209,12 @@ pub mod doc {
                 root_doc::WellKnownFacet::RefGeneric(val) => Self::RefGeneric(val),
                 root_doc::WellKnownFacet::LabelGeneric(val) => Self::LabelGeneric(val),
                 root_doc::WellKnownFacet::PseudoLabel(val) => Self::PseudoLabel(val),
-                root_doc::WellKnownFacet::PseudoLabelSet(val) => {
-                    Self::PseudoLabelSet(PseudoLabelSetFacet {
+                root_doc::WellKnownFacet::PseudoLabelCandidates(val) => {
+                    Self::PseudoLabelCandidates(PseudoLabelCandidatesFacet {
                         labels: val
                             .labels
                             .into_iter()
-                            .map(|label| PseudoLabelSetLabel {
+                            .map(|label| PseudoLabelCandidate {
                                 label: label.label,
                                 prompts: label.prompts,
                                 negative_prompts: label.negative_prompts,
@@ -325,12 +325,12 @@ pub mod doc {
                 WellKnownFacet::RefGeneric(val) => Self::RefGeneric(val),
                 WellKnownFacet::LabelGeneric(val) => Self::LabelGeneric(val),
                 WellKnownFacet::PseudoLabel(val) => Self::PseudoLabel(val),
-                WellKnownFacet::PseudoLabelSet(val) => {
-                    Self::PseudoLabelSet(root_doc::PseudoLabelSetFacet {
+                WellKnownFacet::PseudoLabelCandidates(val) => {
+                    Self::PseudoLabelCandidates(root_doc::PseudoLabelCandidatesFacet {
                         labels: val
                             .labels
                             .into_iter()
-                            .map(|label| root_doc::PseudoLabelSetLabel {
+                            .map(|label| root_doc::PseudoLabelCandidate {
                                 label: label.label,
                                 prompts: label.prompts,
                                 negative_prompts: label.negative_prompts,

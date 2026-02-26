@@ -121,7 +121,7 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
         .or_else(|| args.sqlite_connections.first().map(|(_, token)| token))
         .ok_or_else(|| JobErrorX::Terminal(ferr!("no sqlite connection available")))?;
     let config_label_set_facet_key = daybook_types::doc::FacetKey {
-        tag: daybook_types::doc::FacetTag::WellKnown(WellKnownFacetTag::PseudoLabelSet),
+        tag: daybook_types::doc::FacetTag::WellKnown(WellKnownFacetTag::PseudoLabelCandidates),
         id: IMAGE_LABEL_SET_CONFIG_FACET_ID.into(),
     }
     .to_string();
@@ -187,19 +187,19 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
                 let facet_raw: daybook_types::doc::FacetRaw = serde_json::from_str(&raw).map_err(
                     |err| JobErrorX::Terminal(ferr!("error parsing config label set facet json: {err}")),
                 )?;
-                match WellKnownFacet::from_json(facet_raw, WellKnownFacetTag::PseudoLabelSet)
-                    .map_err(|err| JobErrorX::Terminal(err.wrap_err("config facet is not PseudoLabelSet")))?
+                match WellKnownFacet::from_json(facet_raw, WellKnownFacetTag::PseudoLabelCandidates)
+                    .map_err(|err| JobErrorX::Terminal(err.wrap_err("config facet is not PseudoLabelCandidates")))?
                 {
-                    WellKnownFacet::PseudoLabelSet(value) => value,
+                    WellKnownFacet::PseudoLabelCandidates(value) => value,
                     _ => unreachable!(),
                 }
             } else {
                 let value = default_image_pseudo_label_set();
                 let facet_raw: daybook_types::doc::FacetRaw =
-                    WellKnownFacet::PseudoLabelSet(value.clone()).into();
+                    WellKnownFacet::PseudoLabelCandidates(value.clone()).into();
                 let facet_raw = serde_json::to_string(&facet_raw).expect(ERROR_JSON);
                 token.update(&facet_raw)
-                    .wrap_err("error writing default PseudoLabelSet config facet")
+                    .wrap_err("error writing default PseudoLabelCandidates config facet")
                     .map_err(JobErrorX::Terminal)?;
                 value
             };
@@ -212,10 +212,10 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             let raw = token.get();
             let facet_raw: daybook_types::doc::FacetRaw = serde_json::from_str(&raw)
                 .map_err(|err| JobErrorX::Terminal(ferr!("error parsing config label set facet json: {err}")))?;
-            let value = match WellKnownFacet::from_json(facet_raw, WellKnownFacetTag::PseudoLabelSet)
-                .map_err(|err| JobErrorX::Terminal(err.wrap_err("config facet is not PseudoLabelSet")))?
+            let value = match WellKnownFacet::from_json(facet_raw, WellKnownFacetTag::PseudoLabelCandidates)
+                .map_err(|err| JobErrorX::Terminal(err.wrap_err("config facet is not PseudoLabelCandidates")))?
             {
-                WellKnownFacet::PseudoLabelSet(value) => value,
+                WellKnownFacet::PseudoLabelCandidates(value) => value,
                 _ => unreachable!(),
             };
             (value, heads_json)
@@ -346,7 +346,7 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
                         label: cache_row.label.as_deref(),
                         description: &cache_row.description,
                         query_text: &query_text,
-                        model_tag: &embed_result.model_id,
+                        model_tag: NOMIC_TEXT_MODEL_ID,
                         vector: &embed_result.vector,
                     },
                 )?;
@@ -579,11 +579,11 @@ struct CacheEmbeddingRow<'a> {
     vector: &'a [f32],
 }
 
-fn default_image_pseudo_label_set() -> daybook_types::doc::PseudoLabelSetFacet {
-    use daybook_types::doc::{PseudoLabelSetFacet, PseudoLabelSetLabel};
-    PseudoLabelSetFacet {
+fn default_image_pseudo_label_set() -> daybook_types::doc::PseudoLabelCandidatesFacet {
+    use daybook_types::doc::{PseudoLabelCandidatesFacet, PseudoLabelCandidate};
+    PseudoLabelCandidatesFacet {
         labels: vec![
-            PseudoLabelSetLabel {
+            PseudoLabelCandidate {
                 label: IMAGE_LABEL_RECEIPT.to_string(),
                 prompts: vec![
                     "a photo of a long printed grocery store receipt".into(),
@@ -596,7 +596,7 @@ fn default_image_pseudo_label_set() -> daybook_types::doc::PseudoLabelSetFacet {
                     "a restaurant menu with printed prices".into(),
                 ],
             },
-            PseudoLabelSetLabel {
+            PseudoLabelCandidate {
                 label: IMAGE_LABEL_TWITTER_SCREENSHOT.to_string(),
                 prompts: vec![
                     "a screenshot of a tweet in the twitter app interface".into(),
@@ -609,7 +609,7 @@ fn default_image_pseudo_label_set() -> daybook_types::doc::PseudoLabelSetFacet {
                     "a spreadsheet screenshot with rows and columns".into(),
                 ],
             },
-            PseudoLabelSetLabel {
+            PseudoLabelCandidate {
                 label: IMAGE_LABEL_MINECRAFT.to_string(),
                 prompts: vec![
                     "a minecraft gameplay screenshot with blocky pixelated terrain".into(),

@@ -52,7 +52,7 @@ async fn test_learned_image_label_proposals_receipt_twice_prints_labels() -> Res
     Ok(())
 }
 
-fn assert_proposal_set_invariants(set: &daybook_types::doc::PseudoLabelSetFacet) -> Res<()> {
+fn assert_proposal_set_invariants(set: &daybook_types::doc::PseudoLabelCandidatesFacet) -> Res<()> {
     let mut seen_labels = std::collections::BTreeSet::new();
 
     for label in &set.labels {
@@ -157,13 +157,13 @@ async fn add_blob_image_doc(
 async fn wait_for_proposal_set(
     test_cx: &crate::e2e::DaybookTestContext,
     timeout_secs: u64,
-) -> Res<daybook_types::doc::PseudoLabelSetFacet> {
+) -> Res<daybook_types::doc::PseudoLabelCandidatesFacet> {
     let config_doc_id = test_cx
         ._config_repo
         .get_or_init_global_props_doc_id(&test_cx.drawer_repo)
         .await?;
     let proposal_set_key = FacetKey {
-        tag: daybook_types::doc::FacetTag::WellKnown(WellKnownFacetTag::PseudoLabelSet),
+        tag: daybook_types::doc::FacetTag::WellKnown(WellKnownFacetTag::PseudoLabelCandidates),
         id: PROPOSAL_SET_CONFIG_FACET_ID.into(),
     };
 
@@ -189,8 +189,8 @@ async fn wait_for_proposal_set(
         {
             if let Some(raw) = doc.facets.get(&proposal_set_key) {
                 let facet =
-                    WellKnownFacet::from_json(raw.clone(), WellKnownFacetTag::PseudoLabelSet)?;
-                let WellKnownFacet::PseudoLabelSet(value) = facet else {
+                    WellKnownFacet::from_json(raw.clone(), WellKnownFacetTag::PseudoLabelCandidates)?;
+                let WellKnownFacet::PseudoLabelCandidates(value) = facet else {
                     eyre::bail!("proposal set config facet had unexpected type");
                 };
                 if !value.labels.is_empty() {

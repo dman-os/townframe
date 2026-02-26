@@ -35,15 +35,17 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             facet_key.tag == daybook_types::doc::FacetTag::WellKnown(WellKnownFacetTag::Note)
         })
         .map(|(_, val)| {
-            WellKnownFacet::from_json(serde_json::from_str(val).unwrap(), WellKnownFacetTag::Note)
+            let raw = serde_json::from_str(val).map_err(|err| {
+                JobErrorX::Terminal(ferr!("unable to parse facet found on doc: {err}"))
+            })?;
+            WellKnownFacet::from_json(raw, WellKnownFacetTag::Note)
+                .map_err(|err| {
+                    JobErrorX::Terminal(err.wrap_err("unable to parse facet found on doc"))
+                })
         }) {
         Some(Ok(WellKnownFacet::Note(Note { content, .. }))) => content,
         Some(Ok(_)) => unreachable!(),
-        Some(Err(err)) => {
-            return Err(JobErrorX::Terminal(
-                err.wrap_err("unable to parse facet found on doc"),
-            ))
-        }
+        Some(Err(err)) => return Err(err),
         None => {
             return Err(JobErrorX::Terminal(ferr!(
                 "no {tag} found on doc",

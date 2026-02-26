@@ -23,8 +23,11 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
         .iter()
         .find(|(key, _)| key == "@daybook/wip/doc-embedding-index")
         .map(|(_, token)| token)
-        .or_else(|| args.sqlite_connections.first().map(|(_, token)| token))
-        .ok_or_else(|| JobErrorX::Terminal(ferr!("no sqlite connection available")))?;
+        .ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "sqlite connection '@daybook/wip/doc-embedding-index' not found"
+            ))
+        })?;
 
     let embedding_raw = embedding_facet_token.get();
     let embedding_json: daybook_types::doc::FacetRaw = serde_json::from_str(&embedding_raw)

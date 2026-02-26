@@ -141,7 +141,7 @@ impl DocProcessorTriageListener {
                 )
             });
 
-            let predicate_doc = if needs_full_doc {
+            let predicate_doc_arc = if needs_full_doc {
                 if full_doc_for_reference_predicates.is_none() {
                     full_doc_for_reference_predicates = Some(
                         rt.drawer
@@ -152,22 +152,26 @@ impl DocProcessorTriageListener {
                 }
                 match full_doc_for_reference_predicates
                     .as_ref()
-                    .and_then(|opt| opt.as_deref())
+                    .and_then(|opt| opt.as_ref())
                 {
-                    Some(doc) => doc,
+                    Some(doc) => Some(doc),
                     None => continue,
                 }
             } else {
-                doc
+                None
             };
+            let predicate_doc = predicate_doc_arc.map(|doc| doc.as_ref()).unwrap_or(doc);
 
             self.predicate_resolved.clear();
             for requirement in &self.predicate_requirements {
                 match requirement {
                     DocPredicateEvalRequirement::FullDoc => {
+                        let predicate_doc_arc = predicate_doc_arc.expect(
+                            "FullDoc requirement implies full doc was loaded and cached",
+                        );
                         self.predicate_resolved.insert(
                             requirement.clone(),
-                            DocPredicateEvalResolved::FullDoc(Arc::new(predicate_doc.clone())),
+                            DocPredicateEvalResolved::FullDoc(Arc::clone(predicate_doc_arc)),
                         );
                     }
                     DocPredicateEvalRequirement::FacetsOfTag(tag) => {

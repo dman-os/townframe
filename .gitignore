@@ -33,3 +33,5 @@ jniLibs
 .gradle-local
 
 *.log
+
+__pycache__

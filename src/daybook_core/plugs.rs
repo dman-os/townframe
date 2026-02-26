@@ -208,7 +208,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 },
                             ],
                             config_prop_acl: vec![RoutineFacetAccess {
-                                tag: WellKnownFacetTag::PseudoLabelSet.into(),
+                                tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
                                 key_id: Some("daybook-wip-image-label-set".into()),
                                 read: true,
                                 write: true,
@@ -306,7 +306,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 },
                             ],
                             config_prop_acl: vec![RoutineFacetAccess {
-                                tag: WellKnownFacetTag::PseudoLabelSet.into(),
+                                tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
                                 key_id: Some("daybook-wip-image-label-set".into()),
                                 read: true,
                                 write: true,
@@ -373,7 +373,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 },
                             ],
                             config_prop_acl: vec![RoutineFacetAccess {
-                                tag: WellKnownFacetTag::PseudoLabelSet.into(),
+                                tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
                                 key_id: Some("daybook_wip_learned_image_label_proposals".into()),
                                 read: true,
                                 write: true,
@@ -666,8 +666,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     references: default(),
                 },
                 FacetManifest {
-                    key_tag: WellKnownFacetTag::PseudoLabelSet.into(),
-                    value_schema: schemars::schema_for!(daybook_types::doc::PseudoLabelSetFacet),
+                    key_tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
+                    value_schema: schemars::schema_for!(daybook_types::doc::PseudoLabelCandidatesFacet),
                     display_config: default(),
                     references: default(),
                 },

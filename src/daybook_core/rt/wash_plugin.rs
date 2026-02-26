@@ -29,13 +29,13 @@ mod binds_guest {
                 wit_doc::WellKnownFacet::LabelGeneric(val)
             }
             root_doc::WellKnownFacet::PseudoLabel(val) => wit_doc::WellKnownFacet::PseudoLabel(val),
-            root_doc::WellKnownFacet::PseudoLabelSet(val) => {
-                wit_doc::WellKnownFacet::PseudoLabelSet(
-                    daybook_types::wit::doc::PseudoLabelSetFacet {
+            root_doc::WellKnownFacet::PseudoLabelCandidates(val) => {
+                wit_doc::WellKnownFacet::PseudoLabelCandidates(
+                    daybook_types::wit::doc::PseudoLabelCandidatesFacet {
                         labels: val
                             .labels
                             .into_iter()
-                            .map(|label| daybook_types::wit::doc::PseudoLabelSetLabel {
+                            .map(|label| daybook_types::wit::doc::PseudoLabelCandidate {
                                 label: label.label,
                                 prompts: label.prompts,
                                 negative_prompts: label.negative_prompts,
@@ -168,12 +168,12 @@ mod binds_guest {
                 root_doc::WellKnownFacet::LabelGeneric(val)
             }
             wit_doc::WellKnownFacet::PseudoLabel(val) => root_doc::WellKnownFacet::PseudoLabel(val),
-            wit_doc::WellKnownFacet::PseudoLabelSet(val) => {
-                root_doc::WellKnownFacet::PseudoLabelSet(root_doc::PseudoLabelSetFacet {
+            wit_doc::WellKnownFacet::PseudoLabelCandidates(val) => {
+                root_doc::WellKnownFacet::PseudoLabelCandidates(root_doc::PseudoLabelCandidatesFacet {
                     labels: val
                         .labels
                         .into_iter()
-                        .map(|label| root_doc::PseudoLabelSetLabel {
+                        .map(|label| root_doc::PseudoLabelCandidate {
                             label: label.label,
                             prompts: label.prompts,
                             negative_prompts: label.negative_prompts,
