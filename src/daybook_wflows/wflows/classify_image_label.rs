@@ -130,6 +130,11 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     let ro_config_label_set_token =
         tuple_list_get(&args.ro_config_facet_tokens, &config_label_set_facet_key);
     if rw_config_label_set_token.is_none() && ro_config_label_set_token.is_none() {
+        info!(
+            doc_id = %args.doc_id,
+            facet_key = %args.facet_key,
+            "skipping image label classification: no PseudoLabelCandidates config facet token"
+        );
         return Ok(());
     }
 
@@ -145,15 +150,29 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
 
     if embedding.dtype != daybook_types::doc::EmbeddingDtype::F32 || embedding.compression.is_some()
     {
+        debug!(
+            ?embedding.dtype,
+            ?embedding.compression,
+            "skipping image label classification: unsupported embedding dtype/compression"
+        );
         return Ok(());
     }
     if embedding.dim != 768 {
+        debug!(
+            dim = embedding.dim,
+            "skipping image label classification: unexpected embedding dim"
+        );
         return Ok(());
     }
     if !embedding
         .model_tag
         .eq_ignore_ascii_case(NOMIC_VISION_MODEL_ID)
     {
+        debug!(
+            model_tag = %embedding.model_tag,
+            expected_model_tag = %NOMIC_VISION_MODEL_ID,
+            "skipping image label classification: unexpected embedding model"
+        );
         return Ok(());
     }
     let parsed_ref = match daybook_types::url::parse_facet_ref(&embedding.facet_ref) {
@@ -409,7 +428,8 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
                 }
                 continue;
             }
-            let label = row_opt_text(row, "label");
+            let label = row_opt_text(row, "label")
+                .ok_or_else(|| JobErrorX::Terminal(ferr!("scored row missing label column")))?;
             let Some(label) = label else {
                 continue;
             };
@@ -713,13 +733,21 @@ fn row_text(row: &crate::wit::townframe::sql::types::ResultRow, name: &str) -> O
     })
 }
 
-fn row_opt_text(row: &crate::wit::townframe::sql::types::ResultRow, name: &str) -> Option<String> {
-    row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Text(value) if entry.column_name == name => {
-            Some(value.clone())
+/// Returns `Some(Some(text))` if the column exists and is TEXT, `Some(None)` if it exists and is
+/// NULL, and `None` if the column is missing or has a non-text/non-null type.
+fn row_opt_text(
+    row: &crate::wit::townframe::sql::types::ResultRow,
+    name: &str,
+) -> Option<Option<String>> {
+    row.iter().find_map(|entry| {
+        if entry.column_name != name {
+            return None;
         }
-        crate::wit::townframe::sql::types::SqlValue::Null if entry.column_name == name => None,
-        _ => None,
+        match &entry.value {
+            crate::wit::townframe::sql::types::SqlValue::Text(value) => Some(Some(value.clone())),
+            crate::wit::townframe::sql::types::SqlValue::Null => Some(None),
+            _ => None,
+        }
     })
 }
 

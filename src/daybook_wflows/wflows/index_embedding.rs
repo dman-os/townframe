@@ -72,69 +72,86 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             )
             .map_err(|err| JobErrorX::Terminal(ferr!("error initializing vector index: {err:?}")))?;
 
-        let existing_rows = sqlite_connection
-            .query(
-                "SELECT rowid FROM doc_embedding_meta WHERE doc_id = ?1 AND facet_key = ?2",
-                &[
-                    SqlValue::Text(args.doc_id.clone()),
-                    SqlValue::Text(args.facet_key.clone()),
-                ],
-            )
-            .map_err(|err| JobErrorX::Terminal(ferr!("error selecting vector row: {err:?}")))?;
+        sqlite_connection
+            .query("BEGIN IMMEDIATE TRANSACTION", &[])
+            .map_err(|err| JobErrorX::Terminal(ferr!("error beginning sqlite transaction: {err:?}")))?;
 
-        let existing_rowid = existing_rows.first().and_then(|row| {
-            row.iter().find_map(|entry| match &entry.value {
-                SqlValue::Integer(value) if entry.column_name == "rowid" => Some(*value),
-                _ => None,
-            })
-        });
-
-        if let Some(rowid) = existing_rowid {
-            sqlite_connection
+        let tx_result: Result<(), JobErrorX> = (|| {
+            let existing_rows = sqlite_connection
                 .query(
-                    "UPDATE doc_embedding_vec SET embedding = ?1 WHERE rowid = ?2",
-                    &[SqlValue::Text(vector_json), SqlValue::Integer(rowid)],
-                )
-                .map_err(|err| JobErrorX::Terminal(ferr!("error updating vec row: {err:?}")))?;
-            sqlite_connection
-                .query(
-                    "UPDATE doc_embedding_meta SET origin_heads = ?1 WHERE rowid = ?2",
-                    &[SqlValue::Text(serialized_heads), SqlValue::Integer(rowid)],
-                )
-                .map_err(|err| JobErrorX::Terminal(ferr!("error updating meta row: {err:?}")))?;
-        } else {
-            sqlite_connection
-                .query(
-                    "INSERT INTO doc_embedding_vec (embedding) VALUES (?1)",
-                    &[SqlValue::Text(vector_json)],
-                )
-                .map_err(|err| JobErrorX::Terminal(ferr!("error inserting vec row: {err:?}")))?;
-            let inserted_rowid_rows = sqlite_connection
-                .query("SELECT last_insert_rowid() AS rowid", &[])
-                .map_err(|err| {
-                    JobErrorX::Terminal(ferr!("error getting inserted rowid: {err:?}"))
-                })?;
-            let inserted_rowid = inserted_rowid_rows
-                .first()
-                .and_then(|row| {
-                    row.iter().find_map(|entry| match &entry.value {
-                        SqlValue::Integer(value) if entry.column_name == "rowid" => Some(*value),
-                        _ => None,
-                    })
-                })
-                .ok_or_else(|| JobErrorX::Terminal(ferr!("missing inserted rowid")))?;
-            sqlite_connection
-                .query(
-                    "INSERT INTO doc_embedding_meta (rowid, doc_id, facet_key, origin_heads) VALUES (?1, ?2, ?3, ?4)",
+                    "SELECT rowid FROM doc_embedding_meta WHERE doc_id = ?1 AND facet_key = ?2",
                     &[
-                        SqlValue::Integer(inserted_rowid),
                         SqlValue::Text(args.doc_id.clone()),
                         SqlValue::Text(args.facet_key.clone()),
-                        SqlValue::Text(serialized_heads),
                     ],
                 )
-                .map_err(|err| JobErrorX::Terminal(ferr!("error inserting meta row: {err:?}")))?;
+                .map_err(|err| JobErrorX::Terminal(ferr!("error selecting vector row: {err:?}")))?;
+
+            let existing_rowid = existing_rows.first().and_then(|row| {
+                row.iter().find_map(|entry| match &entry.value {
+                    SqlValue::Integer(value) if entry.column_name == "rowid" => Some(*value),
+                    _ => None,
+                })
+            });
+
+            if let Some(rowid) = existing_rowid {
+                sqlite_connection
+                    .query(
+                        "UPDATE doc_embedding_vec SET embedding = ?1 WHERE rowid = ?2",
+                        &[SqlValue::Text(vector_json.clone()), SqlValue::Integer(rowid)],
+                    )
+                    .map_err(|err| JobErrorX::Terminal(ferr!("error updating vec row: {err:?}")))?;
+                sqlite_connection
+                    .query(
+                        "UPDATE doc_embedding_meta SET origin_heads = ?1 WHERE rowid = ?2",
+                        &[SqlValue::Text(serialized_heads.clone()), SqlValue::Integer(rowid)],
+                    )
+                    .map_err(|err| JobErrorX::Terminal(ferr!("error updating meta row: {err:?}")))?;
+            } else {
+                sqlite_connection
+                    .query(
+                        "INSERT INTO doc_embedding_vec (embedding) VALUES (?1)",
+                        &[SqlValue::Text(vector_json.clone())],
+                    )
+                    .map_err(|err| JobErrorX::Terminal(ferr!("error inserting vec row: {err:?}")))?;
+                let inserted_rowid_rows = sqlite_connection
+                    .query("SELECT last_insert_rowid() AS rowid", &[])
+                    .map_err(|err| {
+                        JobErrorX::Terminal(ferr!("error getting inserted rowid: {err:?}"))
+                    })?;
+                let inserted_rowid = inserted_rowid_rows
+                    .first()
+                    .and_then(|row| {
+                        row.iter().find_map(|entry| match &entry.value {
+                            SqlValue::Integer(value) if entry.column_name == "rowid" => Some(*value),
+                            _ => None,
+                        })
+                    })
+                    .ok_or_else(|| JobErrorX::Terminal(ferr!("missing inserted rowid")))?;
+                sqlite_connection
+                    .query(
+                        "INSERT INTO doc_embedding_meta (rowid, doc_id, facet_key, origin_heads) VALUES (?1, ?2, ?3, ?4)",
+                        &[
+                            SqlValue::Integer(inserted_rowid),
+                            SqlValue::Text(args.doc_id.clone()),
+                            SqlValue::Text(args.facet_key.clone()),
+                            SqlValue::Text(serialized_heads.clone()),
+                        ],
+                    )
+                    .map_err(|err| JobErrorX::Terminal(ferr!("error inserting meta row: {err:?}")))?;
+            }
+
+            Ok(())
+        })();
+
+        if let Err(err) = tx_result {
+            let _ = sqlite_connection.query("ROLLBACK TRANSACTION", &[]);
+            return Err(err);
         }
+
+        sqlite_connection
+            .query("COMMIT TRANSACTION", &[])
+            .map_err(|err| JobErrorX::Terminal(ferr!("error committing sqlite transaction: {err:?}")))?;
 
         Ok(Json(()))
     })?;

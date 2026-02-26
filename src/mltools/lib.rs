@@ -806,13 +806,12 @@ mod cloud {
                 .await
             }
             LlmBackendConfig::CloudGemini { model, auth } => {
-                let chat_options = genai::chat::ChatOptions::default();
                 if let Some(auth) = auth {
                     match auth {
-                        CloudAuth::ApiKey { .. } => {}
                         CloudAuth::Basic { .. } => {
                             eyre::bail!("basic auth is not supported for Gemini backend")
                         }
+                        CloudAuth::ApiKey { .. } => {}
                     }
                 }
 
@@ -827,7 +826,11 @@ mod cloud {
                 let client = genai_client(genai::adapter::AdapterKind::Gemini, None, auth.as_ref())?;
                 let model_iden = genai::ModelIden::new(genai::adapter::AdapterKind::Gemini, model);
                 let response = client
-                    .exec_chat(&model_iden, chat_req, Some(&chat_options))
+                    .exec_chat(
+                        &model_iden,
+                        chat_req,
+                        Some(&genai::chat::ChatOptions::default()),
+                    )
                     .await
                     .map_err(|error| eyre::eyre!("genai multimodal chat error: {error:?}"))?;
 
@@ -1310,7 +1313,7 @@ mod tests {
                 .iter()
                 .any(|backend| matches!(backend, LlmBackendConfig::CloudGemini { .. })));
 
-            if crate::models::gemini_api_key().is_some() && cfg!(any(test, feature = "tests")) {
+            if std::env::var("GEMINI_API_KEY").is_ok() && cfg!(any(test, feature = "tests")) {
                 assert!(matches!(
                     config.llm.backends.first(),
                     Some(LlmBackendConfig::CloudGemini { .. })

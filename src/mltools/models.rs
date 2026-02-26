@@ -16,10 +16,6 @@ use utils_rs::prelude::*;
 pub(crate) const OLLAMA_URL_DEFAULT: &str = env!("OLLAMA_URL");
 pub(crate) const OLLAMA_USERNAME: &str = env!("OLLAMA_USERNAME");
 pub(crate) const OLLAMA_PASSWORD: &str = env!("OLLAMA_PASSWORD");
-pub(crate) fn gemini_api_key() -> Option<String> {
-    let _ = utils_rs::dotenv_hierarchical();
-    std::env::var("GEMINI_API_KEY").ok()
-}
 const OLLAMA_EMBED_MODEL_DEFAULT: &str = "embeddinggemma";
 const OLLAMA_LLM_MODEL_DEFAULT: &str = "gemma3";
 const NOMIC_TEXT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
@@ -272,6 +268,8 @@ pub async fn mobile_default_with_observer(
     observer: Option<&MobileDefaultObserver>,
 ) -> Res<Config> {
     let download_dir = download_dir.as_ref().to_path_buf();
+    let _ = utils_rs::dotenv_hierarchical();
+    let gemini_api_key = std::env::var("GEMINI_API_KEY").ok();
     tokio::fs::create_dir_all(&download_dir)
         .await
         .wrap_err_with(|| format!("error creating {}", download_dir.display()))?;
@@ -396,7 +394,9 @@ pub async fn mobile_default_with_observer(
         },
         EmbedBackendConfig::CloudGemini {
             model: "gemini-embedding-001".to_string(),
-            auth: gemini_api_key().map(|key| crate::CloudAuth::ApiKey { key }),
+            auth: gemini_api_key
+                .clone()
+                .map(|key| crate::CloudAuth::ApiKey { key }),
         },
     ];
 
@@ -411,13 +411,15 @@ pub async fn mobile_default_with_observer(
         },
         LlmBackendConfig::CloudGemini {
             model: "gemini-flash-latest".to_string(),
-            auth: gemini_api_key().map(|key| crate::CloudAuth::ApiKey { key }),
+            auth: gemini_api_key
+                .clone()
+                .map(|key| crate::CloudAuth::ApiKey { key }),
         },
     ];
 
     // In tests, prefer Gemini chat first when available so cloud chat smoke tests can bypass
     // gateway/proxy issues affecting Ollama routes.
-    if cfg!(any(test, feature = "tests")) && gemini_api_key().is_some() {
+    if cfg!(any(test, feature = "tests")) && gemini_api_key.is_some() {
         if let Some(gemini_llm_ix) = llm_backends
             .iter()
             .position(|backend| matches!(backend, LlmBackendConfig::CloudGemini { .. }))

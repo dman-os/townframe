@@ -80,7 +80,7 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
         }
     })?;
 
-    let new_labels = vec![llm_response.clone()];
+    let new_labels = vec![llm_response];
 
     cx.effect(|| {
         let new_facet: daybook_types::doc::FacetRaw =

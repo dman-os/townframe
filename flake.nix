@@ -40,7 +40,7 @@
           rustVersion = "2026-01-01";
 
           ghjkMainEnv = {
-            CARGO_BUILD_JOBS = "8";
+            CARGO_BUILD_JOBS = "12";
           };
 
           ghjkDevEnv = {

@@ -47,8 +47,12 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
         })?;
 
     let sqlite_connection = tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY)
-        .or_else(|| args.sqlite_connections.first().map(|(_, token)| token))
-        .ok_or_else(|| JobErrorX::Terminal(ferr!("no sqlite connection available")))?;
+        .ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "sqlite connection '{}' not found in sqlite_connections",
+                LOCAL_STATE_KEY
+            ))
+        })?;
 
     let config_facet_key = daybook_types::doc::FacetKey {
         tag: daybook_types::doc::FacetTag::WellKnown(WellKnownFacetTag::PseudoLabelCandidates),
@@ -575,12 +579,31 @@ fn get_or_compute_text_embedding(
         )
         .map_err(|err| JobErrorX::Terminal(ferr!("error querying learned label embedding cache: {err:?}")))?;
     if let Some(row) = cache_rows.first() {
-        let model_tag = row_text(row, "model_tag").unwrap_or_default();
-        let dim = row_i64(row, "dim").unwrap_or_default();
-        let vector_bytes = row_blob(row, "vector").unwrap_or_default();
+        let model_tag = row_text(row, "model_tag").ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "malformed learned label embedding cache row: missing/invalid field 'model_tag'"
+            ))
+        })?;
+        let dim = row_i64(row, "dim").ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "malformed learned label embedding cache row: missing/invalid field 'dim'"
+            ))
+        })?;
+        let vector_bytes = row_blob(row, "vector").ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "malformed learned label embedding cache row: missing/invalid field 'vector'"
+            ))
+        })?;
         let vector = embedding_bytes_to_f32(&vector_bytes).map_err(|err| {
             JobErrorX::Terminal(err.wrap_err("invalid cached learned label embedding bytes"))
         })?;
+        if dim != vector.len() as i64 {
+            return Err(JobErrorX::Terminal(ferr!(
+                "malformed learned label embedding cache row: dim {} does not match vector len {}",
+                dim,
+                vector.len()
+            )));
+        }
         if model_tag.eq_ignore_ascii_case(NOMIC_TEXT_MODEL_ID) && dim == (vector.len() as i64) {
             return Ok(vector);
         }
@@ -619,10 +642,25 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
     if left.len() != right.len() || left.is_empty() {
         return -1.0;
     }
-    left.iter()
+    let dot = left
+        .iter()
         .zip(right)
         .map(|(left_value, right_value)| f64::from(*left_value) * f64::from(*right_value))
-        .sum()
+        .sum::<f64>();
+    let left_norm = left
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+    let right_norm = right
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+    if left_norm == 0.0 || right_norm == 0.0 {
+        return -1.0;
+    }
+    (dot / (left_norm * right_norm)).clamp(-1.0, 1.0)
 }
 
 fn mean_normalized(vectors: &[Vec<f32>]) -> Option<Vec<f32>> {
