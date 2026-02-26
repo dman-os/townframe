@@ -25,6 +25,8 @@ pub enum PartitionEffectDeets {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RunJobAttemptDeets {
     pub run_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_worker_id: Option<Arc<str>>,
 }
 
 impl From<RunJobAttemptDeets> for PartitionEffectDeets {

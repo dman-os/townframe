@@ -25,6 +25,8 @@ pub struct JobRunEvent {
     pub timestamp: Timestamp,
     pub effect_id: crate::partition::effects::EffectId,
     pub run_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<Arc<str>>,
     pub start_at: Timestamp,
     pub end_at: Timestamp,
     pub result: JobRunResult,

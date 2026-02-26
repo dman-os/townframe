@@ -7,15 +7,18 @@ use crate::interlude::*;
 use std::collections::HashSet;
 use std::sync::atomic::AtomicU64;
 use std::sync::RwLock;
+use std::time::Instant;
 
 use anyhow::Context;
-use utils_rs::prelude::tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
+use utils_rs::prelude::tokio::sync::mpsc;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
 use wflow_core::gen::metastore::{WasmcloudWflowServiceMeta, WflowServiceMeta};
 use wflow_core::metastore::MetdataStore;
-use wflow_core::partition::{job_events, service, state};
+use wflow_core::partition::{effects, job_events, state};
+use wflow_tokio::partition::service;
 
 pub mod binds_partition_host {
     wash_runtime::wasmtime::component::bindgen!({
@@ -53,30 +56,14 @@ use binds_service::townframe::wflow::types;
 #[educe(Debug)]
 struct ActiveJobCtx {
     #[educe(Debug(ignore))]
-    trap_tx: tokio::sync::Mutex<Option<oneshot::Sender<JobTrap>>>,
+    yield_tx: mpsc::UnboundedSender<JobTrap>,
+    #[educe(Debug(ignore))]
+    resume_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<SessionResume>>,
+    #[educe(Debug(ignore))]
+    pause_cancel: CancellationToken,
     cur_step: AtomicU64,
     active_step: std::sync::Mutex<Option<ActiveStepCtx>>,
-    journal: state::JobState,
-}
-
-impl ActiveJobCtx {
-    /// Set a trap and block forever (async). This should be called when the trap
-    /// is set, as the `run` invocation will be dropped when a trap is set.
-    async fn set_trap_and_block_forever(
-        &self,
-        trap: JobTrap,
-    ) -> anyhow::Result<futures::never::Never> {
-        let trap_tx = { self.trap_tx.lock().await.take() };
-        let Some(trap_tx) = trap_tx else {
-            anyhow::bail!("run has already trapped");
-        };
-        if trap_tx.send(trap).is_err() {
-            anyhow::bail!("run has been abandoned");
-        }
-        // Block forever since the run invocation will be dropped
-        futures::future::pending::<futures::never::Never>().await;
-        unreachable!()
-    }
+    journal: std::sync::Mutex<state::JobState>,
 }
 
 #[derive(Debug)]
@@ -95,6 +82,32 @@ enum JobTrap {
         attempt_id: u64,
     },
     RunComplete(Result<String, types::JobError>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SessionKey {
+    worker_id: Arc<str>,
+    job_id: Arc<str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SessionResume {
+    Continue,
+    Stop,
+}
+
+struct SessionHandle {
+    job_id: Arc<str>,
+    ctx_id: Arc<str>,
+    workload_id: Arc<str>,
+    component_id: String,
+    next_run_id: u64,
+    last_effect_id: effects::EffectId,
+    last_used: Instant,
+    resume_tx: mpsc::UnboundedSender<SessionResume>,
+    yield_rx: mpsc::UnboundedReceiver<JobTrap>,
+    cancel_token: CancellationToken,
+    join_handle: tokio::task::JoinHandle<()>,
 }
 
 impl host::Host for SharedWashCtx {
@@ -118,7 +131,8 @@ impl host::Host for SharedWashCtx {
             anyhow::bail!("concurrent steps not allowed");
         }
         let step_id = job.cur_step.load(std::sync::atomic::Ordering::Relaxed);
-        let attempt_id = if let Some(state) = job.journal.steps.get(step_id as usize) {
+        let journal = job.journal.lock().expect(ERROR_MUTEX);
+        let attempt_id = if let Some(state) = journal.steps.get(step_id as usize) {
             use wflow_core::partition::job_events::JobEffectResultDeets;
             use wflow_core::partition::state::JobStepState;
             match state {
@@ -151,6 +165,7 @@ impl host::Host for SharedWashCtx {
         } else {
             0
         };
+        drop(journal);
         let start_at = Timestamp::now();
         active_step.replace(ActiveStepCtx {
             attempt_id: attempt_id as u64,
@@ -205,12 +220,21 @@ impl host::Host for SharedWashCtx {
             )
             .expect("impossible: wasm is single threaded");
 
-        // Set trap and block forever - the run invocation will be dropped
-        job.set_trap_and_block_forever(trap)
-            .await
-            .map_err(|err| wasmtime::Error::msg(format!("{err:?}")))?;
+        if job.yield_tx.send(trap).is_err() {
+            anyhow::bail!("session parent dropped");
+        }
 
-        unreachable!()
+        let mut resume_rx = job.resume_rx.lock().await;
+        let cmd = tokio::select! {
+            _ = job.pause_cancel.cancelled() => {
+                return Ok(Err("session cancelled".to_string()));
+            }
+            cmd = resume_rx.recv() => cmd
+        };
+        match cmd {
+            Some(SessionResume::Continue) => Ok(Ok(())),
+            Some(SessionResume::Stop) | None => Ok(Err("session stopped".to_string())),
+        }
     }
 }
 
@@ -262,6 +286,7 @@ pub struct WflowPlugin {
     active_jobs: RwLock<HashMap<Arc<str>, Arc<ActiveJobCtx>>>,
     // ctx id -> job id
     active_contexts: DHashMap<Arc<str>, Arc<str>>,
+    sessions: std::sync::Mutex<HashMap<SessionKey, SessionHandle>>,
 
     metastore: Arc<dyn MetdataStore>,
 }
@@ -274,6 +299,7 @@ impl WflowPlugin {
             active_keys: default(),
             active_jobs: default(),
             active_contexts: default(),
+            sessions: default(),
             metastore,
         }
     }
@@ -295,6 +321,194 @@ impl WflowPlugin {
         self.active_contexts
             .get(&wcx.active_ctx.id[..])
             .map(|val| Arc::clone(val.value()))
+    }
+
+    fn session_key(run_ctx: &service::RunJobCtx, job_id: &Arc<str>) -> SessionKey {
+        SessionKey {
+            worker_id: Arc::clone(&run_ctx.worker_id),
+            job_id: Arc::clone(job_id),
+        }
+    }
+
+    fn take_session(&self, key: &SessionKey) -> Option<SessionHandle> {
+        self.sessions.lock().expect(ERROR_MUTEX).remove(key)
+    }
+
+    fn put_session(&self, key: SessionKey, mut session: SessionHandle) {
+        session.last_used = Instant::now();
+        self.sessions
+            .lock()
+            .expect(ERROR_MUTEX)
+            .insert(key, session);
+    }
+
+    fn drop_session_handle(&self, session: SessionHandle) {
+        let _ = session.resume_tx.send(SessionResume::Stop);
+        session.cancel_token.cancel();
+        session.join_handle.abort();
+        let _ = self.active_contexts.remove(&session.ctx_id);
+        let _ = self
+            .active_jobs
+            .write()
+            .expect(ERROR_MUTEX)
+            .remove(&session.job_id);
+    }
+
+    fn invalidate_sessions_for_workload(&self, workload_id: &str) {
+        let keys = {
+            let sessions = self.sessions.lock().expect(ERROR_MUTEX);
+            sessions
+                .iter()
+                .filter(|(_, session)| session.workload_id.as_ref() == workload_id)
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>()
+        };
+        for key in keys {
+            if let Some(session) = self.take_session(&key) {
+                self.drop_session_handle(session);
+            }
+        }
+    }
+
+    fn should_keep_session(result: &job_events::JobRunResult) -> bool {
+        matches!(
+            result,
+            job_events::JobRunResult::StepEffect(job_events::JobEffectResult {
+                deets: job_events::JobEffectResultDeets::Success { .. },
+                ..
+            })
+        )
+    }
+
+    fn trap_to_result(trap: JobTrap) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
+        match trap {
+            JobTrap::RunComplete(Err(err)) => match err {
+                types::JobError::Transient(err) => Err(job_events::JobError::Transient {
+                    error_json: err.error_json.into(),
+                    retry_policy: err.retry_policy.map(|policy| match policy {
+                        types::RetryPolicy::Immediate => {
+                            wflow_core::partition::RetryPolicy::Immediate
+                        }
+                    }),
+                }
+                .into()),
+                types::JobError::Terminal(err_json) => Err(job_events::JobError::Terminal {
+                    error_json: err_json.into(),
+                }
+                .into()),
+            },
+            JobTrap::PersistStep {
+                step_id,
+                value_json,
+                start_at,
+                end_at,
+                attempt_id,
+            } => Ok(job_events::JobRunResult::StepEffect(
+                job_events::JobEffectResult {
+                    step_id,
+                    attempt_id,
+                    start_at,
+                    end_at,
+                    deets: job_events::JobEffectResultDeets::Success { value_json },
+                },
+            )),
+            JobTrap::RunComplete(Ok(value_json)) => Ok(job_events::JobRunResult::Success {
+                value_json: value_json.into(),
+            }),
+        }
+    }
+
+    async fn start_session(
+        &self,
+        workload: &Arc<WflowWorkload>,
+        job_id: Arc<str>,
+        journal: state::JobState,
+    ) -> Result<SessionHandle, job_events::JobRunResult> {
+        let mut store = workload
+            .resolved_handle
+            .new_store(&workload.component_id)
+            .await
+            .to_eyre()
+            .wrap_err("error creating component store")
+            .map_err(Into::<job_events::JobRunResult>::into)?;
+        let instance = workload
+            .instance_pre
+            .instantiate_async(&mut store)
+            .await
+            .to_eyre()
+            .wrap_err("error creating component store")
+            .map_err(Into::<job_events::JobRunResult>::into)?;
+        let bundle_args = bundle::RunArgs {
+            ctx: types::JobCtx {
+                job_id: job_id.to_string(),
+            },
+            wflow_key: journal.wflow.key.clone(),
+            args_json: journal.init_args_json.to_string(),
+        };
+        let ctx_id: Arc<str> = store.data().active_ctx.id.clone().into();
+        let (yield_tx, yield_rx) = mpsc::unbounded_channel();
+        let (resume_tx, resume_rx) = mpsc::unbounded_channel();
+        let pause_cancel = CancellationToken::new();
+        let _old = self.active_jobs.write().expect(ERROR_MUTEX).insert(
+            Arc::clone(&job_id),
+            ActiveJobCtx {
+                yield_tx: yield_tx.clone(),
+                resume_rx: tokio::sync::Mutex::new(resume_rx),
+                pause_cancel: pause_cancel.clone(),
+                journal: std::sync::Mutex::new(journal),
+                cur_step: default(),
+                active_step: None.into(),
+            }
+            .into(),
+        );
+        assert!(_old.is_none(), "fishy");
+
+        self.active_contexts
+            .insert(Arc::clone(&ctx_id), Arc::clone(&job_id));
+        let join_handle = tokio::spawn(async move {
+            let fut = instance
+                .townframe_wflow_bundle()
+                .call_run(&mut store, &bundle_args);
+            let trap = match fut.await {
+                Ok(res) => JobTrap::RunComplete(res),
+                Err(err) => {
+                    let terminal = types::JobError::Terminal(format!("wasm error: {err:?}"));
+                    JobTrap::RunComplete(Err(terminal))
+                }
+            };
+            let _ = yield_tx.send(trap);
+        });
+
+        Ok(SessionHandle {
+            job_id: Arc::clone(&job_id),
+            ctx_id,
+            workload_id: Arc::from(workload.resolved_handle.id()),
+            component_id: workload.component_id.clone(),
+            next_run_id: 0,
+            last_effect_id: effects::EffectId {
+                entry_id: 0,
+                effect_idx: 0,
+            },
+            last_used: Instant::now(),
+            resume_tx,
+            yield_rx,
+            cancel_token: pause_cancel,
+            join_handle,
+        })
+    }
+
+    async fn wait_for_session_yield(
+        &self,
+        session: &mut SessionHandle,
+    ) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
+        let Some(trap) = session.yield_rx.recv().await else {
+            return Err(job_events::JobRunResult::WorkerErr(
+                job_events::JobRunWorkerError::Other {
+                    msg: "session loop closed without yielding".into(),
+                },
+            ));
+        };
+        Self::trap_to_result(trap)
     }
 }
 
@@ -416,6 +630,7 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
         resolved: &wash_runtime::engine::workload::ResolvedWorkload,
         component_id: &str,
     ) -> anyhow::Result<()> {
+        self.invalidate_sessions_for_workload(resolved.id());
         let Some((workload_id, wflow_keys)) = self.pending_workloads.remove(resolved.id()) else {
             anyhow::bail!("unrecognized workload was resolved");
         };
@@ -467,6 +682,7 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
         workload_id: &str,
         _interfaces: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
+        self.invalidate_sessions_for_workload(workload_id);
         if let Some(wflow) = self
             .active_workloads
             .write()
@@ -491,6 +707,7 @@ impl service::WflowServiceHost for WflowPlugin {
     type ExtraArgs = WasmcloudWflowServiceMeta;
     async fn run(
         &self,
+        run_ctx: &service::RunJobCtx,
         job_id: Arc<str>,
         journal: state::JobState,
         args: &Self::ExtraArgs,
@@ -506,105 +723,54 @@ impl service::WflowServiceHost for WflowPlugin {
                 job_events::JobRunWorkerError::WflowNotFound,
             ));
         };
-        let mut store = workload
-            .resolved_handle
-            .new_store(&workload.component_id)
-            .await
-            .to_eyre()
-            .wrap_err("error creating component store")?;
-
-        let instance = workload
-            .instance_pre
-            .instantiate_async(&mut store)
-            .await
-            .to_eyre()
-            .wrap_err("error creating component store")?;
-        let bundle_args = bundle::RunArgs {
-            ctx: types::JobCtx {
-                job_id: job_id.to_string(),
-            },
-            wflow_key: journal.wflow.key.clone(),
-            args_json: journal.init_args_json.to_string(),
+        let key = Self::session_key(run_ctx, &job_id);
+        let mut session = if let Some(session) = self.take_session(&key) {
+            let session_valid = session.next_run_id == run_ctx.run_id
+                && session.last_effect_id != run_ctx.effect_id
+                && session.workload_id.as_ref() == args.workload_id
+                && session.component_id == workload.component_id
+                && self
+                    .active_jobs
+                    .read()
+                    .expect(ERROR_MUTEX)
+                    .contains_key(&job_id);
+            if !session_valid {
+                self.drop_session_handle(session);
+                self.start_session(&workload, Arc::clone(&job_id), journal)
+                    .await?
+            } else {
+                let active_job = self
+                    .active_jobs
+                    .read()
+                    .expect(ERROR_MUTEX)
+                    .get(&job_id)
+                    .cloned()
+                    .expect("active job missing for valid session");
+                *active_job.journal.lock().expect(ERROR_MUTEX) = journal.clone();
+                if session.resume_tx.send(SessionResume::Continue).is_err() {
+                    self.drop_session_handle(session);
+                    self.start_session(&workload, Arc::clone(&job_id), journal)
+                        .await?
+                } else {
+                    session
+                }
+            }
+        } else {
+            self.start_session(&workload, Arc::clone(&job_id), journal)
+                .await?
         };
 
-        let ctx_id: Arc<str> = store.data().active_ctx.id.clone().into();
-        let fut = instance
-            .townframe_wflow_bundle()
-            .call_run(&mut store, &bundle_args);
-
-        let (trap_tx, trap_rx) = oneshot::channel();
-        let trap_tx = tokio::sync::Mutex::new(Some(trap_tx));
-        let _old = self.active_jobs.write().expect(ERROR_MUTEX).insert(
-            Arc::clone(&job_id),
-            ActiveJobCtx {
-                trap_tx,
-                journal,
-                cur_step: default(),
-                active_step: None.into(),
-            }
-            .into(),
-        );
-        assert!(_old.is_none(), "fishy");
-
-        self.active_contexts
-            .insert(Arc::clone(&ctx_id), Arc::clone(&job_id));
-        scopeguard::defer! {
-            let _ = self.active_contexts.remove(&ctx_id);
-            let _ = self.active_jobs
-                .write()
-                .expect(ERROR_MUTEX)
-                .remove(&job_id);
-        }
-
-        // TODO: timeout
-        let trap = tokio::select! {
-            trap = trap_rx => {
-                trap.expect("trap channel dropped without use")
-            },
-            res = fut => {
-                JobTrap::RunComplete(
-                    res
-                        .to_eyre()
-                        .wrap_err("wasm error")?
-                )
-            }
+        let result = self.wait_for_session_yield(&mut session).await;
+        let run_result = match &result {
+            Ok(v) | Err(v) => v,
         };
-        // FIXME: unite type hierarichies
-
-        match trap {
-            JobTrap::RunComplete(Err(err)) => match err {
-                types::JobError::Transient(err) => Err(job_events::JobError::Transient {
-                    error_json: err.error_json.into(),
-                    retry_policy: err.retry_policy.map(|policy| match policy {
-                        types::RetryPolicy::Immediate => {
-                            wflow_core::partition::RetryPolicy::Immediate
-                        }
-                    }),
-                }
-                .into()),
-                types::JobError::Terminal(err_json) => Err(job_events::JobError::Terminal {
-                    error_json: err_json.into(),
-                }
-                .into()),
-            },
-            JobTrap::PersistStep {
-                step_id,
-                value_json,
-                start_at,
-                end_at,
-                attempt_id,
-            } => Ok(job_events::JobRunResult::StepEffect(
-                job_events::JobEffectResult {
-                    step_id,
-                    attempt_id,
-                    start_at,
-                    end_at,
-                    deets: job_events::JobEffectResultDeets::Success { value_json },
-                },
-            )),
-            JobTrap::RunComplete(Ok(value_json)) => Ok(job_events::JobRunResult::Success {
-                value_json: value_json.into(),
-            }),
+        if Self::should_keep_session(run_result) {
+            session.next_run_id = run_ctx.run_id + 1;
+            session.last_effect_id = run_ctx.effect_id.clone();
+            self.put_session(key, session);
+        } else {
+            self.drop_session_handle(session);
         }
+        result
     }
 }

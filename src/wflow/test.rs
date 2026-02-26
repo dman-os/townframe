@@ -3,6 +3,8 @@ use crate::interlude::*;
 #[cfg(test)]
 mod cancel_job;
 #[cfg(test)]
+mod effect_chain_perf;
+#[cfg(test)]
 mod fails_once;
 #[cfg(test)]
 mod fails_until_told;
@@ -478,6 +480,7 @@ impl WflowTestContext {
             filters => vec![
                 (r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", "[timestamp]"),
                 (r"\w*Location.*:\d+:\d+", "[location]"),
+                (r"tokio-fxw-p\d+-\d+", "[tokio-fxw]"),
             ]
         }, {
             insta::assert_yaml_snapshot!(snapshot_name, log_snapshot);

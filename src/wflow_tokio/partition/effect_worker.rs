@@ -6,7 +6,8 @@ use utils_rs::prelude::tokio::task::JoinHandle;
 use wflow_core::partition::{effects, job_events, log};
 
 use crate::partition::{
-    state::PartitionWorkingState, EffectCancelTokens, JobToEffectId, PartitionCtx,
+    state::PartitionWorkingState, DirectEffectRx, EffectCancelTokens, JobToEffectId, PartitionCtx,
+    WorkerId,
 };
 
 pub struct TokioEffectWorkerHandle {
@@ -34,10 +35,12 @@ impl Drop for TokioEffectWorkerHandle {
 
 pub fn start_tokio_effect_worker(
     worker_id: usize,
+    worker_name: WorkerId,
     pcx: PartitionCtx,
     state: Arc<PartitionWorkingState>,
     effect_cancel_tokens: EffectCancelTokens,
     job_to_effect_id: JobToEffectId,
+    direct_effect_rx: DirectEffectRx,
     effect_rx: async_channel::Receiver<effects::EffectId>,
     cancel_token: CancellationToken,
 ) -> TokioEffectWorkerHandle {
@@ -53,6 +56,7 @@ pub fn start_tokio_effect_worker(
                 state,
                 effect_cancel_tokens,
                 job_to_effect_id,
+                worker_id: Arc::clone(&worker_name),
                 log: pcx.log_ref(),
                 pcx,
             };
@@ -62,6 +66,12 @@ pub fn start_tokio_effect_worker(
                     biased;
                     _ = cancel_token.cancelled() => {
                         break;
+                    }
+                    effect_id = direct_effect_rx.recv() => {
+                        let Ok(effect_id) = effect_id else {
+                            continue;
+                        };
+                        worker.handle_partition_effects(effect_id).await?;
                     }
                     effect_id = effect_rx.recv() => {
                         let Ok(effect_id) = effect_id else {
@@ -90,6 +100,7 @@ struct TokioEffectWorker {
     state: Arc<PartitionWorkingState>,
     effect_cancel_tokens: EffectCancelTokens,
     job_to_effect_id: JobToEffectId,
+    worker_id: WorkerId,
 }
 
 impl TokioEffectWorker {
@@ -119,7 +130,7 @@ impl TokioEffectWorker {
                     .lock()
                     .await
                     .insert(Arc::clone(&job_id), effect_id.clone());
-                let run_fut = self.run_job_effect(Arc::clone(&job_id));
+                let run_fut = self.run_job_effect(effect_id.clone(), run_id, Arc::clone(&job_id));
                 let result = tokio::select! {
                     biased;
                     _ = run_abort_token.cancelled() => job_events::JobRunResult::Aborted,
@@ -136,6 +147,7 @@ impl TokioEffectWorker {
                             effect_id,
                             timestamp: end_at,
                             run_id,
+                            worker_id: Some(Arc::clone(&self.worker_id)),
                             start_at,
                             end_at,
                             result,
@@ -160,7 +172,12 @@ impl TokioEffectWorker {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn run_job_effect(&mut self, job_id: Arc<str>) -> job_events::JobRunResult {
+    async fn run_job_effect(
+        &mut self,
+        effect_id: effects::EffectId,
+        run_id: u64,
+        job_id: Arc<str>,
+    ) -> job_events::JobRunResult {
         let job_state_snapshot = {
             let jobs = self.state.read_jobs().await;
             let Some(state) = jobs.active.get(&job_id) else {
@@ -170,18 +187,33 @@ impl TokioEffectWorker {
             };
             state.clone()
         };
+        let run_ctx = crate::partition::service::RunJobCtx {
+            effect_id,
+            run_id,
+            worker_id: Arc::clone(&self.worker_id),
+        };
 
         let res = match &job_state_snapshot.wflow.service {
             wflow_core::gen::metastore::WflowServiceMeta::Wasmcloud(meta) => {
                 self.pcx
                     .local_wasmcloud_host
-                    .run(Arc::clone(&job_id), job_state_snapshot.clone(), meta)
+                    .run(
+                        &run_ctx,
+                        Arc::clone(&job_id),
+                        job_state_snapshot.clone(),
+                        meta,
+                    )
                     .await
             }
             wflow_core::metastore::WflowServiceMeta::LocalNative => {
                 self.pcx
                     .local_native_host
-                    .run(Arc::clone(&job_id), job_state_snapshot.clone(), &())
+                    .run(
+                        &run_ctx,
+                        Arc::clone(&job_id),
+                        job_state_snapshot.clone(),
+                        &(),
+                    )
                     .await
             }
         };

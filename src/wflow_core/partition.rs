@@ -4,7 +4,6 @@ pub mod effects;
 pub mod job_events;
 pub mod log;
 pub mod reduce;
-pub mod service;
 pub mod state;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

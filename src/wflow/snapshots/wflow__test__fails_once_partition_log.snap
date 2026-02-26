@@ -1,5 +1,6 @@
 ---
 source: src/wflow/test.rs
+assertion_line: 486
 expression: log_snapshot
 ---
 - - 1
@@ -29,6 +30,7 @@ expression: log_snapshot
         entry_id: 2
         effect_idx: 0
       run_id: 0
+      worker_id: [tokio-fxw]
       start_at: "[timestamp]"
       end_at: "[timestamp]"
       result:
@@ -52,6 +54,7 @@ expression: log_snapshot
         entry_id: 4
         effect_idx: 0
       run_id: 1
+      worker_id: [tokio-fxw]
       start_at: "[timestamp]"
       end_at: "[timestamp]"
       result:
@@ -71,6 +74,7 @@ expression: log_snapshot
           deets:
             RunJob:
               run_id: 2
+              preferred_worker_id: [tokio-fxw]
 - - 7
   - JobEffectResult:
       job_id: test-fails-once-1
@@ -79,6 +83,7 @@ expression: log_snapshot
         entry_id: 6
         effect_idx: 0
       run_id: 2
+      worker_id: [tokio-fxw]
       start_at: "[timestamp]"
       end_at: "[timestamp]"
       result:

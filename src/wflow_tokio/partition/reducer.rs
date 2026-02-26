@@ -15,7 +15,7 @@ use wflow_core::partition::{effects, log};
 
 use crate::partition::{
     state::JobCounts, state::PartitionWorkingState, EffectCancelTokens, PartitionCtx,
-    PartitionLogRef,
+    PartitionLogRef, WorkerEffectSenders,
 };
 use wflow_core::snapstore::SnapStore;
 
@@ -48,6 +48,7 @@ pub fn start_tokio_partition_reducer(
     state: Arc<PartitionWorkingState>,
     effect_cancel_tokens: EffectCancelTokens,
     effect_tx: async_channel::Sender<effects::EffectId>,
+    worker_effect_senders: WorkerEffectSenders,
     cancel_token: CancellationToken,
     snap_store: Arc<dyn SnapStore<Snapshot = Arc<[u8]>>>,
 ) -> TokioPartitionReducerHandle {
@@ -83,6 +84,7 @@ pub fn start_tokio_partition_reducer(
                 new_effects: default(),
                 event_effects: default(),
                 effect_tx,
+                worker_effect_senders,
                 snapstore: snap_store,
                 entries_since_snapshot: 0,
                 last_snapshot_time: Timestamp::now(),
@@ -162,6 +164,7 @@ struct TokioPartitionReducer {
     new_effects: Vec<effects::EffectId>,
     event_effects: Vec<effects::PartitionEffect>,
     effect_tx: async_channel::Sender<effects::EffectId>,
+    worker_effect_senders: WorkerEffectSenders,
     snapstore: Arc<dyn SnapStore<Snapshot = Arc<[u8]>>>,
     entries_since_snapshot: u64,
     last_snapshot_time: Timestamp,
@@ -172,6 +175,25 @@ struct TokioPartitionReducer {
 }
 
 impl TokioPartitionReducer {
+    async fn schedule_effect(
+        &self,
+        effect_id: effects::EffectId,
+        preferred_worker_id: Option<&Arc<str>>,
+    ) -> Res<()> {
+        if let Some(worker_id) = preferred_worker_id {
+            if let Some(tx) = self.worker_effect_senders.get(worker_id) {
+                if tx.send(effect_id.clone()).await.is_ok() {
+                    debug!(?effect_id, %worker_id, routing = "direct", "scheduled effect");
+                    return Ok(());
+                }
+                warn!(?effect_id, %worker_id, "direct worker queue send failed; falling back");
+            }
+        }
+        debug!(?effect_id, routing = "shared", "scheduled effect");
+        self.effect_tx.send(effect_id).await?;
+        Ok(())
+    }
+
     async fn reschedule_effects_after_replay(&mut self) -> Res<()> {
         if self.did_reschedule_after_replay {
             return Ok(());
@@ -197,8 +219,8 @@ impl TokioPartitionReducer {
                     .insert(effect_id.clone(), cancel_token);
             }
             info!(?effect_id, "rescheduling effect back after re-boot");
-            self.effect_tx
-                .send(effect_id.clone())
+            // Do not honor sticky worker hints during replay recovery. Warm sessions are process-local.
+            self.schedule_effect(effect_id.clone(), None)
                 .await
                 .wrap_err("failed to schedule effect at startup")?;
         }
@@ -317,9 +339,21 @@ impl TokioPartitionReducer {
             }
         }
         // Send all effects to the channel
-        for effect_id in self.new_effects.drain(..) {
-            debug!(?effect_id, "scheduling new effect");
-            self.effect_tx.send(effect_id).await?;
+        let pending_effect_ids = std::mem::take(&mut self.new_effects);
+        for effect_id in pending_effect_ids {
+            let preferred_worker_id = {
+                let effects_map = self.state.read_effects().await;
+                effects_map
+                    .get(&effect_id)
+                    .and_then(|effect| match &effect.deets {
+                        effects::PartitionEffectDeets::RunJob(run) => {
+                            run.preferred_worker_id.clone()
+                        }
+                        _ => None,
+                    })
+            };
+            self.schedule_effect(effect_id, preferred_worker_id.as_ref())
+                .await?;
         }
         Ok(())
     }

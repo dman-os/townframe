@@ -44,6 +44,7 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
         wflow_sdk::route_wflows!(args, {
             "fails_once" => |cx, args: FailsOnceArgs| fails_once(cx, args),
             "fails_until_told" => |cx, args: FailsUntilToldArgs| fails_until_told(cx, args),
+            "effect_chain" => |cx, args: EffectChainArgs| effect_chain(cx, args),
         })
     }
 }
@@ -129,5 +130,17 @@ fn fails_until_told(cx: WflowCtx, args: FailsUntilToldArgs) -> Result<(), JobErr
         }
     })?;
 
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EffectChainArgs {
+    steps: u64,
+}
+
+fn effect_chain(cx: WflowCtx, args: EffectChainArgs) -> Result<(), JobErrorX> {
+    for ii in 0..args.steps {
+        cx.effect(|| Ok(Json(ii)))?;
+    }
     Ok(())
 }

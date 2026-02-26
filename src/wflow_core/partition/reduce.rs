@@ -28,7 +28,10 @@ pub fn reduce_job_init_event(
 
     effects.push(PartitionEffect {
         job_id: event.job_id,
-        deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets { run_id: 0 }),
+        deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets {
+            run_id: 0,
+            preferred_worker_id: None,
+        }),
     })
 }
 
@@ -61,6 +64,7 @@ pub fn reduce_job_run_event(
     //     job_id: Arc::clone(&event.job_id),
     //     effect_commands,
     // };
+    let worker_id_for_hint = event.worker_id.clone();
     let job_id = Arc::clone(&event.job_id);
     let Some(state::JobState {
         ref mut runs,
@@ -102,6 +106,7 @@ pub fn reduce_job_run_event(
                         job_id,
                         deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets {
                             run_id: runs.len() as u64,
+                            preferred_worker_id: None,
                         }),
                     }),
                 }
@@ -131,6 +136,7 @@ pub fn reduce_job_run_event(
                             deets: effects::PartitionEffectDeets::RunJob(
                                 effects::RunJobAttemptDeets {
                                     run_id: runs.len() as u64,
+                                    preferred_worker_id: worker_id_for_hint.clone(),
                                 },
                             ),
                         });
@@ -154,6 +160,7 @@ pub fn reduce_job_run_event(
                                     deets: effects::PartitionEffectDeets::RunJob(
                                         effects::RunJobAttemptDeets {
                                             run_id: runs.len() as u64,
+                                            preferred_worker_id: None,
                                         },
                                     ),
                                 })
