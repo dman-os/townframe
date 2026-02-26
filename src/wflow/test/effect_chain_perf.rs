@@ -1,41 +1,6 @@
 use crate::interlude::*;
 
-use crate::test::{InitialWorkload, WflowTestContext};
-
-fn test_wflows_wasm_path() -> Res<String> {
-    use std::path::PathBuf;
-
-    let mut candidates = Vec::<PathBuf>::new();
-    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
-        candidates.push(
-            PathBuf::from(target_dir)
-                .join("wasm32-wasip2")
-                .join("debug")
-                .join("test_wflows.wasm"),
-        );
-    }
-
-    let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = crate_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("wflow crate should live under repo/src/wflow");
-    candidates.push(
-        repo_root
-            .join("target")
-            .join("wasm32-wasip2")
-            .join("debug")
-            .join("test_wflows.wasm"),
-    );
-
-    if let Some(path) = candidates.into_iter().find(|path| path.exists()) {
-        return Ok(path.to_string_lossy().to_string());
-    }
-
-    Err(ferr!(
-        "test_wflows.wasm not found; build it first with `cargo build --target wasm32-wasip2 -p test_wflows`"
-    ))
-}
+use crate::test::{test_wflows_wasm_path, InitialWorkload, WflowTestContext};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_effect_chain_latency_smoke_baseline() -> Res<()> {
@@ -45,7 +10,7 @@ async fn test_effect_chain_latency_smoke_baseline() -> Res<()> {
 
     let test_cx = WflowTestContext::builder()
         .initial_workloads(vec![InitialWorkload {
-            wasm_path: test_wflows_wasm_path()?,
+            wasm_path: test_wflows_wasm_path()?.into(),
             wflow_keys: vec!["effect_chain".to_string()],
         }])
         .build()

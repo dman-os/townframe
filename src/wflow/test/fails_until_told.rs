@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::test::{InitialWorkload, WflowTestContext};
+use crate::test::{test_wflows_wasm_path, InitialWorkload, WflowTestContext};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_fails_until_told() -> Res<()> {
@@ -9,7 +9,7 @@ async fn test_fails_until_told() -> Res<()> {
     // First run: job will fail transiently
     let test_cx = WflowTestContext::builder()
         .initial_workloads(vec![InitialWorkload {
-            wasm_path: "../../target/wasm32-wasip2/debug/test_wflows.wasm".into(),
+            wasm_path: test_wflows_wasm_path()?.into(),
             wflow_keys: vec!["fails_until_told".to_string()],
         }])
         .build()
@@ -80,7 +80,7 @@ async fn test_fails_until_told() -> Res<()> {
         .with_snapstore(snap_store)
         .with_keyvalue_plugin(shared_keyvalue)
         .initial_workloads(vec![InitialWorkload {
-            wasm_path: "../../target/wasm32-wasip2/debug/test_wflows.wasm".into(),
+            wasm_path: test_wflows_wasm_path()?,
             wflow_keys: vec!["fails_until_told".to_string()],
         }])
         .build()

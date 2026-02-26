@@ -72,7 +72,7 @@ pub fn start_tokio_effect_worker(
                     }
                     effect_id = direct_effect_rx.recv() => {
                         let Ok(effect_id) = effect_id else {
-                            continue;
+                            break;
                         };
                         worker.handle_partition_effects(effect_id).await?;
                     }

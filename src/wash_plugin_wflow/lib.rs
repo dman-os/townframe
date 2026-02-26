@@ -685,18 +685,12 @@ impl service::WflowServiceHost for WflowPlugin {
             let session = session_box
                 .as_any_mut()
                 .downcast_mut::<WasmRunSession>()
-                .and_then(|session| session.session.take());
-            let Some(session) = session else {
-                return service::RunJobReply {
-                    result: Err(job_events::JobRunResult::WorkerErr(
-                        job_events::JobRunWorkerError::Other {
-                            msg: "invalid wasm session type".into(),
-                        },
-                    )),
-                    session: None,
-                };
-            };
+                .expect("invalid session type for wasm host")
+                .session
+                .take()
+                .expect("wasm session already taken");
             let session_valid = session.next_run_id == run_ctx.run_id
+                && session.job_id == job_id
                 && session.last_effect_id != run_ctx.effect_id
                 && session.workload_id.as_ref() == args.workload_id
                 && session.component_id == workload.component_id
@@ -771,9 +765,10 @@ impl service::WflowServiceHost for WflowPlugin {
         let session = session
             .as_any_mut()
             .downcast_mut::<WasmRunSession>()
-            .and_then(|session| session.session.take());
-        if let Some(session) = session {
-            self.drop_session_handle(session);
-        }
+            .expect("invalid session type for wasm host")
+            .session
+            .take()
+            .expect("wasm session already taken");
+        self.drop_session_handle(session);
     }
 }
