@@ -11,7 +11,7 @@ pub struct ActiveDispatch {
 #[derive(Debug, Clone, Reconcile, Hydrate, Serialize, Deserialize)]
 pub struct VersionedDispatch {
     pub version: Uuid,
-    #[autosurgeon(with = "utils_rs::am::codecs::json")]
+    #[autosurgeon(with = "am_utils_rs::codecs::json")]
     pub payload: Arc<ActiveDispatch>,
 }
 
@@ -35,17 +35,17 @@ pub enum ActiveDispatchArgs {
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
 pub struct FacetRoutineArgs {
     pub doc_id: daybook_types::doc::DocId,
-    #[autosurgeon(with = "utils_rs::am::codecs::path")]
+    #[autosurgeon(with = "am_utils_rs::codecs::path")]
     pub branch_path: daybook_types::doc::BranchPath,
-    #[autosurgeon(with = "utils_rs::am::codecs::path")]
+    #[autosurgeon(with = "am_utils_rs::codecs::path")]
     pub staging_branch_path: daybook_types::doc::BranchPath,
     pub heads: ChangeHashSet,
     pub facet_key: String,
-    #[autosurgeon(with = "utils_rs::am::codecs::json")]
+    #[autosurgeon(with = "am_utils_rs::codecs::json")]
     pub facet_acl: Vec<crate::plugs::manifest::RoutineFacetAccess>,
-    #[autosurgeon(with = "utils_rs::am::codecs::json")]
+    #[autosurgeon(with = "am_utils_rs::codecs::json")]
     pub config_prop_acl: Vec<crate::plugs::manifest::RoutineFacetAccess>,
-    #[autosurgeon(with = "utils_rs::am::codecs::json")]
+    #[autosurgeon(with = "am_utils_rs::codecs::json")]
     pub local_state_acl: Vec<crate::plugs::manifest::RoutineLocalStateAccess>,
 }
 
@@ -73,7 +73,7 @@ pub struct DispatchRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub local_actor_id: automerge::ActorId,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
+    _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
     dispatch_am_handle: samod::DocHandle,
 }
 
@@ -121,9 +121,8 @@ impl DispatchRepo {
                 .await?
         };
 
-        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
-            Vec<utils_rs::am::changes::ChangeNotification>,
-        >();
+        let (notif_tx, notif_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Vec<am_utils_rs::changes::ChangeNotification>>();
         let ticket = DispatchStore::register_change_listener(&acx, &broker, vec![], {
             move |notifs| {
                 if let Err(err) = notif_tx.send(notifs) {
@@ -169,7 +168,7 @@ impl DispatchRepo {
     async fn handle_notifs(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<utils_rs::am::changes::ChangeNotification>,
+            Vec<am_utils_rs::changes::ChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -247,7 +246,7 @@ impl DispatchRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<DispatchEvent>,
     ) -> Res<()> {
-        if !utils_rs::am::changes::path_prefix_matches(
+        if !am_utils_rs::changes::path_prefix_matches(
             &[DispatchStore::prop().into(), "active_dispatches".into()],
             &patch.path,
         ) {

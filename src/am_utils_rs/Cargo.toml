@@ -1,0 +1,38 @@
+[package]
+name = "am_utils_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[features]
+default = ["repo"]
+repo = [
+    "dep:samod",
+    "samod/tokio",
+    "samod/tungstenite",
+    "dep:tokio-tungstenite"
+]
+
+[dependencies]
+utils_rs = { workspace = true, features = ["hash"] }
+
+tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread", "time"] }
+tokio-util = { workspace = true }
+tokio-tungstenite = { version = "0.27.0", features = ["url"], optional = true }
+
+# automerge
+automerge = { workspace = true }
+autosurgeon = { workspace = true }
+samod = { workspace = true, optional = true }
+
+# encoding
+serde.workspace = true
+data-encoding.workspace = true
+
+# errors
+thiserror.workspace = true

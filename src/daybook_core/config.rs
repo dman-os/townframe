@@ -6,9 +6,9 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reconcile, Hydrate)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct UserMeta {
-    #[autosurgeon(with = "utils_rs::am::codecs::path")]
+    #[autosurgeon(with = "am_utils_rs::codecs::path")]
     pub user_path: daybook_types::doc::UserPath,
-    #[autosurgeon(with = "utils_rs::am::codecs::date")]
+    #[autosurgeon(with = "am_utils_rs::codecs::date")]
     pub seen_at: Timestamp,
 }
 
@@ -106,7 +106,7 @@ pub struct ConfigRepo {
     local_actor_id: automerge::ActorId,
     cancel_token: CancellationToken,
     global_props_doc_init_lock: tokio::sync::Mutex<()>,
-    _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
+    _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
 }
 
 impl crate::repos::Repo for ConfigRepo {
@@ -161,9 +161,8 @@ impl ConfigRepo {
 
         let (broker, broker_stop) = acx.change_manager().add_doc(app_am_handle.clone()).await?;
 
-        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
-            Vec<utils_rs::am::changes::ChangeNotification>,
-        >();
+        let (notif_tx, notif_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Vec<am_utils_rs::changes::ChangeNotification>>();
         // Register change listener to automatically notify repo listeners
         let ticket = ConfigStore::register_change_listener(&acx, &broker, vec![], {
             move |notifs| {
@@ -213,7 +212,7 @@ impl ConfigRepo {
     async fn handle_notifs(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<utils_rs::am::changes::ChangeNotification>,
+            Vec<am_utils_rs::changes::ChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -302,7 +301,7 @@ impl ConfigRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<ConfigEvent>,
     ) -> Res<()> {
-        if !utils_rs::am::changes::path_prefix_matches(&[ConfigStore::prop().into()], &patch.path) {
+        if !am_utils_rs::changes::path_prefix_matches(&[ConfigStore::prop().into()], &patch.path) {
             return Ok(());
         }
 

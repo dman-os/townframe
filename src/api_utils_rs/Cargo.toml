@@ -11,7 +11,7 @@ path = "lib.rs"
 
 [features]
 default = ["automerge"]
-automerge = ["utils_rs/automerge", "dep:autosurgeon", "dep:automerge"]
+automerge = ["dep:autosurgeon", "dep:automerge"]
 
 [dependencies]
 utils_rs.workspace = true

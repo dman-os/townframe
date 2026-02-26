@@ -61,7 +61,7 @@ impl Ctx {
         &self.repo_ctx.doc_drawer
     }
 
-    fn acx(&self) -> &utils_rs::am::AmCtx {
+    fn acx(&self) -> &am_utils_rs::AmCtx {
         &self.repo_ctx.acx
     }
 

@@ -19,7 +19,7 @@ use generational_box::SyncStorage;
 use samod::{DocumentId, PeerId};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tower_http::ServiceBuilderExt;
-use utils_rs::am::changes::ChangeFilter;
+use am_utils_rs::changes::ChangeFilter;
 
 fn main() -> Res<()> {
     utils_rs::setup_tracing()?;
@@ -87,7 +87,7 @@ struct Config {}
 
 struct Ctx {
     _config: Config,
-    acx: utils_rs::am::AmCtx,
+    acx: am_utils_rs::AmCtx,
     _peer_docs: Arc<DHashMap<PeerId, HashSet<DocumentId>>>,
     _doc_peers: Arc<DHashMap<DocumentId, PeerId>>,
     _gen_store: generational_box::Owner<SyncStorage>,
@@ -102,10 +102,10 @@ impl Ctx {
 
         let (doc_setup_req_tx, mut doc_setup_req_rx) = mpsc::unbounded_channel::<DocSetupRequest>();
         let announcer_tx = doc_setup_req_tx.clone();
-        let (acx, _acx_stop) = utils_rs::am::AmCtx::boot(
-            utils_rs::am::Config {
+        let (acx, _acx_stop) = am_utils_rs::AmCtx::boot(
+            am_utils_rs::Config {
                 peer_id: "daybook_sync".to_string(),
-                storage: utils_rs::am::StorageConfig::Disk {
+                storage: am_utils_rs::StorageConfig::Disk {
                     path: "/tmp/samod-sync".into(),
                 },
             },

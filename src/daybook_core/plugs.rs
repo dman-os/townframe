@@ -699,10 +699,10 @@ pub struct PlugsStore {
     pub manifests: HashMap<String, ThroughJson<VersionedPlug>>,
 
     /// Index: property tag -> plug id (@ns/name)
-    #[autosurgeon(with = "utils_rs::am::codecs::skip")]
+    #[autosurgeon(with = "am_utils_rs::codecs::skip")]
     pub tag_to_plug: HashMap<String, String>,
     /// Index: property tag -> facet manifest
-    #[autosurgeon(with = "utils_rs::am::codecs::skip")]
+    #[autosurgeon(with = "am_utils_rs::codecs::skip")]
     pub facet_manifests: HashMap<String, manifest::FacetManifest>,
 }
 
@@ -758,7 +758,7 @@ pub struct PlugsRepo {
     pub mutation_mutex: tokio::sync::Mutex<()>,
     pub local_actor_id: automerge::ActorId,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
+    _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
 }
 
 // Granular event enum for specific changes
@@ -807,9 +807,8 @@ impl PlugsRepo {
 
         let (broker, broker_stop) = acx.change_manager().add_doc(app_am_handle.clone()).await?;
 
-        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
-            Vec<utils_rs::am::changes::ChangeNotification>,
-        >();
+        let (notif_tx, notif_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Vec<am_utils_rs::changes::ChangeNotification>>();
         let ticket = PlugsStore::register_change_listener(&acx, &broker, vec![], {
             move |notifs| {
                 if let Err(err) = notif_tx.send(notifs) {
@@ -857,7 +856,7 @@ impl PlugsRepo {
     async fn handle_notifs(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<utils_rs::am::changes::ChangeNotification>,
+            Vec<am_utils_rs::changes::ChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -1699,9 +1698,9 @@ mod tests {
     async fn setup_repo() -> Res<(AmCtx, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
         let local_actor_id = automerge::ActorId::random();
         let (acx, _acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             None::<samod::AlwaysAnnounce>,
         )

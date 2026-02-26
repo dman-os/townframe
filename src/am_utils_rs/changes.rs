@@ -1,20 +1,19 @@
-#[cfg(feature = "automerge-repo")]
 use crate::interlude::*;
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 use automerge::ReadDoc;
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 use autosurgeon::Prop;
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 use samod::DocumentId;
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 use tokio::{
     sync::{mpsc, RwLock},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 #[derive(Debug, Clone)]
 pub struct ChangeNotification {
     pub patch: Arc<automerge::Patch>,
@@ -22,30 +21,30 @@ pub struct ChangeNotification {
     pub actor_ids: Arc<[automerge::ActorId]>,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 impl ChangeNotification {
     pub fn is_local_only(&self, local_actor_id: &automerge::ActorId) -> bool {
         self.actor_ids.len() == 1 && self.actor_ids.first() == Some(local_actor_id)
     }
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 pub struct ChangeFilter {
     pub doc_id: Option<DocIdFilter>,
     pub path: Vec<Prop<'static>>,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 struct ChangeListener {
     id: Uuid,
     filter: ChangeFilter,
     on_change: Box<dyn Fn(Vec<ChangeNotification>) + Send + Sync + 'static>,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 type ChangeTx = mpsc::UnboundedSender<(DocumentId, Vec<ChangeNotification>)>;
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 pub struct ChangeListenerManager {
     listeners: RwLock<Vec<ChangeListener>>,
     change_tx: tokio::sync::Mutex<Option<ChangeTx>>,
@@ -53,14 +52,14 @@ pub struct ChangeListenerManager {
     cancel_token: CancellationToken,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 pub struct ChangeListenerManagerStopToken {
     pub cancel_token: CancellationToken,
     pub switchboard_handle: Option<JoinHandle<()>>,
     pub manager: Arc<ChangeListenerManager>,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 impl ChangeListenerManagerStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
@@ -79,19 +78,19 @@ impl ChangeListenerManagerStopToken {
     }
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 pub struct DocChangeBroker {
     doc_id: DocumentId,
     cancel_token: CancellationToken,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 pub struct DocChangeBrokerStopToken {
     pub join_handle: JoinHandle<()>,
     pub cancel_token: CancellationToken,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 impl DocChangeBrokerStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
@@ -100,7 +99,7 @@ impl DocChangeBrokerStopToken {
     }
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 impl DocChangeBroker {
     pub fn filter(&self) -> DocIdFilter {
         DocIdFilter {
@@ -109,13 +108,13 @@ impl DocChangeBroker {
     }
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 #[non_exhaustive]
 pub struct DocIdFilter {
     pub doc_id: DocumentId,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 impl ChangeListenerManager {
     pub fn boot() -> (Arc<Self>, ChangeListenerManagerStopToken) {
         let (change_tx, change_rx) = mpsc::unbounded_channel();
@@ -155,7 +154,7 @@ impl ChangeListenerManager {
         };
 
         let doc_id = handle.document_id().clone();
-        let span = tracing::info_span!("doc listener task", ?doc_id);
+        let span = utils_rs::prelude::tracing::info_span!("doc listener task", ?doc_id);
         let main_cancel_token = self.cancel_token.child_token();
         let cancel_token_task = main_cancel_token.clone();
         let fut = async move {
@@ -163,8 +162,6 @@ impl ChangeListenerManager {
 
             let heads = handle.with_document(|doc| doc.get_heads());
             let mut heads: Arc<[automerge::ChangeHash]> = heads.into();
-
-            use futures::StreamExt;
 
             let mut doc_change_stream = handle.changes();
             loop {
@@ -347,7 +344,7 @@ impl Drop for ChangeListenerRegistration {
 }
 
 /// Check if a change path matches a listener path (including subpaths)
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 pub fn path_prefix_matches(
     listener_path: &[Prop<'_>],
     change_path: &[(automerge::ObjId, automerge::Prop)],
@@ -365,7 +362,7 @@ pub fn path_prefix_matches(
 }
 
 /// Check if two properties match (handles different property types)
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 pub fn prop_matches(listener_prop: &Prop<'_>, change_prop: &automerge::Prop) -> bool {
     match (listener_prop, change_prop) {
         (Prop::Key(listener_key), automerge::Prop::Map(change_key)) => listener_key == change_key,

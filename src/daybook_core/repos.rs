@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 pub struct RepoStopToken {
     pub cancel_token: CancellationToken,
     pub worker_handle: Option<JoinHandle<()>>,
-    pub broker_stop_tokens: Vec<utils_rs::am::changes::DocChangeBrokerStopToken>,
+    pub broker_stop_tokens: Vec<am_utils_rs::changes::DocChangeBrokerStopToken>,
 }
 
 impl RepoStopToken {

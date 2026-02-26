@@ -15,6 +15,7 @@ impl service::WflowServiceHost for LocalNativeHost {
         _job_id: Arc<str>,
         _journal: state::JobState,
         _session: Option<Box<dyn service::WflowServiceSession>>,
+        _cancel_token: tokio_util::sync::CancellationToken,
         _args: &Self::ExtraArgs,
     ) -> service::RunJobReply {
         todo!()

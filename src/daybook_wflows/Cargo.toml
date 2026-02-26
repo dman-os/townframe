@@ -13,6 +13,7 @@ path = "lib.rs"
 [dependencies]
 utils_rs = { workspace = true }
 api_utils_rs.workspace = true
+am_utils_rs.workspace = true
 wflow_sdk.workspace = true
 daybook_types = { workspace = true, features = ["wit", "automerge"] }
 

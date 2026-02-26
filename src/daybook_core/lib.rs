@@ -6,6 +6,7 @@ mod interlude {
 
     pub use daybook_types::doc::ChangeHashSet;
 
+    pub use am_utils_rs::prelude::*;
     pub use api_utils_rs::prelude::*;
     pub use autosurgeon::{Hydrate, Reconcile};
     pub use samod::DocumentId;
@@ -17,7 +18,6 @@ mod interlude {
         sync::{Arc, LazyLock, RwLock},
     };
     pub use struct_patch::Patch;
-    pub use utils_rs::am::AmCtx;
     pub use utils_rs::{CHeapStr, DHashMap};
 }
 

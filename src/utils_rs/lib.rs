@@ -3,26 +3,15 @@ pub mod downloader;
 mod macros;
 pub mod testing;
 
-#[cfg(feature = "automerge")]
-pub mod am;
-
 pub mod prelude {
     pub use crate::interlude::*;
 
-    #[cfg(feature = "automerge")]
-    pub use crate::am::codecs::ThroughJson;
-
-    #[cfg(feature = "automerge")]
-    pub use automerge;
-    #[cfg(feature = "automerge")]
-    pub use autosurgeon;
     pub use dashmap;
+    pub use displaydoc;
     pub use dotenv_flow;
     pub use educe;
     pub use futures;
     pub use regex;
-    #[cfg(feature = "automerge-repo")]
-    pub use samod;
     pub use serde_json;
     pub use tokio;
 }
@@ -57,6 +46,7 @@ mod interlude {
     pub use tracing_unwrap::*;
 
     pub use futures::FutureExt;
+    pub use futures::StreamExt;
 }
 
 use crate::interlude::*;

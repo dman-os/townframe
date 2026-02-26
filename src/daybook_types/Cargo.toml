@@ -13,7 +13,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
 default = ["automerge", "uniffi", "wit"]
-automerge = ["dep:autosurgeon", "dep:automerge", "utils_rs/automerge"]
+automerge = ["dep:autosurgeon", "dep:automerge"]
 uniffi = ["dep:uniffi", "dep:uuid"]
 wit = ["dep:wit-bindgen"]
 schemars = ["dep:schemars"]
@@ -36,6 +36,7 @@ schemars = { version = "1.2", features = [
 # internal
 api_utils_rs = { workspace = true, default-features = false }
 utils_rs = { workspace = true, default-features = false }
+am_utils_rs = { workspace = true, default-features = false }
 
 # error
 thiserror.workspace = true
@@ -44,15 +45,15 @@ displaydoc.workspace = true
 # time (needed for root Doc type)
 time = { workspace = true, features = ["serde"] }
 
-# automerge (feature-gated)
+# automerge
 autosurgeon = { workspace = true, features = ["uuid"], optional = true }
 automerge = { workspace = true, optional = true }
 
-# ffi (feature-gated)
+# ffi
 uniffi = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 
-# wit (feature-gated)
+# wit
 wit-bindgen = { workspace = true, optional = true }
 
 pastey.workspace = true

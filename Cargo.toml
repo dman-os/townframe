@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+  "./src/am_utils_rs",
   "./src/api_utils_rs",
   "./src/daybook_cli",
   "./src/daybook_core",
@@ -14,7 +15,6 @@ members = [
   "./src/pauperfuse/",
   "./src/test_wflows",
   "./src/utils_rs",
-  "./src/wash_plugin_am_repo/",
   # "./src/wash_plugin_pglite/",
   "./src/wash_plugin_mltools/",
   "./src/wash_plugin_utils/",
@@ -49,6 +49,7 @@ repository = ""
 # internal
 utils_rs = { path = "./src/utils_rs", default-features = false }
 api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
+am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
 macros = { path = "./src/macros" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
@@ -62,7 +63,6 @@ wflow_tokio = { path = "./src/wflow_tokio", default-features = false }
 wflow_sdk = { path = "./src/wflow_sdk", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 wash_plugin_pglite = { path = "./src/wash_plugin_pglite", default-features = false }
-wash_plugin_am_repo = { path = "./src/wash_plugin_am_repo" }
 wash_plugin_utils = { path = "./src/wash_plugin_utils/" }
 wash_plugin_mltools = { path = "./src/wash_plugin_mltools/" }
 

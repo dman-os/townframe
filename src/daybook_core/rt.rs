@@ -1010,7 +1010,6 @@ async fn start_bundle_workload(
                         .into(),
                         ..WitInterface::from("townframe:wflow/bundle")
                     },
-                    WitInterface::from("townframe:am-repo/repo"),
                     // FIXME: the following syntax is not supported here
                     // WitInterface::from("townframe:daybook/drawer,capabilities,facet-routine"),
                     WitInterface::from("townframe:daybook/drawer"),

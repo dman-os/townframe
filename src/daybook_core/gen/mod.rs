@@ -66,9 +66,9 @@ pub mod doc {
     #[cfg_attr(feature = "uniffi", patch(attribute(derive(uniffi::Record))))]
     pub struct Doc {
         pub id: DocId,
-        #[autosurgeon(with = "utils_rs::am::codecs::date")]
+        #[autosurgeon(with = "am_utils_rs::codecs::date")]
         pub created_at: Timestamp,
-        #[autosurgeon(with = "utils_rs::am::codecs::date")]
+        #[autosurgeon(with = "am_utils_rs::codecs::date")]
         pub updated_at: Timestamp,
         pub content: DocContent,
         pub props: Vec<DocProp>,

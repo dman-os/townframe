@@ -25,7 +25,6 @@ mod wit {
             "townframe:wflow/types": wflow_sdk::wit::townframe::wflow::types,
             "townframe:wflow/host": wflow_sdk::wit::townframe::wflow::host,
             "townframe:wflow/bundle": generate,
-            "townframe:am-repo/repo": generate,
         }
     });
 }

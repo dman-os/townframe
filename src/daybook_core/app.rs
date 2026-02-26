@@ -236,7 +236,7 @@ pub struct RepoCtx {
     pub lock_guard: RepoLockGuard,
     pub sql: SqlCtx,
     pub acx: AmCtx,
-    pub acx_stop: tokio::sync::Mutex<Option<utils_rs::am::AmCtxStopToken>>,
+    pub acx_stop: tokio::sync::Mutex<Option<am_utils_rs::AmCtxStopToken>>,
     pub doc_app: samod::DocHandle,
     pub doc_drawer: samod::DocHandle,
     pub local_actor_id: automerge::ActorId,
@@ -261,8 +261,8 @@ impl RepoCtx {
             );
         }
 
-        let am_config = utils_rs::am::Config {
-            storage: utils_rs::am::StorageConfig::Disk {
+        let am_config = am_utils_rs::Config {
+            storage: am_utils_rs::StorageConfig::Disk {
                 path: layout.samod_root.clone(),
             },
             peer_id: options.peer_id,
@@ -285,7 +285,7 @@ impl RepoCtx {
         );
 
         let (acx, acx_stop) =
-            utils_rs::am::AmCtx::boot(am_config, Option::<samod::AlwaysAnnounce>::None).await?;
+            am_utils_rs::AmCtx::boot(am_config, Option::<samod::AlwaysAnnounce>::None).await?;
         if let Some(ws_connector_url) = options.ws_connector_url {
             acx.spawn_ws_connector(ws_connector_url.into());
         }

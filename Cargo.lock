@@ -106,6 +106,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "am_utils_rs"
+version = "0.1.0"
+dependencies = [
+ "automerge",
+ "autosurgeon",
+ "data-encoding",
+ "samod",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "utils_rs",
+]
+
+[[package]]
 name = "ambient-authority"
 version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1943,6 +1959,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 name = "daybook_cli"
 version = "0.1.0"
 dependencies = [
+ "am_utils_rs",
  "automerge",
  "autosurgeon",
  "clap",
@@ -1972,6 +1989,7 @@ name = "daybook_core"
 version = "0.1.0"
 dependencies = [
  "addr",
+ "am_utils_rs",
  "anyhow",
  "api_utils_rs",
  "async-trait",
@@ -2016,7 +2034,6 @@ dependencies = [
  "url",
  "utils_rs",
  "wash-runtime",
- "wash_plugin_am_repo",
  "wash_plugin_mltools",
  "wash_plugin_utils",
  "wash_plugin_wflow",
@@ -2029,6 +2046,7 @@ dependencies = [
 name = "daybook_ffi"
 version = "0.1.0"
 dependencies = [
+ "am_utils_rs",
  "api_utils_rs",
  "automerge",
  "autosurgeon",
@@ -2080,6 +2098,7 @@ name = "daybook_types"
 version = "0.1.0"
 dependencies = [
  "addr",
+ "am_utils_rs",
  "api_utils_rs",
  "automerge",
  "autosurgeon",
@@ -2104,6 +2123,7 @@ dependencies = [
 name = "daybook_wflows"
 version = "0.1.0"
 dependencies = [
+ "am_utils_rs",
  "api_utils_rs",
  "color-eyre",
  "daybook_types",
@@ -8373,8 +8393,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "automerge",
- "autosurgeon",
  "blake3",
  "bs58",
  "color-eyre",
@@ -8391,15 +8409,12 @@ dependencies = [
  "multihash",
  "regex",
  "reqwest 0.12.28",
- "samod",
  "serde",
  "serde_json",
  "sha2 0.11.0-pre.5",
  "thiserror 2.0.18",
  "time",
  "tokio",
- "tokio-tungstenite",
- "tokio-util",
  "tracing",
  "tracing-android",
  "tracing-appender",
@@ -8626,30 +8641,6 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi-io",
  "windows-sys 0.60.2",
-]
-
-[[package]]
-name = "wash_plugin_am_repo"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-channel",
- "async-trait",
- "automerge",
- "autosurgeon",
- "data-encoding",
- "displaydoc",
- "macros",
- "parking_lot",
- "samod",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio-util",
- "tracing",
- "utils_rs",
- "wash-runtime",
- "wasmtime",
 ]
 
 [[package]]

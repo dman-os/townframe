@@ -96,6 +96,11 @@ fn hydrate_heuristic_key<'a, D: ReadDoc>(
                 ));
             }
             automerge::ScalarValue::Int(int_value) => {
+                if let Ok(uint_value) = u64::try_from(*int_value) {
+                    return Ok(autosurgeon::reconcile::LoadKey::Found(
+                        JsonHeuristicKey::U64(uint_value),
+                    ));
+                }
                 return Ok(autosurgeon::reconcile::LoadKey::Found(
                     JsonHeuristicKey::I64(*int_value),
                 ));
@@ -602,7 +607,7 @@ mod tests {
 
     #[test]
     fn smoke() -> Res<()> {
-        crate::testing::setup_tracing_once();
+        utils_rs::testing::setup_tracing_once();
         let mut doc = automerge::AutoCommit::new();
 
         let val = test_val();
@@ -636,7 +641,7 @@ mod tests {
             pub map: HashMap<String, ThroughJson<Arc<Foo>>>,
         }
 
-        crate::testing::setup_tracing_once();
+        utils_rs::testing::setup_tracing_once();
         let mut doc = automerge::AutoCommit::new();
 
         let mut val = {
@@ -1079,6 +1084,45 @@ mod tests {
                 .iter()
                 .any(|p| matches!(p.action, automerge::PatchAction::Insert { index: 2, .. })),
             "expected positional fallback to append the shifted tail item at index 2, saw: {patches:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn heuristic_keyed_array_matches_existing_positive_int_id_with_json_uint_id() -> Res<()> {
+        use automerge::transaction::Transactable;
+
+        let mut doc = automerge::AutoCommit::new();
+        let facet_obj = doc.put_object(automerge::ROOT, "facet", automerge::ObjType::Map)?;
+        let items_obj = doc.put_object(&facet_obj, "items", automerge::ObjType::List)?;
+        let item_obj = doc.insert_object(&items_obj, 0, automerge::ObjType::Map)?;
+        doc.put(&item_obj, "id", 1_i64)?;
+        doc.put(&item_obj, "name", "A")?;
+        doc.commit();
+
+        let ids_before = object_ids_by_scalar_field_in_array_prop(&doc, "facet", "items", "id")?;
+
+        let modified = serde_json::json!({
+            "items": [
+                {"id": "x", "name": "X"},
+                {"id": 1, "name": "A"}
+            ]
+        });
+        let (_commit, _heads, patches) =
+            reconcile_json_prop_with_delta(&mut doc, "facet", modified)?;
+        let ids_after = object_ids_by_scalar_field_in_array_prop(&doc, "facet", "items", "id")?;
+
+        assert_eq!(
+            ids_before.get("1"),
+            ids_after.get("1"),
+            "positive automerge Int(1) id should match JSON number 1 and preserve object identity"
+        );
+        assert!(
+            patches
+                .iter()
+                .any(|p| matches!(p.action, automerge::PatchAction::Insert { index: 0, .. })),
+            "expected keyed front insert when matching existing int id=1, saw: {patches:?}"
         );
 
         Ok(())

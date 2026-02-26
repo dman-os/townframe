@@ -53,7 +53,7 @@ mod binds_guest {
             root_doc::WellKnownFacet::ImageMetadata(val) => {
                 wit_doc::WellKnownFacet::ImageMetadata(wit_doc::ImageMetadata {
                     facet_ref: val.facet_ref.to_string(),
-                    ref_heads: utils_rs::am::serialize_commit_heads(&val.ref_heads.0),
+                    ref_heads: am_utils_rs::serialize_commit_heads(&val.ref_heads.0),
                     mime: val.mime,
                     width_px: val.width_px,
                     height_px: val.height_px,
@@ -62,7 +62,7 @@ mod binds_guest {
             root_doc::WellKnownFacet::OcrResult(val) => {
                 wit_doc::WellKnownFacet::OcrResult(wit_doc::OcrResult {
                     facet_ref: val.facet_ref.to_string(),
-                    ref_heads: utils_rs::am::serialize_commit_heads(&val.ref_heads.0),
+                    ref_heads: am_utils_rs::serialize_commit_heads(&val.ref_heads.0),
                     model_tag: val.model_tag,
                     text: val.text,
                     text_regions: val.text_regions.map(|regions| {
@@ -87,7 +87,7 @@ mod binds_guest {
             root_doc::WellKnownFacet::Embedding(val) => {
                 wit_doc::WellKnownFacet::Embedding(wit_doc::Embedding {
                     facet_ref: val.facet_ref.to_string(),
-                    ref_heads: utils_rs::am::serialize_commit_heads(&val.ref_heads.0),
+                    ref_heads: am_utils_rs::serialize_commit_heads(&val.ref_heads.0),
                     model_tag: val.model_tag,
                     vector: val.vector,
                     dim: val.dim,
@@ -193,7 +193,7 @@ mod binds_guest {
                 root_doc::WellKnownFacet::ImageMetadata(root_doc::ImageMetadata {
                     facet_ref: val.facet_ref.parse().unwrap(),
                     ref_heads: root_doc::ChangeHashSet(
-                        utils_rs::am::parse_commit_heads(&val.ref_heads).unwrap(),
+                        am_utils_rs::parse_commit_heads(&val.ref_heads).unwrap(),
                     ),
                     mime: val.mime,
                     width_px: val.width_px,
@@ -204,7 +204,7 @@ mod binds_guest {
                 root_doc::WellKnownFacet::OcrResult(root_doc::OcrResult {
                     facet_ref: val.facet_ref.parse().unwrap(),
                     ref_heads: root_doc::ChangeHashSet(
-                        utils_rs::am::parse_commit_heads(&val.ref_heads).unwrap(),
+                        am_utils_rs::parse_commit_heads(&val.ref_heads).unwrap(),
                     ),
                     model_tag: val.model_tag,
                     text: val.text,
@@ -231,7 +231,7 @@ mod binds_guest {
                 root_doc::WellKnownFacet::Embedding(root_doc::Embedding {
                     facet_ref: val.facet_ref.parse().unwrap(),
                     ref_heads: root_doc::ChangeHashSet(
-                        utils_rs::am::parse_commit_heads(&val.ref_heads).unwrap(),
+                        am_utils_rs::parse_commit_heads(&val.ref_heads).unwrap(),
                     ),
                     model_tag: val.model_tag,
                     vector: val.vector,
@@ -536,7 +536,7 @@ impl drawer::Host for SharedWashCtx {
         doc_id: drawer::DocId,
         heads: drawer::Heads,
     ) -> wasmtime::Result<Result<drawer::Doc, drawer::GetDocError>> {
-        let heads = match utils_rs::am::parse_commit_heads(&heads) {
+        let heads = match am_utils_rs::parse_commit_heads(&heads) {
             Ok(val) => val,
             Err(err) => return Ok(Err(drawer::GetDocError::InvalidHeads(format!("{err:?}")))),
         };
@@ -569,7 +569,7 @@ impl drawer::Host for SharedWashCtx {
         patch: drawer::DocPatch,
     ) -> wasmtime::Result<Result<(), drawer::UpdateDocError>> {
         let heads = match heads {
-            Some(heads) => match utils_rs::am::parse_commit_heads(&heads) {
+            Some(heads) => match am_utils_rs::parse_commit_heads(&heads) {
                 Ok(val) => Some(ChangeHashSet(val)),
                 Err(err) => {
                     return Ok(Err(drawer::UpdateDocError::InvalidHeads(format!(
@@ -770,7 +770,7 @@ impl facet_routine::Host for SharedWashCtx {
 
         Ok(facet_routine::FacetRoutineArgs {
             doc_id: doc_id.clone(),
-            heads: utils_rs::am::serialize_commit_heads(heads.as_ref()),
+            heads: am_utils_rs::serialize_commit_heads(heads.as_ref()),
             facet_key: facet_key.clone(),
             rw_facet_tokens,
             ro_facet_tokens,

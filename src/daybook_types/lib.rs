@@ -70,9 +70,9 @@ macro_rules! custom_type_set {
         use $crate::doc::ChangeHashSet;
         uniffi::custom_type!(ChangeHashSet, Vec<String>, {
             remote,
-            lower: |hash| utils_rs::am::serialize_commit_heads(&hash.0),
+            lower: |hash| am_utils_rs::serialize_commit_heads(&hash.0),
             try_lift: |strings: Vec<String>| {
-                Ok(ChangeHashSet(utils_rs::am::parse_commit_heads(&strings).to_anyhow()?))
+                Ok(ChangeHashSet(am_utils_rs::parse_commit_heads(&strings).to_anyhow()?))
             }
         });
 

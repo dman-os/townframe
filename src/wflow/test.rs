@@ -540,9 +540,6 @@ async fn register_workload_on_host(
                     ..WitInterface::from("townframe:wflow/bundle")
                 },
                 WitInterface {
-                    ..WitInterface::from("townframe:am-repo/repo")
-                },
-                WitInterface {
                     ..WitInterface::from("townframe:daybook/drawer")
                 },
                 WitInterface {

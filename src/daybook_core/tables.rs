@@ -231,11 +231,11 @@ pub struct TablesStore {
     pub panels: HashMap<Uuid, Panel>,
 
     // Indices for tracking relationships (not stored in CRDT)
-    #[autosurgeon(with = "utils_rs::am::codecs::skip")]
+    #[autosurgeon(with = "am_utils_rs::codecs::skip")]
     pub panel_to_tab: HashMap<Uuid, Uuid>, // panel_id -> tab_id
-    #[autosurgeon(with = "utils_rs::am::codecs::skip")]
+    #[autosurgeon(with = "am_utils_rs::codecs::skip")]
     pub tab_to_table: HashMap<Uuid, Uuid>, // tab_id -> table_id
-    #[autosurgeon(with = "utils_rs::am::codecs::skip")]
+    #[autosurgeon(with = "am_utils_rs::codecs::skip")]
     pub tab_to_window: HashMap<Uuid, Uuid>, // tab_id -> window_id
 }
 
@@ -388,7 +388,7 @@ pub struct TablesRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub local_actor_id: automerge::ActorId,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
+    _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
 }
 
 impl crate::repos::Repo for TablesRepo {
@@ -448,9 +448,8 @@ impl TablesRepo {
 
         let (broker, broker_stop) = acx.change_manager().add_doc(app_am_handle.clone()).await?;
 
-        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
-            Vec<utils_rs::am::changes::ChangeNotification>,
-        >();
+        let (notif_tx, notif_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Vec<am_utils_rs::changes::ChangeNotification>>();
         // Register change listener to automatically notify repo listeners
         let ticket = TablesStore::register_change_listener(&acx, &broker, vec![], {
             move |notifs| {
@@ -497,7 +496,7 @@ impl TablesRepo {
     async fn handle_notifs(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<utils_rs::am::changes::ChangeNotification>,
+            Vec<am_utils_rs::changes::ChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {

@@ -229,7 +229,7 @@ pub mod doc {
                 root_doc::WellKnownFacet::ImageMetadata(val) => {
                     Self::ImageMetadata(ImageMetadata {
                         facet_ref: val.facet_ref.to_string(),
-                        ref_heads: utils_rs::am::serialize_commit_heads(&val.ref_heads.0),
+                        ref_heads: am_utils_rs::serialize_commit_heads(&val.ref_heads.0),
                         mime: val.mime,
                         width_px: val.width_px,
                         height_px: val.height_px,
@@ -237,7 +237,7 @@ pub mod doc {
                 }
                 root_doc::WellKnownFacet::OcrResult(val) => Self::OcrResult(OcrResult {
                     facet_ref: val.facet_ref.to_string(),
-                    ref_heads: utils_rs::am::serialize_commit_heads(&val.ref_heads.0),
+                    ref_heads: am_utils_rs::serialize_commit_heads(&val.ref_heads.0),
                     model_tag: val.model_tag,
                     text: val.text,
                     text_regions: val.text_regions.map(|regions| {
@@ -260,7 +260,7 @@ pub mod doc {
                 }),
                 root_doc::WellKnownFacet::Embedding(val) => Self::Embedding(Embedding {
                     facet_ref: val.facet_ref.to_string(),
-                    ref_heads: utils_rs::am::serialize_commit_heads(&val.ref_heads.0),
+                    ref_heads: am_utils_rs::serialize_commit_heads(&val.ref_heads.0),
                     model_tag: val.model_tag,
                     vector: val.vector,
                     dim: val.dim,
@@ -343,7 +343,7 @@ pub mod doc {
                 WellKnownFacet::ImageMetadata(val) => {
                     Self::ImageMetadata(root_doc::ImageMetadata {
                         facet_ref: val.facet_ref.parse()?,
-                        ref_heads: root_doc::ChangeHashSet(utils_rs::am::parse_commit_heads(
+                        ref_heads: root_doc::ChangeHashSet(am_utils_rs::parse_commit_heads(
                             &val.ref_heads,
                         )?),
                         mime: val.mime,
@@ -353,7 +353,7 @@ pub mod doc {
                 }
                 WellKnownFacet::OcrResult(val) => Self::OcrResult(root_doc::OcrResult {
                     facet_ref: val.facet_ref.parse()?,
-                    ref_heads: root_doc::ChangeHashSet(utils_rs::am::parse_commit_heads(
+                    ref_heads: root_doc::ChangeHashSet(am_utils_rs::parse_commit_heads(
                         &val.ref_heads,
                     )?),
                     model_tag: val.model_tag,
@@ -378,7 +378,7 @@ pub mod doc {
                 }),
                 WellKnownFacet::Embedding(val) => Self::Embedding(root_doc::Embedding {
                     facet_ref: val.facet_ref.parse()?,
-                    ref_heads: root_doc::ChangeHashSet(utils_rs::am::parse_commit_heads(
+                    ref_heads: root_doc::ChangeHashSet(am_utils_rs::parse_commit_heads(
                         &val.ref_heads,
                     )?),
                     model_tag: val.model_tag,

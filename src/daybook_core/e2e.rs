@@ -1,7 +1,7 @@
 use crate::interlude::*;
 use automerge::transaction::Transactable;
 
-use utils_rs::am::AmCtx;
+use am_utils_rs::AmCtx;
 
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
@@ -23,7 +23,7 @@ pub struct DaybookTestContext {
     pub plugs_stop: crate::repos::RepoStopToken,
     pub config_stop: crate::repos::RepoStopToken,
     pub dispatch_stop: crate::repos::RepoStopToken,
-    pub acx_stop: utils_rs::am::AmCtxStopToken,
+    pub acx_stop: am_utils_rs::AmCtxStopToken,
     pub rt_stop: crate::rt::RtStopToken,
     pub rt: Arc<crate::rt::Rt>,
     pub _temp_dir: tempfile::TempDir,
@@ -141,9 +141,9 @@ pub async fn test_cx_with_options(
 
     // Initialize AmCtx with memory storage
     let (acx, acx_stop) = AmCtx::boot(
-        utils_rs::am::Config {
+        am_utils_rs::Config {
             peer_id,
-            storage: utils_rs::am::StorageConfig::Memory,
+            storage: am_utils_rs::StorageConfig::Memory,
         },
         Option::<samod::AlwaysAnnounce>::None,
     )

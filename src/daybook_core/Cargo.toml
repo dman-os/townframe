@@ -16,7 +16,8 @@ uniffi = ["dep:uniffi"]
 
 [dependencies]
 # internal
-utils_rs = { workspace = true, features = ["hash", "native", "automerge-repo", "downloader"] }
+utils_rs = { workspace = true, features = ["hash", "native", "downloader"] }
+am_utils_rs = { workspace = true, features = ["repo"] }
 api_utils_rs = { workspace = true, features = ["automerge"] }
 wflow = { workspace = true }
 daybook_types = { workspace = true, features = [
@@ -113,6 +114,5 @@ tokio-stream = "0.1.17"
 tokio-util = { workspace = true }
 wflow = { workspace = true, features = ["test-harness"] }
 insta = { workspace = true, features = ["json"] }
-wash_plugin_am_repo.workspace = true
 tempfile.workspace = true
 loom = "0.7.2"
