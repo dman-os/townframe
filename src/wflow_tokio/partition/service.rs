@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use std::any::Any;
 
 use wflow_core::partition::effects;
 use wflow_core::partition::job_events;
@@ -11,6 +12,15 @@ pub struct RunJobCtx {
     pub worker_id: Arc<str>,
 }
 
+pub trait WflowServiceSession: Send {
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+pub struct RunJobReply {
+    pub result: Result<job_events::JobRunResult, job_events::JobRunResult>,
+    pub session: Option<Box<dyn WflowServiceSession>>,
+}
+
 #[async_trait]
 pub trait WflowServiceHost {
     type ExtraArgs;
@@ -19,6 +29,9 @@ pub trait WflowServiceHost {
         ctx: &RunJobCtx,
         job_id: Arc<str>,
         journal: state::JobState,
+        session: Option<Box<dyn WflowServiceSession>>,
         args: &Self::ExtraArgs,
-    ) -> Result<job_events::JobRunResult, job_events::JobRunResult>;
+    ) -> RunJobReply;
+
+    fn drop_session(&self, _session: Box<dyn WflowServiceSession>) {}
 }

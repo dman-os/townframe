@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use std::collections::HashMap;
 
 use tokio_util::sync::CancellationToken;
 
@@ -33,6 +34,7 @@ impl Drop for TokioEffectWorkerHandle {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn start_tokio_effect_worker(
     worker_id: usize,
     worker_name: WorkerId,
@@ -57,6 +59,7 @@ pub fn start_tokio_effect_worker(
                 effect_cancel_tokens,
                 job_to_effect_id,
                 worker_id: Arc::clone(&worker_name),
+                sessions: default(),
                 log: pcx.log_ref(),
                 pcx,
             };
@@ -81,6 +84,7 @@ pub fn start_tokio_effect_worker(
                     }
                 };
             }
+            worker.shutdown_sessions();
             debug!("shutting down");
             eyre::Ok(())
         }
@@ -101,9 +105,55 @@ struct TokioEffectWorker {
     effect_cancel_tokens: EffectCancelTokens,
     job_to_effect_id: JobToEffectId,
     worker_id: WorkerId,
+    sessions: HashMap<Arc<str>, CachedRunSession>,
+}
+
+enum CachedHostKind {
+    Wasmcloud,
+    LocalNative,
+}
+
+struct CachedRunSession {
+    host_kind: CachedHostKind,
+    next_run_id: u64,
+    last_effect_id: effects::EffectId,
+    session: Box<dyn crate::partition::service::WflowServiceSession>,
 }
 
 impl TokioEffectWorker {
+    fn should_keep_session(result: &job_events::JobRunResult) -> bool {
+        matches!(
+            result,
+            job_events::JobRunResult::StepEffect(job_events::JobEffectResult {
+                deets: job_events::JobEffectResultDeets::Success { .. },
+                ..
+            })
+        )
+    }
+
+    fn take_session(&mut self, job_id: &Arc<str>) -> Option<CachedRunSession> {
+        self.sessions.remove(job_id)
+    }
+
+    fn put_session(&mut self, job_id: Arc<str>, session: CachedRunSession) {
+        self.sessions.insert(job_id, session);
+    }
+
+    fn drop_cached_session(&self, session: CachedRunSession) {
+        match session.host_kind {
+            CachedHostKind::Wasmcloud => {
+                self.pcx.local_wasmcloud_host.drop_session(session.session)
+            }
+            CachedHostKind::LocalNative => self.pcx.local_native_host.drop_session(session.session),
+        }
+    }
+
+    fn shutdown_sessions(&mut self) {
+        for (_job_id, session) in std::mem::take(&mut self.sessions) {
+            self.drop_cached_session(session);
+        }
+    }
+
     #[tracing::instrument(skip(self))]
     async fn handle_partition_effects(&mut self, effect_id: effects::EffectId) -> Res<()> {
         let (job_id, deets) = {
@@ -188,36 +238,81 @@ impl TokioEffectWorker {
             state.clone()
         };
         let run_ctx = crate::partition::service::RunJobCtx {
-            effect_id,
+            effect_id: effect_id.clone(),
             run_id,
             worker_id: Arc::clone(&self.worker_id),
         };
+        let mut cached = self.take_session(&job_id);
+        if let Some(session) = cached.as_ref() {
+            if session.next_run_id != run_id || session.last_effect_id == effect_id {
+                let session = cached.take().expect("checked is_some");
+                self.drop_cached_session(session);
+            }
+        }
 
-        let res = match &job_state_snapshot.wflow.service {
+        let (host_kind, reply) = match &job_state_snapshot.wflow.service {
             wflow_core::gen::metastore::WflowServiceMeta::Wasmcloud(meta) => {
-                self.pcx
-                    .local_wasmcloud_host
-                    .run(
-                        &run_ctx,
-                        Arc::clone(&job_id),
-                        job_state_snapshot.clone(),
-                        meta,
-                    )
-                    .await
+                if let Some(session) = cached.as_ref() {
+                    if !matches!(session.host_kind, CachedHostKind::Wasmcloud) {
+                        let session = cached.take().expect("checked is_some");
+                        self.drop_cached_session(session);
+                    }
+                }
+                (
+                    CachedHostKind::Wasmcloud,
+                    self.pcx
+                        .local_wasmcloud_host
+                        .run(
+                            &run_ctx,
+                            Arc::clone(&job_id),
+                            job_state_snapshot.clone(),
+                            cached.take().map(|session_entry| session_entry.session),
+                            meta,
+                        )
+                        .await,
+                )
             }
             wflow_core::metastore::WflowServiceMeta::LocalNative => {
-                self.pcx
-                    .local_native_host
-                    .run(
-                        &run_ctx,
-                        Arc::clone(&job_id),
-                        job_state_snapshot.clone(),
-                        &(),
-                    )
-                    .await
+                if let Some(session) = cached.as_ref() {
+                    if !matches!(session.host_kind, CachedHostKind::LocalNative) {
+                        let session = cached.take().expect("checked is_some");
+                        self.drop_cached_session(session);
+                    }
+                }
+                (
+                    CachedHostKind::LocalNative,
+                    self.pcx
+                        .local_native_host
+                        .run(
+                            &run_ctx,
+                            Arc::clone(&job_id),
+                            job_state_snapshot.clone(),
+                            cached.take().map(|session_entry| session_entry.session),
+                            &(),
+                        )
+                        .await,
+                )
             }
         };
-        match res {
+
+        let run_result_ref = match &reply.result {
+            Ok(val) | Err(val) => val,
+        };
+        if let Some(session) = reply.session {
+            let cached = CachedRunSession {
+                host_kind,
+                next_run_id: run_id + 1,
+                last_effect_id: effect_id,
+                session,
+            };
+            if Self::should_keep_session(run_result_ref) {
+                self.put_session(Arc::clone(&job_id), cached);
+            } else {
+                self.drop_cached_session(cached);
+            }
+        }
+
+        match reply.result {
             Ok(val) | Err(val) => val,
         }
     }

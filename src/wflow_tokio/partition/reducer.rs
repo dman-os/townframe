@@ -161,7 +161,7 @@ struct TokioPartitionReducer {
     log: PartitionLogRef,
     state: Arc<PartitionWorkingState>,
     effect_cancel_tokens: EffectCancelTokens,
-    new_effects: Vec<effects::EffectId>,
+    new_effects: Vec<(effects::EffectId, Option<Arc<str>>)>,
     event_effects: Vec<effects::PartitionEffect>,
     effect_tx: async_channel::Sender<effects::EffectId>,
     worker_effect_senders: WorkerEffectSenders,
@@ -323,6 +323,10 @@ impl TokioPartitionReducer {
                 entry_id,
                 effect_idx: ii as u64,
             };
+            let preferred_worker_id = match &effect.deets {
+                effects::PartitionEffectDeets::RunJob(run) => run.preferred_worker_id.clone(),
+                _ => None,
+            };
             if let effects::PartitionEffectDeets::RunJob(..) = &effect.deets {
                 let cancel_token = CancellationToken::new();
                 self.effect_cancel_tokens
@@ -335,23 +339,12 @@ impl TokioPartitionReducer {
                 effects_map.insert(id.clone(), effect);
             }
             if entry_id > self.replay_latest_entry_id {
-                self.new_effects.push(id);
+                self.new_effects.push((id, preferred_worker_id));
             }
         }
         // Send all effects to the channel
         let pending_effect_ids = std::mem::take(&mut self.new_effects);
-        for effect_id in pending_effect_ids {
-            let preferred_worker_id = {
-                let effects_map = self.state.read_effects().await;
-                effects_map
-                    .get(&effect_id)
-                    .and_then(|effect| match &effect.deets {
-                        effects::PartitionEffectDeets::RunJob(run) => {
-                            run.preferred_worker_id.clone()
-                        }
-                        _ => None,
-                    })
-            };
+        for (effect_id, preferred_worker_id) in pending_effect_ids {
             self.schedule_effect(effect_id, preferred_worker_id.as_ref())
                 .await?;
         }

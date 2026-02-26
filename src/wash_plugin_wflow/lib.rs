@@ -4,12 +4,10 @@ mod interlude {
 
 use crate::interlude::*;
 
+use anyhow::Context;
 use std::collections::HashSet;
 use std::sync::atomic::AtomicU64;
 use std::sync::RwLock;
-use std::time::Instant;
-
-use anyhow::Context;
 use tokio_util::sync::CancellationToken;
 use utils_rs::prelude::tokio::sync::mpsc;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
@@ -84,12 +82,6 @@ enum JobTrap {
     RunComplete(Result<String, types::JobError>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SessionKey {
-    worker_id: Arc<str>,
-    job_id: Arc<str>,
-}
-
 #[derive(Debug, Clone, Copy)]
 enum SessionResume {
     Continue,
@@ -103,11 +95,20 @@ struct SessionHandle {
     component_id: String,
     next_run_id: u64,
     last_effect_id: effects::EffectId,
-    last_used: Instant,
     resume_tx: mpsc::UnboundedSender<SessionResume>,
     yield_rx: mpsc::UnboundedReceiver<JobTrap>,
     cancel_token: CancellationToken,
     join_handle: tokio::task::JoinHandle<()>,
+}
+
+struct WasmRunSession {
+    session: Option<SessionHandle>,
+}
+
+impl service::WflowServiceSession for WasmRunSession {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 impl host::Host for SharedWashCtx {
@@ -286,8 +287,6 @@ pub struct WflowPlugin {
     active_jobs: RwLock<HashMap<Arc<str>, Arc<ActiveJobCtx>>>,
     // ctx id -> job id
     active_contexts: DHashMap<Arc<str>, Arc<str>>,
-    sessions: std::sync::Mutex<HashMap<SessionKey, SessionHandle>>,
-
     metastore: Arc<dyn MetdataStore>,
 }
 
@@ -299,7 +298,6 @@ impl WflowPlugin {
             active_keys: default(),
             active_jobs: default(),
             active_contexts: default(),
-            sessions: default(),
             metastore,
         }
     }
@@ -323,25 +321,6 @@ impl WflowPlugin {
             .map(|val| Arc::clone(val.value()))
     }
 
-    fn session_key(run_ctx: &service::RunJobCtx, job_id: &Arc<str>) -> SessionKey {
-        SessionKey {
-            worker_id: Arc::clone(&run_ctx.worker_id),
-            job_id: Arc::clone(job_id),
-        }
-    }
-
-    fn take_session(&self, key: &SessionKey) -> Option<SessionHandle> {
-        self.sessions.lock().expect(ERROR_MUTEX).remove(key)
-    }
-
-    fn put_session(&self, key: SessionKey, mut session: SessionHandle) {
-        session.last_used = Instant::now();
-        self.sessions
-            .lock()
-            .expect(ERROR_MUTEX)
-            .insert(key, session);
-    }
-
     fn drop_session_handle(&self, session: SessionHandle) {
         let _ = session.resume_tx.send(SessionResume::Stop);
         session.cancel_token.cancel();
@@ -352,32 +331,6 @@ impl WflowPlugin {
             .write()
             .expect(ERROR_MUTEX)
             .remove(&session.job_id);
-    }
-
-    fn invalidate_sessions_for_workload(&self, workload_id: &str) {
-        let keys = {
-            let sessions = self.sessions.lock().expect(ERROR_MUTEX);
-            sessions
-                .iter()
-                .filter(|(_, session)| session.workload_id.as_ref() == workload_id)
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>()
-        };
-        for key in keys {
-            if let Some(session) = self.take_session(&key) {
-                self.drop_session_handle(session);
-            }
-        }
-    }
-
-    fn should_keep_session(result: &job_events::JobRunResult) -> bool {
-        matches!(
-            result,
-            job_events::JobRunResult::StepEffect(job_events::JobEffectResult {
-                deets: job_events::JobEffectResultDeets::Success { .. },
-                ..
-            })
-        )
     }
 
     fn trap_to_result(trap: JobTrap) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
@@ -489,7 +442,6 @@ impl WflowPlugin {
                 entry_id: 0,
                 effect_idx: 0,
             },
-            last_used: Instant::now(),
             resume_tx,
             yield_rx,
             cancel_token: pause_cancel,
@@ -630,7 +582,6 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
         resolved: &wash_runtime::engine::workload::ResolvedWorkload,
         component_id: &str,
     ) -> anyhow::Result<()> {
-        self.invalidate_sessions_for_workload(resolved.id());
         let Some((workload_id, wflow_keys)) = self.pending_workloads.remove(resolved.id()) else {
             anyhow::bail!("unrecognized workload was resolved");
         };
@@ -682,7 +633,6 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
         workload_id: &str,
         _interfaces: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
-        self.invalidate_sessions_for_workload(workload_id);
         if let Some(wflow) = self
             .active_workloads
             .write()
@@ -710,8 +660,9 @@ impl service::WflowServiceHost for WflowPlugin {
         run_ctx: &service::RunJobCtx,
         job_id: Arc<str>,
         journal: state::JobState,
+        mut session: Option<Box<dyn service::WflowServiceSession>>,
         args: &Self::ExtraArgs,
-    ) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
+    ) -> service::RunJobReply {
         let Some(workload) = self
             .active_workloads
             .read()
@@ -719,12 +670,32 @@ impl service::WflowServiceHost for WflowPlugin {
             .get(&args.workload_id[..])
             .cloned()
         else {
-            return Err(job_events::JobRunResult::WorkerErr(
-                job_events::JobRunWorkerError::WflowNotFound,
-            ));
+            return service::RunJobReply {
+                result: Err(job_events::JobRunResult::WorkerErr(
+                    job_events::JobRunWorkerError::WflowNotFound,
+                )),
+                session: None,
+            };
         };
-        let key = Self::session_key(run_ctx, &job_id);
-        let mut session = if let Some(session) = self.take_session(&key) {
+        let start_session = |journal| async {
+            self.start_session(&workload, Arc::clone(&job_id), journal)
+                .await
+        };
+        let mut session = if let Some(mut session_box) = session.take() {
+            let session = session_box
+                .as_any_mut()
+                .downcast_mut::<WasmRunSession>()
+                .and_then(|session| session.session.take());
+            let Some(session) = session else {
+                return service::RunJobReply {
+                    result: Err(job_events::JobRunResult::WorkerErr(
+                        job_events::JobRunWorkerError::Other {
+                            msg: "invalid wasm session type".into(),
+                        },
+                    )),
+                    session: None,
+                };
+            };
             let session_valid = session.next_run_id == run_ctx.run_id
                 && session.last_effect_id != run_ctx.effect_id
                 && session.workload_id.as_ref() == args.workload_id
@@ -736,8 +707,15 @@ impl service::WflowServiceHost for WflowPlugin {
                     .contains_key(&job_id);
             if !session_valid {
                 self.drop_session_handle(session);
-                self.start_session(&workload, Arc::clone(&job_id), journal)
-                    .await?
+                match start_session(journal.clone()).await {
+                    Ok(session) => session,
+                    Err(result) => {
+                        return service::RunJobReply {
+                            result: Err(result),
+                            session: None,
+                        };
+                    }
+                }
             } else {
                 let active_job = self
                     .active_jobs
@@ -749,28 +727,53 @@ impl service::WflowServiceHost for WflowPlugin {
                 *active_job.journal.lock().expect(ERROR_MUTEX) = journal.clone();
                 if session.resume_tx.send(SessionResume::Continue).is_err() {
                     self.drop_session_handle(session);
-                    self.start_session(&workload, Arc::clone(&job_id), journal)
-                        .await?
+                    match start_session(journal.clone()).await {
+                        Ok(session) => session,
+                        Err(result) => {
+                            return service::RunJobReply {
+                                result: Err(result),
+                                session: None,
+                            };
+                        }
+                    }
                 } else {
                     session
                 }
             }
         } else {
-            self.start_session(&workload, Arc::clone(&job_id), journal)
-                .await?
+            match start_session(journal.clone()).await {
+                Ok(session) => session,
+                Err(result) => {
+                    return service::RunJobReply {
+                        result: Err(result),
+                        session: None,
+                    };
+                }
+            }
         };
 
         let result = self.wait_for_session_yield(&mut session).await;
-        let run_result = match &result {
-            Ok(v) | Err(v) => v,
-        };
-        if Self::should_keep_session(run_result) {
-            session.next_run_id = run_ctx.run_id + 1;
-            session.last_effect_id = run_ctx.effect_id.clone();
-            self.put_session(key, session);
-        } else {
+        match &result {
+            Ok(_) | Err(_) => {
+                session.next_run_id = run_ctx.run_id + 1;
+                session.last_effect_id = run_ctx.effect_id.clone();
+            }
+        }
+        service::RunJobReply {
+            result,
+            session: Some(Box::new(WasmRunSession {
+                session: Some(session),
+            })),
+        }
+    }
+
+    fn drop_session(&self, mut session: Box<dyn service::WflowServiceSession>) {
+        let session = session
+            .as_any_mut()
+            .downcast_mut::<WasmRunSession>()
+            .and_then(|session| session.session.take());
+        if let Some(session) = session {
             self.drop_session_handle(session);
         }
-        result
     }
 }
