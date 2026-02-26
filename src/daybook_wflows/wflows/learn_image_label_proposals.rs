@@ -1,5 +1,6 @@
 use super::super::*;
 use crate::interlude::*;
+use crate::{embedding_bytes_to_f32, row_blob, row_i64, row_text};
 use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
 const NOMIC_VISION_MODEL_ID: &str = "nomic-ai/nomic-embed-vision-v1.5";
@@ -46,8 +47,8 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             ))
         })?;
 
-    let sqlite_connection = tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY)
-        .ok_or_else(|| {
+    let sqlite_connection =
+        tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY).ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
                 "sqlite connection '{}' not found in sqlite_connections",
                 LOCAL_STATE_KEY
@@ -215,10 +216,13 @@ fn load_or_init_proposal_set(
                         "error parsing config proposal set facet json: {err}"
                     ))
                 })?;
-            return match WellKnownFacet::from_json(facet_raw, WellKnownFacetTag::PseudoLabelCandidates)
-                .map_err(|err| {
-                    JobErrorX::Terminal(err.wrap_err("config facet is not PseudoLabelCandidates"))
-                })? {
+            return match WellKnownFacet::from_json(
+                facet_raw,
+                WellKnownFacetTag::PseudoLabelCandidates,
+            )
+            .map_err(|err| {
+                JobErrorX::Terminal(err.wrap_err("config facet is not PseudoLabelCandidates"))
+            })? {
                 WellKnownFacet::PseudoLabelCandidates(value) => Ok(value),
                 _ => unreachable!(),
             };
@@ -604,7 +608,7 @@ fn get_or_compute_text_embedding(
                 vector.len()
             )));
         }
-        if model_tag.eq_ignore_ascii_case(NOMIC_TEXT_MODEL_ID) && dim == (vector.len() as i64) {
+        if model_tag.eq_ignore_ascii_case(NOMIC_TEXT_MODEL_ID) {
             return Ok(vector);
         }
     }
@@ -732,48 +736,6 @@ impl Dsu {
             self.rank[left_root] = self.rank[left_root].saturating_add(1);
         }
     }
-}
-
-fn row_text(row: &crate::wit::townframe::sql::types::ResultRow, name: &str) -> Option<String> {
-    row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Text(value) if entry.column_name == name => {
-            Some(value.clone())
-        }
-        _ => None,
-    })
-}
-
-fn row_i64(row: &crate::wit::townframe::sql::types::ResultRow, name: &str) -> Option<i64> {
-    row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Integer(value)
-            if entry.column_name == name =>
-        {
-            Some(*value)
-        }
-        _ => None,
-    })
-}
-
-fn row_blob(row: &crate::wit::townframe::sql::types::ResultRow, name: &str) -> Option<Vec<u8>> {
-    row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Blob(value) if entry.column_name == name => {
-            Some(value.clone())
-        }
-        _ => None,
-    })
-}
-
-fn embedding_bytes_to_f32(bytes: &[u8]) -> Res<Vec<f32>> {
-    if !bytes.len().is_multiple_of(4) {
-        eyre::bail!(
-            "embedding bytes length {} is not divisible by 4",
-            bytes.len()
-        );
-    }
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect())
 }
 
 #[cfg(test)]

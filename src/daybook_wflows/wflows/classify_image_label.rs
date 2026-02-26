@@ -1,5 +1,6 @@
 use super::super::*;
 use crate::interlude::*;
+use crate::{embedding_bytes_to_f32, row_i64, row_text};
 use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
 const NOMIC_VISION_MODEL_ID: &str = "nomic-ai/nomic-embed-vision-v1.5";
@@ -274,29 +275,37 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
 
         let current_version_rows = sqlite_connection
             .query(
-                "SELECT version_id, facet_heads_json FROM image_label_label_set_versions WHERE is_current = 1 ORDER BY version_id DESC LIMIT 1",
+                "SELECT version_id, facet_heads_json, schema_version, model_tag, embedding_dim \
+                 FROM image_label_label_set_versions WHERE is_current = 1 ORDER BY version_id DESC LIMIT 1",
                 &[],
             )
             .map_err(|err| JobErrorX::Terminal(ferr!("error loading label set cache version: {err:?}")))?;
         let current_version_row = current_version_rows.first();
         let current_version_id = current_version_row.and_then(|row| row_i64(row, "version_id"));
         let current_heads_json = current_version_row.and_then(|row| row_text(row, "facet_heads_json"));
+        let current_schema_version =
+            current_version_row.and_then(|row| row_i64(row, "schema_version"));
+        let current_model_tag = current_version_row.and_then(|row| row_text(row, "model_tag"));
+        let current_embedding_dim = current_version_row.and_then(|row| row_i64(row, "embedding_dim"));
+        let config_schema_version = LABEL_SET_CACHE_SCHEMA_VERSION;
+        let config_model_tag = NOMIC_TEXT_MODEL_ID.to_string();
+        let config_embedding_dim = 768_i64;
         let needs_rebuild = current_version_id.is_none()
-            || current_heads_json.as_deref() != Some(&config_heads_json);
+            || current_heads_json.as_deref() != Some(&config_heads_json)
+            || current_schema_version != Some(config_schema_version)
+            || current_model_tag.as_deref() != Some(config_model_tag.as_str())
+            || current_embedding_dim != Some(config_embedding_dim);
 
         let active_version_id = if needs_rebuild {
             sqlite_connection
-                .query("UPDATE image_label_label_set_versions SET is_current = 0 WHERE is_current = 1", &[])
-                .map_err(|err| JobErrorX::Terminal(ferr!("error clearing current label set version: {err:?}")))?;
-            sqlite_connection
                 .query(
-                    "INSERT INTO image_label_label_set_versions (facet_key, facet_heads_json, schema_version, model_tag, embedding_dim, is_current) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+                    "INSERT INTO image_label_label_set_versions (facet_key, facet_heads_json, schema_version, model_tag, embedding_dim, is_current) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
                     &[
                         SqlValue::Text(config_label_set_facet_key.clone()),
                         SqlValue::Text(config_heads_json.clone()),
-                        SqlValue::Integer(LABEL_SET_CACHE_SCHEMA_VERSION),
-                        SqlValue::Text(NOMIC_TEXT_MODEL_ID.to_string()),
-                        SqlValue::Integer(768),
+                        SqlValue::Integer(config_schema_version),
+                        SqlValue::Text(config_model_tag.clone()),
+                        SqlValue::Integer(config_embedding_dim),
                     ],
                 )
                 .map_err(|err| JobErrorX::Terminal(ferr!("error inserting label set version row: {err:?}")))?;
@@ -393,6 +402,27 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
                     },
                 )?;
             }
+            sqlite_connection
+                .query(
+                    "UPDATE image_label_label_set_versions SET is_current = 0 WHERE is_current = 1",
+                    &[],
+                )
+                .map_err(|err| {
+                    JobErrorX::Terminal(ferr!(
+                        "error clearing current label set version during promotion: {err:?}"
+                    ))
+                })?;
+            sqlite_connection
+                .query(
+                    "UPDATE image_label_label_set_versions SET is_current = 1 WHERE version_id = ?1",
+                    &[SqlValue::Integer(version_id)],
+                )
+                .map_err(|err| {
+                    JobErrorX::Terminal(ferr!(
+                        "error promoting rebuilt label set version {}: {err:?}",
+                        version_id
+                    ))
+                })?;
             let _ = cache_row_count;
             version_id
         } else {
@@ -600,7 +630,7 @@ struct CacheEmbeddingRow<'a> {
 }
 
 fn default_image_pseudo_label_set() -> daybook_types::doc::PseudoLabelCandidatesFacet {
-    use daybook_types::doc::{PseudoLabelCandidatesFacet, PseudoLabelCandidate};
+    use daybook_types::doc::{PseudoLabelCandidate, PseudoLabelCandidatesFacet};
     PseudoLabelCandidatesFacet {
         labels: vec![
             PseudoLabelCandidate {
@@ -724,15 +754,6 @@ fn sqlite_vec_rowid_cosine_similarity(
         .ok_or_else(|| JobErrorX::Terminal(ferr!("missing sqlite-vec rowid score value")))
 }
 
-fn row_text(row: &crate::wit::townframe::sql::types::ResultRow, name: &str) -> Option<String> {
-    row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Text(value) if entry.column_name == name => {
-            Some(value.clone())
-        }
-        _ => None,
-    })
-}
-
 /// Returns `Some(Some(text))` if the column exists and is TEXT, `Some(None)` if it exists and is
 /// NULL, and `None` if the column is missing or has a non-text/non-null type.
 fn row_opt_text(
@@ -765,33 +786,9 @@ fn row_real(row: &crate::wit::townframe::sql::types::ResultRow, name: &str) -> O
     })
 }
 
-fn row_i64(row: &crate::wit::townframe::sql::types::ResultRow, name: &str) -> Option<i64> {
-    row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Integer(value)
-            if entry.column_name == name =>
-        {
-            Some(*value)
-        }
-        _ => None,
-    })
-}
-
 fn embedding_vec_to_json(values: &[f32]) -> Res<String> {
     let bytes = daybook_types::doc::embedding_f32_slice_to_le_bytes(values);
     daybook_types::doc::embedding_f32_bytes_to_json(&bytes, values.len() as u32)
-}
-
-fn embedding_bytes_to_f32(bytes: &[u8]) -> Res<Vec<f32>> {
-    if !bytes.len().is_multiple_of(4) {
-        eyre::bail!(
-            "embedding bytes length {} is not divisible by 4",
-            bytes.len()
-        );
-    }
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect())
 }
 
 fn mean_normalized(vectors: &[Vec<f32>]) -> Option<Vec<f32>> {

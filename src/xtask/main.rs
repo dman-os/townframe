@@ -156,7 +156,8 @@ async fn main_main() -> Res<()> {
                 let image = image.ok_or_eyre(
                     "embed-similarity-demo requires --image when --image-compare is provided",
                 )?;
-                let image_a = mltools::embed_image(ctx.as_ref(), &image, image_mime(&image)?).await?;
+                let image_a =
+                    mltools::embed_image(ctx.as_ref(), &image, image_mime(&image)?).await?;
                 let image_a_again =
                     mltools::embed_image(ctx.as_ref(), &image, image_mime(&image)?).await?;
                 let image_b =
@@ -235,7 +236,8 @@ async fn main_main() -> Res<()> {
                     Some("webp") => "image/webp",
                     _ => eyre::bail!("unsupported image extension for '{}'", image.display()),
                 };
-                let image_embedding = mltools::embed_image(ctx.as_ref(), &image, image_mime).await?;
+                let image_embedding =
+                    mltools::embed_image(ctx.as_ref(), &image, image_mime).await?;
                 let image_embedding_again =
                     mltools::embed_image(ctx.as_ref(), &image, image_mime).await?;
                 let (builtin_image_embedding, builtin_text_embedding) =

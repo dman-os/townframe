@@ -623,7 +623,8 @@ mod cloud {
             let service_url = service_url.to_string();
             let target_resolver = genai::resolver::ServiceTargetResolver::from_resolver_fn(
                 move |mut service_target: genai::ServiceTarget| {
-                    service_target.endpoint = genai::resolver::Endpoint::from_owned(service_url.clone());
+                    service_target.endpoint =
+                        genai::resolver::Endpoint::from_owned(service_url.clone());
                     Ok::<_, genai::resolver::Error>(service_target)
                 },
             );
@@ -635,9 +636,9 @@ mod cloud {
             let auth_resolver = genai::resolver::AuthResolver::from_resolver_fn(
                 move |model_iden: genai::ModelIden| {
                     if model_iden.adapter_kind == provider {
-                        Ok::<_, genai::resolver::Error>(Some(genai::resolver::AuthData::from_single(
-                            key.clone(),
-                        )))
+                        Ok::<_, genai::resolver::Error>(Some(
+                            genai::resolver::AuthData::from_single(key.clone()),
+                        ))
                     } else {
                         Ok::<_, genai::resolver::Error>(None)
                     }
@@ -823,7 +824,8 @@ mod cloud {
                 let chat_req = genai::chat::ChatRequest::new(vec![genai::chat::ChatMessage::user(
                     user_content,
                 )]);
-                let client = genai_client(genai::adapter::AdapterKind::Gemini, None, auth.as_ref())?;
+                let client =
+                    genai_client(genai::adapter::AdapterKind::Gemini, None, auth.as_ref())?;
                 let model_iden = genai::ModelIden::new(genai::adapter::AdapterKind::Gemini, model);
                 let response = client
                     .exec_chat(
@@ -1313,7 +1315,7 @@ mod tests {
                 .iter()
                 .any(|backend| matches!(backend, LlmBackendConfig::CloudGemini { .. })));
 
-            if std::env::var("GEMINI_API_KEY").is_ok() && cfg!(any(test, feature = "tests")) {
+            if std::env::var("GEMINI_API_KEY").is_ok() {
                 assert!(matches!(
                     config.llm.backends.first(),
                     Some(LlmBackendConfig::CloudGemini { .. })

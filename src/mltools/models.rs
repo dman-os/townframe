@@ -268,7 +268,7 @@ pub async fn mobile_default_with_observer(
     observer: Option<&MobileDefaultObserver>,
 ) -> Res<Config> {
     let download_dir = download_dir.as_ref().to_path_buf();
-    let _ = utils_rs::dotenv_hierarchical();
+    utils_rs::dotenv_hierarchical().wrap_err("error loading hierarchical .env")?;
     let gemini_api_key = std::env::var("GEMINI_API_KEY").ok();
     tokio::fs::create_dir_all(&download_dir)
         .await
@@ -311,7 +311,8 @@ pub async fn mobile_default_with_observer(
     let api = ApiBuilder::from_cache(Cache::new(hf_cache_dir.clone()))
         .with_progress(true)
         .build()?;
-    let text_cache_repo = Cache::new(hf_cache_dir.clone()).repo(Repo::model(NOMIC_TEXT_MODEL_ID.into()));
+    let text_cache_repo =
+        Cache::new(hf_cache_dir.clone()).repo(Repo::model(NOMIC_TEXT_MODEL_ID.into()));
     let text_model_repo = api.model(NOMIC_TEXT_MODEL_ID.to_string());
 
     let onnx_path = hf_download_with_progress(

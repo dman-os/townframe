@@ -166,9 +166,8 @@ impl DocProcessorTriageListener {
             for requirement in &self.predicate_requirements {
                 match requirement {
                     DocPredicateEvalRequirement::FullDoc => {
-                        let predicate_doc_arc = predicate_doc_arc.expect(
-                            "FullDoc requirement implies full doc was loaded and cached",
-                        );
+                        let predicate_doc_arc = predicate_doc_arc
+                            .expect("FullDoc requirement implies full doc was loaded and cached");
                         self.predicate_resolved.insert(
                             requirement.clone(),
                             DocPredicateEvalResolved::FullDoc(Arc::clone(predicate_doc_arc)),

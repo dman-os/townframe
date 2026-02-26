@@ -38,10 +38,9 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             let raw = serde_json::from_str(val).map_err(|err| {
                 JobErrorX::Terminal(ferr!("unable to parse facet found on doc: {err}"))
             })?;
-            WellKnownFacet::from_json(raw, WellKnownFacetTag::Note)
-                .map_err(|err| {
-                    JobErrorX::Terminal(err.wrap_err("unable to parse facet found on doc"))
-                })
+            WellKnownFacet::from_json(raw, WellKnownFacetTag::Note).map_err(|err| {
+                JobErrorX::Terminal(err.wrap_err("unable to parse facet found on doc"))
+            })
         }) {
         Some(Ok(WellKnownFacet::Note(Note { content, .. }))) => content,
         Some(Ok(_)) => unreachable!(),
@@ -54,6 +53,19 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
         }
     };
 
+    const MAX_LLM_INPUT_CHARS: usize = 8_000;
+    const MAX_LABEL_CHARS: usize = 64;
+    let content_text_for_prompt = if content_text.chars().count() > MAX_LLM_INPUT_CHARS {
+        let mut truncated = content_text
+            .chars()
+            .take(MAX_LLM_INPUT_CHARS)
+            .collect::<String>();
+        truncated.push_str("\n[truncated]");
+        truncated
+    } else {
+        content_text.clone()
+    };
+
     // Call the LLM to generate a label
     let llm_response: String = cx.effect(|| {
         use crate::wit::townframe::daybook::mltools_llm_chat;
@@ -61,7 +73,7 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
         let message_text = format!(
             "Based on the following document content, provide a single short label or category (1-3 words). \
             Just return the label, nothing else.\n\nDocument content:\n{}",
-            content_text
+            content_text_for_prompt
         );
         let result = mltools_llm_chat::llm_chat(&message_text);
 
@@ -74,6 +86,23 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
                     .trim_matches('\'')
                     .trim()
                     .to_string();
+                let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+                let word_count = label.split_whitespace().count();
+                if label.is_empty() {
+                    return Err(JobErrorX::Terminal(ferr!(
+                        "llm returned an empty label after normalization"
+                    )));
+                }
+                if !(1..=3).contains(&word_count) {
+                    return Err(JobErrorX::Terminal(ferr!(
+                        "llm returned invalid label word count {word_count}; expected 1..=3"
+                    )));
+                }
+                if label.chars().count() > MAX_LABEL_CHARS {
+                    return Err(JobErrorX::Terminal(ferr!(
+                        "llm returned label longer than {MAX_LABEL_CHARS} chars"
+                    )));
+                }
                 Ok(Json(label))
             }
             Err(err) => Err(JobErrorX::Terminal(ferr!("error calling LLM: {err}"))),

@@ -188,8 +188,10 @@ async fn wait_for_proposal_set(
             .await?
         {
             if let Some(raw) = doc.facets.get(&proposal_set_key) {
-                let facet =
-                    WellKnownFacet::from_json(raw.clone(), WellKnownFacetTag::PseudoLabelCandidates)?;
+                let facet = WellKnownFacet::from_json(
+                    raw.clone(),
+                    WellKnownFacetTag::PseudoLabelCandidates,
+                )?;
                 let WellKnownFacet::PseudoLabelCandidates(value) = facet else {
                     eyre::bail!("proposal set config facet had unexpected type");
                 };

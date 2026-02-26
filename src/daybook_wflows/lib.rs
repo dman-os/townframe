@@ -68,6 +68,57 @@ fn tuple_list_take<T>(pairs: &mut Vec<(String, T)>, key: &str) -> Option<T> {
     Some(pairs.swap_remove(ix).1)
 }
 
+pub(crate) fn row_text(
+    row: &crate::wit::townframe::sql::types::ResultRow,
+    name: &str,
+) -> Option<String> {
+    row.iter().find_map(|entry| match &entry.value {
+        crate::wit::townframe::sql::types::SqlValue::Text(value) if entry.column_name == name => {
+            Some(value.clone())
+        }
+        _ => None,
+    })
+}
+
+pub(crate) fn row_i64(
+    row: &crate::wit::townframe::sql::types::ResultRow,
+    name: &str,
+) -> Option<i64> {
+    row.iter().find_map(|entry| match &entry.value {
+        crate::wit::townframe::sql::types::SqlValue::Integer(value)
+            if entry.column_name == name =>
+        {
+            Some(*value)
+        }
+        _ => None,
+    })
+}
+
+pub(crate) fn row_blob(
+    row: &crate::wit::townframe::sql::types::ResultRow,
+    name: &str,
+) -> Option<Vec<u8>> {
+    row.iter().find_map(|entry| match &entry.value {
+        crate::wit::townframe::sql::types::SqlValue::Blob(value) if entry.column_name == name => {
+            Some(value.clone())
+        }
+        _ => None,
+    })
+}
+
+pub(crate) fn embedding_bytes_to_f32(bytes: &[u8]) -> Res<Vec<f32>> {
+    if !bytes.len().is_multiple_of(4) {
+        eyre::bail!(
+            "embedding bytes length {} is not divisible by 4",
+            bytes.len()
+        );
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
 impl wit::exports::townframe::wflow::bundle::Guest for Component {
     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
         use wflows::*;

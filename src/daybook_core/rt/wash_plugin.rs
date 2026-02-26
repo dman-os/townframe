@@ -169,17 +169,19 @@ mod binds_guest {
             }
             wit_doc::WellKnownFacet::PseudoLabel(val) => root_doc::WellKnownFacet::PseudoLabel(val),
             wit_doc::WellKnownFacet::PseudoLabelCandidates(val) => {
-                root_doc::WellKnownFacet::PseudoLabelCandidates(root_doc::PseudoLabelCandidatesFacet {
-                    labels: val
-                        .labels
-                        .into_iter()
-                        .map(|label| root_doc::PseudoLabelCandidate {
-                            label: label.label,
-                            prompts: label.prompts,
-                            negative_prompts: label.negative_prompts,
-                        })
-                        .collect(),
-                })
+                root_doc::WellKnownFacet::PseudoLabelCandidates(
+                    root_doc::PseudoLabelCandidatesFacet {
+                        labels: val
+                            .labels
+                            .into_iter()
+                            .map(|label| root_doc::PseudoLabelCandidate {
+                                label: label.label,
+                                prompts: label.prompts,
+                                negative_prompts: label.negative_prompts,
+                            })
+                            .collect(),
+                    },
+                )
             }
             wit_doc::WellKnownFacet::TitleGeneric(val) => {
                 root_doc::WellKnownFacet::TitleGeneric(val)

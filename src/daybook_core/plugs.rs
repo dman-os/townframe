@@ -667,7 +667,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 },
                 FacetManifest {
                     key_tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
-                    value_schema: schemars::schema_for!(daybook_types::doc::PseudoLabelCandidatesFacet),
+                    value_schema: schemars::schema_for!(
+                        daybook_types::doc::PseudoLabelCandidatesFacet
+                    ),
                     display_config: default(),
                     references: default(),
                 },
