@@ -10,7 +10,7 @@ async fn test_effect_chain_latency_smoke_baseline() -> Res<()> {
 
     let test_cx = WflowTestContext::builder()
         .initial_workloads(vec![InitialWorkload {
-            wasm_path: test_wflows_wasm_path()?.into(),
+            wasm_path: test_wflows_wasm_path()?,
             wflow_keys: vec!["effect_chain".to_string()],
         }])
         .build()

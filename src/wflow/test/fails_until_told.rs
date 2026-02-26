@@ -9,7 +9,7 @@ async fn test_fails_until_told() -> Res<()> {
     // First run: job will fail transiently
     let test_cx = WflowTestContext::builder()
         .initial_workloads(vec![InitialWorkload {
-            wasm_path: test_wflows_wasm_path()?.into(),
+            wasm_path: test_wflows_wasm_path()?,
             wflow_keys: vec!["fails_until_told".to_string()],
         }])
         .build()

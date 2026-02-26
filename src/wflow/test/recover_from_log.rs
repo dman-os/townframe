@@ -22,7 +22,7 @@ async fn recovers_partition_from_log_only_without_duplicate_effects() -> Res<()>
 
     let test_cx = WflowTestContext::builder()
         .initial_workloads(vec![InitialWorkload {
-            wasm_path: test_wflows_wasm_path()?.into(),
+            wasm_path: test_wflows_wasm_path()?,
             wflow_keys: vec!["fails_once".to_string()],
         }])
         .build()
@@ -47,7 +47,7 @@ async fn recovers_partition_from_log_only_without_duplicate_effects() -> Res<()>
     let test_cx = WflowTestContext::builder()
         .with_logstore(logstore)
         .initial_workloads(vec![InitialWorkload {
-            wasm_path: test_wflows_wasm_path()?.into(),
+            wasm_path: test_wflows_wasm_path()?,
             wflow_keys: vec!["fails_once".to_string()],
         }])
         .build()
