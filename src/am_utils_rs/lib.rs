@@ -5,6 +5,7 @@ mod interlude {
 pub mod prelude {
     pub use crate::codecs::ThroughJson;
 
+    #[cfg(feature = "repo")]
     pub use crate::AmCtx;
     pub use automerge;
     pub use autosurgeon;

@@ -101,6 +101,13 @@ struct SessionHandle {
     join_handle: tokio::task::JoinHandle<()>,
 }
 
+impl SessionHandle {
+    fn request_cancel(&self) {
+        let _ = self.resume_tx.send(SessionResume::Stop);
+        self.cancel_token.cancel();
+    }
+}
+
 struct WasmRunSession {
     session: Option<SessionHandle>,
 }
@@ -457,6 +464,7 @@ impl WflowPlugin {
         let trap = tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
+                session.request_cancel();
                 return Ok(job_events::JobRunResult::Aborted);
             }
             trap = session.yield_rx.recv() => trap

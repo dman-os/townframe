@@ -2082,6 +2082,7 @@ dependencies = [
 name = "daybook_fuse"
 version = "0.1.0"
 dependencies = [
+ "am_utils_rs",
  "daybook_core",
  "daybook_types",
  "pauperfuse",

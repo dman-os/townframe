@@ -191,10 +191,10 @@ mod binds_guest {
             }
             wit_doc::WellKnownFacet::ImageMetadata(val) => {
                 root_doc::WellKnownFacet::ImageMetadata(root_doc::ImageMetadata {
-                    facet_ref: val.facet_ref.parse().unwrap(),
-                    ref_heads: root_doc::ChangeHashSet(
-                        am_utils_rs::parse_commit_heads(&val.ref_heads).unwrap(),
-                    ),
+                    facet_ref: val.facet_ref.parse()?,
+                    ref_heads: root_doc::ChangeHashSet(am_utils_rs::parse_commit_heads(
+                        &val.ref_heads,
+                    )?),
                     mime: val.mime,
                     width_px: val.width_px,
                     height_px: val.height_px,
@@ -202,10 +202,10 @@ mod binds_guest {
             }
             wit_doc::WellKnownFacet::OcrResult(val) => {
                 root_doc::WellKnownFacet::OcrResult(root_doc::OcrResult {
-                    facet_ref: val.facet_ref.parse().unwrap(),
-                    ref_heads: root_doc::ChangeHashSet(
-                        am_utils_rs::parse_commit_heads(&val.ref_heads).unwrap(),
-                    ),
+                    facet_ref: val.facet_ref.parse()?,
+                    ref_heads: root_doc::ChangeHashSet(am_utils_rs::parse_commit_heads(
+                        &val.ref_heads,
+                    )?),
                     model_tag: val.model_tag,
                     text: val.text,
                     text_regions: val.text_regions.map(|regions| {
@@ -229,10 +229,10 @@ mod binds_guest {
             }
             wit_doc::WellKnownFacet::Embedding(val) => {
                 root_doc::WellKnownFacet::Embedding(root_doc::Embedding {
-                    facet_ref: val.facet_ref.parse().unwrap(),
-                    ref_heads: root_doc::ChangeHashSet(
-                        am_utils_rs::parse_commit_heads(&val.ref_heads).unwrap(),
-                    ),
+                    facet_ref: val.facet_ref.parse()?,
+                    ref_heads: root_doc::ChangeHashSet(am_utils_rs::parse_commit_heads(
+                        &val.ref_heads,
+                    )?),
                     model_tag: val.model_tag,
                     vector: val.vector,
                     dim: val.dim,
@@ -266,51 +266,46 @@ mod binds_guest {
             wit_doc::WellKnownFacet::Dmeta(dmeta) => {
                 root_doc::WellKnownFacet::Dmeta(root_doc::Dmeta {
                     id: dmeta.id,
-                    created_at: Timestamp::from_second(dmeta.created_at.seconds as i64).unwrap(),
+                    created_at: Timestamp::from_second(dmeta.created_at.seconds as i64)?,
                     updated_at: dmeta
                         .updated_at
                         .into_iter()
-                        .map(|dt| Timestamp::from_second(dt.seconds as i64).unwrap())
-                        .collect(),
+                        .map(|dt| Timestamp::from_second(dt.seconds as i64))
+                        .collect::<Result<_, _>>()?,
                     facet_uuids: dmeta
                         .facet_uuids
                         .into_iter()
                         .map(|(facet_uuid_str, facet_key_str)| {
-                            (
-                                Uuid::parse_str(&facet_uuid_str).unwrap(),
+                            eyre::Ok((
+                                Uuid::parse_str(&facet_uuid_str)?,
                                 root_doc::FacetKey::from(facet_key_str),
-                            )
+                            ))
                         })
-                        .collect(),
+                        .collect::<Result<_, _>>()?,
                     facets: dmeta
                         .facets
                         .into_iter()
                         .map(|(facet_key_str, facet_meta)| {
-                            (
+                            eyre::Ok((
                                 root_doc::FacetKey::from(facet_key_str),
                                 root_doc::FacetMeta {
                                     created_at: Timestamp::from_second(
                                         facet_meta.created_at.seconds as i64,
-                                    )
-                                    .unwrap(),
+                                    )?,
                                     updated_at: facet_meta
                                         .updated_at
                                         .into_iter()
-                                        .map(|dt| {
-                                            Timestamp::from_second(dt.seconds as i64).unwrap()
-                                        })
-                                        .collect(),
+                                        .map(|dt| Timestamp::from_second(dt.seconds as i64))
+                                        .collect::<Result<_, _>>()?,
                                     uuid: facet_meta
                                         .uuid
                                         .into_iter()
-                                        .map(|facet_uuid_str| {
-                                            Uuid::parse_str(&facet_uuid_str).unwrap()
-                                        })
-                                        .collect(),
+                                        .map(|facet_uuid_str| Uuid::parse_str(&facet_uuid_str))
+                                        .collect::<Result<_, _>>()?,
                                 },
-                            )
+                            ))
                         })
-                        .collect(),
+                        .collect::<Result<_, _>>()?,
                 })
             }
             wit_doc::WellKnownFacet::Note(note) => root_doc::WellKnownFacet::Note(root_doc::Note {

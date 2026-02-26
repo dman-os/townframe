@@ -154,7 +154,7 @@ impl ChangeListenerManager {
         };
 
         let doc_id = handle.document_id().clone();
-        let span = utils_rs::prelude::tracing::info_span!("doc listener task", ?doc_id);
+        let span = tracing::info_span!("doc listener task", ?doc_id);
         let main_cancel_token = self.cancel_token.child_token();
         let cancel_token_task = main_cancel_token.clone();
         let fut = async move {

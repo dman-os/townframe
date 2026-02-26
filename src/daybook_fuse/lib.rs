@@ -6,6 +6,7 @@ mod interlude {
     pub use std::sync::Arc;
     pub use std::time::Duration;
 
+    pub use am_utils_rs::prelude::*;
     pub use daybook_types::doc::{self, Doc, DocId};
     pub use tokio_util::sync::CancellationToken;
     pub use utils_rs::prelude::*;
