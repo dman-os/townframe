@@ -1,5 +1,9 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 reviews:
+  auto_review:
+    # enable reviews for stacked PRs
+    base_branches:
+      - .*
   path_filters:
     - "**/*"
     - "!src/daybook_compose/composeApp/src/commonMain/kotlin/org/example/daybook/uniffi/**"

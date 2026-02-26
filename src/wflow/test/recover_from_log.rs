@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 use std::collections::HashMap;
 
-use crate::test::{InitialWorkload, WflowTestContext};
+use crate::test::{test_wflows_wasm_path, InitialWorkload, WflowTestContext};
 
 fn source_effect_counts(
     log_snapshot: &[(u64, wflow_core::partition::log::PartitionLogEntry)],
@@ -22,7 +22,7 @@ async fn recovers_partition_from_log_only_without_duplicate_effects() -> Res<()>
 
     let test_cx = WflowTestContext::builder()
         .initial_workloads(vec![InitialWorkload {
-            wasm_path: "../../target/wasm32-wasip2/debug/test_wflows.wasm".into(),
+            wasm_path: test_wflows_wasm_path()?,
             wflow_keys: vec!["fails_once".to_string()],
         }])
         .build()
@@ -47,7 +47,7 @@ async fn recovers_partition_from_log_only_without_duplicate_effects() -> Res<()>
     let test_cx = WflowTestContext::builder()
         .with_logstore(logstore)
         .initial_workloads(vec![InitialWorkload {
-            wasm_path: "../../target/wasm32-wasip2/debug/test_wflows.wasm".into(),
+            wasm_path: test_wflows_wasm_path()?,
             wflow_keys: vec!["fails_once".to_string()],
         }])
         .build()

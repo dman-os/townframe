@@ -8715,6 +8715,7 @@ dependencies = [
  "wash-runtime",
  "wasmtime",
  "wflow_core",
+ "wflow_tokio",
 ]
 
 [[package]]

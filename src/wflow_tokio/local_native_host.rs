@@ -1,6 +1,7 @@
-use wflow_core::partition::{job_events, service, state};
+use wflow_core::partition::state;
 
 use crate::interlude::*;
+use crate::partition::service;
 
 pub struct LocalNativeHost {}
 
@@ -10,10 +11,12 @@ impl service::WflowServiceHost for LocalNativeHost {
 
     async fn run(
         &self,
+        _ctx: &service::RunJobCtx,
         _job_id: Arc<str>,
         _journal: state::JobState,
+        _session: Option<Box<dyn service::WflowServiceSession>>,
         _args: &Self::ExtraArgs,
-    ) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
+    ) -> service::RunJobReply {
         todo!()
     }
 }

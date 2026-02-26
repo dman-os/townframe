@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use wflow_core::{
     log, metastore,
-    partition::{effects, log::PartitionLogEntry, service},
+    partition::{effects, log::PartitionLogEntry},
     r#gen::types::PartitionId,
 };
 
@@ -14,6 +14,7 @@ use wflow_core::snapstore::SnapStore;
 
 mod effect_worker;
 pub mod reducer;
+pub mod service;
 pub mod state;
 
 /// Map from EffectId to cancellation token. Reducer populates for RunJob before sending to channel;
@@ -23,6 +24,10 @@ pub type EffectCancelTokens = Arc<Mutex<HashMap<effects::EffectId, CancellationT
 /// Map from job_id to the EffectId of the RunJob currently executing that job. RunJob worker
 /// registers when starting (when token present); AbortRun worker uses this to find which token to cancel.
 pub type JobToEffectId = Arc<Mutex<HashMap<Arc<str>, effects::EffectId>>>;
+pub type WorkerId = Arc<str>;
+pub type DirectEffectTx = async_channel::Sender<effects::EffectId>;
+pub type DirectEffectRx = async_channel::Receiver<effects::EffectId>;
+pub type WorkerEffectSenders = Arc<HashMap<WorkerId, DirectEffectTx>>;
 
 #[derive(Clone)]
 pub struct PartitionCtx {
@@ -31,11 +36,11 @@ pub struct PartitionCtx {
     pub processed_entries_offset: u64,
     pub log: Arc<dyn wflow_core::log::LogStore>,
     pub local_wasmcloud_host: Arc<
-        dyn service::WflowServiceHost<ExtraArgs = metastore::WasmcloudWflowServiceMeta>
+        dyn self::service::WflowServiceHost<ExtraArgs = metastore::WasmcloudWflowServiceMeta>
             + Sync
             + Send,
     >,
-    pub local_native_host: Arc<dyn service::WflowServiceHost<ExtraArgs = ()> + Sync + Send>,
+    pub local_native_host: Arc<dyn self::service::WflowServiceHost<ExtraArgs = ()> + Sync + Send>,
 }
 
 impl PartitionCtx {
@@ -45,11 +50,11 @@ impl PartitionCtx {
         log: Arc<dyn log::LogStore>,
         processed_entries_offset: u64,
         local_wasmcloud_host: Arc<
-            dyn service::WflowServiceHost<ExtraArgs = metastore::WasmcloudWflowServiceMeta>
+            dyn self::service::WflowServiceHost<ExtraArgs = metastore::WasmcloudWflowServiceMeta>
                 + Sync
                 + Send,
         >,
-        local_native_host: Arc<dyn service::WflowServiceHost<ExtraArgs = ()> + Sync + Send>,
+        local_native_host: Arc<dyn self::service::WflowServiceHost<ExtraArgs = ()> + Sync + Send>,
     ) -> Self {
         Self {
             id,
@@ -149,25 +154,33 @@ pub async fn start_tokio_worker(
     let cancel_token = CancellationToken::new();
     let effect_cancel_tokens: EffectCancelTokens = Arc::new(Mutex::new(HashMap::new()));
     let job_to_effect_id: JobToEffectId = Arc::new(Mutex::new(HashMap::new()));
+    let mut direct_effect_senders: HashMap<WorkerId, DirectEffectTx> = HashMap::new();
     let mut effect_workers = vec![];
     // Shared channel for effect scheduling
     let (effect_tx, effect_rx) = async_channel::unbounded::<effects::EffectId>();
     for ii in 0..8 {
+        let worker_id: WorkerId = format!("tokio-fxw-p{}-{}", pcx.id, ii).into();
+        let (direct_effect_tx, direct_effect_rx) = async_channel::bounded::<effects::EffectId>(64);
+        direct_effect_senders.insert(Arc::clone(&worker_id), direct_effect_tx);
         effect_workers.push(effect_worker::start_tokio_effect_worker(
             ii,
+            worker_id,
             pcx.clone(),
             Arc::clone(&working_state),
             Arc::clone(&effect_cancel_tokens),
             Arc::clone(&job_to_effect_id),
+            direct_effect_rx,
             effect_rx.clone(),
             cancel_token.child_token(),
         ));
     }
+    let direct_effect_senders = Arc::new(direct_effect_senders);
     let part_reducer = reducer::start_tokio_partition_reducer(
         pcx.clone(),
         Arc::clone(&working_state),
         Arc::clone(&effect_cancel_tokens),
         effect_tx,
+        direct_effect_senders,
         cancel_token.child_token(),
         snap_store,
     );

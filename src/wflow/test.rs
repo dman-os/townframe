@@ -3,6 +3,8 @@ use crate::interlude::*;
 #[cfg(test)]
 mod cancel_job;
 #[cfg(test)]
+mod effect_chain_perf;
+#[cfg(test)]
 mod fails_once;
 #[cfg(test)]
 mod fails_until_told;
@@ -478,6 +480,7 @@ impl WflowTestContext {
             filters => vec![
                 (r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", "[timestamp]"),
                 (r"\w*Location.*:\d+:\d+", "[location]"),
+                (r"tokio-fxw-p\d+-\d+", "[tokio-fxw]"),
             ]
         }, {
             insta::assert_yaml_snapshot!(snapshot_name, log_snapshot);
@@ -555,4 +558,40 @@ async fn register_workload_on_host(
 
     host.workload_start(req).await.to_eyre()?;
     Ok(())
+}
+
+#[cfg(test)]
+fn test_wflows_wasm_path() -> Res<String> {
+    use std::path::PathBuf;
+
+    let mut candidates = Vec::<PathBuf>::new();
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        candidates.push(
+            PathBuf::from(target_dir)
+                .join("wasm32-wasip2")
+                .join("debug")
+                .join("test_wflows.wasm"),
+        );
+    }
+
+    let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = crate_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("wflow crate should live under repo/src/wflow");
+    candidates.push(
+        repo_root
+            .join("target")
+            .join("wasm32-wasip2")
+            .join("debug")
+            .join("test_wflows.wasm"),
+    );
+
+    if let Some(path) = candidates.into_iter().find(|path| path.exists()) {
+        return Ok(path.to_string_lossy().to_string());
+    }
+
+    Err(ferr!(
+        "test_wflows.wasm not found; build it first with `cargo build --target wasm32-wasip2 -p test_wflows`"
+    ))
 }

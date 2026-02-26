@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::test::WflowTestContext;
+use crate::test::{test_wflows_wasm_path, WflowTestContext};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_fails_once() -> Res<()> {
@@ -10,10 +10,7 @@ async fn test_fails_once() -> Res<()> {
 
     // Register the test_wflows workload
     test_cx
-        .register_workload(
-            "../../target/wasm32-wasip2/debug/test_wflows.wasm",
-            vec!["fails_once".to_string()],
-        )
+        .register_workload(&test_wflows_wasm_path()?, vec!["fails_once".to_string()])
         .await?;
 
     // Schedule the job - it should fail the first time
@@ -62,10 +59,7 @@ async fn test_fails_once_sqlite() -> Res<()> {
 
     // Register the test_wflows workload
     test_cx
-        .register_workload(
-            "../../target/wasm32-wasip2/debug/test_wflows.wasm",
-            vec!["fails_once".to_string()],
-        )
+        .register_workload(&test_wflows_wasm_path()?, vec!["fails_once".to_string()])
         .await?;
 
     // Schedule the job - it should fail the first time
