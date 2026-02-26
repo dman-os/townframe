@@ -113,6 +113,10 @@ pub enum EmbedBackendConfig {
         model: String,
         auth: Option<CloudAuth>,
     },
+    CloudGemini {
+        model: String,
+        auth: Option<CloudAuth>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -139,12 +143,17 @@ pub enum LlmBackendConfig {
         model: String,
         auth: Option<CloudAuth>,
     },
+    CloudGemini {
+        model: String,
+        auth: Option<CloudAuth>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum CloudAuth {
     Basic { username: String, password: String },
+    ApiKey { key: String },
 }
 
 pub struct Ctx {
@@ -176,8 +185,8 @@ pub async fn embed_text(ctx: &Ctx, text: &str) -> Res<EmbedResult> {
     };
     match backend_config {
         EmbedBackendConfig::LocalFastembed { .. } => local::embed_text(backend_config, text).await,
-        EmbedBackendConfig::CloudOllama { url, model, auth } => {
-            cloud::embed_text_ollama(url, model, text, auth.as_ref()).await
+        EmbedBackendConfig::CloudOllama { .. } | EmbedBackendConfig::CloudGemini { .. } => {
+            cloud::embed_text(backend_config, text).await
         }
     }
 }
@@ -226,8 +235,8 @@ pub async fn llm_chat(ctx: &Ctx, text: &str) -> Res<LlmChatResult> {
     };
 
     match backend_config {
-        LlmBackendConfig::CloudOllama { url, model, auth } => {
-            cloud::llm_chat_ollama(url, model, text, auth.as_ref()).await
+        LlmBackendConfig::CloudOllama { .. } | LlmBackendConfig::CloudGemini { .. } => {
+            cloud::llm_chat(backend_config, text).await
         }
     }
 }
@@ -292,7 +301,7 @@ mod local {
                 tokenizer_config_path.clone(),
                 model_id.clone(),
             ),
-            EmbedBackendConfig::CloudOllama { .. } => {
+            EmbedBackendConfig::CloudOllama { .. } | EmbedBackendConfig::CloudGemini { .. } => {
                 eyre::bail!("cloud backend is not supported in local::embed_text")
             }
         };
@@ -597,88 +606,113 @@ mod local {
 mod cloud {
     use super::*;
 
-    fn ollama_new(url: &str, auth: Option<&CloudAuth>) -> Res<ollama_rs::Ollama> {
-        let parsed_url =
-            url::Url::parse(url).wrap_err_with(|| format!("invalid Ollama url: {url}"))?;
-        let host = parsed_url
-            .host_str()
-            .ok_or_eyre("Ollama url missing host")?;
-        let scheme = parsed_url.scheme();
-        let port = parsed_url.port().unwrap_or(match scheme {
-            "https" => 443,
-            _ => 80,
-        });
+    pub async fn embed_text(backend_config: &EmbedBackendConfig, text: &str) -> Res<EmbedResult> {
+        let (model, auth, provider) = match backend_config {
+            EmbedBackendConfig::CloudOllama { model, auth, .. } => {
+                (model, auth, genai::adapter::AdapterKind::Ollama)
+            }
+            EmbedBackendConfig::CloudGemini { model, auth } => {
+                (model, auth, genai::adapter::AdapterKind::Gemini)
+            }
+            _ => eyre::bail!("unsupported cloud embed backend"),
+        };
 
-        let ollama = ollama_rs::Ollama::new_with_client(
-            format!("{scheme}://{host}"),
-            port,
+        if let EmbedBackendConfig::CloudOllama { url, .. } = backend_config {
+            std::env::set_var("OLLAMA_HOST", url);
+        }
+
+        let mut embed_options = genai::embed::EmbedOptions::default();
+        if let Some(auth) = auth {
             match auth {
-                Some(CloudAuth::Basic { username, password }) => reqwest::Client::builder()
-                    .default_headers({
-                        let mut headers = reqwest::header::HeaderMap::new();
-                        let mut token = "Basic ".to_string();
-                        data_encoding::BASE64
-                            .encode_append(format!("{username}:{password}").as_bytes(), &mut token);
-                        let mut token: reqwest::header::HeaderValue =
-                            token.parse().wrap_err("error formatting Auth header")?;
-                        token.set_sensitive(true);
-                        headers.insert(reqwest::header::AUTHORIZATION, token);
-                        headers
-                    })
-                    .build()?,
-                None => reqwest::Client::builder().build()?,
-            },
-        );
-        Ok(ollama)
-    }
+                CloudAuth::ApiKey { key } => {
+                    std::env::set_var("GEMINI_API_KEY", key);
+                }
+                CloudAuth::Basic { username, password } => {
+                    let mut token = "Basic ".to_string();
+                    data_encoding::BASE64.encode_append(
+                        format!("{username}:{password}").as_bytes(),
+                        &mut token,
+                    );
+                    embed_options = embed_options.with_headers(genai::Headers::from([(
+                        "Authorization",
+                        token,
+                    )]));
+                }
+            }
+        }
 
-    pub async fn embed_text_ollama(
-        url: &str,
-        model: &str,
-        text: &str,
-        auth: Option<&CloudAuth>,
-    ) -> Res<EmbedResult> {
-        let ollama = ollama_new(url, auth)?;
+        let client = genai::Client::default();
+        let model_iden = genai::ModelIden::new(provider, model);
 
-        use ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest;
-
-        let request = GenerateEmbeddingsRequest::new(model.to_owned(), text.into());
-        let mut response = ollama
-            .generate_embeddings(request)
+        let res = client
+            .embed(&model_iden, text, Some(&embed_options))
             .await
-            .map_err(|error| eyre::eyre!("ollama embedding error: {error:?}"))?;
-        if response.embeddings.is_empty() {
-            eyre::bail!("ollama embedding response is empty");
-        }
-        let vector = response.embeddings.swap_remove(0);
-        if vector.is_empty() {
-            eyre::bail!("ollama embedding vector is empty");
-        }
+            .map_err(|e| eyre::eyre!("genai embedding error: {e:?}"))?;
+
+        let embedding = res
+            .embeddings
+            .into_iter()
+            .next()
+            .ok_or_eyre("no embeddings returned")?;
 
         Ok(EmbedResult {
-            dimensions: vector.len() as u32,
-            vector,
+            dimensions: embedding.dimensions as u32,
+            vector: embedding.vector,
             model_id: model.to_string(),
         })
     }
 
-    pub async fn llm_chat_ollama(
-        url: &str,
-        model: &str,
-        text: &str,
-        auth: Option<&CloudAuth>,
-    ) -> Res<LlmChatResult> {
-        let ollama = ollama_new(url, auth)?;
-        use ollama_rs::generation::completion::request::GenerationRequest;
+    pub async fn llm_chat(backend_config: &LlmBackendConfig, text: &str) -> Res<LlmChatResult> {
+        let (model, auth, provider) = match backend_config {
+            LlmBackendConfig::CloudOllama { model, auth, .. } => {
+                (model, auth, genai::adapter::AdapterKind::Ollama)
+            }
+            LlmBackendConfig::CloudGemini { model, auth } => {
+                (model, auth, genai::adapter::AdapterKind::Gemini)
+            }
+        };
 
-        let generation_request = GenerationRequest::new(model.to_owned(), text.to_owned());
-        let response = ollama
-            .generate(generation_request)
+        if let LlmBackendConfig::CloudOllama { url, .. } = backend_config {
+            std::env::set_var("OLLAMA_HOST", url);
+        }
+
+        let mut chat_options = genai::chat::ChatOptions::default();
+        if let Some(auth) = auth {
+            match auth {
+                CloudAuth::ApiKey { key } => {
+                    std::env::set_var("GEMINI_API_KEY", key);
+                }
+                CloudAuth::Basic { username, password } => {
+                    let mut token = "Basic ".to_string();
+                    data_encoding::BASE64.encode_append(
+                        format!("{username}:{password}").as_bytes(),
+                        &mut token,
+                    );
+                    chat_options = chat_options.with_extra_headers(genai::Headers::from([(
+                        "Authorization",
+                        token,
+                    )]));
+                }
+            }
+        }
+
+        let client = genai::Client::default();
+
+        let chat_req = genai::chat::ChatRequest::new(vec![genai::chat::ChatMessage::user(
+            text.to_string(),
+        )]);
+
+        let model_iden = genai::ModelIden::new(provider, model);
+        let response = client
+            .exec_chat(&model_iden, chat_req, Some(&chat_options))
             .await
-            .map_err(|error| eyre::eyre!("ollama error: {error:?}"))?;
+            .map_err(|e| eyre::eyre!("genai chat error: {e:?}"))?;
 
         Ok(LlmChatResult {
-            text: response.response,
+            text: response
+                .first_text()
+                .unwrap_or_default()
+                .to_string(),
         })
     }
 }
@@ -887,6 +921,57 @@ mod tests {
                         username: crate::models::OLLAMA_USERNAME.to_string(),
                         password: crate::models::OLLAMA_PASSWORD.to_string(),
                     }),
+                }],
+            );
+
+            let result = llm_chat(&context, "reply with one short word").await?;
+            assert!(!result.text.trim().is_empty());
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    #[ignore = "requires GEMINI_API_KEY"]
+    fn test_embed_text_gemini_roundtrip() -> Res<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set");
+            let context = context_with(
+                vec![],
+                vec![EmbedBackendConfig::CloudGemini {
+                    model: "gemini-embedding-001".to_string(),
+                    auth: Some(crate::CloudAuth::ApiKey { key }),
+                }],
+                vec![],
+            );
+            let result = embed_text(&context, "gemini embedding smoke test").await?;
+            assert!(!result.vector.is_empty());
+            assert!(result.dimensions > 0);
+            assert_eq!(result.dimensions as usize, result.vector.len());
+            assert_eq!(result.model_id, "gemini-embedding-001");
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    #[ignore = "requires GEMINI_API_KEY"]
+    fn test_llm_chat_gemini_roundtrip() -> Res<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        runtime.block_on(async {
+            let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set");
+            let context = context_with(
+                vec![],
+                vec![],
+                vec![LlmBackendConfig::CloudGemini {
+                    model: "gemini-flash-latest".to_string(),
+                    auth: Some(crate::CloudAuth::ApiKey { key }),
                 }],
             );
 

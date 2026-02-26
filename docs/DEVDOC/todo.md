@@ -64,8 +64,13 @@
   - [ ] Assert samod fsyncs reliably
   - [ ] Notification handling
     - [ ] How to avoid missing triage work?
-- [ ] SQL table schema/data update path
-- [ ] Replace sqlite-vec
+
+- [ ] Cleanup and show it to people
+
+- [ ] Tutorial
+- [ ] sqlite
+  - [ ] SQL table schema/data update path
+  - [ ] Replace sqlite-vec
 - [ ] CI/CD
   - [ ] Kotlin tests
   - [ ] Version tagging and releases
@@ -79,10 +84,6 @@
       - [ ] to Flathub
     - [ ] Windows.exe
       - [ ] to Scoop.sh
-
-- [ ] Cleanup for public pre-alpha
-
-- [ ] Tutorial
 - [ ] Replace Path with camino at certain places
 - [ ] Explore multi doc drawer
   - [ ] Drawer doc migration where a drawer is marked as deprecated and all devices that have seen it must merge it into the active docs. This allows eventually consistent garbage collection

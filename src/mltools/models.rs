@@ -13,9 +13,13 @@ use std::sync::{
 use utils_rs::downloader::Downloader;
 use utils_rs::prelude::*;
 
-const OLLAMA_URL_DEFAULT: &str = env!("OLLAMA_URL");
+pub(crate) const OLLAMA_URL_DEFAULT: &str = env!("OLLAMA_URL");
 pub(crate) const OLLAMA_USERNAME: &str = env!("OLLAMA_USERNAME");
 pub(crate) const OLLAMA_PASSWORD: &str = env!("OLLAMA_PASSWORD");
+pub(crate) fn gemini_api_key() -> Option<String> {
+    let _ = utils_rs::dotenv_hierarchical();
+    std::env::var("GEMINI_API_KEY").ok()
+}
 const OLLAMA_EMBED_MODEL_DEFAULT: &str = "embeddinggemma";
 const OLLAMA_LLM_MODEL_DEFAULT: &str = "gemma3";
 const NOMIC_TEXT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
@@ -404,6 +408,10 @@ pub async fn mobile_default_with_observer(
                         password: OLLAMA_PASSWORD.to_string(),
                     }),
                 },
+                EmbedBackendConfig::CloudGemini {
+                    model: "gemini-embedding-001".to_string(),
+                    auth: gemini_api_key().map(|key| crate::CloudAuth::ApiKey { key }),
+                },
             ],
         },
         image_embed: ImageEmbedConfig {
@@ -414,14 +422,20 @@ pub async fn mobile_default_with_observer(
             }],
         },
         llm: LlmConfig {
-            backends: vec![LlmBackendConfig::CloudOllama {
-                url: OLLAMA_URL_DEFAULT.to_string(),
-                model: OLLAMA_LLM_MODEL_DEFAULT.to_string(),
-                auth: Some(crate::CloudAuth::Basic {
-                    username: OLLAMA_USERNAME.to_string(),
-                    password: OLLAMA_PASSWORD.to_string(),
-                }),
-            }],
+            backends: vec![
+                LlmBackendConfig::CloudOllama {
+                    url: OLLAMA_URL_DEFAULT.to_string(),
+                    model: OLLAMA_LLM_MODEL_DEFAULT.to_string(),
+                    auth: Some(crate::CloudAuth::Basic {
+                        username: OLLAMA_USERNAME.to_string(),
+                        password: OLLAMA_PASSWORD.to_string(),
+                    }),
+                },
+                LlmBackendConfig::CloudGemini {
+                    model: "gemini-flash-latest".to_string(),
+                    auth: gemini_api_key().map(|key| crate::CloudAuth::ApiKey { key }),
+                },
+            ],
         },
     })
 }
