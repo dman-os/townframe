@@ -64,8 +64,13 @@
   - [ ] Assert samod fsyncs reliably
   - [ ] Notification handling
     - [ ] How to avoid missing triage work?
-- [ ] SQL table schema/data update path
-- [ ] Replace sqlite-vec
+
+- [ ] Cleanup and show it to people
+
+- [ ] Tutorial
+- [ ] sqlite
+  - [ ] SQL table schema/data update path
+  - [ ] Replace sqlite-vec
 - [ ] CI/CD
   - [ ] Kotlin tests
   - [ ] Version tagging and releases
@@ -79,9 +84,10 @@
       - [ ] to Flathub
     - [ ] Windows.exe
       - [ ] to Scoop.sh
-
-- [ ] Cleanup for public pre-alpha
-
+- [ ] Keychains for secrets
+ 
+ - [ ] Cleanup for public pre-alpha
+ 
 - [ ] Tutorial
 - [ ] Replace Path with camino at certain places
 - [ ] Explore multi doc drawer
@@ -206,3 +212,4 @@
   - [ ] Filters
 - [ ] Screen recording
 - [ ] Agent OS
+- [ ] UI applets

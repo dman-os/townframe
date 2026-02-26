@@ -119,6 +119,14 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     "doc-facet-ref-index".into(),
                     Arc::new(LocalStateManifest::SqliteFile {}),
                 ),
+                (
+                    "image-label-classifier".into(),
+                    Arc::new(LocalStateManifest::SqliteFile {}),
+                ),
+                (
+                    "learned-image-label-proposals".into(),
+                    Arc::new(LocalStateManifest::SqliteFile {}),
+                ),
             ]
             .into(),
             dependencies: [
@@ -156,21 +164,22 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::PseudoLabel.into(),
+                            facet_acl: vec![
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::Note.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: false,
+                                },
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::PseudoLabel.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: true,
+                                },
+                            ],
+                            config_prop_acl: vec![],
                         },
-                        facet_acl: vec![
-                            RoutineFacetAccess {
-                                tag: WellKnownFacetTag::Note.into(),
-                                key_id: None,
-                                read: true,
-                                write: false,
-                            },
-                            RoutineFacetAccess {
-                                tag: WellKnownFacetTag::PseudoLabel.into(),
-                                key_id: None,
-                                read: true,
-                                write: true,
-                            },
-                        ],
                         local_state_acl: vec![],
                     }
                     .into(),
@@ -184,21 +193,56 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::Note.into(),
-                        },
-                        facet_acl: vec![
-                            RoutineFacetAccess {
-                                tag: WellKnownFacetTag::Blob.into(),
-                                key_id: None,
-                                read: true,
-                                write: false,
-                            },
-                            RoutineFacetAccess {
-                                tag: WellKnownFacetTag::Note.into(),
-                                key_id: None,
+                            facet_acl: vec![
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::Blob.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: false,
+                                },
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::Note.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: true,
+                                },
+                            ],
+                            config_prop_acl: vec![RoutineFacetAccess {
+                                tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
+                                key_id: Some("daybook-wip-image-label-set".into()),
                                 read: true,
                                 write: true,
-                            },
-                        ],
+                            }],
+                        },
+                        local_state_acl: vec![],
+                    }
+                    .into(),
+                ),
+                (
+                    "embed-image".into(),
+                    RoutineManifest {
+                        r#impl: RoutineImpl::Wflow {
+                            key: "embed-image".into(),
+                            bundle: "daybook_wflows".into(),
+                        },
+                        deets: RoutineManifestDeets::DocFacet {
+                            working_facet_tag: WellKnownFacetTag::Embedding.into(),
+                            facet_acl: vec![
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::Blob.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: false,
+                                },
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::Embedding.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: true,
+                                },
+                            ],
+                            config_prop_acl: vec![],
+                        },
                         local_state_acl: vec![],
                     }
                     .into(),
@@ -212,22 +256,66 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::Embedding.into(),
+                            facet_acl: vec![
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::Note.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: false,
+                                },
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::Embedding.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: true,
+                                },
+                            ],
+                            config_prop_acl: vec![],
                         },
-                        facet_acl: vec![
-                            RoutineFacetAccess {
-                                tag: WellKnownFacetTag::Note.into(),
-                                key_id: None,
-                                read: true,
-                                write: false,
-                            },
-                            RoutineFacetAccess {
-                                tag: WellKnownFacetTag::Embedding.into(),
-                                key_id: None,
+                        local_state_acl: vec![],
+                    }
+                    .into(),
+                ),
+                (
+                    "classify-image-label".into(),
+                    RoutineManifest {
+                        r#impl: RoutineImpl::Wflow {
+                            key: "classify-image-label".into(),
+                            bundle: "daybook_wflows".into(),
+                        },
+                        deets: RoutineManifestDeets::DocFacet {
+                            working_facet_tag: WellKnownFacetTag::PseudoLabel.into(),
+                            facet_acl: vec![
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::Blob.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: false,
+                                },
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::Embedding.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: false,
+                                },
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::PseudoLabel.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: true,
+                                },
+                            ],
+                            config_prop_acl: vec![RoutineFacetAccess {
+                                tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
+                                key_id: Some("daybook-wip-image-label-set".into()),
                                 read: true,
                                 write: true,
-                            },
-                        ],
-                        local_state_acl: vec![],
+                            }],
+                        },
+                        local_state_acl: vec![RoutineLocalStateAccess {
+                            plug_id: "@daybook/wip".into(),
+                            local_state_key: "image-label-classifier".into(),
+                        }],
                     }
                     .into(),
                 ),
@@ -240,16 +328,60 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::Embedding.into(),
+                            facet_acl: vec![RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Embedding.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                            }],
+                            config_prop_acl: vec![],
                         },
-                        facet_acl: vec![RoutineFacetAccess {
-                            tag: WellKnownFacetTag::Embedding.into(),
-                            key_id: None,
-                            read: true,
-                            write: false,
-                        }],
                         local_state_acl: vec![RoutineLocalStateAccess {
                             plug_id: "@daybook/wip".into(),
                             local_state_key: "doc-embedding-index".into(),
+                        }],
+                    }
+                    .into(),
+                ),
+                (
+                    "learn-image-label-proposals".into(),
+                    RoutineManifest {
+                        r#impl: RoutineImpl::Wflow {
+                            key: "learn-image-label-proposals".into(),
+                            bundle: "daybook_wflows".into(),
+                        },
+                        deets: RoutineManifestDeets::DocFacet {
+                            working_facet_tag: WellKnownFacetTag::PseudoLabel.into(),
+                            facet_acl: vec![
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::Blob.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: false,
+                                },
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::Embedding.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: false,
+                                },
+                                RoutineFacetAccess {
+                                    tag: WellKnownFacetTag::PseudoLabel.into(),
+                                    key_id: None,
+                                    read: true,
+                                    write: true,
+                                },
+                            ],
+                            config_prop_acl: vec![RoutineFacetAccess {
+                                tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
+                                key_id: Some("daybook_wip_learned_image_label_proposals".into()),
+                                read: true,
+                                write: true,
+                            }],
+                        },
+                        local_state_acl: vec![RoutineLocalStateAccess {
+                            plug_id: "@daybook/wip".into(),
+                            local_state_key: "learned-image-label-proposals".into(),
                         }],
                     }
                     .into(),
@@ -264,13 +396,14 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::LabelGeneric.into(),
+                            facet_acl: vec![RoutineFacetAccess {
+                                tag: WellKnownFacetTag::LabelGeneric.into(),
+                                key_id: None,
+                                read: true,
+                                write: true,
+                            }],
+                            config_prop_acl: vec![],
                         },
-                        facet_acl: vec![RoutineFacetAccess {
-                            tag: WellKnownFacetTag::LabelGeneric.into(),
-                            key_id: None,
-                            read: true,
-                            write: true,
-                        }],
                         local_state_acl: vec![],
                     }
                     .into(),
@@ -289,6 +422,16 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     .into(),
                 ),
                 (
+                    "embed-image".into(),
+                    CommandManifest {
+                        desc: "Embed image blob and write embedding facet".into(),
+                        deets: CommandDeets::DocCommand {
+                            routine_name: "embed-image".into(),
+                        },
+                    }
+                    .into(),
+                ),
+                (
                     "embed-text".into(),
                     CommandManifest {
                         desc: "Embed note text and write embedding facet".into(),
@@ -299,11 +442,32 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     .into(),
                 ),
                 (
+                    "classify-image-label".into(),
+                    CommandManifest {
+                        desc: "Classify image embedding into a label using local state KNN".into(),
+                        deets: CommandDeets::DocCommand {
+                            routine_name: "classify-image-label".into(),
+                        },
+                    }
+                    .into(),
+                ),
+                (
                     "index-embedding".into(),
                     CommandManifest {
                         desc: "Index embedding facet into local vector store".into(),
                         deets: CommandDeets::DocCommand {
                             routine_name: "index-embedding".into(),
+                        },
+                    }
+                    .into(),
+                ),
+                (
+                    "learn-image-label-proposals".into(),
+                    CommandManifest {
+                        desc: "Learn image label proposals into a global pseudo-label proposal set"
+                            .into(),
+                        deets: CommandDeets::DocCommand {
+                            routine_name: "learn-image-label-proposals".into(),
                         },
                     }
                     .into(),
@@ -328,7 +492,12 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         desc: "Use LLM to label the document content".into(),
                         deets: ProcessorDeets::DocProcessor {
                             routine_name: "pseudo-label".into(),
-                            predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
+                            predicate: DocPredicateClause::And(vec![
+                                DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
+                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                    WellKnownFacetTag::Blob.into(),
+                                ))),
+                            ]),
                         },
                     }
                     .into(),
@@ -350,6 +519,25 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     .into(),
                 ),
                 (
+                    "embed-image".into(),
+                    ProcessorManifest {
+                        desc: "Compute image embedding facet from image blob".into(),
+                        deets: ProcessorDeets::DocProcessor {
+                            routine_name: "embed-image".into(),
+                            predicate: DocPredicateClause::And(vec![
+                                DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),
+                                DocPredicateClause::Not(Box::new(
+                                    DocPredicateClause::HasReferenceToTag {
+                                        source_tag: WellKnownFacetTag::Embedding.into(),
+                                        target_tag: WellKnownFacetTag::Blob.into(),
+                                    },
+                                )),
+                            ]),
+                        },
+                    }
+                    .into(),
+                ),
+                (
                     "embed-text".into(),
                     ProcessorManifest {
                         desc: "Compute embedding facet from note content".into(),
@@ -358,9 +546,26 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             predicate: DocPredicateClause::And(vec![
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
                                 DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                    WellKnownFacetTag::Blob.into(),
+                                ))),
+                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
                                     WellKnownFacetTag::Embedding.into(),
                                 ))),
                             ]),
+                        },
+                    }
+                    .into(),
+                ),
+                (
+                    "classify-image-label".into(),
+                    ProcessorManifest {
+                        desc: "Classify image embeddings into local fallback labels".into(),
+                        deets: ProcessorDeets::DocProcessor {
+                            routine_name: "classify-image-label".into(),
+                            predicate: DocPredicateClause::HasReferenceToTag {
+                                source_tag: WellKnownFacetTag::Embedding.into(),
+                                target_tag: WellKnownFacetTag::Blob.into(),
+                            },
                         },
                     }
                     .into(),
@@ -378,6 +583,23 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     }
                     .into(),
                 ),
+                // FIXME: temporary disable label learner
+                // (
+                //     "learn-image-label-proposals".into(),
+                //     ProcessorManifest {
+                //         desc:
+                //             "Learn image label proposals from image embeddings using multimodal LLM"
+                //                 .into(),
+                //         deets: ProcessorDeets::DocProcessor {
+                //             routine_name: "learn-image-label-proposals".into(),
+                //             predicate: DocPredicateClause::HasReferenceToTag {
+                //                 source_tag: WellKnownFacetTag::Embedding.into(),
+                //                 target_tag: WellKnownFacetTag::Blob.into(),
+                //             },
+                //         },
+                //     }
+                //     .into(),
+                // ),
                 #[cfg(debug_assertions)]
                 (
                     "test-label".into(),
@@ -387,6 +609,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             routine_name: "test-label".into(),
                             predicate: DocPredicateClause::And(vec![
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
+                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                    WellKnownFacetTag::Blob.into(),
+                                ))),
                                 DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
                                     WellKnownFacetTag::LabelGeneric.into(),
                                 ))),
@@ -406,8 +631,11 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             "pseudo-label".into(),
                             "test-label".into(),
                             "ocr-image".into(),
+                            "embed-image".into(),
                             "embed-text".into(),
                             "index-embedding".into(),
+                            "classify-image-label".into(),
+                            "learn-image-label-proposals".into(),
                         ],
                         // FIXME: make this more generic
                         component_urls: vec![
@@ -434,6 +662,14 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 FacetManifest {
                     key_tag: WellKnownFacetTag::PseudoLabel.into(),
                     value_schema: schemars::schema_for!(Vec<String>),
+                    display_config: default(),
+                    references: default(),
+                },
+                FacetManifest {
+                    key_tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
+                    value_schema: schemars::schema_for!(
+                        daybook_types::doc::PseudoLabelCandidatesFacet
+                    ),
                     display_config: default(),
                     references: default(),
                 },
@@ -1259,9 +1495,18 @@ impl PlugsRepo {
         }
 
         for (routine_name, routine) in &manifest.routines {
-            for access in &routine.facet_acl {
+            for access in routine.facet_acl() {
                 if !available_tags.contains(&access.tag.to_string()) {
                     eyre::bail!("Invalid ACL in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}", routine_name, access.tag);
+                }
+            }
+            for access in routine.config_prop_acl() {
+                if !available_tags.contains(&access.tag.to_string()) {
+                    eyre::bail!(
+                        "Invalid config_prop_acl in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
+                        routine_name,
+                        access.tag
+                    );
                 }
             }
             for access in &routine.local_state_acl {
@@ -1278,7 +1523,10 @@ impl PlugsRepo {
             }
 
             // If it's a DocProp routine, the 'working_prop_tag' must also be accessible.
-            if let manifest::RoutineManifestDeets::DocFacet { working_facet_tag } = &routine.deets {
+            if let manifest::RoutineManifestDeets::DocFacet {
+                working_facet_tag, ..
+            } = &routine.deets
+            {
                 if !available_tags.contains(&working_facet_tag.to_string()) {
                     eyre::bail!(
                         "Invalid routine deets for '{}': working_facet_tag '{}' not in scope",
@@ -1616,7 +1864,6 @@ mod tests {
                     bundle: "bundle1".into(),
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
-                facet_acl: vec![],
                 local_state_acl: vec![],
             }
             .into(),
@@ -1704,7 +1951,6 @@ mod tests {
                     bundle: "missing_bundle".into(),
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
-                facet_acl: vec![],
                 local_state_acl: vec![],
             }
             .into(),
@@ -1735,7 +1981,6 @@ mod tests {
                     bundle: "bundle1".into(),
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
-                facet_acl: vec![],
                 local_state_acl: vec![],
             }
             .into(),
@@ -1916,7 +2161,6 @@ mod tests {
                     bundle: "bundle1".into(),
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
-                facet_acl: vec![],
                 local_state_acl: vec![],
             }
             .into(),

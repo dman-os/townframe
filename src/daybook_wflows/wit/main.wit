@@ -9,6 +9,7 @@ world bundle {
     import townframe:daybook/sqlite-connection;
     import townframe:daybook/mltools-ocr;
     import townframe:daybook/mltools-embed;
+    import townframe:daybook/mltools-image-tools;
     import townframe:daybook/mltools-llm-chat;
 
     export townframe:wflow/bundle;

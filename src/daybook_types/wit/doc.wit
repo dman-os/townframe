@@ -74,6 +74,16 @@ interface doc {
         key: string
     }
 
+    record pseudo-label-candidate {
+        label: string,
+        prompts: list<string>,
+        negative-prompts: list<string>,
+    }
+
+    record pseudo-label-candidates-facet {
+        labels: list<pseudo-label-candidate>,
+    }
+
     variant well-known-facet {
         ref-generic(doc-ref), 
         label-generic(string), 
@@ -87,6 +97,7 @@ interface doc {
         note(note),
         blob(blob),
         pending(pending),
+        pseudo-label-candidates(pseudo-label-candidates-facet),
     }
 
     type facet-raw = json;

@@ -763,7 +763,7 @@ Routine acl: {routine_acl:?}
 Routine impl: {routine_impl:?}
 ",
                     routine_deets = routine.deets,
-                    routine_acl = routine.facet_acl,
+                    routine_acl = routine.facet_acl(),
                     routine_impl = routine.r#impl,
                 ))
                 .arg(Arg::new("doc-id").required(true))

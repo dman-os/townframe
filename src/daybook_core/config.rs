@@ -23,6 +23,7 @@ pub struct ConfigStore {
     pub facet_display: VersionedConfigSection<HashMap<String, ThroughJson<FacetDisplayHint>>>,
     pub users: VersionedConfigSection<HashMap<String, ThroughJson<UserMeta>>>,
     pub mltools: VersionedConfigSection<ThroughJson<mltools::Config>>,
+    pub global_props_doc_id: VersionedConfigSection<Option<String>>,
 }
 
 impl Default for ConfigStore {
@@ -68,9 +69,14 @@ impl Default for ConfigStore {
                 payload: mltools::Config {
                     ocr: mltools::OcrConfig { backends: vec![] },
                     embed: mltools::EmbedConfig { backends: vec![] },
+                    image_embed: mltools::ImageEmbedConfig { backends: vec![] },
                     llm: mltools::LlmConfig { backends: vec![] },
                 }
                 .into(),
+            },
+            global_props_doc_id: VersionedConfigSection {
+                version: Uuid::nil(),
+                payload: None,
             },
         }
     }
@@ -99,6 +105,7 @@ pub struct ConfigRepo {
     local_user_path: daybook_types::doc::UserPath,
     local_actor_id: automerge::ActorId,
     cancel_token: CancellationToken,
+    global_props_doc_init_lock: tokio::sync::Mutex<()>,
     _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
 }
 
@@ -178,6 +185,7 @@ impl ConfigRepo {
             local_user_path,
             local_actor_id,
             cancel_token: main_cancel_token.child_token(),
+            global_props_doc_init_lock: tokio::sync::Mutex::new(()),
             _change_listener_tickets: vec![ticket],
         };
         let repo = Arc::new(repo);
@@ -254,6 +262,7 @@ impl ConfigRepo {
                         store.facet_display = new_store.facet_display;
                         store.users = new_store.users;
                         store.mltools = new_store.mltools;
+                        store.global_props_doc_id = new_store.global_props_doc_id;
                     })
                     .await?;
 
@@ -306,7 +315,10 @@ impl ConfigRepo {
                 let Some((_obj, automerge::Prop::Map(section_key))) = patch.path.get(1) else {
                     return Ok(());
                 };
-                if matches!(section_key.as_ref(), "facet_display" | "users" | "mltools") {
+                if matches!(
+                    section_key.as_ref(),
+                    "facet_display" | "users" | "mltools" | "global_props_doc_id"
+                ) {
                     out.push(ConfigEvent::Changed { heads });
                 }
             }
@@ -389,6 +401,47 @@ impl ConfigRepo {
             })
             .await?;
         Ok(())
+    }
+
+    pub async fn get_global_props_doc_id(&self) -> Option<daybook_types::doc::DocId> {
+        self.store
+            .query_sync(|store| store.global_props_doc_id.payload.clone())
+            .await
+    }
+
+    pub async fn set_global_props_doc_id(&self, doc_id: daybook_types::doc::DocId) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        self.store
+            .mutate_sync(move |store| {
+                store.global_props_doc_id.version = Uuid::new_v4();
+                store.global_props_doc_id.payload = Some(doc_id);
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_or_init_global_props_doc_id(
+        &self,
+        drawer_repo: &crate::drawer::DrawerRepo,
+    ) -> Res<daybook_types::doc::DocId> {
+        if let Some(doc_id) = self.get_global_props_doc_id().await {
+            return Ok(doc_id);
+        }
+        let _guard = self.global_props_doc_init_lock.lock().await;
+        if let Some(doc_id) = self.get_global_props_doc_id().await {
+            return Ok(doc_id);
+        }
+        let doc_id = drawer_repo
+            .add(daybook_types::doc::AddDocArgs {
+                branch_path: daybook_types::doc::BranchPath::from("main"),
+                facets: HashMap::new(),
+                user_path: Some(self.local_user_path.clone()),
+            })
+            .await?;
+        self.set_global_props_doc_id(doc_id.clone()).await?;
+        Ok(doc_id)
     }
 
     pub fn get_local_user_path(&self) -> daybook_types::doc::UserPath {

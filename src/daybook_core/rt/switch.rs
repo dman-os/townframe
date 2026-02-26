@@ -3,6 +3,9 @@ use crate::interlude::*;
 use std::collections::BTreeMap;
 
 use crate::drawer::DrawerEvent;
+use crate::plugs::manifest::{
+    DocPredicateEvalMode, DocPredicateEvalRequirement, DocPredicateEvalResolved,
+};
 use crate::plugs::PlugsEvent;
 use crate::rt::dispatch::DispatchEvent;
 use crate::rt::Rt;
@@ -160,6 +163,8 @@ pub async fn spawn_switch_worker(
         store,
         rt,
         prepared_sinks: prepare_sinks(sinks),
+        predicate_requirements: HashSet::new(),
+        predicate_resolved: HashMap::new(),
     };
 
     let events = worker
@@ -394,19 +399,21 @@ struct SwitchWorker {
     rt: Arc<Rt>,
     store: crate::stores::StoreHandle<SwitchStateStore>,
     prepared_sinks: Vec<PreparedSwitchSink>,
+    predicate_requirements: HashSet<DocPredicateEvalRequirement>,
+    predicate_resolved: HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
 }
 
 impl SwitchWorker {
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self, event))]
     async fn dispatch_to_listeners(&mut self, event: &SwitchEvent) -> Res<()> {
-        let ctx = SwitchSinkCtx {
-            rt: Some(&self.rt),
-            store: Some(&self.store),
-        };
         for index in 0..self.prepared_sinks.len() {
             if !self.listener_interested_in_event(index, event).await? {
                 continue;
             }
+            let ctx = SwitchSinkCtx {
+                rt: Some(&self.rt),
+                store: Some(&self.store),
+            };
 
             let listener_name = self.prepared_sinks[index].name.clone();
             let outcome = self.prepared_sinks[index]
@@ -421,27 +428,61 @@ impl SwitchWorker {
         Ok(())
     }
 
-    async fn listener_interested_in_event(&self, index: usize, event: &SwitchEvent) -> Res<bool> {
-        let listener = &self.prepared_sinks[index];
+    async fn listener_interested_in_event(
+        &mut self,
+        index: usize,
+        event: &SwitchEvent,
+    ) -> Res<bool> {
         match event {
             SwitchEvent::Drawer(event) => {
-                if !listener.consume_drawer {
+                if !self.prepared_sinks[index].consume_drawer {
                     return Ok(false);
                 }
-                self.drawer_event_matches_listener(event, listener).await
+                let predicate = self.prepared_sinks[index].drawer_predicate.clone();
+                self.drawer_event_matches_listener(event, predicate.as_ref())
+                    .await
             }
-            SwitchEvent::Plugs(_) => Ok(listener.consume_plugs),
-            SwitchEvent::Dispatch(_) => Ok(listener.consume_dispatch),
-            SwitchEvent::Config(_) => Ok(listener.consume_config),
+            SwitchEvent::Plugs(_) => Ok(self.prepared_sinks[index].consume_plugs),
+            SwitchEvent::Dispatch(_) => Ok(self.prepared_sinks[index].consume_dispatch),
+            SwitchEvent::Config(_) => Ok(self.prepared_sinks[index].consume_config),
         }
     }
 
     async fn drawer_event_matches_listener(
-        &self,
+        &mut self,
         event: &Arc<DrawerEvent>,
-        listener: &PreparedSwitchSink,
+        predicate: Option<&crate::plugs::manifest::DocPredicateClause>,
     ) -> Res<bool> {
-        let Some(predicate) = listener.drawer_predicate.as_ref() else {
+        fn resolve_meta_predicate_requirements(
+            requirements: &HashSet<DocPredicateEvalRequirement>,
+            meta_doc: &Doc,
+            out: &mut HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
+        ) {
+            out.clear();
+            for requirement in requirements {
+                match requirement {
+                    DocPredicateEvalRequirement::FacetsOfTag(tag) => {
+                        let source_facets = meta_doc
+                            .facets
+                            .iter()
+                            .filter(|(facet_key, _)| facet_key.tag.to_string() == tag.0)
+                            .map(|(facet_key, facet_raw)| (facet_key.clone(), facet_raw.clone()))
+                            .collect::<Vec<_>>();
+                        out.insert(
+                            requirement.clone(),
+                            DocPredicateEvalResolved::FacetsOfTag(source_facets),
+                        );
+                    }
+                    DocPredicateEvalRequirement::FullDoc
+                    | DocPredicateEvalRequirement::FacetManifest => {
+                        // Switch prefilter stays cheap by default. Missing resolved requirements
+                        // are handled conservatively by predicate evaluation in ApproxInterest mode.
+                    }
+                }
+            }
+        }
+
+        let Some(predicate) = predicate else {
             return Ok(true);
         };
         match &**event {
@@ -464,7 +505,19 @@ impl SwitchWorker {
                 else {
                     return Ok(false);
                 };
-                Ok(predicate.matches(&facet_keys_set_to_meta_doc(id, &facet_keys_set)))
+                let meta_doc = facet_keys_set_to_meta_doc(id, &facet_keys_set);
+                self.predicate_requirements.clear();
+                predicate.append_requirements(&mut self.predicate_requirements);
+                resolve_meta_predicate_requirements(
+                    &self.predicate_requirements,
+                    &meta_doc,
+                    &mut self.predicate_resolved,
+                );
+                Ok(predicate.evaluate(
+                    &meta_doc,
+                    DocPredicateEvalMode::ApproxInterest,
+                    &self.predicate_resolved,
+                ))
             }
             DrawerEvent::DocUpdated {
                 id,
@@ -500,7 +553,19 @@ impl SwitchWorker {
                 else {
                     return Ok(false);
                 };
-                Ok(predicate.matches(&facet_keys_set_to_meta_doc(id, &facet_keys_set)))
+                let meta_doc = facet_keys_set_to_meta_doc(id, &facet_keys_set);
+                self.predicate_requirements.clear();
+                predicate.append_requirements(&mut self.predicate_requirements);
+                resolve_meta_predicate_requirements(
+                    &self.predicate_requirements,
+                    &meta_doc,
+                    &mut self.predicate_resolved,
+                );
+                Ok(predicate.evaluate(
+                    &meta_doc,
+                    DocPredicateEvalMode::ApproxInterest,
+                    &self.predicate_resolved,
+                ))
             }
         }
     }

@@ -1,6 +1,6 @@
 use crate::{
-    Config, EmbedBackendConfig, EmbedConfig, LlmBackendConfig, LlmConfig, OcrBackendConfig,
-    OcrConfig,
+    Config, EmbedBackendConfig, EmbedConfig, ImageEmbedBackendConfig, ImageEmbedConfig,
+    LlmBackendConfig, LlmConfig, OcrBackendConfig, OcrConfig,
 };
 use fs4::fs_std::FileExt;
 use hf_hub::{api::tokio::ApiBuilder, Cache, Repo};
@@ -13,12 +13,13 @@ use std::sync::{
 use utils_rs::downloader::Downloader;
 use utils_rs::prelude::*;
 
-const OLLAMA_URL_DEFAULT: &str = env!("OLLAMA_URL");
+pub(crate) const OLLAMA_URL_DEFAULT: &str = env!("OLLAMA_URL");
 pub(crate) const OLLAMA_USERNAME: &str = env!("OLLAMA_USERNAME");
 pub(crate) const OLLAMA_PASSWORD: &str = env!("OLLAMA_PASSWORD");
 const OLLAMA_EMBED_MODEL_DEFAULT: &str = "embeddinggemma";
 const OLLAMA_LLM_MODEL_DEFAULT: &str = "gemma3";
-const NOMIC_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
+const NOMIC_TEXT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
+const NOMIC_VISION_MODEL_ID: &str = "nomic-ai/nomic-embed-vision-v1.5";
 const OAR_RELEASE_BASE_URL: &str = "https://github.com/GreatV/oar-ocr/releases/download/v0.3.0";
 
 #[derive(Debug, Clone)]
@@ -228,6 +229,7 @@ impl hf_hub::api::tokio::Progress for HfHubProgress {
 }
 
 async fn hf_download_with_progress(
+    model_id: &str,
     model_repo: &hf_hub::api::tokio::ApiRepo,
     cache_repo: &hf_hub::CacheRepo,
     file: &str,
@@ -247,7 +249,7 @@ async fn hf_download_with_progress(
     let result = model_repo
         .download_with_progress(file, progress)
         .await
-        .wrap_err_with(|| format!("error downloading {file} from {NOMIC_MODEL_ID}"));
+        .wrap_err_with(|| format!("error downloading {file} from {model_id}"));
     if let Err(err) = &result {
         if let Some(observer) = observer {
             observer.emit(MobileDefaultEvent::DownloadFailed {
@@ -266,6 +268,8 @@ pub async fn mobile_default_with_observer(
     observer: Option<&MobileDefaultObserver>,
 ) -> Res<Config> {
     let download_dir = download_dir.as_ref().to_path_buf();
+    utils_rs::dotenv_hierarchical().wrap_err("error loading hierarchical .env")?;
+    let gemini_api_key = std::env::var("GEMINI_API_KEY").ok();
     tokio::fs::create_dir_all(&download_dir)
         .await
         .wrap_err_with(|| format!("error creating {}", download_dir.display()))?;
@@ -304,33 +308,127 @@ pub async fn mobile_default_with_observer(
     tokio::fs::create_dir_all(&hf_cache_dir)
         .await
         .wrap_err_with(|| format!("error creating {}", hf_cache_dir.display()))?;
-    let api = ApiBuilder::from_cache(Cache::new(hf_cache_dir))
+    let api = ApiBuilder::from_cache(Cache::new(hf_cache_dir.clone()))
         .with_progress(true)
         .build()?;
-    let cache_repo = Cache::new(download_dir.join("hf")).repo(Repo::model(NOMIC_MODEL_ID.into()));
-    let model_repo = api.model(NOMIC_MODEL_ID.to_string());
+    let text_cache_repo =
+        Cache::new(hf_cache_dir.clone()).repo(Repo::model(NOMIC_TEXT_MODEL_ID.into()));
+    let text_model_repo = api.model(NOMIC_TEXT_MODEL_ID.to_string());
 
     let onnx_path = hf_download_with_progress(
-        &model_repo,
-        &cache_repo,
+        NOMIC_TEXT_MODEL_ID,
+        &text_model_repo,
+        &text_cache_repo,
         "onnx/model_quantized.onnx",
         observer,
     )
     .await?;
-    let tokenizer_path =
-        hf_download_with_progress(&model_repo, &cache_repo, "tokenizer.json", observer).await?;
-    let config_path =
-        hf_download_with_progress(&model_repo, &cache_repo, "config.json", observer).await?;
+    let tokenizer_path = hf_download_with_progress(
+        NOMIC_TEXT_MODEL_ID,
+        &text_model_repo,
+        &text_cache_repo,
+        "tokenizer.json",
+        observer,
+    )
+    .await?;
+    let config_path = hf_download_with_progress(
+        NOMIC_TEXT_MODEL_ID,
+        &text_model_repo,
+        &text_cache_repo,
+        "config.json",
+        observer,
+    )
+    .await?;
     let special_tokens_map_path = hf_download_with_progress(
-        &model_repo,
-        &cache_repo,
+        NOMIC_TEXT_MODEL_ID,
+        &text_model_repo,
+        &text_cache_repo,
         "special_tokens_map.json",
         observer,
     )
     .await?;
-    let tokenizer_config_path =
-        hf_download_with_progress(&model_repo, &cache_repo, "tokenizer_config.json", observer)
-            .await?;
+    let tokenizer_config_path = hf_download_with_progress(
+        NOMIC_TEXT_MODEL_ID,
+        &text_model_repo,
+        &text_cache_repo,
+        "tokenizer_config.json",
+        observer,
+    )
+    .await?;
+
+    let vision_cache_repo =
+        Cache::new(hf_cache_dir.clone()).repo(Repo::model(NOMIC_VISION_MODEL_ID.into()));
+    let vision_model_repo = api.model(NOMIC_VISION_MODEL_ID.to_string());
+    let vision_onnx_path = hf_download_with_progress(
+        NOMIC_VISION_MODEL_ID,
+        &vision_model_repo,
+        &vision_cache_repo,
+        "onnx/model.onnx",
+        observer,
+    )
+    .await?;
+    let vision_preprocessor_config_path = hf_download_with_progress(
+        NOMIC_VISION_MODEL_ID,
+        &vision_model_repo,
+        &vision_cache_repo,
+        "preprocessor_config.json",
+        observer,
+    )
+    .await?;
+
+    let embed_backends = vec![
+        EmbedBackendConfig::LocalFastembed {
+            onnx_path,
+            tokenizer_path,
+            config_path,
+            special_tokens_map_path,
+            tokenizer_config_path,
+            model_id: NOMIC_TEXT_MODEL_ID.to_string(),
+        },
+        EmbedBackendConfig::CloudOllama {
+            url: OLLAMA_URL_DEFAULT.to_string(),
+            model: OLLAMA_EMBED_MODEL_DEFAULT.to_string(),
+            auth: Some(crate::CloudAuth::Basic {
+                username: OLLAMA_USERNAME.to_string(),
+                password: OLLAMA_PASSWORD.to_string(),
+            }),
+        },
+        EmbedBackendConfig::CloudGemini {
+            model: "gemini-embedding-001".to_string(),
+            auth: gemini_api_key
+                .clone()
+                .map(|key| crate::CloudAuth::ApiKey { key }),
+        },
+    ];
+
+    let mut llm_backends = vec![
+        LlmBackendConfig::CloudOllama {
+            url: OLLAMA_URL_DEFAULT.to_string(),
+            model: OLLAMA_LLM_MODEL_DEFAULT.to_string(),
+            auth: Some(crate::CloudAuth::Basic {
+                username: OLLAMA_USERNAME.to_string(),
+                password: OLLAMA_PASSWORD.to_string(),
+            }),
+        },
+        LlmBackendConfig::CloudGemini {
+            model: "gemini-flash-latest".to_string(),
+            auth: gemini_api_key
+                .clone()
+                .map(|key| crate::CloudAuth::ApiKey { key }),
+        },
+    ];
+
+    // In tests, prefer Gemini chat first when available so cloud chat smoke tests can bypass
+    // gateway/proxy issues affecting Ollama routes.
+    if cfg!(any(test, feature = "tests")) && gemini_api_key.is_some() {
+        if let Some(gemini_llm_ix) = llm_backends
+            .iter()
+            .position(|backend| matches!(backend, LlmBackendConfig::CloudGemini { .. }))
+        {
+            let gemini_backend = llm_backends.remove(gemini_llm_ix);
+            llm_backends.insert(0, gemini_backend);
+        }
+    }
 
     Ok(Config {
         ocr: OcrConfig {
@@ -345,34 +443,17 @@ pub async fn mobile_default_with_observer(
             }],
         },
         embed: EmbedConfig {
-            backends: vec![
-                EmbedBackendConfig::LocalFastembed {
-                    onnx_path,
-                    tokenizer_path,
-                    config_path,
-                    special_tokens_map_path,
-                    tokenizer_config_path,
-                    model_id: NOMIC_MODEL_ID.to_string(),
-                },
-                EmbedBackendConfig::CloudOllama {
-                    url: OLLAMA_URL_DEFAULT.to_string(),
-                    model: OLLAMA_EMBED_MODEL_DEFAULT.to_string(),
-                    auth: Some(crate::CloudAuth::Basic {
-                        username: OLLAMA_USERNAME.to_string(),
-                        password: OLLAMA_PASSWORD.to_string(),
-                    }),
-                },
-            ],
+            backends: embed_backends,
+        },
+        image_embed: ImageEmbedConfig {
+            backends: vec![ImageEmbedBackendConfig::LocalFastembed {
+                onnx_path: vision_onnx_path,
+                preprocessor_config_path: vision_preprocessor_config_path,
+                model_id: NOMIC_VISION_MODEL_ID.to_string(),
+            }],
         },
         llm: LlmConfig {
-            backends: vec![LlmBackendConfig::CloudOllama {
-                url: OLLAMA_URL_DEFAULT.to_string(),
-                model: OLLAMA_LLM_MODEL_DEFAULT.to_string(),
-                auth: Some(crate::CloudAuth::Basic {
-                    username: OLLAMA_USERNAME.to_string(),
-                    password: OLLAMA_PASSWORD.to_string(),
-                }),
-            }],
+            backends: llm_backends,
         },
     })
 }

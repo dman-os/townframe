@@ -22,7 +22,9 @@ hf_hub = [
 tests = []
 
 [dependencies]
-utils_rs = { workspace = true, default-features = false, features = ["downloader"] }
+utils_rs = { workspace = true, default-features = false, features = [
+  "downloader",
+] }
 api_utils_rs = { workspace = true, default-features = false }
 
 serde.workspace = true
@@ -35,9 +37,11 @@ bon.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
 # ml
-ollama-rs = { version = "0.3.4", default-features = false, features = ["rustls"] }
+genai = { version = "0.6.0-beta.2" }
 url.workspace = true
-hf-hub = { version = "0.4.3", default-features = false, features = ["tokio"], optional = true }
+hf-hub = { version = "0.4.3", default-features = false, features = [
+  "tokio",
+], optional = true }
 
 # os
 fs4 = { workspace = true, optional = true }
@@ -45,11 +49,18 @@ directories = { workspace = true, optional = true }
 
 reqwest.workspace = true
 data-encoding.workspace = true
+nalgebra = "0.34.1"
 
 [target.'cfg(target_os = "android")'.dependencies]
 oar-ocr = { git = "https://github.com/GreatV/oar-ocr", version = "0.6.1", default-features = false }
-fastembed = { version = "5.8.1", default-features = false, features = ["ort-load-dynamic", "image-models"] }
+fastembed = { version = "5.8.1", default-features = false, features = [
+  "ort-load-dynamic",
+  "image-models",
+] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 oar-ocr = { git = "https://github.com/GreatV/oar-ocr", version = "0.6.1" }
-fastembed = { version = "5.8.1", default-features = false, features = ["ort-download-binaries", "image-models"] }
+fastembed = { version = "5.8.1", default-features = false, features = [
+  "ort-download-binaries",
+  "image-models",
+] }

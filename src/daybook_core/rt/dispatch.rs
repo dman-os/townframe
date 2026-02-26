@@ -44,6 +44,8 @@ pub struct FacetRoutineArgs {
     #[autosurgeon(with = "utils_rs::am::codecs::json")]
     pub facet_acl: Vec<crate::plugs::manifest::RoutineFacetAccess>,
     #[autosurgeon(with = "utils_rs::am::codecs::json")]
+    pub config_prop_acl: Vec<crate::plugs::manifest::RoutineFacetAccess>,
+    #[autosurgeon(with = "utils_rs::am::codecs::json")]
     pub local_state_acl: Vec<crate::plugs::manifest::RoutineLocalStateAccess>,
 }
 

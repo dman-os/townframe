@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use crate::plugs::reference::select_json_path_values;
 
 use garde::Validate;
 
@@ -246,8 +247,6 @@ pub struct RoutineManifest {
     #[garde(dive)]
     pub deets: RoutineManifestDeets,
     #[garde(dive)]
-    pub facet_acl: Vec<RoutineFacetAccess>,
-    #[garde(dive)]
     #[serde(default)]
     pub local_state_acl: Vec<RoutineLocalStateAccess>,
 }
@@ -264,7 +263,11 @@ impl RoutineManifest {
         use daybook_types::doc::{FacetKey, FacetTag};
         let mut read_tags = std::collections::HashSet::new();
         let mut read_keys = std::collections::HashSet::new();
-        for access in &self.facet_acl {
+        let facet_acl = match &self.deets {
+            RoutineManifestDeets::DocFacet { facet_acl, .. } => facet_acl.as_slice(),
+            _ => &[],
+        };
+        for access in facet_acl {
             if !access.read {
                 continue;
             }
@@ -278,10 +281,29 @@ impl RoutineManifest {
                 read_tags.insert(access.tag.0.clone());
             }
         }
-        if let RoutineManifestDeets::DocFacet { working_facet_tag } = &self.deets {
+        if let RoutineManifestDeets::DocFacet {
+            working_facet_tag, ..
+        } = &self.deets
+        {
             read_tags.insert(working_facet_tag.0.clone());
         }
         (read_tags, read_keys)
+    }
+
+    pub fn facet_acl(&self) -> &[RoutineFacetAccess] {
+        match &self.deets {
+            RoutineManifestDeets::DocFacet { facet_acl, .. } => facet_acl.as_slice(),
+            _ => &[],
+        }
+    }
+
+    pub fn config_prop_acl(&self) -> &[RoutineFacetAccess] {
+        match &self.deets {
+            RoutineManifestDeets::DocFacet {
+                config_prop_acl, ..
+            } => config_prop_acl.as_slice(),
+            _ => &[],
+        }
     }
 }
 
@@ -308,6 +330,12 @@ pub enum RoutineManifestDeets {
     DocFacet {
         #[garde(dive)]
         working_facet_tag: FacetTag,
+        #[garde(dive)]
+        #[serde(default)]
+        facet_acl: Vec<RoutineFacetAccess>,
+        #[garde(dive)]
+        #[serde(default)]
+        config_prop_acl: Vec<RoutineFacetAccess>,
     },
     // DocCollator { predicate },
     // DocPropCollator { predicate },
@@ -389,19 +417,109 @@ pub enum ProcessorDeets {
 #[serde(rename_all = "camelCase")]
 pub enum DocPredicateClause {
     HasTag(#[garde(dive)] FacetTag),
+    HasReferenceToTag {
+        #[garde(dive)]
+        source_tag: FacetTag,
+        #[garde(dive)]
+        target_tag: FacetTag,
+    },
     Or(#[garde(dive)] Vec<Self>),
     And(#[garde(dive)] Vec<Self>),
     Not(#[garde(dive)] Box<Self>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DocPredicateEvalRequirement {
+    FullDoc,
+    FacetsOfTag(FacetTag),
+    FacetManifest,
+}
+
+#[derive(Debug, Clone)]
+pub enum DocPredicateEvalResolved {
+    FullDoc(Arc<daybook_types::doc::Doc>),
+    FacetsOfTag(Vec<(daybook_types::doc::FacetKey, daybook_types::doc::FacetRaw)>),
+    FacetManifest(Arc<HashMap<String, Vec<FacetReferenceManifest>>>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocPredicateEvalMode {
+    ApproxInterest,
+    Exact,
+}
+
 impl DocPredicateClause {
-    pub fn matches(&self, doc: &daybook_types::doc::Doc) -> bool {
+    pub fn append_requirements(
+        &self,
+        out: &mut std::collections::HashSet<DocPredicateEvalRequirement>,
+    ) {
+        match self {
+            Self::HasTag(_) => {}
+            Self::HasReferenceToTag { source_tag, .. } => {
+                out.insert(DocPredicateEvalRequirement::FacetsOfTag(source_tag.clone()));
+                out.insert(DocPredicateEvalRequirement::FacetManifest);
+            }
+            Self::Or(clauses) | Self::And(clauses) => {
+                for clause in clauses {
+                    clause.append_requirements(out);
+                }
+            }
+            Self::Not(clause) => clause.append_requirements(out),
+        }
+    }
+
+    pub fn evaluate(
+        &self,
+        doc: &daybook_types::doc::Doc,
+        mode: DocPredicateEvalMode,
+        resolved: &HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
+    ) -> bool {
         match self {
             Self::HasTag(tag) => doc.facets.keys().any(|key| key.tag.to_string() == tag.0),
-            Self::Or(clauses) => clauses.iter().any(|clause| clause.matches(doc)),
-            Self::And(clauses) => clauses.iter().all(|clause| clause.matches(doc)),
-            Self::Not(clause) => !clause.matches(doc),
+            Self::HasReferenceToTag {
+                source_tag,
+                target_tag,
+            } => {
+                let Some(DocPredicateEvalResolved::FacetsOfTag(source_facets)) = resolved.get(
+                    &DocPredicateEvalRequirement::FacetsOfTag(source_tag.clone()),
+                ) else {
+                    return match mode {
+                        DocPredicateEvalMode::ApproxInterest => doc
+                            .facets
+                            .keys()
+                            .any(|key| key.tag.to_string() == source_tag.0),
+                        DocPredicateEvalMode::Exact => false,
+                    };
+                };
+
+                let Some(DocPredicateEvalResolved::FacetManifest(facet_reference_specs)) =
+                    resolved.get(&DocPredicateEvalRequirement::FacetManifest)
+                else {
+                    return match mode {
+                        DocPredicateEvalMode::ApproxInterest => !source_facets.is_empty(),
+                        DocPredicateEvalMode::Exact => false,
+                    };
+                };
+
+                doc_facets_have_manifest_declared_reference_to_tag(
+                    source_facets,
+                    &source_tag.0,
+                    &target_tag.0,
+                    facet_reference_specs,
+                )
+            }
+            Self::Or(clauses) => clauses
+                .iter()
+                .any(|clause| clause.evaluate(doc, mode, resolved)),
+            Self::And(clauses) => clauses
+                .iter()
+                .all(|clause| clause.evaluate(doc, mode, resolved)),
+            Self::Not(clause) => !clause.evaluate(doc, mode, resolved),
         }
+    }
+
+    pub fn matches(&self, doc: &daybook_types::doc::Doc) -> bool {
+        self.evaluate(doc, DocPredicateEvalMode::ApproxInterest, &HashMap::new())
     }
 
     /// Collect all PropTags referenced by this predicate (for HasTag, the tag; for And/Or/Not, union from sub-clauses).
@@ -416,6 +534,13 @@ impl DocPredicateClause {
             Self::HasTag(tag) => {
                 out.insert(tag.clone());
             }
+            Self::HasReferenceToTag {
+                source_tag,
+                target_tag,
+            } => {
+                out.insert(source_tag.clone());
+                out.insert(target_tag.clone());
+            }
             Self::Or(clauses) | Self::And(clauses) => {
                 for clause in clauses {
                     clause.collect_referenced_tags(out);
@@ -424,6 +549,70 @@ impl DocPredicateClause {
             Self::Not(clause) => clause.collect_referenced_tags(out),
         }
     }
+}
+
+fn doc_facets_have_manifest_declared_reference_to_tag(
+    source_facets: &[(daybook_types::doc::FacetKey, daybook_types::doc::FacetRaw)],
+    source_tag: &str,
+    target_tag: &str,
+    facet_reference_specs: &HashMap<String, Vec<FacetReferenceManifest>>,
+) -> bool {
+    let Some(reference_specs) = facet_reference_specs.get(source_tag) else {
+        return false;
+    };
+
+    for (facet_key, facet_raw) in source_facets {
+        if facet_key.tag.to_string() != source_tag {
+            continue;
+        }
+        if facet_has_reference_to_tag(facet_raw, target_tag, reference_specs) {
+            return true;
+        }
+    }
+    false
+}
+
+fn facet_has_reference_to_tag(
+    facet_raw: &serde_json::Value,
+    target_tag: &str,
+    reference_specs: &[FacetReferenceManifest],
+) -> bool {
+    for reference_spec in reference_specs {
+        match reference_spec.reference_kind {
+            FacetReferenceKind::UrlFacet => {}
+        }
+
+        let selected_values = match select_json_path_values(facet_raw, &reference_spec.json_path) {
+            Ok(values) => values,
+            Err(err) => {
+                debug!(error = %err, json_path = %reference_spec.json_path, "invalid facet reference json_path");
+                continue;
+            }
+        };
+
+        for selected in selected_values {
+            let url_strings: Vec<&str> = match selected {
+                serde_json::Value::String(value) => vec![value.as_str()],
+                serde_json::Value::Array(items) => {
+                    items.iter().filter_map(|item| item.as_str()).collect()
+                }
+                _ => Vec::new(),
+            };
+
+            for url_str in url_strings {
+                let Ok(matches_target) = daybook_types::url::facet_ref_str_targets_tag(
+                    url_str,
+                    &daybook_types::doc::FacetTag::from(target_tag),
+                ) else {
+                    continue;
+                };
+                if matches_target {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]

@@ -36,6 +36,24 @@ pub struct OcrTextRegion {
     pub confidence_score: Option<f32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PseudoLabelCandidate {
+    pub label: String,
+    pub prompts: Vec<String>,
+    pub negative_prompts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PseudoLabelCandidatesFacet {
+    pub labels: Vec<PseudoLabelCandidate>,
+}
+
 crate::define_enum_and_tag!(
     "org.example.daybook.",
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,6 +80,7 @@ crate::define_enum_and_tag!(
         RefGeneric type (DocId),
         LabelGeneric type (String),
         PseudoLabel type (Vec<String>),
+        PseudoLabelCandidates type (PseudoLabelCandidatesFacet),
         TitleGeneric type (String),
         PathGeneric type (PathBuf),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -281,6 +300,8 @@ impl FacetKey {
 }
 
 pub const DEFAULT_FACET_ID: &str = "main";
+// Convention: custom facet key IDs use snake_case (underscores), e.g.
+// "daybook_wip_learned_image_label_proposals". Keep this stable for consistency.
 
 impl From<WellKnownFacetTag> for FacetKey {
     fn from(tag: WellKnownFacetTag) -> Self {
@@ -863,6 +884,10 @@ mod ser_de {
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
                 WellKnownFacetTag::PseudoLabel => Self::PseudoLabel(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::PseudoLabelCandidates => Self::PseudoLabelCandidates(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),

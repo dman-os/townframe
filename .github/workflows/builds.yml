@@ -148,7 +148,7 @@ jobs:
               ;;
             prerelease)
               release_tag="${DAYBOOK_PRERELEASE_TAG}"
-              release_name="Daybook Compose pre-release (v${cargo_version})"
+              release_name="main branch build ${{ github.sha }} (v${cargo_version})"
               is_prerelease="true"
               ;;
             none)

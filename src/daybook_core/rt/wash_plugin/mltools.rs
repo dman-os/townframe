@@ -1,9 +1,8 @@
-use crate::interlude::*;
-
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
 use super::{
-    binds_guest, capabilities, mltools_embed, mltools_llm_chat, mltools_ocr, DaybookPlugin,
+    binds_guest, capabilities, mltools_embed, mltools_image_tools, mltools_llm_chat, mltools_ocr,
+    DaybookPlugin,
 };
 
 async fn mltools_ctx_from_config_repo(plugin: &DaybookPlugin) -> mltools::Ctx {
@@ -17,70 +16,15 @@ impl mltools_ocr::Host for SharedWashCtx {
         &mut self,
         blob_facet: wasmtime::component::Resource<capabilities::FacetTokenRo>,
     ) -> wasmtime::Result<Result<mltools_ocr::OcrResult, String>> {
+        let blob = match super::caps::get_blob_facet_from_token_ro(self, &blob_facet).await? {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err)),
+        };
         let plugin = DaybookPlugin::from_ctx(self);
-
-        let (doc_id, heads, facet_key) = {
-            let token = self
-                .table
-                .get(&blob_facet)
-                .context("error locating blob facet token")
-                .to_anyhow()?;
-            (
-                token.doc_id.clone(),
-                token.heads.clone(),
-                token.facet_key.clone(),
-            )
-        };
-
-        let Some(doc) = plugin.get_doc(&doc_id, &heads).await.to_anyhow()? else {
-            return Ok(Err(format!("doc not found: {doc_id}")));
-        };
-
-        let Some(blob_facet_raw) = doc.facets.get(&facet_key) else {
-            return Ok(Err(format!("blob facet not found: {}", facet_key)));
-        };
-
-        let blob_facet_value = match daybook_types::doc::WellKnownFacet::from_json(
-            blob_facet_raw.clone(),
-            daybook_types::doc::WellKnownFacetTag::Blob,
-        ) {
+        let image_path = match super::caps::resolve_blob_path_from_blob_facet(&plugin, &blob).await
+        {
             Ok(value) => value,
-            Err(err) => return Ok(Err(err.to_string())),
-        };
-
-        let daybook_types::doc::WellKnownFacet::Blob(blob) = blob_facet_value else {
-            return Ok(Err("facet is not a blob".to_string()));
-        };
-
-        let Some(urls) = blob.urls.as_ref() else {
-            return Ok(Err("blob facet is missing urls".to_string()));
-        };
-        let Some(first_url) = urls.first() else {
-            return Ok(Err("blob facet urls is empty".to_string()));
-        };
-
-        let parsed_url = match url::Url::parse(first_url) {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err.to_string())),
-        };
-        if parsed_url.scheme() != crate::blobs::BLOB_SCHEME {
-            return Ok(Err(format!(
-                "unsupported blob url scheme '{}'",
-                parsed_url.scheme()
-            )));
-        }
-        if parsed_url.host_str().is_some() {
-            return Ok(Err("blob url authority must be empty".to_string()));
-        }
-
-        let hash = parsed_url.path().trim_start_matches('/');
-        if hash.is_empty() {
-            return Ok(Err("blob url path is missing hash".to_string()));
-        }
-
-        let image_path = match plugin.blobs_repo.get_path(hash).await {
-            Ok(value) => value,
-            Err(err) => return Ok(Err(err.to_string())),
+            Err(err) => return Ok(Err(err)),
         };
 
         let mltools_ctx = mltools_ctx_from_config_repo(&plugin).await;
@@ -127,6 +71,35 @@ impl mltools_embed::Host for SharedWashCtx {
             model_id: result.model_id,
         }))
     }
+
+    async fn embed_image(
+        &mut self,
+        blob_facet: wasmtime::component::Resource<capabilities::FacetTokenRo>,
+    ) -> wasmtime::Result<Result<mltools_embed::EmbedResult, String>> {
+        let blob = match super::caps::get_blob_facet_from_token_ro(self, &blob_facet).await? {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err)),
+        };
+        let plugin = DaybookPlugin::from_ctx(self);
+        let image_path = match super::caps::resolve_blob_path_from_blob_facet(&plugin, &blob).await
+        {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err)),
+        };
+        let mltools_ctx = mltools_ctx_from_config_repo(&plugin).await;
+
+        let result = match mltools::embed_image(&mltools_ctx, &image_path, blob.mime.as_str()).await
+        {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
+
+        Ok(Ok(mltools_embed::EmbedResult {
+            vector: result.vector,
+            dimensions: result.dimensions,
+            model_id: result.model_id,
+        }))
+    }
 }
 
 impl mltools_llm_chat::Host for SharedWashCtx {
@@ -139,5 +112,63 @@ impl mltools_llm_chat::Host for SharedWashCtx {
             Err(err) => return Ok(Err(err.to_string())),
         };
         Ok(Ok(result.text))
+    }
+
+    async fn llm_chat_multimodal(
+        &mut self,
+        prompt: String,
+        image_bytes: Vec<u8>,
+        image_mime: String,
+    ) -> wasmtime::Result<Result<String, String>> {
+        let plugin = DaybookPlugin::from_ctx(self);
+        let mltools_ctx = mltools_ctx_from_config_repo(&plugin).await;
+
+        let result =
+            match mltools::llm_chat_multimodal(&mltools_ctx, &prompt, &image_bytes, &image_mime)
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => return Ok(Err(err.to_string())),
+            };
+        Ok(Ok(result.text))
+    }
+}
+
+impl mltools_image_tools::Host for SharedWashCtx {
+    async fn downsize_image_from_blob(
+        &mut self,
+        blob_facet: wasmtime::component::Resource<capabilities::FacetTokenRo>,
+        max_side: u32,
+        jpeg_quality: u8,
+    ) -> wasmtime::Result<Result<mltools_image_tools::ImageBytesResult, String>> {
+        let blob = match super::caps::get_blob_facet_from_token_ro(self, &blob_facet).await? {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err)),
+        };
+        if !blob.mime.starts_with("image/") {
+            return Ok(Err(format!("blob mime is not image/*: {}", blob.mime)));
+        }
+        let plugin = DaybookPlugin::from_ctx(self);
+        let image_path = match super::caps::resolve_blob_path_from_blob_facet(&plugin, &blob).await
+        {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err)),
+        };
+        let image_bytes = match std::fs::read(&image_path) {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(format!("error reading blob bytes: {err}"))),
+        };
+        let downsized =
+            match crate::imgtools::downsize_image_jpeg(&image_bytes, max_side, jpeg_quality) {
+                Ok(value) => value,
+                Err(err) => return Ok(Err(err.to_string())),
+            };
+
+        Ok(Ok(mltools_image_tools::ImageBytesResult {
+            bytes: downsized.bytes,
+            mime: downsized.mime,
+            width: downsized.width,
+            height: downsized.height,
+        }))
     }
 }

@@ -24,11 +24,17 @@ interface llm-chat {
     }
 
     variant request-input {
-        text(string)
+        text(string),
+        image(image-input),
+    }
+
+    record image-input {
+        bytes: list<u8>,
+        mime: string,
     }
 
     record request {
-        input: request-input
+        input: list<request-input>
     }
 
     record response-message {
@@ -44,6 +50,15 @@ interface llm-chat {
         text: string
     }
 
+}
+
+interface image-tools {
+    record downsize-image-result {
+        bytes: list<u8>,
+        mime: string,
+        width: u32,
+        height: u32,
+    }
 }
 
 interface ocr {
@@ -70,6 +85,7 @@ interface embed {
 world guest {
     import types;
     import llm-chat;
+    import image-tools;
     import ocr;
     import embed;
 }
