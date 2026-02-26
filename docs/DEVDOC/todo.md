@@ -84,6 +84,11 @@
       - [ ] to Flathub
     - [ ] Windows.exe
       - [ ] to Scoop.sh
+- [ ] Keychains for secrets
+ 
+ - [ ] Cleanup for public pre-alpha
+ 
+- [ ] Tutorial
 - [ ] Replace Path with camino at certain places
 - [ ] Explore multi doc drawer
   - [ ] Drawer doc migration where a drawer is marked as deprecated and all devices that have seen it must merge it into the active docs. This allows eventually consistent garbage collection

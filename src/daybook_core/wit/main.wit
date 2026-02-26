@@ -116,8 +116,30 @@ interface mltools-embed {
     embed-image: func(blob-facet: facet-token-ro) -> result<embed-result, string>;
 }
 
+interface mltools-image-tools {
+    use capabilities.{facet-token-ro};
+
+    record image-bytes-result {
+        bytes: list<u8>,
+        mime: string,
+        width: u32,
+        height: u32,
+    }
+
+    downsize-image-from-blob: func(
+        blob-facet: facet-token-ro,
+        max-side: u32,
+        jpeg-quality: u8,
+    ) -> result<image-bytes-result, string>;
+}
+
 interface mltools-llm-chat {
     llm-chat: func(text: string) -> result<string, string>;
+    llm-chat-multimodal: func(
+        prompt: string,
+        image-bytes: list<u8>,
+        image-mime: string,
+    ) -> result<string, string>;
 }
 
 world all-guest {
@@ -127,6 +149,7 @@ world all-guest {
     import sqlite-connection;
     import mltools-ocr;
     import mltools-embed;
+    import mltools-image-tools;
     import mltools-llm-chat;
     import wasi:filesystem/preopens@0.2.6;
 }

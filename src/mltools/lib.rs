@@ -241,6 +241,29 @@ pub async fn llm_chat(ctx: &Ctx, text: &str) -> Res<LlmChatResult> {
     }
 }
 
+pub async fn llm_chat_multimodal(
+    ctx: &Ctx,
+    prompt: &str,
+    image_bytes: &[u8],
+    image_mime: &str,
+) -> Res<LlmChatResult> {
+    if prompt.trim().is_empty() {
+        eyre::bail!("empty llm input prompt");
+    }
+    if image_bytes.is_empty() {
+        eyre::bail!("empty llm input image bytes");
+    }
+    if image_mime.trim().is_empty() {
+        eyre::bail!("empty llm input image mime");
+    }
+
+    let Some(backend_config) = ctx.config.llm.backends.first() else {
+        eyre::bail!("no llm backend configured");
+    };
+
+    cloud::llm_chat_multimodal(backend_config, prompt, image_bytes, image_mime).await
+}
+
 /// local execution of ML tools.
 mod local {
     use super::*;
@@ -605,6 +628,43 @@ mod local {
 /// client for cloud token providers.
 mod cloud {
     use super::*;
+    fn ollama_http_client(auth: Option<&CloudAuth>) -> Res<reqwest::Client> {
+        match auth {
+            Some(CloudAuth::Basic { username, password }) => reqwest::Client::builder()
+                .default_headers({
+                    let mut headers = reqwest::header::HeaderMap::new();
+                    let mut token = "Basic ".to_string();
+                    data_encoding::BASE64
+                        .encode_append(format!("{username}:{password}").as_bytes(), &mut token);
+                    let mut token: reqwest::header::HeaderValue =
+                        token.parse().wrap_err("error formatting Auth header")?;
+                    token.set_sensitive(true);
+                    headers.insert(reqwest::header::AUTHORIZATION, token);
+                    headers
+                })
+                .build()
+                .map_err(Into::into),
+            Some(CloudAuth::ApiKey { .. }) => {
+                eyre::bail!("api-key auth is not supported for Ollama backend")
+            }
+            None => reqwest::Client::builder().build().map_err(Into::into),
+        }
+    }
+
+    fn ollama_api_base_url(url: &str) -> Res<url::Url> {
+        let parsed_url =
+            url::Url::parse(url).wrap_err_with(|| format!("invalid Ollama url: {url}"))?;
+        let host = parsed_url
+            .host_str()
+            .ok_or_eyre("Ollama url missing host")?;
+        let scheme = parsed_url.scheme();
+        let port = parsed_url.port().unwrap_or(match scheme {
+            "https" => 443,
+            _ => 80,
+        });
+        url::Url::parse(&format!("{scheme}://{host}:{port}"))
+            .wrap_err("error building Ollama base url")
+    }
 
     pub async fn embed_text(backend_config: &EmbedBackendConfig, text: &str) -> Res<EmbedResult> {
         let (model, auth, provider) = match backend_config {
@@ -629,25 +689,20 @@ mod cloud {
                 }
                 CloudAuth::Basic { username, password } => {
                     let mut token = "Basic ".to_string();
-                    data_encoding::BASE64.encode_append(
-                        format!("{username}:{password}").as_bytes(),
-                        &mut token,
-                    );
-                    embed_options = embed_options.with_headers(genai::Headers::from([(
-                        "Authorization",
-                        token,
-                    )]));
+                    data_encoding::BASE64
+                        .encode_append(format!("{username}:{password}").as_bytes(), &mut token);
+                    embed_options = embed_options
+                        .with_headers(genai::Headers::from([("Authorization", token)]));
                 }
             }
         }
 
         let client = genai::Client::default();
         let model_iden = genai::ModelIden::new(provider, model);
-
         let res = client
             .embed(&model_iden, text, Some(&embed_options))
             .await
-            .map_err(|e| eyre::eyre!("genai embedding error: {e:?}"))?;
+            .map_err(|error| eyre::eyre!("genai embedding error: {error:?}"))?;
 
         let embedding = res
             .embeddings
@@ -684,36 +739,146 @@ mod cloud {
                 }
                 CloudAuth::Basic { username, password } => {
                     let mut token = "Basic ".to_string();
-                    data_encoding::BASE64.encode_append(
-                        format!("{username}:{password}").as_bytes(),
-                        &mut token,
-                    );
-                    chat_options = chat_options.with_extra_headers(genai::Headers::from([(
-                        "Authorization",
-                        token,
-                    )]));
+                    data_encoding::BASE64
+                        .encode_append(format!("{username}:{password}").as_bytes(), &mut token);
+                    chat_options = chat_options
+                        .with_extra_headers(genai::Headers::from([("Authorization", token)]));
                 }
             }
         }
 
         let client = genai::Client::default();
 
-        let chat_req = genai::chat::ChatRequest::new(vec![genai::chat::ChatMessage::user(
-            text.to_string(),
-        )]);
+        let chat_req =
+            genai::chat::ChatRequest::new(vec![genai::chat::ChatMessage::user(text.to_string())]);
 
         let model_iden = genai::ModelIden::new(provider, model);
         let response = client
             .exec_chat(&model_iden, chat_req, Some(&chat_options))
             .await
-            .map_err(|e| eyre::eyre!("genai chat error: {e:?}"))?;
+            .wrap_err("genai chat error")?;
 
         Ok(LlmChatResult {
-            text: response
-                .first_text()
-                .unwrap_or_default()
-                .to_string(),
+            text: response.first_text().unwrap_or_default().to_string(),
         })
+    }
+
+    pub async fn llm_chat_multimodal(
+        backend_config: &LlmBackendConfig,
+        prompt: &str,
+        image_bytes: &[u8],
+        image_mime: &str,
+    ) -> Res<LlmChatResult> {
+        match backend_config {
+            LlmBackendConfig::CloudOllama { url, model, auth } => {
+                llm_chat_ollama_multimodal(
+                    url,
+                    model,
+                    prompt,
+                    image_bytes,
+                    image_mime,
+                    auth.as_ref(),
+                )
+                .await
+            }
+            LlmBackendConfig::CloudGemini { model, auth } => {
+                let chat_options = genai::chat::ChatOptions::default();
+                if let Some(auth) = auth {
+                    match auth {
+                        CloudAuth::ApiKey { key } => {
+                            std::env::set_var("GEMINI_API_KEY", key);
+                        }
+                        CloudAuth::Basic { .. } => {
+                            eyre::bail!("basic auth is not supported for Gemini backend")
+                        }
+                    }
+                }
+
+                let image_b64 = data_encoding::BASE64.encode(image_bytes);
+                let user_content = genai::chat::MessageContent::from_parts(vec![
+                    genai::chat::ContentPart::from_text(prompt),
+                    genai::chat::ContentPart::from_binary_base64(image_mime, image_b64, None),
+                ]);
+                let chat_req = genai::chat::ChatRequest::new(vec![genai::chat::ChatMessage::user(
+                    user_content,
+                )]);
+                let client = genai::Client::default();
+                let model_iden = genai::ModelIden::new(genai::adapter::AdapterKind::Gemini, model);
+                let response = client
+                    .exec_chat(&model_iden, chat_req, Some(&chat_options))
+                    .await
+                    .map_err(|error| eyre::eyre!("genai multimodal chat error: {error:?}"))?;
+
+                Ok(LlmChatResult {
+                    text: response.first_text().unwrap_or_default().to_string(),
+                })
+            }
+        }
+    }
+
+    pub async fn llm_chat_ollama_multimodal(
+        url: &str,
+        model: &str,
+        prompt: &str,
+        image_bytes: &[u8],
+        _image_mime: &str,
+        auth: Option<&CloudAuth>,
+    ) -> Res<LlmChatResult> {
+        #[derive(serde::Deserialize)]
+        struct ChatMessage {
+            content: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct ChatResponse {
+            message: Option<ChatMessage>,
+            response: Option<String>,
+        }
+
+        let client = ollama_http_client(auth)?;
+        let endpoint = ollama_api_base_url(url)?
+            .join("/api/chat")
+            .wrap_err("error joining Ollama chat endpoint")?;
+        let image_b64 = data_encoding::BASE64.encode(image_bytes);
+
+        let payload = serde_json::json!({
+            "model": model,
+            "stream": false,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "images": [image_b64],
+                }
+            ]
+        });
+
+        let response = client
+            .post(endpoint)
+            .timeout(std::time::Duration::from_secs(300))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|error| {
+                eyre::eyre!("ollama multimodal request failed for model '{model}': {error:?}")
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read body>".to_string());
+            eyre::bail!("ollama multimodal error {status}: {body}");
+        }
+        let body: ChatResponse = response
+            .json()
+            .await
+            .wrap_err("error parsing ollama multimodal response")?;
+        let text = body
+            .message
+            .map(|message| message.content)
+            .or(body.response)
+            .ok_or_eyre("ollama multimodal response missing message content")?;
+        Ok(LlmChatResult { text })
     }
 }
 
@@ -818,6 +983,52 @@ mod tests {
         rejects_missing_backend: (
             context_with(vec![], vec![], vec![]),
             "hello",
+            "no llm backend configured",
+        ),
+    }
+
+    utils_rs::table_tests! {
+        test_llm_chat_multimodal_api_contract,
+        (context, prompt, image_bytes, image_mime, expected_error_fragment),
+        {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed building tokio runtime");
+            let result = runtime.block_on(async {
+                llm_chat_multimodal(&context, prompt, &image_bytes, image_mime).await
+            });
+            expect_error_message_contains(result, expected_error_fragment);
+        }
+    }
+
+    test_llm_chat_multimodal_api_contract! {
+        rejects_empty_prompt: (
+            context_with(vec![], vec![], vec![]),
+            "",
+            vec![1, 2, 3],
+            "image/png",
+            "empty llm input prompt",
+        ),
+        rejects_empty_image_bytes: (
+            context_with(vec![], vec![], vec![]),
+            "hello",
+            Vec::<u8>::new(),
+            "image/png",
+            "empty llm input image bytes",
+        ),
+        rejects_empty_image_mime: (
+            context_with(vec![], vec![], vec![]),
+            "hello",
+            vec![1, 2, 3],
+            "   ",
+            "empty llm input image mime",
+        ),
+        rejects_missing_backend: (
+            context_with(vec![], vec![], vec![]),
+            "hello",
+            vec![1, 2, 3],
+            "image/png",
             "no llm backend configured",
         ),
     }
@@ -932,7 +1143,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires GEMINI_API_KEY"]
     fn test_embed_text_gemini_roundtrip() -> Res<()> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -958,7 +1168,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires GEMINI_API_KEY"]
     fn test_llm_chat_gemini_roundtrip() -> Res<()> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -981,7 +1190,38 @@ mod tests {
             Ok(())
         })
     }
+    #[test]
+    fn test_llm_chat_multimodal_cloud_router_roundtrip() -> Res<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let image_bytes = include_bytes!("../daybook_core/e2e/sample-screenshot-meme.jpg").to_vec();
 
+        runtime.block_on(async {
+            let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set");
+            let model = std::env::var("GEMINI_LLM_MODEL")
+                .unwrap_or_else(|_| "gemini-flash-latest".to_string());
+            let context = context_with(
+                vec![],
+                vec![],
+                vec![LlmBackendConfig::CloudGemini {
+                    model,
+                    auth: Some(crate::CloudAuth::ApiKey { key }),
+                }],
+            );
+
+            let result = llm_chat_multimodal(
+                &context,
+                "Reply with one short word describing the dominant type of image.",
+                &image_bytes,
+                "image/jpeg",
+            )
+            .await?;
+            assert!(!result.text.trim().is_empty());
+
+            Ok(())
+        })
+    }
     #[cfg(feature = "hf_hub")]
     #[test]
     #[ignore = "downloads model assets from remote registries"]
@@ -993,9 +1233,9 @@ mod tests {
             let config = crate::models::mobile_default(test_model_cache_dir()).await?;
 
             assert_eq!(config.ocr.backends.len(), 1);
-            assert_eq!(config.embed.backends.len(), 2);
+            assert!(config.embed.backends.len() >= 3);
             assert_eq!(config.image_embed.backends.len(), 1);
-            assert_eq!(config.llm.backends.len(), 1);
+            assert!(config.llm.backends.len() >= 2);
 
             let EmbedBackendConfig::LocalFastembed {
                 onnx_path,
@@ -1025,6 +1265,34 @@ mod tests {
             assert_eq!(model_id, "nomic-ai/nomic-embed-vision-v1.5");
             assert!(onnx_path.exists());
             assert!(preprocessor_config_path.exists());
+
+            assert!(config
+                .embed
+                .backends
+                .iter()
+                .any(|backend| matches!(backend, EmbedBackendConfig::CloudOllama { .. })));
+            assert!(config
+                .embed
+                .backends
+                .iter()
+                .any(|backend| matches!(backend, EmbedBackendConfig::CloudGemini { .. })));
+            assert!(config
+                .llm
+                .backends
+                .iter()
+                .any(|backend| matches!(backend, LlmBackendConfig::CloudOllama { .. })));
+            assert!(config
+                .llm
+                .backends
+                .iter()
+                .any(|backend| matches!(backend, LlmBackendConfig::CloudGemini { .. })));
+
+            if crate::models::gemini_api_key().is_some() && cfg!(any(test, feature = "tests")) {
+                assert!(matches!(
+                    config.llm.backends.first(),
+                    Some(LlmBackendConfig::CloudGemini { .. })
+                ));
+            }
 
             Ok(())
         })

@@ -10,6 +10,7 @@ mod doc_created_wflow;
 mod embed_text_wflow;
 mod image_label_nomic_wflow;
 mod image_label_screenshot_meme_wflow;
+mod learned_image_label_proposals_wflow;
 mod ocr_image_wflow;
 mod plugin_local_index_wflow;
 

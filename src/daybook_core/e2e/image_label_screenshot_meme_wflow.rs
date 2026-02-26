@@ -53,7 +53,10 @@ async fn test_image_label_fallback_multi_label_screenshot_meme() -> Res<()> {
                 updated_doc = Some(doc);
                 break;
             }
-            info!(was_embedded = doc.facets.contains_key(&embedding_key), "XXX");
+            info!(
+                was_embedded = doc.facets.contains_key(&embedding_key),
+                "XXX"
+            );
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }

@@ -30,17 +30,19 @@ mod binds_guest {
             }
             root_doc::WellKnownFacet::PseudoLabel(val) => wit_doc::WellKnownFacet::PseudoLabel(val),
             root_doc::WellKnownFacet::PseudoLabelSet(val) => {
-                wit_doc::WellKnownFacet::PseudoLabelSet(daybook_types::wit::doc::PseudoLabelSetFacet {
-                    labels: val
-                        .labels
-                        .into_iter()
-                        .map(|label| daybook_types::wit::doc::PseudoLabelSetLabel {
-                            label: label.label,
-                            prompts: label.prompts,
-                            negative_prompts: label.negative_prompts,
-                        })
-                        .collect(),
-                })
+                wit_doc::WellKnownFacet::PseudoLabelSet(
+                    daybook_types::wit::doc::PseudoLabelSetFacet {
+                        labels: val
+                            .labels
+                            .into_iter()
+                            .map(|label| daybook_types::wit::doc::PseudoLabelSetLabel {
+                                label: label.label,
+                                prompts: label.prompts,
+                                negative_prompts: label.negative_prompts,
+                            })
+                            .collect(),
+                    },
+                )
             }
             root_doc::WellKnownFacet::TitleGeneric(val) => {
                 wit_doc::WellKnownFacet::TitleGeneric(val)
@@ -349,6 +351,7 @@ pub use binds_guest::townframe::daybook::capabilities;
 pub use binds_guest::townframe::daybook::drawer;
 pub use binds_guest::townframe::daybook::facet_routine;
 pub use binds_guest::townframe::daybook::mltools_embed;
+pub use binds_guest::townframe::daybook::mltools_image_tools;
 pub use binds_guest::townframe::daybook::mltools_llm_chat;
 pub use binds_guest::townframe::daybook::mltools_ocr;
 pub use binds_guest::townframe::daybook::sqlite_connection;
@@ -486,6 +489,12 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
                         item.linker(),
                         |ctx| ctx,
                     )?;
+                }
+                if iface.interfaces.contains("mltools-image-tools") {
+                    mltools_image_tools::add_to_linker::<
+                        _,
+                        wasmtime::component::HasSelf<SharedWashCtx>,
+                    >(item.linker(), |ctx| ctx)?;
                 }
                 if iface.interfaces.contains("mltools-llm-chat") {
                     mltools_llm_chat::add_to_linker::<
@@ -695,7 +704,9 @@ impl facet_routine::Host for SharedWashCtx {
                 .config_repo
                 .get_or_init_global_props_doc_id(&dayook_plugin.drawer_repo)
                 .await
-                .map_err(|err| anyhow::anyhow!("error getting/initializing global props config doc: {err}"))?;
+                .map_err(|err| {
+                    anyhow::anyhow!("error getting/initializing global props config doc: {err}")
+                })?;
             let config_heads = dayook_plugin
                 .drawer_repo
                 .get_doc_branches(&config_doc_id)

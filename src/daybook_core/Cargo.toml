@@ -86,6 +86,7 @@ sqlite-vec.workspace = true
 pastey.workspace = true
 directories.workspace = true
 fs4.workspace = true
+image = { version = "0.25", default-features = true, features = ["jpeg", "png", "gif", "webp", "bmp"] }
 
 # wasm
 wash-runtime = { workspace = true }

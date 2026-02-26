@@ -161,7 +161,11 @@ impl capabilities::HostFacetTokenRo for SharedWashCtx {
             .get(&handle)
             .context("error locating token")
             .to_anyhow()?;
-        let Some(doc) = plugin.get_doc(&token.doc_id, &token.heads).await.to_anyhow()? else {
+        let Some(doc) = plugin
+            .get_doc(&token.doc_id, &token.heads)
+            .await
+            .to_anyhow()?
+        else {
             return Ok(false);
         };
         Ok(doc.facets.contains_key(&token.facet_key))
@@ -323,7 +327,11 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             .get(&handle)
             .context("error locating token")
             .to_anyhow()?;
-        let Some(doc) = plugin.get_doc(&token.doc_id, &token.heads).await.to_anyhow()? else {
+        let Some(doc) = plugin
+            .get_doc(&token.doc_id, &token.heads)
+            .await
+            .to_anyhow()?
+        else {
             return Ok(false);
         };
         Ok(doc.facets.contains_key(&token.facet_key))

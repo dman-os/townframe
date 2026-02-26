@@ -1,7 +1,8 @@
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
 use super::{
-    binds_guest, capabilities, mltools_embed, mltools_llm_chat, mltools_ocr, DaybookPlugin,
+    binds_guest, capabilities, mltools_embed, mltools_image_tools, mltools_llm_chat, mltools_ocr,
+    DaybookPlugin,
 };
 
 async fn mltools_ctx_from_config_repo(plugin: &DaybookPlugin) -> mltools::Ctx {
@@ -111,5 +112,63 @@ impl mltools_llm_chat::Host for SharedWashCtx {
             Err(err) => return Ok(Err(err.to_string())),
         };
         Ok(Ok(result.text))
+    }
+
+    async fn llm_chat_multimodal(
+        &mut self,
+        prompt: String,
+        image_bytes: Vec<u8>,
+        image_mime: String,
+    ) -> wasmtime::Result<Result<String, String>> {
+        let plugin = DaybookPlugin::from_ctx(self);
+        let mltools_ctx = mltools_ctx_from_config_repo(&plugin).await;
+
+        let result =
+            match mltools::llm_chat_multimodal(&mltools_ctx, &prompt, &image_bytes, &image_mime)
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => return Ok(Err(err.to_string())),
+            };
+        Ok(Ok(result.text))
+    }
+}
+
+impl mltools_image_tools::Host for SharedWashCtx {
+    async fn downsize_image_from_blob(
+        &mut self,
+        blob_facet: wasmtime::component::Resource<capabilities::FacetTokenRo>,
+        max_side: u32,
+        jpeg_quality: u8,
+    ) -> wasmtime::Result<Result<mltools_image_tools::ImageBytesResult, String>> {
+        let blob = match super::caps::get_blob_facet_from_token_ro(self, &blob_facet).await? {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err)),
+        };
+        if !blob.mime.starts_with("image/") {
+            return Ok(Err(format!("blob mime is not image/*: {}", blob.mime)));
+        }
+        let plugin = DaybookPlugin::from_ctx(self);
+        let image_path = match super::caps::resolve_blob_path_from_blob_facet(&plugin, &blob).await
+        {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err)),
+        };
+        let image_bytes = match std::fs::read(&image_path) {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(format!("error reading blob bytes: {err}"))),
+        };
+        let downsized =
+            match crate::imgtools::downsize_image_jpeg(&image_bytes, max_side, jpeg_quality) {
+                Ok(value) => value,
+                Err(err) => return Ok(Err(err.to_string())),
+            };
+
+        Ok(Ok(mltools_image_tools::ImageBytesResult {
+            bytes: downsized.bytes,
+            mime: downsized.mime,
+            width: downsized.width,
+            height: downsized.height,
+        }))
     }
 }

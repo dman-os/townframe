@@ -1986,6 +1986,7 @@ dependencies = [
  "fs4",
  "futures",
  "garde",
+ "image",
  "insta",
  "jsonschema",
  "libsqlite3-sys",

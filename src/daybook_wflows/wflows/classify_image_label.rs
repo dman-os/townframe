@@ -685,7 +685,10 @@ fn sqlite_vec_rowid_cosine_similarity(
             "SELECT (1.0 - vec_distance_cosine(v1.embedding, v2.embedding)) AS score \
              FROM image_label_prompt_vec v1 JOIN image_label_prompt_vec v2 \
              ON v1.rowid = ?1 AND v2.rowid = ?2",
-            &[SqlValue::Integer(left_rowid), SqlValue::Integer(right_rowid)],
+            &[
+                SqlValue::Integer(left_rowid),
+                SqlValue::Integer(right_rowid),
+            ],
         )
         .map_err(|err| {
             JobErrorX::Terminal(ferr!(
@@ -693,7 +696,9 @@ fn sqlite_vec_rowid_cosine_similarity(
             ))
         })?;
     let Some(row) = rows.first() else {
-        return Err(JobErrorX::Terminal(ferr!("missing sqlite-vec rowid score row")));
+        return Err(JobErrorX::Terminal(ferr!(
+            "missing sqlite-vec rowid score row"
+        )));
     };
     row_real(row, "score")
         .ok_or_else(|| JobErrorX::Terminal(ferr!("missing sqlite-vec rowid score value")))

@@ -403,9 +403,7 @@ impl ConfigRepo {
 
     pub async fn get_global_props_doc_id(&self) -> Option<daybook_types::doc::DocId> {
         self.store
-            .query_sync(|store| {
-                store.global_props_doc_id.payload.clone()
-            })
+            .query_sync(|store| store.global_props_doc_id.payload.clone())
             .await
     }
 

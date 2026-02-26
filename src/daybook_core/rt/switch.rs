@@ -404,7 +404,7 @@ struct SwitchWorker {
 }
 
 impl SwitchWorker {
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self, event))]
     async fn dispatch_to_listeners(&mut self, event: &SwitchEvent) -> Res<()> {
         for index in 0..self.prepared_sinks.len() {
             if !self.listener_interested_in_event(index, event).await? {

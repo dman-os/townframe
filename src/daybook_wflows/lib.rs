@@ -41,6 +41,7 @@ mod wit {
             "townframe:daybook/sqlite-connection": generate,
             "townframe:daybook/mltools-ocr": generate,
             "townframe:daybook/mltools-embed": generate,
+            "townframe:daybook/mltools-image-tools": generate,
             "townframe:daybook/mltools-llm-chat": generate,
         }
     });
@@ -78,6 +79,9 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
             "embed-text" => |cx, _args: serde_json::Value| embed_text::run(cx),
             "index-embedding" => |cx, _args: serde_json::Value| index_embedding::run(cx),
             "classify-image-label" => |cx, _args: serde_json::Value| classify_image_label::run(cx),
+            "learn-image-label-proposals" => |cx, _args: serde_json::Value| {
+                learn_image_label_proposals::run(cx)
+            },
         })
     }
 }
