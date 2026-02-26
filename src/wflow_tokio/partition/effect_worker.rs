@@ -180,11 +180,20 @@ impl TokioEffectWorker {
                     .lock()
                     .await
                     .insert(Arc::clone(&job_id), effect_id.clone());
-                let run_fut = self.run_job_effect(effect_id.clone(), run_id, Arc::clone(&job_id));
-                let result = tokio::select! {
-                    biased;
-                    _ = run_abort_token.cancelled() => job_events::JobRunResult::Aborted,
-                    res = run_fut => res,
+                let result = {
+                    let run_fut =
+                        self.run_job_effect(effect_id.clone(), run_id, Arc::clone(&job_id));
+                    tokio::pin!(run_fut);
+                    tokio::select! {
+                        biased;
+                        _ = run_abort_token.cancelled() => {
+                            // Drive run_job_effect to completion so it can drop/retain any in-flight
+                            // cached host session through the normal cleanup path before we emit Aborted.
+                            let _ignored = (&mut run_fut).await;
+                            job_events::JobRunResult::Aborted
+                        },
+                        res = &mut run_fut => res,
+                    }
                 };
                 self.job_to_effect_id.lock().await.remove(&job_id);
                 self.effect_cancel_tokens.lock().await.remove(&effect_id);
