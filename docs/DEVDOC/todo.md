@@ -23,6 +23,13 @@
 
 ## Stack
 
+- [ ] P2P
+  - [ ] iroh
+- [ ] Prune dependencies
+- [ ] Blobs server
+  - [ ] Iroh blobs?
+  - [ ] Chunked hashing for transfers
+    - Chunks at rest?
 - [ ] Good and local document classification
   - [ ] Receipt parsing
   - [ ] Collators
@@ -49,12 +56,6 @@
   - [x] CLI support
     - [ ] Make it nice
   - [ ] GUI support
-- [ ] Blobs server
-  - [ ] Iroh blobs?
-  - [ ] Chunked hashing for transfers
-    - Chunks at rest?
-- [ ] P2P
-  - [ ] iroh
 - [ ] Bugs
   - [ ] `WflowNotFound`
     - `HostEvent(WflowRegistered)``?
@@ -157,11 +158,14 @@
 - [ ] pauperfuse
 - [ ] Deploy
   - [ ] Buy domain
+    - [ ] https://daybook.com (taken :/)
+    - [ ] https://townframe.com (taken :/)
+    - [ ] https://db.tf (not avail :/)
     - [ ] https://daybook.tf
-    - [ ] https://daybook.com
-    - [ ] https://motherton.db.tf
-    - [ ] https://mother.ton.tf
-    - [ ] https://mother.town.tf
+    - [ ] https://ton.tf (need to be an EU resident :/)
+      - [ ] https://mother.ton.tf
+      - [ ] https://motherton.db.tf
+      - [ ] https://mother.town.tf
 - [ ] PgLite based testing
 - [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
 - [ ] DRY up all the wit bindgen

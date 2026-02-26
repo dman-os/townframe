@@ -14,12 +14,12 @@ use std::collections::HashSet;
 
 use crate::interlude::*;
 
+use am_utils_rs::changes::ChangeFilter;
 use axum::Router;
 use generational_box::SyncStorage;
 use samod::{DocumentId, PeerId};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tower_http::ServiceBuilderExt;
-use am_utils_rs::changes::ChangeFilter;
 
 fn main() -> Res<()> {
     utils_rs::setup_tracing()?;
