@@ -431,7 +431,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
         WitWorld {
             exports: std::collections::HashSet::new(),
             imports: std::collections::HashSet::from([WitInterface::from(
-                "townframe:daybook/drawer,capabilities,facet-routine,sqlite-connection,mltools-ocr,mltools-embed,mltools-llm-chat",
+                "townframe:daybook/drawer,capabilities,facet-routine,sqlite-connection,mltools-ocr,mltools-embed,mltools-image-tools,mltools-llm-chat",
             )]),
         }
     }

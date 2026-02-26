@@ -612,6 +612,19 @@ mod local {
 /// client for cloud token providers.
 mod cloud {
     use super::*;
+
+    fn normalize_genai_service_url(url: &str) -> Res<String> {
+        let mut parsed = url::Url::parse(url)
+            .wrap_err_with(|| format!("invalid service url for genai client: {url}"))?;
+        let path = parsed.path();
+        if path.is_empty() || path == "/" {
+            parsed.set_path("/");
+        } else if !path.ends_with('/') {
+            parsed.set_path(&format!("{path}/"));
+        }
+        Ok(parsed.to_string())
+    }
+
     fn genai_client(
         provider: genai::adapter::AdapterKind,
         service_url: Option<&str>,
@@ -620,7 +633,7 @@ mod cloud {
         let mut builder = genai::Client::builder();
 
         if let Some(service_url) = service_url {
-            let service_url = service_url.to_string();
+            let service_url = normalize_genai_service_url(service_url)?;
             let target_resolver = genai::resolver::ServiceTargetResolver::from_resolver_fn(
                 move |mut service_target: genai::ServiceTarget| {
                     service_target.endpoint =

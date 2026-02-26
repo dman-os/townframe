@@ -1500,6 +1500,15 @@ impl PlugsRepo {
                     eyre::bail!("Invalid ACL in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}", routine_name, access.tag);
                 }
             }
+            for access in routine.config_prop_acl() {
+                if !available_tags.contains(&access.tag.to_string()) {
+                    eyre::bail!(
+                        "Invalid config_prop_acl in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
+                        routine_name,
+                        access.tag
+                    );
+                }
+            }
             for access in &routine.local_state_acl {
                 if !available_local_states
                     .contains(&(access.plug_id.clone(), access.local_state_key.to_string()))
