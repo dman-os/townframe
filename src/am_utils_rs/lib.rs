@@ -18,6 +18,8 @@ use crate::interlude::*;
 #[cfg(feature = "repo")]
 pub mod changes;
 pub mod codecs;
+#[cfg(feature = "iroh")]
+pub mod iroh {}
 
 #[cfg(feature = "repo")]
 use automerge::Automerge;

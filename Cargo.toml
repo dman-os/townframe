@@ -201,7 +201,7 @@ clap_complete = "4.5"
 
 [patch.crates-io]
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
-wash-runtime = { git = "https://github.com/wasmcloud/wash", rev = "ea7821407902001c3aeaf3cc22c684c05d49d039" }
+wash-runtime = { git = "https://github.com/wasmcloud/wash", rev = "e3cbff002a7922f83af02ce546286d4530203a6b" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "28d9b6db96f09a34967a0941950f6753fd73a006" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 

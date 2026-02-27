@@ -10,7 +10,7 @@ workspace = true
 path = "lib.rs"
 
 [features]
-default = ["repo"]
+default = ["repo", "iroh"]
 repo = [
     "dep:samod",
     "samod/tokio",
@@ -36,3 +36,5 @@ data-encoding.workspace = true
 
 # errors
 thiserror.workspace = true
+iroh = { version = "0.96.1", optional = true }
+# iroh = "0.96.1"
