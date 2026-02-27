@@ -498,12 +498,14 @@ fun App(
     LaunchedEffect(initAttempt) {
         initState = AppInitState.Loading
         try {
-            val globalsCtx = FfiCtx.forGlobals()
-            val knownRepos = globalsCtx.listKnownRepos()
-            val lastUsedRepo = globalsCtx.getLastUsedRepo()
-            val shouldOpenLastUsedRepo =
-                lastUsedRepo != null && globalsCtx.isRepoUsable(lastUsedRepo.path)
+            val globalsCtx = GlobalFfiCtx.forGlobals()
+            // FIXME: use getRepoConfig and do this in kotlin
+            // val knownRepos = globalsCtx.listKnownRepos()
+            // val lastUsedRepo = globalsCtx.getLastUsedRepo()
+            // val shouldOpenLastUsedRepo =
+            //     lastUsedRepo != null && globalsCtx.isRepoUsable(lastUsedRepo.path)
             globalsCtx.close()
+
             if (shouldOpenLastUsedRepo) {
                 pendingOpenRepoPath = lastUsedRepo.path
                 initState = AppInitState.OpeningRepo(repoPath = lastUsedRepo.path)

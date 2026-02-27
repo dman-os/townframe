@@ -284,9 +284,6 @@ pub mod hash {
     use super::*;
 
     #[cfg(feature = "hash")]
-    use std::io::Write;
-
-    #[cfg(feature = "hash")]
     const SHA2_256: u64 = 0x12;
     #[cfg(feature = "hash")]
     const BLAKE3: u64 = 0x1e;
@@ -303,9 +300,12 @@ pub mod hash {
 
     #[cfg(feature = "hash")]
     pub fn hash_obj<T: serde::Serialize>(obj: &T) -> String {
-        use sha2::Digest;
+        use sha2::digest::Digest;
         let mut hash = sha2::Sha256::new();
-        json_canon::to_writer(&mut hash, obj).expect("error serializing manifest");
+        // FIXME: sha2 removed std::io::Write support
+        // json_canon::to_writer(&mut hash, obj).expect("error serializing manifest");
+        let vec = json_canon::to_vec(obj).expect("error serializing manifest");
+        hash.update(&vec);
         let hash = hash.finalize();
 
         let hash =
@@ -322,7 +322,7 @@ pub mod hash {
     pub fn hash_bytes(bytes: &[u8]) -> String {
         use sha2::Digest;
         let mut hash = sha2::Sha256::new();
-        hash.write_all(bytes).expect("error writing to hasher");
+        hash.update(bytes);
         let hash = hash.finalize();
 
         let hash =
@@ -380,8 +380,7 @@ pub mod hash {
             if bytes_read == 0 {
                 break;
             }
-            hash.write_all(&buf[..bytes_read])
-                .expect("error writing to hasher");
+            hash.update(&buf[..bytes_read])
         }
         let hash = hash.finalize();
 

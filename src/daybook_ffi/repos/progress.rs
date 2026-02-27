@@ -31,10 +31,8 @@ impl ProgressRepoFfi {
     #[uniffi::constructor]
     #[tracing::instrument(err, skip(fcx))]
     pub async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
-        let fcx = Arc::clone(&fcx);
-        let cx = Arc::clone(fcx.repo_ctx());
         let repo = fcx
-            .do_on_rt(ProgressRepo::boot(cx.sql().db_pool.clone()))
+            .do_on_rt(ProgressRepo::boot(fcx.rcx.sql.db_pool.clone()))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
         Ok(Arc::new(Self { fcx, repo }))

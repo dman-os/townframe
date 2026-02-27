@@ -33,8 +33,8 @@ samod = { workspace = true, optional = true }
 # encoding
 serde.workspace = true
 data-encoding.workspace = true
+bytes.workspace = true
 
 # errors
 thiserror.workspace = true
-iroh = { version = "0.96.1", optional = true }
-# iroh = "0.96.1"
+iroh = { workspace = true, optional = true }

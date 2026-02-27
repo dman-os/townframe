@@ -36,3 +36,6 @@ parking_lot.workspace = true
 
 # tokio
 tokio.workspace = true
+
+# logging
+tracing.workspace = true

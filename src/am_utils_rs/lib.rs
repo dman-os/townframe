@@ -19,7 +19,7 @@ use crate::interlude::*;
 pub mod changes;
 pub mod codecs;
 #[cfg(feature = "iroh")]
-pub mod iroh {}
+pub mod iroh;
 
 #[cfg(feature = "repo")]
 use automerge::Automerge;
@@ -51,12 +51,16 @@ pub enum StorageConfig {
 }
 
 #[cfg(feature = "repo")]
-#[derive(Clone)]
+#[derive(Clone, educe::Educe)]
+#[educe(Debug)]
 pub struct AmCtx {
+    #[educe(Debug(ignore))]
     repo: samod::Repo,
     // peer_id: samod::PeerId,
     // doc_handle: tokio::sync::OnceCell<DocHandle>,
+    #[educe(Debug(ignore))]
     change_manager: Arc<ChangeListenerManager>,
+    #[educe(Debug(ignore))]
     handle_cache: Arc<DHashMap<DocumentId, DocHandle>>,
 }
 
@@ -163,6 +167,7 @@ impl AmCtx {
             join_handle,
         })
     }
+
     /// Maintains connection to the sync server
     pub fn spawn_ws_connector(&self, addr: std::borrow::Cow<'static, str>) {
         let repo = self.repo.clone();

@@ -1,5 +1,6 @@
 use crate::interlude::*;
 
+use daybook_core::app::{globals::KnownRepoEntry, GlobalCtx};
 use tokio::sync::oneshot;
 
 daybook_types::custom_type_set!();
@@ -26,28 +27,11 @@ impl FfiError {
 #[derive(uniffi::Object)]
 pub struct FfiCtx {
     rt: Arc<tokio::runtime::Runtime>,
-    pub cx: Option<crate::SharedCtx>,
+    #[allow(unused)]
+    pub gcx: Arc<GlobalCtx>,
+    pub rcx: Arc<daybook_core::repo::RepoCtx>,
 }
 pub type SharedFfiCtx = Arc<FfiCtx>;
-
-#[derive(uniffi::Record, Clone, Debug)]
-pub struct KnownRepoEntryFfi {
-    pub id: String,
-    pub path: String,
-    pub created_at_unix_secs: i64,
-    pub last_opened_at_unix_secs: i64,
-}
-
-impl From<daybook_core::repo::KnownRepoEntry> for KnownRepoEntryFfi {
-    fn from(value: daybook_core::repo::KnownRepoEntry) -> Self {
-        Self {
-            id: value.id,
-            path: value.path,
-            created_at_unix_secs: value.created_at_unix_secs,
-            last_opened_at_unix_secs: value.last_opened_at_unix_secs,
-        }
-    }
-}
 
 impl FfiCtx {
     pub async fn do_on_rt<O, F>(&self, future: F) -> O
@@ -57,107 +41,98 @@ impl FfiCtx {
     {
         do_on_rt(&self.rt, future).await
     }
-
-    pub fn repo_ctx(&self) -> &crate::SharedCtx {
-        self.cx
-            .as_ref()
-            .expect("FfiCtx does not have an attached repo context")
-    }
 }
 
 #[uniffi::export]
 impl FfiCtx {
     #[uniffi::constructor]
-    #[tracing::instrument(err)]
-    async fn for_globals() -> Result<Arc<FfiCtx>, FfiError> {
+    #[tracing::instrument(err, skip(gcx))]
+    async fn init(repo_root: String, gcx: &GlobalFfiCtx) -> Result<Arc<Self>, FfiError> {
         utils_rs::setup_tracing_once();
-        let rt = Arc::new(crate::init_tokio()?);
-        Ok(Arc::new(Self { cx: None, rt }))
-    }
 
-    #[uniffi::constructor]
-    #[tracing::instrument(err)]
-    async fn for_repo_root(repo_root: String) -> Result<Arc<FfiCtx>, FfiError> {
-        utils_rs::setup_tracing_once();
-        let rt = Arc::new(crate::init_tokio()?);
+        let gcx = gcx.inner.clone();
+
+        let rt = crate::init_tokio()?;
+        let rt = Arc::new(rt);
+
         let repo_root = std::path::PathBuf::from(repo_root);
         let repo_root_for_init = repo_root.clone();
-        let cx = do_on_rt(&rt, async move {
-            Ctx::init(repo_root_for_init, Some("ws://0.0.0.0:8090".to_string())).await
+
+        let (rcx, gcx) = do_on_rt(&rt, async move {
+            let rcx = daybook_core::repo::RepoCtx::open(
+                &gcx,
+                &repo_root_for_init,
+                daybook_core::repo::RepoOpenOptions {
+                    ensure_initialized: true,
+                    peer_id: "daybook_client".to_string(),
+                    ws_connector_url: Some("ws://0.0.0.0:8090".to_string()),
+                },
+            )
+            .await?;
+            let rcx = Arc::new(rcx);
+
+            // FIXME: garbage, this should be handeld by the RepoCtx itself
+            let _repo = daybook_core::repo::upsert_known_repo(&gcx.sql.db_pool, &repo_root).await?;
+            daybook_core::repo::mark_repo_initialized(&repo_root).await?;
+
+            eyre::Ok((rcx, gcx))
         })
         .await
         .wrap_err("error initializing main Ctx")
         .inspect_err(|err| tracing::error!(?err))?;
-        do_on_rt(&rt, async move {
-            let global_ctx = daybook_core::repo::GlobalCtx::new().await?;
-            let _repo =
-                daybook_core::repo::upsert_known_repo(&global_ctx.sql.db_pool, &repo_root).await?;
-            daybook_core::repo::mark_repo_initialized(&repo_root).await?;
-            Ok::<(), eyre::Report>(())
-        })
-        .await
-        .wrap_err("error writing global repo metadata")
-        .inspect_err(|err| tracing::error!(?err))?;
-        Ok(Arc::new(Self { cx: Some(cx), rt }))
-    }
 
+        Ok(Arc::new(Self { rcx, gcx, rt }))
+    }
+}
+
+async fn do_on_rt<O, F>(rt: &tokio::runtime::Runtime, future: F) -> O
+where
+    O: Send + Sync + 'static,
+    F: std::future::Future<Output = O> + Send + 'static,
+{
+    let (tx, rx) = oneshot::channel();
+    rt.spawn(async {
+        let res = future.await;
+        tx.send(res)
+    });
+    rx.await.expect(ERROR_CHANNEL)
+}
+
+#[derive(uniffi::Object)]
+pub struct GlobalFfiCtx {
+    rt: Arc<tokio::runtime::Runtime>,
+    pub inner: Arc<GlobalCtx>,
+}
+
+#[uniffi::export]
+impl GlobalFfiCtx {
     #[uniffi::constructor]
     #[tracing::instrument(err)]
-    async fn for_ffi() -> Result<Arc<FfiCtx>, FfiError> {
+    async fn new(repo_root: String) -> Result<Arc<Self>, FfiError> {
         utils_rs::setup_tracing_once();
-        let rt = Arc::new(crate::init_tokio()?);
-        let repo_root = do_on_rt(&rt, async {
-            let global_ctx = daybook_core::repo::GlobalCtx::new().await?;
-            if let Some(last_used_repo) =
-                daybook_core::repo::get_last_used_repo(&global_ctx.sql.db_pool).await?
-            {
-                Ok::<std::path::PathBuf, eyre::Report>(std::path::PathBuf::from(
-                    last_used_repo.path,
-                ))
-            } else {
-                Ok(global_ctx.config.default_repo_root)
-            }
+
+        let rt = crate::init_tokio()?;
+        let rt = Arc::new(rt);
+
+        let inner = do_on_rt(&rt, async move {
+            let gcx = GlobalCtx::new().await?;
+            let gcx = Arc::new(gcx);
+            eyre::Ok(gcx)
         })
         .await
-        .wrap_err("error resolving default repo path")
+        .wrap_err("error initializing ctx")
         .inspect_err(|err| tracing::error!(?err))?;
-        let repo_root_for_init = repo_root.clone();
-        let cx = do_on_rt(&rt, async move {
-            Ctx::init(repo_root_for_init, Some("ws://0.0.0.0:8090".to_string())).await
-        })
-        .await
-        .wrap_err("error initializing main Ctx")
-        .inspect_err(|err| tracing::error!(?err))?;
-        do_on_rt(&rt, async move {
-            let global_ctx = daybook_core::repo::GlobalCtx::new().await?;
-            let _repo =
-                daybook_core::repo::upsert_known_repo(&global_ctx.sql.db_pool, &repo_root).await?;
-            daybook_core::repo::mark_repo_initialized(&repo_root).await?;
-            Ok::<(), eyre::Report>(())
-        })
-        .await
-        .wrap_err("error updating global repo metadata")
-        .inspect_err(|err| tracing::error!(?err))?;
-        Ok(Arc::new(Self { cx: Some(cx), rt }))
+
+        Ok(Arc::new(Self { inner, rt }))
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn list_known_repos(self: Arc<Self>) -> Result<Vec<KnownRepoEntryFfi>, FfiError> {
+    async fn get_repo_config(
+        self: Arc<Self>,
+    ) -> Result<daybook_core::app::globals::RepoConfig, FfiError> {
+        let this = self.clone();
         self.do_on_rt(async move {
-            let global_ctx = daybook_core::repo::GlobalCtx::new().await?;
-            let repos = daybook_core::repo::list_known_repos(&global_ctx.sql.db_pool).await?;
-            Ok::<Vec<KnownRepoEntryFfi>, eyre::Report>(repos.into_iter().map(Into::into).collect())
-        })
-        .await
-        .map_err(Into::into)
-    }
-
-    #[tracing::instrument(err, skip(self))]
-    async fn get_last_used_repo(self: Arc<Self>) -> Result<Option<KnownRepoEntryFfi>, FfiError> {
-        self.do_on_rt(async move {
-            let global_ctx = daybook_core::repo::GlobalCtx::new().await?;
-            let repo = daybook_core::repo::get_last_used_repo(&global_ctx.sql.db_pool).await?;
-            Ok::<Option<KnownRepoEntryFfi>, eyre::Report>(repo.map(Into::into))
+            daybook_core::app::globals::get_repo_config(&this.inner.sql.db_pool).await
         })
         .await
         .map_err(Into::into)
@@ -167,13 +142,13 @@ impl FfiCtx {
     async fn register_repo_path(
         self: Arc<Self>,
         repo_root: String,
-    ) -> Result<KnownRepoEntryFfi, FfiError> {
+    ) -> Result<KnownRepoEntry, FfiError> {
         let repo_root = std::path::PathBuf::from(repo_root);
+        let this = self.clone();
         self.do_on_rt(async move {
-            let global_ctx = daybook_core::repo::GlobalCtx::new().await?;
             let repo =
-                daybook_core::repo::upsert_known_repo(&global_ctx.sql.db_pool, &repo_root).await?;
-            Ok::<KnownRepoEntryFfi, eyre::Report>(repo.into())
+                daybook_core::repo::upsert_known_repo(&this.inner.sql.db_pool, &repo_root).await?;
+            eyre::Ok(repo)
         })
         .await
         .map_err(Into::into)
@@ -193,15 +168,12 @@ impl FfiCtx {
     }
 }
 
-async fn do_on_rt<O, F>(rt: &tokio::runtime::Runtime, future: F) -> O
-where
-    O: Send + Sync + 'static,
-    F: std::future::Future<Output = O> + Send + 'static,
-{
-    let (tx, rx) = oneshot::channel();
-    rt.spawn(async {
-        let res = future.await;
-        tx.send(res)
-    });
-    rx.await.expect(ERROR_CHANNEL)
+impl GlobalFfiCtx {
+    pub async fn do_on_rt<O, F>(&self, future: F) -> O
+    where
+        O: Send + Sync + 'static,
+        F: std::future::Future<Output = O> + Send + 'static,
+    {
+        do_on_rt(&self.rt, future).await
+    }
 }

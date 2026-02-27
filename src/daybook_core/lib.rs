@@ -34,7 +34,7 @@ pub mod repo;
 pub mod repos;
 pub mod rt;
 pub mod stores;
-// pub mod sync;
+pub mod sync;
 pub mod tables;
 
 #[cfg(test)]

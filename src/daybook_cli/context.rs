@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 pub struct Config {
     pub cli_config: Arc<crate::config::CliConfig>,
-    pub global_ctx: Arc<daybook_core::repo::GlobalCtx>,
+    pub global_ctx: Arc<daybook_core::app::GlobalCtx>,
 }
 
 impl Config {
@@ -11,7 +11,7 @@ impl Config {
     }
 
     pub async fn new(cli_config: Arc<crate::config::CliConfig>) -> Res<Self> {
-        let global_ctx = Arc::new(daybook_core::repo::GlobalCtx::new().await?);
+        let global_ctx = Arc::new(daybook_core::app::GlobalCtx::new().await?);
         Ok(Self {
             cli_config,
             global_ctx,
