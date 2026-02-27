@@ -54,9 +54,9 @@ pub mod doc {
     #[derive(Debug, Clone, Hydrate, Reconcile, PartialEq, Serialize, Deserialize)]
     pub struct Doc {
         pub id: DocId,
-        #[autosurgeon(with = "utils_rs::am::codecs::date")]
+        #[autosurgeon(with = "am_utils_rs::codecs::date")]
         pub created_at: Timestamp,
-        #[autosurgeon(with = "utils_rs::am::codecs::date")]
+        #[autosurgeon(with = "am_utils_rs::codecs::date")]
         pub updated_at: Timestamp,
         pub content: DocContent,
         pub props: Vec<DocProp>,

@@ -5,7 +5,6 @@ world bundle {
 
     import wasi:keyvalue/store@0.2.0-draft;
     import townframe:wflow/host;
-    import townframe:am-repo/repo;
 
     export townframe:wflow/bundle;
 }

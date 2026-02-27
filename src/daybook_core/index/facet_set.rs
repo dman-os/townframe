@@ -195,7 +195,7 @@ impl DocFacetSetIndexRepo {
         facet_keys: &HashSet<daybook_types::doc::FacetKey>,
     ) -> Res<()> {
         let serialized_heads =
-            serde_json::to_string(&utils_rs::am::serialize_commit_heads(&heads.0))
+            serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
                 .expect(ERROR_JSON);
         let mut desired_tags: HashSet<String> = facet_keys
             .iter()
@@ -296,7 +296,7 @@ impl DocFacetSetIndexRepo {
                 Ok(DocFacetTagMembership {
                     doc_id,
                     facet_tag: facet_tag.to_string(),
-                    origin_heads: ChangeHashSet(utils_rs::am::parse_commit_heads(&head_strings)?),
+                    origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
                 })
             })
             .collect()

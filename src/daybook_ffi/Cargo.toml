@@ -19,6 +19,7 @@ path = "lib.rs"
 [dependencies]
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
+am_utils_rs = { workspace = true, default-features = false }
 daybook_core = { workspace = true, features = ["uniffi"] }
 daybook_types = { workspace = true, features = ["uniffi"] }
 mltools = { workspace = true, features = ["hf_hub"] }

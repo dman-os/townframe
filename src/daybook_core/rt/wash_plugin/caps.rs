@@ -210,7 +210,7 @@ impl capabilities::HostFacetTokenRo for SharedWashCtx {
             .get(&handle)
             .context("error locating token")
             .to_anyhow()?;
-        Ok(utils_rs::am::serialize_commit_heads(token.heads.as_ref()))
+        Ok(am_utils_rs::serialize_commit_heads(token.heads.as_ref()))
     }
 
     async fn drop(
@@ -376,7 +376,7 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             .get(&handle)
             .context("error locating token")
             .to_anyhow()?;
-        Ok(utils_rs::am::serialize_commit_heads(token.heads.as_ref()))
+        Ok(am_utils_rs::serialize_commit_heads(token.heads.as_ref()))
     }
 
     async fn update(

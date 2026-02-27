@@ -279,7 +279,7 @@ impl DocFacetRefIndexRepo {
         facets: &HashMap<FacetKey, daybook_types::doc::ArcFacetRaw>,
     ) -> Res<()> {
         let serialized_heads =
-            serde_json::to_string(&utils_rs::am::serialize_commit_heads(&heads.0))
+            serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
                 .expect(ERROR_JSON);
 
         sqlx::query("DELETE FROM facet_ref_edges WHERE origin_doc_id = ?1")
@@ -537,7 +537,7 @@ fn reference_kind_from_db_value(value: &str) -> Res<FacetReferenceKind> {
 fn row_to_edge(row: (String, String, String, String, String, String)) -> Res<DocFacetRefEdge> {
     let (origin_doc_id, origin_facet_key, target_doc_id, target_facet_key, reference_kind, heads) =
         row;
-    let heads = utils_rs::am::parse_commit_heads(
+    let heads = am_utils_rs::parse_commit_heads(
         &serde_json::from_str::<Vec<String>>(&heads).expect(ERROR_JSON),
     )
     .expect(ERROR_JSON);

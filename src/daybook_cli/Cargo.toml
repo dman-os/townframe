@@ -13,6 +13,7 @@ path = "main.rs"
 [dependencies]
 # internal
 utils_rs = { workspace = true, features = ["native"] }
+am_utils_rs.workspace = true
 daybook_core = { workspace = true }
 daybook_fuse = { workspace = true }
 daybook_types = { workspace = true }

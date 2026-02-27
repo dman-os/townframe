@@ -1015,7 +1015,7 @@ mod ser_de {
             // FIXME: optimze for non-human readable formats
             let set = <Vec<String>>::deserialize(deserializer)?;
             Ok(Self(
-                utils_rs::am::parse_commit_heads(&set).map_err(serde::de::Error::custom)?,
+                am_utils_rs::parse_commit_heads(&set).map_err(serde::de::Error::custom)?,
             ))
         }
     }

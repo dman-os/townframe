@@ -18,10 +18,10 @@ use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
 mod facet_recovery;
 
 // FIXME: refactor by hand?
+use am_utils_rs::changes::ChangeNotification;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use utils_rs::am::changes::ChangeNotification;
 
 type FacetCacheKey = (DocId, Uuid);
 
@@ -52,7 +52,7 @@ fn parse_commit_heads_array(
         };
         commit_head_strings.push(commit_head.clone());
     }
-    utils_rs::am::parse_commit_heads(&commit_head_strings).wrap_err_with(|| {
+    am_utils_rs::parse_commit_heads(&commit_head_strings).wrap_err_with(|| {
         format!(
             "facet '{}' at_commit path '{}' contains invalid commit hash values",
             origin_facet_key, at_commit_json_path
@@ -76,7 +76,7 @@ pub struct DrawerRepo {
 
     pub registry: Arc<crate::repos::ListenersRegistry>,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<utils_rs::am::changes::ChangeListenerRegistration>,
+    _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
     current_heads: std::sync::RwLock<ChangeHashSet>,
     drawer_am_handle: samod::DocHandle,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
@@ -244,7 +244,7 @@ impl DrawerRepo {
         let ticket = acx
             .change_manager()
             .add_listener(
-                utils_rs::am::changes::ChangeFilter {
+                am_utils_rs::changes::ChangeFilter {
                     doc_id: Some(broker.filter()),
                     path: vec!["docs".into(), "map".into()],
                 },
@@ -557,7 +557,7 @@ impl DrawerRepo {
                         referenced_facet.url_value
                     );
                 }
-                utils_rs::am::parse_commit_heads(&commit_head_strings).wrap_err_with(|| {
+                am_utils_rs::parse_commit_heads(&commit_head_strings).wrap_err_with(|| {
                     format!(
                         "facet '{}' reference '{}' has invalid commit-head fragment",
                         origin_facet_key, referenced_facet.url_value
@@ -642,8 +642,7 @@ impl DrawerRepo {
         out: &mut Vec<DrawerEvent>,
     ) -> Res<()> {
         // Prefix: docs.map
-        if !utils_rs::am::changes::path_prefix_matches(&["docs".into(), "map".into()], &patch.path)
-        {
+        if !am_utils_rs::changes::path_prefix_matches(&["docs".into(), "map".into()], &patch.path) {
             return Ok(());
         }
 
@@ -2172,9 +2171,9 @@ mod tests {
     async fn test_v2_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-v2".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -2271,9 +2270,9 @@ mod tests {
     async fn test_v2_merge() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-v2-merge".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -2384,17 +2383,17 @@ mod tests {
     async fn test_v2_sync_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (client_acx, client_acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "client".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
         .await?;
         let (server_acx, server_acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "server".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -2497,9 +2496,9 @@ mod tests {
     async fn test_v2_additional_apis() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-v2-apis".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -2643,9 +2642,9 @@ mod tests {
     async fn test_v2_metadata_maintenance() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-v2-meta".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -2793,9 +2792,9 @@ mod tests {
     async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-update-actor".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -2864,9 +2863,9 @@ mod tests {
     async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-merge-actor".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3022,9 +3021,9 @@ mod tests {
     async fn test_v2_updated_at_merge() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-v2-updated-at".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3139,9 +3138,9 @@ mod tests {
     async fn test_v2_facet_blame_maintenance() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-v2-blame".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3300,9 +3299,9 @@ mod tests {
     async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-v2-scope".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3377,9 +3376,9 @@ mod tests {
     async fn test_v2_doc_updated_includes_changed_facet_keys() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-v2-changed-facets".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3475,9 +3474,9 @@ mod tests {
     async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-v2-unknown-tag".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3525,9 +3524,9 @@ mod tests {
     async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-v2-self-ref".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3587,9 +3586,9 @@ mod tests {
     {
         utils_rs::testing::setup_tracing_once();
         let (acx, acx_stop) = AmCtx::boot(
-            utils_rs::am::Config {
+            am_utils_rs::Config {
                 peer_id: "test-v2-body-empty-fragment-self".into(),
-                storage: utils_rs::am::StorageConfig::Memory,
+                storage: am_utils_rs::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )

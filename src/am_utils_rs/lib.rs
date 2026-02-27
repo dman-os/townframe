@@ -1,23 +1,40 @@
+mod interlude {
+    pub use utils_rs::prelude::*;
+}
+
+pub mod prelude {
+    pub use crate::codecs::ThroughJson;
+
+    #[cfg(feature = "repo")]
+    pub use crate::AmCtx;
+    pub use automerge;
+    pub use autosurgeon;
+    #[cfg(feature = "repo")]
+    pub use samod;
+}
+
 use crate::interlude::*;
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 pub mod changes;
 pub mod codecs;
+#[cfg(feature = "iroh")]
+pub mod iroh {}
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 use automerge::Automerge;
 use automerge::ChangeHash;
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 use autosurgeon::{Hydrate, Prop, Reconcile};
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 use samod::{DocHandle, DocumentId};
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 use changes::ChangeListenerManager;
 
 /// Configuration for Automerge storage
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Peer ID for this client
@@ -26,14 +43,14 @@ pub struct Config {
     pub storage: StorageConfig,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 #[derive(Debug, Clone)]
 pub enum StorageConfig {
     Disk { path: PathBuf },
     Memory,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 #[derive(Clone)]
 pub struct AmCtx {
     repo: samod::Repo,
@@ -43,13 +60,13 @@ pub struct AmCtx {
     handle_cache: Arc<DHashMap<DocumentId, DocHandle>>,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 pub struct AmCtxStopToken {
     pub repo: samod::Repo,
-    pub change_manager_stop_token: crate::am::changes::ChangeListenerManagerStopToken,
+    pub change_manager_stop_token: crate::changes::ChangeListenerManagerStopToken,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 impl AmCtxStopToken {
     pub async fn stop(self) -> Res<()> {
         self.change_manager_stop_token.stop().await?;
@@ -57,13 +74,13 @@ impl AmCtxStopToken {
         Ok(())
     }
 }
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 pub struct RepoConnection {
     pub peer_info: samod::PeerInfo,
     pub join_handle: tokio::task::JoinHandle<()>,
 }
 
-#[cfg(feature = "automerge-repo")]
+#[cfg(feature = "repo")]
 impl AmCtx {
     pub async fn boot<A: samod::AnnouncePolicy>(
         config: Config,
@@ -120,7 +137,6 @@ impl AmCtx {
         tx_to_peer: futures::channel::mpsc::UnboundedSender<Vec<u8>>,
         direction: samod::ConnDirection,
     ) -> Res<RepoConnection> {
-        use futures::StreamExt;
         let repo = self.repo.clone();
         let conn = tokio::task::block_in_place(|| {
             repo.connect(
@@ -527,7 +543,7 @@ pub fn parse_commit_heads<S: AsRef<str>>(heads: &[S]) -> Res<Arc<[ChangeHash]>> 
         .iter()
         .map(|commit| {
             let mut buf = [0u8; 32];
-            crate::hash::decode_base58_multibase_onto(commit.as_ref(), &mut buf)?;
+            utils_rs::hash::decode_base58_multibase_onto(commit.as_ref(), &mut buf)?;
             eyre::Ok(automerge::ChangeHash(buf))
         })
         .collect()
@@ -536,7 +552,7 @@ pub fn parse_commit_heads<S: AsRef<str>>(heads: &[S]) -> Res<Arc<[ChangeHash]>> 
 pub fn serialize_commit_heads(heads: &[ChangeHash]) -> Vec<String> {
     heads
         .iter()
-        .map(|commit| crate::hash::encode_base58_multibase(commit.0))
+        .map(|commit| utils_rs::hash::encode_base58_multibase(commit.0))
         .collect()
 }
 

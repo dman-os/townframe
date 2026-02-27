@@ -6,6 +6,7 @@ mod interlude {
     pub use std::sync::Arc;
     pub use std::time::Duration;
 
+    pub use am_utils_rs::prelude::*;
     pub use daybook_types::doc::{self, Doc, DocId};
     pub use tokio_util::sync::CancellationToken;
     pub use utils_rs::prelude::*;
@@ -471,7 +472,7 @@ mod tests {
         drawer_stop: Option<daybook_core::repos::RepoStopToken>,
         plugs_repo: Arc<PlugsRepo>,
         plugs_stop: Option<daybook_core::repos::RepoStopToken>,
-        acx_stop: Option<utils_rs::am::AmCtxStopToken>,
+        acx_stop: Option<am_utils_rs::AmCtxStopToken>,
         temp_dir: tempfile::TempDir,
     }
 
@@ -487,9 +488,9 @@ mod tests {
             let sql_ctx = daybook_core::repo::SqlCtx::new(&sql_url).await?;
             daybook_core::repo::set_local_user_path(&sql_ctx.db_pool, "/test-device").await?;
 
-            let (acx, acx_stop) = utils_rs::am::AmCtx::boot(
-                utils_rs::am::Config {
-                    storage: utils_rs::am::StorageConfig::Disk { path: am_path },
+            let (acx, acx_stop) = am_utils_rs::AmCtx::boot(
+                am_utils_rs::Config {
+                    storage: am_utils_rs::StorageConfig::Disk { path: am_path },
                     peer_id: "daybook_fuse_test".to_string(),
                 },
                 Option::<samod::AlwaysAnnounce>::None,

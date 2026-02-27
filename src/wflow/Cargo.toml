@@ -18,7 +18,7 @@ test-harness = ["wasmtime", "insta", "tempfile"]
 wflow_core = { workspace = true, features = ["test-harness"] }
 wflow_tokio.workspace = true
 wash_plugin_wflow.workspace = true
-utils_rs.workspace = true
+utils_rs = { workspace = true, features = ["hash"] }
 
 # encodign
 serde.workspace = true

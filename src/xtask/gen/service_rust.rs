@@ -956,7 +956,7 @@ fn record_field(
         }
         // Emit autosurgeon date helper at field-level when the parent record requested autosurgeon
         if cx.attrs.automerge {
-            writeln!(buf, "#[autosurgeon(with = \"utils_rs::am::codecs::date\")]",)?;
+            writeln!(buf, "#[autosurgeon(with = \"am_utils_rs::codecs::date\")]",)?;
         }
     }
     write!(

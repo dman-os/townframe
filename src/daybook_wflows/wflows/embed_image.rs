@@ -44,7 +44,7 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     let embed_result = mltools_embed::embed_image(blob_facet_token)
         .map_err(|err| JobErrorX::Terminal(ferr!("error running embed-image: {err}")))?;
 
-    let heads = utils_rs::am::parse_commit_heads(&args.heads)
+    let heads = am_utils_rs::parse_commit_heads(&args.heads)
         .map_err(|err| JobErrorX::Terminal(ferr!("invalid heads from facet-routine: {err}")))?;
     let facet_key = daybook_types::doc::FacetKey::from(blob_facet_key.as_str());
     let facet_ref =

@@ -101,6 +101,13 @@ struct SessionHandle {
     join_handle: tokio::task::JoinHandle<()>,
 }
 
+impl SessionHandle {
+    fn request_cancel(&self) {
+        let _ = self.resume_tx.send(SessionResume::Stop);
+        self.cancel_token.cancel();
+    }
+}
+
 struct WasmRunSession {
     session: Option<SessionHandle>,
 }
@@ -452,8 +459,17 @@ impl WflowPlugin {
     async fn wait_for_session_yield(
         &self,
         session: &mut SessionHandle,
+        cancel_token: &CancellationToken,
     ) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
-        let Some(trap) = session.yield_rx.recv().await else {
+        let trap = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                session.request_cancel();
+                return Ok(job_events::JobRunResult::Aborted);
+            }
+            trap = session.yield_rx.recv() => trap
+        };
+        let Some(trap) = trap else {
             return Err(job_events::JobRunResult::WorkerErr(
                 job_events::JobRunWorkerError::Other {
                     msg: "session loop closed without yielding".into(),
@@ -661,6 +677,7 @@ impl service::WflowServiceHost for WflowPlugin {
         job_id: Arc<str>,
         journal: state::JobState,
         mut session: Option<Box<dyn service::WflowServiceSession>>,
+        cancel_token: CancellationToken,
         args: &Self::ExtraArgs,
     ) -> service::RunJobReply {
         let Some(workload) = self
@@ -746,7 +763,9 @@ impl service::WflowServiceHost for WflowPlugin {
             }
         };
 
-        let result = self.wait_for_session_yield(&mut session).await;
+        let result = self
+            .wait_for_session_yield(&mut session, &cancel_token)
+            .await;
         match &result {
             Ok(_) | Err(_) => {
                 session.next_run_id = run_ctx.run_id + 1;

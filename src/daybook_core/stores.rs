@@ -45,31 +45,31 @@ pub trait Store: Hydrate + Reconcile + Send + Sync + 'static {
 
     async fn register_change_listener<F>(
         acx: &AmCtx,
-        broker: &utils_rs::am::changes::DocChangeBroker,
+        broker: &am_utils_rs::changes::DocChangeBroker,
         path: Vec<autosurgeon::Prop<'static>>,
         on_change: F,
-    ) -> Res<utils_rs::am::changes::ChangeListenerRegistration>
+    ) -> Res<am_utils_rs::changes::ChangeListenerRegistration>
     where
-        F: Fn(Vec<utils_rs::am::changes::ChangeNotification>) + Send + Sync + 'static,
+        F: Fn(Vec<am_utils_rs::changes::ChangeNotification>) + Send + Sync + 'static,
     {
         Self::register_change_listener_for_prop(acx, broker, Self::prop(), path, on_change).await
     }
 
     async fn register_change_listener_for_prop<F>(
         acx: &AmCtx,
-        broker: &utils_rs::am::changes::DocChangeBroker,
+        broker: &am_utils_rs::changes::DocChangeBroker,
         prop: Cow<'static, str>,
         mut path: Vec<autosurgeon::Prop<'static>>,
         on_change: F,
-    ) -> Res<utils_rs::am::changes::ChangeListenerRegistration>
+    ) -> Res<am_utils_rs::changes::ChangeListenerRegistration>
     where
-        F: Fn(Vec<utils_rs::am::changes::ChangeNotification>) + Send + Sync + 'static,
+        F: Fn(Vec<am_utils_rs::changes::ChangeNotification>) + Send + Sync + 'static,
     {
         path.insert(0, prop.into());
         let ticket = acx
             .change_manager()
             .add_listener(
-                utils_rs::am::changes::ChangeFilter {
+                am_utils_rs::changes::ChangeFilter {
                     path,
                     doc_id: Some(broker.filter()),
                 },

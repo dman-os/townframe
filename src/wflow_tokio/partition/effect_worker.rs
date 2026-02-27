@@ -180,12 +180,14 @@ impl TokioEffectWorker {
                     .lock()
                     .await
                     .insert(Arc::clone(&job_id), effect_id.clone());
-                let run_fut = self.run_job_effect(effect_id.clone(), run_id, Arc::clone(&job_id));
-                let result = tokio::select! {
-                    biased;
-                    _ = run_abort_token.cancelled() => job_events::JobRunResult::Aborted,
-                    res = run_fut => res,
-                };
+                let result = self
+                    .run_job_effect(
+                        effect_id.clone(),
+                        run_id,
+                        Arc::clone(&job_id),
+                        run_abort_token.clone(),
+                    )
+                    .await;
                 self.job_to_effect_id.lock().await.remove(&job_id);
                 self.effect_cancel_tokens.lock().await.remove(&effect_id);
                 let elapsed = run_start_instant.elapsed();
@@ -227,6 +229,7 @@ impl TokioEffectWorker {
         effect_id: effects::EffectId,
         run_id: u64,
         job_id: Arc<str>,
+        cancel_token: CancellationToken,
     ) -> job_events::JobRunResult {
         let job_state_snapshot = {
             let jobs = self.state.read_jobs().await;
@@ -267,6 +270,7 @@ impl TokioEffectWorker {
                             Arc::clone(&job_id),
                             job_state_snapshot.clone(),
                             cached.take().map(|session_entry| session_entry.session),
+                            cancel_token.clone(),
                             meta,
                         )
                         .await,
@@ -288,6 +292,7 @@ impl TokioEffectWorker {
                             Arc::clone(&job_id),
                             job_state_snapshot.clone(),
                             cached.take().map(|session_entry| session_entry.session),
+                            cancel_token,
                             &(),
                         )
                         .await,

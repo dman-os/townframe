@@ -1,5 +1,6 @@
 use crate::interlude::*;
 use std::any::Any;
+use tokio_util::sync::CancellationToken;
 
 use wflow_core::partition::effects;
 use wflow_core::partition::job_events;
@@ -30,6 +31,7 @@ pub trait WflowServiceHost {
         job_id: Arc<str>,
         journal: state::JobState,
         session: Option<Box<dyn WflowServiceSession>>,
+        cancel_token: CancellationToken,
         args: &Self::ExtraArgs,
     ) -> RunJobReply;
 
