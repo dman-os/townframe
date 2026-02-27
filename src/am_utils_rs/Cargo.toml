@@ -21,20 +21,29 @@ repo = [
 [dependencies]
 utils_rs = { workspace = true, features = ["hash"] }
 
+#
+# async
 tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread", "time"] }
 tokio-util = { workspace = true }
 tokio-tungstenite = { version = "0.27.0", features = ["url"], optional = true }
 
+#
 # automerge
 automerge = { workspace = true }
 autosurgeon = { workspace = true }
 samod = { workspace = true, optional = true }
 
+#
 # encoding
 serde.workspace = true
 data-encoding.workspace = true
 bytes.workspace = true
 
+#
 # errors
 thiserror.workspace = true
 iroh = { workspace = true, optional = true }
+
+#
+# logging
+tracing.workspace = true

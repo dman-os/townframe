@@ -240,6 +240,8 @@ pub async fn init_from_globals(
 }
 
 pub mod globals {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use sqlx::SqlitePool;
 
     use crate::interlude::*;
@@ -293,6 +295,38 @@ pub mod globals {
         Ok(())
     }
 
+    const REPO_ID_KEY: &str = "repo_id";
+
+    pub async fn get_repo_id(sql: &SqlitePool) -> Res<Option<String>> {
+        let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
+            .bind(REPO_ID_KEY)
+            .fetch_optional(sql)
+            .await?;
+        Ok(rec)
+    }
+
+    pub async fn set_repo_id(sql: &SqlitePool, repo_id: &str) -> Res<()> {
+        sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(REPO_ID_KEY)
+            .bind(repo_id)
+            .execute(sql)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_or_init_repo_id(sql: &SqlitePool) -> Res<String> {
+        if let Some(repo_id) = get_repo_id(sql).await? {
+            return Ok(repo_id);
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let repo_id = format!("repo-{}-{:016x}", now, rand::random::<u64>());
+        set_repo_id(sql, &repo_id).await?;
+        Ok(repo_id)
+    }
+
     #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
     pub struct RepoConfig {
@@ -307,7 +341,26 @@ pub mod globals {
         pub created_at_unix_secs: i64,
         pub last_opened_at_unix_secs: i64,
     }
+    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+    pub struct SyncConfig {
+        pub known_devices: Vec<SyncDeviceEntry>,
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct SyncDeviceEntry {
+        pub endpoint_id: String,
+        #[serde(default = "default_sync_device_name")]
+        pub name: String,
+        pub added_at_unix_secs: i64,
+        pub last_connected_at_unix_secs: Option<i64>,
+    }
+
+    fn default_sync_device_name() -> String {
+        "unknown-device".to_string()
+    }
+
     const REPO_CONFIG_KEY: &str = "repo_config";
+    const SYNC_CONFIG_KEY: &str = "sync_config";
 
     pub async fn get_repo_config(sql: &SqlitePool) -> Res<RepoConfig> {
         let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
@@ -328,6 +381,28 @@ pub mod globals {
         .bind(&json)
         .execute(sql)
         .await?;
+        Ok(())
+    }
+
+    pub async fn get_sync_config(sql: &SqlitePool) -> Res<SyncConfig> {
+        let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
+            .bind(SYNC_CONFIG_KEY)
+            .fetch_optional(sql)
+            .await?;
+        let state = match rec {
+            Some(json) => serde_json::from_str::<SyncConfig>(&json)?,
+            None => SyncConfig::default(),
+        };
+        Ok(state)
+    }
+
+    pub async fn set_sync_config(sql: &SqlitePool, state: &SyncConfig) -> Res<()> {
+        let json = serde_json::to_string(state)?;
+        sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(SYNC_CONFIG_KEY)
+            .bind(&json)
+            .execute(sql)
+            .await?;
         Ok(())
     }
 }

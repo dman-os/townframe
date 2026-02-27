@@ -123,7 +123,9 @@ pub fn setup_tracing() -> Res<()> {
     let filter: Option<String> = None;
 
     #[allow(clippy::unnecessary_literal_unwrap)]
-    let filter = filter.unwrap_or_else(|| "info,samod_core=warn,ort::logging=warn".into());
+    let filter = filter.unwrap_or_else(||
+        "info,samod_core=warn,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn".into()
+    );
 
     use tracing_subscriber::prelude::*;
     let registry = tracing_subscriber::registry()

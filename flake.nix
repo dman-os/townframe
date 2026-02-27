@@ -49,7 +49,6 @@
             KANIDM_SKIP_HOSTNAME_VERIFICATION = "true";
             KANIDM_ACCEPT_INVALID_CERTS = "true";
             WASMCLOUD_OCI_ALLOWED_INSECURE = "localhost:5000";
-            RUST_LOG="INFO,ort=WARN";
           };
 
           # Android SDK/NDK without Studio (for CI)

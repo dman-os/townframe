@@ -93,6 +93,7 @@ impl crate::stores::Store for ConfigStore {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum ConfigEvent {
     Changed { heads: ChangeHashSet },
+    SyncDevicesChanged,
 }
 
 pub struct ConfigRepo {
@@ -104,6 +105,7 @@ pub struct ConfigRepo {
     plug_repo: Arc<PlugsRepo>,
     local_user_path: daybook_types::doc::UserPath,
     local_actor_id: automerge::ActorId,
+    sql_pool: sqlx::SqlitePool,
     cancel_token: CancellationToken,
     global_props_doc_init_lock: tokio::sync::Mutex<()>,
     _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
@@ -125,6 +127,7 @@ impl ConfigRepo {
         app_doc_id: DocumentId,
         plug_repo: Arc<PlugsRepo>,
         local_user_path: daybook_types::doc::UserPath,
+        sql_pool: sqlx::SqlitePool,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
 
@@ -183,6 +186,7 @@ impl ConfigRepo {
             plug_repo,
             local_user_path,
             local_actor_id,
+            sql_pool,
             cancel_token: main_cancel_token.child_token(),
             global_props_doc_init_lock: tokio::sync::Mutex::new(()),
             _change_listener_tickets: vec![ticket],
@@ -465,6 +469,83 @@ impl ConfigRepo {
                     .map(|doc| doc.0.user_path.clone())
             })
             .await
+    }
+
+    pub async fn get_repo_id(&self) -> Res<String> {
+        crate::app::globals::get_or_init_repo_id(&self.sql_pool).await
+    }
+
+    pub async fn list_known_sync_devices(&self) -> Res<Vec<crate::app::globals::SyncDeviceEntry>> {
+        let config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
+        Ok(config.known_devices)
+    }
+
+    pub async fn upsert_known_sync_device(
+        &self,
+        device: crate::app::globals::SyncDeviceEntry,
+    ) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let mut config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
+        if let Some(existing) = config
+            .known_devices
+            .iter_mut()
+            .find(|entry| entry.endpoint_id == device.endpoint_id)
+        {
+            *existing = device;
+        } else {
+            config.known_devices.push(device);
+        }
+        crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
+        self.registry.notify([ConfigEvent::SyncDevicesChanged]);
+        Ok(())
+    }
+
+    pub async fn remove_known_sync_device(&self, endpoint_id: &str) -> Res<bool> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let mut config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
+        let before = config.known_devices.len();
+        config
+            .known_devices
+            .retain(|entry| entry.endpoint_id != endpoint_id);
+        let removed = config.known_devices.len() != before;
+        if removed {
+            crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
+            self.registry.notify([ConfigEvent::SyncDevicesChanged]);
+        }
+        Ok(removed)
+    }
+
+    pub async fn ensure_local_sync_device(
+        &self,
+        endpoint_id: String,
+        device_name: &str,
+    ) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let mut config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
+        if config
+            .known_devices
+            .iter()
+            .any(|entry| entry.endpoint_id == endpoint_id)
+        {
+            return Ok(());
+        }
+        config
+            .known_devices
+            .push(crate::app::globals::SyncDeviceEntry {
+                endpoint_id,
+                name: device_name.to_string(),
+                added_at_unix_secs: jiff::Timestamp::now().as_second(),
+                last_connected_at_unix_secs: None,
+            });
+        crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
+        self.registry.notify([ConfigEvent::SyncDevicesChanged]);
+        Ok(())
     }
 }
 

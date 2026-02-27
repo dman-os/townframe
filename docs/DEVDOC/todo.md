@@ -25,6 +25,7 @@
 
 - [ ] P2P
   - [ ] iroh
+- [ ] Deterministic doc ids for main docs
 - [ ] Prune dependencies
 - [ ] Blobs server
   - [ ] Iroh blobs?
@@ -60,7 +61,7 @@
   - [ ] `WflowNotFound`
     - `HostEvent(WflowRegistered)``?
 - [ ] Cancellation and shutdown
-  - [ ] Kotlin repo's should call close
+  - [ ] Kotlin repo's should call close on Activity teardown
   - [ ] Assert samod fsyncs reliably
   - [ ] Notification handling
     - [ ] How to avoid missing triage work?

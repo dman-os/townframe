@@ -18,21 +18,10 @@ pub struct RepoLayout {
     pub lock_path: std::path::PathBuf,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RepoOpenOptions {
     pub ensure_initialized: bool,
-    pub peer_id: String,
     pub ws_connector_url: Option<String>,
-}
-
-impl Default for RepoOpenOptions {
-    fn default() -> Self {
-        Self {
-            ensure_initialized: false,
-            peer_id: "daybook_client".to_string(),
-            ws_connector_url: None,
-        }
-    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -111,6 +100,9 @@ pub struct RepoCtx {
     pub doc_drawer: samod::DocHandle,
     pub local_actor_id: automerge::ActorId,
     pub local_user_path: String,
+    pub repo_id: String,
+    pub iroh_public_key: String,
+    pub iroh_secret_key: iroh::SecretKey,
 }
 
 impl RepoCtx {
@@ -131,24 +123,22 @@ impl RepoCtx {
             );
         }
 
-        let am_config = am_utils_rs::Config {
-            storage: am_utils_rs::StorageConfig::Disk {
-                path: layout.samod_root.clone(),
-            },
-            peer_id: options.peer_id,
-        };
         let sql_config = SqlConfig {
             database_url: format!("sqlite://{}", layout.sqlite_path.display()),
         };
         let sql = SqlCtx::new(&sql_config.database_url).await?;
-
-        let local_user_path = match globals::get_local_user_path(&sql.db_pool).await? {
-            Some(path) => path,
-            None => {
-                let default_path = "/default-device".to_string();
-                globals::set_local_user_path(&sql.db_pool, &default_path).await?;
-                default_path
-            }
+        let repo_id = crate::app::globals::get_or_init_repo_id(&sql.db_pool).await?;
+        let identity =
+            crate::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &repo_id).await?;
+        let iroh_public_key = identity.iroh_public_key.to_string();
+        let local_user_path = format!("/{}", iroh_public_key);
+        globals::set_local_user_path(&sql.db_pool, &local_user_path).await?;
+        let peer_id = format!("/{}/{}", identity.repo_id, iroh_public_key);
+        let am_config = am_utils_rs::Config {
+            storage: am_utils_rs::StorageConfig::Disk {
+                path: layout.samod_root.clone(),
+            },
+            peer_id,
         };
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(
             &daybook_types::doc::UserPath::from(local_user_path.clone()),
@@ -179,6 +169,7 @@ impl RepoCtx {
                 &doc_drawer,
                 &local_actor_id,
                 &local_user_path,
+                &sql.db_pool,
                 layout.blobs_root.clone(),
             )
             .await?;
@@ -196,6 +187,9 @@ impl RepoCtx {
             doc_drawer,
             local_actor_id,
             local_user_path,
+            repo_id: identity.repo_id,
+            iroh_public_key,
+            iroh_secret_key: identity.iroh_secret_key,
         })
     }
 
@@ -205,6 +199,7 @@ impl RepoCtx {
         doc_drawer: &samod::DocHandle,
         local_actor_id: &automerge::ActorId,
         local_user_path: &str,
+        sql: &SqlitePool,
         blobs_root: std::path::PathBuf,
     ) -> Res<()> {
         use crate::blobs::BlobsRepo;
@@ -229,6 +224,7 @@ impl RepoCtx {
             doc_app.document_id().clone(),
             Arc::clone(&plugs_repo),
             daybook_types::doc::UserPath::from(local_user_path.to_string()),
+            sql.clone(),
         )
         .await?;
         let (_tables_repo, tables_stop) = TablesRepo::load(

@@ -20,6 +20,8 @@ pub mod changes;
 pub mod codecs;
 #[cfg(feature = "iroh")]
 pub mod iroh;
+#[cfg(feature = "repo")]
+pub mod peers;
 
 #[cfg(feature = "repo")]
 use automerge::Automerge;
@@ -32,6 +34,8 @@ use samod::{DocHandle, DocumentId};
 
 #[cfg(feature = "repo")]
 use changes::ChangeListenerManager;
+#[cfg(feature = "repo")]
+use tokio_util::sync::CancellationToken;
 
 /// Configuration for Automerge storage
 #[cfg(feature = "repo")]
@@ -81,7 +85,18 @@ impl AmCtxStopToken {
 #[cfg(feature = "repo")]
 pub struct RepoConnection {
     pub peer_info: samod::PeerInfo,
-    pub join_handle: tokio::task::JoinHandle<()>,
+    join_handle: Option<tokio::task::JoinHandle<()>>,
+    cancel_token: CancellationToken,
+}
+
+impl RepoConnection {
+    pub async fn stop(self) -> Res<()> {
+        self.cancel_token.cancel();
+        if let Some(join_handle) = self.join_handle {
+            utils_rs::wait_on_handle_with_timeout(join_handle, 5 * 1000).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "repo")]
@@ -154,17 +169,29 @@ impl AmCtx {
             .handshake_complete()
             .await
             .map_err(|err| ferr!("failed on handshake: {err:?}"))?;
-        let join_handle = tokio::spawn(
+        let cancel_token = CancellationToken::new();
+        let join_handle = tokio::spawn({
+            let cancel_token = cancel_token.clone();
             async move {
-                let fin_reason = conn.finished().await;
-                info!(?fin_reason, "sync server connector task finished");
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        info!("connection cancelled, dropping");
+                    }
+                    fin_reason = conn.finished() => {
+                        info!(?fin_reason, "sync server connector task finished");
+                    }
+                }
             }
-            .instrument(tracing::info_span!("mpsc sync server connector task")),
-        );
+            .instrument(tracing::info_span!(
+                "mpsc sync server connector task",
+                peer = ?peer_info
+            ))
+        });
 
         Ok(RepoConnection {
             peer_info,
-            join_handle,
+            join_handle: Some(join_handle),
+            cancel_token,
         })
     }
 

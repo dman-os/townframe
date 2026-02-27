@@ -64,7 +64,6 @@ impl FfiCtx {
                 &repo_root_for_init,
                 daybook_core::repo::RepoOpenOptions {
                     ensure_initialized: true,
-                    peer_id: "daybook_client".to_string(),
                     ws_connector_url: Some("ws://0.0.0.0:8090".to_string()),
                 },
             )

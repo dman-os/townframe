@@ -8,6 +8,7 @@ use crate::interlude::*;
 use codec::Codec;
 use samod::ConnDirection;
 use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_util::sync::CancellationToken;
 
 use super::AmCtx;
 
@@ -16,15 +17,15 @@ mod codec;
 impl AmCtx {
     pub const SYNC_ALPN: &[u8] = b"townframe/automerge-repo/1";
 
+    #[tracing::instrument(skip(self, endpoint))]
     pub async fn spawn_connection_iroh(
         &self,
         endpoint: &iroh::Endpoint,
-        addr: impl Into<iroh::EndpointAddr>,
+        addr: iroh::EndpointAddr,
         // rx_from_peer: iroh::endpoint::RecvStream,
         // tx_to_peer: iroh::endpoint::SendStream,
         // direction: samod::ConnDirection,
     ) -> Res<super::RepoConnection> {
-        let addr = addr.into();
         let endpoint_id = addr.id;
         let conn = endpoint.connect(addr, Self::SYNC_ALPN).await?;
         let (tx, rx) = conn.open_bi().await?;
@@ -42,22 +43,40 @@ impl AmCtx {
             .handshake_complete()
             .await
             .map_err(|err| ferr!("failed on handshake: {err:?}"))?;
-        let join_handle = tokio::spawn(
+        let cancel_token = CancellationToken::new();
+        let join_handle = tokio::spawn({
+            let cancel_token = cancel_token.clone();
             async move {
-                let fin_reason = conn.finished().await;
-                info!(?fin_reason, "sync server connector task finished");
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        info!("iroh connection cancelled, dropping");
+                    }
+                    fin_reason = conn.finished() => {
+                        info!(?fin_reason, "iroh connection finished");
+                    }
+                }
             }
-            .instrument(tracing::info_span!("mpsc sync server connector task")),
-        );
+            .instrument(tracing::info_span!(
+                "iroh connector task",
+                peer = ?peer_info
+            ))
+        });
 
         Ok(super::RepoConnection {
             peer_info,
-            join_handle,
+            join_handle: Some(join_handle),
+            cancel_token,
         })
     }
 }
 
-impl iroh::protocol::ProtocolHandler for AmCtx {
+#[derive(Clone, Debug)]
+pub struct IrohRepoProtocol {
+    pub acx: AmCtx,
+    pub conn_tx: tokio::sync::mpsc::UnboundedSender<crate::RepoConnection>,
+}
+
+impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
     async fn accept(
         &self,
         connection: iroh::endpoint::Connection,
@@ -66,7 +85,7 @@ impl iroh::protocol::ProtocolHandler for AmCtx {
 
         let (tx, rx) = connection.accept_bi().await?;
 
-        let repo = self.repo.clone();
+        let repo = self.acx.repo.clone();
         let conn = tokio::task::block_in_place(|| {
             repo.connect(
                 FramedRead::new(rx, Codec::new(endpoint_id)),
@@ -76,21 +95,41 @@ impl iroh::protocol::ProtocolHandler for AmCtx {
         })
         .map_err(iroh::protocol::AcceptError::from_err)?;
 
-        // let peer_info = conn
-        //     .handshake_complete()
-        //     .await
-        //     .map_err(|err| Box::from(format!("failed on handshake: {err:?}")))
-        //     .map_err(iroh::protocol::AcceptError::from_boxed)?;
-        // let join_handle = tokio::spawn(
-        //     async move {}.instrument(tracing::info_span!("mpsc sync server connector task")),
-        // );
-        let fin_reason = conn.finished().await;
-        info!(?fin_reason, %endpoint_id, "incoming connection finished");
+        let peer_info = conn
+            .handshake_complete()
+            .await
+            .map_err(|err| Box::from(format!("failed on handshake: {err:?}")))
+            .map_err(iroh::protocol::AcceptError::from_boxed)?;
+
+        let span = tracing::info_span!(
+            "iroh incoming connection task",
+            peer = ?peer_info
+        );
+
+        let cancel_token = CancellationToken::new();
+        self.conn_tx
+            .send(crate::RepoConnection {
+                join_handle: None,
+                peer_info,
+                cancel_token: cancel_token.clone(),
+            })
+            .expect(ERROR_CHANNEL);
+
+        let _guard = span.enter();
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                info!("connection cancelled, dropping");
+            }
+            fin_reason = conn.finished() => {
+                info!(?fin_reason, "incoming connection finished");
+                info!(?fin_reason, "sync server connector task finished");
+            }
+        }
 
         Ok(())
     }
 
     async fn shutdown(&self) {
-        self.repo.stop().await
+        // The AmCtx stop token owns repo shutdown; protocol shutdown only tears down routing.
     }
 }

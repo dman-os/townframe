@@ -610,11 +610,14 @@ impl SwitchWorker {
             }
             SwitchEvent::Config(event) => {
                 let config_heads = match &**event {
-                    crate::config::ConfigEvent::Changed { heads } => heads.clone(),
+                    crate::config::ConfigEvent::Changed { heads } => Some(heads.clone()),
+                    crate::config::ConfigEvent::SyncDevicesChanged => None,
                 };
                 self.store
                     .mutate_sync(|store| {
-                        store.config_heads = Some(config_heads);
+                        if let Some(config_heads) = config_heads {
+                            store.config_heads = Some(config_heads);
+                        }
                     })
                     .await?;
             }

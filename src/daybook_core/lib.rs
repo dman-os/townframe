@@ -33,6 +33,7 @@ pub mod repo;
 #[allow(unused)]
 pub mod repos;
 pub mod rt;
+pub mod secrets;
 pub mod stores;
 pub mod sync;
 pub mod tables;

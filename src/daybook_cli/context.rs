@@ -33,7 +33,6 @@ pub async fn open_repo_ctx(
             &config.cli_config.repo_path,
             daybook_core::repo::RepoOpenOptions {
                 ensure_initialized,
-                peer_id: "daybook_client".to_string(),
                 ws_connector_url,
             },
         )

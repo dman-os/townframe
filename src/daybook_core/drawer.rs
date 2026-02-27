@@ -768,6 +768,7 @@ impl DrawerRepo {
             };
 
             let mut results = Vec::new();
+            // FIXME: wtf, why are we not using autosurgeon hydrate here?
             for item in doc.map_range(&map_id, ..) {
                 let doc_id = DocId::from(item.key.clone());
                 let entry_id = item.id();

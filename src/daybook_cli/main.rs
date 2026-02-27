@@ -1,3 +1,5 @@
+//! FIXME: move a lot of the repo sync stuff into lazy
+
 #[allow(unused)]
 mod interlude {
     pub use am_utils_rs::prelude::*;
@@ -18,7 +20,9 @@ use daybook_core::config::ConfigRepo;
 use daybook_core::drawer::DrawerRepo;
 use daybook_core::plugs::{manifest, PlugsRepo};
 use daybook_core::progress::ProgressRepo;
+use daybook_core::repos::Repo;
 use daybook_core::rt::dispatch::DispatchRepo;
+use daybook_core::sync::{IrohSyncEvent, IrohSyncRepo};
 
 mod config;
 mod context;
@@ -100,6 +104,20 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    if let StaticCommands::Clone {
+        source,
+        destination,
+    } = &cli.command
+    {
+        clone_repo_from_url(
+            &conf.global_ctx,
+            source,
+            &std::path::PathBuf::from(destination),
+        )
+        .await?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
     if !is_initialized {
         error!(
             path = ?conf.cli_config.repo_path,
@@ -135,7 +153,9 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     .await?;
 
     match cli.command {
-        StaticCommands::Init {} | StaticCommands::Completions { .. } => unreachable!(),
+        StaticCommands::Init {}
+        | StaticCommands::Clone { .. }
+        | StaticCommands::Completions { .. } => unreachable!(),
         StaticCommands::Dump => {
             let mut drawer = ctx.doc_drawer.with_document(|doc| {
                 // eyre::Ok(doc.hydrate(None))
@@ -413,6 +433,162 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 }
             }
         }
+        StaticCommands::Sync {
+            sync_urls,
+            exit_when_synced,
+        } => {
+            let (config_repo, config_stop) = ConfigRepo::load(
+                ctx.acx.clone(),
+                ctx.doc_app.document_id().clone(),
+                Arc::clone(&plugs_repo),
+                daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+                ctx.sql.db_pool.clone(),
+            )
+            .await?;
+            let (sync_repo, sync_stop) = IrohSyncRepo::boot(
+                ctx.acx.clone(),
+                Arc::clone(&config_repo),
+                ctx.iroh_secret_key.clone(),
+                ctx.doc_app.document_id().clone(),
+                ctx.doc_drawer.document_id().clone(),
+                // FIXME: load this from the config repo
+                format!("daybook-cli-{}", std::env::consts::ARCH),
+            )
+            .await?;
+            let local_ticket_url = sync_repo.get_ticket_url().await?;
+            println!("{}", local_ticket_url);
+
+            let mut endpoint_ids = Vec::with_capacity(sync_urls.len());
+            for sync_url in &sync_urls {
+                let bootstrap = sync_repo.connect_url(sync_url).await?;
+                endpoint_ids.push(bootstrap.endpoint_id);
+            }
+
+            if exit_when_synced {
+                if endpoint_ids.is_empty() {
+                    error!("--exit-when-synced requires at least one sync URL");
+                    sync_stop.stop().await?;
+                    config_stop.stop().await?;
+                    return Ok(ExitCode::FAILURE);
+                }
+                let (mut full_sync, full_stop) = sync_repo
+                    .full_sync_peers(Arc::clone(&drawer_repo), &endpoint_ids)
+                    .await?;
+                let mut sync_rx = full_sync.subscribe();
+                loop {
+                    tokio::select! {
+                        biased;
+                        val = sync_rx.recv() => {
+                            let Ok(res) = val else {
+                                break;
+                            };
+                            info!(?res, "sync event");
+                        }
+                        res = full_sync.wait_until_done() => {
+                            res?;
+                        }
+                    };
+                }
+                full_stop.stop().await?;
+            } else {
+                let listener = sync_repo.subscribe(daybook_core::repos::SubscribeOpts::new(512));
+                sync_repo.connect_known_devices_once().await?;
+                loop {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {
+                            break;
+                        }
+                        event = listener.recv_lossy_async() => {
+                            match event {
+                                Ok(event) => {
+                                    match &*event {
+                                        IrohSyncEvent::DocSyncUpdates { updates } => {
+                                            info!(?updates, "docs synced");
+                                        }
+                                        IrohSyncEvent::IncomingConnetion { peer_info } => {
+                                            info!(peer_id = ?peer_info.peer_id, "incoming connection");
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    warn!(?err, "sync listener closed");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            sync_stop.stop().await?;
+            config_stop.stop().await?;
+        }
+        StaticCommands::Devices { command } => {
+            let (config_repo, config_stop) = ConfigRepo::load(
+                ctx.acx.clone(),
+                ctx.doc_app.document_id().clone(),
+                Arc::clone(&plugs_repo),
+                daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+                ctx.sql.db_pool.clone(),
+            )
+            .await?;
+            match command {
+                DevicesCommands::Ls => {
+                    use comfy_table::presets::NOTHING;
+                    use comfy_table::Table;
+
+                    let mut devices = config_repo.list_known_sync_devices().await?;
+                    devices.sort_by_key(|device| device.added_at_unix_secs);
+
+                    let mut table = Table::new();
+                    table
+                        .load_preset(NOTHING)
+                        .set_header(vec!["Endpoint", "Name", "Added At"]);
+                    for device in devices {
+                        table.add_row(vec![
+                            device.endpoint_id,
+                            device.name,
+                            device.added_at_unix_secs.to_string(),
+                        ]);
+                    }
+                    println!("{table}");
+                }
+                DevicesCommands::Add {
+                    iroh_ticket_url,
+                    name,
+                } => {
+                    let bootstrap =
+                        daybook_core::sync::resolve_bootstrap_from_url(&iroh_ticket_url).await?;
+                    let local_repo_id = config_repo.get_repo_id().await?;
+                    if bootstrap.repo_id != local_repo_id {
+                        eyre::bail!(
+                            "ticket repo_id mismatch (local={}, remote={})",
+                            local_repo_id,
+                            bootstrap.repo_id
+                        );
+                    }
+                    let device_name = if let Some(name) = name {
+                        name.clone()
+                    } else if let Some(name) = bootstrap.device_name {
+                        name
+                    } else {
+                        bootstrap.endpoint_id.clone()
+                    };
+                    config_repo
+                        .upsert_known_sync_device(daybook_core::app::globals::SyncDeviceEntry {
+                            endpoint_id: bootstrap.endpoint_id,
+                            name: device_name,
+                            added_at_unix_secs: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64,
+                            last_connected_at_unix_secs: None,
+                        })
+                        .await?;
+                }
+            }
+            config_stop.stop().await?;
+        }
     }
     drawer_stop.stop().await?;
     plugs_stop.stop().await?;
@@ -421,6 +597,166 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+async fn clone_repo_from_url(
+    global_ctx: &daybook_core::app::GlobalCtx,
+    source_url: &str,
+    destination: &std::path::Path,
+) -> Res<()> {
+    let destination = std::path::absolute(destination)?;
+    if destination.exists() {
+        let mut read_dir = tokio::fs::read_dir(&destination).await?;
+        if read_dir.next_entry().await?.is_some() {
+            eyre::bail!("clone destination must be empty: {}", destination.display());
+        }
+    } else {
+        tokio::fs::create_dir_all(&destination).await?;
+    }
+
+    let bootstrap = daybook_core::sync::resolve_bootstrap_from_url(source_url).await?;
+    let sqlite_path = destination.join("sqlite.db");
+    let sql =
+        daybook_core::app::SqlCtx::new(&format!("sqlite://{}", sqlite_path.display())).await?;
+    daybook_core::app::globals::set_repo_id(&sql.db_pool, &bootstrap.repo_id).await?;
+    let identity =
+        daybook_core::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &bootstrap.repo_id)
+            .await?;
+    let local_user_path = format!("/{}", identity.iroh_public_key);
+    daybook_core::app::globals::set_local_user_path(&sql.db_pool, &local_user_path).await?;
+
+    {
+        let (acx, acx_stop) = am_utils_rs::AmCtx::boot(
+            am_utils_rs::Config {
+                storage: am_utils_rs::StorageConfig::Disk {
+                    path: destination.join("samod"),
+                },
+                peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
+            },
+            Option::<samod::AlwaysAnnounce>::None,
+        )
+        .await?;
+        info!("pulling required docs XXX");
+
+        let endpoint = iroh::Endpoint::builder()
+            .secret_key(identity.iroh_secret_key.clone())
+            .bind()
+            .await?;
+        let conn = acx
+            .spawn_connection_iroh(&endpoint, bootstrap.endpoint_addr.clone())
+            .await?;
+
+        daybook_core::sync::pull_required_docs_once(
+            &acx,
+            &bootstrap.app_doc_id,
+            &bootstrap.drawer_doc_id,
+            std::time::Duration::from_secs(30),
+        )
+        .await?;
+
+        daybook_core::app::globals::set_init_state(
+            &sql.db_pool,
+            &daybook_core::app::globals::InitState::Created {
+                doc_id_app: bootstrap.app_doc_id,
+                doc_id_drawer: bootstrap.drawer_doc_id,
+            },
+        )
+        .await?;
+        conn.stop().await?;
+        acx_stop.stop().await?;
+    }
+
+    let ctx = Arc::new(
+        daybook_core::repo::RepoCtx::open(
+            global_ctx,
+            &destination,
+            daybook_core::repo::RepoOpenOptions {
+                ensure_initialized: true,
+                ws_connector_url: None,
+            },
+        )
+        .await?,
+    );
+
+    let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone()).await?;
+
+    let (plugs_repo, plugs_stop) = PlugsRepo::load(
+        ctx.acx.clone(),
+        Arc::clone(&blobs_repo),
+        ctx.doc_app.document_id().clone(),
+        ctx.local_actor_id.clone(),
+    )
+    .await?;
+
+    let (drawer_repo, drawer_stop) = DrawerRepo::load(
+        ctx.acx.clone(),
+        ctx.doc_drawer.document_id().clone(),
+        ctx.local_actor_id.clone(),
+        Arc::new(std::sync::Mutex::new(
+            daybook_core::drawer::lru::KeyedLruPool::new(1000),
+        )),
+        Arc::new(std::sync::Mutex::new(
+            daybook_core::drawer::lru::KeyedLruPool::new(1000),
+        )),
+        Arc::clone(&plugs_repo),
+    )
+    .await?;
+
+    let (config_repo, config_stop) = ConfigRepo::load(
+        ctx.acx.clone(),
+        ctx.doc_app.document_id().clone(),
+        Arc::clone(&plugs_repo),
+        daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+        ctx.sql.db_pool.clone(),
+    )
+    .await?;
+
+    let (sync_repo, sync_stop) = IrohSyncRepo::boot(
+        ctx.acx.clone(),
+        Arc::clone(&config_repo),
+        ctx.iroh_secret_key.clone(),
+        ctx.doc_app.document_id().clone(),
+        ctx.doc_drawer.document_id().clone(),
+        // FIXME: load this from the config repo
+        format!("daybook-cli-{}", std::env::consts::ARCH),
+    )
+    .await?;
+
+    sync_repo
+        .connect_endpoint_addr(bootstrap.endpoint_addr)
+        .await?;
+
+    let (mut full_sync, full_stop) = sync_repo
+        .full_sync_peers(Arc::clone(&drawer_repo), &[bootstrap.endpoint_id])
+        .await?;
+    let mut sync_rx = full_sync.subscribe();
+    loop {
+        tokio::select! {
+            biased;
+            val = sync_rx.recv() => {
+                let Ok(res) = val else {
+                    break;
+                };
+                info!(?res, "sync event");
+            }
+            res = full_sync.wait_until_done() => {
+                res?;
+            }
+        };
+    }
+    full_stop.stop().await?;
+
+    // FIXME: let's provide a stop method on the repo ctx?
+    if let Some(stop) = ctx.acx_stop.lock().await.take() {
+        stop.stop().await?;
+    }
+
+    sync_stop.stop().await?;
+    config_stop.stop().await?;
+    drawer_stop.stop().await?;
+    plugs_stop.stop().await?;
+
+    Ok(())
 }
 
 async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
@@ -482,6 +818,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             ctx.doc_app.document_id().clone(),
             Arc::clone(&plugs_repo),
             daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+            ctx.sql.db_pool.clone(),
         )
     )?;
 
@@ -564,8 +901,11 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         | Ok(StaticCommands::Ls)
         | Ok(StaticCommands::Touch)
         | Ok(StaticCommands::Init { .. })
+        | Ok(StaticCommands::Clone { .. })
         | Ok(StaticCommands::Cat { .. })
         | Ok(StaticCommands::Ed { .. })
+        | Ok(StaticCommands::Devices { .. })
+        | Ok(StaticCommands::Sync { .. })
         | Ok(StaticCommands::Livetree { .. }) => {
             unreachable!("static_cli will prevent these");
         }
@@ -640,6 +980,13 @@ struct Cli {
 enum StaticCommands {
     // Initialize repo
     Init {},
+    /// Clone a repo to a destination path
+    Clone {
+        /// Source bootstrap URL: db+iroh-doc:<ticket>
+        source: String,
+        /// Destination directory path (must be empty or non-existent)
+        destination: String,
+    },
     /// Dump full automerge contents
     Dump,
     /// List documents
@@ -663,10 +1010,37 @@ enum StaticCommands {
         #[clap(subcommand)]
         command: LivetreeCommands,
     },
+    /// Run one-shot iroh sync session
+    Sync {
+        /// Additional sync URLs to connect to (not persisted)
+        sync_urls: Vec<String>,
+        /// Exit once the requested peers are synced
+        #[arg(long, default_value_t = false)]
+        exit_when_synced: bool,
+    },
+    /// Manage known sync devices
+    Devices {
+        #[clap(subcommand)]
+        command: DevicesCommands,
+    },
     /// Generate shell completions
     Completions {
         #[clap(value_enum)]
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum DevicesCommands {
+    /// List known devices
+    Ls,
+    /// Add a device from a bootstrap URL
+    Add {
+        /// Bootstrap URL: db+iroh-doc:<ticket>
+        iroh_ticket_url: String,
+        /// Override display name
+        #[arg(long)]
+        name: Option<String>,
     },
 }
 

@@ -126,6 +126,10 @@ iroh-tickets = "0.3.0"
 #
 # os
 rand.workspace = true
+keyring = "3.6.3"
+iroh-blobs = "0.98.0"
+iroh-docs = "0.96.0"
+iroh-gossip = "0.96.0"
 
 [build-dependencies]
 uniffi = { workspace = true, features = ["build"], optional = true }
