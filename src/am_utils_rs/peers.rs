@@ -98,6 +98,7 @@ impl super::AmCtx {
                     tokio::select! {
                         biased;
                         _ = cancel_token.cancelled() => {
+                            debug!("cancel token lit");
                             break;
                         }
                         val = msg_rx.recv() => {

@@ -51,7 +51,7 @@ pub struct DocEntry {
     // to create changes on the map before the atomic map so that changes
     // to the atmoic version increment will be always observed after the
     // other fields
-    pub version: Uuid,
+    pub vtag: VersionTag,
     pub previous_version_heads: Option<ChangeHashSet>,
 }
 
@@ -142,7 +142,7 @@ pub enum DrawerEvent {
     },
     DocDeleted {
         id: DocId,
-        entry: DocEntry,
         drawer_heads: ChangeHashSet,
+        entry: Option<DocEntry>,
     },
 }

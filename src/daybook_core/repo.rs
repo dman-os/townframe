@@ -93,14 +93,20 @@ impl Drop for RepoLockGuard {
 pub struct RepoCtx {
     pub layout: RepoLayout,
     pub lock_guard: RepoLockGuard,
+
     pub sql: SqlCtx,
+
     pub acx: AmCtx,
     pub acx_stop: tokio::sync::Mutex<Option<am_utils_rs::AmCtxStopToken>>,
+
     pub doc_app: samod::DocHandle,
     pub doc_drawer: samod::DocHandle,
+
     pub local_actor_id: automerge::ActorId,
     pub local_user_path: String,
+    pub local_device_name: String,
     pub repo_id: String,
+
     pub iroh_public_key: String,
     pub iroh_secret_key: iroh::SecretKey,
 }
@@ -110,6 +116,7 @@ impl RepoCtx {
         global_ctx: &GlobalCtx,
         repo_root: &std::path::Path,
         options: RepoOpenOptions,
+        local_device_name: String,
     ) -> Res<Self> {
         let layout = repo_layout(repo_root)?;
         let lock_guard = RepoLockGuard::acquire(&layout.lock_path)?;
@@ -190,6 +197,7 @@ impl RepoCtx {
             repo_id: identity.repo_id,
             iroh_public_key,
             iroh_secret_key: identity.iroh_secret_key,
+            local_device_name,
         })
     }
 

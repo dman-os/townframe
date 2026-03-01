@@ -60,7 +60,7 @@ pub struct Rt {
     pub doc_facet_set_index_repo: Arc<DocFacetSetIndexRepo>,
     pub doc_facet_ref_index_repo: Arc<DocFacetRefIndexRepo>,
     pub sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
-    pub local_actor_id: automerge::ActorId,
+    pub local_actor_id: ActorId,
     local_wflow_part_id: String,
 }
 
@@ -153,7 +153,9 @@ impl RtStopToken {
         }
 
         if let Some(watcher) = self.partition_watcher.take() {
-            if let Err(err) = utils_rs::wait_on_handle_with_timeout(watcher, 10 * 1000).await {
+            if let Err(err) =
+                utils_rs::wait_on_handle_with_timeout(watcher, Duration::from_secs(10)).await
+            {
                 warn!(
                     ?err,
                     "error waiting for partition_watcher during shutdown - continuing"
@@ -193,7 +195,7 @@ impl Rt {
         progress_repo: Arc<crate::progress::ProgressRepo>,
         blobs_repo: Arc<BlobsRepo>,
         config_repo: Arc<ConfigRepo>,
-        local_actor_id: automerge::ActorId,
+        local_actor_id: ActorId,
         local_state_root: PathBuf,
     ) -> Res<(Arc<Self>, RtStopToken)> {
         let wcx = wflow::Ctx::init(&wflow_db_url).await?;
@@ -356,6 +358,7 @@ impl Rt {
         ))
     }
 
+    #[tracing::instrument(skip(self))]
     async fn keep_up_with_partition(&self) -> Res<()> {
         use futures::StreamExt;
 
@@ -384,6 +387,7 @@ impl Rt {
             let entry = tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => {
+                    debug!("cancel token lit");
                     break;
                 }
                 entry = stream.next() => {

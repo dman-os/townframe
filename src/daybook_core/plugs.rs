@@ -688,15 +688,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
     ]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VersionedPlug {
-    pub version: Uuid,
-    pub payload: Arc<manifest::PlugManifest>,
-}
-
 #[derive(Default, Reconcile, Hydrate)]
 pub struct PlugsStore {
-    pub manifests: HashMap<String, ThroughJson<VersionedPlug>>,
+    pub manifests: HashMap<String, Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>,
 
     /// Index: property tag -> plug id (@ns/name)
     #[autosurgeon(with = "am_utils_rs::codecs::skip")]
@@ -712,7 +706,7 @@ impl PlugsStore {
         self.facet_manifests.clear();
 
         for (plug_id, versioned) in &self.manifests {
-            for facet in &versioned.payload.facets {
+            for facet in &versioned.facets {
                 self.tag_to_plug
                     .insert(facet.key_tag.to_string(), plug_id.clone());
                 self.facet_manifests
@@ -723,7 +717,7 @@ impl PlugsStore {
 }
 
 #[async_trait]
-impl crate::stores::Store for PlugsStore {
+impl crate::stores::AmStore for PlugsStore {
     fn prop() -> Cow<'static, str> {
         "plugs".into()
     }
@@ -749,14 +743,14 @@ pub mod version_updates {
 }
 
 pub struct PlugsRepo {
-    pub acx: AmCtx,
-    pub app_doc_id: DocumentId,
-    pub app_am_handle: samod::DocHandle,
-    store: crate::stores::StoreHandle<PlugsStore>,
-    pub blobs: Arc<crate::blobs::BlobsRepo>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
-    pub mutation_mutex: tokio::sync::Mutex<()>,
-    pub local_actor_id: automerge::ActorId,
+    acx: AmCtx,
+    app_doc_id: DocumentId,
+    app_am_handle: samod::DocHandle,
+    store: crate::stores::AmStoreHandle<PlugsStore>,
+    blobs: Arc<crate::blobs::BlobsRepo>,
+    mutation_mutex: tokio::sync::Mutex<()>,
+    local_actor_id: ActorId,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
 }
@@ -786,12 +780,12 @@ impl PlugsRepo {
         acx: AmCtx,
         blobs: Arc<crate::blobs::BlobsRepo>,
         app_doc_id: DocumentId,
-        local_actor_id: automerge::ActorId,
+        local_actor_id: ActorId,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store_val = PlugsStore::load(&acx, &app_doc_id).await?;
-        let store = crate::stores::StoreHandle::new(
+        let store = crate::stores::AmStoreHandle::new(
             store_val,
             acx.clone(),
             app_doc_id.clone(),
@@ -837,7 +831,7 @@ impl PlugsRepo {
             let repo = Arc::clone(&repo);
             let cancel_token = main_cancel_token.clone();
             async move {
-                repo.handle_notifs(notif_rx, cancel_token)
+                repo.notifs_loop(notif_rx, cancel_token)
                     .await
                     .expect("error handling notifs")
             }
@@ -848,12 +842,17 @@ impl PlugsRepo {
             crate::repos::RepoStopToken {
                 cancel_token: main_cancel_token,
                 worker_handle: Some(worker_handle),
-                broker_stop_tokens: broker_stop.into_iter().collect(),
+                broker_stop_tokens: vec![broker_stop],
             },
         ))
     }
 
-    async fn handle_notifs(
+    pub fn get_plugs_heads(&self) -> ChangeHashSet {
+        self.app_am_handle
+            .with_document(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
+    }
+
+    async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
             Vec<am_utils_rs::changes::ChangeNotification>,
@@ -877,13 +876,14 @@ impl PlugsRepo {
 
             events.clear();
             for notif in notifs {
-                if notif.is_local_only(&self.local_actor_id) {
-                    continue;
-                }
-
                 // 3. Call events_for_patch (pure-ish).
-                self.events_for_patch(&notif.patch, &notif.heads, &mut events)
-                    .await?;
+                self.events_for_patch(
+                    &notif.patch,
+                    &notif.heads,
+                    &mut events,
+                    Some(self.local_actor_id.clone()),
+                )
+                .await?;
             }
 
             for event in &events {
@@ -891,7 +891,7 @@ impl PlugsRepo {
                     PlugsEvent::PlugAdded { id, heads } | PlugsEvent::PlugChanged { id, heads } => {
                         let (new_versioned, _) = self
                             .acx
-                            .hydrate_path_at_heads::<ThroughJson<VersionedPlug>>(
+                            .hydrate_path_at_heads::<Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>(
                                 &self.app_doc_id,
                                 &heads.0,
                                 automerge::ROOT,
@@ -902,13 +902,10 @@ impl PlugsRepo {
                             )
                             .await?
                             .expect(ERROR_INVALID_PATCH);
-                        let new_versioned = new_versioned.0;
 
                         self.store
                             .mutate_sync(|store| {
-                                store
-                                    .manifests
-                                    .insert(id.clone(), ThroughJson(new_versioned));
+                                store.manifests.insert(id.clone(), new_versioned);
                                 store.rebuild_indices();
                             })
                             .await?;
@@ -947,14 +944,10 @@ impl PlugsRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
-            self.events_for_patch(&patch, &heads, &mut events).await?;
+            self.events_for_patch(&patch, &heads, &mut events, None)
+                .await?;
         }
         Ok(events)
-    }
-
-    pub fn get_plugs_heads(&self) -> ChangeHashSet {
-        self.app_am_handle
-            .with_document(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
     }
 
     async fn events_for_patch(
@@ -962,6 +955,7 @@ impl PlugsRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<PlugsEvent>,
+        exclude_actor_id: Option<ActorId>,
     ) -> Res<()> {
         let heads = ChangeHashSet(Arc::clone(patch_heads));
         match &patch.action {
@@ -972,21 +966,24 @@ impl PlugsRepo {
             } if patch.path.len() == 3
                 && patch.path[1].1 == automerge::Prop::Map("manifests".into()) =>
             {
-                if key == "version" {
+                if key == "vtag" {
                     let Some((_obj, automerge::Prop::Map(plug_id))) = patch.path.get(2) else {
                         return Ok(());
                     };
 
-                    let version_bytes = match val {
+                    let vtag_bytes = match val {
                         automerge::Value::Scalar(scalar) => match &**scalar {
                             automerge::ScalarValue::Bytes(bytes) => bytes,
                             _ => return Ok(()),
                         },
                         _ => return Ok(()),
                     };
-                    let version = Uuid::from_slice(version_bytes)?;
+                    let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
+                    if Some(vtag.actor_id) == exclude_actor_id {
+                        return Ok(());
+                    }
 
-                    if version.is_nil() {
+                    if vtag.version.is_nil() {
                         out.push(PlugsEvent::PlugAdded {
                             id: plug_id.clone(),
                             heads,
@@ -1029,7 +1026,7 @@ impl PlugsRepo {
 
     pub async fn get(&self, id: &str) -> Option<Arc<manifest::PlugManifest>> {
         self.store
-            .query_sync(|store| store.manifests.get(id).map(|man| Arc::clone(&man.payload)))
+            .query_sync(|store| store.manifests.get(id).map(|man| Arc::clone(&man.val)))
             .await
     }
 
@@ -1061,7 +1058,7 @@ impl PlugsRepo {
                     .values()
                     .flat_map(|versioned| {
                         versioned
-                            .payload
+                            .val
                             .facets
                             .iter()
                             .map(|facet| (facet.key_tag.to_string(), facet.display_config.clone()))
@@ -1077,7 +1074,7 @@ impl PlugsRepo {
                 store
                     .manifests
                     .values()
-                    .map(|man| Arc::clone(&man.payload))
+                    .map(|man| Arc::clone(&man.val))
                     .collect()
             })
             .await
@@ -1166,19 +1163,20 @@ impl PlugsRepo {
                 let manifest = manifest;
                 let is_update = store.manifests.contains_key(&plug_id);
 
-                let versioned = VersionedPlug {
-                    version: if is_update {
-                        Uuid::new_v4()
-                    } else {
-                        Uuid::nil()
+                let versioned = Versioned {
+                    vtag: VersionTag {
+                        actor_id: self.local_actor_id.clone(),
+                        version: if is_update {
+                            Uuid::new_v4()
+                        } else {
+                            Uuid::nil()
+                        },
                     },
-                    payload: Arc::new(manifest),
+                    val: Arc::new(manifest).into(),
                 };
 
                 // Update the manifest in the store
-                store
-                    .manifests
-                    .insert(plug_id.clone(), ThroughJson(versioned));
+                store.manifests.insert(plug_id.clone(), versioned);
 
                 // 3. Rebuild indices
                 // Indices are in-memory caches (marked with #[autosurgeon(skip)])
@@ -1696,7 +1694,7 @@ mod tests {
     use super::*;
 
     async fn setup_repo() -> Res<(AmCtx, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
-        let local_actor_id = automerge::ActorId::random();
+        let local_actor_id = ActorId::random();
         let (acx, _acx_stop) = AmCtx::boot(
             am_utils_rs::Config {
                 peer_id: "test".into(),

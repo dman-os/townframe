@@ -1,4 +1,6 @@
-//! FIXME: move a lot of the repo sync stuff into lazy
+//! FIXME: move a lot of the repo setup stuff into lazy
+//! FIXME: use ctrl_c handlers aross major await points
+//! FIXME: make each command a submodule
 
 #[allow(unused)]
 mod interlude {
@@ -456,7 +458,9 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             )
             .await?;
             let local_ticket_url = sync_repo.get_ticket_url().await?;
-            println!("{}", local_ticket_url);
+            println!(
+                "=== TICKET ===\n=== === == ===\n{local_ticket_url}\n=== === == ===\n=== TICKET ===",
+            );
 
             let mut endpoint_ids = Vec::with_capacity(sync_urls.len());
             for sync_url in &sync_urls {
@@ -505,7 +509,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                                         IrohSyncEvent::DocSyncUpdates { updates } => {
                                             info!(?updates, "docs synced");
                                         }
-                                        IrohSyncEvent::IncomingConnetion { peer_info } => {
+                                        IrohSyncEvent::IncomingConnetion { peer_id } => {
                                             info!(peer_id = ?peer_info.peer_id, "incoming connection");
                                         }
                                     }
@@ -643,7 +647,7 @@ async fn clone_repo_from_url(
             .bind()
             .await?;
         let conn = acx
-            .spawn_connection_iroh(&endpoint, bootstrap.endpoint_addr.clone())
+            .spawn_connection_iroh(&endpoint, bootstrap.endpoint_addr.clone(), None)
             .await?;
 
         daybook_core::sync::pull_required_docs_once(
@@ -666,7 +670,7 @@ async fn clone_repo_from_url(
         acx_stop.stop().await?;
     }
 
-    let ctx = Arc::new(
+    let rcx = Arc::new(
         daybook_core::repo::RepoCtx::open(
             global_ctx,
             &destination,
@@ -674,24 +678,25 @@ async fn clone_repo_from_url(
                 ensure_initialized: true,
                 ws_connector_url: None,
             },
+            format!("daybook-cli-{}", std::env::consts::ARCH),
         )
         .await?,
     );
 
-    let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone()).await?;
+    let blobs_repo = BlobsRepo::new(rcx.layout.blobs_root.clone()).await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
-        ctx.acx.clone(),
+        rcx.acx.clone(),
         Arc::clone(&blobs_repo),
-        ctx.doc_app.document_id().clone(),
-        ctx.local_actor_id.clone(),
+        rcx.doc_app.document_id().clone(),
+        rcx.local_actor_id.clone(),
     )
     .await?;
 
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
-        ctx.acx.clone(),
-        ctx.doc_drawer.document_id().clone(),
-        ctx.local_actor_id.clone(),
+        rcx.acx.clone(),
+        rcx.doc_drawer.document_id().clone(),
+        rcx.local_actor_id.clone(),
         Arc::new(std::sync::Mutex::new(
             daybook_core::drawer::lru::KeyedLruPool::new(1000),
         )),
@@ -703,22 +708,18 @@ async fn clone_repo_from_url(
     .await?;
 
     let (config_repo, config_stop) = ConfigRepo::load(
-        ctx.acx.clone(),
-        ctx.doc_app.document_id().clone(),
+        rcx.acx.clone(),
+        rcx.doc_app.document_id().clone(),
         Arc::clone(&plugs_repo),
-        daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
-        ctx.sql.db_pool.clone(),
+        daybook_types::doc::UserPath::from(rcx.local_user_path.clone()),
+        rcx.sql.db_pool.clone(),
     )
     .await?;
 
     let (sync_repo, sync_stop) = IrohSyncRepo::boot(
-        ctx.acx.clone(),
+        Arc::clone(&rcx),
+        Arc::clone(&drawer_repo),
         Arc::clone(&config_repo),
-        ctx.iroh_secret_key.clone(),
-        ctx.doc_app.document_id().clone(),
-        ctx.doc_drawer.document_id().clone(),
-        // FIXME: load this from the config repo
-        format!("daybook-cli-{}", std::env::consts::ARCH),
     )
     .await?;
 
@@ -747,7 +748,7 @@ async fn clone_repo_from_url(
     full_stop.stop().await?;
 
     // FIXME: let's provide a stop method on the repo ctx?
-    if let Some(stop) = ctx.acx_stop.lock().await.take() {
+    if let Some(stop) = rcx.acx_stop.lock().await.take() {
         stop.stop().await?;
     }
 

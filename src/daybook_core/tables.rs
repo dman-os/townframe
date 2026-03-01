@@ -1,4 +1,5 @@
 use crate::interlude::*;
+
 use tokio_util::sync::CancellationToken;
 
 /// Constants for sidebar layout weights
@@ -17,7 +18,6 @@ mod sidebar_layout {
 pub struct Window {
     #[key]
     pub id: Uuid,
-    pub version: Uuid,
     pub title: String,
     pub tabs: Vec<Uuid>,
     pub selected_table: Option<Uuid>,
@@ -167,7 +167,6 @@ pub enum WindowLayoutOrientation {
 pub struct Table {
     #[key]
     pub id: Uuid,
-    pub version: Uuid,
     pub title: String,
     pub tabs: Vec<Uuid>,
     pub window: TableWindow,
@@ -191,7 +190,6 @@ pub enum TableWindow {
 pub struct Tab {
     #[key]
     pub id: Uuid,
-    pub version: Uuid,
     pub title: String,
     pub panels: Vec<Uuid>,
     pub selected_panel: Option<Uuid>,
@@ -204,7 +202,6 @@ pub struct Tab {
 pub struct Panel {
     #[key]
     pub id: Uuid,
-    pub version: Uuid,
     pub title: String,
 }
 
@@ -222,13 +219,13 @@ pub struct TablesPatches {
 #[derive(Reconcile, Hydrate, Default)]
 pub struct TablesStore {
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    pub windows: HashMap<Uuid, Window>,
+    pub windows: HashMap<Uuid, Versioned<Window>>,
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    pub tables: HashMap<Uuid, Table>,
+    pub tables: HashMap<Uuid, Versioned<Table>>,
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    pub tabs: HashMap<Uuid, Tab>,
+    pub tabs: HashMap<Uuid, Versioned<Tab>>,
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
-    pub panels: HashMap<Uuid, Panel>,
+    pub panels: HashMap<Uuid, Versioned<Panel>>,
 
     // Indices for tracking relationships (not stored in CRDT)
     #[autosurgeon(with = "am_utils_rs::codecs::skip")]
@@ -240,7 +237,7 @@ pub struct TablesStore {
 }
 
 #[async_trait]
-impl crate::stores::Store for TablesStore {
+impl crate::stores::AmStore for TablesStore {
     fn prop() -> Cow<'static, str> {
         "tables".into()
     }
@@ -248,54 +245,63 @@ impl crate::stores::Store for TablesStore {
 
 impl TablesStore {
     // Auto-create a default table with window, tab, and panel
-    fn auto_create_default_all(&mut self) {
+    fn auto_create_default_all(&mut self, local_actor_id: ActorId) {
+        // TODO: consider moving this to the TablesStore::default
         let window_id = Uuid::new_v4();
         let table_id = Uuid::new_v4();
         let tab_id = Uuid::new_v4();
         let panel_id = Uuid::new_v4();
 
         // Create window
-        let window = Window {
-            id: window_id,
-            version: Uuid::nil(),
-            title: "Main Window".to_string(),
-            tabs: vec![tab_id],
-            selected_table: Some(table_id),
-            layout: WindowLayout::default(),
-            last_capture_mode: CaptureMode::default(),
-            documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(
-                sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT,
-            ),
-        };
+        let window = Versioned::mint(
+            local_actor_id.clone(),
+            Window {
+                id: window_id,
+                title: "Main Window".to_string(),
+                tabs: vec![tab_id],
+                selected_table: Some(table_id),
+                layout: WindowLayout::default(),
+                last_capture_mode: CaptureMode::default(),
+                documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(
+                    sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT,
+                ),
+            },
+        );
         self.windows.insert(window_id, window);
 
         // Create table
-        let table = Table {
-            id: table_id,
-            version: Uuid::nil(),
-            title: "Main Table".to_string(),
-            tabs: vec![tab_id],
-            window: TableWindow::Specific { id: window_id },
-            selected_tab: Some(tab_id),
-        };
+        let table = Versioned::mint(
+            local_actor_id.clone(),
+            Table {
+                id: table_id,
+                title: "Main Table".to_string(),
+                tabs: vec![tab_id],
+                window: TableWindow::Specific { id: window_id },
+                selected_tab: Some(tab_id),
+            },
+        );
         self.tables.insert(table_id, table);
 
         // Create tab
-        let tab = Tab {
-            id: tab_id,
-            version: Uuid::nil(),
-            title: "Main Tab".to_string(),
-            panels: vec![panel_id],
-            selected_panel: Some(panel_id),
-        };
+        let tab = Versioned::mint(
+            local_actor_id.clone(),
+            Tab {
+                id: tab_id,
+                title: "Main Tab".to_string(),
+                panels: vec![panel_id],
+                selected_panel: Some(panel_id),
+            },
+        );
         self.tabs.insert(tab_id, tab);
 
         // Create panel
-        let panel = Panel {
-            id: panel_id,
-            version: Uuid::nil(),
-            title: "Main Panel".to_string(),
-        };
+        let panel = Versioned::mint(
+            local_actor_id.clone(),
+            Panel {
+                id: panel_id,
+                title: "Main Panel".to_string(),
+            },
+        );
         self.panels.insert(panel_id, panel);
 
         // Update indices
@@ -384,9 +390,9 @@ pub struct TablesRepo {
     pub acx: AmCtx,
     pub app_doc_id: DocumentId,
     pub app_am_handle: samod::DocHandle,
-    store: crate::stores::StoreHandle<TablesStore>,
+    store: crate::stores::AmStoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
-    pub local_actor_id: automerge::ActorId,
+    pub local_actor_id: ActorId,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
 }
@@ -424,12 +430,12 @@ impl TablesRepo {
     pub async fn load(
         acx: AmCtx,
         app_doc_id: DocumentId,
-        local_actor_id: automerge::ActorId,
+        local_actor_id: ActorId,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store_val = TablesStore::load(&acx, &app_doc_id).await?;
-        let store = crate::stores::StoreHandle::new(
+        let store = crate::stores::AmStoreHandle::new(
             store_val,
             acx.clone(),
             app_doc_id.clone(),
@@ -477,7 +483,7 @@ impl TablesRepo {
             let repo = Arc::clone(&repo);
             let cancel_token = main_cancel_token.clone();
             async move {
-                repo.handle_notifs(notif_rx, cancel_token)
+                repo.notifs_loop(notif_rx, cancel_token)
                     .await
                     .expect("error handling notifs")
             }
@@ -488,12 +494,12 @@ impl TablesRepo {
             crate::repos::RepoStopToken {
                 cancel_token: main_cancel_token,
                 worker_handle: Some(worker_handle),
-                broker_stop_tokens: broker_stop.into_iter().collect(),
+                broker_stop_tokens: vec![broker_stop],
             },
         ))
     }
 
-    async fn handle_notifs(
+    async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
             Vec<am_utils_rs::changes::ChangeNotification>,
@@ -517,12 +523,13 @@ impl TablesRepo {
 
             events.clear();
             for notif in notifs {
-                if notif.is_local_only(&self.local_actor_id) {
-                    continue;
-                }
-
-                self.events_for_patch(&notif.patch, &notif.heads, &mut events)
-                    .await?;
+                self.events_for_patch(
+                    &notif.patch,
+                    &notif.heads,
+                    &mut events,
+                    Some(self.local_actor_id.clone()),
+                )
+                .await?;
             }
 
             for event in &events {
@@ -531,7 +538,7 @@ impl TablesRepo {
                     | TablesEvent::WindowChanged { id, heads } => {
                         let (new_window, _) = self
                             .acx
-                            .hydrate_path_at_heads::<Window>(
+                            .hydrate_path_at_heads::<Versioned<Window>>(
                                 &self.app_doc_id,
                                 &heads.0,
                                 automerge::ROOT,
@@ -561,7 +568,7 @@ impl TablesRepo {
                     TablesEvent::TabAdded { id, heads } | TablesEvent::TabChanged { id, heads } => {
                         let (new_tab, _) = self
                             .acx
-                            .hydrate_path_at_heads::<Tab>(
+                            .hydrate_path_at_heads::<Versioned<Tab>>(
                                 &self.app_doc_id,
                                 &heads.0,
                                 automerge::ROOT,
@@ -592,7 +599,7 @@ impl TablesRepo {
                     | TablesEvent::PanelChanged { id, heads } => {
                         let (new_panel, _) = self
                             .acx
-                            .hydrate_path_at_heads::<Panel>(
+                            .hydrate_path_at_heads::<Versioned<Panel>>(
                                 &self.app_doc_id,
                                 &heads.0,
                                 automerge::ROOT,
@@ -623,7 +630,7 @@ impl TablesRepo {
                     | TablesEvent::TableChanged { id, heads } => {
                         let (new_table, _) = self
                             .acx
-                            .hydrate_path_at_heads::<Table>(
+                            .hydrate_path_at_heads::<Versioned<Table>>(
                                 &self.app_doc_id,
                                 &heads.0,
                                 automerge::ROOT,
@@ -679,7 +686,8 @@ impl TablesRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
-            self.events_for_patch(&patch, &heads, &mut events).await?;
+            self.events_for_patch(&patch, &heads, &mut events, None)
+                .await?;
         }
         Ok(events)
     }
@@ -689,6 +697,7 @@ impl TablesRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<TablesEvent>,
+        exclude_actor_id: Option<ActorId>,
     ) -> Res<()> {
         let heads = ChangeHashSet(Arc::clone(patch_heads));
         match &patch.action {
@@ -696,7 +705,7 @@ impl TablesRepo {
                 key,
                 value: (val, _),
                 ..
-            } if patch.path.len() == 3 && key == "version" => {
+            } if patch.path.len() == 3 && key == "vtag" => {
                 let Some((_obj, automerge::Prop::Map(collection))) = patch.path.get(1) else {
                     return Ok(());
                 };
@@ -707,32 +716,35 @@ impl TablesRepo {
                     return Ok(());
                 };
 
-                let version_bytes = match val {
+                let vtag = match val {
                     automerge::Value::Scalar(scalar) => match &**scalar {
                         automerge::ScalarValue::Bytes(bytes) => bytes,
                         _ => return Ok(()),
                     },
                     _ => return Ok(()),
                 };
-                let version = Uuid::from_slice(version_bytes)?;
+                let vtag = VersionTag::hydrate_bytes(vtag)?;
+                if Some(vtag.actor_id) == exclude_actor_id {
+                    return Ok(());
+                }
 
                 match collection.as_ref() {
-                    "windows" => out.push(if version.is_nil() {
+                    "windows" => out.push(if vtag.version.is_nil() {
                         TablesEvent::WindowAdded { id: item_id, heads }
                     } else {
                         TablesEvent::WindowChanged { id: item_id, heads }
                     }),
-                    "tables" => out.push(if version.is_nil() {
+                    "tables" => out.push(if vtag.version.is_nil() {
                         TablesEvent::TableAdded { id: item_id, heads }
                     } else {
                         TablesEvent::TableChanged { id: item_id, heads }
                     }),
-                    "tabs" => out.push(if version.is_nil() {
+                    "tabs" => out.push(if vtag.version.is_nil() {
                         TablesEvent::TabAdded { id: item_id, heads }
                     } else {
                         TablesEvent::TabChanged { id: item_id, heads }
                     }),
-                    "panels" => out.push(if version.is_nil() {
+                    "panels" => out.push(if vtag.version.is_nil() {
                         TablesEvent::PanelAdded { id: item_id, heads }
                     } else {
                         TablesEvent::PanelChanged { id: item_id, heads }
@@ -784,36 +796,34 @@ impl TablesRepo {
 
     pub async fn get_window(&self, id: Uuid) -> Option<Window> {
         self.store
-            .query_sync(|store| store.windows.get(&id).cloned())
+            .query_sync(|store| store.windows.get(&id).map(Versioned::get_val).cloned())
             .await
     }
 
-    pub async fn set_window(&self, id: Uuid, mut val: Window) -> Res<Option<Window>> {
+    pub async fn set_window(&self, id: Uuid, val: Window) -> Res<Option<Window>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
         let (old, hash) = self
             .store
             .mutate_sync(|store| {
-                val.version = Uuid::new_v4();
-                let old_window = store.windows.get(&id).cloned();
-                let old_tabs = old_window
-                    .as_ref()
-                    .map(|window| window.tabs.clone())
-                    .unwrap_or_default();
-
-                for tab_id in &old_tabs {
+                let Some(old_window) = store.windows.get_mut(&id) else {
+                    store
+                        .windows
+                        .insert(id, Versioned::mint(self.local_actor_id.clone(), val));
+                    return None;
+                };
+                for tab_id in &old_window.tabs {
                     if !val.tabs.contains(tab_id) {
                         store.tab_to_window.remove(tab_id);
                     }
                 }
                 for tab_id in &val.tabs {
-                    if !old_tabs.contains(tab_id) {
+                    if !old_window.tabs.contains(tab_id) {
                         store.tab_to_window.insert(*tab_id, id);
                     }
                 }
-
-                store.windows.insert(id, val)
+                Some(old_window.replace(self.local_actor_id.clone(), val))
             })
             .await?;
 
@@ -831,7 +841,14 @@ impl TablesRepo {
     pub async fn list_windows(&self) -> Res<Vec<Window>> {
         let out = self
             .store
-            .query_sync(|store| store.windows.values().cloned().collect())
+            .query_sync(|store| {
+                store
+                    .windows
+                    .values()
+                    .map(Versioned::get_val)
+                    .cloned()
+                    .collect()
+            })
             .await;
         Ok(out)
     }
@@ -839,38 +856,39 @@ impl TablesRepo {
     pub async fn get_tab(&self, id: Uuid) -> Res<Option<Tab>> {
         let out = self
             .store
-            .query_sync(|store| store.tabs.get(&id).cloned())
+            .query_sync(|store| store.tabs.get(&id).map(Versioned::get_val).cloned())
             .await;
         Ok(out)
     }
 
-    pub async fn set_tab(&self, id: Uuid, mut val: Tab) -> Res<Option<Tab>> {
+    pub async fn set_tab(&self, id: Uuid, val: Tab) -> Res<Option<Tab>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
         let (old, hash) = self
             .store
             .mutate_sync(|store| {
-                val.version = Uuid::new_v4();
                 // Get old tab to check for panel changes
-                let old_tab = store.tabs.get(&id).cloned();
-                let old_panels = old_tab
-                    .as_ref()
-                    .map(|table| table.panels.clone())
-                    .unwrap_or_default();
+                let Some(old_tab) = store.tabs.get_mut(&id) else {
+                    store
+                        .tabs
+                        .insert(id, Versioned::mint(self.local_actor_id.clone(), val));
+                    return None;
+                };
 
                 // Update panel-to-tab index for changed panels
-                for panel_id in &old_panels {
+                for panel_id in &old_tab.panels {
                     if !val.panels.contains(panel_id) {
                         store.panel_to_tab.remove(panel_id);
                     }
                 }
                 for panel_id in &val.panels {
-                    if !old_panels.contains(panel_id) {
+                    if !old_tab.panels.contains(panel_id) {
                         store.panel_to_tab.insert(*panel_id, id);
                     }
                 }
-                store.tabs.insert(id, val)
+
+                Some(old_tab.replace(self.local_actor_id.clone(), val))
             })
             .await?;
 
@@ -900,7 +918,14 @@ impl TablesRepo {
     pub async fn list_tab(&self) -> Res<Vec<Tab>> {
         let out = self
             .store
-            .query_sync(|store| store.tabs.values().cloned().collect())
+            .query_sync(|store| {
+                store
+                    .tabs
+                    .values()
+                    .map(Versioned::get_val)
+                    .cloned()
+                    .collect()
+            })
             .await;
         Ok(out)
     }
@@ -908,63 +933,66 @@ impl TablesRepo {
     pub async fn get_table(&self, id: Uuid) -> Res<Option<Table>> {
         let out = self
             .store
-            .query_sync(|store| store.tables.get(&id).cloned())
+            .query_sync(|store| store.tables.get(&id).map(Versioned::get_val).cloned())
             .await;
         Ok(out)
     }
 
-    pub async fn set_table(&self, id: Uuid, mut val: Table) -> Res<Option<Table>> {
+    pub async fn set_table(&self, id: Uuid, val: Table) -> Res<Option<Table>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
         let (old, hash) = self
             .store
             .mutate_sync(|store| {
-                val.version = Uuid::new_v4();
-                // Get old table to check for tab changes
-                let old_table = store.tables.get(&id).cloned();
-                let old_tabs = old_table
-                    .as_ref()
-                    .map(|table| table.tabs.clone())
-                    .unwrap_or_default();
-
-                // Update tab-to-table index for changed tabs
-                for tab_id in &old_tabs {
-                    if !val.tabs.contains(tab_id) {
-                        store.tab_to_table.remove(tab_id);
-                    }
-                }
-                for tab_id in &val.tabs {
-                    if !old_tabs.contains(tab_id) {
-                        store.tab_to_table.insert(*tab_id, id);
-                    }
-                }
-
                 // Auto-create tab if all tabs were removed
                 if val.tabs.is_empty() {
                     // create a new tab and panel inside the same mutation
                     let tab_id = Uuid::new_v4();
                     let panel_id = Uuid::new_v4();
-                    let tab = Tab {
-                        id: tab_id,
-                        version: Uuid::nil(),
-                        title: "New Tab".to_string(),
-                        panels: vec![panel_id],
-                        selected_panel: Some(panel_id),
-                    };
+                    let tab = Versioned::mint(
+                        self.local_actor_id.clone(),
+                        Tab {
+                            id: tab_id,
+                            title: "New Tab".to_string(),
+                            panels: vec![panel_id],
+                            selected_panel: Some(panel_id),
+                        },
+                    );
                     store.tabs.insert(tab_id, tab);
-                    let panel = Panel {
-                        id: panel_id,
-                        version: Uuid::nil(),
-                        title: "New Panel".to_string(),
-                    };
+                    let panel = Versioned::mint(
+                        self.local_actor_id.clone(),
+                        Panel {
+                            id: panel_id,
+                            title: "New Panel".to_string(),
+                        },
+                    );
                     store.panels.insert(panel_id, panel);
                     if let Some(table) = store.tables.get_mut(&id) {
                         table.tabs.push(tab_id);
                         table.selected_tab = Some(tab_id);
                     }
                 }
-                store.tables.insert(id, val)
+                let Some(old_table) = store.tables.get_mut(&id) else {
+                    store
+                        .tables
+                        .insert(id, Versioned::mint(self.local_actor_id.clone(), val));
+                    return None;
+                };
+
+                // Update tab-to-table index for changed tabs
+                for tab_id in &old_table.tabs {
+                    if !val.tabs.contains(tab_id) {
+                        store.tab_to_table.remove(tab_id);
+                    }
+                }
+                for tab_id in &val.tabs {
+                    if !old_table.tabs.contains(tab_id) {
+                        store.tab_to_table.insert(*tab_id, id);
+                    }
+                }
+
+                Some(old_table.replace(self.local_actor_id.clone(), val))
             })
             .await?;
 
@@ -983,37 +1011,39 @@ impl TablesRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let (tables, _) = self
+        Ok(self
             .store
-            .mutate_sync(|store| {
-                let tables: Vec<Table> = store.tables.values().cloned().collect();
-                if tables.is_empty() {
-                    store.auto_create_default_all();
-                    store.tables.values().cloned().collect()
-                } else {
-                    tables
-                }
+            .query_sync(|store| {
+                store
+                    .tables
+                    .values()
+                    .map(Versioned::get_val)
+                    .cloned()
+                    .collect()
             })
-            .await?;
-
-        Ok(tables)
+            .await)
     }
 
     pub async fn get_panel(&self, id: Uuid) -> Option<Panel> {
         self.store
-            .query_sync(|store| store.panels.get(&id).cloned())
+            .query_sync(|store| store.panels.get(&id).map(Versioned::get_val).cloned())
             .await
     }
 
-    pub async fn set_panel(&self, id: Uuid, mut val: Panel) -> Res<Option<Panel>> {
+    pub async fn set_panel(&self, id: Uuid, val: Panel) -> Res<Option<Panel>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
         let (old, hash) = self
             .store
             .mutate_sync(|store| {
-                val.version = Uuid::new_v4();
-                store.panels.insert(id, val)
+                let Some(old) = store.panels.get_mut(&id) else {
+                    store
+                        .panels
+                        .insert(id, Versioned::mint(self.local_actor_id.clone(), val));
+                    return None;
+                };
+                Some(old.replace(self.local_actor_id.clone(), val))
             })
             .await?;
 
@@ -1048,7 +1078,14 @@ impl TablesRepo {
     pub async fn list_panel(&self) -> Res<Vec<Panel>> {
         let out = self
             .store
-            .query_sync(|store| store.panels.values().cloned().collect())
+            .query_sync(|store| {
+                store
+                    .panels
+                    .values()
+                    .map(Versioned::get_val)
+                    .cloned()
+                    .collect()
+            })
             .await;
         Ok(out)
     }
@@ -1067,7 +1104,7 @@ impl TablesRepo {
                         if let Some(id) = tab_patch.id {
                             if let Some(tab) = store.tabs.get_mut(&id) {
                                 tab.apply(tab_patch);
-                                tab.version = Uuid::new_v4();
+                                tab.vtag = VersionTag::update(self.local_actor_id.clone());
                             }
                         }
                     }
@@ -1079,7 +1116,7 @@ impl TablesRepo {
                         if let Some(id) = window_patch.id {
                             if let Some(window) = store.windows.get_mut(&id) {
                                 window.apply(window_patch);
-                                window.version = Uuid::new_v4();
+                                window.vtag = VersionTag::update(self.local_actor_id.clone());
                             }
                         }
                     }
@@ -1091,7 +1128,7 @@ impl TablesRepo {
                         if let Some(id) = panel_patch.id {
                             if let Some(panel) = store.panels.get_mut(&id) {
                                 panel.apply(panel_patch);
-                                panel.version = Uuid::new_v4();
+                                panel.vtag = VersionTag::update(self.local_actor_id.clone());
                             }
                         }
                     }
@@ -1103,7 +1140,7 @@ impl TablesRepo {
                         if let Some(id) = table_patch.id {
                             if let Some(table) = store.tables.get_mut(&id) {
                                 table.apply(table_patch);
-                                table.version = Uuid::new_v4();
+                                table.vtag = VersionTag::update(self.local_actor_id.clone());
                             }
                         }
                     }
@@ -1128,13 +1165,17 @@ impl TablesRepo {
                 for window in store.windows.values() {
                     if let Some(selected_table_id) = window.selected_table {
                         if let Some(table) = store.tables.get(&selected_table_id) {
-                            return Some(table.clone());
+                            return Some(table.val.clone());
                         }
                     }
                 }
 
                 // If no selected table found, return the first table
-                store.tables.iter().next().map(|(_, table)| table.clone())
+                store
+                    .tables
+                    .iter()
+                    .next()
+                    .map(|(_, table)| table.val.clone())
             })
             .await;
         Ok(out)
@@ -1155,49 +1196,57 @@ impl TablesRepo {
                 } else {
                     // Create a new window
                     let new_window_id = Uuid::new_v4();
-                    let window = Window {
-                        id: new_window_id,
-                        version: Uuid::nil(),
-                        title: "Main Window".to_string(),
-                        tabs: vec![tab_id],
-                        selected_table: Some(table_id),
-                        layout: WindowLayout::default(),
-                        last_capture_mode: CaptureMode::default(),
-                        documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(
-                            sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT,
-                        ),
-                    };
+                    let window = Versioned::mint(
+                        self.local_actor_id.clone(),
+                        Window {
+                            id: new_window_id,
+                            title: "Main Window".to_string(),
+                            tabs: vec![tab_id],
+                            selected_table: Some(table_id),
+                            layout: WindowLayout::default(),
+                            last_capture_mode: CaptureMode::default(),
+                            documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(
+                                sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT,
+                            ),
+                        },
+                    );
                     store.windows.insert(new_window_id, window);
                     new_window_id
                 };
 
                 // Create table
-                let table = Table {
-                    id: table_id,
-                    version: Uuid::nil(),
-                    title: format!("Table {}", store.tables.len() + 1),
-                    tabs: vec![tab_id],
-                    window: TableWindow::Specific { id: window_id },
-                    selected_tab: Some(tab_id),
-                };
+                let table = Versioned::mint(
+                    self.local_actor_id.clone(),
+                    Table {
+                        id: table_id,
+                        title: format!("Table {}", store.tables.len() + 1),
+                        tabs: vec![tab_id],
+                        window: TableWindow::Specific { id: window_id },
+                        selected_tab: Some(tab_id),
+                    },
+                );
                 store.tables.insert(table_id, table);
 
                 // Create tab
-                let tab = Tab {
-                    id: tab_id,
-                    version: Uuid::nil(),
-                    title: format!("Tab {}", store.tabs.len() + 1),
-                    panels: vec![panel_id],
-                    selected_panel: Some(panel_id),
-                };
+                let tab = Versioned::mint(
+                    self.local_actor_id.clone(),
+                    Tab {
+                        id: tab_id,
+                        title: format!("Tab {}", store.tabs.len() + 1),
+                        panels: vec![panel_id],
+                        selected_panel: Some(panel_id),
+                    },
+                );
                 store.tabs.insert(tab_id, tab);
 
                 // Create panel
-                let panel = Panel {
-                    id: panel_id,
-                    version: Uuid::nil(),
-                    title: format!("Panel {}", store.panels.len() + 1),
-                };
+                let panel = Versioned::mint(
+                    self.local_actor_id.clone(),
+                    Panel {
+                        id: panel_id,
+                        title: format!("Panel {}", store.panels.len() + 1),
+                    },
+                );
                 store.panels.insert(panel_id, panel);
 
                 // Update window to include the new tab
@@ -1248,18 +1297,21 @@ impl TablesRepo {
                             id
                         } else {
                             let new_window_id = Uuid::new_v4();
-                            let window = Window {
-                                id: new_window_id,
-                                version: Uuid::nil(),
-                                title: "Main Window".to_string(),
-                                tabs: vec![],
-                                selected_table: Some(table_id),
-                                layout: WindowLayout::default(),
-                                last_capture_mode: CaptureMode::default(),
-                                documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(
-                                    sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT,
-                                ),
-                            };
+                            let window = Versioned::mint(
+                                self.local_actor_id.clone(),
+                                Window {
+                                    id: new_window_id,
+                                    title: "Main Window".to_string(),
+                                    tabs: vec![],
+                                    selected_table: Some(table_id),
+                                    layout: WindowLayout::default(),
+                                    last_capture_mode: CaptureMode::default(),
+                                    documents_screen_list_size_expanded:
+                                        WindowLayoutRegionSize::Weight(
+                                            sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT,
+                                        ),
+                                },
+                            );
                             store.windows.insert(new_window_id, window);
                             new_window_id
                         }
@@ -1270,19 +1322,23 @@ impl TablesRepo {
                 let panel_id = Uuid::new_v4();
 
                 // Create tab and panel
-                let tab = Tab {
-                    id: tab_id,
-                    version: Uuid::nil(),
-                    title: format!("Tab {}", store.tabs.len() + 1),
-                    panels: vec![panel_id],
-                    selected_panel: Some(panel_id),
-                };
+                let tab = Versioned::mint(
+                    self.local_actor_id.clone(),
+                    Tab {
+                        id: tab_id,
+                        title: format!("Tab {}", store.tabs.len() + 1),
+                        panels: vec![panel_id],
+                        selected_panel: Some(panel_id),
+                    },
+                );
                 store.tabs.insert(tab_id, tab);
-                let panel = Panel {
-                    id: panel_id,
-                    version: Uuid::nil(),
-                    title: format!("Panel {}", store.panels.len() + 1),
-                };
+                let panel = Versioned::mint(
+                    self.local_actor_id.clone(),
+                    Panel {
+                        id: panel_id,
+                        title: format!("Panel {}", store.panels.len() + 1),
+                    },
+                );
                 store.panels.insert(panel_id, panel);
 
                 // Update table and window
@@ -1354,19 +1410,23 @@ impl TablesRepo {
                         if table.tabs.is_empty() {
                             let new_tab_id = Uuid::new_v4();
                             let new_panel_id = Uuid::new_v4();
-                            let tab = Tab {
-                                id: new_tab_id,
-                                version: Uuid::nil(),
-                                title: "New Tab".to_string(),
-                                panels: vec![new_panel_id],
-                                selected_panel: Some(new_panel_id),
-                            };
+                            let tab = Versioned::mint(
+                                self.local_actor_id.clone(),
+                                Tab {
+                                    id: new_tab_id,
+                                    title: "New Tab".to_string(),
+                                    panels: vec![new_panel_id],
+                                    selected_panel: Some(new_panel_id),
+                                },
+                            );
                             store.tabs.insert(new_tab_id, tab);
-                            let panel = Panel {
-                                id: new_panel_id,
-                                version: Uuid::nil(),
-                                title: "New Panel".to_string(),
-                            };
+                            let panel = Versioned::mint(
+                                self.local_actor_id.clone(),
+                                Panel {
+                                    id: new_panel_id,
+                                    title: "New Panel".to_string(),
+                                },
+                            );
                             store.panels.insert(new_panel_id, panel);
                             table.tabs.push(new_tab_id);
                             table.selected_tab = Some(new_tab_id);

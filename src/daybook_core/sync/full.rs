@@ -80,6 +80,7 @@ pub fn spawn_full_sync_worker(
             tokio::select! {
                 biased;
                 _ = task_cancel.cancelled() => {
+                    debug!("cancel token lit");
                     break;
                 }
                 recv = updates_rx.recv() => {

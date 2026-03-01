@@ -1,74 +1,388 @@
-use std::str::FromStr;
+use crate::interlude::*;
 
-use iroh_docs::api::protocol::{AddrInfoOptions, ShareMode};
-use iroh_docs::store::Query;
+use iroh::EndpointId;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::interlude::*;
+use crate::drawer::DrawerRepo;
+use crate::repo::RepoCtx;
 
-mod full;
+mod bootstrap;
+// mod full;
+mod full2;
 
 pub const IROH_DOC_URL_SCHEME: &str = "db+iroh-doc";
-const BOOTSTRAP_KEY_REPO_ID: &[u8] = b"repo_id";
-const BOOTSTRAP_KEY_APP_DOC_ID: &[u8] = b"app_doc_id";
-const BOOTSTRAP_KEY_DRAWER_DOC_ID: &[u8] = b"drawer_doc_id";
-const BOOTSTRAP_KEY_DEVICE_NAME: &[u8] = b"device_name";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyncBootstrapState {
-    pub endpoint_addr: iroh::EndpointAddr,
-    pub endpoint_id: String,
-    pub repo_id: String,
-    pub app_doc_id: DocumentId,
-    pub drawer_doc_id: DocumentId,
-    pub device_name: Option<String>,
+pub struct IrohSyncRepo {
+    pub registry: Arc<crate::repos::ListenersRegistry>,
+    cancel_token: CancellationToken,
+    rcx: Arc<RepoCtx>,
+
+    router: iroh::protocol::Router,
+
+    config_repo: Arc<crate::config::ConfigRepo>,
+
+    iroh_docs: iroh_docs::api::DocsApi,
+    iroh_blobs: iroh_blobs::api::Store,
+
+    conn_end_signal_tx: tokio::sync::mpsc::UnboundedSender<am_utils_rs::ConnFinishSignal>,
+    active_samod_peers: tokio::sync::RwLock<HashMap<EndpointId, (am_utils_rs::RepoConnection,)>>,
+    full_sync_handle: full2::WorkerHandle,
+    // bootstrap_docs: tokio::sync::Mutex<Vec<iroh_docs::api::Doc>>,
+    // active_endpoint_ids: tokio::sync::RwLock<HashMap<String, ()>>,
 }
 
 #[derive(Debug, Clone)]
 pub enum IrohSyncEvent {
     IncomingConnetion {
-        peer_info: samod::PeerInfo,
+        endpoint_id: EndpointId,
+        conn_id: samod::ConnectionId,
+        peer_id: Arc<str>,
+    },
+    OutgoingConnection {
+        endpoint_id: EndpointId,
+        conn_id: samod::ConnectionId,
+        peer_id: Arc<str>,
+    },
+    ConnectionClosed {
+        endpoint_id: EndpointId,
+        reason: samod::ConnFinishedReason,
     },
     DocSyncUpdates {
         updates: Arc<[am_utils_rs::peers::DocPeerSyncUpdate]>,
     },
-}
-
-pub struct IrohSyncRepo {
-    acx: AmCtx,
-    router: iroh::protocol::Router,
-    config_repo: Arc<crate::config::ConfigRepo>,
-    observer: Arc<am_utils_rs::peers::PeerSyncObserverHandle>,
-    iroh_docs: iroh_docs::api::DocsApi,
-    iroh_blobs: iroh_blobs::api::Store,
-    bootstrap_docs: tokio::sync::Mutex<Vec<iroh_docs::api::Doc>>,
-    cancel_token: CancellationToken,
-    local_repo_id: String,
-    app_doc_id: DocumentId,
-    drawer_doc_id: DocumentId,
-    local_device_name: String,
-    active_endpoint_ids: tokio::sync::RwLock<HashMap<String, ()>>,
-    pub registry: Arc<crate::repos::ListenersRegistry>,
+    PeerFullySynced {
+        endpoint_id: EndpointId,
+        doc_count: usize,
+    },
+    DocSyncedWithPeer {
+        endpoint_id: EndpointId,
+        doc_id: DocumentId,
+    },
+    StalePeer {
+        endpoint_id: EndpointId,
+    },
 }
 
 pub struct IrohSyncRepoStopToken {
     cancel_token: CancellationToken,
-    worker_handle: Option<JoinHandle<()>>,
-    observer_stop: Option<am_utils_rs::peers::PeerSyncObserverStopToken>,
+    worker_handle: JoinHandle<()>,
     router: iroh::protocol::Router,
+    full_stop_token: full2::StopToken,
 }
 
 impl IrohSyncRepoStopToken {
-    pub async fn stop(mut self) -> Res<()> {
+    pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
-        if let Some(handle) = self.worker_handle.take() {
-            handle.await?;
-        }
-        if let Some(stop) = self.observer_stop.take() {
-            stop.stop().await?;
-        }
         self.router.shutdown().await?;
+        self.full_stop_token.stop().await?;
+        utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(2)).await?;
+        Ok(())
+    }
+}
+
+impl IrohSyncRepo {
+    pub async fn boot(
+        rcx: Arc<RepoCtx>,
+        drawer_repo: Arc<DrawerRepo>,
+        config_repo: Arc<crate::config::ConfigRepo>,
+    ) -> Res<(Arc<Self>, IrohSyncRepoStopToken)> {
+        let endpoint = iroh::Endpoint::builder()
+            .secret_key(rcx.iroh_secret_key.clone())
+            .bind()
+            .await?;
+        let blobs = (*iroh_blobs::store::mem::MemStore::new()).clone();
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let docs = iroh_docs::protocol::Docs::memory()
+            .spawn(endpoint.clone(), blobs.clone(), gossip.clone())
+            .await
+            .map_err(|err| ferr!("error booting iroh docs protocol: {err:?}"))?;
+
+        let (incoming_conn_tx, incoming_conn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (conn_end_tx, conn_end_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let router = iroh::protocol::Router::builder(endpoint.clone())
+            .accept(
+                AmCtx::SYNC_ALPN,
+                am_utils_rs::iroh::IrohRepoProtocol {
+                    cancel_token: default(),
+                    acx: rcx.acx.clone(),
+                    conn_tx: incoming_conn_tx,
+                    end_signal_tx: conn_end_tx.clone(),
+                },
+            )
+            .accept(
+                iroh_blobs::ALPN,
+                iroh_blobs::BlobsProtocol::new(&blobs, None),
+            )
+            .accept(iroh_docs::ALPN, docs.clone())
+            .accept(iroh_gossip::ALPN, gossip.clone())
+            .spawn();
+
+        let cancel_token = CancellationToken::new();
+        let endpoint_id = router.endpoint().id().to_string();
+
+        config_repo
+            .ensure_local_sync_device(endpoint_id, &rcx.local_device_name)
+            .await?;
+
+        let (mut full_sync_handle, full_stop_token) =
+            full2::start_full_sync_worker(rcx.clone(), drawer_repo, cancel_token.child_token())
+                .await?;
+        let full_sync_rx = full_sync_handle.events_rx.take().expect("impossible");
+
+        let repo = Arc::new(Self {
+            rcx,
+            router: router.clone(),
+            config_repo,
+            iroh_docs: docs.api().clone(),
+            iroh_blobs: blobs,
+            cancel_token: cancel_token.clone(),
+            registry: crate::repos::ListenersRegistry::new(),
+            active_samod_peers: default(),
+
+            conn_end_signal_tx: conn_end_tx,
+            full_sync_handle,
+            // bootstrap_docs: tokio::sync::Mutex::new(Vec::new()),
+            // active_endpoint_ids: tokio::sync::RwLock::new(HashMap::new()),
+        });
+
+        let worker_handle = tokio::spawn({
+            let repo = Arc::clone(&repo);
+            async move {
+                repo.machine_loop(full_sync_rx, incoming_conn_rx, conn_end_rx)
+                    .await
+                    .unwrap();
+            }
+            .instrument(tracing::info_span!("IrohSyncRepo listen task"))
+        });
+
+        Ok((
+            repo,
+            IrohSyncRepoStopToken {
+                cancel_token,
+                worker_handle,
+                router,
+                full_stop_token,
+            },
+        ))
+    }
+
+    fn ensure_repo_live(&self) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is shutting down")
+        }
+        Ok(())
+    }
+
+    async fn machine_loop(
+        &self,
+        mut full_sync_rx: tokio::sync::broadcast::Receiver<full2::FullSyncEvent>,
+        mut incoming_conn_rx: tokio::sync::mpsc::UnboundedReceiver<am_utils_rs::RepoConnection>,
+        mut conn_end_rx: tokio::sync::mpsc::UnboundedReceiver<am_utils_rs::ConnFinishSignal>,
+    ) -> Res<()> {
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => {
+                    debug!("cancel token lit");
+                    break;
+                }
+                val = full_sync_rx.recv() => {
+                    match val {
+                        Ok(event) => {
+                            self.handle_full_sync_evt(event).await?;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(?skipped, "sync observer lagged");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            error!("full sync worer is down");
+                            break;
+                        }
+                    }
+                }
+                val = incoming_conn_rx.recv() => {
+                    let conn = val.ok_or_eyre("iroh protcol is down")?;
+                    self.handle_incoming_am_conn(conn).await?;
+                }
+                val = conn_end_rx.recv() => {
+                    let signal = val.expect("impossible actually");
+                    self.handle_conn_end(signal).await?;
+                }
+            }
+        }
+        // cleanup
+        {
+            let mut active_samod_peers =
+                std::mem::replace(&mut *self.active_samod_peers.write().await, default());
+
+            use futures_buffered::BufferedStreamExt;
+            futures::stream::iter(
+                active_samod_peers
+                    .drain()
+                    .map(|(_endpoint_id, (conn,))| conn.stop()),
+            )
+            .buffered_unordered(16)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Res<Vec<_>>>()?;
+        }
+        eyre::Ok(())
+    }
+
+    async fn handle_incoming_am_conn(&self, conn: am_utils_rs::RepoConnection) -> Res<()> {
+        let endpoint_id =
+            endpoint_id_from_peer_id(&conn.peer_id).expect("peer id of unknown structure");
+
+        let events = [IrohSyncEvent::IncomingConnetion {
+            endpoint_id: endpoint_id.clone(),
+            peer_id: conn.peer_id.clone(),
+            conn_id: conn.id,
+        }];
+
+        self.full_sync_handle
+            .add_connection(endpoint_id.clone(), conn.id)
+            .await?;
+
+        self.active_samod_peers
+            .write()
+            .await
+            .insert(endpoint_id, (conn,));
+
+        self.registry.notify(events);
+
+        Ok(())
+    }
+
+    async fn handle_conn_end(&self, signal: am_utils_rs::ConnFinishSignal) -> Res<()> {
+        let endpoint_id =
+            endpoint_id_from_peer_id(&signal.peer_id).expect("peer id of unknown structure");
+
+        let events = [IrohSyncEvent::ConnectionClosed {
+            endpoint_id: endpoint_id.clone(),
+            reason: signal.reason,
+        }];
+
+        self.full_sync_handle
+            .remove_connection(endpoint_id.clone())
+            .await?;
+
+        let old = self.active_samod_peers.write().await.remove(&endpoint_id);
+        assert!(old.is_some(), "fishy");
+
+        self.registry.notify(events);
+        Ok(())
+    }
+
+    async fn handle_full_sync_evt(&self, evt: full2::FullSyncEvent) -> Res<()> {
+        match evt {
+            full2::FullSyncEvent::PeerFullSynced {
+                endpoint_id,
+                doc_count,
+            } => self.registry.notify([IrohSyncEvent::PeerFullySynced {
+                endpoint_id,
+                doc_count,
+            }]),
+            full2::FullSyncEvent::DocSyncedWithPeer {
+                endpoint_id,
+                doc_id,
+            } => self.registry.notify([IrohSyncEvent::DocSyncedWithPeer {
+                endpoint_id,
+                doc_id,
+            }]),
+            full2::FullSyncEvent::StalePeer { endpoint_id } => self
+                .registry
+                .notify([IrohSyncEvent::StalePeer { endpoint_id }]),
+        }
+        Ok(())
+    }
+
+    pub async fn connect_url(&self, iroh_doc_url: &str) -> Res<bootstrap::SyncBootstrapState> {
+        self.ensure_repo_live()?;
+
+        let bootstrap =
+            bootstrap::resolve_bootstrap_with_docs(&self.iroh_docs, &self.iroh_blobs, iroh_doc_url)
+                .await?;
+
+        if bootstrap.repo_id != self.rcx.repo_id {
+            eyre::bail!(
+                "bootstrap repo_id mismatch (local={}, remote={})",
+                self.rcx.repo_id,
+                bootstrap.repo_id
+            );
+        }
+        self.connect_endpoint_addr(bootstrap.endpoint_addr.clone())
+            .await?;
+        Ok(bootstrap)
+    }
+
+    pub async fn connect_endpoint_addr(&self, endpoint_addr: iroh::EndpointAddr) -> Res<()> {
+        self.ensure_repo_live()?;
+
+        if self
+            .active_samod_peers
+            .read()
+            .await
+            .contains_key(&endpoint_addr.id)
+        {
+            return Ok(());
+        }
+
+        if endpoint_addr.id == self.router.endpoint().id() {
+            eyre::bail!("connecting to ourself is not supported");
+        }
+        let endpoint_id = endpoint_addr.id.clone();
+        let conn = self
+            .rcx
+            .acx
+            .spawn_connection_iroh(
+                self.router.endpoint(),
+                endpoint_addr,
+                Some(self.conn_end_signal_tx.clone()),
+            )
+            .await?;
+        let peer_id = conn.peer_info.peer_id.as_str().into();
+        let events = [IrohSyncEvent::OutgoingConnection {
+            endpoint_id: endpoint_id.clone(),
+            peer_id,
+            conn_id: conn.id,
+        }];
+
+        self.full_sync_handle
+            .add_connection(endpoint_id.clone(), conn.id)
+            .await?;
+
+        self.active_samod_peers
+            .write()
+            .await
+            .insert(endpoint_id, (conn,));
+        self.registry.notify(events);
+        Ok(())
+    }
+
+    pub async fn connect_known_devices_once(&self) -> Res<()> {
+        self.ensure_repo_live()?;
+
+        let devices = self.config_repo.list_known_sync_devices().await?;
+        let local_endpoint_id = self.router.endpoint().id();
+        for device in devices {
+            let endpoint_id = parse_endpoint_id_base58(&device.endpoint_id)
+                .wrap_err("unable to decode endpoint id from config repo")?;
+            if endpoint_id == local_endpoint_id {
+                continue;
+            }
+            self.connect_endpoint_addr(iroh::EndpointAddr::new(endpoint_id))
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn wait_until_peers_sync(&self, endpoint_ids: &[EndpointId]) -> Res<()> {
+        self.ensure_repo_live()?;
+        // TODO: listen for self events until our peers have the FullSyncEvent
+        // sent
         Ok(())
     }
 }
@@ -85,455 +399,23 @@ impl crate::repos::Repo for IrohSyncRepo {
     }
 }
 
-impl IrohSyncRepo {
-    pub async fn boot(
-        acx: AmCtx,
-        config_repo: Arc<crate::config::ConfigRepo>,
-        sec_key: iroh::SecretKey,
-        app_doc_id: DocumentId,
-        drawer_doc_id: DocumentId,
-        local_device_name: String,
-    ) -> Res<(Arc<Self>, IrohSyncRepoStopToken)> {
-        let endpoint = iroh::Endpoint::builder().secret_key(sec_key).bind().await?;
-        let blobs = (*iroh_blobs::store::mem::MemStore::new()).clone();
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let docs = iroh_docs::protocol::Docs::memory()
-            .spawn(endpoint.clone(), blobs.clone(), gossip.clone())
-            .await
-            .map_err(|err| ferr!("error booting iroh docs protocol: {err:?}"))?;
-
-        let (incoming_conn_tx, mut incoming_conn_rx) = tokio::sync::mpsc::unbounded_channel();
-        let router = iroh::protocol::Router::builder(endpoint.clone())
-            .accept(
-                AmCtx::SYNC_ALPN,
-                am_utils_rs::iroh::IrohRepoProtocol {
-                    acx: acx.clone(),
-                    conn_tx: incoming_conn_tx,
-                },
-            )
-            .accept(
-                iroh_blobs::ALPN,
-                iroh_blobs::BlobsProtocol::new(&blobs, None),
-            )
-            .accept(iroh_docs::ALPN, docs.clone())
-            .accept(iroh_gossip::ALPN, gossip.clone())
-            .spawn();
-
-        let (observer, observer_stop) = acx.spawn_peer_sync_observer();
-        let main_cancel_token = CancellationToken::new();
-        let local_repo_id = config_repo.get_repo_id().await?;
-        let endpoint_id = router.endpoint().id().to_string();
-        config_repo
-            .ensure_local_sync_device(endpoint_id, &local_device_name)
-            .await?;
-
-        let repo = Arc::new(Self {
-            acx,
-            router: router.clone(),
-            config_repo,
-            observer: Arc::clone(&observer),
-            iroh_docs: docs.api().clone(),
-            iroh_blobs: blobs,
-            bootstrap_docs: tokio::sync::Mutex::new(Vec::new()),
-            cancel_token: main_cancel_token.child_token(),
-            local_repo_id,
-            app_doc_id,
-            drawer_doc_id,
-            local_device_name,
-            active_endpoint_ids: tokio::sync::RwLock::new(HashMap::new()),
-            registry: crate::repos::ListenersRegistry::new(),
-        });
-
-        let worker_handle = tokio::spawn({
-            let repo = Arc::clone(&repo);
-            let cancel_token = main_cancel_token.clone();
-            async move {
-                let mut updates_rx = repo.observer.subscribe();
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = cancel_token.cancelled() => {
-                            break;
-                        }
-                        recv = incoming_conn_rx.recv() => {
-                            let conn = recv.expect(ERROR_CHANNEL);
-                            let endpoint_id = endpoint_id_from_peer_id(&conn.peer_info.peer_id)
-                                .expect("peer id must include endpoint id suffix");
-                            repo.mark_endpoint_connected(endpoint_id).await;
-                            repo.registry.notify([IrohSyncEvent::IncomingConnetion {
-                                peer_info: conn.peer_info
-                            }]);
-                        }
-                        recv = updates_rx.recv() => {
-                            match recv {
-                                Ok(updates) => {
-                                    repo.refresh_active_endpoint_ids_from_snapshot().await.unwrap();
-                                    repo.registry.notify([IrohSyncEvent::DocSyncUpdates { updates }]);
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                                    warn!(?skipped, "sync observer lagged");
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok((
-            repo,
-            IrohSyncRepoStopToken {
-                cancel_token: main_cancel_token,
-                worker_handle: Some(worker_handle),
-                observer_stop: Some(observer_stop),
-                router,
-            },
-        ))
+fn parse_endpoint_id_base58(raw: &str) -> Res<iroh::EndpointId> {
+    let raw = utils_rs::hash::decode_base58_multibase(raw)
+        .wrap_err("peer_id endpoint id is not base58")?;
+    if raw.len() != 32 {
+        eyre::bail!("peer id decoded base58 is not len 32");
     }
-
-    pub async fn get_ticket_url(&self) -> Res<String> {
-        let author = self
-            .iroh_docs
-            .author_default()
-            .await
-            .map_err(|err| ferr!("error getting default docs author: {err:?}"))?;
-        let doc = self
-            .iroh_docs
-            .create()
-            .await
-            .map_err(|err| ferr!("error creating bootstrap doc: {err:?}"))?;
-        doc.set_bytes(
-            author,
-            BOOTSTRAP_KEY_REPO_ID.to_vec(),
-            self.local_repo_id.as_bytes().to_vec(),
-        )
-        .await
-        .map_err(|err| ferr!("error writing repo_id bootstrap key: {err:?}"))?;
-        doc.set_bytes(
-            author,
-            BOOTSTRAP_KEY_APP_DOC_ID.to_vec(),
-            self.app_doc_id.to_string().as_bytes().to_vec(),
-        )
-        .await
-        .map_err(|err| ferr!("error writing app_doc_id bootstrap key: {err:?}"))?;
-        doc.set_bytes(
-            author,
-            BOOTSTRAP_KEY_DRAWER_DOC_ID.to_vec(),
-            self.drawer_doc_id.to_string().as_bytes().to_vec(),
-        )
-        .await
-        .map_err(|err| ferr!("error writing drawer_doc_id bootstrap key: {err:?}"))?;
-        doc.set_bytes(
-            author,
-            BOOTSTRAP_KEY_DEVICE_NAME.to_vec(),
-            self.local_device_name.as_bytes().to_vec(),
-        )
-        .await
-        .map_err(|err| ferr!("error writing device_name bootstrap key: {err:?}"))?;
-        let ticket = doc
-            .share(ShareMode::Write, AddrInfoOptions::RelayAndAddresses)
-            .await
-            .map_err(|err| ferr!("error sharing bootstrap doc: {err:?}"))?;
-        doc.start_sync(vec![])
-            .await
-            .map_err(|err| ferr!("error starting bootstrap doc sync: {err:?}"))?;
-        self.bootstrap_docs.lock().await.push(doc);
-        Ok(format_iroh_doc_ticket_url(&ticket))
-    }
-
-    pub async fn connect_url(&self, iroh_doc_url: &str) -> Res<SyncBootstrapState> {
-        let bootstrap =
-            resolve_bootstrap_with_docs(&self.iroh_docs, &self.iroh_blobs, iroh_doc_url).await?;
-        self.ensure_repo_allowed(&bootstrap).await?;
-        self.connect_endpoint_addr(bootstrap.endpoint_addr.clone())
-            .await?;
-        Ok(bootstrap)
-    }
-
-    pub async fn connect_endpoint_addr(&self, endpoint_addr: iroh::EndpointAddr) -> Res<()> {
-        if endpoint_addr.id == self.router.endpoint().id() {
-            eyre::bail!("Connecting to ourself is not supported");
-        }
-        let endpoint_id = endpoint_addr.id.to_string();
-        let _conn = self
-            .acx
-            .spawn_connection_iroh(self.router.endpoint(), endpoint_addr)
-            .await?;
-        self.mark_endpoint_connected(endpoint_id).await;
-        Ok(())
-    }
-
-    pub async fn connect_known_devices_once(&self) -> Res<()> {
-        let devices = self.config_repo.list_known_sync_devices().await?;
-        let snapshot = self.observer.snapshot().await?;
-        let local_endpoint_id = self.router.endpoint().id().to_string();
-        for device in devices {
-            if device.endpoint_id == local_endpoint_id {
-                continue;
-            }
-            if is_endpoint_already_connected(&snapshot, &device.endpoint_id) {
-                continue;
-            }
-            let endpoint_id = iroh::PublicKey::from_str(&device.endpoint_id)
-                .wrap_err_with(|| format!("invalid endpoint id {}", device.endpoint_id))?;
-            self.connect_endpoint_addr(iroh::EndpointAddr::new(endpoint_id))
-                .await?;
-        }
-        Ok(())
-    }
-
-    pub async fn full_sync_peers(
-        &self,
-        drawer_repo: Arc<crate::drawer::DrawerRepo>,
-        endpoint_ids: &[String],
-    ) -> Res<(full::FullSyncHandle, full::FullSyncStopToken)> {
-        let target_ids = endpoint_ids.iter().cloned().collect::<HashSet<_>>();
-        if target_ids.is_empty() {
-            eyre::bail!("at least one endpoint id must be provided for full_sync_peers");
-        }
-
-        self.refresh_active_endpoint_ids_from_snapshot().await?;
-        self.ensure_endpoints_active(&target_ids).await?;
-
-        let snapshot = self.observer.snapshot().await?;
-        let updates_rx = self.observer.subscribe();
-        Ok(full::spawn_full_sync_worker(
-            drawer_repo,
-            self.acx.clone(),
-            snapshot,
-            updates_rx,
-            target_ids,
-        ))
-    }
-
-    async fn mark_endpoint_connected(&self, endpoint_id: String) {
-        self.active_endpoint_ids
-            .write()
-            .await
-            .insert(endpoint_id, ());
-    }
-
-    async fn refresh_active_endpoint_ids_from_snapshot(&self) -> Res<()> {
-        let snapshot = self.observer.snapshot().await?;
-        let mut next = HashMap::new();
-        for connection in snapshot.connections {
-            let samod::ConnectionState::Connected { their_peer_id } = connection.state else {
-                continue;
-            };
-            let endpoint_id = endpoint_id_from_peer_id(&their_peer_id)
-                .expect("peer id must include endpoint id suffix");
-            next.insert(endpoint_id, ());
-        }
-        *self.active_endpoint_ids.write().await = next;
-        Ok(())
-    }
-
-    async fn ensure_endpoints_active(&self, endpoint_ids: &HashSet<String>) -> Res<()> {
-        let active = self.active_endpoint_ids.read().await;
-        let mut missing = endpoint_ids
-            .iter()
-            .filter(|endpoint_id| !active.contains_key(*endpoint_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            missing.sort();
-            eyre::bail!(
-                "requested endpoints are not connected: {}",
-                missing.join(", ")
-            );
-        }
-        Ok(())
-    }
-
-    async fn ensure_repo_allowed(&self, bootstrap: &SyncBootstrapState) -> Res<()> {
-        if bootstrap.repo_id != self.local_repo_id {
-            eyre::bail!(
-                "bootstrap repo_id mismatch (local={}, remote={})",
-                self.local_repo_id,
-                bootstrap.repo_id
-            );
-        }
-        Ok(())
-    }
+    let mut buf = [0_u8; 32];
+    buf.copy_from_slice(&raw);
+    Ok(iroh::EndpointId::from_bytes(&buf)?)
 }
 
-pub fn format_iroh_doc_ticket_url(ticket: &iroh_docs::DocTicket) -> String {
-    format!("{IROH_DOC_URL_SCHEME}:{ticket}")
-}
-
-pub fn parse_iroh_doc_ticket_url(input: &str) -> Res<iroh_docs::DocTicket> {
-    let payload = input
-        .strip_prefix(&format!("{IROH_DOC_URL_SCHEME}:"))
-        .ok_or_eyre("invalid sync url scheme, expected db+iroh-doc:<ticket>")?;
-    iroh_docs::DocTicket::from_str(payload).wrap_err("invalid iroh docs ticket")
-}
-
-pub async fn resolve_bootstrap_from_url(iroh_doc_url: &str) -> Res<SyncBootstrapState> {
-    let session = TempDocsSession::boot(None).await?;
-    let out = resolve_bootstrap_with_docs(&session.docs, &session.blobs, iroh_doc_url).await;
-    session.shutdown().await?;
-    out
-}
-
-pub async fn pull_required_docs_once(
-    acx: &AmCtx,
-    app_doc_id: &DocumentId,
-    drawer_doc_id: &DocumentId,
-    timeout: std::time::Duration,
-) -> Res<()> {
-    let app_doc_id = app_doc_id.clone();
-    let drawer_doc_id = drawer_doc_id.clone();
-    tokio::time::timeout(timeout, async move {
-        loop {
-            let app = acx.find_doc(&app_doc_id).await?;
-            let drawer = acx.find_doc(&drawer_doc_id).await?;
-            if app.is_some() && drawer.is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        }
-        Ok::<(), eyre::Report>(())
-    })
-    .await
-    .map_err(|_| eyre::eyre!("timed out waiting for remote docs during clone"))??;
-
-    Ok(())
-}
-
-async fn resolve_bootstrap_with_docs(
-    docs: &iroh_docs::api::DocsApi,
-    blobs: &iroh_blobs::api::Store,
-    iroh_doc_url: &str,
-) -> Res<SyncBootstrapState> {
-    let ticket = parse_iroh_doc_ticket_url(iroh_doc_url)?;
-    let endpoint_addr = ticket
-        .nodes
-        .first()
-        .cloned()
-        .ok_or_eyre("iroh docs ticket is missing endpoint addresses")?;
-    let doc = docs
-        .import(ticket.clone())
-        .await
-        .map_err(|err| ferr!("error importing bootstrap doc ticket: {err:?}"))?;
-    doc.start_sync(ticket.nodes.clone())
-        .await
-        .map_err(|err| ferr!("error starting bootstrap doc sync: {err:?}"))?;
-
-    let timeout_at = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
-    loop {
-        let repo_id = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_REPO_ID).await?;
-        let app_doc_id = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_APP_DOC_ID).await?;
-        let drawer_doc_id = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_DRAWER_DOC_ID).await?;
-        let device_name = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_DEVICE_NAME).await?;
-        if let (Some(repo_id), Some(app_doc_id), Some(drawer_doc_id)) =
-            (repo_id, app_doc_id, drawer_doc_id)
-        {
-            let app_doc_id =
-                DocumentId::from_str(&app_doc_id).wrap_err("invalid app_doc_id in bootstrap")?;
-            let drawer_doc_id = DocumentId::from_str(&drawer_doc_id)
-                .wrap_err("invalid drawer_doc_id in bootstrap")?;
-            let endpoint_id = endpoint_addr.id.to_string();
-            // FIXME: let's warn on error at least
-            let _ = doc.leave().await;
-            return Ok(SyncBootstrapState {
-                endpoint_addr,
-                endpoint_id,
-                repo_id,
-                app_doc_id,
-                drawer_doc_id,
-                device_name,
-            });
-        }
-        if tokio::time::Instant::now() >= timeout_at {
-            eyre::bail!("timed out waiting for bootstrap state from iroh docs");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    }
-}
-
-async fn read_bootstrap_key(
-    doc: &iroh_docs::api::Doc,
-    blobs: &iroh_blobs::api::Store,
-    key: &[u8],
-) -> Res<Option<String>> {
-    let Some(entry) = doc
-        .get_one(Query::key_exact(key))
-        .await
-        .map_err(|err| ferr!("error reading bootstrap key: {err:?}"))?
-    else {
-        return Ok(None);
-    };
-    let bytes = match blobs.get_bytes(entry.content_hash()).await {
-        Ok(bytes) => bytes,
-        Err(_) => return Ok(None),
-    };
-    Ok(Some(
-        std::str::from_utf8(&bytes)
-            .wrap_err("bootstrap key has invalid utf8 value")?
-            .to_string(),
-    ))
-}
-
-fn is_endpoint_already_connected(
-    snapshot: &am_utils_rs::peers::PeerSyncSnapshot,
-    endpoint_id: &str,
-) -> bool {
-    snapshot.connections.iter().any(|connection| {
-        let samod::ConnectionState::Connected { their_peer_id } = &connection.state else {
-            return false;
-        };
-        endpoint_id_from_peer_id(their_peer_id)
-            .as_ref()
-            .map(|suffix| suffix == endpoint_id)
-            .unwrap_or(false)
-    })
-}
-
-fn endpoint_id_from_peer_id(peer_id: &samod::PeerId) -> Option<String> {
-    peer_id.to_string().rsplit('/').next().map(str::to_string)
-}
-
-struct TempDocsSession {
-    router: iroh::protocol::Router,
-    docs: iroh_docs::api::DocsApi,
-    blobs: iroh_blobs::api::Store,
-}
-
-impl TempDocsSession {
-    async fn boot(secret_key: Option<iroh::SecretKey>) -> Res<Self> {
-        let mut endpoint_builder = iroh::Endpoint::builder();
-        if let Some(secret_key) = secret_key {
-            endpoint_builder = endpoint_builder.secret_key(secret_key);
-        }
-        let endpoint = endpoint_builder.bind().await?;
-        let blobs = (*iroh_blobs::store::mem::MemStore::new()).clone();
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let docs = iroh_docs::protocol::Docs::memory()
-            .spawn(endpoint.clone(), blobs.clone(), gossip.clone())
-            .await
-            .map_err(|err| ferr!("error booting temporary docs protocol: {err:?}"))?;
-        let router = iroh::protocol::Router::builder(endpoint)
-            .accept(
-                iroh_blobs::ALPN,
-                iroh_blobs::BlobsProtocol::new(&blobs, None),
-            )
-            .accept(iroh_docs::ALPN, docs.clone())
-            .accept(iroh_gossip::ALPN, gossip)
-            .spawn();
-        Ok(Self {
-            router,
-            docs: docs.api().clone(),
-            blobs,
-        })
-    }
-
-    async fn shutdown(self) -> Res<()> {
-        self.router.shutdown().await?;
-        Ok(())
-    }
+fn endpoint_id_from_peer_id(peer_id: &str) -> Res<iroh::EndpointId> {
+    let raw = peer_id
+        .rsplit('/')
+        .next()
+        .ok_or_eyre("unexpected peer_id structure")?;
+    parse_endpoint_id_base58(raw)
 }
 
 #[cfg(test)]
@@ -580,19 +462,20 @@ mod tests {
         let repo_b_path = temp_root.path().join("repo-b");
         tokio::fs::create_dir_all(&repo_a_path).await?;
 
-        let init_ctx = RepoCtx::open(
+        let rtx = RepoCtx::open(
             &gcx,
             &repo_a_path,
             RepoOpenOptions {
                 ensure_initialized: true,
                 ws_connector_url: None,
             },
+            "test-device".into(),
         )
         .await?;
-        if let Some(stop) = init_ctx.acx_stop.lock().await.take() {
+        if let Some(stop) = rtx.acx_stop.lock().await.take() {
             stop.stop().await?;
         }
-        drop(init_ctx);
+        drop(rtx);
 
         copy_dir_all(&repo_a_path, &repo_b_path)?;
         let repo_b_sql = crate::app::SqlCtx::new(&format!(
@@ -624,16 +507,18 @@ mod tests {
 
         let sync_url = node_a.sync_repo.get_ticket_url().await?;
         let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
-        let mut full_sync = node_b
-            .sync_repo
-            .full_sync_peers(
-                Arc::clone(&node_b.drawer),
-                std::slice::from_ref(&bootstrap.endpoint_id),
-            )
-            .await?;
 
-        full_sync.0.wait_until_done().await?;
-        full_sync.1.stop().await?;
+        // FIXME:
+        // let mut full_sync = node_b
+        //     .sync_repo
+        //     .full_sync_peers(
+        //         Arc::clone(&node_b.drawer),
+        //         std::slice::from_ref(&bootstrap.endpoint_id),
+        //     )
+        //     .await?;
+        //
+        // full_sync.0.wait_until_done().await?;
+        // full_sync.1.stop().await?;
 
         tokio::time::timeout(std::time::Duration::from_secs(20), async {
             loop {
@@ -681,7 +566,7 @@ mod tests {
         gcx: &crate::app::GlobalCtx,
         repo_root: &std::path::Path,
     ) -> Res<SyncTestNode> {
-        let ctx = Arc::new(
+        let rtx = Arc::new(
             RepoCtx::open(
                 gcx,
                 repo_root,
@@ -689,22 +574,23 @@ mod tests {
                     ensure_initialized: false,
                     ws_connector_url: None,
                 },
+                "test-device".into(),
             )
             .await?,
         );
 
-        let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone()).await?;
+        let blobs_repo = BlobsRepo::new(rtx.layout.blobs_root.clone()).await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
-            ctx.acx.clone(),
+            rtx.acx.clone(),
             Arc::clone(&blobs_repo),
-            ctx.doc_app.document_id().clone(),
-            ctx.local_actor_id.clone(),
+            rtx.doc_app.document_id().clone(),
+            rtx.local_actor_id.clone(),
         )
         .await?;
         let (drawer_repo, drawer_stop) = DrawerRepo::load(
-            ctx.acx.clone(),
-            ctx.doc_drawer.document_id().clone(),
-            ctx.local_actor_id.clone(),
+            rtx.acx.clone(),
+            rtx.doc_drawer.document_id().clone(),
+            rtx.local_actor_id.clone(),
             Arc::new(std::sync::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),
             )),
@@ -715,25 +601,22 @@ mod tests {
         )
         .await?;
         let (config_repo, config_stop) = crate::config::ConfigRepo::load(
-            ctx.acx.clone(),
-            ctx.doc_app.document_id().clone(),
+            rtx.acx.clone(),
+            rtx.doc_app.document_id().clone(),
             Arc::clone(&plugs_repo),
-            daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
-            ctx.sql.db_pool.clone(),
+            daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
+            rtx.sql.db_pool.clone(),
         )
         .await?;
         let (sync_repo, sync_stop) = IrohSyncRepo::boot(
-            ctx.acx.clone(),
+            Arc::clone(&rtx),
+            Arc::clone(&drawer_repo),
             Arc::clone(&config_repo),
-            ctx.iroh_secret_key.clone(),
-            ctx.doc_app.document_id().clone(),
-            ctx.doc_drawer.document_id().clone(),
-            "sync-test".to_string(),
         )
         .await?;
 
         Ok(SyncTestNode {
-            ctx,
+            ctx: rtx,
             drawer: drawer_repo,
             drawer_stop,
             _plugs_repo: plugs_repo,

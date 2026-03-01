@@ -26,7 +26,7 @@ pub struct SwitchStateStore {
 }
 
 #[async_trait]
-impl crate::stores::Store for SwitchStateStore {
+impl crate::stores::AmStore for SwitchStateStore {
     fn prop() -> Cow<'static, str> {
         "switch".into()
     }
@@ -42,7 +42,7 @@ impl SwitchWorkerHandle {
     pub async fn stop(mut self) -> Res<()> {
         self.cancel_token.cancel();
         let join_handle = self.join_handle.take().expect("join_handle already taken");
-        utils_rs::wait_on_handle_with_timeout(join_handle, 5 * 1000).await?;
+        utils_rs::wait_on_handle_with_timeout(join_handle, Duration::from_secs(5)).await?;
         Ok(())
     }
 }
@@ -88,7 +88,7 @@ pub struct SwitchSinkOutcome {
 pub struct SwitchSinkCtx<'a> {
     // FIXME: why are these optional?
     pub rt: Option<&'a Arc<Rt>>,
-    pub store: Option<&'a crate::stores::StoreHandle<SwitchStateStore>>,
+    pub store: Option<&'a crate::stores::AmStoreHandle<SwitchStateStore>>,
 }
 
 #[async_trait]
@@ -117,10 +117,10 @@ pub async fn spawn_switch_worker(
     sinks: BTreeMap<String, Box<dyn SwitchSink + Send + Sync>>,
 ) -> Res<SwitchWorkerHandle> {
     use crate::repos::{Repo, SubscribeOpts};
-    use crate::stores::Store;
+    use crate::stores::AmStore;
 
     let store = SwitchStateStore::load(&rt.acx, &app_doc_id).await?;
-    let store = crate::stores::StoreHandle::new(
+    let store = crate::stores::AmStoreHandle::new(
         store,
         rt.acx.clone(),
         app_doc_id.clone(),
@@ -257,7 +257,7 @@ pub async fn spawn_switch_worker(
                 tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => {
-                        debug!("SwitchWorker cancelled");
+                        debug!("cancel token lit");
                         break;
                     }
                     event = plug_listener.recv_lossy_async() => {
@@ -397,7 +397,7 @@ fn prepare_sinks(
 
 struct SwitchWorker {
     rt: Arc<Rt>,
-    store: crate::stores::StoreHandle<SwitchStateStore>,
+    store: crate::stores::AmStoreHandle<SwitchStateStore>,
     prepared_sinks: Vec<PreparedSwitchSink>,
     predicate_requirements: HashSet<DocPredicateEvalRequirement>,
     predicate_resolved: HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,

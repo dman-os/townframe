@@ -1,9 +1,10 @@
 use crate::interlude::*;
 
+use automerge::ActorId;
 use futures::future::BoxFuture;
 
 #[async_trait]
-pub trait Store: Hydrate + Reconcile + Send + Sync + 'static {
+pub trait AmStore: Hydrate + Reconcile + Send + Sync + 'static {
     fn prop() -> Cow<'static, str>;
 
     // async fn flush(&mut self, args: &mut Self::FlushArgs) -> Res<()> {
@@ -11,7 +12,7 @@ pub trait Store: Hydrate + Reconcile + Send + Sync + 'static {
         &mut self,
         acx: &mut AmCtx,
         doc_id: &DocumentId,
-        actor_id: Option<automerge::ActorId>,
+        actor_id: Option<ActorId>,
     ) -> Res<Option<automerge::ChangeHash>> {
         self.flush_with_prop(acx, doc_id, Self::prop(), actor_id)
             .await
@@ -22,7 +23,7 @@ pub trait Store: Hydrate + Reconcile + Send + Sync + 'static {
         acx: &mut AmCtx,
         doc_id: &DocumentId,
         prop: Cow<'static, str>,
-        actor_id: Option<automerge::ActorId>,
+        actor_id: Option<ActorId>,
     ) -> Res<Option<automerge::ChangeHash>> {
         acx.reconcile_prop_with_actor(doc_id, automerge::ROOT, prop, self, actor_id)
             .await
@@ -45,7 +46,7 @@ pub trait Store: Hydrate + Reconcile + Send + Sync + 'static {
 
     async fn register_change_listener<F>(
         acx: &AmCtx,
-        broker: &am_utils_rs::changes::DocChangeBroker,
+        broker: &am_utils_rs::changes::DocChangeBrokerHandle,
         path: Vec<autosurgeon::Prop<'static>>,
         on_change: F,
     ) -> Res<am_utils_rs::changes::ChangeListenerRegistration>
@@ -57,7 +58,7 @@ pub trait Store: Hydrate + Reconcile + Send + Sync + 'static {
 
     async fn register_change_listener_for_prop<F>(
         acx: &AmCtx,
-        broker: &am_utils_rs::changes::DocChangeBroker,
+        broker: &am_utils_rs::changes::DocChangeBrokerHandle,
         prop: Cow<'static, str>,
         mut path: Vec<autosurgeon::Prop<'static>>,
         on_change: F,
@@ -75,7 +76,7 @@ pub trait Store: Hydrate + Reconcile + Send + Sync + 'static {
                 },
                 Box::new(on_change),
             )
-            .await;
+            .await?;
         Ok(ticket)
     }
 }
@@ -85,11 +86,11 @@ struct Inner<S> {
     acx: AmCtx,
     doc_id: DocumentId,
     store_prop: Option<String>,
-    local_actor_id: automerge::ActorId,
+    local_actor_id: ActorId,
     // flush_args: S::FlushArgs,
 }
 
-impl<S: Store> Inner<S> {
+impl<S: AmStore> Inner<S> {
     async fn flush(&mut self) -> Res<Option<automerge::ChangeHash>> {
         let actor_id = self.local_actor_id.clone();
         match &self.store_prop {
@@ -112,10 +113,10 @@ impl<S: Store> Inner<S> {
     }
 }
 
-pub struct StoreHandle<S: Store> {
+pub struct AmStoreHandle<S: AmStore> {
     inner: Arc<tokio::sync::RwLock<Inner<S>>>,
 }
-impl<T: Store> Clone for StoreHandle<T> {
+impl<T: AmStore> Clone for AmStoreHandle<T> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -123,16 +124,16 @@ impl<T: Store> Clone for StoreHandle<T> {
     }
 }
 
-impl<S> StoreHandle<S>
+impl<S> AmStoreHandle<S>
 where
-    S: Store,
+    S: AmStore,
 {
     pub fn new(
         store: S,
         //flush_args: S::FlushArgs,
         acx: AmCtx,
         doc_id: DocumentId,
-        local_actor_id: automerge::ActorId,
+        local_actor_id: ActorId,
     ) -> Self {
         Self::new_with_prop(store, acx, doc_id, None, local_actor_id)
     }
@@ -142,7 +143,7 @@ where
         acx: AmCtx,
         doc_id: DocumentId,
         store_prop: Option<String>,
-        local_actor_id: automerge::ActorId,
+        local_actor_id: ActorId,
     ) -> Self {
         Self {
             inner: Arc::new(tokio::sync::RwLock::new(Inner {
@@ -215,5 +216,114 @@ where
         let res = fun(&mut guard.store)?;
         let hash = guard.flush().await?;
         Ok((res, hash))
+    }
+}
+
+#[derive(Clone, Hydrate, Reconcile)]
+pub struct Versioned<T> {
+    pub vtag: VersionTag,
+    // #[serde(flatten)]
+    pub val: T,
+}
+
+#[derive(Clone, Debug)]
+pub struct VersionTag {
+    pub version: Uuid,
+    pub actor_id: ActorId,
+}
+
+impl VersionTag {
+    pub fn update(actor_id: ActorId) -> Self {
+        Self {
+            version: Uuid::new_v4(),
+            actor_id,
+        }
+    }
+
+    pub fn mint(actor_id: ActorId) -> Self {
+        Self {
+            version: Uuid::nil(),
+            actor_id,
+        }
+    }
+
+    pub(crate) fn nil() -> VersionTag {
+        Self {
+            version: Uuid::nil(),
+            actor_id: [0u8; 16].into(),
+        }
+    }
+}
+
+impl Reconcile for VersionTag {
+    type Key<'a> = autosurgeon::reconcile::NoKey;
+
+    fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
+        let mut buf = [0_u8; 32];
+        buf[0..16].copy_from_slice(self.version.as_bytes());
+        buf[16..].copy_from_slice(self.actor_id.to_bytes());
+        reconciler.bytes(&buf)
+    }
+}
+
+impl Hydrate for VersionTag {
+    fn hydrate_bytes(bytes: &[u8]) -> Result<Self, autosurgeon::HydrateError> {
+        if bytes.len() != 32 {
+            return Err(autosurgeon::HydrateError::unexpected(
+                "verison tag in 32 length byte array",
+                format!("verison tags has byte length of {}", bytes.len()),
+            ));
+        }
+        Ok(Self {
+            version: {
+                let mut buf = [0_u8; 16];
+                buf.copy_from_slice(&bytes[0..16]);
+                Uuid::from_bytes(buf)
+            },
+            actor_id: {
+                let mut buf = [0_u8; 16];
+                buf.copy_from_slice(&bytes[16..]);
+                buf.into()
+            },
+        })
+    }
+}
+
+impl<T> std::ops::Deref for Versioned<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.val
+    }
+}
+impl<T> std::ops::DerefMut for Versioned<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.val
+    }
+}
+
+impl<T> Versioned<T> {
+    /// NOTE: avoid usign this in versioned_updates or Default impls
+    pub fn mint(actor_id: ActorId, value: T) -> Self {
+        Self {
+            vtag: VersionTag::mint(actor_id),
+            val: value,
+        }
+    }
+
+    pub fn update(actor_id: ActorId, value: T) -> Self {
+        Self {
+            vtag: VersionTag::update(actor_id),
+            val: value,
+        }
+    }
+
+    pub fn replace(&mut self, actor_id: ActorId, value: T) -> T {
+        self.vtag = VersionTag::update(actor_id);
+        std::mem::replace(&mut self.val, value)
+    }
+
+    pub fn get_val(&self) -> &T {
+        &self.val
     }
 }

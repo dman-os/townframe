@@ -50,10 +50,8 @@ impl FfiCtx {
     async fn init(repo_root: String, gcx: &GlobalFfiCtx) -> Result<Arc<Self>, FfiError> {
         utils_rs::setup_tracing_once();
 
-        let gcx = gcx.inner.clone();
-
-        let rt = crate::init_tokio()?;
-        let rt = Arc::new(rt);
+        let rt = Arc::clone(&gcx.rt);
+        let gcx = Arc::clone(&gcx.inner);
 
         let repo_root = std::path::PathBuf::from(repo_root);
         let repo_root_for_init = repo_root.clone();
@@ -66,6 +64,7 @@ impl FfiCtx {
                     ensure_initialized: true,
                     ws_connector_url: Some("ws://0.0.0.0:8090".to_string()),
                 },
+                format!("daybook-ffi-{}", std::env::consts::ARCH),
             )
             .await?;
             let rcx = Arc::new(rcx);

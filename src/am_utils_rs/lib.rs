@@ -84,16 +84,23 @@ impl AmCtxStopToken {
 }
 #[cfg(feature = "repo")]
 pub struct RepoConnection {
+    pub id: samod::ConnectionId,
+    pub peer_id: Arc<str>,
     pub peer_info: samod::PeerInfo,
     join_handle: Option<tokio::task::JoinHandle<()>>,
     cancel_token: CancellationToken,
+}
+
+pub struct ConnFinishSignal {
+    pub peer_id: Arc<str>,
+    pub reason: samod::ConnFinishedReason,
 }
 
 impl RepoConnection {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
         if let Some(join_handle) = self.join_handle {
-            utils_rs::wait_on_handle_with_timeout(join_handle, 5 * 1000).await?;
+            utils_rs::wait_on_handle_with_timeout(join_handle, Duration::from_secs(5)).await?;
         }
         Ok(())
     }
@@ -155,6 +162,7 @@ impl AmCtx {
         rx_from_peer: futures::channel::mpsc::UnboundedReceiver<Vec<u8>>,
         tx_to_peer: futures::channel::mpsc::UnboundedSender<Vec<u8>>,
         direction: samod::ConnDirection,
+        end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<RepoConnection> {
         let repo = self.repo.clone();
         let conn = tokio::task::block_in_place(|| {
@@ -165,20 +173,30 @@ impl AmCtx {
             )
         })
         .wrap_err("failed to establish connection")?;
+
+        let conn_id = conn.id();
         let peer_info = conn
             .handshake_complete()
             .await
             .map_err(|err| ferr!("failed on handshake: {err:?}"))?;
+        let peer_id: Arc<str> = peer_info.peer_id.as_str().into();
+
         let cancel_token = CancellationToken::new();
         let join_handle = tokio::spawn({
             let cancel_token = cancel_token.clone();
+            let peer_id = peer_id.clone();
             async move {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
-                        info!("connection cancelled, dropping");
+                        debug!("cancel token lit");
                     }
                     fin_reason = conn.finished() => {
                         info!(?fin_reason, "sync server connector task finished");
+                        if let Some(tx) = end_signal_tx {
+                            tx.send(ConnFinishSignal{ peer_id, reason: fin_reason })
+                                .inspect_err(|_| warn!("connection owner closed before finish"))
+                                .ok();
+                        }
                     }
                 }
             }
@@ -189,6 +207,8 @@ impl AmCtx {
         });
 
         Ok(RepoConnection {
+            id: conn_id,
+            peer_id,
             peer_info,
             join_handle: Some(join_handle),
             cancel_token,

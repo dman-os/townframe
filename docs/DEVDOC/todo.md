@@ -65,13 +65,16 @@
   - [ ] Assert samod fsyncs reliably
   - [ ] Notification handling
     - [ ] How to avoid missing triage work?
+- [ ] Keychains for secrets
 
 - [ ] Cleanup and show it to people
-
+ 
+- [ ] Avoid automerge perf footguns
+  - [ ] fork_at
+  - [ ] get_changes
+- [ ] Adopt an rust actor framework
+  - [ ] IRPC!
 - [ ] Tutorial
-- [ ] sqlite
-  - [ ] SQL table schema/data update path
-  - [ ] Replace sqlite-vec
 - [ ] CI/CD
   - [ ] Kotlin tests
   - [ ] Version tagging and releases
@@ -85,11 +88,9 @@
       - [ ] to Flathub
     - [ ] Windows.exe
       - [ ] to Scoop.sh
-- [ ] Keychains for secrets
- 
- - [ ] Cleanup for public pre-alpha
- 
-- [ ] Tutorial
+- [ ] sqlite
+  - [ ] SQL table schema/data update path
+  - [ ] Replace sqlite-vec
 - [ ] Replace Path with camino at certain places
 - [ ] Explore multi doc drawer
   - [ ] Drawer doc migration where a drawer is marked as deprecated and all devices that have seen it must merge it into the active docs. This allows eventually consistent garbage collection
@@ -130,6 +131,7 @@
     - [x] Doc URL
   - [ ] `dpath`
     - [ ] Dpath for plugin info
+  - [ ] Multi doc drawers
 - [ ] Plugins
   - [x] Manifest
   - [ ] Commands
@@ -163,10 +165,12 @@
     - [ ] https://townframe.com (taken :/)
     - [ ] https://db.tf (not avail :/)
     - [ ] https://daybook.tf
-    - [ ] https://ton.tf (need to be an EU resident :/)
-      - [ ] https://mother.ton.tf
-      - [ ] https://motherton.db.tf
-      - [ ] https://mother.town.tf
+    - [ ] https://ton.tf (taken :/)
+    - [ ] https://ton.app (taken :/)
+      - [ ] https://mother.ton.app
+      - [ ] https://mother.ton.frame.app
+      - [ ] https://motherton.db.app
+      - [ ] https://mother.town.app
 - [ ] PgLite based testing
 - [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
 - [ ] DRY up all the wit bindgen

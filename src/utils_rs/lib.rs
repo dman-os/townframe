@@ -24,6 +24,7 @@ mod interlude {
         path::{Path, PathBuf},
         rc::Rc,
         sync::{Arc, LazyLock},
+        time::Duration,
     };
 
     #[cfg(feature = "hash")]
@@ -58,6 +59,8 @@ pub mod expect_tags {
     pub const ERROR_JSON: &str = "json error: oom?";
     pub const ERROR_UTF8: &str = "utf8 error";
     pub const ERROR_MUTEX: &str = "poisioned mutex";
+    pub const ERROR_ACTOR: &str = "task was found dead";
+    pub const ERROR_CALLER: &str = "caller dropped before response";
     pub const ERROR_INVALID_PATCH: &str = "invalid patch: hydration failed";
 }
 
@@ -644,14 +647,9 @@ pub enum WaitOnHandleError {
 
 pub async fn wait_on_handle_with_timeout<T>(
     mut join_handle: tokio::task::JoinHandle<T>,
-    timeout_ms: u64,
+    timeout: Duration,
 ) -> Result<T, WaitOnHandleError> {
-    match tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        &mut join_handle,
-    )
-    .await
-    {
+    match tokio::time::timeout(timeout, &mut join_handle).await {
         Ok(res) => Ok(res?),
         Err(err) => {
             join_handle.abort();

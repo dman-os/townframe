@@ -121,7 +121,7 @@ pub mod version_updates {
     use crate::tables::TablesStore;
 
     pub fn version_latest() -> Res<Vec<u8>> {
-        use crate::stores::Store;
+        use crate::stores::AmStore;
         let mut doc = AutoCommit::new().with_actor(ActorId::random());
         doc.put(ROOT, "version", "0")?;
         // annotate schema for app document
@@ -240,8 +240,6 @@ pub async fn init_from_globals(
 }
 
 pub mod globals {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use sqlx::SqlitePool;
 
     use crate::interlude::*;
@@ -318,11 +316,9 @@ pub mod globals {
         if let Some(repo_id) = get_repo_id(sql).await? {
             return Ok(repo_id);
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let repo_id = format!("repo-{}-{:016x}", now, rand::random::<u64>());
+        let id = Uuid::new_v4();
+        let id = utils_rs::hash::encode_base58_multibase(id);
+        let repo_id = format!("drepo_{id}");
         set_repo_id(sql, &repo_id).await?;
         Ok(repo_id)
     }

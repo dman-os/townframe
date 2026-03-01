@@ -74,6 +74,7 @@ tokio = { workspace = true, features = [
 tokio-util.workspace = true
 futures = { workspace = true }
 async-trait.workspace = true
+tokio-stream = "0.1.18"
 
 #
 # ffi
@@ -130,6 +131,7 @@ keyring = "3.6.3"
 iroh-blobs = "0.98.0"
 iroh-docs = "0.96.0"
 iroh-gossip = "0.96.0"
+futures-buffered = { version = "0.2.13", features = ["tokio-coop"] }
 
 [build-dependencies]
 uniffi = { workspace = true, features = ["build"], optional = true }
@@ -137,7 +139,6 @@ zstd.workspace = true
 # wasmtime.workspace = true
 
 [dev-dependencies]
-tokio-stream = "0.1.17"
 tokio-util = { workspace = true }
 wflow = { workspace = true, features = ["test-harness"] }
 insta = { workspace = true, features = ["json"] }
