@@ -646,7 +646,6 @@ async fn clone_repo_from_url(
             Option::<samod::AlwaysAnnounce>::None,
         )
         .await?;
-        info!("pulling required docs XXX");
         daybook_core::sync::connect_and_pull_required_docs_once(
             &acx,
             identity.iroh_secret_key.clone(),
@@ -654,7 +653,6 @@ async fn clone_repo_from_url(
             std::time::Duration::from_secs(30),
         )
         .await?;
-        info!("required docs pulled XXX");
 
         daybook_core::app::globals::set_init_state(
             &sql.db_pool,
@@ -723,19 +721,21 @@ async fn clone_repo_from_url(
     sync_repo
         .connect_endpoint_addr(bootstrap.endpoint_addr)
         .await?;
+    info!("starting full sync XXX");
     sync_repo
         .wait_for_full_sync(&[bootstrap.endpoint_id], std::time::Duration::from_secs(30))
         .await?;
-
-    // FIXME: let's provide a stop method on the repo ctx?
-    if let Some(stop) = rcx.acx_stop.lock().await.take() {
-        stop.stop().await?;
-    }
+    info!("full sync done");
 
     sync_stop.stop().await?;
     config_stop.stop().await?;
     drawer_stop.stop().await?;
     plugs_stop.stop().await?;
+
+    // FIXME: let's provide a stop method on the repo ctx?
+    if let Some(stop) = rcx.acx_stop.lock().await.take() {
+        stop.stop().await?;
+    }
 
     Ok(())
 }

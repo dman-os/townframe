@@ -264,6 +264,7 @@ impl IrohSyncRepo {
             .await
             .iter()
             .find_map(|(endpoint_id, (conn,))| {
+                info!(?endpoint_id, "XXX");
                 if conn.id == signal.conn_id {
                     Some(endpoint_id.clone())
                 } else {

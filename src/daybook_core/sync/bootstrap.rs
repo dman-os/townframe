@@ -88,6 +88,7 @@ impl IrohSyncRepo {
     }
 }
 
+/// NOTE: this uses a fresh secret key for the connection
 pub async fn resolve_bootstrap_from_url(iroh_doc_url: &str) -> Res<SyncBootstrapState> {
     let session = TempDocsSession::boot(None).await?;
     let out = resolve_bootstrap_with_docs(&session.docs, &session.blobs, iroh_doc_url).await;
@@ -225,11 +226,18 @@ pub async fn connect_and_pull_required_docs_once(
         .spawn_connection_iroh(&endpoint, bootstrap.endpoint_addr.clone(), None)
         .await?;
 
-    let pull_res = pull_required_docs_once(acx, &bootstrap.app_doc_id, &bootstrap.drawer_doc_id, timeout).await;
+    let pull_res = pull_required_docs_once(
+        acx,
+        &bootstrap.app_doc_id,
+        &bootstrap.drawer_doc_id,
+        timeout,
+    )
+    .await;
     let stop_res = conn.stop().await;
 
     pull_res?;
     stop_res?;
+    endpoint.close().await;
     Ok(())
 }
 

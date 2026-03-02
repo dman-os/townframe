@@ -412,7 +412,8 @@ impl Worker {
                 if let Some(conn_id) = self.conn_by_peer.remove(&endpoint_id) {
                     if let Some(state) = self.known_peer_set.remove(&conn_id) {
                         for part_key in state.partitions {
-                            self.remove_peer_from_part(part_key, endpoint_id.clone()).await?;
+                            self.remove_peer_from_part(part_key, endpoint_id.clone())
+                                .await?;
                         }
                     }
                 }
@@ -467,7 +468,9 @@ impl Worker {
             };
             let is_pending = matches!(deets, DocSyncStateDeets::Pending(_));
 
-            let old = self.synced_docs.insert(doc_id.clone(), DocSyncState { deets });
+            let old = self
+                .synced_docs
+                .insert(doc_id.clone(), DocSyncState { deets });
             assert!(old.is_none(), "fishy");
             if is_pending {
                 self.msg_tx

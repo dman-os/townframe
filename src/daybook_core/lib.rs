@@ -22,7 +22,6 @@ mod interlude {
     pub use utils_rs::{CHeapStr, DHashMap};
 }
 
-
 pub mod blobs;
 pub mod config;
 pub mod drawer;
