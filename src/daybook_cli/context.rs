@@ -35,6 +35,7 @@ pub async fn open_repo_ctx(
                 ensure_initialized,
                 ws_connector_url,
             },
+            format!("daybook-cli-{}", std::env::consts::ARCH),
         )
         .await?,
     ))

@@ -60,7 +60,11 @@ impl AmCtx {
                     fin_reason = conn.finished() => {
                         info!(?fin_reason, "iroh connection finished");
                         if let Some(tx) = end_signal_tx {
-                            tx.send(super::ConnFinishSignal{ peer_id, reason: fin_reason })
+                            tx.send(super::ConnFinishSignal {
+                                conn_id,
+                                peer_id,
+                                reason: fin_reason,
+                            })
                                 .inspect_err(|_| warn!("connection owner closed before finish"))
                                 .ok();
                         }
@@ -77,6 +81,7 @@ impl AmCtx {
             id: conn_id,
             peer_id,
             peer_info,
+            endpoint_id: Some(endpoint_id),
             join_handle: Some(join_handle),
             cancel_token,
         })
@@ -130,6 +135,7 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
                 peer_id: peer_id.clone(),
                 join_handle: None,
                 peer_info,
+                endpoint_id: Some(endpoint_id),
                 cancel_token: cancel_token.clone(),
             })
             .expect(ERROR_CHANNEL);
@@ -141,7 +147,11 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
             }
             fin_reason = conn.finished() => {
                 info!(?fin_reason, "incoming connection finished");
-                self.end_signal_tx.send(super::ConnFinishSignal{ peer_id, reason: fin_reason })
+                self.end_signal_tx.send(super::ConnFinishSignal {
+                    conn_id,
+                    peer_id,
+                    reason: fin_reason,
+                })
                     .inspect_err(|_| warn!("connection owner closed before finish"))
                     .ok();
             }

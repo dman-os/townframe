@@ -87,15 +87,20 @@ pub struct RepoConnection {
     pub id: samod::ConnectionId,
     pub peer_id: Arc<str>,
     pub peer_info: samod::PeerInfo,
+    #[cfg(feature = "iroh")]
+    pub endpoint_id: Option<::iroh::EndpointId>,
     join_handle: Option<tokio::task::JoinHandle<()>>,
     cancel_token: CancellationToken,
 }
 
+#[cfg(feature = "repo")]
 pub struct ConnFinishSignal {
+    pub conn_id: samod::ConnectionId,
     pub peer_id: Arc<str>,
     pub reason: samod::ConnFinishedReason,
 }
 
+#[cfg(feature = "repo")]
 impl RepoConnection {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
@@ -193,7 +198,11 @@ impl AmCtx {
                     fin_reason = conn.finished() => {
                         info!(?fin_reason, "sync server connector task finished");
                         if let Some(tx) = end_signal_tx {
-                            tx.send(ConnFinishSignal{ peer_id, reason: fin_reason })
+                            tx.send(ConnFinishSignal {
+                                conn_id,
+                                peer_id,
+                                reason: fin_reason,
+                            })
                                 .inspect_err(|_| warn!("connection owner closed before finish"))
                                 .ok();
                         }
@@ -210,6 +219,8 @@ impl AmCtx {
             id: conn_id,
             peer_id,
             peer_info,
+            #[cfg(feature = "iroh")]
+            endpoint_id: None,
             join_handle: Some(join_handle),
             cancel_token,
         })

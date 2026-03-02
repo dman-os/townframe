@@ -639,6 +639,7 @@ impl DrawerRepo {
                         _ => eyre::bail!("invalid drawer shape"),
                     }
                 }
+                None => return eyre::Ok((ChangeHashSet(doc.get_heads().into()), vec![])),
                 _ => eyre::bail!("invalid drawer shape"),
             };
 
@@ -662,6 +663,7 @@ impl DrawerRepo {
                         _ => eyre::bail!("invalid drawer shape"),
                     }
                 }
+                None => return eyre::Ok(Vec::new()),
                 _ => eyre::bail!("invalid drawer shape"),
             };
 

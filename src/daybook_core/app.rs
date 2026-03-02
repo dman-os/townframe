@@ -344,15 +344,10 @@ pub mod globals {
 
     #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct SyncDeviceEntry {
-        pub endpoint_id: String,
-        #[serde(default = "default_sync_device_name")]
+        pub endpoint_id: iroh::EndpointId,
         pub name: String,
-        pub added_at_unix_secs: i64,
-        pub last_connected_at_unix_secs: Option<i64>,
-    }
-
-    fn default_sync_device_name() -> String {
-        "unknown-device".to_string()
+        pub added_at: Timestamp,
+        pub last_connected_at: Option<Timestamp>,
     }
 
     const REPO_CONFIG_KEY: &str = "repo_config";

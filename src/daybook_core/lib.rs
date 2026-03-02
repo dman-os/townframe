@@ -22,6 +22,7 @@ mod interlude {
     pub use utils_rs::{CHeapStr, DHashMap};
 }
 
+
 pub mod blobs;
 pub mod config;
 pub mod drawer;
@@ -51,6 +52,10 @@ uniffi::setup_scaffolding!();
 #[cfg(feature = "uniffi")]
 daybook_types::custom_type_set!();
 
+#[cfg(feature = "uniffi")]
+use crate::stores::VersionTag;
+
+#[cfg(feature = "uniffi")]
 uniffi::custom_type!(VersionTag, String, {
     remote,
     lower: |tag| format!(

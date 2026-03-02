@@ -517,7 +517,7 @@ impl ConfigRepo {
         Ok(())
     }
 
-    pub async fn remove_known_sync_device(&self, endpoint_id: &str) -> Res<bool> {
+    pub async fn remove_known_sync_device(&self, endpoint_id: &iroh::EndpointId) -> Res<bool> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
@@ -525,7 +525,7 @@ impl ConfigRepo {
         let before = config.known_devices.len();
         config
             .known_devices
-            .retain(|entry| entry.endpoint_id != endpoint_id);
+            .retain(|entry| &entry.endpoint_id != endpoint_id);
         let removed = config.known_devices.len() != before;
         if removed {
             crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
@@ -536,7 +536,7 @@ impl ConfigRepo {
 
     pub async fn ensure_local_sync_device(
         &self,
-        endpoint_id: String,
+        endpoint_id: iroh::EndpointId,
         device_name: &str,
     ) -> Res<()> {
         if self.cancel_token.is_cancelled() {
@@ -555,8 +555,8 @@ impl ConfigRepo {
             .push(crate::app::globals::SyncDeviceEntry {
                 endpoint_id,
                 name: device_name.to_string(),
-                added_at_unix_secs: jiff::Timestamp::now().as_second(),
-                last_connected_at_unix_secs: None,
+                added_at: jiff::Timestamp::now(),
+                last_connected_at: None,
             });
         crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
         self.registry.notify([ConfigEvent::SyncDevicesChanged]);

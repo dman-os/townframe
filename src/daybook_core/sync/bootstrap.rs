@@ -211,6 +211,28 @@ pub async fn pull_required_docs_once(
     Ok(())
 }
 
+pub async fn connect_and_pull_required_docs_once(
+    acx: &AmCtx,
+    iroh_secret_key: iroh::SecretKey,
+    bootstrap: &SyncBootstrapState,
+    timeout: std::time::Duration,
+) -> Res<()> {
+    let endpoint = iroh::Endpoint::builder()
+        .secret_key(iroh_secret_key)
+        .bind()
+        .await?;
+    let conn = acx
+        .spawn_connection_iroh(&endpoint, bootstrap.endpoint_addr.clone(), None)
+        .await?;
+
+    let pull_res = pull_required_docs_once(acx, &bootstrap.app_doc_id, &bootstrap.drawer_doc_id, timeout).await;
+    let stop_res = conn.stop().await;
+
+    pull_res?;
+    stop_res?;
+    Ok(())
+}
+
 async fn read_bootstrap_key(
     doc: &iroh_docs::api::Doc,
     blobs: &iroh_blobs::api::Store,

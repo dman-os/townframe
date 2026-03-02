@@ -378,14 +378,19 @@ impl Worker {
                 partitions,
                 conn_id,
             } => {
-                let new_parts: Vec<_> = if let Some(old) = self.known_peer_set.remove(&conn_id) {
+                let old_conn_id = self.conn_by_peer.get(&endpoint_id).copied();
+                let old_state = self
+                    .known_peer_set
+                    .remove(&conn_id)
+                    .or_else(|| old_conn_id.and_then(|id| self.known_peer_set.remove(&id)));
+                let new_parts: Vec<_> = if let Some(old) = old_state {
                     for part_key in old.partitions.difference(&partitions) {
-                        self.remove_peer_from_part(part_key.clone(), endpoint_id)
+                        self.remove_peer_from_part(part_key.clone(), endpoint_id.clone())
                             .await?;
                     }
                     partitions.difference(&old.partitions).cloned().collect()
                 } else {
-                    default()
+                    partitions.iter().cloned().collect()
                 };
                 self.known_peer_set.insert(
                     conn_id,
@@ -405,7 +410,11 @@ impl Worker {
             }
             Msg::DelPeer { endpoint_id, resp } => {
                 if let Some(conn_id) = self.conn_by_peer.remove(&endpoint_id) {
-                    self.known_peer_set.remove(&conn_id);
+                    if let Some(state) = self.known_peer_set.remove(&conn_id) {
+                        for part_key in state.partitions {
+                            self.remove_peer_from_part(part_key, endpoint_id.clone()).await?;
+                        }
+                    }
                 }
                 resp.send(())
                     .inspect_err(|_| warn!("called dropped before finish"))
@@ -456,11 +465,20 @@ impl Worker {
                     last_backoff: default(),
                 })
             };
+            let is_pending = matches!(deets, DocSyncStateDeets::Pending(_));
 
-            let old = self.synced_docs.insert(doc_id, DocSyncState { deets });
+            let old = self.synced_docs.insert(doc_id.clone(), DocSyncState { deets });
             assert!(old.is_none(), "fishy");
+            if is_pending {
+                self.msg_tx
+                    .send(Msg::BootDocSyncBackoff { doc_id })
+                    .inspect_err(|_| {
+                        error!("FullSyncWorker died before BootDocSyncBackoff enqueue")
+                    })
+                    .ok();
+            }
         }
-        std::mem::replace(&mut self.docs_to_boot, double);
+        self.docs_to_boot = double;
         Ok(())
     }
 
@@ -525,6 +543,7 @@ impl Worker {
                     }
                 }
             }
+            part.is_active = activate;
         }
         Ok(())
     }
@@ -540,7 +559,8 @@ impl Worker {
         }
         let boot_doc = !parts_to_add.is_empty();
         self.known_doc_set.insert(doc_id.clone(), default());
-        self.add_doc_to_paritions(doc_id.clone(), parts_to_add.into_iter());
+        self.add_doc_to_paritions(doc_id.clone(), parts_to_add.into_iter())
+            .await?;
         if boot_doc {
             self.docs_to_boot.insert(doc_id.clone());
         }
@@ -673,6 +693,10 @@ impl Worker {
             .synced_docs
             .get(&doc_id)
             .expect("peer state diff for unkown doc");
+        let local_heads = match &doc_state.deets {
+            DocSyncStateDeets::Active(active) => &active.latest_heads,
+            DocSyncStateDeets::Pending(_) => return Ok(()),
+        };
         for (conn_id, diff) in diff {
             let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) else {
                 warn!(?conn_id, "unkown connection for FullSyncWorker");
@@ -681,26 +705,35 @@ impl Worker {
             let they_have_our_changes = diff
                 .shared_heads
                 .as_ref()
-                .map(|heads| &heads[..] == &doc_state.latest_heads[..])
+                .map(|heads| heads_equal_as_set(heads, local_heads))
                 .unwrap_or_default();
-            let we_have_their_changes =
-                diff.their_heads.is_some() && diff.their_heads == diff.shared_heads;
+            let we_have_their_changes = diff
+                .their_heads
+                .as_ref()
+                .zip(diff.shared_heads.as_ref())
+                .map(|(their, shared)| heads_equal_as_set(their, shared))
+                .unwrap_or_default();
 
             if they_have_our_changes
                 && we_have_their_changes
-                && peer_state.synced_docs.contains(&doc_id)
+                && peer_state.synced_docs.insert(doc_id.clone())
             {
-                peer_state.synced_docs.insert(doc_id.clone());
-                self.events_tx.send(FullSyncEvent::DocSyncedWithPeer {
-                    endpoint_id: peer_state.endpoint_id.clone(),
-                    doc_id: doc_id.clone(),
-                });
+                self.events_tx
+                    .send(FullSyncEvent::DocSyncedWithPeer {
+                        endpoint_id: peer_state.endpoint_id.clone(),
+                        doc_id: doc_id.clone(),
+                    })
+                    .inspect_err(|_| warn!("full sync event receiver dropped"))
+                    .ok();
             }
             if peer_state.synced_docs.len() == self.synced_docs.len() {
-                self.events_tx.send(FullSyncEvent::PeerFullSynced {
-                    endpoint_id: peer_state.endpoint_id.clone(),
-                    doc_count: peer_state.synced_docs.len(),
-                });
+                self.events_tx
+                    .send(FullSyncEvent::PeerFullSynced {
+                        endpoint_id: peer_state.endpoint_id.clone(),
+                        doc_count: peer_state.synced_docs.len(),
+                    })
+                    .inspect_err(|_| warn!("full sync event receiver dropped"))
+                    .ok();
             }
         }
         Ok(())
@@ -728,10 +761,14 @@ impl Worker {
         };
         active.latest_heads = heads;
         for (_, peer_state) in &mut self.known_peer_set {
-            peer_state.synced_docs.remove(&doc_id);
-            self.events_tx.send(FullSyncEvent::StalePeer {
-                endpoint_id: peer_state.endpoint_id.clone(),
-            });
+            if peer_state.synced_docs.remove(&doc_id) {
+                self.events_tx
+                    .send(FullSyncEvent::StalePeer {
+                        endpoint_id: peer_state.endpoint_id.clone(),
+                    })
+                    .inspect_err(|_| warn!("full sync event receiver dropped"))
+                    .ok();
+            }
         }
         Ok(())
     }
@@ -788,4 +825,8 @@ impl Worker {
         });
         Ok(())
     }
+}
+
+fn heads_equal_as_set(a: &[automerge::ChangeHash], b: &[automerge::ChangeHash]) -> bool {
+    a.len() == b.len() && a.iter().all(|head| b.contains(head))
 }
