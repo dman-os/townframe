@@ -8,13 +8,6 @@ pub struct ActiveDispatch {
     pub args: ActiveDispatchArgs,
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate, Serialize, Deserialize)]
-pub struct VersionedDispatch {
-    pub version: Uuid,
-    #[autosurgeon(with = "am_utils_rs::codecs::json")]
-    pub payload: Arc<ActiveDispatch>,
-}
-
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
 pub enum ActiveDispatchDeets {
     Wflow {
@@ -51,7 +44,7 @@ pub struct FacetRoutineArgs {
 
 #[derive(Default, Reconcile, Hydrate)]
 pub struct DispatchStore {
-    pub active_dispatches: HashMap<String, VersionedDispatch>,
+    pub active_dispatches: HashMap<String, Versioned<ThroughJson<Arc<ActiveDispatch>>>>,
     pub wflow_to_dispatch: HashMap<String, String>,
     pub cancelled_dispatches: HashMap<String, bool>,
     // FUXME: this seems like a bad use of automerge?
@@ -59,19 +52,20 @@ pub struct DispatchStore {
 }
 
 #[async_trait]
-impl crate::stores::Store for DispatchStore {
+impl crate::stores::AmStore for DispatchStore {
     fn prop() -> Cow<'static, str> {
         "dispatch".into()
     }
 }
 
 pub struct DispatchRepo {
-    pub acx: AmCtx,
-    pub app_doc_id: DocumentId,
-    // drawer_doc_id: DocumentId,
-    store: crate::stores::StoreHandle<DispatchStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
-    pub local_actor_id: automerge::ActorId,
+
+    acx: AmCtx,
+    app_doc_id: DocumentId,
+    // drawer_doc_id: DocumentId,
+    store: crate::stores::AmStoreHandle<DispatchStore>,
+    local_actor_id: ActorId,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
     dispatch_am_handle: samod::DocHandle,
@@ -99,12 +93,12 @@ impl DispatchRepo {
     pub async fn load(
         acx: AmCtx,
         app_doc_id: DocumentId,
-        local_actor_id: automerge::ActorId,
+        local_actor_id: ActorId,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
 
         let store_val = DispatchStore::load(&acx, &app_doc_id).await?;
-        let store = crate::stores::StoreHandle::new(
+        let store = crate::stores::AmStoreHandle::new(
             store_val,
             acx.clone(),
             app_doc_id.clone(),
@@ -149,7 +143,7 @@ impl DispatchRepo {
             let repo = Arc::clone(&repo);
             let cancel_token = main_cancel_token.clone();
             async move {
-                repo.handle_notifs(notif_rx, cancel_token)
+                repo.notifs_loop(notif_rx, cancel_token)
                     .await
                     .expect("error handling notifs")
             }
@@ -160,12 +154,12 @@ impl DispatchRepo {
             crate::repos::RepoStopToken {
                 cancel_token: main_cancel_token,
                 worker_handle: Some(worker_handle),
-                broker_stop_tokens: broker_stop.into_iter().collect(),
+                broker_stop_tokens: vec![broker_stop],
             },
         ))
     }
 
-    async fn handle_notifs(
+    async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
             Vec<am_utils_rs::changes::ChangeNotification>,
@@ -190,12 +184,13 @@ impl DispatchRepo {
             events.clear();
 
             for notif in notifs {
-                if notif.is_local_only(&self.local_actor_id) {
-                    continue;
-                }
-
-                self.events_for_patch(&notif.patch, &notif.heads, &mut events)
-                    .await?;
+                self.events_for_patch(
+                    &notif.patch,
+                    &notif.heads,
+                    &mut events,
+                    Some(self.local_actor_id.clone()),
+                )
+                .await?;
             }
 
             for event in &events {
@@ -204,7 +199,7 @@ impl DispatchRepo {
                         // Hydrate the new dispatch at heads
                         let (new_versioned, _) = self
                             .acx
-                            .hydrate_path_at_heads::<VersionedDispatch>(
+                            .hydrate_path_at_heads::<Versioned<ThroughJson<Arc<ActiveDispatch>>>>(
                                 &self.app_doc_id,
                                 &heads.0,
                                 automerge::ROOT,
@@ -245,6 +240,7 @@ impl DispatchRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<DispatchEvent>,
+        exclude_actor_id: Option<ActorId>,
     ) -> Res<()> {
         if !am_utils_rs::changes::path_prefix_matches(
             &[DispatchStore::prop().into(), "active_dispatches".into()],
@@ -260,21 +256,24 @@ impl DispatchRepo {
                 key,
                 value: (val, _obj_id),
                 ..
-            } if patch.path.len() == 3 && key == "version" => {
+            } if patch.path.len() == 3 && key == "vtag" => {
                 let Some((_obj, automerge::Prop::Map(dispatch_id))) = patch.path.get(2) else {
                     return Ok(());
                 };
 
-                let version_bytes = match val {
+                let vtag_bytes = match val {
                     automerge::Value::Scalar(scalar) => match &**scalar {
                         automerge::ScalarValue::Bytes(bytes) => bytes,
                         _ => return Ok(()),
                     },
                     _ => return Ok(()),
                 };
-                let version = Uuid::from_slice(version_bytes)?;
+                let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
+                if Some(vtag.actor_id) == exclude_actor_id {
+                    return Ok(());
+                }
 
-                out.push(if version.is_nil() {
+                out.push(if vtag.version.is_nil() {
                     DispatchEvent::DispatchAdded {
                         id: dispatch_id.clone(),
                         heads: dispatch_heads,
@@ -317,7 +316,8 @@ impl DispatchRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
-            self.events_for_patch(&patch, &heads, &mut events).await?;
+            self.events_for_patch(&patch, &heads, &mut events, None)
+                .await?;
         }
         Ok(events)
     }
@@ -333,7 +333,7 @@ impl DispatchRepo {
                 store
                     .active_dispatches
                     .get(id)
-                    .map(|versioned| Arc::clone(&versioned.payload))
+                    .map(|versioned| Arc::clone(&versioned))
             })
             .await
     }
@@ -361,7 +361,7 @@ impl DispatchRepo {
                 store
                     .active_dispatches
                     .get(disp_id)
-                    .map(|versioned| Arc::clone(&versioned.payload))
+                    .map(|versioned| Arc::clone(&versioned))
             })
             .await
     }
@@ -371,10 +371,8 @@ impl DispatchRepo {
         let (_, hash) = self
             .store
             .mutate_sync(|store| {
-                let versioned = VersionedDispatch {
-                    version: Uuid::nil(),
-                    payload: Arc::clone(&dispatch),
-                };
+                let versioned =
+                    Versioned::mint(self.local_actor_id.clone(), Arc::clone(&dispatch).into());
 
                 match &dispatch.deets {
                     ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
@@ -403,7 +401,7 @@ impl DispatchRepo {
                 let old = store.active_dispatches.remove(&id);
                 store.cancelled_dispatches.remove(&id);
                 if let Some(old_dispatch) = &old {
-                    match &old_dispatch.payload.deets {
+                    match &old_dispatch.deets {
                         ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
                             store.wflow_to_dispatch.remove(wflow_job_id);
                         }
@@ -417,7 +415,7 @@ impl DispatchRepo {
             id,
             heads: heads.clone(),
         }]);
-        Ok(old.map(|disp| disp.payload))
+        Ok(old.map(|disp| disp.val.0))
     }
 
     pub async fn list(&self) -> Vec<(String, Arc<ActiveDispatch>)> {
@@ -426,7 +424,7 @@ impl DispatchRepo {
                 store
                     .active_dispatches
                     .iter()
-                    .map(|(key, item)| (key.clone(), Arc::clone(&item.payload)))
+                    .map(|(key, item)| (key.clone(), Arc::clone(&item)))
                     .collect()
             })
             .await

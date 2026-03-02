@@ -24,6 +24,7 @@ mod interlude {
         path::{Path, PathBuf},
         rc::Rc,
         sync::{Arc, LazyLock},
+        time::Duration,
     };
 
     #[cfg(feature = "hash")]
@@ -58,6 +59,8 @@ pub mod expect_tags {
     pub const ERROR_JSON: &str = "json error: oom?";
     pub const ERROR_UTF8: &str = "utf8 error";
     pub const ERROR_MUTEX: &str = "poisioned mutex";
+    pub const ERROR_ACTOR: &str = "task was found dead";
+    pub const ERROR_CALLER: &str = "caller dropped before response";
     pub const ERROR_INVALID_PATCH: &str = "invalid patch: hydration failed";
 }
 
@@ -123,7 +126,9 @@ pub fn setup_tracing() -> Res<()> {
     let filter: Option<String> = None;
 
     #[allow(clippy::unnecessary_literal_unwrap)]
-    let filter = filter.unwrap_or_else(|| "info,samod_core=warn,ort::logging=warn".into());
+    let filter = filter.unwrap_or_else(||
+        "info,samod_core=warn,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn".into()
+    );
 
     use tracing_subscriber::prelude::*;
     let registry = tracing_subscriber::registry()
@@ -284,9 +289,6 @@ pub mod hash {
     use super::*;
 
     #[cfg(feature = "hash")]
-    use std::io::Write;
-
-    #[cfg(feature = "hash")]
     const SHA2_256: u64 = 0x12;
     #[cfg(feature = "hash")]
     const BLAKE3: u64 = 0x1e;
@@ -303,9 +305,12 @@ pub mod hash {
 
     #[cfg(feature = "hash")]
     pub fn hash_obj<T: serde::Serialize>(obj: &T) -> String {
-        use sha2::Digest;
+        use sha2::digest::Digest;
         let mut hash = sha2::Sha256::new();
-        json_canon::to_writer(&mut hash, obj).expect("error serializing manifest");
+        // FIXME: sha2 removed std::io::Write support
+        // json_canon::to_writer(&mut hash, obj).expect("error serializing manifest");
+        let vec = json_canon::to_vec(obj).expect("error serializing manifest");
+        hash.update(&vec);
         let hash = hash.finalize();
 
         let hash =
@@ -322,7 +327,7 @@ pub mod hash {
     pub fn hash_bytes(bytes: &[u8]) -> String {
         use sha2::Digest;
         let mut hash = sha2::Sha256::new();
-        hash.write_all(bytes).expect("error writing to hasher");
+        hash.update(bytes);
         let hash = hash.finalize();
 
         let hash =
@@ -380,8 +385,7 @@ pub mod hash {
             if bytes_read == 0 {
                 break;
             }
-            hash.write_all(&buf[..bytes_read])
-                .expect("error writing to hasher");
+            hash.update(&buf[..bytes_read])
         }
         let hash = hash.finalize();
 
@@ -643,14 +647,9 @@ pub enum WaitOnHandleError {
 
 pub async fn wait_on_handle_with_timeout<T>(
     mut join_handle: tokio::task::JoinHandle<T>,
-    timeout_ms: u64,
+    timeout: Duration,
 ) -> Result<T, WaitOnHandleError> {
-    match tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        &mut join_handle,
-    )
-    .await
-    {
+    match tokio::time::timeout(timeout, &mut join_handle).await {
         Ok(res) => Ok(res?),
         Err(err) => {
             join_handle.abort();

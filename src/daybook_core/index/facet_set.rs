@@ -49,7 +49,7 @@ impl DocFacetSetIndexStopToken {
     pub async fn stop(mut self) -> Res<()> {
         self.cancel_token.cancel();
         if let Some(handle) = self.worker_handle.take() {
-            utils_rs::wait_on_handle_with_timeout(handle, 10000).await?;
+            utils_rs::wait_on_handle_with_timeout(handle, Duration::from_secs(2)).await?;
         }
         Ok(())
     }

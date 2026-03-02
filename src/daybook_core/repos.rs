@@ -1,3 +1,5 @@
+//! FIXME: fuck me, we have a name clash with the core::repo module
+
 use crate::interlude::*;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -7,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 pub struct RepoStopToken {
     pub cancel_token: CancellationToken,
     pub worker_handle: Option<JoinHandle<()>>,
-    pub broker_stop_tokens: Vec<am_utils_rs::changes::DocChangeBrokerStopToken>,
+    pub broker_stop_tokens: Vec<Arc<am_utils_rs::changes::DocChangeBrokerStopToken>>,
 }
 
 impl RepoStopToken {
@@ -17,7 +19,9 @@ impl RepoStopToken {
             handle.await?;
         }
         for token in self.broker_stop_tokens {
-            token.stop().await?;
+            if let Ok(token) = Arc::try_unwrap(token) {
+                token.stop().await?;
+            }
         }
         Ok(())
     }

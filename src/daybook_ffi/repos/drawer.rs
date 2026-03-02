@@ -33,13 +33,11 @@ impl DrawerRepoFfi {
     #[uniffi::constructor]
     #[tracing::instrument(err, skip(fcx, plugs_repo))]
     async fn load(fcx: SharedFfiCtx, plugs_repo: Arc<PlugsRepoFfi>) -> Result<Arc<Self>, FfiError> {
-        let fcx = Arc::clone(&fcx);
-        let cx = Arc::clone(fcx.repo_ctx());
         let (repo, stop_token) = fcx
             .do_on_rt(DrawerRepo::load(
-                cx.acx().clone(),
-                cx.doc_drawer().document_id().clone(),
-                cx.local_actor_id().clone(),
+                fcx.rcx.acx.clone(),
+                fcx.rcx.doc_drawer.document_id().clone(),
+                fcx.rcx.local_actor_id.clone(),
                 Arc::new(std::sync::Mutex::new(
                     daybook_core::drawer::lru::KeyedLruPool::new(1000),
                 )),

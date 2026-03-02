@@ -4,10 +4,6 @@ use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
 use wflow_core::kvstore::*;
 
-use utils_rs::expect_tags::ERROR_CHANNEL;
-
-const ERROR_KVSTORE_WORKER: &str = "kvstore worker was found dead";
-
 enum KvMsg {
     BootTable {
         table: Arc<str>,
@@ -125,7 +121,7 @@ impl SqliteKvStore {
                         snapshot_version: version,
                         resp: tx,
                     })
-                    .map_err(|_| ferr!(ERROR_KVSTORE_WORKER))?;
+                    .map_err(|_| ferr!(ERROR_ACTOR))?;
 
                 match rx.await.wrap_err(ERROR_CHANNEL)?? {
                     Ok(()) => Ok(Ok(())),
@@ -482,7 +478,7 @@ impl KvStore for SqliteKvStore {
                 key: key.to_vec(),
                 resp: tx,
             })
-            .map_err(|_| ferr!(ERROR_KVSTORE_WORKER))?;
+            .map_err(|_| ferr!(ERROR_ACTOR))?;
         rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
@@ -495,7 +491,7 @@ impl KvStore for SqliteKvStore {
                 value,
                 resp: tx,
             })
-            .map_err(|_| ferr!(ERROR_KVSTORE_WORKER))?;
+            .map_err(|_| ferr!(ERROR_ACTOR))?;
         rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
@@ -507,7 +503,7 @@ impl KvStore for SqliteKvStore {
                 key: key.to_vec(),
                 resp: tx,
             })
-            .map_err(|_| ferr!(ERROR_KVSTORE_WORKER))?;
+            .map_err(|_| ferr!(ERROR_ACTOR))?;
         rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
@@ -520,7 +516,7 @@ impl KvStore for SqliteKvStore {
                 delta,
                 resp: tx,
             })
-            .map_err(|_| ferr!(ERROR_KVSTORE_WORKER))?;
+            .map_err(|_| ferr!(ERROR_ACTOR))?;
         rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
@@ -532,7 +528,7 @@ impl KvStore for SqliteKvStore {
                 key: key.to_vec(),
                 resp: tx,
             })
-            .map_err(|_| ferr!(ERROR_KVSTORE_WORKER))?;
+            .map_err(|_| ferr!(ERROR_ACTOR))?;
         let (snapshot_value, snapshot_version) = rx.await.wrap_err(ERROR_CHANNEL)??;
 
         let key: Arc<[u8]> = key.into();

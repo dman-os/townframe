@@ -1,7 +1,17 @@
 use crate::interlude::*;
 
-use crate::plugs::{manifest::FacetDisplayHint, PlugsRepo};
 use tokio_util::sync::CancellationToken;
+
+use crate::plugs::{manifest::FacetDisplayHint, PlugsRepo};
+use crate::stores::Versioned;
+
+#[derive(Reconcile, Hydrate, Clone)]
+pub struct ConfigStore {
+    pub facet_display: HashMap<String, Versioned<ThroughJson<FacetDisplayHint>>>,
+    pub users: HashMap<String, Versioned<ThroughJson<UserMeta>>>,
+    pub mltools: Versioned<ThroughJson<mltools::Config>>,
+    pub global_props_doc_id: Versioned<Option<String>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reconcile, Hydrate)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -12,20 +22,6 @@ pub struct UserMeta {
     pub seen_at: Timestamp,
 }
 
-#[derive(Clone, Reconcile, Hydrate)]
-pub struct VersionedConfigSection<T> {
-    pub version: Uuid,
-    pub payload: T,
-}
-
-#[derive(Reconcile, Hydrate, Clone)]
-pub struct ConfigStore {
-    pub facet_display: VersionedConfigSection<HashMap<String, ThroughJson<FacetDisplayHint>>>,
-    pub users: VersionedConfigSection<HashMap<String, ThroughJson<UserMeta>>>,
-    pub mltools: VersionedConfigSection<ThroughJson<mltools::Config>>,
-    pub global_props_doc_id: VersionedConfigSection<Option<String>>,
-}
-
 impl Default for ConfigStore {
     fn default() -> Self {
         use crate::plugs::manifest::*;
@@ -34,39 +30,39 @@ impl Default for ConfigStore {
 
         key_configs.insert(
             "created_at".to_string(),
-            FacetDisplayHint {
-                always_visible: false,
-                display_title: Some("Created At".to_string()),
-                deets: FacetKeyDisplayDeets::DateTime {
-                    display_type: DateTimeFacetDisplayType::Relative,
-                },
-            }
-            .into(),
+            Versioned {
+                vtag: VersionTag::nil(),
+                val: FacetDisplayHint {
+                    always_visible: false,
+                    display_title: Some("Created At".to_string()),
+                    deets: FacetKeyDisplayDeets::DateTime {
+                        display_type: DateTimeFacetDisplayType::Relative,
+                    },
+                }
+                .into(),
+            },
         );
         key_configs.insert(
             "updated_at".to_string(),
-            FacetDisplayHint {
-                always_visible: false,
-                display_title: Some("Updated At".to_string()),
-                deets: FacetKeyDisplayDeets::DateTime {
-                    display_type: DateTimeFacetDisplayType::Relative,
-                },
-            }
-            .into(),
+            Versioned {
+                vtag: VersionTag::nil(),
+                val: FacetDisplayHint {
+                    always_visible: false,
+                    display_title: Some("Updated At".to_string()),
+                    deets: FacetKeyDisplayDeets::DateTime {
+                        display_type: DateTimeFacetDisplayType::Relative,
+                    },
+                }
+                .into(),
+            },
         );
 
         Self {
-            facet_display: VersionedConfigSection {
-                version: Uuid::nil(),
-                payload: key_configs,
-            },
-            users: VersionedConfigSection {
-                version: Uuid::nil(),
-                payload: HashMap::new(),
-            },
-            mltools: VersionedConfigSection {
-                version: Uuid::nil(),
-                payload: mltools::Config {
+            facet_display: key_configs,
+            users: HashMap::new(),
+            mltools: Versioned {
+                vtag: VersionTag::nil(),
+                val: mltools::Config {
                     ocr: mltools::OcrConfig { backends: vec![] },
                     embed: mltools::EmbedConfig { backends: vec![] },
                     image_embed: mltools::ImageEmbedConfig { backends: vec![] },
@@ -74,16 +70,16 @@ impl Default for ConfigStore {
                 }
                 .into(),
             },
-            global_props_doc_id: VersionedConfigSection {
-                version: Uuid::nil(),
-                payload: None,
+            global_props_doc_id: Versioned {
+                vtag: VersionTag::nil(),
+                val: None,
             },
         }
     }
 }
 
 #[async_trait]
-impl crate::stores::Store for ConfigStore {
+impl crate::stores::AmStore for ConfigStore {
     fn prop() -> Cow<'static, str> {
         "config".into()
     }
@@ -93,17 +89,19 @@ impl crate::stores::Store for ConfigStore {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum ConfigEvent {
     Changed { heads: ChangeHashSet },
+    SyncDevicesChanged,
 }
 
 pub struct ConfigRepo {
     acx: AmCtx,
     app_doc_id: DocumentId,
     app_am_handle: samod::DocHandle,
-    store: crate::stores::StoreHandle<ConfigStore>,
+    store: crate::stores::AmStoreHandle<ConfigStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     plug_repo: Arc<PlugsRepo>,
     local_user_path: daybook_types::doc::UserPath,
-    local_actor_id: automerge::ActorId,
+    local_actor_id: ActorId,
+    sql_pool: sqlx::SqlitePool,
     cancel_token: CancellationToken,
     global_props_doc_init_lock: tokio::sync::Mutex<()>,
     _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
@@ -125,32 +123,34 @@ impl ConfigRepo {
         app_doc_id: DocumentId,
         plug_repo: Arc<PlugsRepo>,
         local_user_path: daybook_types::doc::UserPath,
+        sql_pool: sqlx::SqlitePool,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
-
+        let store_val = ConfigStore::load(&acx, &app_doc_id).await?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
 
-        let store_val = ConfigStore::load(&acx, &app_doc_id).await?;
-        let store = crate::stores::StoreHandle::new(
+        let store = crate::stores::AmStoreHandle::new(
             store_val,
             acx.clone(),
             app_doc_id.clone(),
             local_actor_id.clone(),
         );
 
-        // Ensure local user path is in the users map
-        let actor_id_str = local_actor_id.to_string();
-        let current_path = local_user_path.clone();
         store
-            .mutate_sync(move |store| {
-                store.users.version = Uuid::new_v4();
-                store.users.payload.entry(actor_id_str).or_insert_with(|| {
-                    UserMeta {
-                        user_path: current_path,
-                        seen_at: Timestamp::now(),
-                    }
-                    .into()
-                });
+            .mutate_sync(|store| {
+                store
+                    .users
+                    .entry(local_user_path.to_string_lossy().into_owned())
+                    .or_insert_with(|| {
+                        Versioned::mint(
+                            local_actor_id.clone(),
+                            UserMeta {
+                                user_path: local_user_path.clone(),
+                                seen_at: Timestamp::now(),
+                            }
+                            .into(),
+                        )
+                    });
             })
             .await?;
 
@@ -183,6 +183,7 @@ impl ConfigRepo {
             plug_repo,
             local_user_path,
             local_actor_id,
+            sql_pool,
             cancel_token: main_cancel_token.child_token(),
             global_props_doc_init_lock: tokio::sync::Mutex::new(()),
             _change_listener_tickets: vec![ticket],
@@ -193,7 +194,7 @@ impl ConfigRepo {
             let repo = Arc::clone(&repo);
             let cancel_token = main_cancel_token.clone();
             async move {
-                repo.handle_notifs(notif_rx, cancel_token)
+                repo.notifs_loop(notif_rx, cancel_token)
                     .await
                     .expect("error handling notifs")
             }
@@ -204,12 +205,12 @@ impl ConfigRepo {
             crate::repos::RepoStopToken {
                 cancel_token: main_cancel_token,
                 worker_handle: Some(worker_handle),
-                broker_stop_tokens: broker_stop.into_iter().collect(),
+                broker_stop_tokens: vec![broker_stop],
             },
         ))
     }
 
-    async fn handle_notifs(
+    async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
             Vec<am_utils_rs::changes::ChangeNotification>,
@@ -235,16 +236,27 @@ impl ConfigRepo {
             events.clear();
             let mut last_heads = None;
             for notif in notifs {
-                last_heads = Some(ChangeHashSet(Arc::clone(&notif.heads)));
-                if notif.is_local_only(&self.local_actor_id) {
-                    continue;
+                let len = events.len();
+                self.events_for_patch(
+                    &notif.patch,
+                    &notif.heads,
+                    &mut events,
+                    Some(self.local_actor_id.clone()),
+                )
+                .await?;
+                // events were added
+                if len != events.len() {
+                    last_heads = Some(ChangeHashSet(Arc::clone(&notif.heads)));
                 }
-                self.events_for_patch(&notif.patch, &notif.heads, &mut events)
-                    .await?;
             }
+            // for event in &events {
+            //     match event {
+            //         ConfigEvent::Changed { heads } => todo!(),
+            //         ConfigEvent::SyncDevicesChanged => todo!(),
+            //     }
+            // }
 
-            if !events.is_empty() {
-                let heads = last_heads.expect("events not empty");
+            if let Some(heads) = last_heads {
                 let (new_store, _) = self
                     .acx
                     .hydrate_path_at_heads::<ConfigStore>(
@@ -290,7 +302,8 @@ impl ConfigRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
-            self.events_for_patch(&patch, &heads, &mut events).await?;
+            self.events_for_patch(&patch, &heads, &mut events, None)
+                .await?;
         }
         Ok(events)
     }
@@ -300,20 +313,31 @@ impl ConfigRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<ConfigEvent>,
+        exclude_actor_id: Option<ActorId>,
     ) -> Res<()> {
-        if !am_utils_rs::changes::path_prefix_matches(&[ConfigStore::prop().into()], &patch.path) {
-            return Ok(());
-        }
-
         let heads = ChangeHashSet(Arc::clone(patch_heads));
 
         match &patch.action {
-            automerge::PatchAction::PutMap { key, .. }
-                if patch.path.len() == 2 && key == "version" =>
-            {
+            automerge::PatchAction::PutMap {
+                key,
+                value: (val, _),
+                ..
+            } if patch.path.len() == 2 && key == "vtag" => {
                 let Some((_obj, automerge::Prop::Map(section_key))) = patch.path.get(1) else {
                     return Ok(());
                 };
+                let vtag = match val {
+                    automerge::Value::Scalar(scalar) => match &**scalar {
+                        automerge::ScalarValue::Bytes(bytes) => bytes,
+                        _ => return Ok(()),
+                    },
+                    _ => return Ok(()),
+                };
+                let vtag = VersionTag::hydrate_bytes(vtag)?;
+                if Some(vtag.actor_id) == exclude_actor_id {
+                    return Ok(());
+                }
+
                 if matches!(
                     section_key.as_ref(),
                     "facet_display" | "users" | "mltools" | "global_props_doc_id"
@@ -339,10 +363,10 @@ impl ConfigRepo {
     pub async fn get_facet_display_hint(&self, key: String) -> Option<FacetDisplayHint> {
         let hint = self
             .store
-            .query_sync(|store| store.facet_display.payload.get(&key).cloned())
+            .query_sync(|store| store.facet_display.get(&key).cloned())
             .await;
         if let Some(hint) = hint {
-            return Some(hint.0);
+            return Some(hint.val.0);
         }
         let hint = self.plug_repo.get_display_hint(&key).await;
         if let Some(hint) = hint {
@@ -361,7 +385,7 @@ impl ConfigRepo {
 
         self.store
             .query_sync(move |store| {
-                for (key, val) in &store.facet_display.payload {
+                for (key, val) in &store.facet_display {
                     defaults.insert(key.clone(), val.0.clone());
                 }
                 defaults
@@ -375,8 +399,14 @@ impl ConfigRepo {
         }
         self.store
             .mutate_sync(move |store| {
-                store.facet_display.version = Uuid::new_v4();
-                store.facet_display.payload.insert(key, hint.into());
+                let Some(old) = store.facet_display.get_mut(&key) else {
+                    store.facet_display.insert(
+                        key,
+                        Versioned::mint(self.local_actor_id.clone(), hint.into()),
+                    );
+                    return;
+                };
+                old.replace(self.local_actor_id.clone(), hint.into());
             })
             .await?;
         Ok(())
@@ -384,7 +414,7 @@ impl ConfigRepo {
 
     pub async fn get_mltools_config(&self) -> mltools::Config {
         self.store
-            .query_sync(|store| store.mltools.payload.0.clone())
+            .query_sync(|store| store.mltools.val.0.clone())
             .await
     }
 
@@ -395,8 +425,9 @@ impl ConfigRepo {
 
         self.store
             .mutate_sync(move |store| {
-                store.mltools.version = Uuid::new_v4();
-                store.mltools.payload = config.into();
+                store
+                    .mltools
+                    .replace(self.local_actor_id.clone(), config.into());
             })
             .await?;
         Ok(())
@@ -404,7 +435,7 @@ impl ConfigRepo {
 
     pub async fn get_global_props_doc_id(&self) -> Option<daybook_types::doc::DocId> {
         self.store
-            .query_sync(|store| store.global_props_doc_id.payload.clone())
+            .query_sync(|store| store.global_props_doc_id.val.clone())
             .await
     }
 
@@ -414,8 +445,9 @@ impl ConfigRepo {
         }
         self.store
             .mutate_sync(move |store| {
-                store.global_props_doc_id.version = Uuid::new_v4();
-                store.global_props_doc_id.payload = Some(doc_id);
+                store
+                    .global_props_doc_id
+                    .replace(self.local_actor_id.clone(), Some(doc_id));
             })
             .await?;
         Ok(())
@@ -443,14 +475,6 @@ impl ConfigRepo {
         Ok(doc_id)
     }
 
-    pub fn get_local_user_path(&self) -> daybook_types::doc::UserPath {
-        self.local_user_path.clone()
-    }
-
-    pub fn get_local_actor_id(&self) -> automerge::ActorId {
-        self.local_actor_id.clone()
-    }
-
     pub async fn get_actor_user_path(
         &self,
         actor_id: &automerge::ActorId,
@@ -460,11 +484,83 @@ impl ConfigRepo {
             .query_sync(move |store| {
                 store
                     .users
-                    .payload
                     .get(&actor_id_str)
-                    .map(|doc| doc.0.user_path.clone())
+                    .map(|doc| doc.user_path.clone())
             })
             .await
+    }
+
+    pub async fn list_known_sync_devices(&self) -> Res<Vec<crate::app::globals::SyncDeviceEntry>> {
+        let config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
+        Ok(config.known_devices)
+    }
+
+    pub async fn upsert_known_sync_device(
+        &self,
+        device: crate::app::globals::SyncDeviceEntry,
+    ) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let mut config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
+        if let Some(existing) = config
+            .known_devices
+            .iter_mut()
+            .find(|entry| entry.endpoint_id == device.endpoint_id)
+        {
+            *existing = device;
+        } else {
+            config.known_devices.push(device);
+        }
+        crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
+        self.registry.notify([ConfigEvent::SyncDevicesChanged]);
+        Ok(())
+    }
+
+    pub async fn remove_known_sync_device(&self, endpoint_id: &iroh::EndpointId) -> Res<bool> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let mut config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
+        let before = config.known_devices.len();
+        config
+            .known_devices
+            .retain(|entry| &entry.endpoint_id != endpoint_id);
+        let removed = config.known_devices.len() != before;
+        if removed {
+            crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
+            self.registry.notify([ConfigEvent::SyncDevicesChanged]);
+        }
+        Ok(removed)
+    }
+
+    pub async fn ensure_local_sync_device(
+        &self,
+        endpoint_id: iroh::EndpointId,
+        device_name: &str,
+    ) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let mut config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
+        if config
+            .known_devices
+            .iter()
+            .any(|entry| entry.endpoint_id == endpoint_id)
+        {
+            return Ok(());
+        }
+        config
+            .known_devices
+            .push(crate::app::globals::SyncDeviceEntry {
+                endpoint_id,
+                name: device_name.to_string(),
+                added_at: jiff::Timestamp::now(),
+                last_connected_at: None,
+            });
+        crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
+        self.registry.notify([ConfigEvent::SyncDevicesChanged]);
+        Ok(())
     }
 }
 

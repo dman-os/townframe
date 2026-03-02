@@ -28,7 +28,7 @@ Specifically, daybook design is informed by tech I find shiny, gaps I see in the
   - Everything that is and around LLMs.
   - Uses Automerge for an offline and local-first experience.
   - Uses Compose Multiplatform for a reliable experience on Android and Desktop.
-  - Leverage WASM for a plugins. 
+  - Leverage WASM for plugins. 
 - Gaps
   - Emacs/Vim
     - State of the art editing experience

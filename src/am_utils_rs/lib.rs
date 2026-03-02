@@ -19,7 +19,9 @@ use crate::interlude::*;
 pub mod changes;
 pub mod codecs;
 #[cfg(feature = "iroh")]
-pub mod iroh {}
+pub mod iroh;
+#[cfg(feature = "repo")]
+pub mod peers;
 
 #[cfg(feature = "repo")]
 use automerge::Automerge;
@@ -32,6 +34,8 @@ use samod::{DocHandle, DocumentId};
 
 #[cfg(feature = "repo")]
 use changes::ChangeListenerManager;
+#[cfg(feature = "repo")]
+use tokio_util::sync::CancellationToken;
 
 /// Configuration for Automerge storage
 #[cfg(feature = "repo")]
@@ -51,12 +55,16 @@ pub enum StorageConfig {
 }
 
 #[cfg(feature = "repo")]
-#[derive(Clone)]
+#[derive(Clone, educe::Educe)]
+#[educe(Debug)]
 pub struct AmCtx {
+    #[educe(Debug(ignore))]
     repo: samod::Repo,
     // peer_id: samod::PeerId,
     // doc_handle: tokio::sync::OnceCell<DocHandle>,
+    #[educe(Debug(ignore))]
     change_manager: Arc<ChangeListenerManager>,
+    #[educe(Debug(ignore))]
     handle_cache: Arc<DHashMap<DocumentId, DocHandle>>,
 }
 
@@ -76,8 +84,31 @@ impl AmCtxStopToken {
 }
 #[cfg(feature = "repo")]
 pub struct RepoConnection {
+    pub id: samod::ConnectionId,
+    pub peer_id: Arc<str>,
     pub peer_info: samod::PeerInfo,
-    pub join_handle: tokio::task::JoinHandle<()>,
+    #[cfg(feature = "iroh")]
+    pub endpoint_id: Option<::iroh::EndpointId>,
+    join_handle: Option<tokio::task::JoinHandle<()>>,
+    cancel_token: CancellationToken,
+}
+
+#[cfg(feature = "repo")]
+pub struct ConnFinishSignal {
+    pub conn_id: samod::ConnectionId,
+    pub peer_id: Arc<str>,
+    pub reason: samod::ConnFinishedReason,
+}
+
+#[cfg(feature = "repo")]
+impl RepoConnection {
+    pub async fn stop(self) -> Res<()> {
+        self.cancel_token.cancel();
+        if let Some(join_handle) = self.join_handle {
+            utils_rs::wait_on_handle_with_timeout(join_handle, Duration::from_secs(5)).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "repo")]
@@ -136,6 +167,7 @@ impl AmCtx {
         rx_from_peer: futures::channel::mpsc::UnboundedReceiver<Vec<u8>>,
         tx_to_peer: futures::channel::mpsc::UnboundedSender<Vec<u8>>,
         direction: samod::ConnDirection,
+        end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<RepoConnection> {
         let repo = self.repo.clone();
         let conn = tokio::task::block_in_place(|| {
@@ -146,23 +178,54 @@ impl AmCtx {
             )
         })
         .wrap_err("failed to establish connection")?;
+
+        let conn_id = conn.id();
         let peer_info = conn
             .handshake_complete()
             .await
             .map_err(|err| ferr!("failed on handshake: {err:?}"))?;
-        let join_handle = tokio::spawn(
+        let peer_id: Arc<str> = peer_info.peer_id.as_str().into();
+
+        let cancel_token = CancellationToken::new();
+        let join_handle = tokio::spawn({
+            let cancel_token = cancel_token.clone();
+            let peer_id = peer_id.clone();
             async move {
-                let fin_reason = conn.finished().await;
-                info!(?fin_reason, "sync server connector task finished");
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        debug!("cancel token lit");
+                    }
+                    fin_reason = conn.finished() => {
+                        info!(?fin_reason, "sync server connector task finished");
+                        if let Some(tx) = end_signal_tx {
+                            tx.send(ConnFinishSignal {
+                                conn_id,
+                                peer_id,
+                                reason: fin_reason,
+                            })
+                                .inspect_err(|_| warn!("connection owner closed before finish"))
+                                .ok();
+                        }
+                    }
+                }
             }
-            .instrument(tracing::info_span!("mpsc sync server connector task")),
-        );
+            .instrument(tracing::info_span!(
+                "mpsc sync server connector task",
+                peer = ?peer_info
+            ))
+        });
 
         Ok(RepoConnection {
+            id: conn_id,
+            peer_id,
             peer_info,
-            join_handle,
+            #[cfg(feature = "iroh")]
+            endpoint_id: None,
+            join_handle: Some(join_handle),
+            cancel_token,
         })
     }
+
     /// Maintains connection to the sync server
     pub fn spawn_ws_connector(&self, addr: std::borrow::Cow<'static, str>) {
         let repo = self.repo.clone();

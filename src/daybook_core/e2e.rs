@@ -185,6 +185,7 @@ pub async fn test_cx_with_options(
         app_doc_id.clone(),
         Arc::clone(&plugs_repo),
         local_user_path.clone(),
+        crate::app::SqlCtx::new("sqlite::memory:").await?.db_pool,
     )
     .await?;
     let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(

@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 pub struct Config {
     pub cli_config: Arc<crate::config::CliConfig>,
-    pub global_ctx: Arc<daybook_core::repo::GlobalCtx>,
+    pub global_ctx: Arc<daybook_core::app::GlobalCtx>,
 }
 
 impl Config {
@@ -11,7 +11,7 @@ impl Config {
     }
 
     pub async fn new(cli_config: Arc<crate::config::CliConfig>) -> Res<Self> {
-        let global_ctx = Arc::new(daybook_core::repo::GlobalCtx::new().await?);
+        let global_ctx = Arc::new(daybook_core::app::GlobalCtx::new().await?);
         Ok(Self {
             cli_config,
             global_ctx,
@@ -33,9 +33,9 @@ pub async fn open_repo_ctx(
             &config.cli_config.repo_path,
             daybook_core::repo::RepoOpenOptions {
                 ensure_initialized,
-                peer_id: "daybook_client".to_string(),
                 ws_connector_url,
             },
+            format!("daybook-cli-{}", std::env::consts::ARCH),
         )
         .await?,
     ))

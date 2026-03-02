@@ -15,37 +15,43 @@ default = ["uniffi"]
 uniffi = ["dep:uniffi"]
 
 [dependencies]
+#
 # internal
-utils_rs = { workspace = true, features = ["hash", "native", "downloader"] }
-am_utils_rs = { workspace = true, features = ["repo"] }
+am_utils_rs = { workspace = true, features = ["repo", "iroh"] }
 api_utils_rs = { workspace = true, features = ["automerge"] }
-wflow = { workspace = true }
 daybook_types = { workspace = true, features = [
     "automerge",
     "uniffi",
     "wit",
     "schemars",
 ] }
-wash_plugin_wflow.workspace = true
-wash_plugin_utils.workspace = true
+mltools = { workspace = true, features = ["hf_hub", "tests"] }
+utils_rs = { workspace = true, features = ["hash", "native", "downloader"] }
 wash_plugin_mltools.workspace = true
+wash_plugin_utils.workspace = true
+wash_plugin_wflow.workspace = true
+wflow = { workspace = true }
 
+#
 # encoding
 serde.workspace = true
 serde_json.workspace = true
 zstd.workspace = true
 
+#
 # error
+anyhow.workspace = true
 color-eyre.workspace = true
-thiserror.workspace = true
 displaydoc.workspace = true
-anyhow = { workspace = true }
+thiserror.workspace = true
 
+#
 # log
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-unwrap.workspace = true
 
+#
 # ds
 once_cell.workspace = true
 time.workspace = true
@@ -57,6 +63,7 @@ bs58.workspace = true
 semver = "1"
 addr.workspace = true
 
+#
 # async
 tokio = { workspace = true, features = [
     "rt-multi-thread",
@@ -67,32 +74,42 @@ tokio = { workspace = true, features = [
 tokio-util.workspace = true
 futures = { workspace = true }
 async-trait.workspace = true
+tokio-stream = "0.1.18"
 
+#
 # ffi
 uniffi = { workspace = true, features = ["cli"] }
 
+#
 # sync
 autosurgeon = { workspace = true, features = ["uuid"] }
 automerge = { workspace = true }
 samod = { workspace = true, features = ["tokio", "tungstenite"] }
 
+#
 # http
 reqwest.workspace = true
 
+#
 # db
 sqlx = { workspace = true, features = ["sqlite"] }
 sqlite-vec.workspace = true
+libsqlite3-sys = "0.30.1"
 
+#
 # misc
 pastey.workspace = true
 directories.workspace = true
 fs4.workspace = true
 image = { version = "0.25", default-features = true, features = ["jpeg", "png", "gif", "webp", "bmp"] }
 
+#
 # wasm
 wash-runtime = { workspace = true }
 wasmtime = { workspace = true }
 
+#
+# schema
 schemars = { version = "1.2", features = [
     "uuid1",
     "semver1",
@@ -100,9 +117,21 @@ schemars = { version = "1.2", features = [
     "jiff02",
     "indexmap2",
 ] }
-mltools = { workspace = true, features = ["hf_hub", "tests"] }
-libsqlite3-sys = "0.30.1"
 jsonschema = { version = "0.42.0", default-features = false }
+
+#
+# sync
+iroh = { workspace = true }
+iroh-tickets = "0.3.0"
+
+#
+# os
+rand.workspace = true
+keyring = "3.6.3"
+iroh-blobs = "0.98.0"
+iroh-docs = "0.96.0"
+iroh-gossip = "0.96.0"
+futures-buffered = { version = "0.2.13", features = ["tokio-coop"] }
 
 [build-dependencies]
 uniffi = { workspace = true, features = ["build"], optional = true }
@@ -110,9 +139,8 @@ zstd.workspace = true
 # wasmtime.workspace = true
 
 [dev-dependencies]
-tokio-stream = "0.1.17"
 tokio-util = { workspace = true }
 wflow = { workspace = true, features = ["test-harness"] }
 insta = { workspace = true, features = ["json"] }
 tempfile.workspace = true
-loom = "0.7.2"
+loom.workspace = true

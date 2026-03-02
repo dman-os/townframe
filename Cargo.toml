@@ -46,6 +46,7 @@ license = ""
 repository = ""
 
 [workspace.dependencies]
+#
 # internal
 utils_rs = { path = "./src/utils_rs", default-features = false }
 api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
@@ -66,16 +67,19 @@ wash_plugin_pglite = { path = "./src/wash_plugin_pglite", default-features = fal
 wash_plugin_utils = { path = "./src/wash_plugin_utils/" }
 wash_plugin_mltools = { path = "./src/wash_plugin_mltools/" }
 
+#
 # meta
 syn = { version = "2", features = ["extra-traits"] }
 bon = "3.7.2"
 
+#
 # futures
 async-trait = "0.1"
 futures = "0.3"
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7.17", features = [] }
 
+#
 # ds
 ahash = "0.8"
 time = { version = "0.3", default-features = false, features = ["serde"] }
@@ -85,8 +89,9 @@ parking_lot = "0.12"
 bytes = "1"
 url = "2.5.7"
 addr = "0.15.6"
-# scopeguard = "1.2.0"
+scopeguard = "1.2.0"
 
+#
 # encoding
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
@@ -97,24 +102,28 @@ bs58 = "0.5.1"
 blake3 = "1.8"
 zstd = "0.13"
 
+#
 # web
 leptos = { version = "0.8", default-features = false }
 leptos-use = { version = "0.16", default-features = false }
 leptos_meta = { version = "0.8" }
 leptos_router = { version = "0.8", default-features = false }
 
+#
 # macros
 pastey = "0.1"
 displaydoc = "0.2"
 educe = "0.6"
 struct-patch = "0.10.4"
 
+#
 # errors
 thiserror = "2"
 anyhow = "1"
 garde = { version = "0.22", features = ["derive", "regex", "url", "email"] }
 terrors = "0.3.3"
 
+#
 # logging
 color-eyre = "0.6"
 tracing = "0.1"
@@ -128,20 +137,19 @@ tracing-appender = "0.2.3"
 tracing-error = "0.2.1"
 tracing-futures = "0.2.5"
 
+#
 # auth
 kanidm_client = "1.7.2"
 kanidm_proto = "1.7.2"
-# # openssl = { version = "0.10", features = ["vendored"] }
+
 #
-# [features]
-# default = ["openssl/vendored"]
-
-
 # os
 dotenv-flow = "0.16"
 directories = "6.0"
+rand = "0.9.2"
 fs4 = "0.13.1"
 
+#
 # http
 axum = { version = "0.8.6", default-features = false }
 axum-extra = { version = "0.10.1", default-features = false }
@@ -154,10 +162,11 @@ tower-http = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream", "rustls-tls"] }
 gloo = { version = "0.11.0", default-features = false }
 
-
+#
 # wasm
 wit-bindgen = "0.52.0"
 
+#
 # sync
 automerge = "0.7.3"
 autosurgeon = "0.10.1"
@@ -166,13 +175,15 @@ samod = { version = "0.7.1" }
 # samod = { path = "src/samod/samod" }
 async-channel = "2.5.0"
 
+#
 # testing
 insta = { version =  "1.44", features = ["yaml", "filters"] }
 tempfile = "3"
+loom = "0.7.2"
 
+#
 # db
-# sqlite-vec = "0.2.4-alpha"
-sqlite-vec = "0.1.6"
+sqlite-vec = "0.1.6" # "0.2.4-alpha"
 sqlx = { version = "0.8.6", features = [
   "runtime-tokio",
   # "tls-rustls-ring-webpki",
@@ -184,20 +195,27 @@ sqlx = { version = "0.8.6", features = [
   "ipnetwork",
 ] }
 
+#
 # ffi
 uniffi = { version = "0.31.0" }
 # uniffi = { path = "../uniffi-rs/uniffi/" }
 
+#
+# wasm
 wasmtime = "*"
 wasmtime-wasi = { version = "*" }
 wash-runtime = "0.2.0"
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 
-scopeguard = "1.2.0"
-
+#
 # cli
 clap = "4.5"
 clap_complete = "4.5"
+
+
+# 
+# networks
+iroh = "0.96.1"
 
 [patch.crates-io]
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}

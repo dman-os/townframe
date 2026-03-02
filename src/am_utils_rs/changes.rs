@@ -1,75 +1,58 @@
+//! FIXME: convert change listenrs to a channel based system to avoid
+//! blocking the loop similar to core::repo
+
 use crate::interlude::*;
 
-#[cfg(feature = "repo")]
-use automerge::ReadDoc;
-#[cfg(feature = "repo")]
+mod broker;
+
+pub use broker::{DocChangeBrokerHandle, DocChangeBrokerStopToken, HeadListenerRegistration};
+
+use automerge::ChangeHash;
 use autosurgeon::Prop;
-#[cfg(feature = "repo")]
-use samod::DocumentId;
-#[cfg(feature = "repo")]
-use tokio::{
-    sync::{mpsc, RwLock},
-    task::JoinHandle,
-};
+use samod::{DocHandle, DocumentId};
+use std::sync::Mutex;
+use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "repo")]
 #[derive(Debug, Clone)]
 pub struct ChangeNotification {
     pub patch: Arc<automerge::Patch>,
-    pub heads: Arc<[automerge::ChangeHash]>,
-    pub actor_ids: Arc<[automerge::ActorId]>,
+    pub heads: Arc<[ChangeHash]>,
 }
 
-#[cfg(feature = "repo")]
-impl ChangeNotification {
-    pub fn is_local_only(&self, local_actor_id: &automerge::ActorId) -> bool {
-        self.actor_ids.len() == 1 && self.actor_ids.first() == Some(local_actor_id)
-    }
-}
-
-#[cfg(feature = "repo")]
 pub struct ChangeFilter {
     pub doc_id: Option<DocIdFilter>,
     pub path: Vec<Prop<'static>>,
 }
 
-#[cfg(feature = "repo")]
 struct ChangeListener {
     id: Uuid,
     filter: ChangeFilter,
     on_change: Box<dyn Fn(Vec<ChangeNotification>) + Send + Sync + 'static>,
 }
 
-#[cfg(feature = "repo")]
-type ChangeTx = mpsc::UnboundedSender<(DocumentId, Vec<ChangeNotification>)>;
-
-#[cfg(feature = "repo")]
 pub struct ChangeListenerManager {
-    listeners: RwLock<Vec<ChangeListener>>,
-    change_tx: tokio::sync::Mutex<Option<ChangeTx>>,
-    brokers: DHashMap<DocumentId, Arc<DocChangeBroker>>,
+    listeners: Mutex<Vec<ChangeListener>>,
+    change_tx: mpsc::UnboundedSender<(DocumentId, Vec<ChangeNotification>)>,
+    brokers: DHashMap<
+        DocumentId,
+        (
+            Arc<broker::DocChangeBrokerHandle>,
+            Arc<broker::DocChangeBrokerStopToken>,
+        ),
+    >,
     cancel_token: CancellationToken,
 }
 
-#[cfg(feature = "repo")]
 pub struct ChangeListenerManagerStopToken {
     pub cancel_token: CancellationToken,
     pub switchboard_handle: Option<JoinHandle<()>>,
     pub manager: Arc<ChangeListenerManager>,
 }
 
-#[cfg(feature = "repo")]
 impl ChangeListenerManagerStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
-
-        drop(self.manager.change_tx.lock().await.take());
-
-        // Stop all brokers
-        for entry in self.manager.brokers.iter() {
-            entry.value().cancel_token.cancel();
-        }
 
         if let Some(handle) = self.switchboard_handle {
             handle.await.wrap_err("switchboard task error")?;
@@ -78,37 +61,6 @@ impl ChangeListenerManagerStopToken {
     }
 }
 
-#[cfg(feature = "repo")]
-pub struct DocChangeBroker {
-    doc_id: DocumentId,
-    cancel_token: CancellationToken,
-}
-
-#[cfg(feature = "repo")]
-pub struct DocChangeBrokerStopToken {
-    pub join_handle: JoinHandle<()>,
-    pub cancel_token: CancellationToken,
-}
-
-#[cfg(feature = "repo")]
-impl DocChangeBrokerStopToken {
-    pub async fn stop(self) -> Res<()> {
-        self.cancel_token.cancel();
-        self.join_handle.await.wrap_err("tokio task error")?;
-        Ok(())
-    }
-}
-
-#[cfg(feature = "repo")]
-impl DocChangeBroker {
-    pub fn filter(&self) -> DocIdFilter {
-        DocIdFilter {
-            doc_id: self.doc_id.clone(),
-        }
-    }
-}
-
-#[cfg(feature = "repo")]
 #[non_exhaustive]
 pub struct DocIdFilter {
     pub doc_id: DocumentId,
@@ -118,13 +70,12 @@ pub struct DocIdFilter {
 impl ChangeListenerManager {
     pub fn boot() -> (Arc<Self>, ChangeListenerManagerStopToken) {
         let (change_tx, change_rx) = mpsc::unbounded_channel();
-        let listeners = RwLock::new(Vec::new());
-        let main_cancel_token = CancellationToken::new();
+        let cancel_token = CancellationToken::new();
         let out = Self {
-            listeners,
-            change_tx: Some(change_tx).into(),
+            listeners: default(),
+            change_tx,
             brokers: default(),
-            cancel_token: main_cancel_token.child_token(),
+            cancel_token: cancel_token.clone(),
         };
         let out = Arc::new(out);
 
@@ -134,119 +85,52 @@ impl ChangeListenerManager {
         (
             Arc::clone(&out),
             ChangeListenerManagerStopToken {
-                cancel_token: main_cancel_token,
+                cancel_token,
                 switchboard_handle: Some(handle),
                 manager: out,
             },
         )
     }
 
+    fn ensure_live(&self) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("ChangeListenerManager is stopped");
+        }
+        Ok(())
+    }
+
+    /// NOTE: this only supports linear doc histories and breaks
+    /// on branches.
+    ///
     /// Start listening for events on the given document
+    /// Use the stop token if the Arc is the last one
     pub async fn add_doc(
         &self,
-        handle: samod::DocHandle,
-    ) -> Res<(Arc<DocChangeBroker>, Option<DocChangeBrokerStopToken>)> {
-        if let Some(arc) = self.brokers.get(handle.document_id()) {
-            return Ok((arc.clone(), None));
-        }
-        let Some(change_tx) = self.change_tx.lock().await.as_ref().map(|tx| tx.clone()) else {
-            return Err(ferr!("repo is shuting down"));
-        };
+        handle: DocHandle,
+    ) -> Res<(
+        Arc<broker::DocChangeBrokerHandle>,
+        Arc<broker::DocChangeBrokerStopToken>,
+    )> {
+        self.ensure_live()?;
 
         let doc_id = handle.document_id().clone();
-        let span = tracing::info_span!("doc listener task", ?doc_id);
-        let main_cancel_token = self.cancel_token.child_token();
-        let cancel_token_task = main_cancel_token.clone();
-        let fut = async move {
-            debug!("listening on doc");
-
-            let heads = handle.with_document(|doc| doc.get_heads());
-            let mut heads: Arc<[automerge::ChangeHash]> = heads.into();
-
-            let mut doc_change_stream = handle.changes();
-            loop {
-                let changes = tokio::select! {
-                    biased;
-                    _ = cancel_token_task.cancelled() => {
-                        break;
-                    },
-                    val = doc_change_stream.next() => {
-                        val
-                    }
-                };
-                let Some(changes) = changes else {
-                    break;
-                };
-                let (new_heads, all_changes) = handle.with_document(|doc| {
-                    let mut event_hashes =
-                        std::collections::HashSet::<automerge::ChangeHash>::new();
-                    let mut stack = changes.new_heads.clone();
-                    while let Some(hash) = stack.pop() {
-                        if !event_hashes.insert(hash) {
-                            continue;
-                        }
-                        if let Some(change) = doc.get_change_by_hash(&hash) {
-                            stack.extend(change.deps().iter().copied());
-                        }
-                    }
-
-                    let mut actor_ids: Vec<automerge::ActorId> = vec![];
-                    for change in doc.get_changes(&heads) {
-                        if !event_hashes.contains(&change.hash()) {
-                            continue;
-                        }
-                        if !actor_ids.iter().any(|id| id == change.actor_id()) {
-                            actor_ids.push(change.actor_id().clone());
-                        }
-                    }
-                    actor_ids.sort_by_key(|id| id.to_string());
-
-                    let patches = doc.diff(&heads, &changes.new_heads[..]);
-                    let new_heads: Arc<[automerge::ChangeHash]> = Arc::from(&changes.new_heads[..]);
-                    let actor_ids: Arc<[automerge::ActorId]> = Arc::from(actor_ids);
-
-                    let collected_changes = patches
-                        .into_iter()
-                        .map(|patch| {
-                            let patch = Arc::new(patch);
-                            ChangeNotification {
-                                patch,
-                                heads: Arc::clone(&new_heads),
-                                actor_ids: Arc::clone(&actor_ids),
-                            }
-                        })
-                        .collect::<Vec<_>>();
-
-                    (new_heads, collected_changes)
-                });
-
-                trace!(?all_changes, "XXX changes observed");
-
-                // Notify listeners about changes
-                if !all_changes.is_empty() {
-                    if let Err(err) = change_tx.send((handle.document_id().clone(), all_changes)) {
-                        warn!("failed to send change notifications: {err}");
-                    }
-                }
-
-                heads = new_heads;
-            }
-            eyre::Ok(())
+        if let Some(arc) = self.brokers.get(&doc_id) {
+            return Ok(arc.clone());
         }
-        .instrument(span);
-        let join_handle = tokio::spawn(async { fut.await.unwrap() });
 
-        let out = DocChangeBroker {
-            cancel_token: main_cancel_token.child_token(),
-            doc_id: doc_id.clone(),
-        };
-        let stop_token = DocChangeBrokerStopToken {
-            join_handle,
-            cancel_token: main_cancel_token,
-        };
-        let out = Arc::new(out);
-        self.brokers.insert(doc_id, Arc::clone(&out));
-        Ok((out, Some(stop_token)))
+        let (broker, stop_token) = broker::spawn_doc_listener(
+            handle,
+            // NOTE: if the changes listener is cancelled,
+            // so will all brokers
+            self.cancel_token.child_token(),
+            self.change_tx.clone(),
+        )?;
+
+        let broker = Arc::new(broker);
+        let stop_token = Arc::new(stop_token);
+        self.brokers
+            .insert(doc_id, (Arc::clone(&broker), Arc::clone(&stop_token)));
+        Ok((broker, stop_token))
     }
 
     /// Register a change listener
@@ -255,18 +139,22 @@ impl ChangeListenerManager {
         self: &Arc<Self>,
         filter: ChangeFilter,
         on_change: Box<dyn Fn(Vec<ChangeNotification>) + Send + Sync + 'static>,
-    ) -> ChangeListenerRegistration {
+    ) -> Res<ChangeListenerRegistration> {
+        self.ensure_live()?;
+
         let id = Uuid::new_v4();
-        let mut listeners = self.listeners.write().await;
-        listeners.push(ChangeListener {
-            id,
-            filter,
-            on_change,
-        });
-        ChangeListenerRegistration {
+        self.listeners
+            .lock()
+            .expect(ERROR_MUTEX)
+            .push(ChangeListener {
+                id,
+                filter,
+                on_change,
+            });
+        Ok(ChangeListenerRegistration {
             manager: Arc::downgrade(self),
             id,
-        }
+        })
     }
 
     /// Start the change notification worker
@@ -281,13 +169,23 @@ impl ChangeListenerManager {
                 Vec<ChangeNotification>,
             > = std::collections::HashMap::new();
             loop {
-                let Some((id, notifications)) = change_rx.recv().await else {
-                    break;
+                let (id, notifications) = tokio::select! {
+                    biased;
+                    _ = self.cancel_token.cancelled() => {
+                        debug!("cancel_token lit");
+                        break;
+                    },
+                    val = change_rx.recv() => {
+                        let Some(val) = val else {
+                            break;
+                        };
+                        val
+                    }
                 };
 
                 listener_notifications.clear();
 
-                let listeners = self.listeners.read().await;
+                let listeners = self.listeners.lock().expect(ERROR_MUTEX);
                 for (listener_idx, listener) in listeners.iter().enumerate() {
                     if listener
                         .filter
@@ -335,16 +233,16 @@ impl Drop for ChangeListenerRegistration {
     fn drop(&mut self) {
         if let Some(manager) = self.manager.upgrade() {
             let id = self.id;
-            tokio::spawn(async move {
-                let mut listeners = manager.listeners.write().await;
-                listeners.retain(|listener| listener.id != id);
-            });
+            manager
+                .listeners
+                .lock()
+                .expect(ERROR_MUTEX)
+                .retain(|listener| listener.id != id);
         }
     }
 }
 
 /// Check if a change path matches a listener path (including subpaths)
-#[cfg(feature = "repo")]
 pub fn path_prefix_matches(
     listener_path: &[Prop<'_>],
     change_path: &[(automerge::ObjId, automerge::Prop)],
@@ -362,7 +260,6 @@ pub fn path_prefix_matches(
 }
 
 /// Check if two properties match (handles different property types)
-#[cfg(feature = "repo")]
 pub fn prop_matches(listener_prop: &Prop<'_>, change_prop: &automerge::Prop) -> bool {
     match (listener_prop, change_prop) {
         (Prop::Key(listener_key), automerge::Prop::Map(change_key)) => listener_key == change_key,

@@ -368,8 +368,8 @@ pub mod user_path {
     pub fn to_actor_id(path: &UserPath) -> automerge::ActorId {
         let path_str = path.to_string_lossy();
         let hash = blake3::hash(path_str.as_bytes());
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(hash.as_bytes());
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&hash.as_bytes()[..16]);
         automerge::ActorId::from(bytes)
     }
 
