@@ -243,7 +243,7 @@ impl IrohSyncRepo {
         }];
 
         self.full_sync_handle
-            .add_connection(endpoint_id.clone(), conn.id)
+            .set_connection(endpoint_id.clone(), conn.id)
             .await?;
 
         self.active_samod_peers
@@ -266,7 +266,7 @@ impl IrohSyncRepo {
         }];
 
         self.full_sync_handle
-            .remove_connection(endpoint_id.clone())
+            .del_connection(endpoint_id.clone())
             .await?;
 
         let old = self.active_samod_peers.write().await.remove(&endpoint_id);
@@ -351,7 +351,7 @@ impl IrohSyncRepo {
         }];
 
         self.full_sync_handle
-            .add_connection(endpoint_id.clone(), conn.id)
+            .set_connection(endpoint_id.clone(), conn.id)
             .await?;
 
         self.active_samod_peers
