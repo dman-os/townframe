@@ -1,397 +1,797 @@
-use std::str::FromStr;
-
-use crate::drawer::{DrawerEvent, DrawerRepo};
 use crate::interlude::*;
-use crate::repos::{RecvError, Repo, SubscribeOpts};
 
-use tokio::sync;
-use tokio::task::JoinHandle;
+use iroh::EndpointId;
+use samod::ConnectionId;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone)]
+use crate::drawer::{DrawerEvent, DrawerRepo};
+use crate::repo::RepoCtx;
+
+pub struct WorkerHandle {
+    msg_tx: mpsc::UnboundedSender<Msg>,
+    /// Option allows you to take it out
+    pub events_rx: Option<tokio::sync::broadcast::Receiver<FullSyncEvent>>,
+}
+
+#[derive(Clone)]
 pub enum FullSyncEvent {
-    DocSynced {
-        endpoint_id: String,
+    PeerFullSynced {
+        endpoint_id: EndpointId,
+        doc_count: usize,
+    },
+    DocSyncedWithPeer {
+        endpoint_id: EndpointId,
         doc_id: DocumentId,
-        pending_count: usize,
+    },
+    StalePeer {
+        endpoint_id: EndpointId,
     },
 }
 
-pub struct FullSyncHandle {
-    done_rx: sync::watch::Receiver<bool>,
-    events_tx: sync::broadcast::Sender<Arc<[FullSyncEvent]>>,
+enum Msg {
+    SetPeer {
+        endpoint_id: EndpointId,
+        conn_id: ConnectionId,
+        partitions: HashSet<PartitionKey>,
+        resp: tokio::sync::oneshot::Sender<()>,
+    },
+    // OutgoingConn {
+    //     endpoint_id: EndpointId,
+    //     conn_id: samod::ConnectionId,
+    //     resp: tokio::sync::oneshot::Sender<()>,
+    // },
+    DelPeer {
+        endpoint_id: EndpointId,
+        resp: tokio::sync::oneshot::Sender<()>,
+    },
+    AddFullSyncPeer {
+        endpoint_id: EndpointId,
+        resp: tokio::sync::oneshot::Sender<()>,
+    },
+    BootDocSyncBackoff {
+        doc_id: DocumentId,
+    },
+    DocHeadsUpdated {
+        doc_id: DocumentId,
+        heads: ChangeHashSet,
+    },
+    DocPeerStateViewUpdated {
+        doc_id: DocumentId,
+        diff: DocPeerStateView,
+    },
 }
+type DocPeerStateView = HashMap<ConnectionId, samod::PeerDocState>;
 
-impl FullSyncHandle {
-    pub async fn wait_until_done(&mut self) -> Res<()> {
-        while !*self.done_rx.borrow() {
-            self.done_rx.changed().await.wrap_err(ERROR_CHANNEL)?;
-        }
-        Ok(())
+impl WorkerHandle {
+    pub async fn set_connection(&self, endpoint_id: EndpointId, conn_id: ConnectionId) -> Res<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let msg = Msg::SetPeer {
+            resp: tx,
+            conn_id,
+            endpoint_id,
+            partitions: [PartitionKey::FullSync].into(),
+        };
+        self.msg_tx.send(msg).wrap_err(ERROR_ACTOR)?;
+        rx.await.wrap_err(ERROR_CHANNEL)
+    }
+    pub async fn del_connection(&self, endpoint_id: EndpointId) -> Res<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let msg = Msg::DelPeer {
+            resp: tx,
+            endpoint_id,
+        };
+        self.msg_tx.send(msg).wrap_err(ERROR_ACTOR)?;
+        rx.await.wrap_err(ERROR_CHANNEL)
     }
 
-    pub fn subscribe(&self) -> sync::broadcast::Receiver<Arc<[FullSyncEvent]>> {
-        self.events_tx.subscribe()
+    pub async fn add_full_sync_peer(&self, endpoint_id: EndpointId) -> Res<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.msg_tx
+            .send(Msg::AddFullSyncPeer {
+                resp: tx,
+                endpoint_id,
+            })
+            .wrap_err("FullSyncWorker is dead")?;
+        rx.await.wrap_err(ERROR_CHANNEL)
     }
+
 }
 
-pub struct FullSyncStopToken {
+pub struct StopToken {
     cancel_token: CancellationToken,
-    join_handle: JoinHandle<()>,
+    join_handle: tokio::task::JoinHandle<()>,
 }
 
-impl FullSyncStopToken {
-    pub async fn stop(self) -> Res<()> {
+impl StopToken {
+    pub async fn stop(self) -> Result<(), utils_rs::WaitOnHandleError> {
         self.cancel_token.cancel();
-        self.join_handle.await?;
-        Ok(())
+        utils_rs::wait_on_handle_with_timeout(self.join_handle, Duration::from_secs(1)).await
     }
 }
 
-pub fn spawn_full_sync_worker(
+pub async fn start_full_sync_worker(
+    rcx: Arc<RepoCtx>,
     drawer_repo: Arc<DrawerRepo>,
-    acx: AmCtx,
-    snapshot: am_utils_rs::peers::PeerSyncSnapshot,
-    mut updates_rx: sync::broadcast::Receiver<Arc<[am_utils_rs::peers::DocPeerSyncUpdate]>>,
-    target_endpoint_ids: HashSet<String>,
-) -> (FullSyncHandle, FullSyncStopToken) {
-    let cancel_token = CancellationToken::new();
-    let (done_tx, done_rx) = sync::watch::channel(false);
-    let (events_tx, _events_rx) = sync::broadcast::channel(64);
+    cancel_token: CancellationToken,
+) -> Res<(WorkerHandle, StopToken)> {
+    use crate::repos::Repo;
 
-    let task_cancel = cancel_token.clone();
-    let events_tx_worker = events_tx.clone();
-    let drawer_listener = drawer_repo.subscribe(SubscribeOpts::new(256));
-    let join_handle = tokio::spawn(async move {
-        let mut worker = FullSyncWorker::new(target_endpoint_ids);
-        worker.seed_connections(snapshot.connections);
-        worker
-            .refresh_drawer_docs(&drawer_repo, &acx)
-            .await
-            .unwrap();
-        worker.seed_doc_states(snapshot.docs);
+    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+    let (events_tx, events_rx) = tokio::sync::broadcast::channel(16);
 
-        if worker.is_done() {
-            let _ = done_tx.send(true);
-            return;
-        }
+    let mut worker = Worker {
+        acx: rcx.acx.clone(),
+        cancel_token: cancel_token.clone(),
+        msg_tx: msg_tx.clone(),
+        events_tx,
+        partitions: [
+            //
+            (
+                PartitionKey::FullSync,
+                Partition {
+                    is_active: false,
+                    deets: ParitionDeets::FullSync { peers: default() },
+                },
+            ),
+        ]
+        .into(),
 
-        loop {
-            tokio::select! {
-                biased;
-                _ = task_cancel.cancelled() => {
-                    debug!("cancel token lit");
-                    break;
+        synced_docs: default(),
+        full_sync_peers: default(),
+        known_peer_set: default(),
+        conn_by_peer: default(),
+        known_doc_set: default(),
+        docs_to_boot: default(),
+        docs_to_stop: default(),
+        partitions_to_refresh: default(),
+    };
+
+    let drawer_rx = drawer_repo.subscribe(crate::repos::SubscribeOpts { capacity: 1024 });
+    let (_drawer_heads, known_docs) = drawer_repo.list_just_ids().await?;
+    worker.add_doc(rcx.doc_app.document_id().clone()).await?;
+    worker.add_doc(rcx.doc_drawer.document_id().clone()).await?;
+    for doc_id in known_docs {
+        let doc_id: DocumentId = doc_id
+            .parse()
+            .wrap_err("unable to parse doc_id from drawer")?;
+        worker.add_doc(doc_id.clone()).await?;
+    }
+
+    // let (peer_infos, mut peer_updates) = rcx.acx.repo().connected_peers();
+    // let (peer_observer, observer_stop) = acx.spawn_peer_sync_observer();
+    let fut = {
+        let cancel_token = cancel_token.clone();
+        // let peer_observer = observer.subscribe();
+        async move {
+            loop {
+                if !worker.partitions_to_refresh.is_empty() {
+                    worker.batch_refresh_paritions().await?;
                 }
-                recv = updates_rx.recv() => {
-                    match recv {
-                        Ok(batch) => {
-                            let events = worker.handle_peer_updates(&batch);
-                            if !events.is_empty() {
-                                let _ = events_tx_worker.send(events.into());
-                            }
-                            if worker.is_done() {
-                                let _ = done_tx.send(true);
-                                break;
-                            }
-                        }
-                        Err(sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            warn!(?skipped, "full sync worker lagged");
-                        }
-                        Err(sync::broadcast::error::RecvError::Closed) => {
-                            break;
-                        }
+                if !worker.docs_to_stop.is_empty() {
+                    worker.batch_stop_docs().await?;
+                }
+                if !worker.docs_to_boot.is_empty() {
+                    worker.batch_boot_docs().await?;
+                }
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        break;
                     }
-                }
-                recv = drawer_listener.recv_lossy_async() => {
-                    match recv {
-                        Ok(event) => {
-                            worker.handle_drawer_event(&event, &acx).await.unwrap();
-                            if worker.is_done() {
-                                let _ = done_tx.send(true);
-                                break;
-                            }
-                        }
-                        Err(RecvError::Closed) => break,
-                        Err(RecvError::Dropped { .. }) => unreachable!("recv_lossy_async should never return dropped"),
+                    // val = peer_updates.next() => {
+                    //     let Some(connections) = val else {
+                    //         eyre::bail!("AmCtx is closed, wrong shutdown order");
+                    //     };
+                    //     worker.handle_peer_conn_changes(connections).await?;
+                    // },
+                    // val = peer_observer.recv() => {
+                    //     let evt = match val {
+                    //         Ok(val) => val,
+                    //         Err(tokio::sync::broadcast::error::RecvError::Closed) => todo!(),
+                    //         Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped_count)) => {
+                    //             eyre::bail!("we're laggingn on peer events: dropped_count = {dropped_count}");
+                    //         },
+                    //     };
+                    //     worker.handle_peer_evt(evt).await?;
+                    // }
+                    val = msg_rx.recv() => {
+                        let Some(msg) = val else {
+                            warn!("FullSyncWorkerHandle dropped, closing loop");
+                            break;
+                        };
+                        worker.handle_msg(msg).await?;
+                    }
+                    val = drawer_rx.recv_async() => {
+                        let evt = match val {
+                            Ok(val) => val,
+                            Err(err) => match err {
+                                crate::repos::RecvError::Closed => {
+                                    warn!("DrawerRepo shutdown, closing loop");
+                                    break;
+                                },
+                                crate::repos::RecvError::Dropped { dropped_count } => {
+                                    eyre::bail!("we're dropping drawer events: dropped_count = {dropped_count}");
+                                }
+                            },
+                        };
+                        worker.handle_drawer_event(&evt).await?;
                     }
                 }
             }
+            worker
+                .docs_to_stop
+                .extend(worker.synced_docs.keys().cloned());
+            worker.batch_stop_docs().await?;
+            eyre::Ok(())
         }
-    });
-
-    (
-        FullSyncHandle { done_rx, events_tx },
-        FullSyncStopToken {
+    };
+    let join_handle = tokio::task::spawn(
+        async {
+            fut.await.unwrap();
+        }
+        .instrument(tracing::info_span!("FullSyncWorker task")),
+    );
+    Ok((
+        WorkerHandle {
+            msg_tx,
+            events_rx: Some(events_rx),
+        },
+        StopToken {
             cancel_token,
             join_handle,
         },
-    )
+    ))
 }
 
-struct FullSyncWorker {
-    target_endpoint_ids: HashSet<String>,
-    connected_endpoint_ids: HashSet<String>,
-    target_peer_ids: HashSet<samod::PeerId>,
-    peer_to_endpoint: HashMap<samod::PeerId, String>,
-    per_connection_doc:
-        HashMap<(samod::ConnectionId, DocumentId), Arc<am_utils_rs::peers::DocPeerSyncState>>,
-    tracked_docs: HashSet<DocumentId>,
-    pending: HashSet<(samod::PeerId, DocumentId)>,
+struct Worker {
+    acx: AmCtx,
+    cancel_token: CancellationToken,
+
+    partitions: HashMap<PartitionKey, Partition>,
+
+    docs_to_boot: HashSet<DocumentId>,
+    docs_to_stop: HashSet<DocumentId>,
+    partitions_to_refresh: HashSet<PartitionKey>,
+
+    known_doc_set: HashMap<DocumentId, HashSet<PartitionKey>>,
+    synced_docs: HashMap<DocumentId, DocSyncState>,
+    msg_tx: mpsc::UnboundedSender<Msg>,
+    events_tx: tokio::sync::broadcast::Sender<FullSyncEvent>,
+
+    full_sync_peers: HashSet<EndpointId>,
+    known_peer_set: HashMap<ConnectionId, PeerSyncState>,
+    conn_by_peer: HashMap<EndpointId, ConnectionId>,
 }
 
-impl FullSyncWorker {
-    fn new(target_endpoint_ids: HashSet<String>) -> Self {
-        Self {
-            target_endpoint_ids,
-            connected_endpoint_ids: HashSet::new(),
-            target_peer_ids: HashSet::new(),
-            peer_to_endpoint: HashMap::new(),
-            per_connection_doc: HashMap::new(),
-            tracked_docs: HashSet::new(),
-            pending: HashSet::new(),
+#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PartitionKey {
+    FullSync,
+    // Docs(Uuid),
+    // Blobs(Uuid),
+}
+
+struct Partition {
+    is_active: bool,
+    deets: ParitionDeets,
+}
+
+enum ParitionDeets {
+    FullSync { peers: HashSet<EndpointId> },
+    // Docs { include_set: HashSet<DocumentId> },
+    // Blobs { include_set: HashMap<Uuid> },
+}
+
+struct PeerSyncState {
+    endpoint_id: EndpointId,
+    synced_docs: HashSet<DocumentId>,
+    partitions: HashSet<PartitionKey>,
+}
+
+struct DocSyncState {
+    // doc_id: Arc<str>,
+    // partitions: HashSet<PartitionKey>,
+    deets: DocSyncStateDeets,
+}
+
+enum DocSyncStateDeets {
+    Active(ActiveDocSyncState),
+    Pending(PendingDocSyncState),
+}
+
+struct ActiveDocSyncState {
+    latest_heads: ChangeHashSet,
+    cancel_token: CancellationToken,
+    join_handle: tokio::task::JoinHandle<()>,
+    broker_stop_token: Arc<am_utils_rs::changes::DocChangeBrokerStopToken>,
+}
+
+impl ActiveDocSyncState {
+    async fn stop(self) -> Res<()> {
+        self.cancel_token.cancel();
+        utils_rs::wait_on_handle_with_timeout(self.join_handle, Duration::from_secs(2)).await?;
+        if let Ok(token) = Arc::try_unwrap(self.broker_stop_token) {
+            token.stop().await?;
         }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingDocSyncState {
+    attempt_no: usize,
+    last_backoff: Duration,
+}
+
+impl Worker {
+    async fn handle_drawer_event(&mut self, evt: &DrawerEvent) -> Res<()> {
+        match evt {
+            DrawerEvent::DocUpdated { .. } | DrawerEvent::ListChanged { .. } => {
+                // no-op
+            }
+            DrawerEvent::DocAdded { id, .. } => {
+                let parsed: DocumentId = id.parse().wrap_err("invalid document id")?;
+                self.add_doc(parsed).await?;
+            }
+            DrawerEvent::DocDeleted { id, .. } => {
+                let parsed: DocumentId = id.parse().wrap_err("invalid document id")?;
+                self.remove_doc(parsed).await?;
+            }
+        }
+        Ok(())
     }
 
-    fn seed_connections(&mut self, connections: Vec<samod::ConnectionInfo>) {
-        for conn in connections {
-            let samod::ConnectionState::Connected { their_peer_id } = conn.state else {
-                continue;
-            };
-            self.register_peer(their_peer_id);
-        }
-    }
-
-    fn seed_doc_states(&mut self, docs: Vec<Arc<am_utils_rs::peers::DocPeerSyncState>>) {
-        for doc_state in docs {
-            self.apply_upsert(doc_state, None);
-        }
-    }
-
-    fn handle_peer_updates(
-        &mut self,
-        updates: &[am_utils_rs::peers::DocPeerSyncUpdate],
-    ) -> Vec<FullSyncEvent> {
-        let mut events = Vec::new();
-        for update in updates {
-            match update {
-                am_utils_rs::peers::DocPeerSyncUpdate::Upsert(doc_state) => {
-                    self.apply_upsert(Arc::clone(doc_state), Some(&mut events));
+    async fn handle_msg(&mut self, msg: Msg) -> Res<()> {
+        match msg {
+            Msg::AddFullSyncPeer { endpoint_id, resp } => {
+                self.full_sync_peers.insert(endpoint_id);
+                resp.send(())
+                    .inspect_err(|_| warn!("called dropped before finish"))
+                    .ok();
+            }
+            Msg::SetPeer {
+                endpoint_id,
+                resp,
+                partitions,
+                conn_id,
+            } => {
+                let old_conn_id = self.conn_by_peer.get(&endpoint_id).copied();
+                let old_state = self
+                    .known_peer_set
+                    .remove(&conn_id)
+                    .or_else(|| old_conn_id.and_then(|id| self.known_peer_set.remove(&id)));
+                let new_parts: Vec<_> = if let Some(old) = old_state {
+                    for part_key in old.partitions.difference(&partitions) {
+                        self.remove_peer_from_part(*part_key, endpoint_id)
+                            .await?;
+                    }
+                    partitions.difference(&old.partitions).cloned().collect()
+                } else {
+                    partitions.iter().cloned().collect()
+                };
+                self.known_peer_set.insert(
+                    conn_id,
+                    PeerSyncState {
+                        partitions,
+                        endpoint_id,
+                        synced_docs: default(),
+                    },
+                );
+                self.conn_by_peer.insert(endpoint_id, conn_id);
+                for part_key in new_parts {
+                    self.add_peer_to_part(part_key, endpoint_id).await?;
                 }
-                am_utils_rs::peers::DocPeerSyncUpdate::Removed {
-                    connection_id,
-                    doc_id,
-                } => {
-                    let key = (*connection_id, doc_id.clone());
-                    if let Some(prev) = self.per_connection_doc.remove(&key) {
-                        let Some(peer_id) =
-                            prev.peer_id.as_ref().map(|peer_arc| (**peer_arc).clone())
-                        else {
-                            continue;
-                        };
-                        self.recompute_peer_doc(&peer_id, doc_id, Some(&mut events));
+                resp.send(())
+                    .inspect_err(|_| warn!("called dropped before finish"))
+                    .ok();
+            }
+            Msg::DelPeer { endpoint_id, resp } => {
+                if let Some(conn_id) = self.conn_by_peer.remove(&endpoint_id) {
+                    if let Some(state) = self.known_peer_set.remove(&conn_id) {
+                        for part_key in state.partitions {
+                            self.remove_peer_from_part(part_key, endpoint_id)
+                                .await?;
+                        }
+                    }
+                }
+                resp.send(())
+                    .inspect_err(|_| warn!("called dropped before finish"))
+                    .ok();
+            }
+            Msg::DocHeadsUpdated { doc_id, heads } => {
+                self.handle_doc_heads_change(doc_id, heads).await?;
+            }
+            Msg::DocPeerStateViewUpdated { doc_id, diff } => {
+                self.handle_doc_peer_state_change(doc_id, diff).await?
+            }
+            Msg::BootDocSyncBackoff { doc_id } => {
+                self.handle_doc_boot_backoff(doc_id).await?;
+            }
+        }
+        eyre::Ok(())
+    }
+
+    #[allow(deprecated)]
+    async fn batch_boot_docs(&mut self) -> Res<()> {
+        let mut double = std::mem::replace(&mut self.docs_to_boot, default());
+        for doc_id in double.drain() {
+            let deets = if let Some(handle) = self.acx.repo().find(doc_id.clone()).await? {
+                let active = self.boot_doc_sync_worker(doc_id.clone(), handle).await?;
+                DocSyncStateDeets::Active(active)
+            } else {
+                DocSyncStateDeets::Pending(PendingDocSyncState {
+                    attempt_no: default(),
+                    last_backoff: default(),
+                })
+            };
+            let is_pending = matches!(deets, DocSyncStateDeets::Pending(_));
+
+            let old = self
+                .synced_docs
+                .insert(doc_id.clone(), DocSyncState { deets });
+            assert!(old.is_none(), "fishy");
+            if is_pending {
+                self.msg_tx
+                    .send(Msg::BootDocSyncBackoff { doc_id })
+                    .inspect_err(|_| {
+                        error!("FullSyncWorker died before BootDocSyncBackoff enqueue")
+                    })
+                    .ok();
+            }
+        }
+        self.docs_to_boot = double;
+        Ok(())
+    }
+
+    async fn batch_stop_docs(&mut self) -> Res<()> {
+        use futures::StreamExt;
+        use futures_buffered::BufferedStreamExt;
+
+        futures::stream::iter(
+            self.docs_to_stop
+                .drain()
+                .filter_map(|doc_id| self.synced_docs.remove(&doc_id))
+                .filter_map(|doc| match doc.deets {
+                    DocSyncStateDeets::Active(active) => Some(active.stop()),
+                    DocSyncStateDeets::Pending(_) => None,
+                }),
+        )
+        .buffered_unordered(16)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Res<Vec<_>>>()?;
+        Ok(())
+    }
+
+    async fn batch_refresh_paritions(&mut self) -> Res<()> {
+        for part_key in self.partitions_to_refresh.drain() {
+            let part = self
+                .partitions
+                .get_mut(&part_key)
+                .ok_or_eyre("parition not found")?;
+            let activate = match &part.deets {
+                ParitionDeets::FullSync { peers } => !peers.is_empty(),
+            };
+            if activate == part.is_active {
+                continue;
+            }
+            if activate {
+                match &part.deets {
+                    ParitionDeets::FullSync { .. } => {
+                        for (doc_id, parts) in &self.known_doc_set {
+                            if !parts.contains(&part_key) {
+                                continue;
+                            }
+                            if !self.synced_docs.contains_key(doc_id) {
+                                self.docs_to_boot.insert(doc_id.clone());
+                            }
+                        }
                     }
                 }
             }
-        }
-        events
-    }
-
-    async fn handle_drawer_event(&mut self, event: &DrawerEvent, acx: &AmCtx) -> Res<()> {
-        match event {
-            DrawerEvent::ListChanged { .. } => {
-                self.refresh_drawer_docs_from_list(acx, None).await?
+            if !activate {
+                match &part.deets {
+                    ParitionDeets::FullSync { .. } => {
+                        for (doc_id, parts) in &self.known_doc_set {
+                            if !parts.contains(&part_key) {
+                                continue;
+                            }
+                            if self.synced_docs.contains_key(doc_id) {
+                                self.docs_to_stop.insert(doc_id.clone());
+                            }
+                        }
+                    }
+                }
             }
-            DrawerEvent::DocAdded { id, .. } | DrawerEvent::DocUpdated { id, .. } => {
-                self.refresh_drawer_docs_from_list(acx, Some(id)).await?
-            }
-            DrawerEvent::DocDeleted { id, .. } => {
-                let doc_id = parse_drawer_doc_id(id)?;
-                self.remove_tracked_doc(&doc_id);
-            }
+            part.is_active = activate;
         }
         Ok(())
     }
 
-    async fn refresh_drawer_docs(&mut self, drawer_repo: &DrawerRepo, acx: &AmCtx) -> Res<()> {
-        let docs = drawer_repo.list().await?;
-        let mut next = HashSet::new();
-        for entry in docs {
-            let doc_id = parse_drawer_doc_id(&entry.doc_id)?;
-            ensure_doc_handle_exists(acx, &doc_id).await?;
-            next.insert(doc_id);
+    async fn add_doc(&mut self, doc_id: DocumentId) -> Res<()> {
+        let mut parts_to_add = vec![];
+        for (part_key, part) in &self.partitions {
+            match &part.deets {
+                ParitionDeets::FullSync { .. } => {
+                    parts_to_add.push(*part_key);
+                }
+            }
         }
-
-        let prev_docs = self.tracked_docs.clone();
-        for doc_id in next.iter().cloned() {
-            self.add_tracked_doc(doc_id);
-        }
-        for doc_id in prev_docs.difference(&next) {
-            self.remove_tracked_doc(doc_id);
+        let boot_doc = !parts_to_add.is_empty();
+        self.known_doc_set.insert(doc_id.clone(), default());
+        self.add_doc_to_paritions(doc_id.clone(), parts_to_add.into_iter())
+            .await?;
+        if boot_doc {
+            self.docs_to_boot.insert(doc_id.clone());
         }
         Ok(())
     }
 
-    async fn refresh_drawer_docs_from_list(
+    async fn add_doc_to_paritions(
         &mut self,
-        acx: &AmCtx,
-        doc_id: Option<&daybook_types::doc::DocId>,
+        doc_id: DocumentId,
+        parts: impl Iterator<Item = PartitionKey>,
     ) -> Res<()> {
-        if let Some(doc_id) = doc_id {
-            let am_id = parse_drawer_doc_id(doc_id)?;
-            ensure_doc_handle_exists(acx, &am_id).await?;
-            self.add_tracked_doc(am_id);
-            return Ok(());
+        let doc_state = self
+            .known_doc_set
+            .get_mut(&doc_id)
+            .ok_or_eyre("doc not found")?;
+        doc_state.extend(parts);
+        Ok(())
+    }
+
+    async fn boot_doc_sync_worker(
+        &self,
+        doc_id: DocumentId,
+        handle: samod::DocHandle,
+    ) -> Res<ActiveDocSyncState> {
+        let latest_heads = ChangeHashSet(handle.with_document(|doc| doc.get_heads()).into());
+        let (broker_handle, broker_stop_token) =
+            self.acx.change_manager().add_doc(handle.clone()).await?;
+
+        let cancel_token = self.cancel_token.child_token();
+        let fut = {
+            let cancel_token = cancel_token.clone();
+            let doc_id = doc_id.clone();
+            let msg_tx = self.msg_tx.clone();
+
+            let mut heads_listener = broker_handle.get_head_listener().await?;
+
+            let (peer_state, mut state_stream) = handle.peers();
+
+            msg_tx
+                .send(Msg::DocPeerStateViewUpdated {
+                    doc_id: doc_id.clone(),
+                    diff: peer_state,
+                })
+                .expect("impossible");
+            async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            debug!("cancel token lit");
+                            break;
+                        }
+                        val = heads_listener.change_rx().recv() => {
+                            let Some(heads) = val else {
+                                eyre::bail!("DocChangeBroker was removed from repo, weird!");
+                            };
+                            msg_tx.send(Msg::DocHeadsUpdated{
+                                doc_id: doc_id.clone(),
+                                heads: ChangeHashSet(heads)
+                            }).expect("FullSyncWorker went down without cleaning documents");
+                        }
+                        val = state_stream.next() => {
+                            let Some(diff) = val else {
+                                eyre::bail!("DocHandle was removed from repo, weird!");
+                            };
+                            msg_tx.send(Msg::DocPeerStateViewUpdated{
+                                doc_id: doc_id.clone(),
+                                diff,
+                            }).expect("FullSyncWorker went down without cleaning documents");
+                        }
+                    }
+                }
+                eyre::Ok(())
+            }
+        };
+        let join_handle = tokio::spawn(
+            async move { fut.await.unwrap() }
+                .instrument(tracing::info_span!("DocHandle peer changes reduce task")),
+        );
+        Ok(ActiveDocSyncState {
+            latest_heads,
+            cancel_token,
+            join_handle,
+            broker_stop_token,
+        })
+    }
+
+    async fn add_peer_to_part(
+        &mut self,
+        part_key: PartitionKey,
+        endpoint_id: EndpointId,
+    ) -> Res<()> {
+        let part = self
+            .partitions
+            .get_mut(&part_key)
+            .ok_or_eyre("parition not found")?;
+        match &mut part.deets {
+            ParitionDeets::FullSync { peers } => {
+                peers.insert(endpoint_id);
+            }
+        }
+        self.partitions_to_refresh.insert(part_key);
+        Ok(())
+    }
+
+    async fn remove_peer_from_part(
+        &mut self,
+        part_key: PartitionKey,
+        endpoint_id: EndpointId,
+    ) -> Res<()> {
+        let part = self
+            .partitions
+            .get_mut(&part_key)
+            .ok_or_eyre("parition not found")?;
+        match &mut part.deets {
+            ParitionDeets::FullSync { peers } => {
+                peers.remove(&endpoint_id);
+            }
+        }
+        self.partitions_to_refresh.insert(part_key);
+        Ok(())
+    }
+
+    async fn handle_doc_peer_state_change(
+        &mut self,
+        doc_id: DocumentId,
+        diff: DocPeerStateView,
+    ) -> Res<()> {
+        let doc_state = self
+            .synced_docs
+            .get(&doc_id)
+            .expect("peer state diff for unkown doc");
+        let local_heads = match &doc_state.deets {
+            DocSyncStateDeets::Active(active) => &active.latest_heads,
+            DocSyncStateDeets::Pending(_) => return Ok(()),
+        };
+        for (conn_id, diff) in diff {
+            let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) else {
+                warn!(?conn_id, "unkown connection for FullSyncWorker");
+                continue;
+            };
+            let they_have_our_changes = diff
+                .shared_heads
+                .as_ref()
+                .map(|heads| heads_equal_as_set(heads, local_heads))
+                .unwrap_or_default();
+            let we_have_their_changes = diff
+                .their_heads
+                .as_ref()
+                .zip(diff.shared_heads.as_ref())
+                .map(|(their, shared)| heads_equal_as_set(their, shared))
+                .unwrap_or_default();
+
+            if they_have_our_changes
+                && we_have_their_changes
+                && peer_state.synced_docs.insert(doc_id.clone())
+            {
+                self.events_tx
+                    .send(FullSyncEvent::DocSyncedWithPeer {
+                        endpoint_id: peer_state.endpoint_id,
+                        doc_id: doc_id.clone(),
+                    })
+                    .inspect_err(|_| warn!("full sync event receiver dropped"))
+                    .ok();
+            }
+            if peer_state.synced_docs.len() == self.synced_docs.len() {
+                self.events_tx
+                    .send(FullSyncEvent::PeerFullSynced {
+                        endpoint_id: peer_state.endpoint_id,
+                        doc_count: peer_state.synced_docs.len(),
+                    })
+                    .inspect_err(|_| warn!("full sync event receiver dropped"))
+                    .ok();
+            }
         }
         Ok(())
     }
 
-    fn apply_upsert(
-        &mut self,
-        doc_state: Arc<am_utils_rs::peers::DocPeerSyncState>,
-        mut events: Option<&mut Vec<FullSyncEvent>>,
-    ) {
-        let key = (doc_state.connection_id, doc_state.doc_id.clone());
-        let prev = self.per_connection_doc.insert(key, Arc::clone(&doc_state));
+    async fn remove_doc(&mut self, doc_id: DocumentId) -> Res<()> {
+        self.known_doc_set.remove(&doc_id);
+        self.docs_to_stop.insert(doc_id);
+        Ok(())
+    }
 
-        if let Some(peer_id) = doc_state
-            .peer_id
-            .as_ref()
-            .map(|peer_arc| (**peer_arc).clone())
+    async fn handle_doc_heads_change(
+        &mut self,
+        doc_id: DocumentId,
+        heads: ChangeHashSet,
+    ) -> Res<()> {
+        let Some(state) = self.synced_docs.get_mut(&doc_id) else {
+            // FIXME: turn to error if this can't happen
+            warn!(?doc_id, "doc was removed by the time of heads update");
+            return Ok(());
+        };
+        let active = match &mut state.deets {
+            DocSyncStateDeets::Pending(_) => unreachable!(),
+            DocSyncStateDeets::Active(active) => active,
+        };
+        active.latest_heads = heads;
+        for peer_state in self.known_peer_set.values_mut() {
+            if peer_state.synced_docs.remove(&doc_id) {
+                self.events_tx
+                    .send(FullSyncEvent::StalePeer {
+                        endpoint_id: peer_state.endpoint_id,
+                    })
+                    .inspect_err(|_| warn!("full sync event receiver dropped"))
+                    .ok();
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(deprecated)]
+    async fn handle_doc_boot_backoff(&mut self, doc_id: DocumentId) -> Res<()> {
+        if !self.known_doc_set.contains_key(&doc_id) {
+            return Ok(());
+        };
+        let backoff = match self.synced_docs.get_mut(&doc_id) {
+            None => {
+                // must have bee removed from sync set
+                return Ok(());
+            }
+            Some(state) => match &state.deets {
+                DocSyncStateDeets::Active(_) => {
+                    return Ok(());
+                }
+                DocSyncStateDeets::Pending(pending) => pending.clone(),
+            },
+        };
+        if let Some(handle) = self.acx.repo().find(doc_id.clone()).await? {
+            let active = self.boot_doc_sync_worker(doc_id.clone(), handle).await?;
+            let Some(state) = self.synced_docs.get_mut(&doc_id) else {
+                return Ok(());
+            };
+            state.deets = DocSyncStateDeets::Active(active);
+
+            return Ok(());
+        };
+        warn!(?backoff, "added doc not found in repo, will retry");
+        let delay = (backoff.last_backoff * 2)
+            .max(Duration::from_millis(500))
+            .min(Duration::from_secs(10));
         {
-            self.register_peer(peer_id.clone());
-            if let Some(event_list) = events.as_mut() {
-                self.recompute_peer_doc(&peer_id, &doc_state.doc_id, Some(event_list));
-            } else {
-                self.recompute_peer_doc(&peer_id, &doc_state.doc_id, None);
-            }
+            let Some(state) = self.synced_docs.get_mut(&doc_id) else {
+                return Ok(());
+            };
+            state.deets = DocSyncStateDeets::Pending(PendingDocSyncState {
+                attempt_no: backoff.attempt_no + 1,
+                last_backoff: delay,
+            });
         }
-
-        if let Some(prev) = prev {
-            if let Some(prev_peer) = prev.peer_id.as_ref().map(|peer_arc| (**peer_arc).clone()) {
-                if let Some(event_list) = events {
-                    self.recompute_peer_doc(&prev_peer, &prev.doc_id, Some(event_list));
-                } else {
-                    self.recompute_peer_doc(&prev_peer, &prev.doc_id, None);
-                }
-            }
-        }
-    }
-
-    fn add_tracked_doc(&mut self, doc_id: DocumentId) {
-        if !self.tracked_docs.insert(doc_id.clone()) {
-            return;
-        }
-        for peer_id in self.target_peer_ids.clone() {
-            self.recompute_peer_doc(&peer_id, &doc_id, None);
-        }
-    }
-
-    fn remove_tracked_doc(&mut self, doc_id: &DocumentId) {
-        if !self.tracked_docs.remove(doc_id) {
-            return;
-        }
-        self.pending
-            .retain(|(_, existing_doc_id)| existing_doc_id != doc_id);
-    }
-
-    fn recompute_peer_doc(
-        &mut self,
-        peer_id: &samod::PeerId,
-        doc_id: &DocumentId,
-        mut events: Option<&mut Vec<FullSyncEvent>>,
-    ) {
-        let key = (peer_id.clone(), doc_id.clone());
-
-        if !self.target_peer_ids.contains(peer_id) || !self.tracked_docs.contains(doc_id) {
-            self.pending.remove(&key);
-            return;
-        }
-
-        let is_synced = self.per_connection_doc.values().any(|state| {
-            state
-                .peer_id
-                .as_ref()
-                .map(|peer_arc| **peer_arc == *peer_id)
-                .unwrap_or(false)
-                && state.doc_id == *doc_id
-                && is_doc_synced(&state.state)
+        let msg_tx = self.msg_tx.clone();
+        tokio::task::spawn(async move {
+            tokio::time::sleep(delay).await;
+            msg_tx
+                .send(Msg::BootDocSyncBackoff {
+                    doc_id: doc_id.clone(),
+                })
+                .inspect_err(|_| {
+                    error!(?doc_id, "FullSyncWorker died before doc was enqued");
+                })
+                .ok();
         });
-
-        let was_pending = self.pending.contains(&key);
-        if is_synced {
-            self.pending.remove(&key);
-            if was_pending {
-                let endpoint_id = self
-                    .peer_to_endpoint
-                    .get(peer_id)
-                    .expect("target peer must have endpoint mapping")
-                    .clone();
-                if let Some(events) = events.as_mut() {
-                    events.push(FullSyncEvent::DocSynced {
-                        endpoint_id,
-                        doc_id: doc_id.clone(),
-                        pending_count: self.pending.len(),
-                    });
-                }
-            }
-        } else {
-            self.pending.insert(key);
-        }
-    }
-
-    fn register_peer(&mut self, peer_id: samod::PeerId) {
-        let endpoint_id = self
-            .peer_to_endpoint
-            .entry(peer_id.clone())
-            .or_insert_with(|| {
-                endpoint_id_from_peer_id(&peer_id)
-                    .expect("peer id must always include endpoint id suffix")
-            })
-            .clone();
-        if !self.target_endpoint_ids.contains(&endpoint_id) {
-            return;
-        }
-
-        let is_new_target_peer = self.target_peer_ids.insert(peer_id.clone());
-        self.connected_endpoint_ids.insert(endpoint_id);
-
-        if is_new_target_peer {
-            for doc_id in self.tracked_docs.clone() {
-                self.recompute_peer_doc(&peer_id, &doc_id, None);
-            }
-        }
-    }
-
-    fn is_done(&self) -> bool {
-        self.connected_endpoint_ids.len() == self.target_endpoint_ids.len()
-            && self.pending.is_empty()
+        Ok(())
     }
 }
 
-fn parse_drawer_doc_id(doc_id: &daybook_types::doc::DocId) -> Res<DocumentId> {
-    DocumentId::from_str(&doc_id.to_string())
-        .wrap_err_with(|| format!("invalid drawer document id '{}'", doc_id))
-}
-
-async fn ensure_doc_handle_exists(acx: &AmCtx, doc_id: &DocumentId) -> Res<()> {
-    let handle = acx.find_doc(doc_id).await?;
-    if handle.is_none() {
-        eyre::bail!("drawer references missing automerge doc {}", doc_id);
-    }
-    Ok(())
-}
-
-fn endpoint_id_from_peer_id(peer_id: &samod::PeerId) -> Option<String> {
-    peer_id.to_string().rsplit('/').next().map(str::to_string)
-}
-
-fn is_doc_synced(state: &samod::PeerDocState) -> bool {
-    let Some(shared) = &state.shared_heads else {
-        return false;
-    };
-    let Some(their) = &state.their_heads else {
-        return false;
-    };
-    shared == their
+fn heads_equal_as_set(
+    left: &[automerge::ChangeHash],
+    right: &[automerge::ChangeHash],
+) -> bool {
+    left.len() == right.len() && left.iter().all(|head| right.contains(head))
 }

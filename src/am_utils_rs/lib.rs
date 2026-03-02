@@ -20,8 +20,6 @@ pub mod changes;
 pub mod codecs;
 #[cfg(feature = "iroh")]
 pub mod iroh;
-#[cfg(feature = "repo")]
-pub mod peers;
 
 #[cfg(feature = "repo")]
 use automerge::Automerge;
@@ -189,7 +187,7 @@ impl AmCtx {
         let cancel_token = CancellationToken::new();
         let join_handle = tokio::spawn({
             let cancel_token = cancel_token.clone();
-            let peer_id = peer_id.clone();
+            let peer_id = Arc::<str>::clone(&peer_id);
             async move {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {

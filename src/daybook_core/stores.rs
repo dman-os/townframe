@@ -262,7 +262,7 @@ impl Reconcile for VersionTag {
         let mut buf = [0_u8; 32];
         buf[0..16].copy_from_slice(self.version.as_bytes());
         buf[16..].copy_from_slice(self.actor_id.to_bytes());
-        reconciler.bytes(&buf)
+        reconciler.bytes(buf)
     }
 }
 

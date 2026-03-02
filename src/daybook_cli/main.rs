@@ -486,9 +486,6 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                             match event {
                                 Ok(event) => {
                                     match &*event {
-                                        IrohSyncEvent::DocSyncUpdates { updates } => {
-                                            info!(?updates, "docs synced");
-                                        }
                                         IrohSyncEvent::IncomingConnetion {
                                             endpoint_id,
                                             conn_id,

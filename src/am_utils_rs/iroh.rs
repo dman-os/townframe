@@ -51,7 +51,7 @@ impl AmCtx {
         let cancel_token = CancellationToken::new();
         let join_handle = tokio::spawn({
             let cancel_token = cancel_token.clone();
-            let peer_id = peer_id.clone();
+            let peer_id = Arc::<str>::clone(&peer_id);
             async move {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
@@ -132,7 +132,7 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
         self.conn_tx
             .send(crate::RepoConnection {
                 id: conn_id,
-                peer_id: peer_id.clone(),
+                peer_id: Arc::<str>::clone(&peer_id),
                 join_handle: None,
                 peer_info,
                 endpoint_id: Some(endpoint_id),

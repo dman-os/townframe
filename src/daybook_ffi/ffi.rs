@@ -128,7 +128,7 @@ impl GlobalFfiCtx {
     async fn get_repo_config(
         self: Arc<Self>,
     ) -> Result<daybook_core::app::globals::RepoConfig, FfiError> {
-        let this = self.clone();
+        let this = Arc::clone(&self);
         self.do_on_rt(async move {
             daybook_core::app::globals::get_repo_config(&this.inner.sql.db_pool).await
         })
@@ -142,7 +142,7 @@ impl GlobalFfiCtx {
         repo_root: String,
     ) -> Result<KnownRepoEntry, FfiError> {
         let repo_root = std::path::PathBuf::from(repo_root);
-        let this = self.clone();
+        let this = Arc::clone(&self);
         self.do_on_rt(async move {
             let repo =
                 daybook_core::repo::upsert_known_repo(&this.inner.sql.db_pool, &repo_root).await?;

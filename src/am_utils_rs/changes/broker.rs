@@ -170,7 +170,7 @@ impl DocChangeBroker {
                     .lock()
                     .expect(ERROR_MUTEX)
                     .push(HeadListener {
-                        id: registration.id.clone(),
+                        id: registration.id,
                         change_tx,
                     });
                 resp.send(registration)

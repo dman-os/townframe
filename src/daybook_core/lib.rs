@@ -1,4 +1,6 @@
-#![recursion_limit = "512"]
+// FIXME: investigate why this is being flagged
+// by rustc
+#![recursion_limit = "256"]
 
 #[allow(unused)]
 mod interlude {

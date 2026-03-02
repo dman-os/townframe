@@ -8,8 +8,7 @@ use crate::drawer::DrawerRepo;
 use crate::repo::RepoCtx;
 
 mod bootstrap;
-// mod full;
-mod full2;
+mod full;
 pub use bootstrap::*;
 
 pub const IROH_DOC_URL_SCHEME: &str = "db+iroh-doc";
@@ -28,7 +27,7 @@ pub struct IrohSyncRepo {
 
     conn_end_signal_tx: tokio::sync::mpsc::UnboundedSender<am_utils_rs::ConnFinishSignal>,
     active_samod_peers: tokio::sync::RwLock<HashMap<EndpointId, (am_utils_rs::RepoConnection,)>>,
-    full_sync_handle: full2::WorkerHandle,
+    full_sync_handle: full::WorkerHandle,
     // bootstrap_docs: tokio::sync::Mutex<Vec<iroh_docs::api::Doc>>,
     // active_endpoint_ids: tokio::sync::RwLock<HashMap<String, ()>>,
 }
@@ -49,9 +48,6 @@ pub enum IrohSyncEvent {
         endpoint_id: EndpointId,
         reason: samod::ConnFinishedReason,
     },
-    DocSyncUpdates {
-        updates: Arc<[am_utils_rs::peers::DocPeerSyncUpdate]>,
-    },
     PeerFullySynced {
         endpoint_id: EndpointId,
         doc_count: usize,
@@ -69,7 +65,7 @@ pub struct IrohSyncRepoStopToken {
     cancel_token: CancellationToken,
     worker_handle: JoinHandle<()>,
     router: iroh::protocol::Router,
-    full_stop_token: full2::StopToken,
+    full_stop_token: full::StopToken,
 }
 
 impl IrohSyncRepoStopToken {
@@ -125,9 +121,12 @@ impl IrohSyncRepo {
             .ensure_local_sync_device(router.endpoint().id(), &rcx.local_device_name)
             .await?;
 
-        let (mut full_sync_handle, full_stop_token) =
-            full2::start_full_sync_worker(rcx.clone(), drawer_repo, cancel_token.child_token())
-                .await?;
+        let (mut full_sync_handle, full_stop_token) = full::start_full_sync_worker(
+            Arc::clone(&rcx),
+            drawer_repo,
+            cancel_token.child_token(),
+        )
+        .await?;
         let full_sync_rx = full_sync_handle.events_rx.take().expect("impossible");
 
         let repo = Arc::new(Self {
@@ -176,7 +175,7 @@ impl IrohSyncRepo {
 
     async fn machine_loop(
         &self,
-        mut full_sync_rx: tokio::sync::broadcast::Receiver<full2::FullSyncEvent>,
+        mut full_sync_rx: tokio::sync::broadcast::Receiver<full::FullSyncEvent>,
         mut incoming_conn_rx: tokio::sync::mpsc::UnboundedReceiver<am_utils_rs::RepoConnection>,
         mut conn_end_rx: tokio::sync::mpsc::UnboundedReceiver<am_utils_rs::ConnFinishSignal>,
     ) -> Res<()> {
@@ -234,17 +233,16 @@ impl IrohSyncRepo {
     async fn handle_incoming_am_conn(&self, conn: am_utils_rs::RepoConnection) -> Res<()> {
         let endpoint_id = conn
             .endpoint_id
-            .clone()
             .expect("incoming iroh connection missing endpoint_id");
 
         let events = [IrohSyncEvent::IncomingConnetion {
-            endpoint_id: endpoint_id.clone(),
-            peer_id: conn.peer_id.clone(),
+            endpoint_id,
+            peer_id: Arc::<str>::clone(&conn.peer_id),
             conn_id: conn.id,
         }];
 
         self.full_sync_handle
-            .set_connection(endpoint_id.clone(), conn.id)
+            .set_connection(endpoint_id, conn.id)
             .await?;
 
         self.active_samod_peers
@@ -261,25 +259,24 @@ impl IrohSyncRepo {
         let endpoint_id = self
             .active_samod_peers
             .read()
-            .await
-            .iter()
-            .find_map(|(endpoint_id, (conn,))| {
-                info!(?endpoint_id, "XXX");
-                if conn.id == signal.conn_id {
-                    Some(endpoint_id.clone())
-                } else {
-                    None
-                }
-            })
+                    .await
+                    .iter()
+                    .find_map(|(endpoint_id, (conn,))| {
+                        if conn.id == signal.conn_id {
+                            Some(*endpoint_id)
+                        } else {
+                            None
+                        }
+                    })
             .expect("connection finished for unknown conn_id");
 
         let events = [IrohSyncEvent::ConnectionClosed {
-            endpoint_id: endpoint_id.clone(),
+            endpoint_id,
             reason: signal.reason,
         }];
 
         self.full_sync_handle
-            .del_connection(endpoint_id.clone())
+            .del_connection(endpoint_id)
             .await?;
 
         let old = self.active_samod_peers.write().await.remove(&endpoint_id);
@@ -289,23 +286,23 @@ impl IrohSyncRepo {
         Ok(())
     }
 
-    async fn handle_full_sync_evt(&self, evt: full2::FullSyncEvent) -> Res<()> {
+    async fn handle_full_sync_evt(&self, evt: full::FullSyncEvent) -> Res<()> {
         match evt {
-            full2::FullSyncEvent::PeerFullSynced {
+            full::FullSyncEvent::PeerFullSynced {
                 endpoint_id,
                 doc_count,
             } => self.registry.notify([IrohSyncEvent::PeerFullySynced {
                 endpoint_id,
                 doc_count,
             }]),
-            full2::FullSyncEvent::DocSyncedWithPeer {
+            full::FullSyncEvent::DocSyncedWithPeer {
                 endpoint_id,
                 doc_id,
             } => self.registry.notify([IrohSyncEvent::DocSyncedWithPeer {
                 endpoint_id,
                 doc_id,
             }]),
-            full2::FullSyncEvent::StalePeer { endpoint_id } => self
+            full::FullSyncEvent::StalePeer { endpoint_id } => self
                 .registry
                 .notify([IrohSyncEvent::StalePeer { endpoint_id }]),
         }
@@ -346,7 +343,7 @@ impl IrohSyncRepo {
         if endpoint_addr.id == self.router.endpoint().id() {
             eyre::bail!("connecting to ourself is not supported");
         }
-        let endpoint_id = endpoint_addr.id.clone();
+        let endpoint_id = endpoint_addr.id;
         let conn = self
             .rcx
             .acx
@@ -358,13 +355,13 @@ impl IrohSyncRepo {
             .await?;
         let peer_id = conn.peer_info.peer_id.as_str().into();
         let events = [IrohSyncEvent::OutgoingConnection {
-            endpoint_id: endpoint_id.clone(),
+            endpoint_id,
             peer_id,
             conn_id: conn.id,
         }];
 
         self.full_sync_handle
-            .set_connection(endpoint_id.clone(), conn.id)
+            .set_connection(endpoint_id, conn.id)
             .await?;
 
         self.active_samod_peers
@@ -402,7 +399,7 @@ impl IrohSyncRepo {
         }
         for endpoint_id in &remaining {
             self.full_sync_handle
-                .add_full_sync_peer(endpoint_id.clone())
+                .add_full_sync_peer(*endpoint_id)
                 .await?;
         }
         let listener = self

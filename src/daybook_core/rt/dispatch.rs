@@ -333,7 +333,7 @@ impl DispatchRepo {
                 store
                     .active_dispatches
                     .get(id)
-                    .map(|versioned| Arc::clone(&versioned))
+                    .map(|versioned| Arc::clone(versioned))
             })
             .await
     }
@@ -361,7 +361,7 @@ impl DispatchRepo {
                 store
                     .active_dispatches
                     .get(disp_id)
-                    .map(|versioned| Arc::clone(&versioned))
+                    .map(|versioned| Arc::clone(versioned))
             })
             .await
     }
@@ -424,7 +424,7 @@ impl DispatchRepo {
                 store
                     .active_dispatches
                     .iter()
-                    .map(|(key, item)| (key.clone(), Arc::clone(&item)))
+                    .map(|(key, item)| (key.clone(), Arc::clone(item)))
                     .collect()
             })
             .await
