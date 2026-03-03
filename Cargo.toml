@@ -9,42 +9,22 @@ members = [
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
-  # "./src/daybook_fuse",
   "./src/daybook_pdk",
   "./src/daybook_types",
   "./src/daybook_wflows/",
-  # "./src/daybook_willow/",
-  "./src/macros",
   "./src/mltools/",
-  "./src/pauperfuse/",
   "./src/plug_dayledger/",
   "./src/plug_plabels/",
   "./src/plug_test/",
   "./src/sqlx_utils_rs/",
   "./src/test_wflows",
   "./src/utils_rs",
-  "./src/wash_plugin_mltools/",
-  "./src/wash_plugin_utils/",
   "./src/wash_plugin_wflow/",
   "./src/wflow/",
   "./src/wflow_core/",
-  "./src/wflow_ingress_http/",
   "./src/wflow_sdk",
   "./src/wflow_tokio/",
   "./src/xtask",
-  # "./src/daybook_server",
-  # "./src/wash_plugin_pglite/",
-  # "./src/wflow_webui/",
-]
-exclude = [
-  "./src/btress_api",
-  "./src/btress_http",
-  "./src/daybook_api",
-  "./src/daybook_http",
-  "./src/tests_http",
-  "./src/granary_web",
-  "./src/leptos_wasi/",
-  "./src/daybook_xilem/",
 ]
 
 [workspace.package]
@@ -63,7 +43,6 @@ sqlx_utils_rs = { path = "./src/sqlx_utils_rs", default-features = false }
 api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
 am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
-macros = { path = "./src/macros" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 # daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
@@ -74,8 +53,6 @@ wflow_core = { path = "./src/wflow_core", default-features = false }
 wflow_tokio = { path = "./src/wflow_tokio", default-features = false }
 wflow_sdk = { path = "./src/wflow_sdk", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
-wash_plugin_utils = { path = "./src/wash_plugin_utils/" }
-wash_plugin_mltools = { path = "./src/wash_plugin_mltools/" }
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
