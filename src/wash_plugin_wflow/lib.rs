@@ -464,6 +464,7 @@ impl WflowPlugin {
         let trap = tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
+                debug!("cancel token lit");
                 session.request_cancel();
                 return Ok(job_events::JobRunResult::Aborted);
             }

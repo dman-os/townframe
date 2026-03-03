@@ -60,89 +60,84 @@ pub struct Rt {
     pub doc_facet_set_index_repo: Arc<DocFacetSetIndexRepo>,
     pub doc_facet_ref_index_repo: Arc<DocFacetRefIndexRepo>,
     pub sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
-    pub local_actor_id: automerge::ActorId,
+    pub local_actor_id: ActorId,
     local_wflow_part_id: String,
 }
 
 pub struct RtStopToken {
-    wflow_part_handle: Option<TokioPartitionWorkerHandle>,
+    wflow_part_handle: TokioPartitionWorkerHandle,
     rt: Arc<Rt>,
-    partition_watcher: Option<tokio::task::JoinHandle<()>>,
-    switch_worker: Option<switch::SwitchWorkerHandle>,
-    doc_facet_set_index_stop: Option<crate::index::DocFacetSetIndexStopToken>,
-    doc_facet_ref_index_stop: Option<crate::index::DocFacetRefIndexStopToken>,
-    sqlite_local_state_stop: Option<crate::repos::RepoStopToken>,
+    partition_watcher: tokio::task::JoinHandle<()>,
+    switch_worker: switch::SwitchWorkerHandle,
+    doc_facet_set_index_stop: crate::index::DocFacetSetIndexStopToken,
+    doc_facet_ref_index_stop: crate::index::DocFacetRefIndexStopToken,
+    sqlite_local_state_stop: crate::repos::RepoStopToken,
 }
 
 impl RtStopToken {
-    pub async fn stop(mut self) -> Res<()> {
+    pub async fn stop(self) -> Res<()> {
         self.rt.cancel_token.cancel();
 
         // Stop triage worker first to prevent new dispatches from being created
-        if let Some(worker) = self.switch_worker.take() {
-            if let Err(err) = worker.stop().await {
-                warn!(
-                    ?err,
-                    "error stopping doc_changes_worker during shutdown - continuing"
-                );
-            }
-        }
-
-        if let Some(stop) = self.doc_facet_set_index_stop.take() {
-            if let Err(err) = stop.stop().await {
-                warn!(
-                    ?err,
-                    "error stopping doc_facet_set_index_repo during shutdown - continuing"
-                );
-            }
-        }
-        if let Some(stop) = self.doc_facet_ref_index_stop.take() {
-            if let Err(err) = stop.stop().await {
-                warn!(
-                    ?err,
-                    "error stopping doc_facet_ref_index_repo during shutdown - continuing"
-                );
-            }
-        }
-        if let Some(stop) = self.sqlite_local_state_stop.take() {
-            if let Err(err) = stop.stop().await {
-                warn!(
-                    ?err,
-                    "error stopping sqlite_local_state_repo during shutdown - continuing"
-                );
-            }
-        }
-
-        // Wait for all active dispatches to complete
-        let active_dispatches: Vec<String> = self
-            .rt
-            .dispatch_repo
-            .list()
-            .await
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect();
-        if !active_dispatches.is_empty() {
-            info!(
-                count = active_dispatches.len(),
-                "waiting for active dispatches to complete"
+        if let Err(err) = self.switch_worker.stop().await {
+            warn!(
+                ?err,
+                "error stopping doc_changes_worker during shutdown - continuing"
             );
-            for dispatch_id in active_dispatches {
-                let _ = self
-                    .rt
-                    .wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(30))
-                    .await;
-            }
         }
+
+        if let Err(err) = self.doc_facet_set_index_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping doc_facet_set_index_repo during shutdown - continuing"
+            );
+        }
+
+        if let Err(err) = self.doc_facet_ref_index_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping doc_facet_ref_index_repo during shutdown - continuing"
+            );
+        }
+
+        if let Err(err) = self.sqlite_local_state_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping sqlite_local_state_repo during shutdown - continuing"
+            );
+        }
+
+        // FIXME: this is wrong, dispatches are allowed
+        // to resume on reboot
+        //
+        // Wait for all active dispatches to complete
+        // let active_dispatches: Vec<String> = self
+        //     .rt
+        //     .dispatch_repo
+        //     .list()
+        //     .await
+        //     .iter()
+        //     .map(|(id, _)| id.clone())
+        //     .collect();
+        // if !active_dispatches.is_empty() {
+        //     info!(
+        //         count = active_dispatches.len(),
+        //         "waiting for active dispatches to complete"
+        //     );
+        //     for dispatch_id in active_dispatches {
+        //         let _ = self
+        //             .rt
+        //             .wait_for_dispatch_end(&dispatch_id, Duration::from_secs(30))
+        //             .await;
+        //     }
+        // }
 
         // Stop wflow partition worker
-        if let Some(handle) = self.wflow_part_handle.take() {
-            if let Err(err) = handle.stop().await {
-                warn!(
-                    ?err,
-                    "error stopping wflow_part_handle during shutdown - continuing"
-                );
-            }
+        if let Err(err) = self.wflow_part_handle.stop().await {
+            warn!(
+                ?err,
+                "error stopping wflow_part_handle during shutdown - continuing"
+            );
         }
 
         if let Err(err) = Arc::clone(&self.rt.wash_host).stop().await.to_eyre() {
@@ -152,13 +147,14 @@ impl RtStopToken {
             );
         }
 
-        if let Some(watcher) = self.partition_watcher.take() {
-            if let Err(err) = utils_rs::wait_on_handle_with_timeout(watcher, 10 * 1000).await {
-                warn!(
-                    ?err,
-                    "error waiting for partition_watcher during shutdown - continuing"
-                );
-            }
+        if let Err(err) =
+            utils_rs::wait_on_handle_with_timeout(self.partition_watcher, Duration::from_secs(10))
+                .await
+        {
+            warn!(
+                ?err,
+                "error waiting for partition_watcher during shutdown - continuing"
+            );
         }
 
         Ok(())
@@ -193,7 +189,7 @@ impl Rt {
         progress_repo: Arc<crate::progress::ProgressRepo>,
         blobs_repo: Arc<BlobsRepo>,
         config_repo: Arc<ConfigRepo>,
-        local_actor_id: automerge::ActorId,
+        local_actor_id: ActorId,
         local_state_root: PathBuf,
     ) -> Res<(Arc<Self>, RtStopToken)> {
         let wcx = wflow::Ctx::init(&wflow_db_url).await?;
@@ -346,16 +342,17 @@ impl Rt {
             Arc::clone(&rt),
             RtStopToken {
                 rt,
-                partition_watcher: Some(partition_watcher),
-                switch_worker: Some(switch_worker),
-                doc_facet_set_index_stop: Some(doc_facet_set_index_stop),
-                doc_facet_ref_index_stop: Some(doc_facet_ref_index_stop),
-                sqlite_local_state_stop: Some(sqlite_local_state_stop),
-                wflow_part_handle: Some(wflow_part_handle),
+                partition_watcher,
+                switch_worker,
+                doc_facet_set_index_stop,
+                doc_facet_ref_index_stop,
+                sqlite_local_state_stop,
+                wflow_part_handle,
             },
         ))
     }
 
+    #[tracing::instrument(skip(self))]
     async fn keep_up_with_partition(&self) -> Res<()> {
         use futures::StreamExt;
 
@@ -384,6 +381,7 @@ impl Rt {
             let entry = tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => {
+                    debug!("cancel token lit");
                     break;
                 }
                 entry = stream.next() => {

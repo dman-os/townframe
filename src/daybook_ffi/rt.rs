@@ -34,24 +34,24 @@ impl RtFfi {
         config_repo: Arc<crate::repos::config::ConfigRepoFfi>,
         device_id: String,
     ) -> Result<Arc<Self>, FfiError> {
-        let cx = Arc::clone(fcx.repo_ctx());
-        let repo_root = cx.repo_root().to_path_buf();
+        let cx = Arc::clone(&fcx.rcx);
+        let repo_root = cx.layout.repo_root.to_path_buf();
         let wflow_db_url = format!("sqlite:{}?mode=rwc", repo_root.join("wflow.db").display());
         let local_state_root = repo_root.join("local_states");
 
         let (rt, stop_token) = fcx
             .do_on_rt(daybook_core::rt::Rt::boot(
                 daybook_core::rt::RtConfig { device_id },
-                cx.doc_app().document_id().clone(),
+                cx.doc_app.document_id().clone(),
                 wflow_db_url,
-                cx.acx().clone(),
+                cx.acx.clone(),
                 Arc::clone(&drawer_repo.repo),
                 Arc::clone(&plugs_repo.repo),
                 Arc::clone(&dispatch_repo.repo),
                 Arc::clone(&progress_repo.repo),
                 Arc::clone(&blobs_repo.repo),
                 Arc::clone(&config_repo.repo),
-                cx.local_actor_id().clone(),
+                cx.local_actor_id.clone(),
                 local_state_root,
             ))
             .await

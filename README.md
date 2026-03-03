@@ -2,6 +2,13 @@
 
 Experimental.
 
+> [!WARNING] 
+> #### Disclaimer
+> This repo contains a heap of objectively (and subjectively) bad code and is, in its entirety, designated POC/it-works-sometimes quality.
+> A big reason for that is because I'm responsible for it but also, a majority of it is vibecoded.
+> This especially applies to the Kotlin code in here. 
+> I'd not written a line of Kotlin before this and it shows (great language tho🤌).
+
 > [!NOTE] 
 >
 > #### what's in the oven ‍‍👩🏿‍🍳?
@@ -28,7 +35,7 @@ Specifically, daybook design is informed by tech I find shiny, gaps I see in the
   - Everything that is and around LLMs.
   - Uses Automerge for an offline and local-first experience.
   - Uses Compose Multiplatform for a reliable experience on Android and Desktop.
-  - Leverage WASM for a plugins. 
+  - Leverage WASM for plugins. 
 - Gaps
   - Emacs/Vim
     - State of the art editing experience

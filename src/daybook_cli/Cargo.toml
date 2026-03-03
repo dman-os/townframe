@@ -59,3 +59,7 @@ scopeguard.workspace = true
 thiserror.workspace = true
 displaydoc.workspace = true
 color-eyre.workspace = true
+
+#
+# sync
+iroh = { workspace = true }

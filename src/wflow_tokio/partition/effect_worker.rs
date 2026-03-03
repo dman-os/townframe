@@ -20,7 +20,7 @@ impl TokioEffectWorkerHandle {
     pub async fn stop(mut self) -> Res<()> {
         self.cancel_token.cancel();
         let join_handle = self.join_handle.take().expect("join_handle already taken");
-        utils_rs::wait_on_handle_with_timeout(join_handle, 5 * 1000).await?;
+        utils_rs::wait_on_handle_with_timeout(join_handle, Duration::from_secs(5)).await?;
         Ok(())
     }
 }
@@ -68,6 +68,7 @@ pub fn start_tokio_effect_worker(
                 tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => {
+                        debug!("cancel token lit");
                         break;
                     }
                     effect_id = direct_effect_rx.recv() => {

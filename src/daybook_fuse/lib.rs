@@ -485,8 +485,9 @@ mod tests {
 
             let sql_path = temp_dir.path().join("sqlite.db");
             let sql_url = format!("sqlite://{}", sql_path.display());
-            let sql_ctx = daybook_core::repo::SqlCtx::new(&sql_url).await?;
-            daybook_core::repo::set_local_user_path(&sql_ctx.db_pool, "/test-device").await?;
+            let sql_ctx = daybook_core::app::SqlCtx::new(&sql_url).await?;
+            daybook_core::app::globals::set_local_user_path(&sql_ctx.db_pool, "/test-device")
+                .await?;
 
             let (acx, acx_stop) = am_utils_rs::AmCtx::boot(
                 am_utils_rs::Config {
@@ -499,7 +500,7 @@ mod tests {
 
             let doc_app = tokio::sync::OnceCell::new();
             let doc_drawer = tokio::sync::OnceCell::new();
-            daybook_core::repo::init_from_globals(&acx, &sql_ctx.db_pool, &doc_app, &doc_drawer)
+            daybook_core::app::init_from_globals(&acx, &sql_ctx.db_pool, &doc_app, &doc_drawer)
                 .await?;
 
             let local_actor_id = daybook_types::doc::user_path::to_actor_id(

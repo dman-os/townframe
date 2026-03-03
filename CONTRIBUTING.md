@@ -1,6 +1,6 @@
 # CONTRIBUTING
 
-Feel free to throw yourself or tokens at the code though I'd personally appreciate help the most in the design and research aspect.
+Feel free to throw yourself or tokens at the code though I'd personally appreciate help the most in design and research.
 
 ## Repo guide
 

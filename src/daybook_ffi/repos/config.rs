@@ -42,14 +42,13 @@ impl ConfigRepoFfi {
     #[uniffi::constructor]
     #[tracing::instrument(err, skip(fcx, plug_repo))]
     async fn load(fcx: SharedFfiCtx, plug_repo: Arc<PlugsRepoFfi>) -> Result<Arc<Self>, FfiError> {
-        let fcx = Arc::clone(&fcx);
-        let cx = Arc::clone(fcx.repo_ctx());
         let (repo, stop_token) = fcx
             .do_on_rt(ConfigRepo::load(
-                cx.acx().clone(),
-                cx.doc_app().document_id().clone(),
+                fcx.rcx.acx.clone(),
+                fcx.rcx.doc_app.document_id().clone(),
                 Arc::clone(&plug_repo.repo),
-                daybook_types::doc::UserPath::from(cx.local_user_path().to_string()),
+                daybook_types::doc::UserPath::from(fcx.rcx.local_user_path.to_string()),
+                fcx.rcx.sql.db_pool.clone(),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
@@ -130,7 +129,7 @@ impl ConfigRepoFfi {
         progress_repo: Arc<ProgressRepoFfi>,
     ) -> Result<(), FfiError> {
         let repo = Arc::clone(&self.repo);
-        let repo_root = self.fcx.repo_ctx().repo_root().to_path_buf();
+        let repo_root = self.fcx.rcx.layout.repo_root.clone();
         self.fcx
             .do_on_rt(async move {
                 let task_id = "mltools/mobile_default".to_string();

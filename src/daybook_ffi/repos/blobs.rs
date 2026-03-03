@@ -14,10 +14,9 @@ impl BlobsRepoFfi {
     #[uniffi::constructor]
     #[tracing::instrument(err, skip(fcx))]
     pub async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
-        let cx = Arc::clone(fcx.repo_ctx());
         let repo = fcx
             .do_on_rt(daybook_core::blobs::BlobsRepo::new(
-                cx.blobs_root().to_path_buf(),
+                fcx.rcx.layout.blobs_root.to_path_buf(),
             ))
             .await?;
         Ok(Arc::new(Self { fcx, repo }))

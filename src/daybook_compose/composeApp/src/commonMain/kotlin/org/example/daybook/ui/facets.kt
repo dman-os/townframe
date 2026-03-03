@@ -44,6 +44,7 @@ fun encodeWellKnownFacet(facet: WellKnownFacet): String =
         is WellKnownFacet.ImageMetadata -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.OcrResult -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.Embedding -> facetJsonCodec.encodeToString(facet.v1)
+        is WellKnownFacet.PseudoLabelCandidates -> facetJsonCodec.encodeToString(facet.v1)
     }
 
 @Suppress("UNCHECKED_CAST")
@@ -77,6 +78,8 @@ inline fun <reified T : WellKnownFacet> decodeWellKnownFacet(value: String): Res
                     WellKnownFacet.OcrResult(facetJsonCodec.decodeFromString(value))
                 WellKnownFacet.Embedding::class ->
                     WellKnownFacet.Embedding(facetJsonCodec.decodeFromString(value))
+                WellKnownFacet.PseudoLabelCandidates::class ->
+                    WellKnownFacet.PseudoLabelCandidates(facetJsonCodec.decodeFromString(value))
                 else -> error("Unsupported WellKnownFacet type: ${T::class.qualifiedName}")
             }
         facetValue as T
@@ -113,6 +116,7 @@ fun buildSelfFacetRefUrl(key: FacetKey): String {
                 org.example.daybook.uniffi.types.WellKnownFacetTag.IMAGE_METADATA -> "org.example.daybook.imagemetadata"
                 org.example.daybook.uniffi.types.WellKnownFacetTag.OCR_RESULT -> "org.example.daybook.ocrresult"
                 org.example.daybook.uniffi.types.WellKnownFacetTag.EMBEDDING -> "org.example.daybook.embedding"
+                org.example.daybook.uniffi.types.WellKnownFacetTag.PSEUDO_LABEL_CANDIDATES -> "org.example.daybook.pseudolabelcandidates"
             }
             is FacetTag.Any -> tag.v1
         }

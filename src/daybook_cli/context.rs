@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 pub struct Config {
     pub cli_config: Arc<crate::config::CliConfig>,
-    pub global_ctx: Arc<daybook_core::repo::GlobalCtx>,
+    pub acx: Arc<daybook_core::app::AppCtx>,
 }
 
 impl Config {
@@ -11,11 +11,8 @@ impl Config {
     }
 
     pub async fn new(cli_config: Arc<crate::config::CliConfig>) -> Res<Self> {
-        let global_ctx = Arc::new(daybook_core::repo::GlobalCtx::new().await?);
-        Ok(Self {
-            cli_config,
-            global_ctx,
-        })
+        let acx = Arc::new(daybook_core::app::AppCtx::load().await?);
+        Ok(Self { cli_config, acx })
     }
 }
 
@@ -27,16 +24,20 @@ pub async fn open_repo_ctx(
     ensure_initialized: bool,
     ws_connector_url: Option<String>,
 ) -> Res<SharedCtx> {
-    Ok(Arc::new(
-        daybook_core::repo::RepoCtx::open(
-            &config.global_ctx,
-            &config.cli_config.repo_path,
-            daybook_core::repo::RepoOpenOptions {
-                ensure_initialized,
-                peer_id: "daybook_client".to_string(),
-                ws_connector_url,
-            },
-        )
-        .await?,
-    ))
+    let options = daybook_core::repo::RepoOpenOptions { ws_connector_url };
+    let local_device_name = format!("daybook-cli-{}", std::env::consts::ARCH);
+    let rcx = if ensure_initialized
+        && !daybook_core::repo::is_repo_initialized(&config.cli_config.repo_path).await?
+    {
+        config
+            .acx
+            .init_repo(&config.cli_config.repo_path, options, local_device_name)
+            .await?
+    } else {
+        config
+            .acx
+            .open_repo(&config.cli_config.repo_path, options, local_device_name)
+            .await?
+    };
+    Ok(Arc::new(rcx))
 }

@@ -31,14 +31,12 @@ impl PlugsRepoFfi {
         fcx: SharedFfiCtx,
         blobs_repo: Arc<crate::repos::blobs::BlobsRepoFfi>,
     ) -> Result<Arc<Self>, FfiError> {
-        let fcx = Arc::clone(&fcx);
-        let cx = Arc::clone(fcx.repo_ctx());
         let (repo, stop_token) = fcx
             .do_on_rt(PlugsRepo::load(
-                cx.acx().clone(),
+                fcx.rcx.acx.clone(),
                 Arc::clone(&blobs_repo.repo),
-                cx.doc_app().document_id().clone(),
-                cx.local_actor_id().clone(),
+                fcx.rcx.doc_app.document_id().clone(),
+                fcx.rcx.local_actor_id.clone(),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;

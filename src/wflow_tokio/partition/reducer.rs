@@ -29,7 +29,7 @@ impl TokioPartitionReducerHandle {
         self.cancel_token.cancel();
         // Move out the join_handle to await it
         let join_handle = self.join_handle.take().expect("join_handle already taken");
-        utils_rs::wait_on_handle_with_timeout(join_handle, 15 * 1000).await?;
+        utils_rs::wait_on_handle_with_timeout(join_handle, Duration::from_secs(5)).await?;
         Ok(())
     }
 }

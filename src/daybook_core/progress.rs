@@ -256,7 +256,7 @@ impl ProgressRepo {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(ProgressMsg::UpsertTask { args, resp: tx })
-            .map_err(|_| eyre::eyre!("progress worker gone"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.wrap_err("progress worker response channel")??;
         self.registry.notify([
             ProgressEvent::TaskUpserted { id },
@@ -275,7 +275,7 @@ impl ProgressRepo {
                 update,
                 resp: tx,
             })
-            .map_err(|_| eyre::eyre!("progress worker gone"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.wrap_err("progress worker response channel")??;
         self.registry.notify([
             ProgressEvent::UpdateAdded {
@@ -295,7 +295,7 @@ impl ProgressRepo {
                 task_id: task_id.clone(),
                 resp: tx,
             })
-            .map_err(|_| eyre::eyre!("progress worker gone"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.wrap_err("progress worker response channel")??;
         self.registry.notify([
             ProgressEvent::TaskUpserted { id: task_id },
@@ -313,7 +313,7 @@ impl ProgressRepo {
                 task_id: task_id.clone(),
                 resp: tx,
             })
-            .map_err(|_| eyre::eyre!("progress worker gone"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.wrap_err("progress worker response channel")??;
         self.registry.notify([
             ProgressEvent::UpdateAdded { id: task_id },
@@ -336,7 +336,7 @@ impl ProgressRepo {
                 retention_override,
                 resp: tx,
             })
-            .map_err(|_| eyre::eyre!("progress worker gone"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.wrap_err("progress worker response channel")??;
         self.registry.notify([
             ProgressEvent::TaskUpserted { id: task_id },
@@ -350,7 +350,7 @@ impl ProgressRepo {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(ProgressMsg::ClearCompleted { resp: tx })
-            .map_err(|_| eyre::eyre!("progress worker gone"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         let deleted = rx.await.wrap_err("progress worker response channel")??;
         self.registry.notify([ProgressEvent::ListChanged]);
         Ok(deleted)
@@ -364,7 +364,7 @@ impl ProgressRepo {
                 task_id: task_id.to_string(),
                 resp: tx,
             })
-            .map_err(|_| eyre::eyre!("progress worker gone"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.wrap_err("progress worker response channel")?
     }
 
@@ -373,7 +373,7 @@ impl ProgressRepo {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(ProgressMsg::List { resp: tx })
-            .map_err(|_| eyre::eyre!("progress worker gone"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.wrap_err("progress worker response channel")?
     }
 
@@ -385,7 +385,7 @@ impl ProgressRepo {
                 tag_prefix: tag_prefix.to_string(),
                 resp: tx,
             })
-            .map_err(|_| eyre::eyre!("progress worker gone"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.wrap_err("progress worker response channel")?
     }
 
@@ -397,7 +397,7 @@ impl ProgressRepo {
                 task_id: task_id.to_string(),
                 resp: tx,
             })
-            .map_err(|_| eyre::eyre!("progress worker gone"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.wrap_err("progress worker response channel")?
     }
 
