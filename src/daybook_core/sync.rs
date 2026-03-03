@@ -737,7 +737,8 @@ mod tests {
             .await?,
         );
 
-        let blobs_repo = BlobsRepo::new(rtx.layout.blobs_root.clone()).await?;
+        let blobs_repo =
+            BlobsRepo::new(rtx.layout.blobs_root.clone(), rtx.local_user_path.clone()).await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
             rtx.acx.clone(),
             Arc::clone(&blobs_repo),

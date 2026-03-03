@@ -201,7 +201,6 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         }
         StaticCommands::Ls => {
             let doc_entries = drawer_repo.list().await?;
-
             let mut docs = Vec::new();
             for entry in &doc_entries {
                 let Some(main_branch) = entry.main_branch_path() else {
@@ -295,9 +294,11 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     ctx.local_user_path.clone(),
                 )),
             };
-            let id = drawer_repo.add(doc).await?;
-            info!(id, "created document");
-            println!("{id}");
+            for ii in 0..100 {
+                let id = drawer_repo.add(doc.clone()).await?;
+                info!(id, ii, "created document");
+                println!("{id}");
+            }
         }
         StaticCommands::Ed { id, branch } => {
             let Ok(Some(branches)) = drawer_repo.get_doc_branches(&id).await else {
@@ -449,9 +450,26 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             )
             .await?;
             let local_ticket_url = sync_repo.get_ticket_url().await?;
-            println!(
-                "=== TICKET ===\n=== === == ===\n{local_ticket_url}\n=== === == ===\n=== TICKET ===",
-            );
+            {
+                use qrcode::render::unicode;
+                use qrcode::QrCode;
+                let code = QrCode::new(&local_ticket_url[..]).unwrap();
+                let image = code
+                    .render::<unicode::Dense1x2>()
+                    .dark_color(unicode::Dense1x2::Light)
+                    .light_color(unicode::Dense1x2::Dark)
+                    .build();
+                println!("Scan the following QR code to clone this repo");
+                println!("");
+                println!("{image}");
+                println!("");
+                println!("Or copy the following ticket:");
+                println!("");
+                println!("");
+                println!("{local_ticket_url}");
+                println!("");
+                println!("");
+            }
 
             let mut endpoint_ids = Vec::with_capacity(sync_urls.len());
             for sync_url in &sync_urls {

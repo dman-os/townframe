@@ -164,17 +164,20 @@ impl ConfigRepo {
 
         let (notif_tx, notif_rx) =
             tokio::sync::mpsc::unbounded_channel::<Vec<am_utils_rs::changes::ChangeNotification>>();
+        let cancel_token = CancellationToken::new();
         // Register change listener to automatically notify repo listeners
         let ticket = ConfigStore::register_change_listener(&acx, &broker, vec![], {
+            let cancel_token = cancel_token.clone();
             move |notifs| {
                 if let Err(err) = notif_tx.send(notifs) {
-                    warn!("failed to send change notifications: {err}");
+                    if !cancel_token.is_cancelled() {
+                        warn!("failed to send change notifications: {err}");
+                    }
                 }
             }
         })
         .await?;
 
-        let main_cancel_token = CancellationToken::new();
         let repo = Self {
             acx: acx.clone(),
             app_doc_id: app_doc_id.clone(),
@@ -185,7 +188,7 @@ impl ConfigRepo {
             local_user_path,
             local_actor_id,
             sql_pool,
-            cancel_token: main_cancel_token.child_token(),
+            cancel_token: cancel_token.clone(),
             global_props_doc_init_lock: tokio::sync::Mutex::new(()),
             sync_config_lock: tokio::sync::Mutex::new(()),
             _change_listener_tickets: vec![ticket],
@@ -194,7 +197,7 @@ impl ConfigRepo {
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
-            let cancel_token = main_cancel_token.clone();
+            let cancel_token = cancel_token.child_token();
             async move {
                 repo.notifs_loop(notif_rx, cancel_token)
                     .await
@@ -205,7 +208,7 @@ impl ConfigRepo {
         Ok((
             repo,
             crate::repos::RepoStopToken {
-                cancel_token: main_cancel_token,
+                cancel_token,
                 worker_handle: Some(worker_handle),
                 broker_stop_tokens: vec![broker_stop],
             },

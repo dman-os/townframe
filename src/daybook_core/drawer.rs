@@ -32,6 +32,8 @@ pub struct DrawerRepo {
     // LRU Caches
     entry_cache: Arc<DHashMap<DocId, DocEntry>>,
     facet_cache: std::sync::Mutex<FacetCacheState>,
+    facet_schema_validators:
+        std::sync::Mutex<HashMap<(String, String), Arc<jsonschema::Validator>>>,
     handles: Arc<DHashMap<DocId, samod::DocHandle>>,
 
     // LRU Pools (Policy only)
@@ -117,6 +119,7 @@ impl DrawerRepo {
             local_actor_id,
             entry_cache: Arc::new(DHashMap::new()),
             facet_cache: std::sync::Mutex::new(FacetCacheState::new(doc_pool)),
+            facet_schema_validators: std::sync::Mutex::new(HashMap::new()),
             handles: Arc::new(DHashMap::new()),
             entry_pool,
             registry: crate::repos::ListenersRegistry::new(),
@@ -364,7 +367,7 @@ impl DrawerRepo {
 
     pub async fn validate_facets(
         &self,
-        incoming_facets: &HashMap<FacetKey, daybook_types::doc::ArcFacetRaw>,
+        incoming_facets: &HashMap<FacetKey, FacetRaw>,
         resulting_facet_keys: &HashSet<FacetKey>,
     ) -> Res<()> {
         for (facet_key, facet_value) in incoming_facets {
@@ -377,8 +380,15 @@ impl DrawerRepo {
             };
 
             let schema_json = serde_json::to_value(&facet_manifest.value_schema)?;
-            let validator = jsonschema::validator_for(&schema_json)?;
-            if let Err(validation_error) = validator.validate(facet_value.as_ref()) {
+            let schema_cache_key = (facet_tag.clone(), serde_json::to_string(&schema_json)?);
+            let mut cache = self.facet_schema_validators.lock().unwrap();
+            let validator = Arc::clone(cache.entry(schema_cache_key).or_insert_with(|| {
+                Arc::new(
+                    jsonschema::validator_for(&schema_json)
+                        .expect("facet schema must compile to a validator"),
+                )
+            }));
+            if let Err(validation_error) = validator.validate(facet_value) {
                 eyre::bail!(
                     "facet '{}' failed schema validation: {}",
                     facet_key,
@@ -390,7 +400,7 @@ impl DrawerRepo {
                 self.validate_facet_reference(
                     resulting_facet_keys,
                     facet_key,
-                    facet_value.as_ref(),
+                    facet_value,
                     reference_manifest,
                 )?;
             }
@@ -649,7 +659,7 @@ impl DrawerRepo {
             eyre::bail!("repo is stopped");
         }
 
-        self.drawer_am_handle.with_document(|doc| {
+        let (results, cache_entries) = self.drawer_am_handle.with_document(|doc| {
             let map_id = match doc.get(automerge::ROOT, "docs")? {
                 Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
                     match doc.get(&id, "map")? {
@@ -657,49 +667,47 @@ impl DrawerRepo {
                         _ => eyre::bail!("invalid drawer shape"),
                     }
                 }
-                None => return eyre::Ok(Vec::new()),
+                None => return eyre::Ok((Vec::new(), Vec::new())),
                 _ => eyre::bail!("invalid drawer shape"),
             };
 
             let mut results = Vec::new();
-            // FIXME: wtf, why are we not using autosurgeon hydrate here?
+            let mut cache_entries = Vec::new();
             for item in doc.map_range(&map_id, ..) {
                 let doc_id = DocId::from(item.key.clone());
-                let entry_id = item.id();
-
-                let branches =
-                    if let Some((automerge::Value::Object(automerge::ObjType::Map), b_id)) =
-                        doc.get(&entry_id, "branches")?
-                    {
-                        let mut b_map = HashMap::new();
-                        for b_item in doc.map_range(&b_id, ..) {
-                            let b_heads: ChangeHashSet =
-                                autosurgeon::hydrate_prop(doc, &b_id, b_item.key.clone())?;
-                            b_map.insert(b_item.key.to_string(), b_heads);
-                        }
-                        b_map
-                    } else {
-                        HashMap::new()
-                    };
-
-                results.push(DocNBranches { doc_id, branches });
+                let entry: Option<DocEntry> = autosurgeon::hydrate_prop(doc, &map_id, item.key)?;
+                let Some(entry) = entry else {
+                    continue;
+                };
+                results.push(DocNBranches {
+                    doc_id: doc_id.clone(),
+                    branches: entry.branches.clone(),
+                });
+                cache_entries.push((doc_id, entry));
             }
-            Ok(results)
-        })
+            Ok((results, cache_entries))
+        })?;
+
+        {
+            let mut pool = self.entry_pool.lock().unwrap();
+            for (doc_id, entry) in cache_entries {
+                let pruned = pool.insert_key(&doc_id, 1);
+                for pkey in pruned {
+                    self.entry_cache.remove(&pkey);
+                }
+                self.entry_cache.insert(doc_id, entry);
+            }
+        }
+
+        Ok(results)
     }
 
     pub async fn add(&self, args: AddDocArgs) -> Result<DocId, DrawerError> {
         if self.cancel_token.is_cancelled() {
             return Err(ferr!("repo is stopped"))?;
         }
-        let incoming_facets: HashMap<FacetKey, daybook_types::doc::ArcFacetRaw> = args
-            .facets
-            .iter()
-            .map(|(facet_key, facet_value)| (facet_key.clone(), Arc::new(facet_value.clone())))
-            .collect();
-        let resulting_keys: HashSet<FacetKey> = incoming_facets.keys().cloned().collect();
-        self.validate_facets(&incoming_facets, &resulting_keys)
-            .await?;
+        let resulting_keys: HashSet<FacetKey> = args.facets.keys().cloned().collect();
+        self.validate_facets(&args.facets, &resulting_keys).await?;
         let mutation_actor_id = if let Some(path) = &args.user_path {
             daybook_types::doc::user_path::to_actor_id(path)
         } else {
@@ -738,7 +746,6 @@ impl DrawerRepo {
             let heads = heads.expect("commit failed");
             eyre::Ok(ChangeHashSet(Arc::from([heads])))
         })?;
-
         // 2. Update drawer doc
         let mut users = HashMap::new();
         if let Some(user_path) = args.user_path {
@@ -774,6 +781,7 @@ impl DrawerRepo {
         };
 
         let drawer_heads = self.drawer_am_handle.with_document(|doc| {
+            doc.set_actor(self.local_actor_id.clone());
             let mut tx = doc.transaction();
             let docs_obj = match tx.get(automerge::ROOT, "docs")? {
                 Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
@@ -783,8 +791,12 @@ impl DrawerRepo {
                 Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
                 _ => tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?,
             };
-
-            autosurgeon::reconcile_prop(&mut tx, &map_id, &*doc_id, &entry)?;
+            autosurgeon::reconcile_prop(
+                &mut tx,
+                &map_id,
+                autosurgeon::Prop::Key((&doc_id[..]).into()),
+                &entry,
+            )?;
             let (heads, _) = tx.commit();
             let heads = heads.expect("commit failed");
             eyre::Ok(ChangeHashSet(Arc::from([heads])))
@@ -800,7 +812,6 @@ impl DrawerRepo {
             self.entry_cache.insert(doc_id.clone(), entry.clone());
         }
         self.handles.insert(doc_id.clone(), handle);
-
         self.registry.notify([
             DrawerEvent::DocAdded {
                 id: doc_id.clone(),
@@ -863,18 +874,13 @@ impl DrawerRepo {
                 id: patch.id.clone(),
             })?;
         let mut resulting_keys = existing_facet_keys;
-        let incoming_facets: HashMap<FacetKey, daybook_types::doc::ArcFacetRaw> = patch
-            .facets_set
-            .iter()
-            .map(|(facet_key, facet_value)| (facet_key.clone(), Arc::new(facet_value.clone())))
-            .collect();
-        for facet_key in incoming_facets.keys() {
+        for facet_key in patch.facets_set.keys() {
             resulting_keys.insert(facet_key.clone());
         }
         for facet_key in &patch.facets_remove {
             resulting_keys.remove(facet_key);
         }
-        self.validate_facets(&incoming_facets, &resulting_keys)
+        self.validate_facets(&patch.facets_set, &resulting_keys)
             .await?;
 
         let now = Timestamp::now();
@@ -1222,6 +1228,18 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
+        let current_heads = self.current_heads.read().unwrap().clone();
+        if heads == &current_heads {
+            return self.get_entry(doc_id).await;
+        }
+        self.hydrate_entry_at_heads(doc_id, heads).await
+    }
+
+    async fn hydrate_entry_at_heads(
+        &self,
+        doc_id: &DocId,
+        heads: &ChangeHashSet,
+    ) -> Res<Option<DocEntry>> {
         // Entry cache is currently only for "latest" known heads of the drawer doc.
         // For specific heads, we always hydrate.
         let path = vec![
@@ -1247,7 +1265,7 @@ impl DrawerRepo {
         }
 
         let heads = self.current_heads.read().unwrap().clone();
-        let entry = self.get_entry_at_heads(doc_id, &heads).await?;
+        let entry = self.hydrate_entry_at_heads(doc_id, &heads).await?;
 
         if let Some(entry) = entry {
             let mut pool = self.entry_pool.lock().unwrap();
@@ -2172,6 +2190,8 @@ mod tests {
 
     use crate::drawer::lru::KeyedLruPool;
     use crate::repos::Repo;
+    use automerge::transaction::Transactable;
+    use automerge::ReadDoc;
     use daybook_types::doc::{Body, FacetKey, UserPath, WellKnownFacet, WellKnownFacetTag};
     use daybook_types::url::build_facet_ref;
 
@@ -3644,6 +3664,211 @@ mod tests {
 
         assert!(add_result.is_ok(), "{add_result:?}");
 
+        stop_token.stop().await?;
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+
+        let temp_dir = tempfile::tempdir()?;
+        let storage_path = temp_dir.path().join("samod-amctx-disk");
+        std::fs::create_dir_all(&storage_path)?;
+
+        let (acx, acx_stop) = AmCtx::boot(
+            am_utils_rs::Config {
+                peer_id: format!("perf-drawer-raw-amctx-{}", Uuid::new_v4()),
+                storage: am_utils_rs::StorageConfig::Disk {
+                    path: storage_path.clone(),
+                },
+            },
+            Some(samod::AlwaysAnnounce),
+        )
+        .await?;
+
+        let local_actor_id = automerge::ActorId::random();
+        let mut aggregate_doc = automerge::Automerge::new();
+        {
+            let mut tx = aggregate_doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            let docs_obj = tx.put_object(automerge::ROOT, "docs", automerge::ObjType::Map)?;
+            tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?;
+            tx.commit();
+        }
+        let aggregate_handle = acx.add_doc(aggregate_doc).await?;
+
+        let total_docs: u64 = 80;
+        let started_at = std::time::Instant::now();
+
+        for ii in 0..total_docs {
+            let mut content_doc = automerge::Automerge::new();
+            content_doc.set_actor(automerge::ActorId::random());
+            let content_handle = acx.add_doc(content_doc).await?;
+            let content_doc_id = content_handle.document_id().to_string();
+
+            let content_heads = content_handle.with_document(|doc| -> Res<ChangeHashSet> {
+                let mut tx = doc.transaction();
+                tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
+                tx.put(automerge::ROOT, "id", &content_doc_id)?;
+                let facets_obj =
+                    tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?;
+                for jj in 0..4_u64 {
+                    let facet_obj = tx.put_object(
+                        &facets_obj,
+                        format!("org.test.perf/{jj:02}"),
+                        automerge::ObjType::Map,
+                    )?;
+                    tx.put(&facet_obj, "title", format!("doc-{ii}-facet-{jj}"))?;
+                    tx.put(&facet_obj, "num", (ii * 10 + jj) as i64)?;
+                    let tags_obj = tx.put_object(&facet_obj, "tags", automerge::ObjType::List)?;
+                    tx.insert(&tags_obj, 0, "alpha")?;
+                    tx.insert(&tags_obj, 1, "beta")?;
+                    tx.insert(&tags_obj, 2, "gamma")?;
+                }
+                let (heads, _) = tx.commit();
+                let head = heads.expect("content doc commit failed");
+                Ok(ChangeHashSet(Arc::from([head])))
+            })?;
+
+            aggregate_handle.with_document(|doc| -> Res<()> {
+                let mut tx = doc.transaction();
+                let docs_obj = match tx.get(automerge::ROOT, "docs")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => eyre::bail!("aggregate docs map missing"),
+                };
+                let map_obj = match tx.get(&docs_obj, "map")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => eyre::bail!("aggregate docs.map missing"),
+                };
+                let entry = DocEntry {
+                    branches: [("main".to_string(), content_heads.clone())].into(),
+                    facet_blames: [
+                        (
+                            FacetKey::from("org.test.perf/00").to_string(),
+                            FacetBlame {
+                                heads: content_heads.clone(),
+                            },
+                        ),
+                        (
+                            FacetKey::from("org.test.perf/01").to_string(),
+                            FacetBlame {
+                                heads: content_heads.clone(),
+                            },
+                        ),
+                        (
+                            FacetKey::from("org.test.perf/02").to_string(),
+                            FacetBlame {
+                                heads: content_heads.clone(),
+                            },
+                        ),
+                        (
+                            FacetKey::from("org.test.perf/03").to_string(),
+                            FacetBlame {
+                                heads: content_heads.clone(),
+                            },
+                        ),
+                    ]
+                    .into(),
+                    users: HashMap::new(),
+                    vtag: VersionTag::mint(local_actor_id.clone()),
+                    previous_version_heads: None,
+                };
+                autosurgeon::reconcile_prop(&mut tx, &map_obj, &*content_doc_id, &entry)?;
+                tx.commit();
+                Ok(())
+            })?;
+        }
+
+        let elapsed = started_at.elapsed();
+        let docs_per_sec = total_docs as f64 / elapsed.as_secs_f64();
+        eprintln!(
+            "samod+automerge via AmCtx baseline: added {} docs in {:?} ({:.2} docs/sec)",
+            total_docs, elapsed, docs_per_sec
+        );
+        assert!(docs_per_sec > 0.0);
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn perf_drawer_add_disk_baseline() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+
+        let temp_dir = tempfile::tempdir()?;
+        let storage_path = temp_dir.path().join("drawer-disk");
+        std::fs::create_dir_all(&storage_path)?;
+
+        let (acx, acx_stop) = AmCtx::boot(
+            am_utils_rs::Config {
+                peer_id: format!("perf-drawer-add-{}", Uuid::new_v4()),
+                storage: am_utils_rs::StorageConfig::Disk {
+                    path: storage_path.clone(),
+                },
+            },
+            Some(samod::AlwaysAnnounce),
+        )
+        .await?;
+
+        let drawer_doc_id = {
+            let mut doc = automerge::Automerge::new();
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+            let handle = acx.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+
+        let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(4000)));
+        let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(4000)));
+        let (repo, stop_token) = DrawerRepo::load(
+            acx.clone(),
+            drawer_doc_id,
+            automerge::ActorId::random(),
+            entry_pool,
+            doc_pool,
+            None,
+        )
+        .await?;
+
+        let total_docs: u64 = 80;
+        let started_at = std::time::Instant::now();
+        for ii in 0..total_docs {
+            let _doc_id = repo
+                .add(AddDocArgs {
+                    branch_path: "main".into(),
+                    facets: [
+                        (
+                            FacetKey::from(WellKnownFacetTag::TitleGeneric),
+                            WellKnownFacet::TitleGeneric(format!("doc-{ii}")).into(),
+                        ),
+                        (
+                            FacetKey::from(WellKnownFacetTag::Note),
+                            WellKnownFacet::Note(format!("note-{ii}").into()).into(),
+                        ),
+                        (
+                            FacetKey::from(WellKnownFacetTag::LabelGeneric),
+                            WellKnownFacet::LabelGeneric(format!("label-{ii}")).into(),
+                        ),
+                        (
+                            FacetKey::from(WellKnownFacetTag::PathGeneric),
+                            WellKnownFacet::PathGeneric(format!("/tmp/doc-{ii}").into()).into(),
+                        ),
+                    ]
+                    .into(),
+                    user_path: None,
+                })
+                .await?;
+        }
+
+        let elapsed = started_at.elapsed();
+        let docs_per_sec = total_docs as f64 / elapsed.as_secs_f64();
+        eprintln!(
+            "drawer add baseline: added {} docs in {:?} ({:.2} docs/sec)",
+            total_docs, elapsed, docs_per_sec
+        );
+        assert!(docs_per_sec > 0.0);
         stop_token.stop().await?;
         acx_stop.stop().await?;
         Ok(())

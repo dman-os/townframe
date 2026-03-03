@@ -1,5 +1,5 @@
 //! modified from https://github.com/n0-computer/iroh-examples/tree/8b40bb5557bacbfd817a4b66a931aec6af655b51/iroh-automerge-repo
-//! unkown license??
+//! MIT/Apache 2.0
 //! Combines [`iroh`] with automerge's [`samod`] library, a library to create "automerge repositories"
 //! in rust that speak the automerge repo protocol.
 

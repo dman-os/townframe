@@ -63,3 +63,4 @@ color-eyre.workspace = true
 #
 # sync
 iroh = { workspace = true }
+qrcode.workspace = true

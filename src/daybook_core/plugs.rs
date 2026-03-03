@@ -803,16 +803,19 @@ impl PlugsRepo {
 
         let (notif_tx, notif_rx) =
             tokio::sync::mpsc::unbounded_channel::<Vec<am_utils_rs::changes::ChangeNotification>>();
+        let cancel_token = CancellationToken::new();
         let ticket = PlugsStore::register_change_listener(&acx, &broker, vec![], {
+            let cancel_token = cancel_token.clone();
             move |notifs| {
                 if let Err(err) = notif_tx.send(notifs) {
-                    warn!("failed to send change notifications: {err}");
+                    if !cancel_token.is_cancelled() {
+                        warn!("failed to send change notifications: {err}");
+                    }
                 }
             }
         })
         .await?;
 
-        let main_cancel_token = CancellationToken::new();
         let repo = Self {
             acx: acx.clone(),
             app_doc_id: app_doc_id.clone(),
@@ -822,14 +825,14 @@ impl PlugsRepo {
             local_actor_id,
             registry: Arc::clone(&registry),
             mutation_mutex: tokio::sync::Mutex::new(()),
-            cancel_token: main_cancel_token.child_token(),
+            cancel_token: cancel_token.clone(),
             _change_listener_tickets: vec![ticket],
         };
         let repo = Arc::new(repo);
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
-            let cancel_token = main_cancel_token.clone();
+            let cancel_token = cancel_token.child_token();
             async move {
                 repo.notifs_loop(notif_rx, cancel_token)
                     .await
@@ -840,7 +843,7 @@ impl PlugsRepo {
         Ok((
             repo,
             crate::repos::RepoStopToken {
-                cancel_token: main_cancel_token,
+                cancel_token,
                 worker_handle: Some(worker_handle),
                 broker_stop_tokens: vec![broker_stop],
             },
@@ -1709,7 +1712,9 @@ mod tests {
         let doc_id = handle.document_id().clone();
 
         let temp_dir = tempfile::tempdir()?;
-        let blobs = crate::blobs::BlobsRepo::new(temp_dir.path().to_path_buf()).await?;
+        let blobs =
+            crate::blobs::BlobsRepo::new(temp_dir.path().to_path_buf(), "/test-user".to_string())
+                .await?;
 
         let (repo, _repo_stop) =
             PlugsRepo::load(acx.clone(), blobs, doc_id.clone(), local_actor_id).await?;

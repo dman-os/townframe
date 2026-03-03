@@ -104,13 +104,14 @@ pub fn spawn_doc_listener(
                 heads_listeners: default(),
                 handle: handle.clone(),
                 change_tx,
+                cancel_token,
             };
 
             let mut doc_change_stream = handle.changes();
             loop {
                 tokio::select! {
                     biased;
-                    _ = cancel_token.cancelled() => {
+                    _ = worker.cancel_token.cancelled() => {
                         debug!("cancel token lit");
                         break;
                     },
@@ -154,6 +155,7 @@ struct DocChangeBroker {
     heads_listeners: Arc<Mutex<Vec<HeadListener>>>,
     handle: DocHandle,
     change_tx: mpsc::UnboundedSender<(DocumentId, Vec<ChangeNotification>)>,
+    cancel_token: CancellationToken,
 }
 
 impl DocChangeBroker {
@@ -224,7 +226,9 @@ impl DocChangeBroker {
                 .change_tx
                 .send((self.handle.document_id().clone(), all_changes))
             {
-                warn!("failed to send change notifications: {err}");
+                if !self.cancel_token.is_cancelled() {
+                    eyre::bail!("failed to send change notifications: {err}");
+                }
             }
         }
 

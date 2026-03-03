@@ -24,7 +24,7 @@
 ## Stack
 
 - [ ] P2P
-  - [ ] iroh
+  - [x] iroh
 - [ ] Deterministic doc ids for main docs
 - [ ] Prune dependencies
 - [ ] Blobs server
@@ -69,9 +69,14 @@
 
 - [ ] Cleanup and show it to people
  
+- [ ] Consider using lmdb or redb for the kvstore on wflow_tokio
 - [ ] Draft Buffer
+- [ ] /commands
+- [ ] Grouped facets `Body { order: ["db://self/facet", ["db://self/facet2", "db://self/facet2], ]}`
 - [ ] Avoid automerge perf footguns
   - [ ] fork_at
+    - We don't need to use fork_at for ReadDoc
+      - Does autosurgeon support this?
   - [ ] get_changes
 - [ ] Adopt an rust actor framework
   - [ ] IRPC!

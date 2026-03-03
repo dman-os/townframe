@@ -389,16 +389,19 @@ impl TablesRepo {
         let (notif_tx, notif_rx) =
             tokio::sync::mpsc::unbounded_channel::<Vec<am_utils_rs::changes::ChangeNotification>>();
         // Register change listener to automatically notify repo listeners
+        let cancel_token = CancellationToken::new();
         let ticket = TablesStore::register_change_listener(&acx, &broker, vec![], {
+            let cancel_token = cancel_token.clone();
             move |notifs| {
                 if let Err(err) = notif_tx.send(notifs) {
-                    warn!("failed to send change notifications: {err}");
+                    if !cancel_token.is_cancelled() {
+                        warn!("failed to send change notifications: {err}");
+                    }
                 }
             }
         })
         .await?;
 
-        let main_cancel_token = CancellationToken::new();
         let repo = Self {
             acx,
             app_doc_id,
@@ -406,14 +409,14 @@ impl TablesRepo {
             store,
             registry: Arc::clone(&registry),
             local_actor_id,
-            cancel_token: main_cancel_token.child_token(),
+            cancel_token: cancel_token.clone(),
             _change_listener_tickets: vec![ticket],
         };
         let repo = Arc::new(repo);
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
-            let cancel_token = main_cancel_token.clone();
+            let cancel_token = cancel_token.child_token();
             async move {
                 repo.notifs_loop(notif_rx, cancel_token)
                     .await
@@ -424,7 +427,7 @@ impl TablesRepo {
         Ok((
             repo,
             crate::repos::RepoStopToken {
-                cancel_token: main_cancel_token,
+                cancel_token,
                 worker_handle: Some(worker_handle),
                 broker_stop_tokens: vec![broker_stop],
             },

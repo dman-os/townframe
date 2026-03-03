@@ -347,6 +347,7 @@ pub type DocId = String;
 pub type DocUserId = automerge::ActorId;
 pub type FacetBlame = HashMap<FacetKey, DocUserId>;
 
+// FIXME: use camino here
 pub type UserPath = std::path::PathBuf;
 pub type BranchPath = std::path::PathBuf;
 

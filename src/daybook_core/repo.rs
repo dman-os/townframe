@@ -250,7 +250,7 @@ impl RepoCtx {
         use crate::rt::dispatch::DispatchRepo;
         use crate::tables::TablesRepo;
 
-        let blobs_repo = BlobsRepo::new(blobs_root).await?;
+        let blobs_repo = BlobsRepo::new(blobs_root, local_user_path.to_string()).await?;
         let mut plugs_repo: Option<Arc<PlugsRepo>> = None;
         let mut plugs_stop: Option<crate::repos::RepoStopToken> = None;
         let mut config_stop: Option<crate::repos::RepoStopToken> = None;

@@ -171,7 +171,11 @@ pub async fn test_cx_with_options(
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
 
     let temp_dir = tempfile::tempdir()?;
-    let blobs = crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs")).await?;
+    let blobs = crate::blobs::BlobsRepo::new(
+        temp_dir.path().join("blobs"),
+        local_user_path.to_string_lossy().to_string(),
+    )
+    .await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         acx.clone(),
