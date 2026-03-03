@@ -34,7 +34,7 @@ pub struct IrohSyncRepo {
 
 #[derive(Debug, Clone)]
 pub enum IrohSyncEvent {
-    IncomingConnetion {
+    IncomingConnection {
         endpoint_id: EndpointId,
         conn_id: samod::ConnectionId,
         peer_id: Arc<str>,
@@ -121,12 +121,9 @@ impl IrohSyncRepo {
             .ensure_local_sync_device(router.endpoint().id(), &rcx.local_device_name)
             .await?;
 
-        let (mut full_sync_handle, full_stop_token) = full::start_full_sync_worker(
-            Arc::clone(&rcx),
-            drawer_repo,
-            cancel_token.child_token(),
-        )
-        .await?;
+        let (mut full_sync_handle, full_stop_token) =
+            full::start_full_sync_worker(Arc::clone(&rcx), drawer_repo, cancel_token.child_token())
+                .await?;
         let full_sync_rx = full_sync_handle.events_rx.take().expect("impossible");
 
         let repo = Arc::new(Self {
@@ -235,7 +232,7 @@ impl IrohSyncRepo {
             .endpoint_id
             .expect("incoming iroh connection missing endpoint_id");
 
-        let events = [IrohSyncEvent::IncomingConnetion {
+        let events = [IrohSyncEvent::IncomingConnection {
             endpoint_id,
             peer_id: Arc::<str>::clone(&conn.peer_id),
             conn_id: conn.id,
@@ -259,15 +256,15 @@ impl IrohSyncRepo {
         let endpoint_id = self
             .active_samod_peers
             .read()
-                    .await
-                    .iter()
-                    .find_map(|(endpoint_id, (conn,))| {
-                        if conn.id == signal.conn_id {
-                            Some(*endpoint_id)
-                        } else {
-                            None
-                        }
-                    })
+            .await
+            .iter()
+            .find_map(|(endpoint_id, (conn,))| {
+                if conn.id == signal.conn_id {
+                    Some(*endpoint_id)
+                } else {
+                    None
+                }
+            })
             .expect("connection finished for unknown conn_id");
 
         let events = [IrohSyncEvent::ConnectionClosed {
@@ -275,9 +272,7 @@ impl IrohSyncRepo {
             reason: signal.reason,
         }];
 
-        self.full_sync_handle
-            .del_connection(endpoint_id)
-            .await?;
+        self.full_sync_handle.del_connection(endpoint_id).await?;
 
         let old = self.active_samod_peers.write().await.remove(&endpoint_id);
         assert!(old.is_some(), "fishy");

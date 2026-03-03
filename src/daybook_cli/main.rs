@@ -486,7 +486,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                             match event {
                                 Ok(event) => {
                                     match &*event {
-                                        IrohSyncEvent::IncomingConnetion {
+                                        IrohSyncEvent::IncomingConnection {
                                             endpoint_id,
                                             conn_id,
                                             peer_id,

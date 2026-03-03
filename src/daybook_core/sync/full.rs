@@ -95,7 +95,6 @@ impl WorkerHandle {
             .wrap_err("FullSyncWorker is dead")?;
         rx.await.wrap_err(ERROR_CHANNEL)
     }
-
 }
 
 pub struct StopToken {
@@ -362,8 +361,7 @@ impl Worker {
                     .or_else(|| old_conn_id.and_then(|id| self.known_peer_set.remove(&id)));
                 let new_parts: Vec<_> = if let Some(old) = old_state {
                     for part_key in old.partitions.difference(&partitions) {
-                        self.remove_peer_from_part(*part_key, endpoint_id)
-                            .await?;
+                        self.remove_peer_from_part(*part_key, endpoint_id).await?;
                     }
                     partitions.difference(&old.partitions).cloned().collect()
                 } else {
@@ -389,8 +387,7 @@ impl Worker {
                 if let Some(conn_id) = self.conn_by_peer.remove(&endpoint_id) {
                     if let Some(state) = self.known_peer_set.remove(&conn_id) {
                         for part_key in state.partitions {
-                            self.remove_peer_from_part(part_key, endpoint_id)
-                                .await?;
+                            self.remove_peer_from_part(part_key, endpoint_id).await?;
                         }
                     }
                 }
@@ -789,9 +786,6 @@ impl Worker {
     }
 }
 
-fn heads_equal_as_set(
-    left: &[automerge::ChangeHash],
-    right: &[automerge::ChangeHash],
-) -> bool {
+fn heads_equal_as_set(left: &[automerge::ChangeHash], right: &[automerge::ChangeHash]) -> bool {
     left.len() == right.len() && left.iter().all(|head| right.contains(head))
 }

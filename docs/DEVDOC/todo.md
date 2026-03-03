@@ -74,6 +74,7 @@
   - [ ] get_changes
 - [ ] Adopt an rust actor framework
   - [ ] IRPC!
+  - [ ] Consider futures-signals
 - [ ] Tutorial
 - [ ] CI/CD
   - [ ] Kotlin tests

@@ -31,7 +31,11 @@ resource "helm_release" "ollama" {
       }
       persistentVolume = {
         enabled = true
-        size = "20Gi"
+        size    = "20Gi"
+      }
+      # Exclude the model PVC from Velero filesystem backups.
+      podAnnotations = {
+        "backup.velero.io/backup-volumes-excludes" = "ollama-data"
       }
     })
   ]

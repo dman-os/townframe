@@ -85,11 +85,12 @@ import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.DispatchRepoFfi
 import org.example.daybook.uniffi.FfiCtx
 import org.example.daybook.uniffi.FfiException
-import org.example.daybook.uniffi.KnownRepoEntryFfi
+import org.example.daybook.uniffi.GlobalFfiCtx
 import org.example.daybook.uniffi.ProgressRepoFfi
 import org.example.daybook.uniffi.RtFfi
 import org.example.daybook.uniffi.TablesEventListener
 import org.example.daybook.uniffi.TablesRepoFfi
+import org.example.daybook.uniffi.core.KnownRepoEntry
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.uniffi.core.Panel
 import org.example.daybook.uniffi.core.Tab
@@ -155,7 +156,7 @@ enum class AppScreens {
 private sealed interface AppInitState {
     data object Loading : AppInitState
 
-    data class Welcome(val repos: List<KnownRepoEntryFfi>) : AppInitState
+    data class Welcome(val repos: List<KnownRepoEntry>) : AppInitState
 
     data class OpeningRepo(val repoPath: String) : AppInitState
 
@@ -498,12 +499,14 @@ fun App(
     LaunchedEffect(initAttempt) {
         initState = AppInitState.Loading
         try {
-            val globalsCtx = GlobalFfiCtx.forGlobals()
-            // FIXME: use getRepoConfig and do this in kotlin
-            // val knownRepos = globalsCtx.listKnownRepos()
-            // val lastUsedRepo = globalsCtx.getLastUsedRepo()
-            // val shouldOpenLastUsedRepo =
-            //     lastUsedRepo != null && globalsCtx.isRepoUsable(lastUsedRepo.path)
+            val globalsCtx = GlobalFfiCtx.init()
+            val repoConfig = globalsCtx.getRepoConfig()
+            val knownRepos = repoConfig.knownRepos
+            val lastUsedRepo =
+                repoConfig.lastUsedRepoId?.let { lastUsedRepoId ->
+                    knownRepos.find { repo -> repo.id == lastUsedRepoId }
+                }
+            val shouldOpenLastUsedRepo = lastUsedRepo != null && globalsCtx.isRepoUsable(lastUsedRepo.path)
             globalsCtx.close()
 
             if (shouldOpenLastUsedRepo) {
@@ -521,7 +524,9 @@ fun App(
         val repoPath = pendingOpenRepoPath ?: return@LaunchedEffect
         try {
             initState = AppInitState.OpeningRepo(repoPath = repoPath)
-            val fcx = FfiCtx.forRepoRoot(repoPath)
+            val gcx = GlobalFfiCtx.init()
+            val fcx = FfiCtx.init(repoPath, gcx)
+            gcx.close()
             val tablesRepo = TablesRepoFfi.load(fcx = fcx)
             val blobsRepo =
                 org.example.daybook.uniffi.BlobsRepoFfi
@@ -1003,7 +1008,7 @@ private fun LoadingScreen(message: String = "Preparing Daybook…") {
 
 @Composable
 private fun WelcomeScreen(
-    repos: List<KnownRepoEntryFfi>,
+    repos: List<KnownRepoEntry>,
     onOpenRepo: (String) -> Unit
 ) {
     val openRepoLauncher = rememberDirectoryPickerLauncher { directory ->

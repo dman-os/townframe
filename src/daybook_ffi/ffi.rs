@@ -106,7 +106,7 @@ pub struct GlobalFfiCtx {
 impl GlobalFfiCtx {
     #[uniffi::constructor]
     #[tracing::instrument(err)]
-    async fn new(repo_root: String) -> Result<Arc<Self>, FfiError> {
+    async fn init() -> Result<Arc<Self>, FfiError> {
         utils_rs::setup_tracing_once();
 
         let rt = crate::init_tokio()?;

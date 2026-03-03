@@ -2,6 +2,8 @@
 
 import { $ } from "./utils.ts";
 
+await $`${$.path(import.meta.resolve("./gen-ffi-dayb.ts"))}`;
+
 const failurePattern = /(^|\n)(FAILED|FAILURE:|^e:|\bFAILED\b|\bException\b)/im;
 
 const processHandle = new Deno.Command("/bin/sh", {
