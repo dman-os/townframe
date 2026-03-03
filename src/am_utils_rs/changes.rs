@@ -37,8 +37,8 @@ pub struct ChangeListenerManager {
     brokers: DHashMap<
         DocumentId,
         (
-            Arc<broker::DocChangeBrokerHandle>,
-            Arc<broker::DocChangeBrokerStopToken>,
+            std::sync::Weak<broker::DocChangeBrokerHandle>,
+            std::sync::Weak<broker::DocChangeBrokerStopToken>,
         ),
     >,
     cancel_token: CancellationToken,
@@ -114,23 +114,41 @@ impl ChangeListenerManager {
         self.ensure_live()?;
 
         let doc_id = handle.document_id().clone();
-        if let Some(arc) = self.brokers.get(&doc_id) {
-            return Ok(arc.clone());
+        match self.brokers.entry(doc_id) {
+            dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
+                let (broker_weak, stop_weak) = occupied.get();
+                if let (Some(broker), Some(stop_token)) =
+                    (broker_weak.upgrade(), stop_weak.upgrade())
+                {
+                    return Ok((broker, stop_token));
+                }
+
+                let (broker, stop_token) = broker::spawn_doc_listener(
+                    handle,
+                    // NOTE: if the changes listener is cancelled,
+                    // so will all brokers
+                    self.cancel_token.child_token(),
+                    self.change_tx.clone(),
+                )?;
+                let broker = Arc::new(broker);
+                let stop_token = Arc::new(stop_token);
+                occupied.insert((Arc::downgrade(&broker), Arc::downgrade(&stop_token)));
+                Ok((broker, stop_token))
+            }
+            dashmap::mapref::entry::Entry::Vacant(vacant) => {
+                let (broker, stop_token) = broker::spawn_doc_listener(
+                    handle,
+                    // NOTE: if the changes listener is cancelled,
+                    // so will all brokers
+                    self.cancel_token.child_token(),
+                    self.change_tx.clone(),
+                )?;
+                let broker = Arc::new(broker);
+                let stop_token = Arc::new(stop_token);
+                vacant.insert((Arc::downgrade(&broker), Arc::downgrade(&stop_token)));
+                Ok((broker, stop_token))
+            }
         }
-
-        let (broker, stop_token) = broker::spawn_doc_listener(
-            handle,
-            // NOTE: if the changes listener is cancelled,
-            // so will all brokers
-            self.cancel_token.child_token(),
-            self.change_tx.clone(),
-        )?;
-
-        let broker = Arc::new(broker);
-        let stop_token = Arc::new(stop_token);
-        self.brokers
-            .insert(doc_id, (Arc::clone(&broker), Arc::clone(&stop_token)));
-        Ok((broker, stop_token))
     }
 
     /// Register a change listener

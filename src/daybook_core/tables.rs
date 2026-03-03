@@ -877,9 +877,10 @@ impl TablesRepo {
         let (old, hash) = self
             .store
             .mutate_sync(|store| {
-                // Auto-create tab if all tabs were removed
-                if val.tabs.is_empty() {
-                    // create a new tab and panel inside the same mutation
+                let mut next_val = val;
+
+                // Auto-create tab if all tabs were removed.
+                if next_val.tabs.is_empty() {
                     let tab_id = Uuid::new_v4();
                     let panel_id = Uuid::new_v4();
                     let tab = Versioned::mint(
@@ -892,6 +893,7 @@ impl TablesRepo {
                         },
                     );
                     store.tabs.insert(tab_id, tab);
+
                     let panel = Versioned::mint(
                         self.local_actor_id.clone(),
                         Panel {
@@ -900,31 +902,31 @@ impl TablesRepo {
                         },
                     );
                     store.panels.insert(panel_id, panel);
-                    if let Some(table) = store.tables.get_mut(&id) {
-                        table.tabs.push(tab_id);
-                        table.selected_tab = Some(tab_id);
-                    }
+                    next_val.tabs.push(tab_id);
+                    next_val.selected_tab = Some(tab_id);
+                    store.tab_to_table.insert(tab_id, id);
                 }
+
                 let Some(old_table) = store.tables.get_mut(&id) else {
                     store
                         .tables
-                        .insert(id, Versioned::mint(self.local_actor_id.clone(), val));
+                        .insert(id, Versioned::mint(self.local_actor_id.clone(), next_val));
                     return None;
                 };
 
                 // Update tab-to-table index for changed tabs
                 for tab_id in &old_table.tabs {
-                    if !val.tabs.contains(tab_id) {
+                    if !next_val.tabs.contains(tab_id) {
                         store.tab_to_table.remove(tab_id);
                     }
                 }
-                for tab_id in &val.tabs {
+                for tab_id in &next_val.tabs {
                     if !old_table.tabs.contains(tab_id) {
                         store.tab_to_table.insert(*tab_id, id);
                     }
                 }
 
-                Some(old_table.replace(self.local_actor_id.clone(), val))
+                Some(old_table.replace(self.local_actor_id.clone(), next_val))
             })
             .await?;
 

@@ -104,6 +104,7 @@ pub struct ConfigRepo {
     sql_pool: sqlx::SqlitePool,
     cancel_token: CancellationToken,
     global_props_doc_init_lock: tokio::sync::Mutex<()>,
+    sync_config_lock: tokio::sync::Mutex<()>,
     _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
 }
 
@@ -186,6 +187,7 @@ impl ConfigRepo {
             sql_pool,
             cancel_token: main_cancel_token.child_token(),
             global_props_doc_init_lock: tokio::sync::Mutex::new(()),
+            sync_config_lock: tokio::sync::Mutex::new(()),
             _change_listener_tickets: vec![ticket],
         };
         let repo = Arc::new(repo);
@@ -502,6 +504,7 @@ impl ConfigRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
+        let _sync_config_guard = self.sync_config_lock.lock().await;
         let mut config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
         if let Some(existing) = config
             .known_devices
@@ -521,6 +524,7 @@ impl ConfigRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
+        let _sync_config_guard = self.sync_config_lock.lock().await;
         let mut config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
         let before = config.known_devices.len();
         config
@@ -542,6 +546,7 @@ impl ConfigRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
+        let _sync_config_guard = self.sync_config_lock.lock().await;
         let mut config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
         if config
             .known_devices

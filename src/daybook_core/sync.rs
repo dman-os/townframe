@@ -13,6 +13,11 @@ pub use bootstrap::*;
 
 pub const IROH_DOC_URL_SCHEME: &str = "db+iroh-doc";
 
+enum ActivePeerState {
+    Connecting,
+    Connected(am_utils_rs::RepoConnection),
+}
+
 pub struct IrohSyncRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     cancel_token: CancellationToken,
@@ -26,7 +31,7 @@ pub struct IrohSyncRepo {
     iroh_blobs: iroh_blobs::api::Store,
 
     conn_end_signal_tx: tokio::sync::mpsc::UnboundedSender<am_utils_rs::ConnFinishSignal>,
-    active_samod_peers: tokio::sync::RwLock<HashMap<EndpointId, (am_utils_rs::RepoConnection,)>>,
+    active_samod_peers: tokio::sync::RwLock<HashMap<EndpointId, ActivePeerState>>,
     full_sync_handle: full::WorkerHandle,
     // bootstrap_docs: tokio::sync::Mutex<Vec<iroh_docs::api::Doc>>,
     // active_endpoint_ids: tokio::sync::RwLock<HashMap<String, ()>>,
@@ -213,11 +218,12 @@ impl IrohSyncRepo {
                 std::mem::replace(&mut *self.active_samod_peers.write().await, default());
 
             use futures_buffered::BufferedStreamExt;
-            futures::stream::iter(
-                active_samod_peers
-                    .drain()
-                    .map(|(_endpoint_id, (conn,))| conn.stop()),
-            )
+            futures::stream::iter(active_samod_peers.drain().filter_map(
+                |(_endpoint_id, state)| match state {
+                    ActivePeerState::Connected(conn) => Some(conn.stop()),
+                    ActivePeerState::Connecting => None,
+                },
+            ))
             .buffered_unordered(16)
             .collect::<Vec<_>>()
             .await
@@ -232,20 +238,38 @@ impl IrohSyncRepo {
             .endpoint_id
             .expect("incoming iroh connection missing endpoint_id");
 
+        {
+            let mut active_samod_peers = self.active_samod_peers.write().await;
+            if active_samod_peers.contains_key(&endpoint_id) {
+                drop(active_samod_peers);
+                conn.stop().await?;
+                return Ok(());
+            }
+            active_samod_peers.insert(endpoint_id, ActivePeerState::Connecting);
+        }
+
         let events = [IrohSyncEvent::IncomingConnection {
             endpoint_id,
             peer_id: Arc::<str>::clone(&conn.peer_id),
             conn_id: conn.id,
         }];
 
-        self.full_sync_handle
+        if let Err(err) = self
+            .full_sync_handle
             .set_connection(endpoint_id, conn.id)
-            .await?;
+            .await
+        {
+            let old = self.active_samod_peers.write().await.remove(&endpoint_id);
+            assert!(old.is_some(), "fishy");
+            return Err(err);
+        }
 
-        self.active_samod_peers
+        let old = self
+            .active_samod_peers
             .write()
             .await
-            .insert(endpoint_id, (conn,));
+            .insert(endpoint_id, ActivePeerState::Connected(conn));
+        assert!(matches!(old, Some(ActivePeerState::Connecting)), "fishy");
 
         self.registry.notify(events);
 
@@ -258,12 +282,9 @@ impl IrohSyncRepo {
             .read()
             .await
             .iter()
-            .find_map(|(endpoint_id, (conn,))| {
-                if conn.id == signal.conn_id {
-                    Some(*endpoint_id)
-                } else {
-                    None
-                }
+            .find_map(|(endpoint_id, state)| match state {
+                ActivePeerState::Connected(conn) if conn.id == signal.conn_id => Some(*endpoint_id),
+                ActivePeerState::Connected(_) | ActivePeerState::Connecting => None,
             })
             .expect("connection finished for unknown conn_id");
 
@@ -275,8 +296,92 @@ impl IrohSyncRepo {
         self.full_sync_handle.del_connection(endpoint_id).await?;
 
         let old = self.active_samod_peers.write().await.remove(&endpoint_id);
-        assert!(old.is_some(), "fishy");
+        assert!(matches!(old, Some(ActivePeerState::Connected(_))), "fishy");
 
+        self.registry.notify(events);
+        Ok(())
+    }
+
+    async fn reserve_endpoint_connection(&self, endpoint_id: EndpointId) -> bool {
+        let mut active_samod_peers = self.active_samod_peers.write().await;
+        if active_samod_peers.contains_key(&endpoint_id) {
+            return false;
+        }
+        active_samod_peers.insert(endpoint_id, ActivePeerState::Connecting);
+        true
+    }
+
+    async fn clear_endpoint_if_connecting(&self, endpoint_id: EndpointId) {
+        let mut active_samod_peers = self.active_samod_peers.write().await;
+        if matches!(
+            active_samod_peers.get(&endpoint_id),
+            Some(ActivePeerState::Connecting)
+        ) {
+            active_samod_peers.remove(&endpoint_id);
+        }
+    }
+
+    async fn finalize_outgoing_connection(
+        &self,
+        endpoint_id: EndpointId,
+        conn: am_utils_rs::RepoConnection,
+    ) -> Res<()> {
+        let conn_id = conn.id;
+        if let Err(err) = self
+            .full_sync_handle
+            .set_connection(endpoint_id, conn_id)
+            .await
+        {
+            self.clear_endpoint_if_connecting(endpoint_id).await;
+            return Err(err);
+        }
+
+        let old = self
+            .active_samod_peers
+            .write()
+            .await
+            .insert(endpoint_id, ActivePeerState::Connected(conn));
+        assert!(matches!(old, Some(ActivePeerState::Connecting)), "fishy");
+        Ok(())
+    }
+
+    pub async fn connect_endpoint_addr(&self, endpoint_addr: iroh::EndpointAddr) -> Res<()> {
+        self.ensure_repo_live()?;
+
+        if endpoint_addr.id == self.router.endpoint().id() {
+            eyre::bail!("connecting to ourself is not supported");
+        }
+        let endpoint_id = endpoint_addr.id;
+
+        if !self.reserve_endpoint_connection(endpoint_id).await {
+            return Ok(());
+        }
+
+        let conn = match self
+            .rcx
+            .acx
+            .spawn_connection_iroh(
+                self.router.endpoint(),
+                endpoint_addr,
+                Some(self.conn_end_signal_tx.clone()),
+            )
+            .await
+        {
+            Ok(conn) => conn,
+            Err(err) => {
+                self.clear_endpoint_if_connecting(endpoint_id).await;
+                return Err(err);
+            }
+        };
+        let peer_id = conn.peer_info.peer_id.as_str().into();
+        let conn_id = conn.id;
+        let events = [IrohSyncEvent::OutgoingConnection {
+            endpoint_id,
+            peer_id,
+            conn_id,
+        }];
+
+        self.finalize_outgoing_connection(endpoint_id, conn).await?;
         self.registry.notify(events);
         Ok(())
     }
@@ -321,50 +426,6 @@ impl IrohSyncRepo {
         self.connect_endpoint_addr(bootstrap.endpoint_addr.clone())
             .await?;
         Ok(bootstrap)
-    }
-
-    pub async fn connect_endpoint_addr(&self, endpoint_addr: iroh::EndpointAddr) -> Res<()> {
-        self.ensure_repo_live()?;
-
-        if self
-            .active_samod_peers
-            .read()
-            .await
-            .contains_key(&endpoint_addr.id)
-        {
-            return Ok(());
-        }
-
-        if endpoint_addr.id == self.router.endpoint().id() {
-            eyre::bail!("connecting to ourself is not supported");
-        }
-        let endpoint_id = endpoint_addr.id;
-        let conn = self
-            .rcx
-            .acx
-            .spawn_connection_iroh(
-                self.router.endpoint(),
-                endpoint_addr,
-                Some(self.conn_end_signal_tx.clone()),
-            )
-            .await?;
-        let peer_id = conn.peer_info.peer_id.as_str().into();
-        let events = [IrohSyncEvent::OutgoingConnection {
-            endpoint_id,
-            peer_id,
-            conn_id: conn.id,
-        }];
-
-        self.full_sync_handle
-            .set_connection(endpoint_id, conn.id)
-            .await?;
-
-        self.active_samod_peers
-            .write()
-            .await
-            .insert(endpoint_id, (conn,));
-        self.registry.notify(events);
-        Ok(())
     }
 
     pub async fn connect_known_devices_once(&self) -> Res<()> {

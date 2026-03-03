@@ -53,8 +53,7 @@ impl FfiCtx {
         let rt = Arc::clone(&gcx.rt);
         let gcx = Arc::clone(&gcx.inner);
 
-        let repo_root = std::path::PathBuf::from(repo_root);
-        let repo_root_for_init = repo_root.clone();
+        let repo_root_for_init = std::path::PathBuf::from(repo_root);
 
         let (rcx, gcx) = do_on_rt(&rt, async move {
             let rcx = daybook_core::repo::RepoCtx::open(
@@ -68,10 +67,6 @@ impl FfiCtx {
             )
             .await?;
             let rcx = Arc::new(rcx);
-
-            // FIXME: garbage, this should be handeld by the RepoCtx itself
-            let _repo = daybook_core::repo::upsert_known_repo(&gcx.sql.db_pool, &repo_root).await?;
-            daybook_core::repo::mark_repo_initialized(&repo_root).await?;
 
             eyre::Ok((rcx, gcx))
         })

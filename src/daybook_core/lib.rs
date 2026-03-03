@@ -62,7 +62,7 @@ uniffi::custom_type!(VersionTag, String, {
     lower: |tag| format!(
         "{}_{}",
         utils_rs::hash::encode_base58_multibase(tag.actor_id.to_bytes()),
-        tag.version.bs58()
+        utils_rs::hash::encode_base58_multibase(tag.version.as_bytes())
     ),
     try_lift: |str| {
         let (actor_id, version)  = str.split_once('_')

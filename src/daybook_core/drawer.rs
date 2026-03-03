@@ -173,11 +173,8 @@ impl DrawerRepo {
             };
 
             events.clear();
-            // let mut last_heads = None;
 
             for notif in notifs {
-                // last_heads = Some(ChangeHashSet(Arc::clone(&notif.heads)));
-
                 if let Err(err) = self
                     .events_for_patch(
                         &notif.patch,
@@ -195,9 +192,6 @@ impl DrawerRepo {
             }
 
             if !events.is_empty() {
-                // let drawer_heads = last_heads.expect("notifs not empty");
-                // *self.current_heads.write().unwrap() = drawer_heads.clone();
-
                 // Invalidate caches for updated docs
                 for event in &events {
                     match event {

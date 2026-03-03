@@ -65,84 +65,79 @@ pub struct Rt {
 }
 
 pub struct RtStopToken {
-    wflow_part_handle: Option<TokioPartitionWorkerHandle>,
+    wflow_part_handle: TokioPartitionWorkerHandle,
     rt: Arc<Rt>,
-    partition_watcher: Option<tokio::task::JoinHandle<()>>,
-    switch_worker: Option<switch::SwitchWorkerHandle>,
-    doc_facet_set_index_stop: Option<crate::index::DocFacetSetIndexStopToken>,
-    doc_facet_ref_index_stop: Option<crate::index::DocFacetRefIndexStopToken>,
-    sqlite_local_state_stop: Option<crate::repos::RepoStopToken>,
+    partition_watcher: tokio::task::JoinHandle<()>,
+    switch_worker: switch::SwitchWorkerHandle,
+    doc_facet_set_index_stop: crate::index::DocFacetSetIndexStopToken,
+    doc_facet_ref_index_stop: crate::index::DocFacetRefIndexStopToken,
+    sqlite_local_state_stop: crate::repos::RepoStopToken,
 }
 
 impl RtStopToken {
-    pub async fn stop(mut self) -> Res<()> {
+    pub async fn stop(self) -> Res<()> {
         self.rt.cancel_token.cancel();
 
         // Stop triage worker first to prevent new dispatches from being created
-        if let Some(worker) = self.switch_worker.take() {
-            if let Err(err) = worker.stop().await {
-                warn!(
-                    ?err,
-                    "error stopping doc_changes_worker during shutdown - continuing"
-                );
-            }
-        }
-
-        if let Some(stop) = self.doc_facet_set_index_stop.take() {
-            if let Err(err) = stop.stop().await {
-                warn!(
-                    ?err,
-                    "error stopping doc_facet_set_index_repo during shutdown - continuing"
-                );
-            }
-        }
-        if let Some(stop) = self.doc_facet_ref_index_stop.take() {
-            if let Err(err) = stop.stop().await {
-                warn!(
-                    ?err,
-                    "error stopping doc_facet_ref_index_repo during shutdown - continuing"
-                );
-            }
-        }
-        if let Some(stop) = self.sqlite_local_state_stop.take() {
-            if let Err(err) = stop.stop().await {
-                warn!(
-                    ?err,
-                    "error stopping sqlite_local_state_repo during shutdown - continuing"
-                );
-            }
-        }
-
-        // Wait for all active dispatches to complete
-        let active_dispatches: Vec<String> = self
-            .rt
-            .dispatch_repo
-            .list()
-            .await
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect();
-        if !active_dispatches.is_empty() {
-            info!(
-                count = active_dispatches.len(),
-                "waiting for active dispatches to complete"
+        if let Err(err) = self.switch_worker.stop().await {
+            warn!(
+                ?err,
+                "error stopping doc_changes_worker during shutdown - continuing"
             );
-            for dispatch_id in active_dispatches {
-                let _ = self
-                    .rt
-                    .wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(30))
-                    .await;
-            }
         }
+
+        if let Err(err) = self.doc_facet_set_index_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping doc_facet_set_index_repo during shutdown - continuing"
+            );
+        }
+
+        if let Err(err) = self.doc_facet_ref_index_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping doc_facet_ref_index_repo during shutdown - continuing"
+            );
+        }
+
+        if let Err(err) = self.sqlite_local_state_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping sqlite_local_state_repo during shutdown - continuing"
+            );
+        }
+
+        // FIXME: this is wrong, dispatches are allowed
+        // to resume on reboot
+        //
+        // Wait for all active dispatches to complete
+        // let active_dispatches: Vec<String> = self
+        //     .rt
+        //     .dispatch_repo
+        //     .list()
+        //     .await
+        //     .iter()
+        //     .map(|(id, _)| id.clone())
+        //     .collect();
+        // if !active_dispatches.is_empty() {
+        //     info!(
+        //         count = active_dispatches.len(),
+        //         "waiting for active dispatches to complete"
+        //     );
+        //     for dispatch_id in active_dispatches {
+        //         let _ = self
+        //             .rt
+        //             .wait_for_dispatch_end(&dispatch_id, Duration::from_secs(30))
+        //             .await;
+        //     }
+        // }
 
         // Stop wflow partition worker
-        if let Some(handle) = self.wflow_part_handle.take() {
-            if let Err(err) = handle.stop().await {
-                warn!(
-                    ?err,
-                    "error stopping wflow_part_handle during shutdown - continuing"
-                );
-            }
+        if let Err(err) = self.wflow_part_handle.stop().await {
+            warn!(
+                ?err,
+                "error stopping wflow_part_handle during shutdown - continuing"
+            );
         }
 
         if let Err(err) = Arc::clone(&self.rt.wash_host).stop().await.to_eyre() {
@@ -152,15 +147,14 @@ impl RtStopToken {
             );
         }
 
-        if let Some(watcher) = self.partition_watcher.take() {
-            if let Err(err) =
-                utils_rs::wait_on_handle_with_timeout(watcher, Duration::from_secs(10)).await
-            {
-                warn!(
-                    ?err,
-                    "error waiting for partition_watcher during shutdown - continuing"
-                );
-            }
+        if let Err(err) =
+            utils_rs::wait_on_handle_with_timeout(self.partition_watcher, Duration::from_secs(10))
+                .await
+        {
+            warn!(
+                ?err,
+                "error waiting for partition_watcher during shutdown - continuing"
+            );
         }
 
         Ok(())

@@ -97,6 +97,7 @@ pub struct IrohRepoProtocol {
 }
 
 impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
+    #[tracing::instrument]
     async fn accept(
         &self,
         connection: iroh::endpoint::Connection,
@@ -123,9 +124,9 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
             .map_err(iroh::protocol::AcceptError::from_boxed)?;
         let peer_id: Arc<str> = peer_info.peer_id.as_str().into();
 
-        let span = tracing::info_span!(
-            "iroh incoming connection task",
-            peer = ?peer_info
+        tracing::record_all!(
+            tracing::Span::current(),
+            peer = ?peer_info,
         );
 
         let cancel_token = self.cancel_token.child_token();
@@ -140,6 +141,7 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
             })
             .expect(ERROR_CHANNEL);
 
+        let span = tracing::Span::current();
         let _guard = span.enter();
         tokio::select! {
             _ = cancel_token.cancelled() => {

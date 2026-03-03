@@ -34,7 +34,7 @@ impl SecretRepo {
                 Ok(secret_hex) => {
                     let secret = decode_secret_hex(&secret_hex)?;
                     let encoded = data_encoding::HEXLOWER.encode(&secret.to_bytes());
-                    set_fallback_secret(sql, &repo_id, &encoded).await?;
+                    let _ = ensure_fallback_secret(sql, &repo_id, &encoded).await?;
                     secret
                 }
                 Err(keyring::Error::NoEntry) => {
@@ -77,29 +77,28 @@ fn fallback_secret_key(repo_id: &str) -> String {
 
 async fn load_or_init_fallback_secret(sql: &SqlitePool, repo_id: &str) -> Res<iroh::SecretKey> {
     let fallback_key = fallback_secret_key(repo_id);
-    let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-        .bind(&fallback_key)
-        .fetch_optional(sql)
-        .await?;
-    if let Some(secret_hex) = rec {
-        return decode_secret_hex(&secret_hex);
-    }
     let generated = iroh::SecretKey::generate(&mut rand::rng());
     let encoded = data_encoding::HEXLOWER.encode(&generated.to_bytes());
-    set_fallback_secret(sql, repo_id, &encoded).await?;
-    Ok(generated)
+    if ensure_fallback_secret(sql, repo_id, &encoded).await? {
+        return Ok(generated);
+    }
+
+    let secret_hex = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
+        .bind(&fallback_key)
+        .fetch_optional(sql)
+        .await?
+        .ok_or_eyre("fallback iroh secret key missing after insert-or-ignore")?;
+    decode_secret_hex(&secret_hex)
 }
 
-async fn set_fallback_secret(sql: &SqlitePool, repo_id: &str, encoded: &str) -> Res<()> {
+async fn ensure_fallback_secret(sql: &SqlitePool, repo_id: &str, encoded: &str) -> Res<bool> {
     let fallback_key = fallback_secret_key(repo_id);
-    sqlx::query(
-        "INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    )
-    .bind(&fallback_key)
-    .bind(encoded)
-    .execute(sql)
-    .await?;
-    Ok(())
+    let result = sqlx::query("INSERT OR IGNORE INTO kvstore(key, value) VALUES (?1, ?2)")
+        .bind(&fallback_key)
+        .bind(encoded)
+        .execute(sql)
+        .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 #[cfg(test)]
@@ -109,15 +108,23 @@ pub async fn force_set_fallback_secret_for_tests(
     secret: &iroh::SecretKey,
 ) -> Res<()> {
     let encoded = data_encoding::HEXLOWER.encode(&secret.to_bytes());
-    set_fallback_secret(sql, repo_id, &encoded).await
+    let fallback_key = fallback_secret_key(repo_id);
+    sqlx::query(
+        "INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(&fallback_key)
+    .bind(&encoded)
+    .execute(sql)
+    .await?;
+    Ok(())
 }
 
 fn decode_secret_hex(secret_hex: &str) -> Res<iroh::SecretKey> {
     let raw = data_encoding::HEXLOWER
         .decode(secret_hex.as_bytes())
-        .wrap_err("invalid encoded iroh secret key in keyring")?;
+        .wrap_err("invalid encoded iroh secret key")?;
     if raw.len() != 32 {
-        eyre::bail!("invalid iroh secret key length in keyring: {}", raw.len());
+        eyre::bail!("invalid iroh secret key length: {}", raw.len());
     }
     let mut bytes = [0_u8; 32];
     bytes.copy_from_slice(&raw);

@@ -313,13 +313,34 @@ pub mod globals {
     }
 
     pub async fn get_or_init_repo_id(sql: &SqlitePool) -> Res<String> {
-        if let Some(repo_id) = get_repo_id(sql).await? {
+        let mut tx = sql.begin().await?;
+
+        if let Some(repo_id) =
+            sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
+                .bind(REPO_ID_KEY)
+                .fetch_optional(&mut *tx)
+                .await?
+        {
+            tx.commit().await?;
             return Ok(repo_id);
         }
+
         let id = Uuid::new_v4();
         let id = utils_rs::hash::encode_base58_multibase(id);
-        let repo_id = format!("drepo_{id}");
-        set_repo_id(sql, &repo_id).await?;
+        let generated_repo_id = format!("drepo_{id}");
+
+        sqlx::query("INSERT OR IGNORE INTO kvstore(key, value) VALUES (?1, ?2)")
+            .bind(REPO_ID_KEY)
+            .bind(&generated_repo_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let repo_id = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
+            .bind(REPO_ID_KEY)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
         Ok(repo_id)
     }
 

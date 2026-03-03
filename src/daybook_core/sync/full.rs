@@ -647,10 +647,10 @@ impl Worker {
         doc_id: DocumentId,
         diff: DocPeerStateView,
     ) -> Res<()> {
-        let doc_state = self
-            .synced_docs
-            .get(&doc_id)
-            .expect("peer state diff for unkown doc");
+        let Some(doc_state) = self.synced_docs.get(&doc_id) else {
+            debug!(?doc_id, "ignoring peer state diff for removed/unknown doc");
+            return Ok(());
+        };
         let local_heads = match &doc_state.deets {
             DocSyncStateDeets::Active(active) => &active.latest_heads,
             DocSyncStateDeets::Pending(_) => return Ok(()),

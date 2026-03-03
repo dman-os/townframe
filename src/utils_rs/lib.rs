@@ -305,7 +305,7 @@ pub mod hash {
 
     #[cfg(feature = "hash")]
     pub fn hash_obj<T: serde::Serialize>(obj: &T) -> String {
-        use sha2::digest::Digest;
+        use sha2::Digest;
         let mut hash = sha2::Sha256::new();
         // FIXME: sha2 removed std::io::Write support
         // json_canon::to_writer(&mut hash, obj).expect("error serializing manifest");

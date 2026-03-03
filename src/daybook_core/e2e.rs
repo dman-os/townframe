@@ -180,12 +180,13 @@ pub async fn test_cx_with_options(
         local_actor_id.clone(),
     )
     .await?;
+    let sql_ctx = crate::app::SqlCtx::new("sqlite::memory:").await?;
     let (config_repo, config_stop) = crate::config::ConfigRepo::load(
         acx.clone(),
         app_doc_id.clone(),
         Arc::clone(&plugs_repo),
         local_user_path.clone(),
-        crate::app::SqlCtx::new("sqlite::memory:").await?.db_pool,
+        sql_ctx.db_pool.clone(),
     )
     .await?;
     let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
@@ -194,10 +195,7 @@ pub async fn test_cx_with_options(
         local_actor_id.clone(),
     )
     .await?;
-    let progress_repo = crate::progress::ProgressRepo::boot(
-        crate::app::SqlCtx::new("sqlite::memory:").await?.db_pool,
-    )
-    .await?;
+    let progress_repo = crate::progress::ProgressRepo::boot(sql_ctx.db_pool.clone()).await?;
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
         acx.clone(),
         drawer_doc_id,

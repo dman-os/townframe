@@ -233,6 +233,8 @@ pub struct VersionTag {
 }
 
 impl VersionTag {
+    /// Create a version tag to be used when
+    /// updating an instance.
     pub fn update(actor_id: ActorId) -> Self {
         Self {
             version: Uuid::new_v4(),
@@ -240,6 +242,8 @@ impl VersionTag {
         }
     }
 
+    /// Create a version tag to be used for a new
+    /// instance of a tagged version.
     pub fn mint(actor_id: ActorId) -> Self {
         Self {
             version: Uuid::nil(),
@@ -247,6 +251,8 @@ impl VersionTag {
         }
     }
 
+    /// Create a static and empty version tag to be used
+    /// in determinstic contexts like automerge version updates.
     pub(crate) fn nil() -> VersionTag {
         Self {
             version: Uuid::nil(),
@@ -270,8 +276,8 @@ impl Hydrate for VersionTag {
     fn hydrate_bytes(bytes: &[u8]) -> Result<Self, autosurgeon::HydrateError> {
         if bytes.len() != 32 {
             return Err(autosurgeon::HydrateError::unexpected(
-                "verison tag in 32 length byte array",
-                format!("verison tags has byte length of {}", bytes.len()),
+                "version tag in 32 length byte array",
+                format!("version tags has byte length of {}", bytes.len()),
             ));
         }
         Ok(Self {
@@ -303,7 +309,6 @@ impl<T> std::ops::DerefMut for Versioned<T> {
 }
 
 impl<T> Versioned<T> {
-    /// NOTE: avoid usign this in versioned_updates or Default impls
     pub fn mint(actor_id: ActorId, value: T) -> Self {
         Self {
             vtag: VersionTag::mint(actor_id),

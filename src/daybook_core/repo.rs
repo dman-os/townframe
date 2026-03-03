@@ -218,59 +218,117 @@ impl RepoCtx {
         use crate::tables::TablesRepo;
 
         let blobs_repo = BlobsRepo::new(blobs_root).await?;
-        let (plugs_repo, plugs_stop) = PlugsRepo::load(
-            acx.clone(),
-            Arc::clone(&blobs_repo),
-            doc_app.document_id().clone(),
-            local_actor_id.clone(),
-        )
-        .await
-        .wrap_err("error loading plugs repo during init dance")?;
+        let mut plugs_repo: Option<Arc<PlugsRepo>> = None;
+        let mut plugs_stop: Option<crate::repos::RepoStopToken> = None;
+        let mut config_stop: Option<crate::repos::RepoStopToken> = None;
+        let mut tables_stop: Option<crate::repos::RepoStopToken> = None;
+        let mut dispatch_stop: Option<crate::repos::RepoStopToken> = None;
+        let mut drawer_stop: Option<crate::repos::RepoStopToken> = None;
 
-        let (_config_repo, config_stop) = ConfigRepo::load(
-            acx.clone(),
-            doc_app.document_id().clone(),
-            Arc::clone(&plugs_repo),
-            daybook_types::doc::UserPath::from(local_user_path.to_string()),
-            sql.clone(),
-        )
-        .await?;
-        let (_tables_repo, tables_stop) = TablesRepo::load(
-            acx.clone(),
-            doc_app.document_id().clone(),
-            local_actor_id.clone(),
-        )
-        .await?;
-        let (_dispatch_repo, dispatch_stop) = DispatchRepo::load(
-            acx.clone(),
-            doc_app.document_id().clone(),
-            local_actor_id.clone(),
-        )
-        .await?;
-        let (_drawer_repo, drawer_stop) = DrawerRepo::load(
-            acx.clone(),
-            doc_drawer.document_id().clone(),
-            local_actor_id.clone(),
-            Arc::new(std::sync::Mutex::new(
-                crate::drawer::lru::KeyedLruPool::new(1000),
-            )),
-            Arc::new(std::sync::Mutex::new(
-                crate::drawer::lru::KeyedLruPool::new(1000),
-            )),
-            #[cfg(not(test))]
-            Arc::clone(&plugs_repo),
-            #[cfg(test)]
-            Some(Arc::clone(&plugs_repo)),
-        )
-        .await?;
+        let init_result: Res<()> = async {
+            let (repo, stop) = PlugsRepo::load(
+                acx.clone(),
+                Arc::clone(&blobs_repo),
+                doc_app.document_id().clone(),
+                local_actor_id.clone(),
+            )
+            .await
+            .wrap_err("error loading plugs repo during init dance")?;
+            plugs_repo = Some(repo);
+            plugs_stop = Some(stop);
 
-        plugs_repo.ensure_system_plugs().await?;
+            let (_config_repo, stop) = ConfigRepo::load(
+                acx.clone(),
+                doc_app.document_id().clone(),
+                Arc::clone(plugs_repo.as_ref().expect("plugs repo must be loaded")),
+                daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                sql.clone(),
+            )
+            .await?;
+            config_stop = Some(stop);
 
-        drawer_stop.stop().await?;
-        plugs_stop.stop().await?;
-        config_stop.stop().await?;
-        tables_stop.stop().await?;
-        dispatch_stop.stop().await?;
+            let (_tables_repo, stop) = TablesRepo::load(
+                acx.clone(),
+                doc_app.document_id().clone(),
+                local_actor_id.clone(),
+            )
+            .await?;
+            tables_stop = Some(stop);
+
+            let (_dispatch_repo, stop) = DispatchRepo::load(
+                acx.clone(),
+                doc_app.document_id().clone(),
+                local_actor_id.clone(),
+            )
+            .await?;
+            dispatch_stop = Some(stop);
+
+            let (_drawer_repo, stop) = DrawerRepo::load(
+                acx.clone(),
+                doc_drawer.document_id().clone(),
+                local_actor_id.clone(),
+                Arc::new(std::sync::Mutex::new(
+                    crate::drawer::lru::KeyedLruPool::new(1000),
+                )),
+                Arc::new(std::sync::Mutex::new(
+                    crate::drawer::lru::KeyedLruPool::new(1000),
+                )),
+                #[cfg(not(test))]
+                Arc::clone(plugs_repo.as_ref().expect("plugs repo must be loaded")),
+                #[cfg(test)]
+                Some(Arc::clone(
+                    plugs_repo.as_ref().expect("plugs repo must be loaded"),
+                )),
+            )
+            .await?;
+            drawer_stop = Some(stop);
+
+            plugs_repo
+                .as_ref()
+                .expect("plugs repo must be loaded")
+                .ensure_system_plugs()
+                .await?;
+
+            Ok(())
+        }
+        .await;
+
+        if let Err(err) = init_result {
+            if let Some(stop) = drawer_stop.take() {
+                let _ = stop.stop().await;
+            }
+            if let Some(stop) = plugs_stop.take() {
+                let _ = stop.stop().await;
+            }
+            if let Some(stop) = config_stop.take() {
+                let _ = stop.stop().await;
+            }
+            if let Some(stop) = tables_stop.take() {
+                let _ = stop.stop().await;
+            }
+            if let Some(stop) = dispatch_stop.take() {
+                let _ = stop.stop().await;
+            }
+            return Err(err);
+        }
+
+        drawer_stop
+            .expect("drawer stop token missing")
+            .stop()
+            .await?;
+        plugs_stop.expect("plugs stop token missing").stop().await?;
+        config_stop
+            .expect("config stop token missing")
+            .stop()
+            .await?;
+        tables_stop
+            .expect("tables stop token missing")
+            .stop()
+            .await?;
+        dispatch_stop
+            .expect("dispatch stop token missing")
+            .stop()
+            .await?;
         Ok(())
     }
 }
@@ -288,7 +346,7 @@ fn repo_layout(repo_root: &std::path::Path) -> Res<RepoLayout> {
     })
 }
 
-pub async fn mark_repo_initialized(repo_root: &std::path::Path) -> Res<()> {
+async fn mark_repo_initialized(repo_root: &std::path::Path) -> Res<()> {
     let layout = repo_layout(repo_root)?;
     if let Some(parent) = layout.marker_path.parent() {
         tokio::fs::create_dir_all(parent).await?;

@@ -182,19 +182,24 @@ impl DocChangeBroker {
     }
     async fn handle_changes(&mut self, changes: samod_core::DocumentChanged) -> Res<()> {
         let new_heads: Arc<[ChangeHash]> = Arc::from(&changes.new_heads[..]);
-        for listener in self.heads_listeners.lock().expect(ERROR_MUTEX).iter() {
-            match listener.change_tx.try_send(Arc::clone(&new_heads)) {
-                Ok(()) => {}
-                Err(err) => match err {
-                    mpsc::error::TrySendError::Full(_) => {
+        self.heads_listeners
+            .lock()
+            .expect(ERROR_MUTEX)
+            .retain(
+                |listener| match listener.change_tx.try_send(Arc::clone(&new_heads)) {
+                    Ok(()) => true,
+                    Err(mpsc::error::TrySendError::Full(_)) => {
                         panic!("HeadListenerRegistration is full, yo");
                     }
-                    mpsc::error::TrySendError::Closed(_) => {
-                        panic!("HeadListenerRegistration dropepd without cleanup");
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        warn!(
+                            id = ?listener.id,
+                            "HeadListenerRegistration dropped without cleanup"
+                        );
+                        false
                     }
                 },
-            }
-        }
+            );
         let (new_heads, all_changes) = self.handle.with_document(|doc| {
             let patches = doc.diff(&self.heads, &changes.new_heads[..]);
             let collected_changes = patches
