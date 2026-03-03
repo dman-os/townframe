@@ -421,20 +421,30 @@ impl Worker {
         use futures::StreamExt;
         use futures_buffered::BufferedStreamExt;
 
-        futures::stream::iter(
-            self.docs_to_stop
-                .drain()
-                .filter_map(|doc_id| self.synced_docs.remove(&doc_id))
-                .filter_map(|doc| match doc.deets {
-                    DocSyncStateDeets::Active(active) => Some(active.stop()),
-                    DocSyncStateDeets::Pending(_) => None,
-                }),
-        )
-        .buffered_unordered(16)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Res<Vec<_>>>()?;
+        let stopped_doc_ids: Vec<_> = self.docs_to_stop.drain().collect();
+        let mut stop_futs = vec![];
+
+        for doc_id in &stopped_doc_ids {
+            if let Some(doc) = self.synced_docs.remove(doc_id) {
+                match doc.deets {
+                    DocSyncStateDeets::Active(active) => stop_futs.push(active.stop()),
+                    DocSyncStateDeets::Pending(_) => {}
+                }
+            }
+        }
+
+        futures::stream::iter(stop_futs)
+            .buffered_unordered(16)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Res<Vec<_>>>()?;
+
+        for doc_id in stopped_doc_ids {
+            for peer_state in self.known_peer_set.values_mut() {
+                peer_state.synced_docs.remove(&doc_id);
+            }
+        }
         Ok(())
     }
 

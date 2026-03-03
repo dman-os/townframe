@@ -111,6 +111,13 @@ pub struct RepoCtx {
 }
 
 impl RepoCtx {
+    pub async fn shutdown(&self) -> Res<()> {
+        if let Some(stop) = self.acx_stop.lock().await.take() {
+            stop.stop().await?;
+        }
+        Ok(())
+    }
+
     pub async fn open(
         repo_root: &std::path::Path,
         options: RepoOpenOptions,
@@ -427,7 +434,10 @@ impl AppCtx {
         local_device_name: String,
     ) -> Res<RepoCtx> {
         let rcx = RepoCtx::init(repo_root, options, local_device_name).await?;
-        let _repo_entry = upsert_known_repo(&self.sql.db_pool, repo_root).await?;
+        if let Err(err) = upsert_known_repo(&self.sql.db_pool, repo_root).await {
+            let _ = rcx.shutdown().await;
+            return Err(err);
+        }
         Ok(rcx)
     }
 
@@ -438,7 +448,10 @@ impl AppCtx {
         local_device_name: String,
     ) -> Res<RepoCtx> {
         let rcx = RepoCtx::open(repo_root, options, local_device_name).await?;
-        let _repo_entry = upsert_known_repo(&self.sql.db_pool, repo_root).await?;
+        if let Err(err) = upsert_known_repo(&self.sql.db_pool, repo_root).await {
+            let _ = rcx.shutdown().await;
+            return Err(err);
+        }
         Ok(rcx)
     }
 }

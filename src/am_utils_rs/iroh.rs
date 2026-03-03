@@ -141,8 +141,6 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
             })
             .expect(ERROR_CHANNEL);
 
-        let span = tracing::Span::current();
-        let _guard = span.enter();
         tokio::select! {
             _ = cancel_token.cancelled() => {
                 debug!("cancel token lit");
