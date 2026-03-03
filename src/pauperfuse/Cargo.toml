@@ -11,10 +11,33 @@ name = "pauperfuse"
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 utils_rs = { workspace = true, default-features = false }
-async-trait.workspace = true
-sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+
+#
+# async
+# async-trait.workspace = true
+futures-buffered.workspace = true
+
+#
+# errors
+thiserror.workspace = true
+
+#
+# encoding
 blake3.workspace = true
+
+#
+# fs
+notify = "9.0.0-rc.2"
+# camino = "1.2.2"
+filetime = "0.2.27"
+jwalk = "0.8.1"
+
+#
+# sql
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 
 [dev-dependencies]
 tempfile.workspace = true

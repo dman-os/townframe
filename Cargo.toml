@@ -76,11 +76,13 @@ syn = { version = "2", features = ["extra-traits"] }
 bon = "3.7.2"
 
 #
-# futures
+# async
 async-trait = "0.1"
 futures = "0.3"
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7.17", features = [] }
+async-channel = "2.5.0"
+futures-buffered = { version = "0.2.13", features = ["tokio-coop"] }
 
 #
 # ds

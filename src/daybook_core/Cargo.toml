@@ -78,7 +78,7 @@ tokio-util.workspace = true
 futures = { workspace = true }
 async-trait.workspace = true
 tokio-stream = "0.1.18"
-futures-buffered = { version = "0.2.13", features = ["tokio-coop"] }
+futures-buffered.workspace = true
 
 #
 # ffi
