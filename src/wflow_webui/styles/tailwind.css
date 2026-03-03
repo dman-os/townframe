@@ -1,6 +1,0 @@
-@import "tailwindcss";
-
-
-h1 {
-    @apply font-bold text-4xl;
-}

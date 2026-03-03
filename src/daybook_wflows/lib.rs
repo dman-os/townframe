@@ -13,8 +13,6 @@ mod wit {
         // generate_all,
         // async: true,
         with: {
-            "wasi:keyvalue/store@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::store,
-            "wasi:keyvalue/atomics@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::atomics,
             "wasi:logging/logging@0.1.0-draft": api_utils_rs::wit::wasi::logging::logging,
             "wasmcloud:postgres/types@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::types,
             "wasmcloud:postgres/query@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::query,

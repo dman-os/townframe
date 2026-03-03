@@ -88,8 +88,6 @@ pub struct Rt {
     pub wflow_plugin: Arc<wash_plugin_wflow::WflowPlugin>,
     pub daybook_plugin: Arc<wash_plugin::DaybookPlugin>,
     pub stateless_view_plugin: Arc<wash_plugin::StatelessViewPlugin>,
-    pub utils_plugin: Arc<wash_plugin_utils::UtilsPlugin>,
-    pub mltools_plugin: Arc<wash_plugin_mltools::MltoolsPlugin>,
     pub blobs_repo: Arc<BlobsRepo>,
     pub doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     pub doc_facet_set_index_repo: Arc<DocFacetSetIndexRepo>,
@@ -363,12 +361,6 @@ impl Rt {
             Arc::clone(&plugs_repo),
         ));
         let stateless_view_plugin = Arc::new(wash_plugin::StatelessViewPlugin::new());
-        let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {})
-            .wrap_err("error creating utils plugin")?;
-        let mltools_plugin =
-            wash_plugin_mltools::MltoolsPlugin::new(wash_plugin_mltools::Config {})
-                .wrap_err("error creating mltools plugin")?;
-
         let wash_host = wflow::build_wash_host(vec![
             #[expect(clippy::clone_on_ref_ptr)]
             wflow_plugin.clone(),
@@ -376,10 +368,6 @@ impl Rt {
             daybook_plugin.clone(),
             #[expect(clippy::clone_on_ref_ptr)]
             stateless_view_plugin.clone(),
-            #[expect(clippy::clone_on_ref_ptr)]
-            utils_plugin.clone(),
-            #[expect(clippy::clone_on_ref_ptr)]
-            mltools_plugin.clone(),
         ])
         .await?;
 
@@ -468,8 +456,6 @@ impl Rt {
             wflow_plugin,
             daybook_plugin,
             stateless_view_plugin,
-            utils_plugin,
-            mltools_plugin,
             blobs_repo,
             doc_blobs_index_repo: Arc::clone(&doc_blobs_index_repo),
             doc_facet_set_index_repo: Arc::clone(&doc_facet_set_index_repo),
