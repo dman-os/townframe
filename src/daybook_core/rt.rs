@@ -342,12 +342,12 @@ impl Rt {
             Arc::clone(&rt),
             RtStopToken {
                 rt,
-                partition_watcher: Some(partition_watcher),
-                switch_worker: Some(switch_worker),
-                doc_facet_set_index_stop: Some(doc_facet_set_index_stop),
-                doc_facet_ref_index_stop: Some(doc_facet_ref_index_stop),
-                sqlite_local_state_stop: Some(sqlite_local_state_stop),
-                wflow_part_handle: Some(wflow_part_handle),
+                partition_watcher,
+                switch_worker,
+                doc_facet_set_index_stop,
+                doc_facet_ref_index_stop,
+                sqlite_local_state_stop,
+                wflow_part_handle,
             },
         ))
     }

@@ -20,7 +20,6 @@ pub struct RepoLayout {
 
 #[derive(Debug, Clone, Default)]
 pub struct RepoOpenOptions {
-    pub ensure_initialized: bool,
     pub ws_connector_url: Option<String>,
 }
 
@@ -113,28 +112,56 @@ pub struct RepoCtx {
 
 impl RepoCtx {
     pub async fn open(
-        global_ctx: &GlobalCtx,
         repo_root: &std::path::Path,
         options: RepoOpenOptions,
         local_device_name: String,
     ) -> Res<Self> {
         let layout = repo_layout(repo_root)?;
         let lock_guard = RepoLockGuard::acquire(&layout.lock_path)?;
-
-        let is_initialized = is_repo_initialized(&layout.repo_root).await?;
-        if !options.ensure_initialized && !is_initialized {
+        if !is_repo_initialized(&layout.repo_root).await? {
             eyre::bail!(
                 "repo not initialized at path {} (missing marker {})",
                 layout.repo_root.display(),
                 layout.marker_path.display()
             );
         }
+        Self::open_inner(layout, lock_guard, options, local_device_name, false).await
+    }
 
+    pub async fn init(
+        repo_root: &std::path::Path,
+        options: RepoOpenOptions,
+        local_device_name: String,
+    ) -> Res<Self> {
+        let layout = repo_layout(repo_root)?;
+        let lock_guard = RepoLockGuard::acquire(&layout.lock_path)?;
+        if is_repo_initialized(&layout.repo_root).await? {
+            eyre::bail!(
+                "repo already initialized at path {}",
+                layout.repo_root.display()
+            );
+        }
+        Self::open_inner(layout, lock_guard, options, local_device_name, true).await
+    }
+
+    async fn open_inner(
+        layout: RepoLayout,
+        lock_guard: RepoLockGuard,
+        options: RepoOpenOptions,
+        local_device_name: String,
+        initialize_repo: bool,
+    ) -> Res<Self> {
         let sql_config = SqlConfig {
             database_url: format!("sqlite://{}", layout.sqlite_path.display()),
         };
         let sql = SqlCtx::new(&sql_config.database_url).await?;
-        let repo_id = crate::app::globals::get_or_init_repo_id(&sql.db_pool).await?;
+        let repo_id = if initialize_repo {
+            crate::app::globals::get_or_init_repo_id(&sql.db_pool).await?
+        } else {
+            crate::app::globals::get_repo_id(&sql.db_pool)
+                .await?
+                .ok_or_eyre("repo_id missing in initialized repo")?
+        };
         let identity =
             crate::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &repo_id).await?;
         let iroh_public_key = identity.iroh_public_key.to_string();
@@ -169,7 +196,7 @@ impl RepoCtx {
             .expect("doc_drawer cell should be initialized")
             .clone();
 
-        if options.ensure_initialized && !is_initialized {
+        if initialize_repo {
             Self::run_repo_init_dance(
                 &acx,
                 &doc_app,
@@ -183,7 +210,6 @@ impl RepoCtx {
             mark_repo_initialized(&layout.repo_root).await?;
         }
 
-        let _repo_entry = upsert_known_repo(&global_ctx.sql.db_pool, &layout.repo_root).await?;
         Ok(Self {
             layout,
             lock_guard,
@@ -391,4 +417,28 @@ pub async fn upsert_known_repo(
     repo_config.known_repos.push(repo.clone());
     globals::set_repo_config(sql, &repo_config).await?;
     Ok(repo)
+}
+
+impl AppCtx {
+    pub async fn init_repo(
+        &self,
+        repo_root: &std::path::Path,
+        options: RepoOpenOptions,
+        local_device_name: String,
+    ) -> Res<RepoCtx> {
+        let rcx = RepoCtx::init(repo_root, options, local_device_name).await?;
+        let _repo_entry = upsert_known_repo(&self.sql.db_pool, repo_root).await?;
+        Ok(rcx)
+    }
+
+    pub async fn open_repo(
+        &self,
+        repo_root: &std::path::Path,
+        options: RepoOpenOptions,
+        local_device_name: String,
+    ) -> Res<RepoCtx> {
+        let rcx = RepoCtx::open(repo_root, options, local_device_name).await?;
+        let _repo_entry = upsert_known_repo(&self.sql.db_pool, repo_root).await?;
+        Ok(rcx)
+    }
 }

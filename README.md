@@ -2,13 +2,12 @@
 
 Experimental.
 
-> ![WARNING] 
-> ## Disclaimer
-> This repo contains is a heap of objectively (and subjectively) bad code and is in its entirety designated POC/it-works-sometimes quality.
+> [!WARNING] 
+> #### Disclaimer
+> This repo contains a heap of objectively (and subjectively) bad code and is, in its entirety, designated POC/it-works-sometimes quality.
 > A big reason for that is because I'm responsible for it but also, a majority of it is vibecoded.
-> This especialy applies to the Kotllin code in here. 
+> This especially applies to the Kotlin code in here. 
 > I'd not written a line of Kotlin before this and it shows (great language tho🤌).
-
 
 > [!NOTE] 
 >

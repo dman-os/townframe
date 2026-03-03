@@ -51,14 +51,14 @@ impl SqlCtx {
 }
 
 #[derive(Debug, Clone)]
-pub struct GlobalConfig {
+pub struct AppConfig {
     pub app_data_dir: std::path::PathBuf,
     pub sql: SqlConfig,
     pub default_repo_root: std::path::PathBuf,
 }
 
-impl GlobalConfig {
-    pub fn new() -> Res<Self> {
+impl AppConfig {
+    pub fn load() -> Res<Self> {
         let app_data_dir = app_data_dir()?;
         let sql = SqlConfig {
             database_url: format!(
@@ -95,16 +95,19 @@ fn app_data_dir() -> Res<std::path::PathBuf> {
     }
 }
 
-pub struct GlobalCtx {
-    pub config: GlobalConfig,
+pub struct AppCtx {
+    pub config: AppConfig,
     pub sql: SqlCtx,
 }
 
-impl GlobalCtx {
-    pub async fn new() -> Res<Self> {
-        let config = GlobalConfig::new()?;
+impl AppCtx {
+    pub async fn new(config: AppConfig) -> Res<Self> {
         let sql = SqlCtx::new(&config.sql.database_url).await?;
         Ok(Self { config, sql })
+    }
+
+    pub async fn load() -> Res<Self> {
+        Self::new(AppConfig::load()?).await
     }
 }
 

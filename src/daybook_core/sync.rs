@@ -453,11 +453,6 @@ impl IrohSyncRepo {
         if remaining.is_empty() {
             return Ok(());
         }
-        for endpoint_id in &remaining {
-            self.full_sync_handle
-                .add_full_sync_peer(*endpoint_id)
-                .await?;
-        }
         let listener = self
             .registry
             .subscribe::<IrohSyncEvent>(crate::repos::SubscribeOpts { capacity: 1024 });
@@ -547,17 +542,14 @@ mod tests {
         utils_rs::testing::setup_tracing_once();
         std::env::set_var("DAYB_DISABLE_KEYRING", "1");
 
-        let gcx = crate::app::GlobalCtx::new().await?;
         let temp_root = tempfile::tempdir()?;
         let repo_a_path = temp_root.path().join("repo-a");
         let repo_b_path = temp_root.path().join("repo-b");
         tokio::fs::create_dir_all(&repo_a_path).await?;
 
-        let rtx = RepoCtx::open(
-            &gcx,
+        let rtx = RepoCtx::init(
             &repo_a_path,
             RepoOpenOptions {
-                ensure_initialized: true,
                 ws_connector_url: None,
             },
             "test-device".into(),
@@ -582,8 +574,8 @@ mod tests {
         )
         .await?;
 
-        let node_a = open_sync_node(&gcx, &repo_a_path).await?;
-        let node_b = open_sync_node(&gcx, &repo_b_path).await?;
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let node_b = open_sync_node(&repo_b_path).await?;
 
         let mut created_doc_ids = Vec::new();
         for _ in 0..3 {
@@ -633,17 +625,14 @@ mod tests {
         utils_rs::testing::setup_tracing_once();
         std::env::set_var("DAYB_DISABLE_KEYRING", "1");
 
-        let gcx = crate::app::GlobalCtx::new().await?;
         let temp_root = tempfile::tempdir()?;
         let repo_a_path = temp_root.path().join("repo-a");
         let repo_b_path = temp_root.path().join("repo-b");
         tokio::fs::create_dir_all(&repo_a_path).await?;
 
-        let rtx = RepoCtx::open(
-            &gcx,
+        let rtx = RepoCtx::init(
             &repo_a_path,
             RepoOpenOptions {
-                ensure_initialized: true,
                 ws_connector_url: None,
             },
             "test-device".into(),
@@ -668,8 +657,8 @@ mod tests {
         )
         .await?;
 
-        let node_a = open_sync_node(&gcx, &repo_a_path).await?;
-        let node_b = open_sync_node(&gcx, &repo_b_path).await?;
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let node_b = open_sync_node(&repo_b_path).await?;
 
         let sync_url = node_a.sync_repo.get_ticket_url().await?;
         let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
@@ -736,16 +725,11 @@ mod tests {
         Ok(())
     }
 
-    async fn open_sync_node(
-        gcx: &crate::app::GlobalCtx,
-        repo_root: &std::path::Path,
-    ) -> Res<SyncTestNode> {
+    async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
         let rtx = Arc::new(
             RepoCtx::open(
-                gcx,
                 repo_root,
                 RepoOpenOptions {
-                    ensure_initialized: false,
                     ws_connector_url: None,
                 },
                 "test-device".into(),

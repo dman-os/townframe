@@ -27,7 +27,7 @@ mod macros;
 mod repos;
 mod rt;
 
-pub use daybook_core::app::{GlobalCtx, SqlCtx};
+pub use daybook_core::app::{AppCtx, SqlCtx};
 pub use daybook_core::repo::RepoOpenOptions;
 
 fn init_tokio() -> Res<tokio::runtime::Runtime> {

@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use daybook_core::app::{globals::KnownRepoEntry, GlobalCtx};
+use daybook_core::app::{globals::KnownRepoEntry, AppCtx};
 use tokio::sync::oneshot;
 
 daybook_types::custom_type_set!();
@@ -28,7 +28,7 @@ impl FfiError {
 pub struct FfiCtx {
     rt: Arc<tokio::runtime::Runtime>,
     #[allow(unused)]
-    pub gcx: Arc<GlobalCtx>,
+    pub acx: Arc<AppCtx>,
     pub rcx: Arc<daybook_core::repo::RepoCtx>,
 }
 pub type SharedFfiCtx = Arc<FfiCtx>;
@@ -46,35 +46,44 @@ impl FfiCtx {
 #[uniffi::export]
 impl FfiCtx {
     #[uniffi::constructor]
-    #[tracing::instrument(err, skip(gcx))]
-    async fn init(repo_root: String, gcx: &GlobalFfiCtx) -> Result<Arc<Self>, FfiError> {
+    #[tracing::instrument(err, skip(acx))]
+    async fn init(repo_root: String, acx: &AppFfiCtx) -> Result<Arc<Self>, FfiError> {
         utils_rs::setup_tracing_once();
 
-        let rt = Arc::clone(&gcx.rt);
-        let gcx = Arc::clone(&gcx.inner);
+        let rt = Arc::clone(&acx.rt);
+        let acx = Arc::clone(&acx.inner);
 
         let repo_root_for_init = std::path::PathBuf::from(repo_root);
 
-        let (rcx, gcx) = do_on_rt(&rt, async move {
-            let rcx = daybook_core::repo::RepoCtx::open(
-                &gcx,
-                &repo_root_for_init,
-                daybook_core::repo::RepoOpenOptions {
-                    ensure_initialized: true,
-                    ws_connector_url: Some("ws://0.0.0.0:8090".to_string()),
-                },
-                format!("daybook-ffi-{}", std::env::consts::ARCH),
-            )
-            .await?;
+        let (rcx, acx) = do_on_rt(&rt, async move {
+            let rcx = if daybook_core::repo::is_repo_initialized(&repo_root_for_init).await? {
+                acx.open_repo(
+                    &repo_root_for_init,
+                    daybook_core::repo::RepoOpenOptions {
+                        ws_connector_url: Some("ws://0.0.0.0:8090".to_string()),
+                    },
+                    format!("daybook-ffi-{}", std::env::consts::ARCH),
+                )
+                .await?
+            } else {
+                acx.init_repo(
+                    &repo_root_for_init,
+                    daybook_core::repo::RepoOpenOptions {
+                        ws_connector_url: Some("ws://0.0.0.0:8090".to_string()),
+                    },
+                    format!("daybook-ffi-{}", std::env::consts::ARCH),
+                )
+                .await?
+            };
             let rcx = Arc::new(rcx);
 
-            eyre::Ok((rcx, gcx))
+            eyre::Ok((rcx, acx))
         })
         .await
         .wrap_err("error initializing main Ctx")
         .inspect_err(|err| tracing::error!(?err))?;
 
-        Ok(Arc::new(Self { rcx, gcx, rt }))
+        Ok(Arc::new(Self { rcx, acx, rt }))
     }
 }
 
@@ -92,13 +101,13 @@ where
 }
 
 #[derive(uniffi::Object)]
-pub struct GlobalFfiCtx {
+pub struct AppFfiCtx {
     rt: Arc<tokio::runtime::Runtime>,
-    pub inner: Arc<GlobalCtx>,
+    pub inner: Arc<AppCtx>,
 }
 
 #[uniffi::export]
-impl GlobalFfiCtx {
+impl AppFfiCtx {
     #[uniffi::constructor]
     #[tracing::instrument(err)]
     async fn init() -> Result<Arc<Self>, FfiError> {
@@ -108,9 +117,9 @@ impl GlobalFfiCtx {
         let rt = Arc::new(rt);
 
         let inner = do_on_rt(&rt, async move {
-            let gcx = GlobalCtx::new().await?;
-            let gcx = Arc::new(gcx);
-            eyre::Ok(gcx)
+            let acx = AppCtx::load().await?;
+            let acx = Arc::new(acx);
+            eyre::Ok(acx)
         })
         .await
         .wrap_err("error initializing ctx")
@@ -161,7 +170,7 @@ impl GlobalFfiCtx {
     }
 }
 
-impl GlobalFfiCtx {
+impl AppFfiCtx {
     pub async fn do_on_rt<O, F>(&self, future: F) -> O
     where
         O: Send + Sync + 'static,

@@ -85,7 +85,7 @@ import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.DispatchRepoFfi
 import org.example.daybook.uniffi.FfiCtx
 import org.example.daybook.uniffi.FfiException
-import org.example.daybook.uniffi.GlobalFfiCtx
+import org.example.daybook.uniffi.AppFfiCtx
 import org.example.daybook.uniffi.ProgressRepoFfi
 import org.example.daybook.uniffi.RtFfi
 import org.example.daybook.uniffi.TablesEventListener
@@ -499,7 +499,7 @@ fun App(
     LaunchedEffect(initAttempt) {
         initState = AppInitState.Loading
         try {
-            val globalsCtx = GlobalFfiCtx.init()
+            val globalsCtx = AppFfiCtx.init()
             val repoConfig = globalsCtx.getRepoConfig()
             val knownRepos = repoConfig.knownRepos
             val lastUsedRepo =
@@ -524,7 +524,7 @@ fun App(
         val repoPath = pendingOpenRepoPath ?: return@LaunchedEffect
         try {
             initState = AppInitState.OpeningRepo(repoPath = repoPath)
-            val gcx = GlobalFfiCtx.init()
+            val gcx = AppFfiCtx.init()
             val fcx = FfiCtx.init(repoPath, gcx)
             gcx.close()
             val tablesRepo = TablesRepoFfi.load(fcx = fcx)

@@ -37,7 +37,7 @@ pub struct ChangeListenerManager {
     brokers: DHashMap<
         DocumentId,
         (
-            std::sync::Weak<broker::DocChangeBrokerHandle>,
+            Arc<broker::DocChangeBrokerHandle>,
             std::sync::Weak<broker::DocChangeBrokerStopToken>,
         ),
     >,
@@ -116,11 +116,9 @@ impl ChangeListenerManager {
         let doc_id = handle.document_id().clone();
         match self.brokers.entry(doc_id) {
             dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
-                let (broker_weak, stop_weak) = occupied.get();
-                if let (Some(broker), Some(stop_token)) =
-                    (broker_weak.upgrade(), stop_weak.upgrade())
-                {
-                    return Ok((broker, stop_token));
+                let (broker, stop_weak) = occupied.get();
+                if let Some(stop_token) = stop_weak.upgrade() {
+                    return Ok((Arc::clone(broker), stop_token));
                 }
 
                 let (broker, stop_token) = broker::spawn_doc_listener(
@@ -132,7 +130,7 @@ impl ChangeListenerManager {
                 )?;
                 let broker = Arc::new(broker);
                 let stop_token = Arc::new(stop_token);
-                occupied.insert((Arc::downgrade(&broker), Arc::downgrade(&stop_token)));
+                occupied.insert((Arc::clone(&broker), Arc::downgrade(&stop_token)));
                 Ok((broker, stop_token))
             }
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
@@ -145,7 +143,7 @@ impl ChangeListenerManager {
                 )?;
                 let broker = Arc::new(broker);
                 let stop_token = Arc::new(stop_token);
-                vacant.insert((Arc::downgrade(&broker), Arc::downgrade(&stop_token)));
+                vacant.insert((Arc::clone(&broker), Arc::downgrade(&stop_token)));
                 Ok((broker, stop_token))
             }
         }

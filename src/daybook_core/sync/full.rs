@@ -45,10 +45,6 @@ enum Msg {
         endpoint_id: EndpointId,
         resp: tokio::sync::oneshot::Sender<()>,
     },
-    AddFullSyncPeer {
-        endpoint_id: EndpointId,
-        resp: tokio::sync::oneshot::Sender<()>,
-    },
     BootDocSyncBackoff {
         doc_id: DocumentId,
     },
@@ -82,17 +78,6 @@ impl WorkerHandle {
             endpoint_id,
         };
         self.msg_tx.send(msg).wrap_err(ERROR_ACTOR)?;
-        rx.await.wrap_err(ERROR_CHANNEL)
-    }
-
-    pub async fn add_full_sync_peer(&self, endpoint_id: EndpointId) -> Res<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.msg_tx
-            .send(Msg::AddFullSyncPeer {
-                resp: tx,
-                endpoint_id,
-            })
-            .wrap_err("FullSyncWorker is dead")?;
         rx.await.wrap_err(ERROR_CHANNEL)
     }
 }
@@ -137,7 +122,6 @@ pub async fn start_full_sync_worker(
         .into(),
 
         synced_docs: default(),
-        full_sync_peers: default(),
         known_peer_set: default(),
         conn_by_peer: default(),
         known_doc_set: default(),
@@ -258,7 +242,6 @@ struct Worker {
     msg_tx: mpsc::UnboundedSender<Msg>,
     events_tx: tokio::sync::broadcast::Sender<FullSyncEvent>,
 
-    full_sync_peers: HashSet<EndpointId>,
     known_peer_set: HashMap<ConnectionId, PeerSyncState>,
     conn_by_peer: HashMap<EndpointId, ConnectionId>,
 }
@@ -342,12 +325,6 @@ impl Worker {
 
     async fn handle_msg(&mut self, msg: Msg) -> Res<()> {
         match msg {
-            Msg::AddFullSyncPeer { endpoint_id, resp } => {
-                self.full_sync_peers.insert(endpoint_id);
-                resp.send(())
-                    .inspect_err(|_| warn!("called dropped before finish"))
-                    .ok();
-            }
             Msg::SetPeer {
                 endpoint_id,
                 resp,

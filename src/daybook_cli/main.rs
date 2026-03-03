@@ -111,12 +111,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         destination,
     } = &cli.command
     {
-        clone_repo_from_url(
-            &conf.global_ctx,
-            source,
-            &std::path::PathBuf::from(destination),
-        )
-        .await?;
+        clone_repo_from_url(&conf.acx, source, &std::path::PathBuf::from(destination)).await?;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -607,7 +602,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
 }
 
 async fn clone_repo_from_url(
-    global_ctx: &daybook_core::app::GlobalCtx,
+    acx: &daybook_core::app::AppCtx,
     source_url: &str,
     destination: &std::path::Path,
 ) -> Res<()> {
@@ -663,11 +658,9 @@ async fn clone_repo_from_url(
     }
 
     let rcx = Arc::new(
-        daybook_core::repo::RepoCtx::open(
-            global_ctx,
+        acx.open_repo(
             &destination,
             daybook_core::repo::RepoOpenOptions {
-                ensure_initialized: true,
                 ws_connector_url: None,
             },
             format!("daybook-cli-{}", std::env::consts::ARCH),
