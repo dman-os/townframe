@@ -15,7 +15,7 @@ use super::AmCtx;
 mod codec;
 
 impl AmCtx {
-    pub const SYNC_ALPN: &[u8] = b"townframe/automerge-repo/1";
+    pub const SYNC_ALPN: &[u8] = b"townframe/automerge-repo/0";
 
     #[tracing::instrument(skip(self, endpoint, end_signal_tx))]
     pub async fn spawn_connection_iroh(

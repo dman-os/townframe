@@ -4,6 +4,14 @@ pub type Multihash = String;
 
 pub type MimeType = String;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct UserMeta {
+    pub user_path: UserPath,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +82,7 @@ crate::define_enum_and_tag!(
             // FIXME: unix timestamp codec
             pub created_at: Timestamp,
             pub updated_at: Vec<Timestamp>,
+            pub users: HashMap<String, UserMeta>,
             pub facet_uuids: HashMap<Uuid,FacetKey>,
             pub facets: HashMap<FacetKey, FacetMeta>
         },
@@ -400,10 +409,6 @@ pub mod user_path {
         }
         Ok(path)
     }
-}
-
-pub struct Users {
-    pub users: HashMap<String, DocUserId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

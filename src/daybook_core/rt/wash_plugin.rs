@@ -126,6 +126,18 @@ mod binds_guest {
                     id: dmeta.id,
                     created_at: dmeta.created_at.into(),
                     updated_at: dmeta.updated_at.into_iter().map(Into::into).collect(),
+                    users: dmeta
+                        .users
+                        .into_iter()
+                        .map(|(actor_id, user_meta)| {
+                            (
+                                actor_id,
+                                wit_doc::UserMeta {
+                                    user_path: user_meta.user_path.to_string_lossy().to_string(),
+                                },
+                            )
+                        })
+                        .collect(),
                     facet_uuids: dmeta
                         .facet_uuids
                         .into_iter()
@@ -272,6 +284,18 @@ mod binds_guest {
                         .into_iter()
                         .map(|dt| Timestamp::from_second(dt.seconds as i64))
                         .collect::<Result<_, _>>()?,
+                    users: dmeta
+                        .users
+                        .into_iter()
+                        .map(|(actor_id, user_meta)| {
+                            (
+                                actor_id,
+                                root_doc::UserMeta {
+                                    user_path: root_doc::UserPath::from(user_meta.user_path),
+                                },
+                            )
+                        })
+                        .collect(),
                     facet_uuids: dmeta
                         .facet_uuids
                         .into_iter()

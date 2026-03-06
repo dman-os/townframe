@@ -313,6 +313,12 @@ impl ConfigRepo {
         Ok(events)
     }
 
+    pub async fn events_for_init(&self) -> Res<Vec<ConfigEvent>> {
+        Ok(vec![ConfigEvent::Changed {
+            heads: ChangeHashSet(self.get_config_heads().await?),
+        }])
+    }
+
     async fn events_for_patch(
         &self,
         patch: &automerge::Patch,

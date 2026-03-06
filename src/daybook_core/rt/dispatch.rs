@@ -325,6 +325,22 @@ impl DispatchRepo {
         Ok(events)
     }
 
+    pub async fn events_for_init(&self) -> Res<Vec<DispatchEvent>> {
+        let heads = self.get_dispatch_heads();
+        let dispatch_ids = self
+            .store
+            .query_sync(|store| store.active_dispatches.keys().cloned().collect::<Vec<_>>())
+            .await;
+        let mut events = Vec::with_capacity(dispatch_ids.len());
+        for id in dispatch_ids {
+            events.push(DispatchEvent::DispatchAdded {
+                id,
+                heads: heads.clone(),
+            });
+        }
+        Ok(events)
+    }
+
     pub fn get_dispatch_heads(&self) -> ChangeHashSet {
         self.dispatch_am_handle
             .with_document(|am_doc| ChangeHashSet(am_doc.get_heads().into()))

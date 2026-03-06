@@ -1,5 +1,77 @@
 # duck-log
 
+## 2026-03-06 | sync hell
+
+I've been trying to implemeng sync over iroh for the past two weeks.
+I was almost done today but...I've slowly learned details that complicate the whole deal.
+
+- Samod/Automerge-repo assume a lazy, query on demand model. 
+  - Not fit for rarely connected P2P peers which would prefer full clones.
+  - An active DocHandle will require a tokio task driving it to subscribe to changes from other peers.
+- The single drawer doc impl is not good at all.
+  - Writes will be serialized which is not good since writing out the automerge metadata is very slow.
+    - On debug builds, I'm seeing a consistent "performance" of 2 adds per second.
+    - Most of the slowness is creating the ops for the DocEntry.
+    - If I swap the DocEntry for a single string kv, it rises to 40.
+  - Since each doc change requires a corresponding drawer doc write, that's going to be a lot of unrequired and uncompressible history forever persisted.
+- Using branches over the same Samod doc_id muddies the frontier heads meaning.
+  - Does this affect the sync protcol? I think so since it's frontier based.
+- Most fatally, the switch/triage needs to to be sync aware.
+  - That is, there might be a ChangeHash seen by the local drawer doc for a Change that hasn't yet arrived to locally.
+- Automerge docs need to be fully loaded in memory, even if they're compressed.
+  - This becomes a problem when 10000k docs are in the repo, our target number.
+- Subduction and Keyhive are almost ready.
+  - This is mainly a Sync protocol replacement that will be added to Samod.
+
+New requirements:
+- Use separate doc_ids per branch to have a single, stable frontier heads.
+- Drawer shouldn't know be changed for each doc change, only branch changes reducing need for GC. 
+- Use local state to store dirty flags for unprocessed docs.
+- Some docs or branches should not be synced.
+  - Temporary branches for wflows.
+- Partitions for syncs.
+  - I.e. we should have a predicatae based or named sets of documents that do opt-in syncs.
+  - Keep certain docs on one device.
+- Minimize resources required per doc for eager repo sync.
+- Shard drawer Automerge.
+- Cross-process distribution
+  - Use kv-store for state
+
+Possible solutions:
+- Use virtual sharding to allow graceful scaling automerge docs per drawer.
+- Use custom CRDT for drawer
+- Set reconcilliation sync between peers for (doc_id,heads) pairs.
+  - Well, each side does it's own reconcilliation but we'll still need to exchange something to indicate each peer has.
+  - No, this isn't useful. We'll have the drawer doc to find out what docs exist across peers.
+    - And I dont't see how we can use set reconciliation to solve heads mismatch across all docs.
+
+Where I'm fucking lost:
+- How do we listen to changes on a doc without a tokio task?
+  - Well, where do changes originate?
+    - The drawer
+    - The sync layer
+  - We do have a reliable heads frontier per doc
+- Okay, how do we make the sync layer listen for changes across peers?
+  - Use peer wide broadcasts?
+    - How to avoid racing network saturation when a change in one peer goes across a network?
+      - Gossip?
+        - It's not eager enough for initial connection but good enough for later changes.
+        - Phased sync!!
+- Okay, how do we reconcile changes with a peer on connection?
+  - A repo wide frontier of sorts?
+    - A device local counter that tracks a devices frontier?
+      - Local sqlite table that tracks doc_id,heads,counter
+      - Counter can be used to easily find new heads from a peer since last connection
+  - Just have per doc state but use batched exchange?
+    - Do we even need the batching? We're using a single connection?
+      - Yes, we need the batching to avoid the tokio task overhead
+
+---
+
+How to impl this?
+- Phased full sync first
+- Per-branch refactor second. 
+
 ## 2026-02-23 | Relocatable processing
 
 Heterogenus devices with different capabilities.

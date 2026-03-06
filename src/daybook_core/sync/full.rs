@@ -788,39 +788,20 @@ impl Worker {
                 continue;
             }
             let prior_pending = self.pending_docs.get(&doc_id).cloned();
-            if let Some(handle) = self.acx.repo().find(doc_id.clone()).await? {
-                let now = std::time::Instant::now();
-                let retry = RetryState {
-                    attempt_no: prior_pending.as_ref().map_or(0, |prior| prior.attempt_no),
-                    last_backoff: prior_pending
-                        .as_ref()
-                        .map_or(Duration::from_millis(0), |prior| prior.last_backoff),
-                    last_attempt_at: prior_pending
-                        .as_ref()
-                        .map_or(now, |prior| prior.last_attempt_at),
-                };
-                let active = self
-                    .boot_doc_sync_worker(doc_id.clone(), handle, retry)
-                    .await?;
-                self.pending_docs.remove(&doc_id);
-                self.active_docs.insert(doc_id, active);
-                budget = budget.saturating_sub(1);
-            } else {
-                let prior = prior_pending.unwrap_or(PendingDocSyncState {
-                    attempt_no: 0,
-                    last_backoff: Duration::from_millis(0),
-                    last_attempt_at: std::time::Instant::now(),
-                    due_at: std::time::Instant::now(),
-                });
-                let delay = next_backoff_delay(prior.last_backoff, Duration::from_millis(500));
-                let pending = PendingDocSyncState {
-                    attempt_no: prior.attempt_no + 1,
-                    last_backoff: delay,
-                    last_attempt_at: std::time::Instant::now(),
-                    due_at: std::time::Instant::now() + delay,
-                };
-                self.pending_docs.insert(doc_id.clone(), pending);
-            }
+            let now = std::time::Instant::now();
+            let retry = RetryState {
+                attempt_no: prior_pending.as_ref().map_or(0, |prior| prior.attempt_no),
+                last_backoff: prior_pending
+                    .as_ref()
+                    .map_or(Duration::from_millis(0), |prior| prior.last_backoff),
+                last_attempt_at: prior_pending
+                    .as_ref()
+                    .map_or(now, |prior| prior.last_attempt_at),
+            };
+            let active = self.boot_doc_sync_worker(doc_id.clone(), retry).await?;
+            self.pending_docs.remove(&doc_id);
+            self.active_docs.insert(doc_id, active);
+            budget = budget.saturating_sub(1);
         }
         self.docs_to_boot = double;
         Ok(())
@@ -829,26 +810,19 @@ impl Worker {
     async fn boot_doc_sync_worker(
         &self,
         doc_id: DocumentId,
-        handle: samod::DocHandle,
         retry: RetryState,
     ) -> Res<ActiveDocSyncState> {
-        let latest_heads = ChangeHashSet(handle.with_document(|doc| doc.get_heads()).into());
-        let (broker_handle, broker_stop_token) =
-            self.acx.change_manager().add_doc(handle.clone()).await?;
-
         let cancel_token = self.cancel_token.child_token();
         let stop_token = doc_worker::spawn_doc_sync_worker(
             doc_id.clone(),
-            handle,
-            broker_handle,
-            broker_stop_token,
+            self.acx.clone(),
             cancel_token.clone(),
             self.msg_tx.clone(),
             retry,
         )
         .await?;
         Ok(ActiveDocSyncState {
-            latest_heads,
+            latest_heads: ChangeHashSet(Arc::from([])),
             stop_token,
         })
     }
@@ -1062,11 +1036,9 @@ impl Worker {
         previous_backoff: Duration,
         _previous_attempt_at: std::time::Instant,
     ) -> Res<()> {
-        let active = self
-            .active_docs
-            .remove(&doc_id)
-            .expect("doc backoff requested by non-active worker");
-        active.stop_token.stop().await?;
+        if let Some(active) = self.active_docs.remove(&doc_id) {
+            active.stop_token.stop().await?;
+        }
         let now = std::time::Instant::now();
         let delay = delay.min(Duration::from_secs(600));
         let backoff = next_backoff_delay(previous_backoff, delay);

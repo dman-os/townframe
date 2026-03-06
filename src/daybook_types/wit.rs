@@ -6,6 +6,11 @@ pub mod doc {
     pub use root_doc::{Blob, DocId, FacetKey, MimeType, Multihash, Note, UserPath};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct UserMeta {
+        pub user_path: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Pending {
         pub key: String,
     }
@@ -34,6 +39,7 @@ pub mod doc {
         pub created_at: Datetime,
         #[serde_as(as = "Vec<Datetime>")]
         pub updated_at: Vec<Datetime>,
+        pub users: Vec<(String, UserMeta)>,
         pub facet_uuids: Vec<(String, String)>,
         pub facets: Vec<(String, FacetMeta)>,
     }
@@ -284,6 +290,18 @@ pub mod doc {
                     id: dmeta.id,
                     created_at: dmeta.created_at.into(),
                     updated_at: dmeta.updated_at.into_iter().map(Into::into).collect(),
+                    users: dmeta
+                        .users
+                        .into_iter()
+                        .map(|(actor_id, user_meta)| {
+                            (
+                                actor_id,
+                                UserMeta {
+                                    user_path: user_meta.user_path.to_string_lossy().to_string(),
+                                },
+                            )
+                        })
+                        .collect(),
                     facet_uuids: dmeta
                         .facet_uuids
                         .into_iter()
@@ -408,6 +426,18 @@ pub mod doc {
                     id: dmeta.id,
                     created_at: dmeta.created_at.into(),
                     updated_at: dmeta.updated_at.into_iter().map(Into::into).collect(),
+                    users: dmeta
+                        .users
+                        .into_iter()
+                        .map(|(actor_id, user_meta)| {
+                            (
+                                actor_id,
+                                root_doc::UserMeta {
+                                    user_path: root_doc::UserPath::from(user_meta.user_path),
+                                },
+                            )
+                        })
+                        .collect(),
                     facet_uuids: dmeta
                         .facet_uuids
                         .into_iter()

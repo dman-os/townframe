@@ -953,6 +953,22 @@ impl PlugsRepo {
         Ok(events)
     }
 
+    pub async fn events_for_init(&self) -> Res<Vec<PlugsEvent>> {
+        let heads = self.get_plugs_heads();
+        let plug_ids = self
+            .store
+            .query_sync(|store| store.manifests.keys().cloned().collect::<Vec<_>>())
+            .await;
+        let mut events = Vec::with_capacity(plug_ids.len());
+        for id in plug_ids {
+            events.push(PlugsEvent::PlugAdded {
+                id,
+                heads: heads.clone(),
+            });
+        }
+        Ok(events)
+    }
+
     async fn events_for_patch(
         &self,
         patch: &automerge::Patch,

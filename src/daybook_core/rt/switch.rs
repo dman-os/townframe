@@ -140,25 +140,6 @@ pub async fn spawn_switch_worker(
         .dispatch_repo
         .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
 
-    // Catch up on missed events
-    let (initial_drawer_heads, initial_dispatch_heads, initial_plug_heads, initial_config_heads) =
-        store
-            .query_sync(|store| {
-                (
-                    store.drawer_heads.clone(),
-                    store.dispatch_heads.clone(),
-                    store.plug_heads.clone(),
-                    store.config_heads.clone(),
-                )
-            })
-            .await;
-
-    let empty_heads = ChangeHashSet(vec![].into());
-    let drawer_heads_now = rt.drawer.get_drawer_heads();
-    let dispatch_heads_now = rt.dispatch_repo.get_dispatch_heads();
-    let plug_heads_now = rt.plugs_repo.get_plugs_heads();
-    let config_heads_now = ChangeHashSet(rt.config_repo.get_config_heads().await?);
-
     let mut worker = SwitchWorker {
         store,
         rt,
@@ -167,14 +148,7 @@ pub async fn spawn_switch_worker(
         predicate_resolved: HashMap::new(),
     };
 
-    let events = worker
-        .rt
-        .plugs_repo
-        .diff_events(
-            initial_plug_heads.unwrap_or_else(|| empty_heads.clone()),
-            Some(plug_heads_now),
-        )
-        .await?;
+    let events = worker.rt.plugs_repo.events_for_init().await?;
     for event in events {
         let event = Arc::new(event);
         worker
@@ -187,14 +161,7 @@ pub async fn spawn_switch_worker(
             .unwrap_or_log();
     }
 
-    let events = worker
-        .rt
-        .drawer
-        .diff_events(
-            initial_drawer_heads.unwrap_or_else(|| empty_heads.clone()),
-            Some(drawer_heads_now),
-        )
-        .await?;
+    let events = worker.rt.drawer.events_for_init().await?;
     for event in events {
         let event = Arc::new(event);
         worker
@@ -207,14 +174,7 @@ pub async fn spawn_switch_worker(
             .unwrap_or_log();
     }
 
-    let events = worker
-        .rt
-        .dispatch_repo
-        .diff_events(
-            initial_dispatch_heads.unwrap_or_else(|| empty_heads.clone()),
-            Some(dispatch_heads_now),
-        )
-        .await?;
+    let events = worker.rt.dispatch_repo.events_for_init().await?;
     for event in events {
         let event = Arc::new(event);
         worker
@@ -227,14 +187,7 @@ pub async fn spawn_switch_worker(
             .unwrap_or_log();
     }
 
-    let events = worker
-        .rt
-        .config_repo
-        .diff_events(
-            initial_config_heads.unwrap_or(empty_heads),
-            Some(config_heads_now),
-        )
-        .await?;
+    let events = worker.rt.config_repo.events_for_init().await?;
     for event in events {
         let event = Arc::new(event);
         worker
