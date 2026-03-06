@@ -5,7 +5,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::drawer::DrawerRepo;
+use crate::index::DocBlobsIndexRepo;
 use crate::repo::RepoCtx;
+use crate::blobs::BlobsRepo;
 
 mod bootstrap;
 mod full;
@@ -61,6 +63,15 @@ pub enum IrohSyncEvent {
         endpoint_id: EndpointId,
         doc_id: DocumentId,
     },
+    BlobSynced {
+        hash: String,
+        endpoint_id: Option<EndpointId>,
+    },
+    BlobSyncBackoff {
+        hash: String,
+        delay: Duration,
+        attempt_no: usize,
+    },
     StalePeer {
         endpoint_id: EndpointId,
     },
@@ -88,12 +99,14 @@ impl IrohSyncRepo {
         rcx: Arc<RepoCtx>,
         drawer_repo: Arc<DrawerRepo>,
         config_repo: Arc<crate::config::ConfigRepo>,
+        blobs_repo: Arc<BlobsRepo>,
+        doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     ) -> Res<(Arc<Self>, IrohSyncRepoStopToken)> {
         let endpoint = iroh::Endpoint::builder()
             .secret_key(rcx.iroh_secret_key.clone())
             .bind()
             .await?;
-        let blobs = (*iroh_blobs::store::mem::MemStore::new()).clone();
+        let blobs = blobs_repo.iroh_store();
         let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
         let docs = iroh_docs::protocol::Docs::memory()
             .spawn(endpoint.clone(), blobs.clone(), gossip.clone())
@@ -127,8 +140,15 @@ impl IrohSyncRepo {
             .await?;
 
         let (mut full_sync_handle, full_stop_token) =
-            full::start_full_sync_worker(Arc::clone(&rcx), drawer_repo, cancel_token.child_token())
-                .await?;
+            full::start_full_sync_worker(
+                Arc::clone(&rcx),
+                drawer_repo,
+                blobs_repo,
+                doc_blobs_index_repo,
+                endpoint.clone(),
+                cancel_token.child_token(),
+            )
+            .await?;
         let full_sync_rx = full_sync_handle.events_rx.take().expect("impossible");
 
         let repo = Arc::new(Self {
@@ -402,6 +422,19 @@ impl IrohSyncRepo {
                 endpoint_id,
                 doc_id,
             }]),
+            full::FullSyncEvent::BlobSynced { hash, endpoint_id } => {
+                self.registry
+                    .notify([IrohSyncEvent::BlobSynced { hash, endpoint_id }])
+            }
+            full::FullSyncEvent::BlobSyncBackoff {
+                hash,
+                delay,
+                attempt_no,
+            } => self.registry.notify([IrohSyncEvent::BlobSyncBackoff {
+                hash,
+                delay,
+                attempt_no,
+            }]),
             full::FullSyncEvent::StalePeer { endpoint_id } => self
                 .registry
                 .notify([IrohSyncEvent::StalePeer { endpoint_id }]),
@@ -510,6 +543,8 @@ mod tests {
 
     use crate::blobs::BlobsRepo;
     use crate::drawer::DrawerRepo;
+    use crate::index::DocBlobsIndexRepo;
+    use crate::local_state::SqliteLocalStateRepo;
     use crate::plugs::PlugsRepo;
     use crate::repo::{RepoCtx, RepoOpenOptions};
 
@@ -520,6 +555,8 @@ mod tests {
         _plugs_repo: Arc<PlugsRepo>,
         plugs_stop: crate::repos::RepoStopToken,
         config_stop: crate::repos::RepoStopToken,
+        doc_blobs_index_stop: crate::index::DocBlobsIndexStopToken,
+        sqlite_local_state_stop: crate::repos::RepoStopToken,
         sync_repo: Arc<IrohSyncRepo>,
         sync_stop: IrohSyncRepoStopToken,
     }
@@ -530,6 +567,8 @@ mod tests {
             self.drawer_stop.stop().await?;
             self.plugs_stop.stop().await?;
             self.config_stop.stop().await?;
+            self.doc_blobs_index_stop.stop().await?;
+            self.sqlite_local_state_stop.stop().await?;
             if let Some(stop) = self.ctx.acx_stop.lock().await.take() {
                 stop.stop().await?;
             }
@@ -767,10 +806,19 @@ mod tests {
             rtx.sql.db_pool.clone(),
         )
         .await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            SqliteLocalStateRepo::boot(rtx.layout.repo_root.join("local_state")).await?;
+        let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
+            Arc::clone(&drawer_repo),
+            Arc::clone(&sqlite_local_state_repo),
+        )
+        .await?;
         let (sync_repo, sync_stop) = IrohSyncRepo::boot(
             Arc::clone(&rtx),
             Arc::clone(&drawer_repo),
             Arc::clone(&config_repo),
+            Arc::clone(&blobs_repo),
+            Arc::clone(&doc_blobs_index_repo),
         )
         .await?;
 
@@ -781,6 +829,8 @@ mod tests {
             _plugs_repo: plugs_repo,
             plugs_stop,
             config_stop,
+            doc_blobs_index_stop,
+            sqlite_local_state_stop,
             sync_repo,
             sync_stop,
         })

@@ -20,6 +20,8 @@ use clap::*;
 use daybook_core::blobs::BlobsRepo;
 use daybook_core::config::ConfigRepo;
 use daybook_core::drawer::DrawerRepo;
+use daybook_core::index::DocBlobsIndexRepo;
+use daybook_core::local_state::SqliteLocalStateRepo;
 use daybook_core::plugs::{manifest, PlugsRepo};
 use daybook_core::progress::ProgressRepo;
 use daybook_core::repos::Repo;
@@ -126,7 +128,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     // configured repo is Initialized since `init`
     // initializes the repo
     let ctx = context::open_repo_ctx(&conf, false, None).await?;
-    let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone()).await?;
+    let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         ctx.acx.clone(),
         Arc::clone(&blobs_repo),
@@ -443,10 +445,19 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 ctx.sql.db_pool.clone(),
             )
             .await?;
+            let (sqlite_local_state_repo, sqlite_local_state_stop) =
+                SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
+            let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
+                Arc::clone(&drawer_repo),
+                Arc::clone(&sqlite_local_state_repo),
+            )
+            .await?;
             let (sync_repo, sync_stop) = IrohSyncRepo::boot(
                 Arc::clone(&ctx),
                 Arc::clone(&drawer_repo),
                 Arc::clone(&config_repo),
+                Arc::clone(&blobs_repo),
+                Arc::clone(&doc_blobs_index_repo),
             )
             .await?;
             let local_ticket_url = sync_repo.get_ticket_url().await?;
@@ -528,6 +539,16 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                                         } => {
                                             info!(?endpoint_id, ?doc_id, "doc synced with peer");
                                         }
+                                        IrohSyncEvent::BlobSynced { hash, endpoint_id } => {
+                                            info!(?endpoint_id, %hash, "blob synced");
+                                        }
+                                        IrohSyncEvent::BlobSyncBackoff {
+                                            hash,
+                                            delay,
+                                            attempt_no,
+                                        } => {
+                                            info!(%hash, ?delay, ?attempt_no, "blob sync backoff");
+                                        }
                                         IrohSyncEvent::StalePeer { endpoint_id } => {
                                             warn!(?endpoint_id, "stale sync peer");
                                         }
@@ -544,6 +565,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             }
 
             sync_stop.stop().await?;
+            doc_blobs_index_stop.stop().await?;
+            sqlite_local_state_stop.stop().await?;
             config_stop.stop().await?;
         }
         StaticCommands::Devices { command } => {
@@ -686,7 +709,7 @@ async fn clone_repo_from_url(
         .await?,
     );
 
-    let blobs_repo = BlobsRepo::new(rcx.layout.blobs_root.clone()).await?;
+    let blobs_repo = BlobsRepo::new(rcx.layout.blobs_root.clone(), rcx.local_user_path.clone()).await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         rcx.acx.clone(),
@@ -718,11 +741,20 @@ async fn clone_repo_from_url(
         rcx.sql.db_pool.clone(),
     )
     .await?;
+    let (sqlite_local_state_repo, sqlite_local_state_stop) =
+        SqliteLocalStateRepo::boot(rcx.layout.repo_root.join("local_state")).await?;
+    let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
+        Arc::clone(&drawer_repo),
+        Arc::clone(&sqlite_local_state_repo),
+    )
+    .await?;
 
     let (sync_repo, sync_stop) = IrohSyncRepo::boot(
         Arc::clone(&rcx),
         Arc::clone(&drawer_repo),
         Arc::clone(&config_repo),
+        Arc::clone(&blobs_repo),
+        Arc::clone(&doc_blobs_index_repo),
     )
     .await?;
 
@@ -736,6 +768,8 @@ async fn clone_repo_from_url(
     info!("full sync done");
 
     sync_stop.stop().await?;
+    doc_blobs_index_stop.stop().await?;
+    sqlite_local_state_stop.stop().await?;
     config_stop.stop().await?;
     drawer_stop.stop().await?;
     plugs_stop.stop().await?;
@@ -769,7 +803,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     }
 
     let ctx = context::open_repo_ctx(&conf, false, None).await?;
-    let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone()).await?;
+    let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         ctx.acx.clone(),
         Arc::clone(&blobs_repo),

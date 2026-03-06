@@ -181,6 +181,40 @@ impl BlobsRepo {
         }
     }
 
+    pub fn iroh_store(&self) -> iroh_blobs::api::Store {
+        self.iroh_store.clone()
+    }
+
+    pub async fn has_hash(&self, hash: &str) -> Res<bool> {
+        Ok(self.get_path(hash).await.is_ok())
+    }
+
+    pub async fn put_from_store(&self, hash: &str) -> Res<String> {
+        let object_paths = self.object_paths(hash)?;
+        tokio::fs::create_dir_all(&object_paths.dir).await?;
+
+        if !tokio::fs::try_exists(&object_paths.blob).await? {
+            let iroh_hash = daybook_hash_to_iroh_hash(hash)?;
+            self.iroh_store
+                .blobs()
+                .export(iroh_hash, &object_paths.blob)
+                .await
+                .map_err(|err| eyre::eyre!("error exporting blob from iroh store: {err:?}"))?;
+        }
+
+        let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
+        let meta = self.build_meta(
+            hash.to_string(),
+            BlobMode::OwnedCopy,
+            blob_meta.len(),
+            None,
+            true,
+        );
+        self.write_meta(&object_paths.meta, &meta).await?;
+
+        Ok(hash.to_string())
+    }
+
     fn object_paths(&self, hash: &str) -> Res<ObjectPaths> {
         if hash.len() < 4 {
             eyre::bail!("invalid blob hash: {hash}");
@@ -308,6 +342,16 @@ impl BlobsRepo {
         dir_file.sync_all().await?;
         Ok(())
     }
+}
+
+pub(crate) fn daybook_hash_to_iroh_hash(hash: &str) -> Res<iroh_blobs::Hash> {
+    let decoded = utils_rs::hash::decode_base32_multibase(hash)?;
+    if decoded.len() < 34 {
+        eyre::bail!("invalid daybook blob hash bytes");
+    }
+    let digest = &decoded[decoded.len() - 32..];
+    let digest: [u8; 32] = digest.try_into().expect("length checked");
+    Ok(iroh_blobs::Hash::from_bytes(digest))
 }
 
 #[cfg(test)]
@@ -479,6 +523,28 @@ mod tests {
             .await
             .map_err(|err| eyre::eyre!("iroh has check failed: {err:?}"))?;
         assert!(has_c, "iroh should contain bytes from put_path_reference");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_from_store_materializes_owned_blob() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let data = b"materialize-from-store";
+        let hash = utils_rs::hash::blake3_hash_bytes(data);
+
+        repo.iroh_store
+            .blobs()
+            .add_bytes(data.to_vec())
+            .await
+            .map_err(|err| eyre::eyre!("iroh add bytes failed: {err:?}"))?;
+
+        assert!(repo.get_path(&hash).await.is_err());
+
+        repo.put_from_store(&hash).await?;
+        let path = repo.get_path(&hash).await?;
+        let got = tokio::fs::read(path).await?;
+        assert_eq!(got, data);
 
         Ok(())
     }
