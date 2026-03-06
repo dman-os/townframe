@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::blobs::BlobsRepo;
 use crate::drawer::DrawerRepo;
 use crate::index::DocBlobsIndexRepo;
+use crate::progress::ProgressRepo;
 use crate::repo::RepoCtx;
 
 mod bootstrap;
@@ -28,6 +29,10 @@ pub struct IrohSyncRepo {
     router: iroh::protocol::Router,
 
     config_repo: Arc<crate::config::ConfigRepo>,
+    drawer_repo: Arc<DrawerRepo>,
+    blobs_repo: Arc<BlobsRepo>,
+    doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
+    progress_repo: Option<Arc<ProgressRepo>>,
 
     iroh_docs: iroh_docs::api::DocsApi,
     iroh_blobs: iroh_blobs::api::Store,
@@ -67,6 +72,17 @@ pub enum IrohSyncEvent {
         hash: String,
         endpoint_id: Option<EndpointId>,
     },
+    BlobDownloadStarted {
+        endpoint_id: EndpointId,
+        partition: String,
+        hash: String,
+    },
+    BlobDownloadFinished {
+        endpoint_id: EndpointId,
+        partition: String,
+        hash: String,
+        success: bool,
+    },
     BlobSyncBackoff {
         hash: String,
         delay: Duration,
@@ -95,12 +111,51 @@ impl IrohSyncRepoStopToken {
 }
 
 impl IrohSyncRepo {
+    async fn collect_expected_blob_hashes_from_drawer(&self) -> Res<HashSet<String>> {
+        use daybook_types::doc::{FacetKey, WellKnownFacet, WellKnownFacetTag};
+
+        let blob_facet_key = FacetKey::from(WellKnownFacetTag::Blob);
+        let mut expected = HashSet::new();
+        for item in self.drawer_repo.list().await? {
+            let Some(main_heads) = item.branches.get("main") else {
+                continue;
+            };
+            let Some(doc) = self
+                .drawer_repo
+                .get_doc_with_facets_at_heads(
+                    &item.doc_id,
+                    main_heads,
+                    Some(vec![blob_facet_key.clone()]),
+                )
+                .await?
+            else {
+                continue;
+            };
+            for facet_raw in doc.facets.values() {
+                let facet = WellKnownFacet::from_json(facet_raw.clone(), WellKnownFacetTag::Blob)?;
+                let WellKnownFacet::Blob(blob) = facet else {
+                    continue;
+                };
+                let Some(urls) = blob.urls else {
+                    continue;
+                };
+                for url in urls {
+                    if let Some(hash) = parse_db_blob_hash(&url) {
+                        expected.insert(hash);
+                    }
+                }
+            }
+        }
+        Ok(expected)
+    }
+
     pub async fn boot(
         rcx: Arc<RepoCtx>,
         drawer_repo: Arc<DrawerRepo>,
         config_repo: Arc<crate::config::ConfigRepo>,
         blobs_repo: Arc<BlobsRepo>,
         doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
+        progress_repo: Option<Arc<ProgressRepo>>,
     ) -> Res<(Arc<Self>, IrohSyncRepoStopToken)> {
         let endpoint = iroh::Endpoint::builder()
             .secret_key(rcx.iroh_secret_key.clone())
@@ -141,9 +196,10 @@ impl IrohSyncRepo {
 
         let (mut full_sync_handle, full_stop_token) = full::start_full_sync_worker(
             Arc::clone(&rcx),
-            drawer_repo,
-            blobs_repo,
-            doc_blobs_index_repo,
+            Arc::clone(&drawer_repo),
+            Arc::clone(&blobs_repo),
+            Arc::clone(&doc_blobs_index_repo),
+            progress_repo.clone(),
             endpoint.clone(),
             cancel_token.child_token(),
         )
@@ -154,6 +210,10 @@ impl IrohSyncRepo {
             rcx,
             router: router.clone(),
             config_repo,
+            drawer_repo,
+            blobs_repo,
+            doc_blobs_index_repo,
+            progress_repo,
             iroh_docs: docs.api().clone(),
             iroh_blobs: blobs,
             cancel_token: cancel_token.clone(),
@@ -424,6 +484,26 @@ impl IrohSyncRepo {
             full::FullSyncEvent::BlobSynced { hash, endpoint_id } => self
                 .registry
                 .notify([IrohSyncEvent::BlobSynced { hash, endpoint_id }]),
+            full::FullSyncEvent::BlobDownloadStarted {
+                endpoint_id,
+                partition,
+                hash,
+            } => self.registry.notify([IrohSyncEvent::BlobDownloadStarted {
+                endpoint_id,
+                partition: partition.as_tag_value().to_string(),
+                hash,
+            }]),
+            full::FullSyncEvent::BlobDownloadFinished {
+                endpoint_id,
+                partition,
+                hash,
+                success,
+            } => self.registry.notify([IrohSyncEvent::BlobDownloadFinished {
+                endpoint_id,
+                partition: partition.as_tag_value().to_string(),
+                hash,
+                success,
+            }]),
             full::FullSyncEvent::BlobSyncBackoff {
                 hash,
                 delay,
@@ -479,30 +559,124 @@ impl IrohSyncRepo {
         endpoint_ids: &[EndpointId],
         timeout: Duration,
     ) -> Res<()> {
+        use crate::repos::Repo;
+
         self.ensure_repo_live()?;
-        let mut remaining: HashSet<EndpointId> = endpoint_ids.iter().cloned().collect();
-        if remaining.is_empty() {
+        if self.progress_repo.is_none() {
+            eyre::bail!("wait_for_full_sync requires a progress-enabled IrohSyncRepo");
+        }
+        let target_peers: HashSet<EndpointId> = endpoint_ids.iter().cloned().collect();
+        let mut remaining = target_peers.clone();
+        if target_peers.is_empty() {
             return Ok(());
         }
         let listener = self
             .registry
             .subscribe::<IrohSyncEvent>(crate::repos::SubscribeOpts { capacity: 1024 });
+        let doc_blobs_listener = self
+            .doc_blobs_index_repo
+            .subscribe(crate::repos::SubscribeOpts { capacity: 1024 });
         tokio::time::timeout(timeout, async {
-            while !remaining.is_empty() {
-                let event = listener.recv_async().await.map_err(|err| match err {
-                    crate::repos::RecvError::Closed => eyre::eyre!("sync listener closed"),
-                    crate::repos::RecvError::Dropped { dropped_count } => {
-                        eyre::eyre!("sync listener dropped events: dropped_count={dropped_count}")
+            let mut tick = tokio::time::interval(Duration::from_millis(100));
+            let listener = listener;
+            let doc_blobs_listener = doc_blobs_listener;
+            let mut active_downloads: HashSet<(EndpointId, String, String)> = HashSet::new();
+            let mut quiet_since: Option<std::time::Instant> = None;
+            loop {
+                let targeted_active = active_downloads
+                    .iter()
+                    .filter(|(peer_id, _, _)| target_peers.contains(peer_id))
+                    .count();
+                if remaining.is_empty() && targeted_active == 0 {
+                    let mut missing_blob = false;
+                    let expected_hashes = self.collect_expected_blob_hashes_from_drawer().await?;
+                    for hash in expected_hashes {
+                        if !self.blobs_repo.has_hash(&hash).await? {
+                            missing_blob = true;
+                            break;
+                        }
                     }
-                })?;
-                if let IrohSyncEvent::PeerFullySynced { endpoint_id, .. } = event.as_ref() {
-                    remaining.remove(endpoint_id);
+                    if missing_blob {
+                        quiet_since = None;
+                        continue;
+                    }
+                    let now = std::time::Instant::now();
+                    match quiet_since {
+                        None => quiet_since = Some(now),
+                        Some(since) if now.duration_since(since) >= Duration::from_millis(3000) => {
+                            break;
+                        }
+                        Some(_) => {}
+                    }
+                } else {
+                    quiet_since = None;
+                }
+                tokio::select! {
+                    val = listener.recv_async() => {
+                        let event = val.map_err(|err| match err {
+                            crate::repos::RecvError::Closed => eyre::eyre!("sync listener closed"),
+                            crate::repos::RecvError::Dropped { dropped_count } => {
+                                eyre::eyre!("sync listener dropped events: dropped_count={dropped_count}")
+                            }
+                        })?;
+                        match event.as_ref() {
+                            IrohSyncEvent::PeerFullySynced { endpoint_id, .. } => {
+                                remaining.remove(endpoint_id);
+                            }
+                            IrohSyncEvent::StalePeer { endpoint_id } => {
+                                if target_peers.contains(endpoint_id) {
+                                    remaining.insert(*endpoint_id);
+                                    quiet_since = None;
+                                }
+                            }
+                            IrohSyncEvent::BlobDownloadStarted {
+                                endpoint_id,
+                                partition,
+                                hash,
+                                ..
+                            } => {
+                                if target_peers.contains(endpoint_id) {
+                                    active_downloads
+                                        .insert((*endpoint_id, partition.clone(), hash.clone()));
+                                    quiet_since = None;
+                                }
+                            }
+                            IrohSyncEvent::BlobDownloadFinished {
+                                endpoint_id,
+                                partition,
+                                hash,
+                                ..
+                            } => {
+                                active_downloads
+                                    .remove(&(*endpoint_id, partition.clone(), hash.clone()));
+                            }
+                            _ => {}
+                        }
+                    }
+                    val = doc_blobs_listener.recv_async() => {
+                        match val {
+                            Ok(_) => {
+                                quiet_since = None;
+                            }
+                            Err(crate::repos::RecvError::Closed) => {
+                                eyre::bail!("doc blobs index listener closed");
+                            }
+                            Err(crate::repos::RecvError::Dropped { dropped_count }) => {
+                                eyre::bail!("doc blobs index listener dropped events: dropped_count={dropped_count}");
+                            }
+                        }
+                    }
+                    _ = tick.tick() => {}
                 }
             }
             eyre::Ok(())
         })
         .await
-        .map_err(|_| eyre::eyre!("timed out waiting for full sync: remaining={remaining:?}"))??;
+        .map_err(|_| {
+            eyre::eyre!(
+                "timed out waiting for full sync: remaining={remaining:?}"
+            )
+        })??;
         Ok(())
     }
 
@@ -522,6 +696,21 @@ impl crate::repos::Repo for IrohSyncRepo {
     fn cancel_token(&self) -> &CancellationToken {
         &self.cancel_token
     }
+}
+
+fn parse_db_blob_hash(raw_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw_url).ok()?;
+    if parsed.scheme() != crate::blobs::BLOB_SCHEME {
+        return None;
+    }
+    if parsed.host_str().is_some() {
+        return None;
+    }
+    let hash = parsed.path().trim_start_matches('/');
+    if hash.is_empty() {
+        return None;
+    }
+    Some(hash.to_string())
 }
 
 // fn parse_endpoint_id_base58(raw: &str) -> Res<iroh::EndpointId> {
@@ -544,10 +733,16 @@ mod tests {
     use crate::index::DocBlobsIndexRepo;
     use crate::local_state::SqliteLocalStateRepo;
     use crate::plugs::PlugsRepo;
+    use crate::progress::ProgressRepo;
     use crate::repo::{RepoCtx, RepoOpenOptions};
+    use crate::repos::{Repo, SubscribeOpts};
+    use daybook_types::doc::{AddDocArgs, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag};
+    use tokio::task::JoinHandle;
+    use tokio_util::sync::CancellationToken;
 
     struct SyncTestNode {
         ctx: Arc<RepoCtx>,
+        blobs_repo: Arc<BlobsRepo>,
         drawer: Arc<DrawerRepo>,
         drawer_stop: crate::repos::RepoStopToken,
         _plugs_repo: Arc<PlugsRepo>,
@@ -555,13 +750,19 @@ mod tests {
         config_stop: crate::repos::RepoStopToken,
         doc_blobs_index_stop: crate::index::DocBlobsIndexStopToken,
         sqlite_local_state_stop: crate::repos::RepoStopToken,
+        doc_blobs_bridge_cancel: CancellationToken,
+        doc_blobs_bridge_handle: Option<JoinHandle<()>>,
         sync_repo: Arc<IrohSyncRepo>,
         sync_stop: IrohSyncRepoStopToken,
     }
 
     impl SyncTestNode {
-        async fn stop(self) -> Res<()> {
+        async fn stop(mut self) -> Res<()> {
             self.sync_stop.stop().await?;
+            self.doc_blobs_bridge_cancel.cancel();
+            if let Some(handle) = self.doc_blobs_bridge_handle.take() {
+                utils_rs::wait_on_handle_with_timeout(handle, Duration::from_secs(2)).await?;
+            }
             self.drawer_stop.stop().await?;
             self.plugs_stop.stop().await?;
             self.config_stop.stop().await?;
@@ -578,42 +779,19 @@ mod tests {
     async fn iroh_sync_between_copied_repos() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+        info!("test=iroh_sync_between_copied_repos stage=setup");
 
         let temp_root = tempfile::tempdir()?;
         let repo_a_path = temp_root.path().join("repo-a");
         let repo_b_path = temp_root.path().join("repo-b");
-        tokio::fs::create_dir_all(&repo_a_path).await?;
+        info!("test=iroh_sync_between_copied_repos stage=init_copy_repos");
+        init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-        let rtx = RepoCtx::init(
-            &repo_a_path,
-            RepoOpenOptions {
-                ws_connector_url: None,
-            },
-            "test-device".into(),
-        )
-        .await?;
-        if let Some(stop) = rtx.acx_stop.lock().await.take() {
-            stop.stop().await?;
-        }
-        drop(rtx);
-
-        copy_dir_all(&repo_a_path, &repo_b_path)?;
-        let repo_b_sql = crate::app::SqlCtx::new(&format!(
-            "sqlite://{}",
-            repo_b_path.join("sqlite.db").display()
-        ))
-        .await?;
-        let repo_id = crate::app::globals::get_or_init_repo_id(&repo_b_sql.db_pool).await?;
-        crate::secrets::force_set_fallback_secret_for_tests(
-            &repo_b_sql.db_pool,
-            &repo_id,
-            &iroh::SecretKey::generate(&mut rand::rng()),
-        )
-        .await?;
-
+        info!("test=iroh_sync_between_copied_repos stage=open_nodes");
         let node_a = open_sync_node(&repo_a_path).await?;
         let node_b = open_sync_node(&repo_b_path).await?;
 
+        info!("test=iroh_sync_between_copied_repos stage=create_docs count=3");
         let mut created_doc_ids = Vec::new();
         for _ in 0..3 {
             let new_doc_id = node_a
@@ -629,9 +807,11 @@ mod tests {
             created_doc_ids.push(new_doc_id);
         }
 
+        info!("test=iroh_sync_between_copied_repos stage=start_bootstrap");
         let sync_url = node_a.sync_repo.get_ticket_url().await?;
         let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
 
+        info!("test=iroh_sync_between_copied_repos stage=wait_full_sync");
         node_b
             .sync_repo
             .wait_for_full_sync(
@@ -639,10 +819,12 @@ mod tests {
                 Duration::from_secs(20),
             )
             .await?;
+        info!("test=iroh_sync_between_copied_repos stage=verify_doc_presence");
         for doc_id in &created_doc_ids {
             wait_for_doc_presence(&node_b.drawer, doc_id, Duration::from_secs(10)).await?;
         }
 
+        info!("test=iroh_sync_between_copied_repos stage=verify_parity");
         wait_for_doc_set_parity(&node_a.drawer, &node_b.drawer, Duration::from_secs(20)).await?;
 
         let ids_a = list_doc_ids(&node_a.drawer).await?;
@@ -652,6 +834,7 @@ mod tests {
             "replica doc sets are not equal after full sync"
         );
 
+        info!("test=iroh_sync_between_copied_repos stage=shutdown");
         node_b.stop().await?;
         node_a.stop().await?;
         Ok(())
@@ -661,44 +844,22 @@ mod tests {
     async fn iroh_live_sync_bidirectional_after_clone() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+        info!("test=iroh_live_sync_bidirectional_after_clone stage=setup");
 
         let temp_root = tempfile::tempdir()?;
         let repo_a_path = temp_root.path().join("repo-a");
         let repo_b_path = temp_root.path().join("repo-b");
-        tokio::fs::create_dir_all(&repo_a_path).await?;
+        info!("test=iroh_live_sync_bidirectional_after_clone stage=init_copy_repos");
+        init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-        let rtx = RepoCtx::init(
-            &repo_a_path,
-            RepoOpenOptions {
-                ws_connector_url: None,
-            },
-            "test-device".into(),
-        )
-        .await?;
-        if let Some(stop) = rtx.acx_stop.lock().await.take() {
-            stop.stop().await?;
-        }
-        drop(rtx);
-
-        copy_dir_all(&repo_a_path, &repo_b_path)?;
-        let repo_b_sql = crate::app::SqlCtx::new(&format!(
-            "sqlite://{}",
-            repo_b_path.join("sqlite.db").display()
-        ))
-        .await?;
-        let repo_id = crate::app::globals::get_or_init_repo_id(&repo_b_sql.db_pool).await?;
-        crate::secrets::force_set_fallback_secret_for_tests(
-            &repo_b_sql.db_pool,
-            &repo_id,
-            &iroh::SecretKey::generate(&mut rand::rng()),
-        )
-        .await?;
-
+        info!("test=iroh_live_sync_bidirectional_after_clone stage=open_nodes");
         let node_a = open_sync_node(&repo_a_path).await?;
         let node_b = open_sync_node(&repo_b_path).await?;
 
+        info!("test=iroh_live_sync_bidirectional_after_clone stage=start_bootstrap");
         let sync_url = node_a.sync_repo.get_ticket_url().await?;
         let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
+        info!("test=iroh_live_sync_bidirectional_after_clone stage=wait_full_sync");
         node_b
             .sync_repo
             .wait_for_full_sync(
@@ -707,6 +868,7 @@ mod tests {
             )
             .await?;
 
+        info!("test=iroh_live_sync_bidirectional_after_clone stage=create_doc_on_a");
         let doc_on_a = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
@@ -719,6 +881,7 @@ mod tests {
             .await?;
         wait_for_doc_presence(&node_b.drawer, &doc_on_a, Duration::from_secs(15)).await?;
 
+        info!("test=iroh_live_sync_bidirectional_after_clone stage=create_doc_on_b");
         let doc_on_b = node_b
             .drawer
             .add(daybook_types::doc::AddDocArgs {
@@ -731,12 +894,154 @@ mod tests {
             .await?;
         wait_for_doc_presence(&node_a.drawer, &doc_on_b, Duration::from_secs(15)).await?;
 
+        info!("test=iroh_live_sync_bidirectional_after_clone stage=verify_parity");
         wait_for_doc_set_parity(&node_a.drawer, &node_b.drawer, Duration::from_secs(20)).await?;
 
         let ids_a = list_doc_ids(&node_a.drawer).await?;
         let ids_b = list_doc_ids(&node_b.drawer).await?;
         assert_eq!(ids_a, ids_b, "live sync did not converge to equal doc sets");
 
+        info!("test=iroh_live_sync_bidirectional_after_clone stage=shutdown");
+        node_b.stop().await?;
+        node_a.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+        info!("test=iroh_clone_sync_batch_100_docs_with_blobs stage=setup");
+
+        let temp_root = tempfile::tempdir()?;
+        let repo_a_path = temp_root.path().join("repo-a");
+        let repo_b_path = temp_root.path().join("repo-b");
+        info!("test=iroh_clone_sync_batch_100_docs_with_blobs stage=init_copy_repos");
+        init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
+
+        info!("test=iroh_clone_sync_batch_100_docs_with_blobs stage=open_nodes");
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let node_b = open_sync_node(&repo_b_path).await?;
+
+        let mut args_batch = Vec::new();
+        info!("test=iroh_clone_sync_batch_100_docs_with_blobs stage=create_docs count=100");
+        for idx in 0..100usize {
+            let payload = format!("blob-payload-{idx:03}").into_bytes();
+            let hash = node_a.blobs_repo.put(&payload).await?;
+            args_batch.push(AddDocArgs {
+                branch_path: daybook_types::doc::BranchPath::from("main"),
+                facets: [(
+                    FacetKey::from(WellKnownFacetTag::Blob),
+                    FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
+                        mime: "application/octet-stream".to_string(),
+                        length_octets: payload.len() as u64,
+                        digest: hash.clone(),
+                        inline: None,
+                        urls: Some(vec![format!("db+blob:///{hash}")]),
+                    })),
+                )]
+                .into(),
+                user_path: Some(daybook_types::doc::UserPath::from(
+                    node_a.ctx.local_user_path.clone(),
+                )),
+            });
+        }
+        let created = node_a.drawer.batch_add(args_batch).await?;
+        assert_eq!(created.len(), 100);
+        info!("test=iroh_clone_sync_batch_100_docs_with_blobs stage=docs_created count=100");
+
+        info!("test=iroh_clone_sync_batch_100_docs_with_blobs stage=start_bootstrap");
+        let sync_url = node_a.sync_repo.get_ticket_url().await?;
+        let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
+        info!("test=iroh_clone_sync_batch_100_docs_with_blobs stage=wait_full_sync");
+        node_b
+            .sync_repo
+            .wait_for_full_sync(
+                std::slice::from_ref(&bootstrap.endpoint_id),
+                Duration::from_secs(120),
+            )
+            .await?;
+
+        info!("test=iroh_clone_sync_batch_100_docs_with_blobs stage=verify_parity");
+        wait_for_doc_set_parity(&node_a.drawer, &node_b.drawer, Duration::from_secs(120)).await?;
+        let ids_a = list_doc_ids(&node_a.drawer).await?;
+        let ids_b = list_doc_ids(&node_b.drawer).await?;
+        assert_eq!(
+            ids_a, ids_b,
+            "doc sets are not equal after 100-doc clone sync"
+        );
+
+        info!("test=iroh_clone_sync_batch_100_docs_with_blobs stage=shutdown");
+        node_b.stop().await?;
+        node_a.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn iroh_blob_sync_validates_bytes() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+        info!("test=iroh_blob_sync_validates_bytes stage=setup");
+
+        let temp_root = tempfile::tempdir()?;
+        let repo_a_path = temp_root.path().join("repo-a");
+        let repo_b_path = temp_root.path().join("repo-b");
+        info!("test=iroh_blob_sync_validates_bytes stage=init_copy_repos");
+        init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
+
+        info!("test=iroh_blob_sync_validates_bytes stage=open_nodes");
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let node_b = open_sync_node(&repo_b_path).await?;
+
+        info!("test=iroh_blob_sync_validates_bytes stage=create_docs_with_blobs count=8");
+        let mut blob_payloads = Vec::new();
+        let mut args_batch = Vec::new();
+        for idx in 0..8usize {
+            let payload = format!("blob-bytes-validation-{idx:03}").into_bytes();
+            let hash = node_a.blobs_repo.put(&payload).await?;
+            blob_payloads.push((hash.clone(), payload));
+            args_batch.push(AddDocArgs {
+                branch_path: daybook_types::doc::BranchPath::from("main"),
+                facets: [(
+                    FacetKey::from(WellKnownFacetTag::Blob),
+                    FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
+                        mime: "application/octet-stream".to_string(),
+                        length_octets: blob_payloads.last().expect("just pushed").1.len() as u64,
+                        digest: hash.clone(),
+                        inline: None,
+                        urls: Some(vec![format!("db+blob:///{hash}")]),
+                    })),
+                )]
+                .into(),
+                user_path: Some(daybook_types::doc::UserPath::from(
+                    node_a.ctx.local_user_path.clone(),
+                )),
+            });
+        }
+        node_a.drawer.batch_add(args_batch).await?;
+
+        info!("test=iroh_blob_sync_validates_bytes stage=start_bootstrap");
+        let sync_url = node_a.sync_repo.get_ticket_url().await?;
+        let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
+        info!("test=iroh_blob_sync_validates_bytes stage=wait_full_sync");
+        node_b
+            .sync_repo
+            .wait_for_full_sync(
+                std::slice::from_ref(&bootstrap.endpoint_id),
+                Duration::from_secs(60),
+            )
+            .await?;
+
+        info!("test=iroh_blob_sync_validates_bytes stage=verify_blob_bytes count=8");
+        for (hash, expected) in &blob_payloads {
+            let got = tokio::fs::read(node_b.blobs_repo.get_path(hash).await?).await?;
+            assert_eq!(
+                got, *expected,
+                "blob content mismatch after sync for hash={hash}"
+            );
+        }
+
+        info!("test=iroh_blob_sync_validates_bytes stage=shutdown");
         node_b.stop().await?;
         node_a.stop().await?;
         Ok(())
@@ -759,6 +1064,59 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn init_and_copy_repo_pair(
+        repo_a_path: &std::path::Path,
+        repo_b_path: &std::path::Path,
+    ) -> Res<()> {
+        info!(
+            "stage=init_and_copy_repo_pair repo_a={} repo_b={}",
+            repo_a_path.display(),
+            repo_b_path.display()
+        );
+        tokio::fs::create_dir_all(repo_a_path).await?;
+        let rtx = RepoCtx::init(
+            repo_a_path,
+            RepoOpenOptions {
+                ws_connector_url: None,
+            },
+            "test-device".into(),
+        )
+        .await?;
+        let source_repo_id = rtx.repo_id.clone();
+        info!("stage=init_and_copy_repo_pair source_repo_id={source_repo_id}");
+        if let Some(stop) = rtx.acx_stop.lock().await.take() {
+            stop.stop().await?;
+        }
+        drop(rtx);
+
+        copy_dir_all(repo_a_path, repo_b_path)?;
+        let repo_b_sql = crate::app::SqlCtx::new(&format!(
+            "sqlite://{}",
+            repo_b_path.join("sqlite.db").display()
+        ))
+        .await?;
+        crate::app::globals::set_repo_id(&repo_b_sql.db_pool, &source_repo_id).await?;
+        let repo_b_repo_id = crate::app::globals::get_repo_id(&repo_b_sql.db_pool)
+            .await?
+            .ok_or_eyre("repo_b repo_id missing after copy")?;
+        if repo_b_repo_id != source_repo_id {
+            eyre::bail!(
+                "copied repo_id mismatch (source={}, copied={})",
+                source_repo_id,
+                repo_b_repo_id
+            );
+        }
+        info!("stage=init_and_copy_repo_pair copied_repo_id_verified");
+        crate::secrets::force_set_fallback_secret_for_tests(
+            &repo_b_sql.db_pool,
+            &source_repo_id,
+            &iroh::SecretKey::generate(&mut rand::rng()),
+        )
+        .await?;
+        info!("stage=init_and_copy_repo_pair done");
         Ok(())
     }
 
@@ -811,17 +1169,24 @@ mod tests {
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
+        let (doc_blobs_bridge_cancel, doc_blobs_bridge_handle) =
+            spawn_doc_blobs_index_bridge_for_tests(
+                Arc::clone(&drawer_repo),
+                Arc::clone(&doc_blobs_index_repo),
+            );
         let (sync_repo, sync_stop) = IrohSyncRepo::boot(
             Arc::clone(&rtx),
             Arc::clone(&drawer_repo),
             Arc::clone(&config_repo),
             Arc::clone(&blobs_repo),
             Arc::clone(&doc_blobs_index_repo),
+            Some(ProgressRepo::boot(rtx.sql.db_pool.clone()).await?),
         )
         .await?;
 
         Ok(SyncTestNode {
             ctx: rtx,
+            blobs_repo,
             drawer: drawer_repo,
             drawer_stop,
             _plugs_repo: plugs_repo,
@@ -829,9 +1194,50 @@ mod tests {
             config_stop,
             doc_blobs_index_stop,
             sqlite_local_state_stop,
+            doc_blobs_bridge_cancel,
+            doc_blobs_bridge_handle: Some(doc_blobs_bridge_handle),
             sync_repo,
             sync_stop,
         })
+    }
+
+    fn spawn_doc_blobs_index_bridge_for_tests(
+        drawer_repo: Arc<DrawerRepo>,
+        doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
+    ) -> (CancellationToken, JoinHandle<()>) {
+        let drawer_listener = drawer_repo.subscribe(SubscribeOpts::new(1024));
+        let cancel = CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel_for_task.cancelled() => break,
+                    evt = drawer_listener.recv_lossy_async() => {
+                        let Ok(evt) = evt else {
+                            break;
+                        };
+                        match evt.as_ref() {
+                            crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
+                                doc_blobs_index_repo.enqueue_delete(id.clone()).unwrap_or_log();
+                            }
+                            crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
+                                if let Some(heads) = entry.branches.get("main") {
+                                    doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                                }
+                            }
+                            crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
+                                if let Some(heads) = entry.branches.get("main") {
+                                    doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                                }
+                            }
+                            crate::drawer::DrawerEvent::ListChanged { .. } => {}
+                        }
+                    }
+                }
+            }
+        });
+        (cancel, handle)
     }
 
     async fn list_doc_ids(drawer: &DrawerRepo) -> Res<HashSet<String>> {

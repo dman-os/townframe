@@ -70,6 +70,7 @@
 
 - [ ] Cleanup and show it to people
  
+- [ ] Use Arc<str> for progress.tags
 - [ ] Consider using lmdb or redb for the kvstore on wflow_tokio
 - [ ] Draft Buffer
 - [ ] /commands

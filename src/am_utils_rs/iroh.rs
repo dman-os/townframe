@@ -17,7 +17,7 @@ mod codec;
 impl AmCtx {
     pub const SYNC_ALPN: &[u8] = b"townframe/automerge-repo/1";
 
-    #[tracing::instrument(skip(self, endpoint))]
+    #[tracing::instrument(skip(self, endpoint, end_signal_tx))]
     pub async fn spawn_connection_iroh(
         &self,
         endpoint: &iroh::Endpoint,
@@ -97,7 +97,7 @@ pub struct IrohRepoProtocol {
 }
 
 impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
-    #[tracing::instrument]
+    #[tracing::instrument(skip(connection))]
     async fn accept(
         &self,
         connection: iroh::endpoint::Connection,

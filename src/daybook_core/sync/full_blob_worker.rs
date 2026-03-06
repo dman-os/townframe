@@ -18,6 +18,7 @@ pub fn spawn_blob_sync_worker(
     peers: Vec<EndpointId>,
     cancel_token: CancellationToken,
     msg_tx: mpsc::UnboundedSender<Msg>,
+    sync_progress_tx: mpsc::Sender<SyncProgressMsg>,
     blobs_repo: Arc<BlobsRepo>,
     endpoint: iroh::Endpoint,
     retry: RetryState,
@@ -28,11 +29,44 @@ pub fn spawn_blob_sync_worker(
         peers,
         cancel_token,
         msg_tx,
+        sync_progress_tx,
         blobs_repo,
         endpoint,
         retry,
     };
     let fut = async move {
+        worker
+            .send_progress(SyncProgressMsg::BlobWorkerStarted {
+                partition: PartitionKey::DocBlobsFullSync,
+                hash: worker.hash.clone(),
+            })
+            .await;
+
+        let iroh_hash = match crate::blobs::daybook_hash_to_iroh_hash(&worker.hash) {
+            Ok(hash) => hash,
+            Err(err) => {
+                tracing::warn!(?err, hash = %worker.hash, "invalid daybook blob hash");
+                worker
+                    .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                        partition: PartitionKey::DocBlobsFullSync,
+                        hash: worker.hash.clone(),
+                        success: false,
+                        reason: "invalid hash".to_string(),
+                    })
+                    .await;
+                worker.request_backoff(Duration::from_secs(5));
+                return;
+            }
+        };
+
+        let has_in_store = worker
+            .blobs_repo
+            .iroh_store()
+            .blobs()
+            .has(iroh_hash)
+            .await
+            .unwrap_or(false);
+
         if worker
             .blobs_repo
             .has_hash(&worker.hash)
@@ -40,36 +74,180 @@ pub fn spawn_blob_sync_worker(
             .unwrap_or(false)
         {
             worker.mark_synced(None);
+            worker
+                .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                    partition: PartitionKey::DocBlobsFullSync,
+                    hash: worker.hash.clone(),
+                    success: true,
+                    reason: "already present in blobs repo".to_string(),
+                })
+                .await;
             return;
         }
 
-        let iroh_hash = match crate::blobs::daybook_hash_to_iroh_hash(&worker.hash) {
-            Ok(hash) => hash,
-            Err(_) => {
-                worker.request_backoff(Duration::from_secs(5));
-                return;
+        if has_in_store {
+            worker
+                .send_progress(SyncProgressMsg::BlobMaterializeStarted {
+                    partition: PartitionKey::DocBlobsFullSync,
+                    hash: worker.hash.clone(),
+                })
+                .await;
+            match worker.blobs_repo.put_from_store(&worker.hash).await {
+                Ok(_) => {
+                    worker.mark_synced(None);
+                    worker
+                        .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                            partition: PartitionKey::DocBlobsFullSync,
+                            hash: worker.hash.clone(),
+                            success: true,
+                            reason: "materialized from local iroh store".to_string(),
+                        })
+                        .await;
+                }
+                Err(err) => {
+                    tracing::warn!(?err, hash = %worker.hash, "put_from_store failed from local iroh store");
+                    worker
+                        .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                            partition: PartitionKey::DocBlobsFullSync,
+                            hash: worker.hash.clone(),
+                            success: false,
+                            reason: "put_from_store failed".to_string(),
+                        })
+                        .await;
+                    worker.request_backoff(Duration::from_secs(2));
+                }
             }
-        };
-        let downloader = worker.blobs_repo.iroh_store().downloader(&worker.endpoint);
+            return;
+        }
 
-        for endpoint_id in worker.peers.clone() {
-            if worker.cancel_token.is_cancelled() {
-                return;
-            }
-            let res = tokio::select! {
-                _ = worker.cancel_token.cancelled() => return,
-                res = async { downloader.download(iroh_hash, vec![endpoint_id]).await } => res,
-            };
-            if res.is_err() {
-                continue;
-            }
-            if worker.blobs_repo.put_from_store(&worker.hash).await.is_ok() {
-                worker.mark_synced(Some(endpoint_id));
-                return;
+        if worker.peers.is_empty() {
+            worker
+                .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                    partition: PartitionKey::DocBlobsFullSync,
+                    hash: worker.hash.clone(),
+                    success: false,
+                    reason: "no peers available".to_string(),
+                })
+                .await;
+            worker.request_backoff(Duration::from_secs(2));
+            return;
+        }
+
+        let downloader = worker.blobs_repo.iroh_store().downloader(&worker.endpoint);
+        let progress = downloader.download(iroh_hash, worker.peers.clone());
+        let stream_res = progress.stream().await;
+        let Ok(mut stream) = stream_res else {
+            worker
+                .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                    partition: PartitionKey::DocBlobsFullSync,
+                    hash: worker.hash.clone(),
+                    success: false,
+                    reason: "failed to open download stream".to_string(),
+                })
+                .await;
+            worker.request_backoff(Duration::from_secs(2));
+            return;
+        };
+
+        let mut selected_endpoint: Option<EndpointId> = None;
+        let mut saw_download_signal = false;
+        use futures::StreamExt;
+        while let Some(item) = tokio::select! {
+            _ = worker.cancel_token.cancelled() => return,
+            item = stream.next() => item,
+        } {
+            match item {
+                iroh_blobs::api::downloader::DownloadProgressItem::TryProvider { id, .. } => {
+                    saw_download_signal = true;
+                    selected_endpoint = Some(id);
+                    worker
+                        .send_progress(SyncProgressMsg::BlobDownloadStarted {
+                            endpoint_id: id,
+                            partition: PartitionKey::DocBlobsFullSync,
+                            hash: worker.hash.clone(),
+                        })
+                        .await;
+                }
+                iroh_blobs::api::downloader::DownloadProgressItem::Progress(done) => {
+                    saw_download_signal = true;
+                    if let Some(endpoint_id) = selected_endpoint {
+                        worker
+                            .send_progress(SyncProgressMsg::BlobDownloadProgress {
+                                endpoint_id,
+                                partition: PartitionKey::DocBlobsFullSync,
+                                hash: worker.hash.clone(),
+                                done,
+                            })
+                            .await;
+                    }
+                }
+                iroh_blobs::api::downloader::DownloadProgressItem::PartComplete { .. } => {
+                    saw_download_signal = true;
+                }
+                iroh_blobs::api::downloader::DownloadProgressItem::ProviderFailed { .. } => {}
+                iroh_blobs::api::downloader::DownloadProgressItem::DownloadError
+                | iroh_blobs::api::downloader::DownloadProgressItem::Error(_) => {}
             }
         }
 
-        worker.request_backoff(Duration::from_secs(2));
+        worker
+            .send_progress(SyncProgressMsg::BlobMaterializeStarted {
+                partition: PartitionKey::DocBlobsFullSync,
+                hash: worker.hash.clone(),
+            })
+            .await;
+        match worker.blobs_repo.put_from_store(&worker.hash).await {
+            Ok(_) => {
+                if let Some(endpoint_id) =
+                    selected_endpoint.or_else(|| worker.peers.first().copied())
+                {
+                    worker
+                        .send_progress(SyncProgressMsg::BlobDownloadFinished {
+                            endpoint_id,
+                            partition: PartitionKey::DocBlobsFullSync,
+                            hash: worker.hash.clone(),
+                            success: true,
+                        })
+                        .await;
+                }
+                worker
+                    .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                        partition: PartitionKey::DocBlobsFullSync,
+                        hash: worker.hash.clone(),
+                        success: true,
+                        reason: "download and materialize succeeded".to_string(),
+                    })
+                    .await;
+                worker.mark_synced(selected_endpoint);
+                return;
+            }
+            Err(err) => {
+                tracing::warn!(?err, hash = %worker.hash, "put_from_store failed after download");
+                if let Some(endpoint_id) = selected_endpoint {
+                    worker
+                        .send_progress(SyncProgressMsg::BlobDownloadFinished {
+                            endpoint_id,
+                            partition: PartitionKey::DocBlobsFullSync,
+                            hash: worker.hash.clone(),
+                            success: false,
+                        })
+                        .await;
+                }
+                worker
+                    .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                        partition: PartitionKey::DocBlobsFullSync,
+                        hash: worker.hash.clone(),
+                        success: false,
+                        reason: if saw_download_signal {
+                            "put_from_store failed after download".to_string()
+                        } else {
+                            "download produced no data".to_string()
+                        },
+                    })
+                    .await;
+                worker.request_backoff(Duration::from_secs(2));
+            }
+        }
     };
     let join_handle = tokio::spawn(fut.instrument(tracing::info_span!("BlobSyncWorker task")));
     Ok(BlobSyncWorkerStopToken {
@@ -83,6 +261,7 @@ struct BlobSyncWorker {
     peers: Vec<EndpointId>,
     cancel_token: CancellationToken,
     msg_tx: mpsc::UnboundedSender<Msg>,
+    sync_progress_tx: mpsc::Sender<SyncProgressMsg>,
     blobs_repo: Arc<BlobsRepo>,
     endpoint: iroh::Endpoint,
     retry: RetryState,
@@ -108,5 +287,9 @@ impl BlobSyncWorker {
                 endpoint_id,
             })
             .expect("FullSyncWorker went down without cleaning boot_blob_sync_worker");
+    }
+
+    async fn send_progress(&self, msg: SyncProgressMsg) {
+        self.sync_progress_tx.send(msg).await.unwrap_or_log();
     }
 }

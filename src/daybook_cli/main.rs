@@ -453,12 +453,14 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 Arc::clone(&sqlite_local_state_repo),
             )
             .await?;
+            let progress_repo = ProgressRepo::boot(ctx.sql.db_pool.clone()).await?;
             let (sync_repo, sync_stop) = IrohSyncRepo::boot(
                 Arc::clone(&ctx),
                 Arc::clone(&drawer_repo),
                 Arc::clone(&config_repo),
                 Arc::clone(&blobs_repo),
                 Arc::clone(&doc_blobs_index_repo),
+                Some(Arc::clone(&progress_repo)),
             )
             .await?;
             let local_ticket_url = sync_repo.get_ticket_url().await?;
@@ -549,6 +551,21 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                                             attempt_no,
                                         } => {
                                             info!(%hash, ?delay, ?attempt_no, "blob sync backoff");
+                                        }
+                                        IrohSyncEvent::BlobDownloadStarted {
+                                            endpoint_id,
+                                            partition,
+                                            hash,
+                                        } => {
+                                            info!(?endpoint_id, ?partition, %hash, "blob download started");
+                                        }
+                                        IrohSyncEvent::BlobDownloadFinished {
+                                            endpoint_id,
+                                            partition,
+                                            hash,
+                                            success,
+                                        } => {
+                                            info!(?endpoint_id, ?partition, %hash, ?success, "blob download finished");
                                         }
                                         IrohSyncEvent::StalePeer { endpoint_id } => {
                                             warn!(?endpoint_id, "stale sync peer");
@@ -750,6 +767,7 @@ async fn clone_repo_from_url(
         Arc::clone(&sqlite_local_state_repo),
     )
     .await?;
+    let progress_repo = ProgressRepo::boot(rcx.sql.db_pool.clone()).await?;
 
     let (sync_repo, sync_stop) = IrohSyncRepo::boot(
         Arc::clone(&rcx),
@@ -757,6 +775,7 @@ async fn clone_repo_from_url(
         Arc::clone(&config_repo),
         Arc::clone(&blobs_repo),
         Arc::clone(&doc_blobs_index_repo),
+        Some(Arc::clone(&progress_repo)),
     )
     .await?;
 
