@@ -2,7 +2,9 @@ use crate::blobs::BLOB_SCHEME;
 use crate::drawer::DrawerRepo;
 use crate::interlude::*;
 use crate::repos::Repo;
-use daybook_types::doc::{BranchPath, ChangeHashSet, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
+use daybook_types::doc::{
+    BranchPath, ChangeHashSet, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag,
+};
 use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 
@@ -125,11 +127,9 @@ impl DocBlobsIndexRepo {
         .execute(db_pool)
         .await?;
 
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_doc_blob_refs_doc_id ON doc_blob_refs(doc_id)",
-        )
-        .execute(db_pool)
-        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_doc_blob_refs_doc_id ON doc_blob_refs(doc_id)")
+            .execute(db_pool)
+            .await?;
 
         Ok(())
     }
@@ -138,11 +138,13 @@ impl DocBlobsIndexRepo {
         match item {
             DocBlobsIndexWorkItem::Upsert { doc_id, heads } => {
                 self.reindex_doc(&doc_id, &heads).await?;
-                self.registry.notify([DocBlobsIndexEvent::Updated { doc_id }]);
+                self.registry
+                    .notify([DocBlobsIndexEvent::Updated { doc_id }]);
             }
             DocBlobsIndexWorkItem::DeleteDoc { doc_id } => {
                 self.delete_doc(&doc_id).await?;
-                self.registry.notify([DocBlobsIndexEvent::Deleted { doc_id }]);
+                self.registry
+                    .notify([DocBlobsIndexEvent::Deleted { doc_id }]);
             }
         }
         Ok(())
@@ -200,8 +202,9 @@ impl DocBlobsIndexRepo {
             return Ok(());
         }
 
-        let serialized_heads = serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
-            .expect(ERROR_JSON);
+        let serialized_heads =
+            serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
+                .expect(ERROR_JSON);
 
         for hash in hashes {
             sqlx::query(

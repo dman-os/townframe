@@ -128,7 +128,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     // configured repo is Initialized since `init`
     // initializes the repo
     let ctx = context::open_repo_ctx(&conf, false, None).await?;
-    let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
+    let blobs_repo =
+        BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         ctx.acx.clone(),
         Arc::clone(&blobs_repo),
@@ -709,7 +710,8 @@ async fn clone_repo_from_url(
         .await?,
     );
 
-    let blobs_repo = BlobsRepo::new(rcx.layout.blobs_root.clone(), rcx.local_user_path.clone()).await?;
+    let blobs_repo =
+        BlobsRepo::new(rcx.layout.blobs_root.clone(), rcx.local_user_path.clone()).await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         rcx.acx.clone(),
@@ -803,7 +805,8 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     }
 
     let ctx = context::open_repo_ctx(&conf, false, None).await?;
-    let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
+    let blobs_repo =
+        BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         ctx.acx.clone(),
         Arc::clone(&blobs_repo),

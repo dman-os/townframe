@@ -33,7 +33,12 @@ pub fn spawn_blob_sync_worker(
         retry,
     };
     let fut = async move {
-        if worker.blobs_repo.has_hash(&worker.hash).await.unwrap_or(false) {
+        if worker
+            .blobs_repo
+            .has_hash(&worker.hash)
+            .await
+            .unwrap_or(false)
+        {
             worker.mark_synced(None);
             return;
         }
@@ -58,12 +63,7 @@ pub fn spawn_blob_sync_worker(
             if res.is_err() {
                 continue;
             }
-            if worker
-                .blobs_repo
-                .put_from_store(&worker.hash)
-                .await
-                .is_ok()
-            {
+            if worker.blobs_repo.put_from_store(&worker.hash).await.is_ok() {
                 worker.mark_synced(Some(endpoint_id));
                 return;
             }

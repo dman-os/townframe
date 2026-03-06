@@ -69,6 +69,12 @@ struct ValidatedReference {
     url_value: String,
 }
 
+struct PreparedAddDoc {
+    doc_id: DocId,
+    handle: samod::DocHandle,
+    entry: DocEntry,
+}
+
 impl DrawerRepo {
     pub async fn load(
         acx: AmCtx,
@@ -702,23 +708,17 @@ impl DrawerRepo {
         Ok(results)
     }
 
-    pub async fn add(&self, args: AddDocArgs) -> Result<DocId, DrawerError> {
-        if self.cancel_token.is_cancelled() {
-            return Err(ferr!("repo is stopped"))?;
-        }
-        let resulting_keys: HashSet<FacetKey> = args.facets.keys().cloned().collect();
-        self.validate_facets(&args.facets, &resulting_keys).await?;
+    async fn prepare_add_doc(&self, args: AddDocArgs) -> Result<PreparedAddDoc, DrawerError> {
         let mutation_actor_id = if let Some(path) = &args.user_path {
             daybook_types::doc::user_path::to_actor_id(path)
         } else {
             self.local_actor_id.clone()
         };
 
-        // 1. Create content doc
         let mut doc_am = automerge::Automerge::new();
         doc_am.set_actor(mutation_actor_id);
         let handle = self.acx.add_doc(doc_am).await?;
-        let doc_id = handle.document_id().to_string();
+        let doc_id = DocId::from(handle.document_id().to_string());
         let now = Timestamp::now();
 
         let facet_keys: Vec<_> = args.facets.keys().cloned().collect();
@@ -746,7 +746,7 @@ impl DrawerRepo {
             let heads = heads.expect("commit failed");
             eyre::Ok(ChangeHashSet(Arc::from([heads])))
         })?;
-        // 2. Update drawer doc
+
         let mut users = HashMap::new();
         if let Some(user_path) = args.user_path {
             users.insert(
@@ -780,6 +780,32 @@ impl DrawerRepo {
             previous_version_heads: None,
         };
 
+        Ok(PreparedAddDoc {
+            doc_id,
+            handle,
+            entry,
+        })
+    }
+
+    pub async fn batch_add(&self, args_batch: Vec<AddDocArgs>) -> Result<Vec<DocId>, DrawerError> {
+        if self.cancel_token.is_cancelled() {
+            return Err(ferr!("repo is stopped"))?;
+        }
+
+        if args_batch.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        for args in &args_batch {
+            let resulting_keys: HashSet<FacetKey> = args.facets.keys().cloned().collect();
+            self.validate_facets(&args.facets, &resulting_keys).await?;
+        }
+
+        let mut prepared_docs = Vec::with_capacity(args_batch.len());
+        for args in args_batch {
+            prepared_docs.push(self.prepare_add_doc(args).await?);
+        }
+
         let drawer_heads = self.drawer_am_handle.with_document(|doc| {
             doc.set_actor(self.local_actor_id.clone());
             let mut tx = doc.transaction();
@@ -791,40 +817,61 @@ impl DrawerRepo {
                 Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
                 _ => tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?,
             };
-            autosurgeon::reconcile_prop(
-                &mut tx,
-                &map_id,
-                autosurgeon::Prop::Key((&doc_id[..]).into()),
-                &entry,
-            )?;
+            for prepared in &prepared_docs {
+                autosurgeon::reconcile_prop(
+                    &mut tx,
+                    &map_id,
+                    autosurgeon::Prop::Key((&prepared.doc_id[..]).into()),
+                    &prepared.entry,
+                )?;
+            }
             let (heads, _) = tx.commit();
             let heads = heads.expect("commit failed");
             eyre::Ok(ChangeHashSet(Arc::from([heads])))
         })?;
 
-        // 3. Update caches and notify
+        let mut doc_ids = Vec::with_capacity(prepared_docs.len());
+        let mut events = Vec::with_capacity(prepared_docs.len() + 1);
+
         {
             let mut pool = self.entry_pool.lock().unwrap();
-            let pruned = pool.insert_key(&doc_id, 1);
-            for pkey in pruned {
-                self.entry_cache.remove(&pkey);
+            for prepared in &prepared_docs {
+                let pruned = pool.insert_key(&prepared.doc_id, 1);
+                for pkey in pruned {
+                    self.entry_cache.remove(&pkey);
+                }
+                self.entry_cache
+                    .insert(prepared.doc_id.clone(), prepared.entry.clone());
             }
-            self.entry_cache.insert(doc_id.clone(), entry.clone());
         }
-        self.handles.insert(doc_id.clone(), handle);
-        self.registry.notify([
-            DrawerEvent::DocAdded {
-                id: doc_id.clone(),
-                entry,
+
+        for prepared in prepared_docs {
+            doc_ids.push(prepared.doc_id.clone());
+            self.handles
+                .insert(prepared.doc_id.clone(), prepared.handle);
+            events.push(DrawerEvent::DocAdded {
+                id: prepared.doc_id,
+                entry: prepared.entry,
                 drawer_heads: drawer_heads.clone(),
-            },
-            DrawerEvent::ListChanged {
-                drawer_heads: drawer_heads.clone(),
-            },
-        ]);
+            });
+        }
+        events.push(DrawerEvent::ListChanged {
+            drawer_heads: drawer_heads.clone(),
+        });
+        self.registry.notify(events);
         *self.current_heads.write().unwrap() = drawer_heads;
 
-        Ok(doc_id)
+        Ok(doc_ids)
+    }
+
+    pub async fn add(&self, args: AddDocArgs) -> Result<DocId, DrawerError> {
+        let mut created = self.batch_add(vec![args]).await?;
+        if created.len() != 1 {
+            return Err(ferr!(
+                "batch_add returned invalid result for single add call"
+            ))?;
+        }
+        Ok(created.pop().expect("checked above"))
     }
 
     pub async fn update_at_heads(
@@ -2288,6 +2335,189 @@ mod tests {
         assert!(repo.del(&doc_id).await?);
         let list = repo.list().await?;
         assert_eq!(list.len(), 0);
+
+        stop_token.stop().await?;
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_v2_batch_add_smoke() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let (acx, acx_stop) = AmCtx::boot(
+            am_utils_rs::Config {
+                peer_id: "test-v2-batch-add".into(),
+                storage: am_utils_rs::StorageConfig::Memory,
+            },
+            Some(samod::AlwaysAnnounce),
+        )
+        .await?;
+
+        let drawer_doc_id = {
+            let mut doc = automerge::Automerge::new();
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+            let handle = acx.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+
+        let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+        let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+        let (repo, stop_token) = DrawerRepo::load(
+            acx.clone(),
+            drawer_doc_id,
+            automerge::ActorId::random(),
+            entry_pool,
+            doc_pool,
+            None,
+        )
+        .await?;
+
+        let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let created_ids = repo
+            .batch_add(vec![
+                AddDocArgs {
+                    branch_path: "main".into(),
+                    facets: [(
+                        title_key.clone(),
+                        WellKnownFacet::TitleGeneric("First".into()).into(),
+                    )]
+                    .into(),
+                    user_path: None,
+                },
+                AddDocArgs {
+                    branch_path: "main".into(),
+                    facets: [(
+                        title_key.clone(),
+                        WellKnownFacet::TitleGeneric("Second".into()).into(),
+                    )]
+                    .into(),
+                    user_path: None,
+                },
+            ])
+            .await?;
+
+        assert_eq!(created_ids.len(), 2);
+        assert_ne!(created_ids[0], created_ids[1]);
+
+        let list = repo.list().await?;
+        assert_eq!(list.len(), 2);
+        let listed_ids: HashSet<DocId> = list.into_iter().map(|item| item.doc_id).collect();
+        assert!(listed_ids.contains(&created_ids[0]));
+        assert!(listed_ids.contains(&created_ids[1]));
+
+        stop_token.stop().await?;
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let (acx, acx_stop) = AmCtx::boot(
+            am_utils_rs::Config {
+                peer_id: "test-v2-batch-add-events".into(),
+                storage: am_utils_rs::StorageConfig::Memory,
+            },
+            Some(samod::AlwaysAnnounce),
+        )
+        .await?;
+
+        let drawer_doc_id = {
+            let mut doc = automerge::Automerge::new();
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+            let handle = acx.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+
+        let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+        let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+        let (repo, stop_token) = DrawerRepo::load(
+            acx.clone(),
+            drawer_doc_id,
+            automerge::ActorId::random(),
+            entry_pool,
+            doc_pool,
+            None,
+        )
+        .await?;
+
+        let listener = repo.subscribe(crate::repos::SubscribeOpts::new(64));
+        let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let created_ids = repo
+            .batch_add(vec![
+                AddDocArgs {
+                    branch_path: "main".into(),
+                    facets: [(
+                        title_key.clone(),
+                        WellKnownFacet::TitleGeneric("Alpha".into()).into(),
+                    )]
+                    .into(),
+                    user_path: None,
+                },
+                AddDocArgs {
+                    branch_path: "main".into(),
+                    facets: [(
+                        title_key.clone(),
+                        WellKnownFacet::TitleGeneric("Beta".into()).into(),
+                    )]
+                    .into(),
+                    user_path: None,
+                },
+                AddDocArgs {
+                    branch_path: "main".into(),
+                    facets: [(
+                        title_key.clone(),
+                        WellKnownFacet::TitleGeneric("Gamma".into()).into(),
+                    )]
+                    .into(),
+                    user_path: None,
+                },
+            ])
+            .await?;
+
+        let mut events = Vec::new();
+        for _ in 0..4 {
+            let event = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                listener.recv_lossy_async(),
+            )
+            .await
+            .wrap_err("timeout waiting for drawer event")?
+            .map_err(|_| eyre::eyre!("listener closed"))?;
+            events.push(event);
+        }
+
+        let mut added_ids = HashSet::new();
+        let mut doc_added_heads = Vec::new();
+        let mut list_changed_heads = Vec::new();
+        for event in events {
+            match &*event {
+                DrawerEvent::DocAdded {
+                    id, drawer_heads, ..
+                } => {
+                    added_ids.insert(id.clone());
+                    doc_added_heads.push(drawer_heads.clone());
+                }
+                DrawerEvent::ListChanged { drawer_heads } => {
+                    list_changed_heads.push(drawer_heads.clone());
+                }
+                other => eyre::bail!("unexpected event: {other:?}"),
+            }
+        }
+
+        assert_eq!(added_ids.len(), created_ids.len());
+        for created_id in created_ids {
+            assert!(added_ids.contains(&created_id));
+        }
+        assert_eq!(doc_added_heads.len(), 3);
+        assert_eq!(list_changed_heads.len(), 1);
+        for heads in doc_added_heads {
+            assert_eq!(heads, list_changed_heads[0]);
+        }
 
         stop_token.stop().await?;
         acx_stop.stop().await?;

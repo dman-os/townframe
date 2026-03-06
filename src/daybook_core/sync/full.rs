@@ -183,10 +183,9 @@ pub async fn start_full_sync_worker(
     };
 
     let drawer_rx = drawer_repo.subscribe(crate::repos::SubscribeOpts { capacity: 1024 });
-    let doc_blobs_rx =
-        worker
-            .doc_blobs_index_repo
-            .subscribe(crate::repos::SubscribeOpts { capacity: 1024 });
+    let doc_blobs_rx = worker
+        .doc_blobs_index_repo
+        .subscribe(crate::repos::SubscribeOpts { capacity: 1024 });
     let (_drawer_heads, known_docs) = drawer_repo.list_just_ids().await?;
     worker.add_doc(rcx.doc_app.document_id().clone()).await?;
     worker.add_doc(rcx.doc_drawer.document_id().clone()).await?;
@@ -515,8 +514,6 @@ impl Worker {
         eyre::Ok(())
     }
 
-
-
     async fn batch_refresh_paritions(&mut self) -> Res<()> {
         let part_keys: Vec<_> = self.partitions_to_refresh.drain().collect();
         for part_key in part_keys {
@@ -574,8 +571,6 @@ impl Worker {
         Ok(())
     }
 
-
-
     async fn add_peer_to_part(
         &mut self,
         part_key: PartitionKey,
@@ -588,8 +583,7 @@ impl Worker {
         match &mut part.deets {
             ParitionDeets::FullSync { peers } => {
                 peers.insert(endpoint_id);
-                self.docs_to_boot
-                    .extend(self.pending_docs.keys().cloned());
+                self.docs_to_boot.extend(self.pending_docs.keys().cloned());
             }
             ParitionDeets::DocBlobsFullSync { peers } => {
                 peers.insert(endpoint_id);
@@ -621,7 +615,6 @@ impl Worker {
         self.partitions_to_refresh.insert(part_key);
         Ok(())
     }
-
 
     fn backoff_janitor_enqueue_due(&mut self) {
         let now = std::time::Instant::now();
@@ -669,7 +662,6 @@ impl Worker {
             .collect();
         self.blobs_to_boot.extend(due_blobs);
     }
-
 }
 
 // Docs related methods
@@ -855,7 +847,8 @@ impl Worker {
         } else {
             return Ok(());
         };
-        let fullsync_target_count = self.known_doc_set
+        let fullsync_target_count = self
+            .known_doc_set
             .iter()
             .filter(|(_, parts)| parts.contains(&PartitionKey::FullSync))
             .count();
@@ -901,7 +894,6 @@ impl Worker {
         if self.active_docs.contains_key(&doc_id)
             && self.is_doc_fully_synced_for_fullsync_peers(&doc_id)
         {
-
             let Some(active) = self.active_docs.remove(&doc_id) else {
                 return Ok(());
             };
@@ -1059,7 +1051,10 @@ impl Worker {
     async fn handle_doc_blobs_event(&mut self, evt: &DocBlobsIndexEvent) -> Res<()> {
         match evt {
             DocBlobsIndexEvent::Updated { doc_id } => {
-                let hashes = self.doc_blobs_index_repo.list_hashes_for_doc(doc_id).await?;
+                let hashes = self
+                    .doc_blobs_index_repo
+                    .list_hashes_for_doc(doc_id)
+                    .await?;
                 for hash in hashes {
                     self.known_blob_set
                         .entry(hash.clone())
@@ -1136,10 +1131,13 @@ impl Worker {
             let prior_pending = self.pending_blobs.get(&hash).cloned();
             if self.blobs_repo.has_hash(&hash).await? {
                 self.pending_blobs.remove(&hash);
-                self.synced_blobs.insert(hash, SyncedBlobSyncState {
-                    synced_at: std::time::Instant::now(),
-                    last_peer: None,
-                });
+                self.synced_blobs.insert(
+                    hash,
+                    SyncedBlobSyncState {
+                        synced_at: std::time::Instant::now(),
+                        last_peer: None,
+                    },
+                );
             } else {
                 let peers = self.current_blob_partition_peers();
                 if peers.is_empty() {
@@ -1150,18 +1148,19 @@ impl Worker {
                         due_at: std::time::Instant::now(),
                     });
                     let delay = next_backoff_delay(prior.last_backoff, Duration::from_millis(500));
-                    self.pending_blobs.insert(hash.clone(), PendingBlobSyncState {
-                        attempt_no: prior.attempt_no + 1,
-                        last_backoff: delay,
-                        last_attempt_at: std::time::Instant::now(),
-                        due_at: std::time::Instant::now() + delay,
-                    });
+                    self.pending_blobs.insert(
+                        hash.clone(),
+                        PendingBlobSyncState {
+                            attempt_no: prior.attempt_no + 1,
+                            last_backoff: delay,
+                            last_attempt_at: std::time::Instant::now(),
+                            due_at: std::time::Instant::now() + delay,
+                        },
+                    );
                 } else {
                     let now = std::time::Instant::now();
                     let retry = RetryState {
-                        attempt_no: prior_pending
-                            .as_ref()
-                            .map_or(0, |prior| prior.attempt_no),
+                        attempt_no: prior_pending.as_ref().map_or(0, |prior| prior.attempt_no),
                         last_backoff: prior_pending
                             .as_ref()
                             .map_or(Duration::from_millis(0), |prior| prior.last_backoff),
@@ -1169,8 +1168,7 @@ impl Worker {
                             .as_ref()
                             .map_or(now, |prior| prior.last_attempt_at),
                     };
-                    let active =
-                        self.boot_blob_sync_worker(hash.clone(), peers, retry)?;
+                    let active = self.boot_blob_sync_worker(hash.clone(), peers, retry)?;
                     self.pending_blobs.remove(&hash);
                     self.active_blobs.insert(hash, active);
                     budget = budget.saturating_sub(1);
@@ -1198,9 +1196,7 @@ impl Worker {
             retry,
         )?;
 
-        Ok(ActiveBlobSyncState {
-            stop_token,
-        })
+        Ok(ActiveBlobSyncState { stop_token })
     }
 
     fn current_blob_partition_peers(&self) -> Vec<EndpointId> {
@@ -1276,7 +1272,6 @@ impl Worker {
         Ok(())
     }
 }
-
 
 fn heads_equal_as_set(left: &[automerge::ChangeHash], right: &[automerge::ChangeHash]) -> bool {
     left.len() == right.len() && left.iter().all(|head| right.contains(head))

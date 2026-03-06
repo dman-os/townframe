@@ -105,6 +105,15 @@ impl DrawerRepoFfi {
             .await?)
     }
 
+    #[tracing::instrument(err, skip(self), ret)]
+    async fn batch_add(self: Arc<Self>, args: Vec<AddDocArgs>) -> Result<Vec<DocId>, FfiError> {
+        let this = Arc::clone(&self);
+        Ok(self
+            .fcx
+            .do_on_rt(async move { this.repo.batch_add(args).await.map_err(eyre::Report::from) })
+            .await?)
+    }
+
     #[tracing::instrument(err, skip(self))]
     async fn update(
         self: Arc<Self>,

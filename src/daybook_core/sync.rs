@@ -4,10 +4,10 @@ use iroh::EndpointId;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::blobs::BlobsRepo;
 use crate::drawer::DrawerRepo;
 use crate::index::DocBlobsIndexRepo;
 use crate::repo::RepoCtx;
-use crate::blobs::BlobsRepo;
 
 mod bootstrap;
 mod full;
@@ -139,16 +139,15 @@ impl IrohSyncRepo {
             .ensure_local_sync_device(router.endpoint().id(), &rcx.local_device_name)
             .await?;
 
-        let (mut full_sync_handle, full_stop_token) =
-            full::start_full_sync_worker(
-                Arc::clone(&rcx),
-                drawer_repo,
-                blobs_repo,
-                doc_blobs_index_repo,
-                endpoint.clone(),
-                cancel_token.child_token(),
-            )
-            .await?;
+        let (mut full_sync_handle, full_stop_token) = full::start_full_sync_worker(
+            Arc::clone(&rcx),
+            drawer_repo,
+            blobs_repo,
+            doc_blobs_index_repo,
+            endpoint.clone(),
+            cancel_token.child_token(),
+        )
+        .await?;
         let full_sync_rx = full_sync_handle.events_rx.take().expect("impossible");
 
         let repo = Arc::new(Self {
@@ -422,10 +421,9 @@ impl IrohSyncRepo {
                 endpoint_id,
                 doc_id,
             }]),
-            full::FullSyncEvent::BlobSynced { hash, endpoint_id } => {
-                self.registry
-                    .notify([IrohSyncEvent::BlobSynced { hash, endpoint_id }])
-            }
+            full::FullSyncEvent::BlobSynced { hash, endpoint_id } => self
+                .registry
+                .notify([IrohSyncEvent::BlobSynced { hash, endpoint_id }]),
             full::FullSyncEvent::BlobSyncBackoff {
                 hash,
                 delay,

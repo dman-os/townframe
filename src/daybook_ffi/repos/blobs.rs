@@ -17,6 +17,7 @@ impl BlobsRepoFfi {
         let repo = fcx
             .do_on_rt(daybook_core::blobs::BlobsRepo::new(
                 fcx.rcx.layout.blobs_root.to_path_buf(),
+                fcx.rcx.local_user_path.clone(),
             ))
             .await?;
         Ok(Arc::new(Self { fcx, repo }))
