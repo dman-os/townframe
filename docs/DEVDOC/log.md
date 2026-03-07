@@ -2,7 +2,7 @@
 
 ## 2026-03-06 | sync hell
 
-I've been trying to implemeng sync over iroh for the past two weeks.
+I've been trying to implement sync over iroh for the past two weeks.
 I was almost done today but...I've slowly learned details that complicate the whole deal.
 
 - Samod/Automerge-repo assume a lazy, query on demand model. 
@@ -65,12 +65,6 @@ Where I'm fucking lost:
   - Just have per doc state but use batched exchange?
     - Do we even need the batching? We're using a single connection?
       - Yes, we need the batching to avoid the tokio task overhead
-
----
-
-How to impl this?
-- Phased full sync first
-- Per-branch refactor second. 
 
 ## 2026-02-23 | Relocatable processing
 

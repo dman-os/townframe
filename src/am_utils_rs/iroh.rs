@@ -6,7 +6,7 @@
 use crate::interlude::*;
 
 use codec::Codec;
-use samod::ConnDirection;
+use samod::{AcceptorEvent, Dialer, DialerEvent, Transport};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tokio_util::sync::CancellationToken;
 
@@ -14,67 +14,107 @@ use super::AmCtx;
 
 mod codec;
 
+const CONN_URL_SCHEME: &str = "db+iroh+samod";
+
 impl AmCtx {
     pub const SYNC_ALPN: &[u8] = b"townframe/automerge-repo/0";
 
     #[tracing::instrument(skip(self, endpoint, end_signal_tx))]
     pub async fn spawn_connection_iroh(
         &self,
-        endpoint: &iroh::Endpoint,
-        addr: iroh::EndpointAddr,
+        endpoint: iroh::Endpoint,
+        to_addr: iroh::EndpointAddr,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<super::ConnFinishSignal>>,
         // direction: samod::ConnDirection,
         // rx_from_peer: iroh::endpoint::RecvStream,
         // tx_to_peer: iroh::endpoint::SendStream,
     ) -> Res<super::RepoConnection> {
-        let endpoint_id = addr.id;
-        let conn = endpoint.connect(addr, Self::SYNC_ALPN).await?;
-        let (tx, rx) = conn.open_bi().await?;
-
+        let endpoint_id = to_addr.id;
         let repo = self.repo.clone();
-        let conn = tokio::task::block_in_place(|| {
-            repo.connect(
-                FramedRead::new(rx, Codec::new(endpoint_id)),
-                FramedWrite::new(tx, Codec::new(endpoint_id)),
-                samod::ConnDirection::Outgoing,
-            )
-        })
-        .wrap_err("failed to establish connection")?;
+        let dialer = IrohDialer {
+            url: Url::parse(&format!(
+                "{CONN_URL_SCHEME}:{}",
+                utils_rs::hash::encode_base58_multibase(endpoint_id)
+            ))
+            .expect("impossible"),
+            endpoint,
+            endpoint_id,
+            to_addr,
+        };
+        let handle = repo
+            .dial(samod::BackoffConfig::default(), Arc::new(dialer))
+            .wrap_err("error setting up dialer")?;
 
-        let conn_id = conn.id();
-        let peer_info = conn
-            .handshake_complete()
+        let peer_info = handle
+            .established()
             .await
-            .map_err(|err| ferr!("failed on handshake: {err:?}"))?;
+            .wrap_err("error during handshake")?;
         let peer_id: Arc<str> = peer_info.peer_id.as_str().into();
+        let conn_id = handle.connection_id().expect("impossible");
 
         let cancel_token = CancellationToken::new();
-        let join_handle = tokio::spawn({
+        let fut = {
             let cancel_token = cancel_token.clone();
             let peer_id = Arc::<str>::clone(&peer_id);
             async move {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        debug!("cancel token lit");
-                    }
-                    fin_reason = conn.finished() => {
-                        info!(?fin_reason, "iroh connection finished");
-                        if let Some(tx) = end_signal_tx {
-                            tx.send(super::ConnFinishSignal {
-                                conn_id,
-                                peer_id,
-                                reason: fin_reason,
-                            })
-                                .inspect_err(|_| warn!("connection owner closed before finish"))
-                                .ok();
+                let mut events = handle.events();
+                let mut last_reason = None;
+                loop {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            debug!("cancel token lit");
+                        }
+                        evt = events.next() => {
+                            let Some(evt) = evt else {
+                                eyre::bail!(
+                                    "connection stream ended befor disconnect"
+                                );
+                            };
+                            match evt {
+                                DialerEvent::Connected { peer_info } => {
+                                    if peer_info.peer_id.as_str() != &peer_id[..] {
+                                        eyre::bail!(
+                                            "reconnection changed peer_id {peer_id} != {:?}",
+                                            peer_info.peer_id
+                                        );
+                                    }
+                                    info!("connection established");
+                                }
+                                DialerEvent::Disconnected { reason } => {
+                                    last_reason = Some(reason);
+                                    info!("connection lost");
+                                },
+                                DialerEvent::Reconnecting { attempt } => {
+                                    info!(?attempt, "trying to reconnect to peer");
+                                }
+                                DialerEvent::MaxRetriesReached => {
+                                    info!("max retries reached, aborting");
+                                    if let Some(tx) = end_signal_tx {
+                                        tx.send(super::ConnFinishSignal {
+                                            conn_id,
+                                            peer_id,
+                                            // FIXME: find better reason type
+                                            reason: last_reason.unwrap_or_else(|| format!("max re-connention atttempts reached")),
+                                        })
+                                        .inspect_err(|_| warn!("connection owner closed before finish"))
+                                        .ok();
+                                    }
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
+                eyre::Ok(())
             }
             .instrument(tracing::info_span!(
                 "iroh connector task",
-                peer = ?peer_info
+                peer = ?peer_info,
+                endpoint_id = ?endpoint_id,
             ))
+        };
+        let join_handle = tokio::spawn(async {
+            fut.await.unwrap();
         });
 
         Ok(super::RepoConnection {
@@ -84,6 +124,42 @@ impl AmCtx {
             endpoint_id: Some(endpoint_id),
             join_handle: Some(join_handle),
             cancel_token,
+        })
+    }
+}
+
+struct IrohDialer {
+    url: Url,
+    endpoint: iroh::Endpoint,
+    endpoint_id: iroh::PublicKey,
+    to_addr: iroh::EndpointAddr,
+}
+
+impl Dialer for IrohDialer {
+    fn url(&self) -> Url {
+        self.url.clone()
+    }
+
+    fn connect(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Transport, Box<dyn std::error::Error + Send + Sync>>,
+                > + Send,
+        >,
+    > {
+        let endpoint = self.endpoint.clone();
+        let addr = self.to_addr.clone();
+        let endpoint_id = self.endpoint_id.clone();
+        Box::pin(async move {
+            let conn = endpoint.connect(addr, AmCtx::SYNC_ALPN).await?;
+            let (tx, rx) = conn.open_bi().await?;
+            // establish your transport here, then wrap it:
+            Ok(Transport::new(
+                FramedRead::new(rx, Codec::new(endpoint_id)),
+                FramedWrite::new(tx, Codec::new(endpoint_id)),
+            ))
         })
     }
 }
@@ -103,25 +179,62 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
         connection: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
         let endpoint_id = connection.remote_id();
+        tracing::record_all!(
+            tracing::Span::current(),
+            endpoint_id = ?endpoint_id,
+        );
 
         let (tx, rx) = connection.accept_bi().await?;
 
         let repo = self.acx.repo.clone();
-        let conn = tokio::task::block_in_place(|| {
-            repo.connect(
+        let acceptor = repo
+            .make_acceptor(
+                Url::parse(&format!(
+                    "{CONN_URL_SCHEME}:{}",
+                    utils_rs::hash::encode_base58_multibase(endpoint_id)
+                ))
+                .expect("impossible"),
+            )
+            .expect("error making acceptor");
+        acceptor
+            .accept(Transport::new(
                 FramedRead::new(rx, Codec::new(endpoint_id)),
                 FramedWrite::new(tx, Codec::new(endpoint_id)),
-                ConnDirection::Incoming,
-            )
-        })
-        .map_err(iroh::protocol::AcceptError::from_err)?;
-
-        let conn_id = conn.id();
-        let peer_info = conn
-            .handshake_complete()
-            .await
-            .map_err(|err| Box::from(format!("failed on handshake: {err:?}")))
+            ))
+            .map_err(|err| {
+                Box::from(format!(
+                    "failed making samod acceptor for {endpoint_id}: {err:?}"
+                ))
+            })
             .map_err(iroh::protocol::AcceptError::from_boxed)?;
+
+        let mut events = acceptor.events();
+        let conn_id;
+        let peer_info;
+        loop {
+            let event = events.next().await;
+            let Some(event) = event else {
+                return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
+                    "connection stream ended befor disconnect with {endpoint_id}"
+                ))));
+            };
+            match event {
+                AcceptorEvent::ClientConnected {
+                    connection_id,
+                    peer_info: peer_inf,
+                } => {
+                    conn_id = connection_id;
+                    peer_info = peer_inf;
+                    break;
+                }
+                AcceptorEvent::ClientDisconnected { reason, .. } => {
+                    return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
+                        "failed on handshake with {endpoint_id}: {reason:?}"
+                    ))));
+                }
+            }
+        }
+
         let peer_id: Arc<str> = peer_info.peer_id.as_str().into();
 
         tracing::record_all!(
@@ -145,15 +258,30 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
             _ = cancel_token.cancelled() => {
                 debug!("cancel token lit");
             }
-            fin_reason = conn.finished() => {
-                info!(?fin_reason, "incoming connection finished");
-                self.end_signal_tx.send(super::ConnFinishSignal {
-                    conn_id,
-                    peer_id,
-                    reason: fin_reason,
-                })
-                    .inspect_err(|_| warn!("connection owner closed before finish"))
-                    .ok();
+            evt = events.next() => {
+                let Some(evt) = evt else {
+                    return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
+                        "connection stream ended befor disconnect with {endpoint_id}"
+                    ))));
+                };
+                match evt {
+                    AcceptorEvent::ClientDisconnected {
+                        reason,
+                        ..
+                    } => {
+                        info!(?reason, "incoming connection finished");
+                        self.end_signal_tx.send(super::ConnFinishSignal {
+                            conn_id,
+                            peer_id,
+                            reason: format!("{reason}"),
+                        })
+                        .inspect_err(|_| warn!("connection owner closed before finish"))
+                        .ok();
+                    },
+                    AcceptorEvent::ClientConnected {..} => {
+                        unreachable!()
+                    }
+                }
             }
         }
 

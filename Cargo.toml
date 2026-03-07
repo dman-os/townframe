@@ -171,7 +171,7 @@ wit-bindgen = "0.52.0"
 automerge = "0.7.3"
 autosurgeon = "0.10.1"
 automerge-test = "0.6"
-samod = { version = "0.7.1" }
+samod = { version = "0.8.0" }
 # samod = { path = "src/samod/samod" }
 async-channel = "2.5.0"
 qrcode = { version = "0.14.1", default-features = false }
@@ -221,6 +221,8 @@ iroh = "0.96.1"
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 wash-runtime = { git = "https://github.com/wasmcloud/wash", rev = "e3cbff002a7922f83af02ce546286d4530203a6b" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "28d9b6db96f09a34967a0941950f6753fd73a006" }
+samod = { git = "https://github.com/dman-os/samod", rev = "536f15081893e14529668c9d62240e4b4022248e" }
+samod-core = { git = "https://github.com/dman-os/samod", rev = "536f15081893e14529668c9d62240e4b4022248e" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
 

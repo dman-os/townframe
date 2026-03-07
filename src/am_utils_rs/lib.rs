@@ -20,6 +20,9 @@ pub mod changes;
 pub mod codecs;
 #[cfg(feature = "iroh")]
 pub mod iroh;
+#[cfg(feature = "repo")]
+pub mod repo;
+pub mod sync;
 
 #[cfg(feature = "repo")]
 use automerge::Automerge;
@@ -95,7 +98,7 @@ pub struct RepoConnection {
 pub struct ConnFinishSignal {
     pub conn_id: samod::ConnectionId,
     pub peer_id: Arc<str>,
-    pub reason: samod::ConnFinishedReason,
+    pub reason: String,
 }
 
 #[cfg(feature = "repo")]
@@ -160,102 +163,69 @@ impl AmCtx {
         ))
     }
 
-    pub async fn spawn_connection_mpsc(
-        &self,
-        rx_from_peer: futures::channel::mpsc::UnboundedReceiver<Vec<u8>>,
-        tx_to_peer: futures::channel::mpsc::UnboundedSender<Vec<u8>>,
-        direction: samod::ConnDirection,
-        end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
-    ) -> Res<RepoConnection> {
-        let repo = self.repo.clone();
-        let conn = tokio::task::block_in_place(|| {
-            repo.connect(
-                rx_from_peer.map(Ok::<_, std::convert::Infallible>),
-                tx_to_peer,
-                direction,
-            )
-        })
-        .wrap_err("failed to establish connection")?;
-
-        let conn_id = conn.id();
-        let peer_info = conn
-            .handshake_complete()
-            .await
-            .map_err(|err| ferr!("failed on handshake: {err:?}"))?;
-        let peer_id: Arc<str> = peer_info.peer_id.as_str().into();
-
-        let cancel_token = CancellationToken::new();
-        let join_handle = tokio::spawn({
-            let cancel_token = cancel_token.clone();
-            let peer_id = Arc::<str>::clone(&peer_id);
-            async move {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        debug!("cancel token lit");
-                    }
-                    fin_reason = conn.finished() => {
-                        info!(?fin_reason, "sync server connector task finished");
-                        if let Some(tx) = end_signal_tx {
-                            tx.send(ConnFinishSignal {
-                                conn_id,
-                                peer_id,
-                                reason: fin_reason,
-                            })
-                                .inspect_err(|_| warn!("connection owner closed before finish"))
-                                .ok();
-                        }
-                    }
-                }
-            }
-            .instrument(tracing::info_span!(
-                "mpsc sync server connector task",
-                peer = ?peer_info
-            ))
-        });
-
-        Ok(RepoConnection {
-            id: conn_id,
-            peer_id,
-            peer_info,
-            #[cfg(feature = "iroh")]
-            endpoint_id: None,
-            join_handle: Some(join_handle),
-            cancel_token,
-        })
-    }
-
     /// Maintains connection to the sync server
-    pub fn spawn_ws_connector(&self, addr: std::borrow::Cow<'static, str>) {
+    pub async fn spawn_ws_connector(&self, addr: Url) -> Res<tokio::task::JoinHandle<()>> {
         let repo = self.repo.clone();
-        tokio::spawn(
-            async move {
-                let mut attempt = 0u32;
-                loop {
-                    if attempt > 0 {
-                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let handle = repo
+            .dial_websocket(addr, samod::BackoffConfig::default())
+            .wrap_err("error setting up dialer")?;
+        let fut = async move {
+            let mut events = handle.events();
+            while let Some(event) = events.next().await {
+                use samod::DialerEvent;
+                match event {
+                    DialerEvent::Connected { peer_info } => {
+                        info!(?peer_info, "connection established")
                     }
-                    attempt += 1;
-                    match tokio_tungstenite::connect_async(&addr[..]).await {
-                        Ok((conn, resp)) => {
-                            if resp.status().as_u16() != 101 {
-                                error!(?resp, "bad response connecting to server");
-                                continue;
-                            }
-                            let fin =
-                                repo.connect_tungstenite(conn, samod::ConnDirection::Outgoing);
-                            warn!(?fin, "connection closed");
-                        }
-                        Err(err) => {
-                            warn!(?attempt, "error connecting to sync server {err}");
-                            continue;
-                        }
+                    DialerEvent::Disconnected { reason } => {
+                        warn!(?reason, "error connecting to server")
+                    }
+                    DialerEvent::Reconnecting { attempt } => {
+                        warn!(?attempt, "retrying to conect to server")
+                    }
+                    DialerEvent::MaxRetriesReached => {
+                        unreachable!("we don't have max retries")
                     }
                 }
             }
-            .instrument(tracing::info_span!("websocket sync server connector task")),
-        );
+        };
+        Ok(tokio::spawn(async { fut.await }.instrument(
+            tracing::info_span!("websocket sync server connector task"),
+        )))
     }
 
+    pub async fn add_doc(&self, doc: Automerge) -> Res<DocHandle> {
+        let handle = self.repo.create(doc).await?;
+        self.handle_cache
+            .insert(handle.document_id().clone(), handle.clone());
+        Ok(handle)
+    }
+
+    pub async fn find_doc(&self, doc_id: &DocumentId) -> Res<Option<DocHandle>> {
+        if let Some(handle) = self.handle_cache.get(doc_id) {
+            return Ok(Some(handle.clone()));
+        }
+        let Some(handle) = self.repo.find(doc_id.clone()).await? else {
+            return Ok(None);
+        };
+        self.handle_cache.insert(doc_id.clone(), handle.clone());
+        Ok(Some(handle))
+    }
+
+    // FIXME: hide samod from AmCtx consumers
+    #[deprecated]
+    pub fn repo(&self) -> &samod::Repo {
+        &self.repo
+    }
+
+    pub fn change_manager(&self) -> &Arc<ChangeListenerManager> {
+        &self.change_manager
+    }
+}
+
+// Autosurgeon helpers
+#[cfg(feature = "repo")]
+impl AmCtx {
     pub async fn reconcile_prop<'a, T, P>(
         &self,
         doc_id: &DocumentId,
@@ -560,34 +530,6 @@ impl AmCtx {
             };
             Ok(value.map(|item| (item, heads)))
         })
-    }
-
-    pub async fn add_doc(&self, doc: Automerge) -> Res<DocHandle> {
-        let handle = self.repo.create(doc).await?;
-        self.handle_cache
-            .insert(handle.document_id().clone(), handle.clone());
-        Ok(handle)
-    }
-
-    pub async fn find_doc(&self, doc_id: &DocumentId) -> Res<Option<DocHandle>> {
-        if let Some(handle) = self.handle_cache.get(doc_id) {
-            return Ok(Some(handle.clone()));
-        }
-        let Some(handle) = self.repo.find(doc_id.clone()).await? else {
-            return Ok(None);
-        };
-        self.handle_cache.insert(doc_id.clone(), handle.clone());
-        Ok(Some(handle))
-    }
-
-    // FIXME: hide samod from AmCtx consumers
-    #[deprecated]
-    pub fn repo(&self) -> &samod::Repo {
-        &self.repo
-    }
-
-    pub fn change_manager(&self) -> &Arc<ChangeListenerManager> {
-        &self.change_manager
     }
 }
 
