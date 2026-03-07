@@ -39,7 +39,7 @@ pub mod doc {
         pub created_at: Datetime,
         #[serde_as(as = "Vec<Datetime>")]
         pub updated_at: Vec<Datetime>,
-        pub users: Vec<(String, UserMeta)>,
+        pub actors: String,
         pub facet_uuids: Vec<(String, String)>,
         pub facets: Vec<(String, FacetMeta)>,
     }
@@ -288,18 +288,7 @@ pub mod doc {
                     id: dmeta.id,
                     created_at: dmeta.created_at.into(),
                     updated_at: dmeta.updated_at.into_iter().map(Into::into).collect(),
-                    users: dmeta
-                        .users
-                        .into_iter()
-                        .map(|(actor_id, user_meta)| {
-                            (
-                                actor_id,
-                                UserMeta {
-                                    user_path: user_meta.user_path.to_string(),
-                                },
-                            )
-                        })
-                        .collect(),
+                    actors: serde_json::to_string(&dmeta.actors).expect(ERROR_JSON),
                     facet_uuids: dmeta
                         .facet_uuids
                         .into_iter()
@@ -424,18 +413,7 @@ pub mod doc {
                     id: dmeta.id,
                     created_at: dmeta.created_at.into(),
                     updated_at: dmeta.updated_at.into_iter().map(Into::into).collect(),
-                    users: dmeta
-                        .users
-                        .into_iter()
-                        .map(|(actor_id, user_meta)| {
-                            (
-                                actor_id,
-                                root_doc::UserMeta {
-                                    user_path: root_doc::UserPath::from(user_meta.user_path),
-                                },
-                            )
-                        })
-                        .collect(),
+                    actors: serde_json::from_str(&dmeta.actors)?,
                     facet_uuids: dmeta
                         .facet_uuids
                         .into_iter()

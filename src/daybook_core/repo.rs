@@ -7,6 +7,7 @@ use fs4::fs_std::FileExt;
 use sqlx::SqlitePool;
 
 const REPO_MARKER_FILE: &str = "db.repo.txt";
+const REPO_USER_ID_KEY: &str = "repo.user_id";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoLayout {
@@ -172,8 +173,15 @@ impl RepoCtx {
         let identity =
             crate::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &repo_id).await?;
         let iroh_public_key = identity.iroh_public_key.to_string();
-        let local_user_path = format!("/{}", iroh_public_key);
-        globals::set_local_user_path(&sql.db_pool, &local_user_path).await?;
+        let repo_user_id = get_or_init_repo_user_id(&sql.db_pool).await?;
+        let device_bs58 =
+            utils_rs::hash::encode_base58_multibase(identity.iroh_public_key.as_bytes());
+        let device_id = format!(
+            "{}{}",
+            daybook_types::doc::user_path::DEVICE_ID_PREFIX,
+            device_bs58
+        );
+        let local_user_path = format!("/{repo_user_id}/{device_id}");
         let peer_id = format!("/{}/{}", identity.repo_id, iroh_public_key);
         let am_config = am_utils_rs::Config {
             storage: am_utils_rs::StorageConfig::Disk {
@@ -208,7 +216,6 @@ impl RepoCtx {
                 &acx,
                 &doc_app,
                 &doc_drawer,
-                &local_actor_id,
                 &local_user_path,
                 &sql.db_pool,
                 layout.blobs_root.clone(),
@@ -238,7 +245,6 @@ impl RepoCtx {
         acx: &AmCtx,
         doc_app: &samod::DocHandle,
         doc_drawer: &samod::DocHandle,
-        local_actor_id: &automerge::ActorId,
         local_user_path: &str,
         sql: &SqlitePool,
         blobs_root: std::path::PathBuf,
@@ -263,7 +269,7 @@ impl RepoCtx {
                 acx.clone(),
                 Arc::clone(&blobs_repo),
                 doc_app.document_id().clone(),
-                local_actor_id.clone(),
+                daybook_types::doc::UserPath::from(local_user_path.to_string()),
             )
             .await
             .wrap_err("error loading plugs repo during init dance")?;
@@ -283,7 +289,7 @@ impl RepoCtx {
             let (_tables_repo, stop) = TablesRepo::load(
                 acx.clone(),
                 doc_app.document_id().clone(),
-                local_actor_id.clone(),
+                daybook_types::doc::UserPath::from(local_user_path.to_string()),
             )
             .await?;
             tables_stop = Some(stop);
@@ -291,7 +297,7 @@ impl RepoCtx {
             let (_dispatch_repo, stop) = DispatchRepo::load(
                 acx.clone(),
                 doc_app.document_id().clone(),
-                local_actor_id.clone(),
+                daybook_types::doc::UserPath::from(local_user_path.to_string()),
             )
             .await?;
             dispatch_stop = Some(stop);
@@ -299,7 +305,6 @@ impl RepoCtx {
             let (_drawer_repo, stop) = DrawerRepo::load(
                 acx.clone(),
                 doc_drawer.document_id().clone(),
-                local_actor_id.clone(),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
                 blobs_root
                     .parent()
@@ -369,6 +374,38 @@ impl RepoCtx {
             .await?;
         Ok(())
     }
+}
+
+pub async fn get_repo_user_id(sql: &SqlitePool) -> Res<Option<String>> {
+    let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
+        .bind(REPO_USER_ID_KEY)
+        .fetch_optional(sql)
+        .await?;
+    Ok(rec)
+}
+
+pub async fn set_repo_user_id(sql: &SqlitePool, user_id: &str) -> Res<()> {
+    sqlx::query(
+        "INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(REPO_USER_ID_KEY)
+    .bind(user_id)
+    .execute(sql)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_or_init_repo_user_id(sql: &SqlitePool) -> Res<String> {
+    if let Some(user_id) = get_repo_user_id(sql).await? {
+        return Ok(user_id);
+    }
+    let user_id = format!(
+        "{}{}",
+        daybook_types::doc::user_path::USER_ID_PREFIX,
+        Uuid::new_v4().bs58()
+    );
+    set_repo_user_id(sql, &user_id).await?;
+    Ok(user_id)
 }
 
 fn repo_layout(repo_root: &std::path::Path) -> Res<RepoLayout> {

@@ -134,14 +134,13 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         ctx.acx.clone(),
         Arc::clone(&blobs_repo),
         ctx.doc_app.document_id().clone(),
-        ctx.local_actor_id.clone(),
+        daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
     )
     .await?;
     let drawer_doc_id = ctx.doc_drawer.document_id().clone();
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
         ctx.acx.clone(),
         drawer_doc_id,
-        ctx.local_actor_id.clone(),
         ctx.local_user_path.clone().into(),
         ctx.layout.repo_root.join("local_state"),
         Arc::new(std::sync::Mutex::new(
@@ -685,8 +684,7 @@ async fn clone_repo_from_url(
     let identity =
         daybook_core::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &bootstrap.repo_id)
             .await?;
-    let local_user_path = format!("/{}", identity.iroh_public_key);
-    daybook_core::app::globals::set_local_user_path(&sql.db_pool, &local_user_path).await?;
+    let _repo_user_id = daybook_core::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
 
     {
         let (acx, acx_stop) = am_utils_rs::AmCtx::boot(
@@ -736,14 +734,13 @@ async fn clone_repo_from_url(
         rcx.acx.clone(),
         Arc::clone(&blobs_repo),
         rcx.doc_app.document_id().clone(),
-        rcx.local_actor_id.clone(),
+        daybook_types::doc::UserPath::from(rcx.local_user_path.clone()),
     )
     .await?;
 
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
         rcx.acx.clone(),
         rcx.doc_drawer.document_id().clone(),
-        rcx.local_actor_id.clone(),
         rcx.local_user_path.clone().into(),
         rcx.layout.repo_root.join("local_state"),
         Arc::new(std::sync::Mutex::new(
@@ -834,7 +831,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         ctx.acx.clone(),
         Arc::clone(&blobs_repo),
         ctx.doc_app.document_id().clone(),
-        ctx.local_actor_id.clone(),
+        daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
     )
     .await?;
     let (
@@ -847,7 +844,6 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         DrawerRepo::load(
             ctx.acx.clone(),
             ctx.doc_drawer.document_id().clone(),
-            ctx.local_actor_id.clone(),
             ctx.local_user_path.clone().into(),
             ctx.layout.repo_root.join("local_state"),
             Arc::new(std::sync::Mutex::new(
@@ -861,7 +857,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         DispatchRepo::load(
             ctx.acx.clone(),
             ctx.doc_app.document_id().clone(),
-            ctx.local_actor_id.clone()
+            daybook_types::doc::UserPath::from(ctx.local_user_path.clone())
         ),
         ProgressRepo::boot(ctx.sql.db_pool.clone()),
         ConfigRepo::load(

@@ -93,8 +93,11 @@ impl DispatchRepo {
     pub async fn load(
         acx: AmCtx,
         app_doc_id: DocumentId,
-        local_actor_id: ActorId,
+        local_user_path: daybook_types::doc::UserPath,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
+        let local_user_path =
+            daybook_types::doc::user_path::for_repo(&local_user_path, "dispatch-repo")?;
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let registry = crate::repos::ListenersRegistry::new();
 
         let store_val = DispatchStore::load(&acx, &app_doc_id).await?;

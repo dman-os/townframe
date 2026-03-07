@@ -84,7 +84,7 @@ crate::define_enum_and_tag!(
             // FIXME: unix timestamp codec
             pub created_at: Timestamp,
             pub updated_at: Vec<Timestamp>,
-            pub users: HashMap<String, UserMeta>,
+            pub actors: HashMap<String, UserMeta>,
             pub facet_uuids: HashMap<Uuid,FacetKey>,
             pub facets: HashMap<FacetKey, FacetMeta>
         },
@@ -364,6 +364,9 @@ pub type BranchPath = camino::Utf8PathBuf;
 pub mod user_path {
     use super::*;
 
+    pub const USER_ID_PREFIX: &str = "duser-wip-";
+    pub const DEVICE_ID_PREFIX: &str = "ddev-wip-iroh-";
+
     pub fn new(device: &str, plug: Option<&str>, routine: Option<&str>) -> UserPath {
         let mut path = Utf8PathBuf::from("/");
         path.push(device);
@@ -383,11 +386,28 @@ pub mod user_path {
         automerge::ActorId::from(bytes)
     }
 
+    pub fn for_repo(base_user_path: &UserPath, repo_scope: &str) -> Res<UserPath> {
+        if repo_scope.is_empty() {
+            eyre::bail!("repo scope must not be empty");
+        }
+        parse(&format!("{}/{}", base_user_path.as_str(), repo_scope))
+    }
+
+    pub fn for_plug_routine(
+        user_id: &str,
+        device_id: &str,
+        plug_id: &str,
+        routine_id: &str,
+    ) -> Res<UserPath> {
+        parse(&format!("/{user_id}/{device_id}/{plug_id}/{routine_id}"))
+    }
+
     pub fn device(path: &UserPath) -> &str {
         path.as_str()
             .trim_start_matches('/')
             .split('/')
-            .find(|segment| !segment.is_empty())
+            .filter(|segment| !segment.is_empty())
+            .nth(1)
             .unwrap_or("")
     }
 
@@ -396,7 +416,7 @@ pub mod user_path {
             .trim_start_matches('/')
             .split('/')
             .filter(|segment| !segment.is_empty())
-            .nth(1)
+            .nth(2)
     }
 
     pub fn routine(path: &UserPath) -> Option<&str> {
@@ -404,13 +424,16 @@ pub mod user_path {
             .trim_start_matches('/')
             .split('/')
             .filter(|segment| !segment.is_empty())
-            .nth(2)
+            .nth(3)
     }
 
     pub fn parse(input: &str) -> Res<UserPath> {
         let path = Utf8PathBuf::from(input);
         if !path.is_absolute() {
             eyre::bail!("UserPath must start with /");
+        }
+        if path.as_str() != "/" && path.as_str().ends_with('/') {
+            eyre::bail!("UserPath must not end with /");
         }
         Ok(path)
     }

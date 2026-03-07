@@ -1138,13 +1138,12 @@ mod tests {
             rtx.acx.clone(),
             Arc::clone(&blobs_repo),
             rtx.doc_app.document_id().clone(),
-            rtx.local_actor_id.clone(),
+            daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
         )
         .await?;
         let (drawer_repo, drawer_stop) = DrawerRepo::load(
             rtx.acx.clone(),
             rtx.doc_drawer.document_id().clone(),
-            rtx.local_actor_id.clone(),
             daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
             rtx.layout.repo_root.join("local_state"),
             Arc::new(std::sync::Mutex::new(

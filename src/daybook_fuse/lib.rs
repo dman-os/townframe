@@ -486,8 +486,11 @@ mod tests {
             let sql_path = temp_dir.path().join("sqlite.db");
             let sql_url = format!("sqlite://{}", sql_path.display());
             let sql_ctx = daybook_core::app::SqlCtx::new(&sql_url).await?;
-            daybook_core::app::globals::set_local_user_path(&sql_ctx.db_pool, "/test-device")
-                .await?;
+            daybook_core::app::globals::set_local_user_path(
+                &sql_ctx.db_pool,
+                "/test-user/test-device",
+            )
+            .await?;
 
             let (acx, acx_stop) = am_utils_rs::AmCtx::boot(
                 am_utils_rs::Config {
@@ -503,15 +506,14 @@ mod tests {
             daybook_core::app::init_from_globals(&acx, &sql_ctx.db_pool, &doc_app, &doc_drawer)
                 .await?;
 
-            let local_actor_id = daybook_types::doc::user_path::to_actor_id(
-                &daybook_types::doc::UserPath::from("/test-device"),
-            );
-            let blobs_repo = BlobsRepo::new(temp_dir.path().join("blobs")).await?;
+            let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
+            let blobs_repo =
+                BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.to_string()).await?;
             let (plugs_repo, plugs_stop) = PlugsRepo::load(
                 acx.clone(),
                 blobs_repo,
                 doc_app.get().unwrap().document_id().clone(),
-                local_actor_id.clone(),
+                local_user_path.clone(),
             )
             .await?;
 
@@ -522,7 +524,8 @@ mod tests {
                     .expect("drawer doc init")
                     .document_id()
                     .clone(),
-                local_actor_id,
+                local_user_path,
+                temp_dir.path().join("local_state"),
                 Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
                 Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
                 Arc::clone(&plugs_repo),

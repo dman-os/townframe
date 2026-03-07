@@ -169,7 +169,6 @@ pub async fn test_cx_with_options(
     // Load config first to get local identity
     let local_user_path = daybook_types::doc::UserPath::from("/test-user");
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
-
     let temp_dir = tempfile::tempdir()?;
     let blobs =
         crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.to_string())
@@ -179,7 +178,7 @@ pub async fn test_cx_with_options(
         acx.clone(),
         Arc::clone(&blobs),
         app_doc_id.clone(),
-        local_actor_id.clone(),
+        local_user_path.clone(),
     )
     .await?;
     let sql_ctx = crate::app::SqlCtx::new("sqlite::memory:").await?;
@@ -194,14 +193,13 @@ pub async fn test_cx_with_options(
     let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
         acx.clone(),
         app_doc_id.clone(),
-        local_actor_id.clone(),
+        local_user_path.clone(),
     )
     .await?;
     let progress_repo = crate::progress::ProgressRepo::boot(sql_ctx.db_pool.clone()).await?;
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
         acx.clone(),
         drawer_doc_id,
-        local_actor_id.clone(),
         local_user_path.clone(),
         temp_dir.path().join("local_states"),
         Arc::new(std::sync::Mutex::new(

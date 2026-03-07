@@ -128,6 +128,8 @@ impl ConfigRepo {
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
         let store_val = ConfigStore::load(&acx, &app_doc_id).await?;
+        let local_user_path =
+            daybook_types::doc::user_path::for_repo(&local_user_path, "config-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
 
         let store = crate::stores::AmStoreHandle::new(
@@ -141,7 +143,7 @@ impl ConfigRepo {
             .mutate_sync(|store| {
                 store
                     .users
-                    .entry(local_user_path.to_string())
+                    .entry(local_actor_id.to_string())
                     .or_insert_with(|| {
                         Versioned::mint(
                             local_actor_id.clone(),

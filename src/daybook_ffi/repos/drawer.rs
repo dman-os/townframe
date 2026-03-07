@@ -37,7 +37,6 @@ impl DrawerRepoFfi {
             .do_on_rt(DrawerRepo::load(
                 fcx.rcx.acx.clone(),
                 fcx.rcx.doc_drawer.document_id().clone(),
-                fcx.rcx.local_actor_id.clone(),
                 fcx.rcx.local_user_path.clone().into(),
                 fcx.rcx.layout.repo_root.join("local_state"),
                 Arc::new(std::sync::Mutex::new(

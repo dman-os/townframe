@@ -780,8 +780,11 @@ impl PlugsRepo {
         acx: AmCtx,
         blobs: Arc<crate::blobs::BlobsRepo>,
         app_doc_id: DocumentId,
-        local_actor_id: ActorId,
+        local_user_path: daybook_types::doc::UserPath,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
+        let local_user_path =
+            daybook_types::doc::user_path::for_repo(&local_user_path, "plugs-repo")?;
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let registry = crate::repos::ListenersRegistry::new();
 
         let store_val = PlugsStore::load(&acx, &app_doc_id).await?;
@@ -1713,7 +1716,7 @@ mod tests {
     use super::*;
 
     async fn setup_repo() -> Res<(AmCtx, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
-        let local_actor_id = ActorId::random();
+        let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
         let (acx, _acx_stop) = AmCtx::boot(
             am_utils_rs::Config {
                 peer_id: "test".into(),
@@ -1733,7 +1736,7 @@ mod tests {
                 .await?;
 
         let (repo, _repo_stop) =
-            PlugsRepo::load(acx.clone(), blobs, doc_id.clone(), local_actor_id).await?;
+            PlugsRepo::load(acx.clone(), blobs, doc_id.clone(), local_user_path).await?;
         Ok((acx, repo, doc_id, temp_dir))
     }
 

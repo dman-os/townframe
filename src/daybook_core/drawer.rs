@@ -118,7 +118,6 @@ impl DrawerRepo {
     pub async fn load(
         acx: AmCtx,
         drawer_doc_id: DocumentId,
-        local_actor_id: ActorId,
         local_user_path: daybook_types::doc::UserPath,
         local_state_root: PathBuf,
         entry_pool: SharedKeyedLruPool<DocId>,
@@ -126,6 +125,9 @@ impl DrawerRepo {
         #[cfg(not(test))] plugs_repo: Arc<PlugsRepo>,
         #[cfg(test)] plugs_repo: Option<Arc<PlugsRepo>>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
+        let local_user_path =
+            daybook_types::doc::user_path::for_repo(&local_user_path, "drawer-repo")?;
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let drawer_am_handle = acx
             .find_doc(&drawer_doc_id)
             .await?
@@ -2463,19 +2465,23 @@ pub mod dmeta {
             return Ok(());
         };
 
-        let users_obj = match tx.get(dmeta_obj, "users")? {
-            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-            _ => tx.put_object(dmeta_obj, "users", automerge::ObjType::Map)?,
+        let mut actors = match autosurgeon::hydrate_prop::<
+            _,
+            Option<ThroughJson<HashMap<String, UserMeta>>>,
+            _,
+            _,
+        >(tx, dmeta_obj, "actors")?
+        {
+            Some(ThroughJson(map)) => map,
+            None => HashMap::new(),
         };
-        let actor_id_key = actor_id.to_string();
-        autosurgeon::reconcile_prop(
-            tx,
-            &users_obj,
-            autosurgeon::Prop::Key(actor_id_key.into()),
-            ThroughJson(UserMeta {
+        actors.insert(
+            actor_id.to_string(),
+            UserMeta {
                 user_path: user_path.clone(),
-            }),
-        )?;
+            },
+        );
+        autosurgeon::reconcile_prop(tx, dmeta_obj, "actors", ThroughJson(actors))?;
         Ok(())
     }
 
@@ -2500,9 +2506,9 @@ pub mod dmeta {
         };
         let mut facet_uuids = HashMap::new();
         let mut facets = HashMap::new();
-        let mut users = HashMap::new();
+        let mut actors = HashMap::new();
         if let Some(user_path) = user_path {
-            users.insert(
+            actors.insert(
                 actor_id.to_string(),
                 UserMeta {
                     user_path: user_path.clone(),
@@ -2529,7 +2535,7 @@ pub mod dmeta {
                 id: doc_id,
                 created_at: now,
                 updated_at: vec![now],
-                users,
+                actors,
                 facet_uuids,
                 facets,
             })),
@@ -2752,8 +2758,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
@@ -2853,8 +2858,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
@@ -2926,8 +2930,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
@@ -3040,8 +3043,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
@@ -3183,8 +3185,7 @@ mod tests {
         let (client_repo, client_stop) = DrawerRepo::load(
             client_acx.clone(),
             drawer_doc_id.clone(),
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::clone(&entry_pool),
             Arc::clone(&doc_pool),
@@ -3194,8 +3195,7 @@ mod tests {
         let (server_repo, server_stop) = DrawerRepo::load(
             server_acx.clone(),
             drawer_doc_id.clone(),
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::clone(&entry_pool),
             Arc::clone(&doc_pool),
@@ -3272,8 +3272,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
@@ -3430,8 +3429,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
@@ -3441,7 +3439,8 @@ mod tests {
 
         let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
         let facet_note = FacetKey::from(WellKnownFacetTag::Note);
-        let user_path = UserPath::from("/device1/plug1/routine1");
+        let user_path =
+            UserPath::from("/duser-wip-testmeta1/ddev-wip-iroh-testmeta1/plug1/routine1");
 
         // 1. Test 'add' metadata
         let doc_id = repo
@@ -3463,7 +3462,7 @@ mod tests {
             .ok_or_eyre("missing main branch state")?
             .branch_doc_id;
         assert!(
-            dmeta_after_add.users.contains_key(
+            dmeta_after_add.actors.contains_key(
                 &repo
                     .content_actor_id(Some(&user_path), &main_branch_doc_id)
                     .to_string()
@@ -3491,7 +3490,8 @@ mod tests {
         })?;
 
         // 2. Test 'update' metadata and user attribution
-        let user_path2 = UserPath::from("/device2/plug2/routine2");
+        let user_path2 =
+            UserPath::from("/duser-wip-testmeta2/ddev-wip-iroh-testmeta2/plug2/routine2");
         repo.update_at_heads(
             DocPatch {
                 id: doc_id.clone(),
@@ -3510,7 +3510,7 @@ mod tests {
 
         let dmeta_after_update = get_dmeta_on_main(&repo, &doc_id).await?;
         assert!(
-            dmeta_after_update.users.contains_key(
+            dmeta_after_update.actors.contains_key(
                 &repo
                     .content_actor_id(Some(&user_path2), &main_branch_doc_id)
                     .to_string()
@@ -3596,8 +3596,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -3617,7 +3616,7 @@ mod tests {
             })
             .await?;
 
-        let user_path = UserPath::from("/device-actor/plug/routine");
+        let user_path = UserPath::from("/duser-wip-testactor/ddev-wip-iroh-testactor/plug/routine");
         repo.update_at_heads(
             DocPatch {
                 id: doc_id.clone(),
@@ -3682,8 +3681,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -3735,7 +3733,8 @@ mod tests {
             .get(&*local_branch("branch-a").to_string())
             .cloned()
             .ok_or_eyre("missing branch-a")?;
-        let merge_user_path = UserPath::from("/merge-device/plug/routine");
+        let merge_user_path =
+            UserPath::from("/duser-wip-testmerge/ddev-wip-iroh-testmerge/plug/routine");
         repo.merge_from_heads(
             &doc_id,
             &"main".into(),
@@ -3859,8 +3858,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
@@ -3992,8 +3990,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
@@ -4128,8 +4125,7 @@ mod tests {
         let (repo_a, stop_a) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id_a,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::clone(&entry_pool),
             Arc::clone(&doc_pool),
@@ -4139,8 +4135,7 @@ mod tests {
         let (repo_b, stop_b) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id_b,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::clone(&entry_pool),
             Arc::clone(&doc_pool),
@@ -4205,8 +4200,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
@@ -4303,8 +4297,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx,
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -4355,8 +4348,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx,
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -4419,8 +4411,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx,
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -4598,8 +4589,7 @@ mod tests {
         let (repo, stop_token) = DrawerRepo::load(
             acx.clone(),
             drawer_doc_id,
-            automerge::ActorId::random(),
-            daybook_types::doc::UserPath::from("/test-device"),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
