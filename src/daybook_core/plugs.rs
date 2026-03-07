@@ -647,7 +647,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 )
                                 .unwrap();
 
-                                format!("file://{path}", path = path.to_string_lossy())
+                                format!("file://{path}", path = path.to_string())
                                     .parse()
                                     .unwrap()
                             }*/

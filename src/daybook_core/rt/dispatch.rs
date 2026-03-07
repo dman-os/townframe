@@ -28,9 +28,9 @@ pub enum ActiveDispatchArgs {
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
 pub struct FacetRoutineArgs {
     pub doc_id: daybook_types::doc::DocId,
-    #[autosurgeon(with = "am_utils_rs::codecs::path")]
+    #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
     pub branch_path: daybook_types::doc::BranchPath,
-    #[autosurgeon(with = "am_utils_rs::codecs::path")]
+    #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
     pub staging_branch_path: daybook_types::doc::BranchPath,
     pub heads: ChangeHashSet,
     pub facet_key: String,

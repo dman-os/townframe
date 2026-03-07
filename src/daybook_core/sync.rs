@@ -1145,6 +1145,8 @@ mod tests {
             rtx.acx.clone(),
             rtx.doc_drawer.document_id().clone(),
             rtx.local_actor_id.clone(),
+            daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
+            rtx.layout.repo_root.join("local_state"),
             Arc::new(std::sync::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),
             )),

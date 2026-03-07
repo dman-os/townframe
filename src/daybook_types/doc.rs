@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use camino::Utf8PathBuf;
 
 pub type Multihash = String;
 
@@ -9,6 +10,7 @@ pub type MimeType = String;
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct UserMeta {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub user_path: UserPath,
 }
 
@@ -91,7 +93,7 @@ crate::define_enum_and_tag!(
         PseudoLabel type (Vec<String>),
         PseudoLabelCandidates type (PseudoLabelCandidatesFacet),
         TitleGeneric type (String),
-        PathGeneric type (PathBuf),
+        PathGeneric type (String),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
@@ -356,15 +358,14 @@ pub type DocId = String;
 pub type DocUserId = automerge::ActorId;
 pub type FacetBlame = HashMap<FacetKey, DocUserId>;
 
-// FIXME: use camino here
-pub type UserPath = std::path::PathBuf;
-pub type BranchPath = std::path::PathBuf;
+pub type UserPath = camino::Utf8PathBuf;
+pub type BranchPath = camino::Utf8PathBuf;
 
 pub mod user_path {
     use super::*;
 
     pub fn new(device: &str, plug: Option<&str>, routine: Option<&str>) -> UserPath {
-        let mut path = PathBuf::from("/");
+        let mut path = Utf8PathBuf::from("/");
         path.push(device);
         if let Some(plug) = plug {
             path.push(plug);
@@ -376,35 +377,39 @@ pub mod user_path {
     }
 
     pub fn to_actor_id(path: &UserPath) -> automerge::ActorId {
-        let path_str = path.to_string_lossy();
-        let hash = blake3::hash(path_str.as_bytes());
+        let hash = blake3::hash(path.as_str().as_bytes());
         let mut bytes = [0u8; 16];
         bytes.copy_from_slice(&hash.as_bytes()[..16]);
         automerge::ActorId::from(bytes)
     }
 
     pub fn device(path: &UserPath) -> &str {
-        path.components()
-            .nth(1)
-            .and_then(|component| component.as_os_str().to_str())
+        path.as_str()
+            .trim_start_matches('/')
+            .split('/')
+            .find(|segment| !segment.is_empty())
             .unwrap_or("")
     }
 
     pub fn plug(path: &UserPath) -> Option<&str> {
-        path.components()
-            .nth(2)
-            .and_then(|component| component.as_os_str().to_str())
+        path.as_str()
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .nth(1)
     }
 
     pub fn routine(path: &UserPath) -> Option<&str> {
-        path.components()
-            .nth(3)
-            .and_then(|component| component.as_os_str().to_str())
+        path.as_str()
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .nth(2)
     }
 
     pub fn parse(input: &str) -> Res<UserPath> {
-        let path = PathBuf::from(input);
-        if !path.as_path().has_root() {
+        let path = Utf8PathBuf::from(input);
+        if !path.is_absolute() {
             eyre::bail!("UserPath must start with /");
         }
         Ok(path)
@@ -1063,7 +1068,7 @@ mod tests {
         let tag_path = FacetTag::WellKnown(WellKnownFacetTag::PathGeneric);
         new.facets.insert(
             tag_path.clone().into(),
-            WellKnownFacet::PathGeneric(std::path::PathBuf::from("/tmp")).into(),
+            WellKnownFacet::PathGeneric("/tmp".to_string()).into(),
         );
 
         let patch = Doc::diff(&old, &new);

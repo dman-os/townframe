@@ -142,6 +142,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         ctx.acx.clone(),
         drawer_doc_id,
         ctx.local_actor_id.clone(),
+        ctx.local_user_path.clone().into(),
+        ctx.layout.repo_root.join("local_state"),
         Arc::new(std::sync::Mutex::new(
             daybook_core::drawer::lru::KeyedLruPool::new(1000),
         )),
@@ -742,6 +744,8 @@ async fn clone_repo_from_url(
         rcx.acx.clone(),
         rcx.doc_drawer.document_id().clone(),
         rcx.local_actor_id.clone(),
+        rcx.local_user_path.clone().into(),
+        rcx.layout.repo_root.join("local_state"),
         Arc::new(std::sync::Mutex::new(
             daybook_core::drawer::lru::KeyedLruPool::new(1000),
         )),
@@ -844,6 +848,8 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             ctx.acx.clone(),
             ctx.doc_drawer.document_id().clone(),
             ctx.local_actor_id.clone(),
+            ctx.local_user_path.clone().into(),
+            ctx.layout.repo_root.join("local_state"),
             Arc::new(std::sync::Mutex::new(
                 daybook_core::drawer::lru::KeyedLruPool::new(1000)
             )),
@@ -1216,10 +1222,7 @@ Routine impl: {routine_impl:?}
                                 branch
                             }
                         };
-                        let heads = branches
-                            .branches
-                            .get(&branch_path.to_string_lossy().to_string())
-                            .unwrap();
+                        let heads = branches.branches.get(&branch_path.to_string()).unwrap();
 
                         let job_id = ecx
                             .rt

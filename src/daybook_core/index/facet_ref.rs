@@ -209,15 +209,11 @@ impl DocFacetRefIndexRepo {
             let Some(branch_path) = doc.main_branch_path() else {
                 continue;
             };
-            if branch_path.to_string_lossy().starts_with("/tmp/") {
+            if branch_path.to_string().starts_with("/tmp/") {
                 continue;
             }
 
-            let Some(heads) = doc
-                .branches
-                .get(&branch_path.to_string_lossy().to_string())
-                .cloned()
-            else {
+            let Some(heads) = doc.branches.get(&branch_path.to_string()).cloned() else {
                 continue;
             };
             let Some(facet_keys) = self

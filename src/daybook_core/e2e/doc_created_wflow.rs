@@ -134,7 +134,7 @@ async fn test_staging_branch_workflow() -> Res<()> {
     // The staging branch may not exist yet if no writes have happened, or it may have been created
     let branches = test_cx.drawer_repo.get_doc_branches(&doc_id).await;
     if let Ok(Some(branches)) = branches {
-        let staging_branch_str = staging_branch.to_string_lossy().to_string();
+        let staging_branch_str = staging_branch.to_string();
         let staging_exists = branches.branches.contains_key(&staging_branch_str);
 
         if staging_exists {
@@ -164,7 +164,7 @@ async fn test_staging_branch_workflow() -> Res<()> {
     // Verify the staging branch has been cleaned up (merged or deleted)
     let final_branches = test_cx.drawer_repo.get_doc_branches(&doc_id).await;
     if let Ok(Some(branches)) = final_branches {
-        let staging_branch_str = staging_branch.to_string_lossy().to_string();
+        let staging_branch_str = staging_branch.to_string();
         let staging_still_exists = branches.branches.contains_key(&staging_branch_str);
 
         assert!(

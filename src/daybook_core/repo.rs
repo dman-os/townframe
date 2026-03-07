@@ -250,7 +250,7 @@ impl RepoCtx {
         use crate::rt::dispatch::DispatchRepo;
         use crate::tables::TablesRepo;
 
-        let blobs_repo = BlobsRepo::new(blobs_root, local_user_path.to_string()).await?;
+        let blobs_repo = BlobsRepo::new(blobs_root.clone(), local_user_path.to_string()).await?;
         let mut plugs_repo: Option<Arc<PlugsRepo>> = None;
         let mut plugs_stop: Option<crate::repos::RepoStopToken> = None;
         let mut config_stop: Option<crate::repos::RepoStopToken> = None;
@@ -300,6 +300,11 @@ impl RepoCtx {
                 acx.clone(),
                 doc_drawer.document_id().clone(),
                 local_actor_id.clone(),
+                daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                blobs_root
+                    .parent()
+                    .ok_or_eyre("blobs root missing parent")?
+                    .join("local_state"),
                 Arc::new(std::sync::Mutex::new(
                     crate::drawer::lru::KeyedLruPool::new(1000),
                 )),

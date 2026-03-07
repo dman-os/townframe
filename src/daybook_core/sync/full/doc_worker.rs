@@ -33,7 +33,8 @@ pub async fn spawn_doc_sync_worker(
                 worker.handle_missing_doc();
                 return eyre::Ok(());
             };
-            let (broker_handle, broker_stop_token) = acx.change_manager().add_doc(handle.clone()).await?;
+            let (broker_handle, broker_stop_token) =
+                acx.change_manager().add_doc(handle.clone()).await?;
             let mut heads_listener = broker_handle.get_head_listener().await?;
             let (peer_state, state_stream) = handle.peers();
             worker.handle_peer_state_update(peer_state);
@@ -234,13 +235,14 @@ mod tests {
         assert_eq!(state.their_heads, Some(heads_at_2.clone()));
         assert_eq!(state.shared_heads, Some(heads_at_2.clone()));
 
-        let heads_after_branch = alice_handle.with_document(|doc| -> Res<Vec<automerge::ChangeHash>> {
-            let branch_base = heads_at_1.clone();
-            let mut tx = doc.transaction_at(automerge::PatchLog::null(), &branch_base);
-            tx.put(automerge::ROOT, "k_branch", "v_branch")?;
-            tx.commit();
-            Ok(doc.get_heads())
-        })?;
+        let heads_after_branch =
+            alice_handle.with_document(|doc| -> Res<Vec<automerge::ChangeHash>> {
+                let branch_base = heads_at_1.clone();
+                let mut tx = doc.transaction_at(automerge::PatchLog::null(), &branch_base);
+                tx.put(automerge::ROOT, "k_branch", "v_branch")?;
+                tx.commit();
+                Ok(doc.get_heads())
+            })?;
         assert!(
             heads_after_branch.len() >= 2,
             "expected concurrent branch heads after transaction_at from old heads"
@@ -315,7 +317,10 @@ mod tests {
 
         let base_heads_alice = alice_handle.with_document(|doc| doc.get_heads());
         let base_heads_bob = bob_handle.with_document(|doc| doc.get_heads());
-        assert_eq!(base_heads_alice, base_heads_bob, "both nodes should share base");
+        assert_eq!(
+            base_heads_alice, base_heads_bob,
+            "both nodes should share base"
+        );
 
         // Diverge independently on disjoint keys while disconnected.
         let alice_heads_diverged =
@@ -325,12 +330,13 @@ mod tests {
                 tx.commit();
                 Ok(doc.get_heads())
             })?;
-        let bob_heads_diverged = bob_handle.with_document(|doc| -> Res<Vec<automerge::ChangeHash>> {
-            let mut tx = doc.transaction();
-            tx.put(automerge::ROOT, "bob_only", "b")?;
-            tx.commit();
-            Ok(doc.get_heads())
-        })?;
+        let bob_heads_diverged =
+            bob_handle.with_document(|doc| -> Res<Vec<automerge::ChangeHash>> {
+                let mut tx = doc.transaction();
+                tx.put(automerge::ROOT, "bob_only", "b")?;
+                tx.commit();
+                Ok(doc.get_heads())
+            })?;
 
         assert_ne!(alice_heads_diverged, bob_heads_diverged);
         assert_eq!(alice_heads_diverged.len(), 1);
@@ -347,12 +353,11 @@ mod tests {
 
         // Right after reconnect, shared_heads may already be converged if sync is fast.
         // We only require that shared_heads exists and is a frontier set (heads, not history).
-        let state_pre_merge = wait_for_peer_doc_state(
-            &bob_handle,
-            alice_on_bob_after_reconnect.id(),
-            |state| state.shared_heads.is_some(),
-        )
-        .await?;
+        let state_pre_merge =
+            wait_for_peer_doc_state(&bob_handle, alice_on_bob_after_reconnect.id(), |state| {
+                state.shared_heads.is_some()
+            })
+            .await?;
         let shared_pre_merge = state_pre_merge
             .shared_heads
             .clone()
@@ -363,15 +368,18 @@ mod tests {
         );
 
         // After sync converges, both sides should report same heads (two concurrent heads).
-        let state_post_merge = wait_for_peer_doc_state(
-            &bob_handle,
-            alice_on_bob_after_reconnect.id(),
-            |state| {
-                state.their_heads.as_ref().is_some_and(|their| their.len() == 2)
-                    && state.shared_heads.as_ref().is_some_and(|shared| shared.len() == 2)
-            },
-        )
-        .await?;
+        let state_post_merge =
+            wait_for_peer_doc_state(&bob_handle, alice_on_bob_after_reconnect.id(), |state| {
+                state
+                    .their_heads
+                    .as_ref()
+                    .is_some_and(|their| their.len() == 2)
+                    && state
+                        .shared_heads
+                        .as_ref()
+                        .is_some_and(|shared| shared.len() == 2)
+            })
+            .await?;
         let shared_post_merge = state_post_merge
             .shared_heads
             .clone()

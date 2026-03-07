@@ -171,11 +171,9 @@ pub async fn test_cx_with_options(
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
 
     let temp_dir = tempfile::tempdir()?;
-    let blobs = crate::blobs::BlobsRepo::new(
-        temp_dir.path().join("blobs"),
-        local_user_path.to_string_lossy().to_string(),
-    )
-    .await?;
+    let blobs =
+        crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.to_string())
+            .await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         acx.clone(),
@@ -204,6 +202,8 @@ pub async fn test_cx_with_options(
         acx.clone(),
         drawer_doc_id,
         local_actor_id.clone(),
+        local_user_path.clone(),
+        temp_dir.path().join("local_states"),
         Arc::new(std::sync::Mutex::new(
             crate::drawer::lru::KeyedLruPool::new(1000),
         )),

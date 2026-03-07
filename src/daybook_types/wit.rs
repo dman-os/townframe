@@ -183,7 +183,7 @@ pub mod doc {
                     .into_iter()
                     .map(|key| key.to_string())
                     .collect(),
-                user_path: val.user_path.map(|path| path.to_string_lossy().to_string()),
+                user_path: val.user_path.map(|path| path.to_string()),
             }
         }
     }
@@ -229,9 +229,7 @@ pub mod doc {
                     })
                 }
                 root_doc::WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
-                root_doc::WellKnownFacet::PathGeneric(val) => {
-                    Self::PathGeneric(val.to_string_lossy().into_owned())
-                }
+                root_doc::WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val.to_string()),
                 root_doc::WellKnownFacet::ImageMetadata(val) => {
                     Self::ImageMetadata(ImageMetadata {
                         facet_ref: val.facet_ref.to_string(),
@@ -297,7 +295,7 @@ pub mod doc {
                             (
                                 actor_id,
                                 UserMeta {
-                                    user_path: user_meta.user_path.to_string_lossy().to_string(),
+                                    user_path: user_meta.user_path.to_string(),
                                 },
                             )
                         })
@@ -357,7 +355,7 @@ pub mod doc {
                     })
                 }
                 WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
-                WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val.into()),
+                WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val),
                 WellKnownFacet::ImageMetadata(val) => {
                     Self::ImageMetadata(root_doc::ImageMetadata {
                         facet_ref: val.facet_ref.parse()?,

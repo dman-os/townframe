@@ -60,4 +60,4 @@ pastey.workspace = true
 # os
 addr.workspace = true
 blake3.workspace = true
-camino = "1.2.2"
+camino = { version = "1.2.2", features = ["serde1"] }

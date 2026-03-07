@@ -112,6 +112,7 @@ dependencies = [
  "automerge",
  "autosurgeon",
  "bytes",
+ "camino",
  "data-encoding",
  "iroh",
  "samod",

@@ -39,6 +39,7 @@ samod-core = "*"
 serde.workspace = true
 data-encoding.workspace = true
 bytes.workspace = true
+camino = "1.2.2"
 
 #
 # errors

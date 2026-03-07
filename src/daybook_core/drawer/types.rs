@@ -33,10 +33,16 @@ pub struct UpdateDocBatchErrV2 {
     pub map: HashMap<u64, DrawerError>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct StoredBranchRef {
+    pub branch_doc_id: String,
+}
+
 #[derive(Debug, Clone, Reconcile, Hydrate)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DocEntry {
-    pub branches: HashMap<String, ChangeHashSet>,
+    pub branches: HashMap<String, StoredBranchRef>,
     // WARN: field ordering is imporant here, we want reconciliation
     // to create changes on the map before the atomic map so that changes
     // to the atmoic version increment will be always observed after the
@@ -111,12 +117,12 @@ pub enum DrawerEvent {
     },
     DocAdded {
         id: DocId,
-        entry: DocEntry,
+        entry: DocNBranches,
         drawer_heads: ChangeHashSet,
     },
     DocUpdated {
         id: DocId,
-        entry: DocEntry,
+        entry: DocNBranches,
         diff: DocEntryDiff,
         drawer_heads: ChangeHashSet,
     },

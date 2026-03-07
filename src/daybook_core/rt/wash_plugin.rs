@@ -47,9 +47,7 @@ mod binds_guest {
             root_doc::WellKnownFacet::TitleGeneric(val) => {
                 wit_doc::WellKnownFacet::TitleGeneric(val)
             }
-            root_doc::WellKnownFacet::PathGeneric(val) => {
-                wit_doc::WellKnownFacet::PathGeneric(val.to_string_lossy().into_owned())
-            }
+            root_doc::WellKnownFacet::PathGeneric(val) => wit_doc::WellKnownFacet::PathGeneric(val),
             root_doc::WellKnownFacet::ImageMetadata(val) => {
                 wit_doc::WellKnownFacet::ImageMetadata(wit_doc::ImageMetadata {
                     facet_ref: val.facet_ref.to_string(),
@@ -133,7 +131,7 @@ mod binds_guest {
                             (
                                 actor_id,
                                 wit_doc::UserMeta {
-                                    user_path: user_meta.user_path.to_string_lossy().to_string(),
+                                    user_path: user_meta.user_path.to_string(),
                                 },
                             )
                         })
@@ -198,9 +196,7 @@ mod binds_guest {
             wit_doc::WellKnownFacet::TitleGeneric(val) => {
                 root_doc::WellKnownFacet::TitleGeneric(val)
             }
-            wit_doc::WellKnownFacet::PathGeneric(val) => {
-                root_doc::WellKnownFacet::PathGeneric(val.into())
-            }
+            wit_doc::WellKnownFacet::PathGeneric(val) => root_doc::WellKnownFacet::PathGeneric(val),
             wit_doc::WellKnownFacet::ImageMetadata(val) => {
                 root_doc::WellKnownFacet::ImageMetadata(root_doc::ImageMetadata {
                     facet_ref: val.facet_ref.parse()?,

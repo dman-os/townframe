@@ -16,7 +16,7 @@ pub struct ConfigStore {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reconcile, Hydrate)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct UserMeta {
-    #[autosurgeon(with = "am_utils_rs::codecs::path")]
+    #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
     pub user_path: daybook_types::doc::UserPath,
     #[autosurgeon(with = "am_utils_rs::codecs::date")]
     pub seen_at: Timestamp,
@@ -141,7 +141,7 @@ impl ConfigRepo {
             .mutate_sync(|store| {
                 store
                     .users
-                    .entry(local_user_path.to_string_lossy().into_owned())
+                    .entry(local_user_path.to_string())
                     .or_insert_with(|| {
                         Versioned::mint(
                             local_actor_id.clone(),

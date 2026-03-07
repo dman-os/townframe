@@ -157,3 +157,38 @@ pub mod path {
         Ok(PathBuf::from(string))
     }
 }
+
+pub mod utf8_path {
+    use super::*;
+    use camino::Utf8PathBuf;
+
+    pub fn reconcile<R: Reconciler>(path: &Utf8PathBuf, mut reconciler: R) -> Result<(), R::Error> {
+        reconciler.str(path.as_str())
+    }
+
+    pub fn hydrate<'a, D: ReadDoc>(
+        doc: &D,
+        obj: &ObjId,
+        prop: autosurgeon::Prop<'a>,
+    ) -> Result<Utf8PathBuf, HydrateError> {
+        use automerge::{ScalarValue, Value};
+        let string = match doc.get(obj, &prop)? {
+            Some((Value::Scalar(scalar), _)) => match scalar.as_ref() {
+                ScalarValue::Str(str_val) => str_val.to_string(),
+                _ => {
+                    return Err(autosurgeon::HydrateError::unexpected(
+                        "a string",
+                        format!("unexpected scalar type: {:?}", scalar),
+                    ));
+                }
+            },
+            _ => {
+                return Err(autosurgeon::HydrateError::unexpected(
+                    "a scalar value",
+                    "value is not a scalar".to_string(),
+                ));
+            }
+        };
+        Ok(Utf8PathBuf::from(string))
+    }
+}
