@@ -206,7 +206,7 @@ impl PartitionSyncProvider for StaticPartitionSyncProvider {
                 member_count: partition.members.len() as u64,
             });
         }
-        out.sort_by(|a, b| a.partition_id.cmp(&b.partition_id));
+        out.sort_by(|left, right| left.partition_id.cmp(&right.partition_id));
         Ok(out)
     }
 

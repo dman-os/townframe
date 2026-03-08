@@ -94,7 +94,7 @@ impl AmCtx {
                                             conn_id,
                                             peer_id,
                                             // FIXME: find better reason type
-                                            reason: last_reason.unwrap_or_else(|| format!("max re-connention atttempts reached")),
+                                            reason: last_reason.unwrap_or_else(|| "max re-connention atttempts reached".into()),
                                         })
                                         .inspect_err(|_| warn!("connection owner closed before finish"))
                                         .ok();
@@ -151,7 +151,7 @@ impl Dialer for IrohDialer {
     > {
         let endpoint = self.endpoint.clone();
         let addr = self.to_addr.clone();
-        let endpoint_id = self.endpoint_id.clone();
+        let endpoint_id = self.endpoint_id;
         Box::pin(async move {
             let conn = endpoint.connect(addr, AmCtx::SYNC_ALPN).await?;
             let (tx, rx) = conn.open_bi().await?;
@@ -209,31 +209,23 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
             .map_err(iroh::protocol::AcceptError::from_boxed)?;
 
         let mut events = acceptor.events();
-        let conn_id;
-        let peer_info;
-        loop {
-            let event = events.next().await;
-            let Some(event) = event else {
+        let event = events.next().await;
+        let Some(event) = event else {
+            return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
+                "connection stream ended befor disconnect with {endpoint_id}"
+            ))));
+        };
+        let (conn_id, peer_info) = match event {
+            AcceptorEvent::ClientConnected {
+                connection_id,
+                peer_info,
+            } => (connection_id, peer_info),
+            AcceptorEvent::ClientDisconnected { reason, .. } => {
                 return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
-                    "connection stream ended befor disconnect with {endpoint_id}"
+                    "failed on handshake with {endpoint_id}: {reason:?}"
                 ))));
-            };
-            match event {
-                AcceptorEvent::ClientConnected {
-                    connection_id,
-                    peer_info: peer_inf,
-                } => {
-                    conn_id = connection_id;
-                    peer_info = peer_inf;
-                    break;
-                }
-                AcceptorEvent::ClientDisconnected { reason, .. } => {
-                    return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
-                        "failed on handshake with {endpoint_id}: {reason:?}"
-                    ))));
-                }
             }
-        }
+        };
 
         let peer_id: Arc<str> = peer_info.peer_id.as_str().into();
 

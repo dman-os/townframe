@@ -15,7 +15,9 @@ repo = [
     "dep:samod",
     "samod/tokio",
     "samod/tungstenite",
-    "dep:tokio-tungstenite"
+    "dep:tokio-tungstenite",
+    "dep:sqlx",
+    "dep:serde_json",
 ]
 
 [dependencies]
@@ -38,14 +40,17 @@ samod-core = "*"
 #
 # encoding
 serde.workspace = true
+serde_json = { workspace = true, optional = true }
 data-encoding.workspace = true
 bytes.workspace = true
 camino = "1.2.2"
+sqlx = { workspace = true, optional = true, features = ["sqlite", "runtime-tokio"] }
 
 #
 # errors
 thiserror.workspace = true
 iroh = { workspace = true, optional = true }
+irpc = { version = "0.12.0", features = ["derive"] }
 
 #
 # logging

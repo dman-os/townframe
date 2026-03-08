@@ -1,33 +1,23 @@
 use crate::interlude::*;
 
+use crate::sync::protocol::{
+    GetDocsFullRpcReq, GetPartitionEventsRpcReq, ListPartitionsRpcReq, PartitionSyncRpc,
+    SubPartitionsRpcReq,
+};
 use crate::sync::{
     GetDocsFullRequest, GetDocsFullResponse, GetPartitionEventsRequest, GetPartitionEventsResponse,
-    ListPartitionsResponse, PartitionAccessPolicy, PartitionCursorRequest, PartitionSubscription,
-    PartitionSyncError, PartitionSyncProvider, PeerKey, SubPartitionsRequest,
-    DEFAULT_SUBSCRIPTION_CAPACITY,
+    ListPartitionsResponse, PartitionSubscription, PeerKey, PeerSyncProgressEvent,
+    SubPartitionsRequest, DEFAULT_SUBSCRIPTION_CAPACITY,
 };
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 pub type SamodSyncRequest = ();
 
 pub struct PeerSyncWorkerHandle {
     msg_tx: mpsc::UnboundedSender<PeerMsg>,
-}
-
-pub struct PeerSyncWorkerStopToken {
-    cancel_token: CancellationToken,
-    join_handle: tokio::task::JoinHandle<()>,
-}
-
-impl PeerSyncWorkerStopToken {
-    pub async fn stop(self) -> Res<()> {
-        self.cancel_token.cancel();
-        utils_rs::wait_on_handle_with_timeout(self.join_handle, Duration::from_secs(1))
-            .await
-            .wrap_err("failed stopping peer sync worker")
-    }
+    pub events_rx: Option<broadcast::Receiver<PeerSyncProgressEvent>>,
 }
 
 impl PeerSyncWorkerHandle {
@@ -67,6 +57,20 @@ impl PeerSyncWorkerHandle {
     }
 }
 
+pub struct PeerSyncWorkerStopToken {
+    cancel_token: CancellationToken,
+    join_handle: tokio::task::JoinHandle<()>,
+}
+
+impl PeerSyncWorkerStopToken {
+    pub async fn stop(self) -> Res<()> {
+        self.cancel_token.cancel();
+        utils_rs::wait_on_handle_with_timeout(self.join_handle, Duration::from_secs(1))
+            .await
+            .wrap_err("failed stopping peer sync worker")
+    }
+}
+
 enum PeerMsg {
     ListPartitions {
         resp: oneshot::Sender<Res<ListPartitionsResponse>>,
@@ -87,12 +91,12 @@ enum PeerMsg {
 
 pub async fn spawn_peer_sync_worker(
     peer: PeerKey,
-    provider: Arc<dyn PartitionSyncProvider>,
-    access_policy: Arc<dyn PartitionAccessPolicy>,
+    rpc_client: irpc::Client<PartitionSyncRpc>,
     _samod_sync_rx: mpsc::Receiver<SamodSyncRequest>,
     cancel_token: CancellationToken,
 ) -> Res<(PeerSyncWorkerHandle, PeerSyncWorkerStopToken)> {
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+    let (events_tx, events_rx) = broadcast::channel(2048);
     let fut = {
         let cancel_token = cancel_token.clone();
         async move {
@@ -106,49 +110,102 @@ pub async fn spawn_peer_sync_worker(
                         };
                         match msg {
                             PeerMsg::ListPartitions { resp } => {
-                                let out = provider
-                                    .list_partitions_for_peer(&peer)
+                                let start_at = std::time::Instant::now();
+                                let _ = events_tx.send(PeerSyncProgressEvent::RequestStarted {
+                                    op: "list_partitions",
+                                });
+                                let out = match rpc_client
+                                    .rpc(ListPartitionsRpcReq { peer: peer.clone() })
                                     .await
-                                    .map(|mut parts| {
-                                        parts.retain(|part| access_policy.can_access_partition(&peer, &part.partition_id));
-                                        ListPartitionsResponse { partitions: parts }
-                                    });
+                                {
+                                    Ok(Ok(value)) => Ok(value),
+                                    Ok(Err(err)) => Err(err.into_report()),
+                                    Err(err) => Err(ferr!("irpc list_partitions failed: {err}")),
+                                };
+                                let _ = events_tx.send(PeerSyncProgressEvent::RequestFinished {
+                                    op: "list_partitions",
+                                    success: out.is_ok(),
+                                    elapsed: start_at.elapsed(),
+                                });
                                 resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                             }
                             PeerMsg::GetPartitionEvents { req, resp } => {
-                                let out = if let Err(err) =
-                                    ensure_partition_access(&peer, &req.partitions, access_policy.as_ref())
+                                let start_at = std::time::Instant::now();
+                                let _ = events_tx.send(PeerSyncProgressEvent::RequestStarted {
+                                    op: "get_partition_events",
+                                });
+                                let out = match rpc_client
+                                    .rpc(GetPartitionEventsRpcReq {
+                                        peer: peer.clone(),
+                                        req,
+                                    })
+                                    .await
                                 {
-                                    Err(err)
-                                } else {
-                                    provider
-                                        .get_partition_events(&peer, &req.partitions)
-                                        .await
-                                        .map(|events| GetPartitionEventsResponse { events })
+                                    Ok(Ok(value)) => Ok(value),
+                                    Ok(Err(err)) => Err(err.into_report()),
+                                    Err(err) => Err(ferr!("irpc get_partition_events failed: {err}")),
                                 };
+                                let _ = events_tx.send(PeerSyncProgressEvent::RequestFinished {
+                                    op: "get_partition_events",
+                                    success: out.is_ok(),
+                                    elapsed: start_at.elapsed(),
+                                });
                                 resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                             }
                             PeerMsg::GetDocsFull { req, resp } => {
-                                let out = provider
-                                    .get_docs_full(&peer, &req.doc_ids)
+                                let start_at = std::time::Instant::now();
+                                let _ = events_tx.send(PeerSyncProgressEvent::RequestStarted {
+                                    op: "get_docs_full",
+                                });
+                                let out = match rpc_client
+                                    .rpc(GetDocsFullRpcReq {
+                                        peer: peer.clone(),
+                                        req,
+                                    })
                                     .await
-                                    .map(|docs| GetDocsFullResponse { docs });
+                                {
+                                    Ok(Ok(value)) => Ok(value),
+                                    Ok(Err(err)) => Err(err.into_report()),
+                                    Err(err) => Err(ferr!("irpc get_docs_full failed: {err}")),
+                                };
+                                let _ = events_tx.send(PeerSyncProgressEvent::RequestFinished {
+                                    op: "get_docs_full",
+                                    success: out.is_ok(),
+                                    elapsed: start_at.elapsed(),
+                                });
                                 resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                             }
                             PeerMsg::Subscribe { req, resp } => {
-                                let out = if let Err(err) =
-                                    ensure_partition_access(&peer, &req.partitions, access_policy.as_ref())
+                                let start_at = std::time::Instant::now();
+                                let _ = events_tx.send(PeerSyncProgressEvent::RequestStarted {
+                                    op: "subscribe",
+                                });
+                                let out = match rpc_client
+                                    .server_streaming(
+                                        SubPartitionsRpcReq {
+                                            peer: peer.clone(),
+                                            req,
+                                        },
+                                        DEFAULT_SUBSCRIPTION_CAPACITY,
+                                    )
+                                    .await
                                 {
-                                    Err(err)
-                                } else {
-                                    provider
-                                        .subscribe(
-                                            &peer,
-                                            &req.partitions,
-                                            DEFAULT_SUBSCRIPTION_CAPACITY,
-                                        )
-                                        .await
+                                    Ok(rpc_rx) => {
+                                        let (tx, rx) = mpsc::channel(DEFAULT_SUBSCRIPTION_CAPACITY);
+                                        tokio::spawn(bridge_subscription_stream(
+                                            rpc_rx,
+                                            tx,
+                                            events_tx.clone(),
+                                        ));
+                                        Ok(PartitionSubscription { rx })
+                                    }
+                                    Err(err) => Err(ferr!("irpc sub_partitions failed: {err}")),
                                 };
+                                let _ = events_tx.send(PeerSyncProgressEvent::RequestFinished {
+                                    op: "subscribe",
+                                    success: out.is_ok(),
+                                    elapsed: start_at.elapsed(),
+                                });
                                 resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                             }
                         }
@@ -158,11 +215,12 @@ pub async fn spawn_peer_sync_worker(
             eyre::Ok(())
         }
     };
-    let join_handle = tokio::spawn(async {
-        fut.await.unwrap();
-    });
+    let join_handle = tokio::spawn(async { fut.await.unwrap() });
     Ok((
-        PeerSyncWorkerHandle { msg_tx },
+        PeerSyncWorkerHandle {
+            msg_tx,
+            events_rx: Some(events_rx),
+        },
         PeerSyncWorkerStopToken {
             cancel_token,
             join_handle,
@@ -170,18 +228,15 @@ pub async fn spawn_peer_sync_worker(
     ))
 }
 
-fn ensure_partition_access(
-    peer: &PeerKey,
-    reqs: &[PartitionCursorRequest],
-    access_policy: &dyn PartitionAccessPolicy,
-) -> Res<()> {
-    for req in reqs {
-        if !access_policy.can_access_partition(peer, &req.partition_id) {
-            return Err(PartitionSyncError::AccessDenied {
-                partition_id: req.partition_id.clone(),
-            }
-            .into_report());
+async fn bridge_subscription_stream(
+    mut rpc_rx: irpc::channel::mpsc::Receiver<crate::sync::SubscriptionItem>,
+    tx: mpsc::Sender<crate::sync::SubscriptionItem>,
+    events_tx: broadcast::Sender<PeerSyncProgressEvent>,
+) {
+    while let Ok(Some(item)) = rpc_rx.recv().await {
+        if tx.send(item).await.is_err() {
+            break;
         }
+        let _ = events_tx.send(PeerSyncProgressEvent::SubscriptionForwarded);
     }
-    Ok(())
 }

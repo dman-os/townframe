@@ -189,9 +189,9 @@ impl AmCtx {
                 }
             }
         };
-        Ok(tokio::spawn(async { fut.await }.instrument(
-            tracing::info_span!("websocket sync server connector task"),
-        )))
+        Ok(tokio::spawn(fut.instrument(tracing::info_span!(
+            "websocket sync server connector task"
+        ))))
     }
 
     pub async fn add_doc(&self, doc: Automerge) -> Res<DocHandle> {
