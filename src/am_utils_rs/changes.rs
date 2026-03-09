@@ -66,7 +66,6 @@ pub struct DocIdFilter {
     pub doc_id: DocumentId,
 }
 
-#[cfg(feature = "repo")]
 impl ChangeListenerManager {
     pub fn boot() -> (Arc<Self>, ChangeListenerManagerStopToken) {
         let (change_tx, change_rx) = mpsc::unbounded_channel();

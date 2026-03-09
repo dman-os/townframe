@@ -36,7 +36,7 @@ impl AmCtx {
                 "{CONN_URL_SCHEME}:{}",
                 utils_rs::hash::encode_base58_multibase(endpoint_id)
             ))
-            .expect("impossible"),
+            .expect(ERROR_IMPOSSIBLE),
             endpoint,
             endpoint_id,
             to_addr,
@@ -50,7 +50,7 @@ impl AmCtx {
             .await
             .wrap_err("error during handshake")?;
         let peer_id: Arc<str> = peer_info.peer_id.as_str().into();
-        let conn_id = handle.connection_id().expect("impossible");
+        let conn_id = handle.connection_id().expect(ERROR_IMPOSSIBLE);
 
         let cancel_token = CancellationToken::new();
         let fut = {
@@ -193,7 +193,7 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
                     "{CONN_URL_SCHEME}:{}",
                     utils_rs::hash::encode_base58_multibase(endpoint_id)
                 ))
-                .expect("impossible"),
+                .expect(ERROR_IMPOSSIBLE),
             )
             .expect("error making acceptor");
         acceptor

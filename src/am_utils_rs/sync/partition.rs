@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use crate::sync::{
-    FullDoc, OpaqueCursor, PartitionCursorRequest, PartitionEvent, PartitionEventKind, PartitionId,
+    cursor, FullDoc, PartitionCursorRequest, PartitionEvent, PartitionEventKind, PartitionId,
     PartitionSubscription, PartitionSummary, PartitionSyncError, PartitionSyncProvider, PeerKey,
     SubscriptionItem, DEFAULT_SUBSCRIPTION_CAPACITY, MAX_GET_DOCS_FULL_DOC_IDS,
 };
@@ -59,18 +59,12 @@ impl StaticPartitionSyncProvider {
         }
     }
 
-    pub async fn set_full_doc(&self, doc_id: impl Into<String>, automerge_save: Vec<u8>) {
+    pub async fn set_full_doc(&self, doc_id: String, automerge_save: Vec<u8>) {
         let mut state = self.state.write().await;
-        state.docs_full.insert(doc_id.into(), automerge_save);
+        state.docs_full.insert(doc_id, automerge_save);
     }
 
-    pub async fn upsert_member(
-        &self,
-        partition_id: impl Into<String>,
-        doc_id: impl Into<String>,
-    ) -> PartitionEvent {
-        let partition_id = PartitionId(partition_id.into());
-        let doc_id = doc_id.into();
+    pub async fn upsert_member(&self, partition_id: PartitionId, doc_id: String) -> PartitionEvent {
         let mut state = self.state.write().await;
         let txid = state.alloc_txid();
         let partition = state.partition_mut(&partition_id);
@@ -81,48 +75,75 @@ impl StaticPartitionSyncProvider {
             kind: MembershipKind::Upsert,
         });
         let out = PartitionEvent {
-            cursor: OpaqueCursor::from_txid(txid),
-            partition_id: partition_id.clone(),
+            cursor: cursor::from_txid(txid),
+            partition_id,
             kind: PartitionEventKind::MemberUpsert { doc_id },
         };
         let _ = state.live_tx.send(out.clone());
         out
     }
 
-    pub async fn remove_member(
-        &self,
-        partition_id: impl Into<String>,
-        doc_id: impl Into<String>,
-    ) -> PartitionEvent {
-        let partition_id = PartitionId(partition_id.into());
-        let doc_id = doc_id.into();
+    pub async fn remove_member(&self, partition_id: PartitionId, doc_id: String) -> PartitionEvent {
         let mut state = self.state.write().await;
-        let txid = state.alloc_txid();
-        let partition = state.partition_mut(&partition_id);
-        partition.members.remove(&doc_id);
-        partition.membership_log.push(MembershipLogEntry {
-            txid,
-            doc_id: doc_id.clone(),
-            kind: MembershipKind::Removed,
+        let membership_txid = state.alloc_txid();
+        let mut maybe_doc_deleted_hint = None;
+        {
+            let partition = state.partition_mut(&partition_id);
+            partition.members.remove(&doc_id);
+            partition.membership_log.push(MembershipLogEntry {
+                txid: membership_txid,
+                doc_id: doc_id.clone(),
+                kind: MembershipKind::Removed,
+            });
+            if let Some(snapshot) = partition.doc_state.get_mut(&doc_id) {
+                if !snapshot.deleted {
+                    snapshot.deleted = true;
+                    maybe_doc_deleted_hint = Some(snapshot.change_count_hint);
+                }
+            }
+        }
+        let maybe_doc_deleted = maybe_doc_deleted_hint.map(|change_count_hint| {
+            let doc_txid = state.alloc_txid();
+            let partition = state.partition_mut(&partition_id);
+            partition.doc_log.push(DocLogEntry {
+                txid: doc_txid,
+                doc_id: doc_id.clone(),
+                heads: Vec::new(),
+                change_count_hint,
+                kind: DocKind::Deleted,
+            });
+            (doc_txid, change_count_hint)
         });
+        let removed_doc_id = doc_id.clone();
         let out = PartitionEvent {
-            cursor: OpaqueCursor::from_txid(txid),
+            cursor: cursor::from_txid(membership_txid),
             partition_id: partition_id.clone(),
-            kind: PartitionEventKind::MemberRemoved { doc_id },
+            kind: PartitionEventKind::MemberRemoved {
+                doc_id: removed_doc_id,
+            },
         };
         let _ = state.live_tx.send(out.clone());
+        if let Some((doc_txid, change_count_hint)) = maybe_doc_deleted {
+            let _ = state.live_tx.send(PartitionEvent {
+                cursor: cursor::from_txid(doc_txid),
+                partition_id,
+                kind: PartitionEventKind::DocDeleted {
+                    doc_id,
+                    change_count_hint,
+                },
+            });
+        }
         out
     }
 
     pub async fn emit_doc_changed(
         &self,
-        partition_id: impl Into<String>,
-        doc_id: impl Into<String>,
+        partition_id: PartitionId,
+        doc_id: String,
+        // FIXME: consider using ChagneHashSet here
         heads: Vec<String>,
         change_count_hint: u64,
     ) -> PartitionEvent {
-        let partition_id = PartitionId(partition_id.into());
-        let doc_id = doc_id.into();
         let mut state = self.state.write().await;
         let txid = state.alloc_txid();
         let partition = state.partition_mut(&partition_id);
@@ -142,8 +163,8 @@ impl StaticPartitionSyncProvider {
             kind: DocKind::Changed,
         });
         let out = PartitionEvent {
-            cursor: OpaqueCursor::from_txid(txid),
-            partition_id: partition_id.clone(),
+            cursor: cursor::from_txid(txid),
+            partition_id,
             kind: PartitionEventKind::DocChanged {
                 doc_id,
                 heads,
@@ -156,12 +177,10 @@ impl StaticPartitionSyncProvider {
 
     pub async fn emit_doc_deleted(
         &self,
-        partition_id: impl Into<String>,
-        doc_id: impl Into<String>,
+        partition_id: PartitionId,
+        doc_id: String,
         change_count_hint: u64,
     ) -> PartitionEvent {
-        let partition_id = PartitionId(partition_id.into());
-        let doc_id = doc_id.into();
         let mut state = self.state.write().await;
         let txid = state.alloc_txid();
         let partition = state.partition_mut(&partition_id);
@@ -181,8 +200,8 @@ impl StaticPartitionSyncProvider {
             kind: DocKind::Deleted,
         });
         let out = PartitionEvent {
-            cursor: OpaqueCursor::from_txid(txid),
-            partition_id: partition_id.clone(),
+            cursor: cursor::from_txid(txid),
+            partition_id,
             kind: PartitionEventKind::DocDeleted {
                 doc_id,
                 change_count_hint,
@@ -202,7 +221,7 @@ impl PartitionSyncProvider for StaticPartitionSyncProvider {
             let latest = latest_partition_txid(partition);
             out.push(PartitionSummary {
                 partition_id: partition_id.clone(),
-                latest_cursor: OpaqueCursor::from_txid(latest),
+                latest_cursor: cursor::from_txid(latest),
                 member_count: partition.members.len() as u64,
             });
         }
@@ -225,7 +244,7 @@ impl PartitionSyncProvider for StaticPartitionSyncProvider {
                 .into_report()
             })?;
             if let Some(since) = &req.since {
-                let since_txid = since.to_txid().map_err(|_| {
+                let since_txid = cursor::to_txid(since).map_err(|_| {
                     PartitionSyncError::InvalidCursor {
                         cursor: since.clone(),
                     }
@@ -261,6 +280,14 @@ impl PartitionSyncProvider for StaticPartitionSyncProvider {
         Ok(out)
     }
 
+    async fn is_doc_accessible_for_peer(&self, _peer: &PeerKey, doc_id: &str) -> Res<bool> {
+        let state = self.state.read().await;
+        Ok(state
+            .partitions
+            .values()
+            .any(|partition| partition.members.contains(doc_id)))
+    }
+
     async fn subscribe(
         &self,
         peer: &PeerKey,
@@ -274,7 +301,7 @@ impl PartitionSyncProvider for StaticPartitionSyncProvider {
         let replay = self.get_partition_events(peer, reqs).await?;
         let high_watermark = replay
             .iter()
-            .filter_map(|event| event.cursor.to_txid().ok())
+            .filter_map(|event| cursor::to_txid(&event.cursor).ok())
             .max()
             .unwrap_or(0);
         let requested_partitions: HashSet<PartitionId> =
@@ -293,7 +320,7 @@ impl PartitionSyncProvider for StaticPartitionSyncProvider {
                 if !requested_partitions.contains(&event.partition_id) {
                     continue;
                 }
-                let Ok(txid) = event.cursor.to_txid() else {
+                let Ok(txid) = cursor::to_txid(&event.cursor) else {
                     continue;
                 };
                 if txid <= high_watermark {
@@ -359,7 +386,7 @@ fn append_snapshot_events(
     partition_id: &PartitionId,
     out: &mut Vec<PartitionEvent>,
 ) {
-    let snapshot_cursor = OpaqueCursor::from_txid(latest_partition_txid(partition));
+    let snapshot_cursor = cursor::from_txid(latest_partition_txid(partition));
     for doc_id in partition.members.iter().cloned() {
         out.push(PartitionEvent {
             cursor: snapshot_cursor.clone(),
@@ -403,7 +430,7 @@ fn append_replay_events(
             },
         };
         out.push(PartitionEvent {
-            cursor: OpaqueCursor::from_txid(entry.txid),
+            cursor: cursor::from_txid(entry.txid),
             partition_id: partition_id.clone(),
             kind,
         });
@@ -425,7 +452,7 @@ fn append_replay_events(
             },
         };
         out.push(PartitionEvent {
-            cursor: OpaqueCursor::from_txid(entry.txid),
+            cursor: cursor::from_txid(entry.txid),
             partition_id: partition_id.clone(),
             kind,
         });
@@ -433,8 +460,8 @@ fn append_replay_events(
 }
 
 fn cmp_partition_events(left: &PartitionEvent, right: &PartitionEvent) -> std::cmp::Ordering {
-    let left_txid = left.cursor.to_txid().unwrap_or(0);
-    let right_txid = right.cursor.to_txid().unwrap_or(0);
+    let left_txid = cursor::to_txid(&left.cursor).unwrap_or(0);
+    let right_txid = cursor::to_txid(&right.cursor).unwrap_or(0);
     left_txid
         .cmp(&right_txid)
         .then_with(|| left.partition_id.cmp(&right.partition_id))

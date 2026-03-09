@@ -8305,7 +8305,7 @@ dependencies = [
 [[package]]
 name = "samod"
 version = "0.8.0"
-source = "git+https://github.com/dman-os/samod?rev=536f15081893e14529668c9d62240e4b4022248e#536f15081893e14529668c9d62240e4b4022248e"
+source = "git+https://github.com/dman-os/samod?rev=13f5dc6207e3138e49f9ea688165585f793eee31#13f5dc6207e3138e49f9ea688165585f793eee31"
 dependencies = [
  "async-channel",
  "automerge",
@@ -8327,7 +8327,7 @@ dependencies = [
 [[package]]
 name = "samod-core"
 version = "0.8.0"
-source = "git+https://github.com/dman-os/samod?rev=536f15081893e14529668c9d62240e4b4022248e#536f15081893e14529668c9d62240e4b4022248e"
+source = "git+https://github.com/dman-os/samod?rev=13f5dc6207e3138e49f9ea688165585f793eee31#13f5dc6207e3138e49f9ea688165585f793eee31"
 dependencies = [
  "automerge",
  "base64 0.21.7",

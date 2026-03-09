@@ -97,6 +97,11 @@ pub async fn spawn_peer_sync_worker(
 ) -> Res<(PeerSyncWorkerHandle, PeerSyncWorkerStopToken)> {
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
     let (events_tx, events_rx) = broadcast::channel(2048);
+    let mut worker = PeerSyncWorker {
+        rpc_client,
+        events_tx,
+        peer,
+    };
     let fut = {
         let cancel_token = cancel_token.clone();
         async move {
@@ -108,107 +113,7 @@ pub async fn spawn_peer_sync_worker(
                         let Some(msg) = msg else {
                             break;
                         };
-                        match msg {
-                            PeerMsg::ListPartitions { resp } => {
-                                let start_at = std::time::Instant::now();
-                                let _ = events_tx.send(PeerSyncProgressEvent::RequestStarted {
-                                    op: "list_partitions",
-                                });
-                                let out = match rpc_client
-                                    .rpc(ListPartitionsRpcReq { peer: peer.clone() })
-                                    .await
-                                {
-                                    Ok(Ok(value)) => Ok(value),
-                                    Ok(Err(err)) => Err(err.into_report()),
-                                    Err(err) => Err(ferr!("irpc list_partitions failed: {err}")),
-                                };
-                                let _ = events_tx.send(PeerSyncProgressEvent::RequestFinished {
-                                    op: "list_partitions",
-                                    success: out.is_ok(),
-                                    elapsed: start_at.elapsed(),
-                                });
-                                resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-                            }
-                            PeerMsg::GetPartitionEvents { req, resp } => {
-                                let start_at = std::time::Instant::now();
-                                let _ = events_tx.send(PeerSyncProgressEvent::RequestStarted {
-                                    op: "get_partition_events",
-                                });
-                                let out = match rpc_client
-                                    .rpc(GetPartitionEventsRpcReq {
-                                        peer: peer.clone(),
-                                        req,
-                                    })
-                                    .await
-                                {
-                                    Ok(Ok(value)) => Ok(value),
-                                    Ok(Err(err)) => Err(err.into_report()),
-                                    Err(err) => Err(ferr!("irpc get_partition_events failed: {err}")),
-                                };
-                                let _ = events_tx.send(PeerSyncProgressEvent::RequestFinished {
-                                    op: "get_partition_events",
-                                    success: out.is_ok(),
-                                    elapsed: start_at.elapsed(),
-                                });
-                                resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-                            }
-                            PeerMsg::GetDocsFull { req, resp } => {
-                                let start_at = std::time::Instant::now();
-                                let _ = events_tx.send(PeerSyncProgressEvent::RequestStarted {
-                                    op: "get_docs_full",
-                                });
-                                let out = match rpc_client
-                                    .rpc(GetDocsFullRpcReq {
-                                        peer: peer.clone(),
-                                        req,
-                                    })
-                                    .await
-                                {
-                                    Ok(Ok(value)) => Ok(value),
-                                    Ok(Err(err)) => Err(err.into_report()),
-                                    Err(err) => Err(ferr!("irpc get_docs_full failed: {err}")),
-                                };
-                                let _ = events_tx.send(PeerSyncProgressEvent::RequestFinished {
-                                    op: "get_docs_full",
-                                    success: out.is_ok(),
-                                    elapsed: start_at.elapsed(),
-                                });
-                                resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-                            }
-                            PeerMsg::Subscribe { req, resp } => {
-                                let start_at = std::time::Instant::now();
-                                let _ = events_tx.send(PeerSyncProgressEvent::RequestStarted {
-                                    op: "subscribe",
-                                });
-                                let out = match rpc_client
-                                    .server_streaming(
-                                        SubPartitionsRpcReq {
-                                            peer: peer.clone(),
-                                            req,
-                                        },
-                                        DEFAULT_SUBSCRIPTION_CAPACITY,
-                                    )
-                                    .await
-                                {
-                                    Ok(rpc_rx) => {
-                                        let (tx, rx) = mpsc::channel(DEFAULT_SUBSCRIPTION_CAPACITY);
-                                        tokio::spawn(bridge_subscription_stream(
-                                            rpc_rx,
-                                            tx,
-                                            events_tx.clone(),
-                                        ));
-                                        Ok(PartitionSubscription { rx })
-                                    }
-                                    Err(err) => Err(ferr!("irpc sub_partitions failed: {err}")),
-                                };
-                                let _ = events_tx.send(PeerSyncProgressEvent::RequestFinished {
-                                    op: "subscribe",
-                                    success: out.is_ok(),
-                                    elapsed: start_at.elapsed(),
-                                });
-                                resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-                            }
-                        }
+                        worker.handle_msg(msg).await?;
                     }
                 }
             }
@@ -228,6 +133,141 @@ pub async fn spawn_peer_sync_worker(
     ))
 }
 
+struct PeerSyncWorker {
+    rpc_client: irpc::Client<PartitionSyncRpc>,
+    events_tx: broadcast::Sender<PeerSyncProgressEvent>,
+    peer: String,
+}
+
+impl PeerSyncWorker {
+    async fn handle_msg(&mut self, msg: PeerMsg) -> Res<()> {
+        match msg {
+            PeerMsg::ListPartitions { resp } => {
+                let start_at = std::time::Instant::now();
+                self.events_tx
+                    .send(PeerSyncProgressEvent::RequestStarted {
+                        op: "list_partitions",
+                    })
+                    .expect(ERROR_IMPOSSIBLE);
+                let out = match self
+                    .rpc_client
+                    .rpc(ListPartitionsRpcReq {
+                        peer: self.peer.clone(),
+                    })
+                    .await
+                {
+                    Ok(Ok(value)) => Ok(value),
+                    Ok(Err(err)) => Err(err.into_report()),
+                    Err(err) => Err(ferr!("irpc list_partitions failed: {err}")),
+                };
+                self.events_tx
+                    .send(PeerSyncProgressEvent::RequestFinished {
+                        op: "list_partitions",
+                        success: out.is_ok(),
+                        elapsed: start_at.elapsed(),
+                    })
+                    .expect(ERROR_IMPOSSIBLE);
+                resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            }
+            PeerMsg::GetPartitionEvents { req, resp } => {
+                let start_at = std::time::Instant::now();
+                let _ = self.events_tx.send(PeerSyncProgressEvent::RequestStarted {
+                    op: "get_partition_events",
+                });
+                let out = match self
+                    .rpc_client
+                    .rpc(GetPartitionEventsRpcReq {
+                        peer: self.peer.clone(),
+                        req,
+                    })
+                    .await
+                {
+                    Ok(Ok(value)) => Ok(value),
+                    Ok(Err(err)) => Err(err.into_report()),
+                    Err(err) => Err(ferr!("irpc get_partition_events failed: {err}")),
+                };
+                self.events_tx
+                    .send(PeerSyncProgressEvent::RequestFinished {
+                        op: "get_partition_events",
+                        success: out.is_ok(),
+                        elapsed: start_at.elapsed(),
+                    })
+                    .expect(ERROR_IMPOSSIBLE);
+                resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            }
+            PeerMsg::GetDocsFull { req, resp } => {
+                let start_at = std::time::Instant::now();
+                self.events_tx
+                    .send(PeerSyncProgressEvent::RequestStarted {
+                        op: "get_docs_full",
+                    })
+                    .expect(ERROR_IMPOSSIBLE);
+                let out = match self
+                    .rpc_client
+                    .rpc(GetDocsFullRpcReq {
+                        peer: self.peer.clone(),
+                        req,
+                    })
+                    .await
+                {
+                    Ok(Ok(value)) => Ok(value),
+                    Ok(Err(err)) => Err(err.into_report()),
+                    Err(err) => Err(ferr!("irpc get_docs_full failed: {err}")),
+                };
+                self.events_tx
+                    .send(PeerSyncProgressEvent::RequestFinished {
+                        op: "get_docs_full",
+                        success: out.is_ok(),
+                        elapsed: start_at.elapsed(),
+                    })
+                    .expect(ERROR_IMPOSSIBLE);
+                resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            }
+            PeerMsg::Subscribe { req, resp } => {
+                let start_at = std::time::Instant::now();
+                self.events_tx
+                    .send(PeerSyncProgressEvent::RequestStarted { op: "subscribe" })
+                    .expect(ERROR_IMPOSSIBLE);
+                let out = match self
+                    .rpc_client
+                    .server_streaming(
+                        SubPartitionsRpcReq {
+                            peer: self.peer.clone(),
+                            req,
+                        },
+                        DEFAULT_SUBSCRIPTION_CAPACITY,
+                    )
+                    .await
+                {
+                    Ok(rpc_rx) => {
+                        let (tx, rx) = mpsc::channel(DEFAULT_SUBSCRIPTION_CAPACITY);
+                        tokio::spawn(bridge_subscription_stream(
+                            rpc_rx,
+                            tx,
+                            self.events_tx.clone(),
+                        ));
+                        Ok(PartitionSubscription { rx })
+                    }
+                    Err(err) => Err(ferr!("irpc sub_partitions failed: {err}")),
+                };
+                self.events_tx
+                    .send(PeerSyncProgressEvent::RequestFinished {
+                        op: "subscribe",
+                        success: out.is_ok(),
+                        elapsed: start_at.elapsed(),
+                    })
+                    .expect(ERROR_IMPOSSIBLE);
+                resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            }
+        }
+        Ok(())
+    }
+}
+
+// FIXME: recieve a child_token for cancellation and use
+// a select loop over it
+// and also, have the worker keep track of all join handles
+// for cleanup
 async fn bridge_subscription_stream(
     mut rpc_rx: irpc::channel::mpsc::Receiver<crate::sync::SubscriptionItem>,
     tx: mpsc::Sender<crate::sync::SubscriptionItem>,

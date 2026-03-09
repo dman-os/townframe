@@ -1,13 +1,10 @@
 use crate::interlude::*;
 
-use std::str::FromStr;
-
-use samod::DocumentId;
 use sqlx::Row;
 
 use crate::repo::BigRepo;
 use crate::sync::{
-    FullDoc, OpaqueCursor, PartitionCursorRequest, PartitionEvent, PartitionEventKind, PartitionId,
+    cursor, FullDoc, PartitionCursorRequest, PartitionEvent, PartitionEventKind, PartitionId,
     PartitionSubscription, PartitionSummary, PartitionSyncError, PartitionSyncProvider, PeerKey,
     SubscriptionItem, MAX_GET_DOCS_FULL_DOC_IDS,
 };
@@ -17,7 +14,10 @@ const META_NEXT_TXID_KEY: &str = "next_txid";
 impl BigRepo {
     pub(super) async fn ensure_schema(&self) -> Res<()> {
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS big_repo_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            r#"CREATE TABLE IF NOT EXISTS big_repo_meta(
+                key TEXT PRIMARY KEY
+                ,value TEXT NOT NULL
+            )"#,
         )
         .execute(&self.state_pool)
         .await?;
@@ -122,7 +122,7 @@ impl BigRepo {
         sqlx::query(
             "INSERT INTO partition_members(partition_id, doc_id) VALUES(?, ?) ON CONFLICT(partition_id, doc_id) DO NOTHING",
         )
-        .bind(&partition_id.0)
+        .bind(&partition_id)
         .bind(doc_id)
         .execute(&mut *tx)
         .await?;
@@ -131,7 +131,7 @@ impl BigRepo {
             "INSERT INTO partition_membership_log(txid, partition_id, doc_id, kind, created_at_ms) VALUES(?, ?, ?, 'upsert', ?)",
         )
         .bind(membership_txid as i64)
-        .bind(&partition_id.0)
+        .bind(&partition_id)
         .bind(doc_id)
         .bind(Timestamp::now().as_millisecond())
         .execute(&mut *tx)
@@ -154,7 +154,7 @@ impl BigRepo {
                 "#,
             )
             .bind(doc_txid as i64)
-            .bind(&partition_id.0)
+            .bind(&partition_id)
             .bind(doc_id)
             .bind(&heads_json)
             .bind(change_count_hint)
@@ -173,7 +173,7 @@ impl BigRepo {
                     latest_txid = excluded.latest_txid
                 "#,
             )
-            .bind(&partition_id.0)
+            .bind(&partition_id)
             .bind(doc_id)
             .bind(&heads_json)
             .bind(change_count_hint)
@@ -186,7 +186,7 @@ impl BigRepo {
         tx.commit().await?;
 
         let _ = self.partition_events_tx.send(PartitionEvent {
-            cursor: OpaqueCursor::from_txid(membership_txid),
+            cursor: cursor::from_txid(membership_txid),
             partition_id: partition_id.clone(),
             kind: PartitionEventKind::MemberUpsert {
                 doc_id: doc_id.to_owned(),
@@ -194,7 +194,7 @@ impl BigRepo {
         });
         if let Some((doc_txid, heads, change_count_hint)) = initial_doc_event {
             let _ = self.partition_events_tx.send(PartitionEvent {
-                cursor: OpaqueCursor::from_txid(doc_txid),
+                cursor: cursor::from_txid(doc_txid),
                 partition_id: partition_id.clone(),
                 kind: PartitionEventKind::DocChanged {
                     doc_id: doc_id.to_owned(),
@@ -213,29 +213,69 @@ impl BigRepo {
     ) -> Res<()> {
         let mut tx = self.state_pool.begin().await?;
         sqlx::query("DELETE FROM partition_members WHERE partition_id = ? AND doc_id = ?")
-            .bind(&partition_id.0)
+            .bind(&partition_id)
             .bind(doc_id)
             .execute(&mut *tx)
             .await?;
-        let txid = alloc_txid(tx.as_mut()).await?;
+        let membership_txid = alloc_txid(tx.as_mut()).await?;
         sqlx::query(
             "INSERT INTO partition_membership_log(txid, partition_id, doc_id, kind, created_at_ms) VALUES(?, ?, ?, 'removed', ?)",
         )
-        .bind(txid as i64)
-        .bind(&partition_id.0)
+        .bind(membership_txid as i64)
+        .bind(&partition_id)
         .bind(doc_id)
         .bind(Timestamp::now().as_millisecond())
         .execute(&mut *tx)
         .await?;
+        let mut doc_deleted_event: Option<(u64, u64)> = None;
+        if let Some(change_count_hint) = sqlx::query_scalar::<_, i64>(
+            "SELECT change_count_hint FROM partition_doc_state WHERE partition_id = ? AND doc_id = ?",
+        )
+        .bind(&partition_id)
+        .bind(doc_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            let doc_txid = alloc_txid(tx.as_mut()).await?;
+            sqlx::query(
+                "INSERT INTO partition_doc_log(txid, partition_id, doc_id, heads_json, change_count_hint, kind, created_at_ms) VALUES(?, ?, ?, '[]', ?, 'deleted', ?)",
+            )
+            .bind(doc_txid as i64)
+            .bind(&partition_id)
+            .bind(doc_id)
+            .bind(change_count_hint)
+            .bind(Timestamp::now().as_millisecond())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE partition_doc_state SET deleted = 1, latest_txid = ? WHERE partition_id = ? AND doc_id = ?",
+            )
+            .bind(doc_txid as i64)
+            .bind(&partition_id)
+            .bind(doc_id)
+            .execute(&mut *tx)
+            .await?;
+            doc_deleted_event = Some((doc_txid, change_count_hint.max(0) as u64));
+        }
         tx.commit().await?;
 
         let _ = self.partition_events_tx.send(PartitionEvent {
-            cursor: OpaqueCursor::from_txid(txid),
+            cursor: cursor::from_txid(membership_txid),
             partition_id: partition_id.clone(),
             kind: PartitionEventKind::MemberRemoved {
                 doc_id: doc_id.to_owned(),
             },
         });
+        if let Some((doc_txid, change_count_hint)) = doc_deleted_event {
+            let _ = self.partition_events_tx.send(PartitionEvent {
+                cursor: cursor::from_txid(doc_txid),
+                partition_id: partition_id.clone(),
+                kind: PartitionEventKind::DocDeleted {
+                    doc_id: doc_id.to_owned(),
+                    change_count_hint,
+                },
+            });
+        }
         Ok(())
     }
 
@@ -326,8 +366,8 @@ impl BigRepo {
         tx.commit().await?;
         for (partition_id, txid) in emitted {
             let _ = self.partition_events_tx.send(PartitionEvent {
-                cursor: OpaqueCursor::from_txid(txid),
-                partition_id: PartitionId(partition_id),
+                cursor: cursor::from_txid(txid),
+                partition_id,
                 kind: PartitionEventKind::DocChanged {
                     doc_id: doc_id.clone(),
                     heads: serialized_heads.clone(),
@@ -336,6 +376,16 @@ impl BigRepo {
             });
         }
         Ok(())
+    }
+
+    pub async fn partition_member_count(&self, part_id: &PartitionId) -> Res<i64> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(1) FROM partition_members WHERE partition_id = ?",
+        )
+        .bind(&part_id)
+        .fetch_one(&self.state_pool)
+        .await?;
+        Ok(count)
     }
 }
 
@@ -381,8 +431,8 @@ impl PartitionSyncProvider for BigRepo {
                 let member_count: i64 = row.try_get("member_count")?;
                 let latest_txid: i64 = row.try_get("latest_txid")?;
                 eyre::Ok(PartitionSummary {
-                    partition_id: PartitionId(partition_id),
-                    latest_cursor: OpaqueCursor::from_txid(latest_txid.max(0) as u64),
+                    partition_id,
+                    latest_cursor: cursor::from_txid(latest_txid.max(0) as u64),
                     member_count: member_count.max(0) as u64,
                 })
             })
@@ -399,9 +449,8 @@ impl PartitionSyncProvider for BigRepo {
             ensure_partition_exists(&self.state_pool, &req.partition_id).await?;
             match &req.since {
                 Some(cursor) => {
-                    let txid = cursor
-                        .to_txid()
-                        .map_err(|_| PartitionSyncError::InvalidCursor {
+                    let txid =
+                        cursor::to_txid(cursor).map_err(|_| PartitionSyncError::InvalidCursor {
                             cursor: cursor.clone(),
                         })?;
                     append_replay_events(&self.state_pool, &req.partition_id, txid, &mut out)
@@ -426,9 +475,16 @@ impl PartitionSyncProvider for BigRepo {
         }
         let mut out = Vec::new();
         for doc_id in doc_ids {
-            let parsed = DocumentId::from_str(doc_id)
-                .map_err(|err| ferr!("invalid document id '{doc_id}': {err}"))?;
-            let Some(handle) = self.repo.find(parsed).await? else {
+            let is_member: i64 = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM partition_members WHERE doc_id = ?)",
+            )
+            .bind(doc_id)
+            .fetch_one(&self.state_pool)
+            .await?;
+            if is_member != 1 {
+                continue;
+            }
+            let Some(handle) = self.handle_cache.get(doc_id) else {
                 continue;
             };
             let bytes = handle.with_document(|doc| doc.save());
@@ -440,17 +496,28 @@ impl PartitionSyncProvider for BigRepo {
         Ok(out)
     }
 
+    // FIXME: this is not right, we're noto using the peer id
+    async fn is_doc_accessible_for_peer(&self, peer: &PeerKey, doc_id: &str) -> Res<bool> {
+        let exists: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM partition_members WHERE doc_id = ?)")
+                .bind(doc_id)
+                .fetch_one(&self.state_pool)
+                .await?;
+        Ok(exists == 1)
+    }
+
     async fn subscribe(
         &self,
         peer: &PeerKey,
         reqs: &[PartitionCursorRequest],
         capacity: usize,
     ) -> Res<PartitionSubscription> {
-        let replay = self.get_partition_events(peer, reqs).await?;
         let mut live_rx = self.partition_events_tx.subscribe();
+        let replay = self.get_partition_events(peer, reqs).await?;
         let high_watermark = replay
             .iter()
-            .filter_map(|event| event.cursor.to_txid().ok())
+            // FIXME: not good, we shouldn't be allowing neglecting cursors
+            .filter_map(|event| cursor::to_txid(&event.cursor).ok())
             .max()
             .unwrap_or(0);
         let requested: HashSet<PartitionId> =
@@ -469,7 +536,7 @@ impl PartitionSyncProvider for BigRepo {
                 if !requested.contains(&event.partition_id) {
                     continue;
                 }
-                let Ok(txid) = event.cursor.to_txid() else {
+                let Ok(txid) = cursor::to_txid(&event.cursor) else {
                     continue;
                 };
                 if txid <= high_watermark {
@@ -511,9 +578,9 @@ async fn ensure_partition_exists(pool: &sqlx::SqlitePool, partition_id: &Partiti
         )
         "#,
     )
-    .bind(&partition_id.0)
-    .bind(&partition_id.0)
-    .bind(&partition_id.0)
+    .bind(&partition_id)
+    .bind(&partition_id)
+    .bind(&partition_id)
     .fetch_one(pool)
     .await?;
     if found == 1 {
@@ -539,15 +606,15 @@ async fn append_snapshot_events(
         )
         "#,
     )
-    .bind(&partition_id.0)
-    .bind(&partition_id.0)
+    .bind(&partition_id)
+    .bind(&partition_id)
     .fetch_one(pool)
     .await?;
-    let snapshot_cursor = OpaqueCursor::from_txid(latest_txid.max(0) as u64);
+    let snapshot_cursor = cursor::from_txid(latest_txid.max(0) as u64);
 
     let member_rows =
         sqlx::query("SELECT doc_id FROM partition_members WHERE partition_id = ? ORDER BY doc_id")
-            .bind(&partition_id.0)
+            .bind(&partition_id)
             .fetch_all(pool)
             .await?;
     for row in member_rows {
@@ -562,7 +629,7 @@ async fn append_snapshot_events(
     let doc_rows = sqlx::query(
         "SELECT doc_id, heads_json, change_count_hint FROM partition_doc_state WHERE partition_id = ? AND deleted = 0 ORDER BY doc_id",
     )
-    .bind(&partition_id.0)
+    .bind(&partition_id)
     .fetch_all(pool)
     .await?;
     for row in doc_rows {
@@ -592,7 +659,7 @@ async fn append_replay_events(
     let membership_rows = sqlx::query(
         "SELECT txid, doc_id, kind FROM partition_membership_log WHERE partition_id = ? AND txid > ? ORDER BY txid",
     )
-    .bind(&partition_id.0)
+    .bind(&partition_id)
     .bind(since_txid as i64)
     .fetch_all(pool)
     .await?;
@@ -606,7 +673,7 @@ async fn append_replay_events(
             other => eyre::bail!("invalid membership event kind '{other}'"),
         };
         out.push(PartitionEvent {
-            cursor: OpaqueCursor::from_txid(txid.max(0) as u64),
+            cursor: cursor::from_txid(txid.max(0) as u64),
             partition_id: partition_id.clone(),
             kind,
         });
@@ -615,7 +682,7 @@ async fn append_replay_events(
     let doc_rows = sqlx::query(
         "SELECT txid, doc_id, heads_json, change_count_hint, kind FROM partition_doc_log WHERE partition_id = ? AND txid > ? ORDER BY txid",
     )
-    .bind(&partition_id.0)
+    .bind(&partition_id)
     .bind(since_txid as i64)
     .fetch_all(pool)
     .await?;
@@ -638,7 +705,7 @@ async fn append_replay_events(
             other => eyre::bail!("invalid doc event kind '{other}'"),
         };
         out.push(PartitionEvent {
-            cursor: OpaqueCursor::from_txid(txid.max(0) as u64),
+            cursor: cursor::from_txid(txid.max(0) as u64),
             partition_id: partition_id.clone(),
             kind,
         });
@@ -656,8 +723,8 @@ fn event_kind_order(kind: &PartitionEventKind) -> u8 {
 }
 
 fn cmp_partition_events(left: &PartitionEvent, right: &PartitionEvent) -> std::cmp::Ordering {
-    let left_txid = left.cursor.to_txid().unwrap_or(0);
-    let right_txid = right.cursor.to_txid().unwrap_or(0);
+    let left_txid = cursor::to_txid(&left.cursor).unwrap_or(0);
+    let right_txid = cursor::to_txid(&right.cursor).unwrap_or(0);
     left_txid
         .cmp(&right_txid)
         .then_with(|| left.partition_id.cmp(&right.partition_id))
@@ -670,6 +737,7 @@ mod tests {
 
     use crate::repo::{BigRepo, BigRepoConfig};
     use automerge::transaction::Transactable;
+    use tokio::time::timeout;
 
     async fn boot_big_repo() -> Res<Arc<BigRepo>> {
         let repo = samod::Repo::build_tokio()
@@ -685,7 +753,7 @@ mod tests {
         let big_repo = boot_big_repo().await?;
         let handle = big_repo.create_doc(automerge::Automerge::new()).await?;
         let doc_id = handle.document_id().to_string();
-        let partition_id = PartitionId("p-main".into());
+        let partition_id = "p-main".into();
 
         big_repo
             .add_doc_to_partition(&partition_id, &doc_id)
@@ -701,7 +769,7 @@ mod tests {
 
         let events = PartitionSyncProvider::get_partition_events(
             &*big_repo,
-            &PeerKey("peer-a".into()),
+            &"peer-a".into(),
             &[PartitionCursorRequest {
                 partition_id: partition_id.clone(),
                 since: None,
@@ -723,7 +791,7 @@ mod tests {
         let big_repo = boot_big_repo().await?;
         let handle = big_repo.create_doc(automerge::Automerge::new()).await?;
         let doc_id = handle.document_id().to_string();
-        let partition_id = PartitionId("p-fetch".into());
+        let partition_id = "p-fetch".into();
         big_repo
             .add_doc_to_partition(&partition_id, &doc_id)
             .await?;
@@ -738,13 +806,171 @@ mod tests {
 
         let docs = PartitionSyncProvider::get_docs_full(
             &*big_repo,
-            &PeerKey("peer-a".into()),
+            &"peer-a".into(),
             std::slice::from_ref(&doc_id),
         )
         .await?;
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].doc_id, doc_id);
         assert!(!docs[0].automerge_save.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bigrepo_snapshot_excludes_removed_docs() -> Res<()> {
+        let big_repo = boot_big_repo().await?;
+        let handle = big_repo.create_doc(automerge::Automerge::new()).await?;
+        let target_doc_id = handle.document_id().to_string();
+        let partition_id = "p-remove".into();
+
+        big_repo
+            .add_doc_to_partition(&partition_id, &target_doc_id)
+            .await?;
+        handle
+            .with_document(|doc| {
+                let mut tx = doc.transaction();
+                tx.put(automerge::ROOT, "v", 1_i64)
+                    .expect("failed setting test key");
+                tx.commit();
+            })
+            .await?;
+        big_repo
+            .remove_doc_from_partition(&partition_id, &target_doc_id)
+            .await?;
+
+        let snapshot = PartitionSyncProvider::get_partition_events(
+            &*big_repo,
+            &"peer-a".into(),
+            &[PartitionCursorRequest {
+                partition_id,
+                since: None,
+            }],
+        )
+        .await?;
+        assert!(
+            !snapshot.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    PartitionEventKind::MemberUpsert { ref doc_id } if doc_id == &target_doc_id
+                )
+            }),
+            "removed doc should not remain in snapshot membership"
+        );
+        assert!(
+            !snapshot.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    PartitionEventKind::DocChanged { ref doc_id, .. } if doc_id == &target_doc_id
+                )
+            }),
+            "removed doc should not remain in snapshot doc state"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bigrepo_get_docs_full_only_reads_partition_members_from_cache() -> Res<()> {
+        let big_repo = boot_big_repo().await?;
+        let part_id: PartitionId = "p-full".into();
+
+        let unpartitioned_handle = big_repo.create_doc(automerge::Automerge::new()).await?;
+        let unpartitioned_doc = unpartitioned_handle.document_id().to_string();
+
+        let phantom_doc = "phantom-doc".to_string();
+        big_repo
+            .add_doc_to_partition(&part_id, &phantom_doc)
+            .await?;
+
+        let docs = PartitionSyncProvider::get_docs_full(
+            &*big_repo,
+            &"peer-a".into(),
+            &[unpartitioned_doc, phantom_doc],
+        )
+        .await?;
+        assert!(
+            docs.is_empty(),
+            "should not serve docs that are either not in partitions or not locally cached"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bigrepo_subscribe_captures_event_emitted_during_snapshot_build() -> Res<()> {
+        let big_repo = boot_big_repo().await?;
+        let part_id: PartitionId = "p-sub".into();
+        for idx in 0..20_000_u64 {
+            let doc_id = format!("seed-{idx}");
+            big_repo.add_doc_to_partition(&part_id, &doc_id).await?;
+        }
+
+        let live_doc_id = "live-during-subscribe".to_string();
+        let emit_repo = Arc::clone(&big_repo);
+        let emit_part = part_id.clone();
+        let emit_doc = live_doc_id.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            emit_repo
+                .add_doc_to_partition(&emit_part, &emit_doc)
+                .await
+                .expect("failed to emit live member event");
+        });
+
+        let mut sub = PartitionSyncProvider::subscribe(
+            &*big_repo,
+            &"peer-a".into(),
+            &[PartitionCursorRequest {
+                partition_id: part_id,
+                since: None,
+            }],
+            65_536,
+        )
+        .await?;
+
+        let mut saw_live_doc = false;
+        let mut saw_snapshot_complete = false;
+        while let Ok(Some(item)) = timeout(Duration::from_secs(10), sub.rx.recv()).await {
+            match item {
+                SubscriptionItem::SnapshotComplete => {
+                    saw_snapshot_complete = true;
+                    break;
+                }
+                SubscriptionItem::Event(PartitionEvent {
+                    kind: PartitionEventKind::MemberUpsert { doc_id },
+                    ..
+                }) if doc_id == live_doc_id => {
+                    saw_live_doc = true;
+                }
+                _ => {}
+            }
+        }
+        if !saw_live_doc {
+            for _ in 0..8 {
+                let item = timeout(Duration::from_secs(2), sub.rx.recv())
+                    .await
+                    .expect("timed out waiting for post-snapshot events")
+                    .expect("subscription closed unexpectedly");
+                if let SubscriptionItem::Event(PartitionEvent {
+                    kind: PartitionEventKind::MemberUpsert { doc_id },
+                    ..
+                }) = item
+                {
+                    if doc_id == live_doc_id {
+                        saw_live_doc = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            saw_snapshot_complete,
+            "subscription never reached live phase"
+        );
+        assert!(
+            saw_live_doc,
+            "event emitted during subscribe setup should not be lost"
+        );
         Ok(())
     }
 }

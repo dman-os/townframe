@@ -13,32 +13,9 @@ pub use peer::{
     spawn_peer_sync_worker, PeerSyncWorkerHandle, PeerSyncWorkerStopToken, SamodSyncRequest,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct OpaqueCursor(pub String);
+pub type PartitionId = String;
 
-impl OpaqueCursor {
-    pub fn from_txid(txid: u64) -> Self {
-        Self(utils_rs::hash::encode_base58_multibase(txid.to_be_bytes()))
-    }
-
-    pub fn to_txid(&self) -> Res<u64> {
-        let raw = utils_rs::hash::decode_base58_multibase(&self.0)
-            .wrap_err_with(|| format!("invalid cursor encoding '{}'", self.0))?;
-        let raw: [u8; 8] = raw
-            .as_slice()
-            .try_into()
-            .map_err(|_| ferr!("invalid cursor byte length: expected 8 got {}", raw.len()))?;
-        Ok(u64::from_be_bytes(raw))
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-pub struct PartitionId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct PeerKey(pub String);
+pub type PeerKey = String;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartitionSummary {
@@ -143,6 +120,8 @@ pub enum PartitionSyncError {
     TooManyDocIds { requested: usize, max: usize },
     /// unknown partition {partition_id:?}
     UnknownPartition { partition_id: PartitionId },
+    /// access denied for doc {doc_id}
+    DocAccessDenied { doc_id: String },
     /// internal error: {message}
     Internal { message: String },
 }
@@ -194,6 +173,7 @@ pub trait PartitionSyncProvider: Send + Sync + 'static {
         reqs: &[PartitionCursorRequest],
     ) -> Res<Vec<PartitionEvent>>;
     async fn get_docs_full(&self, peer: &PeerKey, doc_ids: &[String]) -> Res<Vec<FullDoc>>;
+    async fn is_doc_accessible_for_peer(&self, peer: &PeerKey, doc_id: &str) -> Res<bool>;
     async fn subscribe(
         &self,
         peer: &PeerKey,
@@ -206,44 +186,31 @@ pub trait PartitionSyncProvider: Send + Sync + 'static {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "repo")]
     use crate::repo::{BigRepo, BigRepoConfig};
 
-    #[cfg(feature = "repo")]
     use automerge::transaction::Transactable;
-    #[cfg(feature = "repo")]
     use samod::DocumentId;
-    #[cfg(feature = "repo")]
     use std::collections::HashMap;
-    #[cfg(feature = "repo")]
     use std::str::FromStr;
 
     use tokio_util::sync::CancellationToken;
 
-    #[test]
-    fn cursor_roundtrip() {
-        let raw = 42_u64;
-        let enc = OpaqueCursor::from_txid(raw);
-        let dec = enc.to_txid().unwrap();
-        assert_eq!(raw, dec);
-    }
-
     #[tokio::test]
     async fn get_partition_events_since_cursor_works() {
         let provider = StaticPartitionSyncProvider::new();
-        let peer = PeerKey("peer-a".into());
+        let peer = "peer-a".into();
 
-        let first = provider.upsert_member("p1", "d1").await;
+        let first = provider.upsert_member("p1".into(), "d1".into()).await;
         provider
-            .emit_doc_changed("p1", "d1", vec!["h1".into()], 1)
+            .emit_doc_changed("p1".into(), "d1".into(), vec!["h1".into()], 1)
             .await;
-        provider.remove_member("p1", "d2").await;
+        provider.remove_member("p1".into(), "d2".into()).await;
 
         let response = provider
             .get_partition_events(
                 &peer,
                 &[PartitionCursorRequest {
-                    partition_id: PartitionId("p1".into()),
+                    partition_id: "p1".into(),
                     since: Some(first.cursor),
                 }],
             )
@@ -264,14 +231,14 @@ mod tests {
     #[tokio::test]
     async fn subscribe_replays_then_streams_live() {
         let provider = StaticPartitionSyncProvider::new();
-        let peer = PeerKey("peer-a".into());
-        provider.upsert_member("p1", "d1").await;
+        let peer = "peer-a".into();
+        provider.upsert_member("p1".into(), "d1".into()).await;
 
         let mut sub = provider
             .subscribe(
                 &peer,
                 &[PartitionCursorRequest {
-                    partition_id: PartitionId("p1".into()),
+                    partition_id: "p1".into(),
                     since: None,
                 }],
                 16,
@@ -285,7 +252,7 @@ mod tests {
         assert_eq!(second, SubscriptionItem::SnapshotComplete);
 
         provider
-            .emit_doc_changed("p1", "d1", vec!["head2".into()], 2)
+            .emit_doc_changed("p1".into(), "d1".into(), vec!["head2".into()], 2)
             .await;
         let live = sub.rx.recv().await.unwrap();
         assert!(matches!(
@@ -298,13 +265,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_does_not_emit_docchanged_for_removed_member() {
+        let provider = StaticPartitionSyncProvider::new();
+        let peer = "peer-a".into();
+
+        provider.upsert_member("p1".into(), "d1".into()).await;
+        provider
+            .emit_doc_changed("p1".into(), "d1".into(), vec!["h1".into()], 1)
+            .await;
+        provider.remove_member("p1".into(), "d1".into()).await;
+
+        let snapshot = provider
+            .get_partition_events(
+                &peer,
+                &[PartitionCursorRequest {
+                    partition_id: "p1".into(),
+                    since: None,
+                }],
+            )
+            .await
+            .unwrap();
+
+        assert!(!snapshot.iter().any(|event| {
+            matches!(
+                event.kind,
+                PartitionEventKind::MemberUpsert { ref doc_id } if doc_id == "d1"
+            )
+        }));
+        assert!(!snapshot.iter().any(|event| {
+            matches!(
+                event.kind,
+                PartitionEventKind::DocChanged { ref doc_id, .. } if doc_id == "d1"
+            )
+        }));
+    }
+
+    #[tokio::test]
     async fn peer_worker_uses_irpc_roundtrip() {
         let provider = Arc::new(StaticPartitionSyncProvider::new());
-        provider.upsert_member("p1", "d1").await;
+        provider.upsert_member("p1".into(), "d1".into()).await;
         provider
-            .emit_doc_changed("p1", "d1", vec!["h-1".into()], 1)
+            .emit_doc_changed("p1".into(), "d1".into(), vec!["h-1".into()], 1)
             .await;
-        provider.set_full_doc("d1", vec![1, 2, 3]).await;
+        provider.set_full_doc("d1".into(), vec![1, 2, 3]).await;
 
         let cancel = CancellationToken::new();
         let (node, node_stop) = spawn_sync_node(
@@ -314,7 +317,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let peer = PeerKey("peer-irpc".into());
+        let peer: PeerKey = "peer-irpc".into();
         node.register_local_peer(peer.clone()).await.unwrap();
 
         let (_samod_tx, samod_rx) = mpsc::channel(4);
@@ -329,12 +332,12 @@ mod tests {
 
         let list = peer_worker.list_partitions().await.unwrap();
         assert_eq!(list.partitions.len(), 1);
-        assert_eq!(list.partitions[0].partition_id, PartitionId("p1".into()));
+        assert_eq!(&list.partitions[0].partition_id, "p1");
 
         let events = peer_worker
             .get_partition_events(GetPartitionEventsRequest {
                 partitions: vec![PartitionCursorRequest {
-                    partition_id: PartitionId("p1".into()),
+                    partition_id: "p1".into(),
                     since: None,
                 }],
             })
@@ -365,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn peer_subscription_over_irpc_replays_and_goes_live() {
         let provider = Arc::new(StaticPartitionSyncProvider::new());
-        provider.upsert_member("p1", "d1").await;
+        provider.upsert_member("p1".into(), "d1".into()).await;
 
         let cancel = CancellationToken::new();
         let (node, node_stop) = spawn_sync_node(
@@ -375,7 +378,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let peer = PeerKey("peer-sub".into());
+        let peer: PeerKey = "peer-sub".into();
         node.register_local_peer(peer.clone()).await.unwrap();
 
         let (_samod_tx, samod_rx) = mpsc::channel(4);
@@ -391,7 +394,7 @@ mod tests {
         let mut sub = peer_worker
             .subscribe(SubPartitionsRequest {
                 partitions: vec![PartitionCursorRequest {
-                    partition_id: PartitionId("p1".into()),
+                    partition_id: "p1".into(),
                     since: None,
                 }],
             })
@@ -404,7 +407,7 @@ mod tests {
         assert_eq!(second, SubscriptionItem::SnapshotComplete);
 
         provider
-            .emit_doc_changed("p1", "d1", vec!["h-live".into()], 7)
+            .emit_doc_changed("p1".into(), "d1".into(), vec!["h-live".into()], 7)
             .await;
         let third = sub.rx.recv().await.unwrap();
         assert!(matches!(
@@ -422,7 +425,7 @@ mod tests {
     #[tokio::test]
     async fn peer_subscription_over_irpc_receives_mixed_live_event_kinds() {
         let provider = Arc::new(StaticPartitionSyncProvider::new());
-        provider.upsert_member("p1", "seed").await;
+        provider.upsert_member("p1".into(), "seed".into()).await;
 
         let cancel = CancellationToken::new();
         let (node, node_stop) = spawn_sync_node(
@@ -432,7 +435,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let peer = PeerKey("peer-mixed-live".into());
+        let peer: PeerKey = "peer-mixed-live".into();
         node.register_local_peer(peer.clone()).await.unwrap();
 
         let (_samod_tx, samod_rx) = mpsc::channel(4);
@@ -448,7 +451,7 @@ mod tests {
         let mut sub = peer_worker
             .subscribe(SubPartitionsRequest {
                 partitions: vec![PartitionCursorRequest {
-                    partition_id: PartitionId("p1".into()),
+                    partition_id: "p1".into(),
                     since: None,
                 }],
             })
@@ -466,12 +469,21 @@ mod tests {
             }
         }
 
-        provider.upsert_member("p1", "doc-live-added").await;
-        provider.remove_member("p1", "seed").await;
         provider
-            .emit_doc_changed("p1", "doc-live-added", vec!["h-live-1".into()], 11)
+            .upsert_member("p1".into(), "doc-live-added".into())
             .await;
-        provider.emit_doc_deleted("p1", "doc-live-added", 12).await;
+        provider.remove_member("p1".into(), "seed".into()).await;
+        provider
+            .emit_doc_changed(
+                "p1".into(),
+                "doc-live-added".into(),
+                vec!["h-live-1".into()],
+                11,
+            )
+            .await;
+        provider
+            .emit_doc_deleted("p1".into(), "doc-live-added".into(), 12)
+            .await;
 
         let mut saw_member_upsert = false;
         let mut saw_member_removed = false;
@@ -504,14 +516,12 @@ mod tests {
         node_stop.stop().await.unwrap();
     }
 
-    #[cfg(feature = "repo")]
     #[tokio::test]
     async fn big_test_partition_sync_reconnect_flow() -> Res<()> {
         run_partition_reconnect_flow_test(40, 20, 10, 10, false).await?;
         Ok(())
     }
 
-    #[cfg(feature = "repo")]
     #[tokio::test]
     #[ignore = "heavy scenario; enable manually while iterating on sync perf"]
     async fn big_test_partition_sync_reconnect_flow_large() -> Res<()> {
@@ -519,7 +529,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "repo")]
     async fn run_partition_reconnect_flow_test(
         total_docs: usize,
         initial_partition_size: usize,
@@ -528,7 +537,7 @@ mod tests {
         print_progress: bool,
     ) -> Res<()> {
         let start_all = std::time::Instant::now();
-        let part_id = PartitionId("sync-part-1".into());
+        let part_id = "sync-part-1".into();
         let src = boot_big_repo("src-peer").await?;
         let dst = boot_big_repo("dst-peer").await?;
 
@@ -536,7 +545,7 @@ mod tests {
         for idx in 0..total_docs {
             let handle = src.create_doc(automerge::Automerge::new()).await?;
             handle
-                .with_document(|doc| {
+                .with_document_local(|doc| {
                     let mut tx = doc.transaction();
                     tx.put(automerge::ROOT, "seq", idx as i64)
                         .expect("failed writing seq");
@@ -557,7 +566,7 @@ mod tests {
             cancel.child_token(),
         )
         .await?;
-        let peer_key = PeerKey("peer-b".into());
+        let peer_key: PeerKey = "peer-b".into();
         node.register_local_peer(peer_key.clone()).await?;
         let (_samod_tx, samod_rx) = mpsc::channel(128);
         let (mut peer_worker, peer_stop) = spawn_peer_sync_worker(
@@ -581,15 +590,13 @@ mod tests {
         )
         .await?;
         let first_sync_elapsed = sync_t0.elapsed();
+        let member_count = dst.partition_member_count(&part_id).await?;
         if print_progress {
             drain_progress_events(&mut progress_rx).await;
             eprintln!(
-                "[sync] first sync done in {:?}, dst member count={}",
-                first_sync_elapsed,
-                partition_member_count(&dst, &part_id).await?
+                "[sync] first sync done in {first_sync_elapsed:?}, dst member count={member_count}",
             );
         }
-        let member_count = partition_member_count(&dst, &part_id).await?;
         assert!(
             member_count >= 500.min(initial_partition_size as i64),
             "expected at least 500 members after first sync checkpoint, got {member_count}"
@@ -641,19 +648,18 @@ mod tests {
         )
         .await?;
         let second_sync_elapsed = sync_t1.elapsed();
+
+        let final_count = dst.partition_member_count(&part_id).await?;
         if print_progress {
             drain_progress_events(&mut progress_rx2).await;
             eprintln!(
-                "[sync] second sync done in {:?}, dst member count={}",
-                second_sync_elapsed,
-                partition_member_count(&dst, &part_id).await?
+                "[sync] second sync done in {second_sync_elapsed:?}, dst member count={final_count}",
             );
         }
 
         let expected = (initial_partition_size
             + add_count.min(total_docs.saturating_sub(initial_partition_size)))
             as i64;
-        let final_count = partition_member_count(&dst, &part_id).await?;
         assert_eq!(final_count, expected);
 
         peer_stop2.stop().await?;
@@ -664,7 +670,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "repo")]
     async fn boot_big_repo(peer_seed: &str) -> Res<Arc<BigRepo>> {
         let repo = samod::Repo::build_tokio()
             .with_peer_id(samod::PeerId::from_string(format!("big-{peer_seed}")))
@@ -674,7 +679,6 @@ mod tests {
         BigRepo::boot(repo, BigRepoConfig::new("sqlite::memory:".to_string())).await
     }
 
-    #[cfg(feature = "repo")]
     async fn sync_partition_once(
         worker: &PeerSyncWorkerHandle,
         dst: &Arc<BigRepo>,
@@ -692,10 +696,10 @@ mod tests {
             .await?;
         let mut to_fetch = Vec::<String>::new();
         for event in &events.events {
-            if let Ok(txid) = event.cursor.to_txid() {
+            if let Ok(txid) = cursor::to_txid(&event.cursor) {
                 if cursor
                     .as_ref()
-                    .and_then(|item| item.to_txid().ok())
+                    .and_then(|item| cursor::to_txid(item).ok())
                     .map(|cur| txid > cur)
                     .unwrap_or(true)
                 {
@@ -730,7 +734,7 @@ mod tests {
                     .map_err(|err| ferr!("failed loading remote automerge save: {err}"))?;
                 if let Some(existing) = dst_doc_cache.get(&doc.doc_id).cloned() {
                     existing
-                        .with_document(|local| {
+                        .with_document_local(|local| {
                             local
                                 .merge(&mut remote_doc)
                                 .expect("failed merging remote doc into local");
@@ -745,18 +749,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "repo")]
-    async fn partition_member_count(repo: &Arc<BigRepo>, part_id: &PartitionId) -> Res<i64> {
-        let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(1) FROM partition_members WHERE partition_id = ?",
-        )
-        .bind(&part_id.0)
-        .fetch_one(repo.state_pool())
-        .await?;
-        Ok(count)
-    }
-
-    #[cfg(feature = "repo")]
     async fn drain_progress_events(
         progress_rx: &mut tokio::sync::broadcast::Receiver<PeerSyncProgressEvent>,
     ) {
@@ -767,5 +759,33 @@ mod tests {
                 Err(_) => break,
             }
         }
+    }
+}
+
+pub type OpaqueCursor = String;
+
+pub mod cursor {
+    use super::*;
+
+    pub fn from_txid(txid: u64) -> String {
+        utils_rs::hash::encode_base58_multibase(txid.to_be_bytes())
+    }
+
+    pub fn to_txid(val: &str) -> Res<u64> {
+        let raw = utils_rs::hash::decode_base58_multibase(val)
+            .wrap_err_with(|| format!("invalid cursor encoding '{}'", val))?;
+        let raw: [u8; 8] = raw
+            .as_slice()
+            .try_into()
+            .map_err(|_| ferr!("invalid cursor byte length: expected 8 got {}", raw.len()))?;
+        Ok(u64::from_be_bytes(raw))
+    }
+
+    #[test]
+    fn cursor_roundtrip() {
+        let raw = 42_u64;
+        let enc = from_txid(raw);
+        let dec = to_txid(&enc).unwrap();
+        assert_eq!(raw, dec);
     }
 }

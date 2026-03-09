@@ -196,7 +196,7 @@ impl RepoCtx {
         let (acx, acx_stop) =
             am_utils_rs::AmCtx::boot(am_config, Option::<samod::AlwaysAnnounce>::None).await?;
         if let Some(ws_connector_url) = options.ws_connector_url {
-            acx.spawn_ws_connector(ws_connector_url.into());
+            acx.spawn_ws_connector(ws_connector_url.parse());
         }
 
         let doc_app_cell = tokio::sync::OnceCell::new();

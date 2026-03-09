@@ -55,11 +55,13 @@ use crate::interlude::*;
 // the hope is to ban unwrap and use these for the common
 // unwrap cases
 pub mod expect_tags {
+    pub const ERROR_IMPOSSIBLE: &str = "pigs are flying";
     pub const ERROR_CHANNEL: &str = "channel error: closed?";
     pub const ERROR_JSON: &str = "json error: oom?";
     pub const ERROR_UTF8: &str = "utf8 error";
     pub const ERROR_MUTEX: &str = "poisioned mutex";
     pub const ERROR_ACTOR: &str = "task was found dead";
+    pub const ERROR_TOKIO: &str = "tokio error: shutting down?";
     pub const ERROR_CALLER: &str = "caller dropped before response";
     pub const ERROR_INVALID_PATCH: &str = "invalid patch: hydration failed";
 }

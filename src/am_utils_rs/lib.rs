@@ -22,6 +22,7 @@ pub mod codecs;
 pub mod iroh;
 #[cfg(feature = "repo")]
 pub mod repo;
+#[cfg(feature = "repo")]
 pub mod sync;
 
 #[cfg(feature = "repo")]
@@ -33,8 +34,6 @@ use autosurgeon::{Hydrate, Prop, Reconcile};
 #[cfg(feature = "repo")]
 use samod::{DocHandle, DocumentId};
 
-#[cfg(feature = "repo")]
-use changes::ChangeListenerManager;
 #[cfg(feature = "repo")]
 use tokio_util::sync::CancellationToken;
 
@@ -64,21 +63,17 @@ pub struct AmCtx {
     // peer_id: samod::PeerId,
     // doc_handle: tokio::sync::OnceCell<DocHandle>,
     #[educe(Debug(ignore))]
-    change_manager: Arc<ChangeListenerManager>,
-    #[educe(Debug(ignore))]
     handle_cache: Arc<DHashMap<DocumentId, DocHandle>>,
 }
 
 #[cfg(feature = "repo")]
 pub struct AmCtxStopToken {
     pub repo: samod::Repo,
-    pub change_manager_stop_token: crate::changes::ChangeListenerManagerStopToken,
 }
 
 #[cfg(feature = "repo")]
 impl AmCtxStopToken {
     pub async fn stop(self) -> Res<()> {
-        self.change_manager_stop_token.stop().await?;
         self.repo.stop().await;
         Ok(())
     }
@@ -146,21 +141,13 @@ impl AmCtx {
             }
         };
 
-        let (change_manager, change_manager_stop_token) = ChangeListenerManager::boot();
         let out = Self {
             repo: repo.clone(),
             // peer_id,
-            change_manager,
             handle_cache: default(),
         };
 
-        Ok((
-            out,
-            AmCtxStopToken {
-                repo,
-                change_manager_stop_token,
-            },
-        ))
+        Ok((out, AmCtxStopToken { repo }))
     }
 
     /// Maintains connection to the sync server
@@ -216,10 +203,6 @@ impl AmCtx {
     #[deprecated]
     pub fn repo(&self) -> &samod::Repo {
         &self.repo
-    }
-
-    pub fn change_manager(&self) -> &Arc<ChangeListenerManager> {
-        &self.change_manager
     }
 }
 
