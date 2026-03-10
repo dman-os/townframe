@@ -98,9 +98,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         let ctx = context::open_repo_ctx(&conf, true, None).await?;
-        if let Some(stop) = ctx.acx_stop.lock().await.take() {
-            stop.stop().await?;
-        }
+        ctx.shutdown().await?;
         info!(
             path = ?conf.cli_config.repo_path,
             "repo initialization success"
@@ -131,7 +129,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     let blobs_repo =
         BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
-        ctx.acx.clone(),
+        Arc::clone(&ctx.big_repo),
         Arc::clone(&blobs_repo),
         ctx.doc_app.document_id().clone(),
         daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
@@ -139,7 +137,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     .await?;
     let drawer_doc_id = ctx.doc_drawer.document_id().clone();
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
-        ctx.acx.clone(),
+        Arc::clone(&ctx.big_repo),
         drawer_doc_id,
         ctx.local_user_path.clone().into(),
         ctx.layout.repo_root.join("local_state"),
@@ -440,7 +438,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             exit_when_synced,
         } => {
             let (config_repo, config_stop) = ConfigRepo::load(
-                ctx.acx.clone(),
+                Arc::clone(&ctx.big_repo),
                 ctx.doc_app.document_id().clone(),
                 Arc::clone(&plugs_repo),
                 daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
@@ -475,15 +473,15 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     .light_color(unicode::Dense1x2::Dark)
                     .build();
                 println!("Scan the following QR code to clone this repo");
-                println!("");
+                println!();
                 println!("{image}");
-                println!("");
+                println!();
                 println!("Or copy the following ticket:");
-                println!("");
-                println!("");
+                println!();
+                println!();
                 println!("{local_ticket_url}");
-                println!("");
-                println!("");
+                println!();
+                println!();
             }
 
             let mut endpoint_ids = Vec::with_capacity(sync_urls.len());
@@ -590,7 +588,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         }
         StaticCommands::Devices { command } => {
             let (config_repo, config_stop) = ConfigRepo::load(
-                ctx.acx.clone(),
+                Arc::clone(&ctx.big_repo),
                 ctx.doc_app.document_id().clone(),
                 Arc::clone(&plugs_repo),
                 daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
@@ -654,9 +652,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     }
     drawer_stop.stop().await?;
     plugs_stop.stop().await?;
-    if let Some(stop) = ctx.acx_stop.lock().await.take() {
-        stop.stop().await?;
-    }
+    ctx.shutdown().await?;
 
     Ok(ExitCode::SUCCESS)
 }
@@ -687,9 +683,9 @@ async fn clone_repo_from_url(
     let _repo_user_id = daybook_core::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
 
     {
-        let (acx, acx_stop) = am_utils_rs::AmCtx::boot(
-            am_utils_rs::Config {
-                storage: am_utils_rs::StorageConfig::Disk {
+        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(
+            am_utils_rs::repo::Config {
+                storage: am_utils_rs::repo::StorageConfig::Disk {
                     path: destination.join("samod"),
                 },
                 peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
@@ -698,7 +694,7 @@ async fn clone_repo_from_url(
         )
         .await?;
         daybook_core::sync::connect_and_pull_required_docs_once(
-            &acx,
+            &big_repo,
             identity.iroh_secret_key.clone(),
             &bootstrap,
             std::time::Duration::from_secs(30),
@@ -713,7 +709,7 @@ async fn clone_repo_from_url(
             },
         )
         .await?;
-        acx_stop.stop().await?;
+        big_repo_stop.stop().await?;
     }
 
     let rcx = Arc::new(
@@ -731,7 +727,7 @@ async fn clone_repo_from_url(
         BlobsRepo::new(rcx.layout.blobs_root.clone(), rcx.local_user_path.clone()).await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
-        rcx.acx.clone(),
+        Arc::clone(&rcx.big_repo),
         Arc::clone(&blobs_repo),
         rcx.doc_app.document_id().clone(),
         daybook_types::doc::UserPath::from(rcx.local_user_path.clone()),
@@ -739,7 +735,7 @@ async fn clone_repo_from_url(
     .await?;
 
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
-        rcx.acx.clone(),
+        Arc::clone(&rcx.big_repo),
         rcx.doc_drawer.document_id().clone(),
         rcx.local_user_path.clone().into(),
         rcx.layout.repo_root.join("local_state"),
@@ -754,7 +750,7 @@ async fn clone_repo_from_url(
     .await?;
 
     let (config_repo, config_stop) = ConfigRepo::load(
-        rcx.acx.clone(),
+        Arc::clone(&rcx.big_repo),
         rcx.doc_app.document_id().clone(),
         Arc::clone(&plugs_repo),
         daybook_types::doc::UserPath::from(rcx.local_user_path.clone()),
@@ -796,10 +792,7 @@ async fn clone_repo_from_url(
     drawer_stop.stop().await?;
     plugs_stop.stop().await?;
 
-    // FIXME: let's provide a stop method on the repo ctx?
-    if let Some(stop) = rcx.acx_stop.lock().await.take() {
-        stop.stop().await?;
-    }
+    rcx.shutdown().await?;
 
     Ok(())
 }
@@ -828,7 +821,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     let blobs_repo =
         BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
-        ctx.acx.clone(),
+        Arc::clone(&ctx.big_repo),
         Arc::clone(&blobs_repo),
         ctx.doc_app.document_id().clone(),
         daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
@@ -842,7 +835,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         (config_repo, config_stop),
     ) = tokio::try_join!(
         DrawerRepo::load(
-            ctx.acx.clone(),
+            Arc::clone(&ctx.big_repo),
             ctx.doc_drawer.document_id().clone(),
             ctx.local_user_path.clone().into(),
             ctx.layout.repo_root.join("local_state"),
@@ -855,13 +848,13 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             Arc::clone(&plugs_repo)
         ),
         DispatchRepo::load(
-            ctx.acx.clone(),
+            Arc::clone(&ctx.big_repo),
             ctx.doc_app.document_id().clone(),
             daybook_types::doc::UserPath::from(ctx.local_user_path.clone())
         ),
         ProgressRepo::boot(ctx.sql.db_pool.clone()),
         ConfigRepo::load(
-            ctx.acx.clone(),
+            Arc::clone(&ctx.big_repo),
             ctx.doc_app.document_id().clone(),
             Arc::clone(&plugs_repo),
             daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
@@ -875,9 +868,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             plugs_stop.stop().await?;
             dispatch_stop.stop().await?;
             config_stop.stop().await?;
-            if let Some(stop) = ctx.acx_stop.lock().await.take() {
-                stop.stop().await?;
-            }
+            ctx.shutdown().await?;
         };
     }
 
@@ -968,7 +959,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
                     },
                     ctx.doc_app.document_id().clone(),
                     format!("sqlite://{}", ctx.layout.sqlite_path.display()),
-                    ctx.acx.clone(),
+                    Arc::clone(&ctx.big_repo),
                     Arc::clone(&drawer),
                     Arc::clone(&plugs_repo),
                     Arc::clone(&dispatch_repo),

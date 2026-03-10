@@ -101,9 +101,8 @@ libsqlite3-sys = "0.30.1"
 #
 # misc
 pastey.workspace = true
-directories.workspace = true
-fs4.workspace = true
 image = { version = "0.25", default-features = true, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+scopeguard.workspace = true
 
 #
 # wasm
@@ -131,6 +130,8 @@ iroh-gossip = "0.96.0"
 
 #
 # os
+directories.workspace = true
+fs4.workspace = true
 rand.workspace = true
 keyring = "3.6.3"
 irpc-iroh = "0.12.0"

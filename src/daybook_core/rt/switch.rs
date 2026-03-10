@@ -122,7 +122,7 @@ pub async fn spawn_switch_worker(
     let store = SwitchStateStore::load(&rt.big_repo, &app_doc_id).await?;
     let store = crate::stores::AmStoreHandle::new(
         store,
-        rt.big_repo.clone(),
+        Arc::clone(&rt.big_repo),
         app_doc_id.clone(),
         rt.local_actor_id.clone(),
     );

@@ -135,7 +135,7 @@ impl ConfigRepo {
 
         let store = crate::stores::AmStoreHandle::new(
             store_val,
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             app_doc_id.clone(),
             local_actor_id.clone(),
         );
@@ -183,7 +183,7 @@ impl ConfigRepo {
         .await?;
 
         let repo = Self {
-            big_repo: big_repo.clone(),
+            big_repo: Arc::clone(&big_repo),
             app_doc_id: app_doc_id.clone(),
             app_am_handle,
             store,

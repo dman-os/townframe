@@ -44,7 +44,6 @@ mod tests {
     use std::str::FromStr;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
-    use tokio_util::sync::CancellationToken;
 
     async fn boot_big_repo(peer_seed: &str) -> Res<Arc<BigRepo>> {
         let repo = samod::Repo::build_tokio()
@@ -78,7 +77,6 @@ mod tests {
             src.add_doc_to_partition(&part_id, doc_id).await?;
         }
 
-        let cancel = CancellationToken::new();
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
         let (node, node_stop) = spawn_sync_node(
@@ -100,7 +98,6 @@ mod tests {
             dst_store.clone(),
             samod_tx.clone(),
             vec![part_id.clone()],
-            cancel.child_token(),
         )
         .await?;
         timeout(Duration::from_secs(5), worker.start()).await??;

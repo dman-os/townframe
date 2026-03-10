@@ -6,7 +6,9 @@ use samod::DocumentId;
 use sqlx::sqlite::SqliteConnectOptions;
 use std::str::FromStr;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
+pub mod iroh;
 mod changes;
 mod partition;
 
@@ -25,6 +27,21 @@ pub use samod_core::ChangeOrigin as BigRepoChangeOrigin;
 pub struct BigRepoConfig {
     pub sqlite_url: String,
     pub subscription_capacity: usize,
+}
+
+/// Configuration for Automerge storage
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// Peer ID for this client
+    pub peer_id: String,
+    /// Storage directory for Automerge documents
+    pub storage: StorageConfig,
+}
+
+#[derive(Debug, Clone)]
+pub enum StorageConfig {
+    Disk { path: PathBuf },
+    Memory,
 }
 
 impl BigRepoConfig {
@@ -81,13 +98,13 @@ impl BigRepo {
     }
 
     pub async fn boot<A: samod::AnnouncePolicy>(
-        config: crate::Config,
+        config: Config,
         announce_policy: Option<A>,
-    ) -> Res<(Arc<Self>, crate::AmCtxStopToken)> {
+    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
         let peer_id = samod::PeerId::from_string(config.peer_id);
         let repo = samod::Repo::build_tokio().with_peer_id(peer_id);
         let (repo, sqlite_url) = match config.storage {
-            crate::StorageConfig::Disk { path } => {
+            StorageConfig::Disk { path } => {
                 std::fs::create_dir_all(&path).wrap_err_with(|| {
                     format!("Failed to create storage directory: {}", path.display())
                 })?;
@@ -102,7 +119,7 @@ impl BigRepo {
                 let sqlite_url = format!("sqlite://{}", path.join("big_repo.sqlite").display());
                 (loaded, sqlite_url)
             }
-            crate::StorageConfig::Memory => {
+            StorageConfig::Memory => {
                 let repo = repo.with_storage(samod::storage::InMemoryStorage::new());
                 let loaded = if let Some(policy) = announce_policy {
                     repo.with_announce_policy(policy).load().await
@@ -113,7 +130,7 @@ impl BigRepo {
             }
         };
         let out = Self::boot_with_repo(repo.clone(), BigRepoConfig::new(sqlite_url)).await?;
-        Ok((out, crate::AmCtxStopToken { repo }))
+        Ok((out, BigRepoStopToken { repo }))
     }
 
     pub fn samod_repo(&self) -> &samod::Repo {
@@ -411,6 +428,53 @@ impl BigRepo {
     }
 }
 
+
+pub struct BigRepoStopToken {
+    pub repo: samod::Repo,
+}
+
+impl BigRepoStopToken {
+    pub async fn stop(self) -> Res<()> {
+        self.repo.stop().await;
+        Ok(())
+    }
+}
+pub struct RepoConnection {
+    pub id: samod::ConnectionId,
+    pub peer_id: Arc<str>,
+    pub peer_info: samod::PeerInfo,
+    #[cfg(feature = "iroh")]
+    pub endpoint_id: Option<::iroh::EndpointId>,
+    join_handle: Option<tokio::task::JoinHandle<()>>,
+    cancel_token: CancellationToken,
+}
+
+impl RepoConnection {
+    pub async fn stop(self) -> Res<()> {
+        self.cancel_token.cancel();
+        if let Some(join_handle) = self.join_handle {
+            let mut join_handle = join_handle;
+            tokio::select! {
+                res = &mut join_handle => {
+                    res.wrap_err("connection task join failed")?;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    warn!("connection task did not stop in time; aborting");
+                    join_handle.abort();
+                    let _ = join_handle.await;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub struct ConnFinishSignal {
+    pub conn_id: samod::ConnectionId,
+    pub peer_id: Arc<str>,
+    pub reason: String,
+}
+
 impl Drop for BigRepo {
     fn drop(&mut self) {
         if let Some(stop_token) = self.change_manager_stop.lock().expect(ERROR_MUTEX).take() {
@@ -423,6 +487,69 @@ impl Drop for BigRepo {
 pub struct BigDocHandle {
     repo: Arc<BigRepo>,
     inner: samod::DocHandle,
+}
+
+impl std::fmt::Debug for BigDocHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BigDocHandle")
+            .field("document_id", self.document_id())
+            .finish()
+    }
+}
+
+impl BigDocHandle {
+    pub fn document_id(&self) -> &DocumentId {
+        self.inner.document_id()
+    }
+
+    // pub fn raw_handle(&self) -> &samod::DocHandle {
+    //     &self.inner
+    // }
+
+    pub async fn with_document<F, R>(&self, operation: F) -> Res<R>
+    where
+        F: 'static + Send + Sync + FnOnce(&mut automerge::Automerge) -> R,
+        R: 'static + Send + Sync,
+    {
+        let handle = self.inner.clone();
+        let (before_heads, out, after_heads) = tokio::task::spawn_blocking(move || {
+            handle.with_document(|doc| {
+                let before_heads = doc.get_heads();
+                let out = operation(doc);
+                let after_heads = doc.get_heads();
+                (before_heads, out, after_heads)
+            })
+        })
+        .await
+        .expect(ERROR_TOKIO);
+        if before_heads != after_heads {
+            self.repo
+                .on_doc_heads_changed(self.document_id(), after_heads)
+                .await?;
+        }
+        Ok(out)
+    }
+
+    /// WARN: do not use this over join! or select!, it blocks the
+    /// current tokio task while running document access inline.
+    pub async fn with_document_local<F, R>(&self, operation: F) -> Res<R>
+    where
+        F: FnOnce(&mut automerge::Automerge) -> R,
+    {
+        let (before_heads, out, after_heads) = self.inner.with_document(|doc| {
+            let before_heads = doc.get_heads();
+            let out = operation(doc);
+            let after_heads = doc.get_heads();
+            (before_heads, out, after_heads)
+        });
+        if before_heads != after_heads {
+            self.repo
+                .on_doc_heads_changed(self.document_id(), after_heads)
+                .await?;
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -820,68 +947,5 @@ mod tests {
             "local listener should ignore raw samod-originated changes"
         );
         Ok(())
-    }
-}
-
-impl std::fmt::Debug for BigDocHandle {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("BigDocHandle")
-            .field("document_id", self.document_id())
-            .finish()
-    }
-}
-
-impl BigDocHandle {
-    pub fn document_id(&self) -> &DocumentId {
-        self.inner.document_id()
-    }
-
-    // pub fn raw_handle(&self) -> &samod::DocHandle {
-    //     &self.inner
-    // }
-
-    pub async fn with_document<F, R>(&self, operation: F) -> Res<R>
-    where
-        F: 'static + Send + Sync + FnOnce(&mut automerge::Automerge) -> R,
-        R: 'static + Send + Sync,
-    {
-        let handle = self.inner.clone();
-        let (before_heads, out, after_heads) = tokio::task::spawn_blocking(move || {
-            handle.with_document(|doc| {
-                let before_heads = doc.get_heads();
-                let out = operation(doc);
-                let after_heads = doc.get_heads();
-                (before_heads, out, after_heads)
-            })
-        })
-        .await
-        .expect(ERROR_TOKIO);
-        if before_heads != after_heads {
-            self.repo
-                .on_doc_heads_changed(self.document_id(), after_heads)
-                .await?;
-        }
-        Ok(out)
-    }
-
-    /// WARN: do not use this over join! or select!, it blocks the
-    /// current tokio task while running document access inline.
-    pub async fn with_document_local<F, R>(&self, operation: F) -> Res<R>
-    where
-        F: FnOnce(&mut automerge::Automerge) -> R,
-    {
-        let (before_heads, out, after_heads) = self.inner.with_document(|doc| {
-            let before_heads = doc.get_heads();
-            let out = operation(doc);
-            let after_heads = doc.get_heads();
-            (before_heads, out, after_heads)
-        });
-        if before_heads != after_heads {
-            self.repo
-                .on_doc_heads_changed(self.document_id(), after_heads)
-                .await?;
-        }
-        Ok(out)
     }
 }

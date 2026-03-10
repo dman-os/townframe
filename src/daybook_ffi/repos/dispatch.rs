@@ -31,7 +31,7 @@ impl DispatchRepoFfi {
     pub async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
         let (repo, stop_token) = fcx
             .do_on_rt(DispatchRepo::load(
-                fcx.rcx.acx.clone(),
+                Arc::clone(&fcx.rcx.big_repo),
                 fcx.rcx.doc_app.document_id().clone(),
                 daybook_types::doc::UserPath::from(fcx.rcx.local_user_path.clone()),
             ))

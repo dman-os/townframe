@@ -120,7 +120,6 @@ pub async fn spawn_peer_sync_worker(
     sync_store: SyncStoreHandle,
     samod_sync_tx: mpsc::Sender<SamodSyncRequest>,
     target_partitions: Vec<PartitionId>,
-    cancel_token: CancellationToken,
 ) -> Res<(PeerSyncWorkerHandle, PeerSyncWorkerStopToken)> {
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
     let (progress_tx, progress_rx) = broadcast::channel(2048);
@@ -137,6 +136,7 @@ pub async fn spawn_peer_sync_worker(
         events_tx,
     };
 
+    let cancel_token = CancellationToken::new();
     let fut = {
         let cancel_token = cancel_token.clone();
         async move {
@@ -344,14 +344,18 @@ impl PeerSyncRunner {
 
         self.bootstrap_members(&selected).await?;
         self.bootstrap_docs(&selected).await?;
-        let _ = self.events_tx.send(PeerSyncWorkerEvent::Bootstrapped {
-            peer: self.remote_peer.clone(),
-            partition_count: selected.len(),
-        });
+        self.events_tx
+            .send(PeerSyncWorkerEvent::Bootstrapped {
+                peer: self.remote_peer.clone(),
+                partition_count: selected.len(),
+            })
+            .expect(ERROR_CALLER);
         self.live_subscribe(&selected).await?;
-        let _ = self.events_tx.send(PeerSyncWorkerEvent::Live {
-            peer: self.remote_peer.clone(),
-        });
+        self.events_tx
+            .send(PeerSyncWorkerEvent::Live {
+                peer: self.remote_peer.clone(),
+            })
+            .expect(ERROR_CALLER);
         Ok(RunDisposition::Reconnect)
     }
 
@@ -565,36 +569,36 @@ impl PeerSyncRunner {
                         .is_doc_present_in_partition_state(&event.partition_id, doc_id)
                         .await?;
                     if found {
-                        let _ = self
-                            .samod_sync_tx
+                        self.samod_sync_tx
                             .send(SamodSyncRequest::RequestDocSync {
                                 peer_key: self.remote_peer.clone(),
                                 partition_id: event.partition_id.clone(),
                                 doc_id: doc_id.clone(),
                                 reason: "remote_doc_changed",
                             })
-                            .await;
+                            .await
+                            .expect(ERROR_CHANNEL);
                     } else {
-                        let _ = self
-                            .samod_sync_tx
+                        self.samod_sync_tx
                             .send(SamodSyncRequest::DocMissingLocal {
                                 peer_key: self.remote_peer.clone(),
                                 partition_id: event.partition_id.clone(),
                                 doc_id: doc_id.clone(),
                             })
-                            .await;
+                            .await
+                            .expect(ERROR_CHANNEL);
                         missing.push(doc_id.clone());
                     }
                 }
                 PartitionDocEventDeets::DocDeleted { doc_id, .. } => {
-                    let _ = self
-                        .samod_sync_tx
+                    self.samod_sync_tx
                         .send(SamodSyncRequest::DocDeleted {
                             peer_key: self.remote_peer.clone(),
                             partition_id: event.partition_id.clone(),
                             doc_id: doc_id.clone(),
                         })
-                        .await;
+                        .await
+                        .expect(ERROR_CHANNEL);
                 }
             }
         }
@@ -660,20 +664,20 @@ impl PeerSyncRunner {
     }
 
     fn emit_phase_started(&self, phase: &'static str) {
-        let _ = self
-            .progress_tx
-            .send(PeerSyncProgressEvent::PhaseStarted { phase });
+        self.progress_tx
+            .send(PeerSyncProgressEvent::PhaseStarted { phase })
+            .expect(ERROR_CHANNEL);
     }
 
     fn emit_phase_finished(&self, phase: &'static str, elapsed: Duration) {
-        let _ = self
-            .progress_tx
-            .send(PeerSyncProgressEvent::PhaseFinished { phase, elapsed });
+        self.progress_tx
+            .send(PeerSyncProgressEvent::PhaseFinished { phase, elapsed })
+            .expect(ERROR_CHANNEL);
     }
 
     fn emit_cursor_updated(&self, partition_id: PartitionId) {
-        let _ = self
-            .progress_tx
-            .send(PeerSyncProgressEvent::CursorUpdated { partition_id });
+        self.progress_tx
+            .send(PeerSyncProgressEvent::CursorUpdated { partition_id })
+            .expect(ERROR_CHANNEL);
     }
 }

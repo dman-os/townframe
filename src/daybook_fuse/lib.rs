@@ -472,7 +472,7 @@ mod tests {
         drawer_stop: Option<daybook_core::repos::RepoStopToken>,
         plugs_repo: Arc<PlugsRepo>,
         plugs_stop: Option<daybook_core::repos::RepoStopToken>,
-        acx_stop: Option<am_utils_rs::AmCtxStopToken>,
+        big_repo_stop: Option<am_utils_rs::BigRepoStopToken>,
         temp_dir: tempfile::TempDir,
     }
 
@@ -492,9 +492,9 @@ mod tests {
             )
             .await?;
 
-            let (acx, acx_stop) = am_utils_rs::AmCtx::boot(
-                am_utils_rs::Config {
-                    storage: am_utils_rs::StorageConfig::Disk { path: am_path },
+            let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(
+                am_utils_rs::repo::Config {
+                    storage: am_utils_rs::repo::StorageConfig::Disk { path: am_path },
                     peer_id: "daybook_fuse_test".to_string(),
                 },
                 Option::<samod::AlwaysAnnounce>::None,
@@ -503,14 +503,19 @@ mod tests {
 
             let doc_app = tokio::sync::OnceCell::new();
             let doc_drawer = tokio::sync::OnceCell::new();
-            daybook_core::app::init_from_globals(&acx, &sql_ctx.db_pool, &doc_app, &doc_drawer)
-                .await?;
+            daybook_core::app::init_from_globals(
+                &big_repo,
+                &sql_ctx.db_pool,
+                &doc_app,
+                &doc_drawer,
+            )
+            .await?;
 
             let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
             let blobs_repo =
                 BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.to_string()).await?;
             let (plugs_repo, plugs_stop) = PlugsRepo::load(
-                acx.clone(),
+                Arc::clone(&big_repo),
                 blobs_repo,
                 doc_app.get().unwrap().document_id().clone(),
                 local_user_path.clone(),
@@ -518,7 +523,7 @@ mod tests {
             .await?;
 
             let (drawer_repo, drawer_stop) = DrawerRepo::load(
-                acx,
+                big_repo,
                 doc_drawer
                     .get()
                     .expect("drawer doc init")
@@ -539,7 +544,7 @@ mod tests {
                 plugs_stop: Some(plugs_stop),
                 drawer_repo,
                 drawer_stop: Some(drawer_stop),
-                acx_stop: Some(acx_stop),
+                big_repo_stop: Some(big_repo_stop),
                 temp_dir,
             })
         }
@@ -551,7 +556,7 @@ mod tests {
             if let Some(stop) = self.plugs_stop.take() {
                 stop.stop().await?;
             }
-            if let Some(stop) = self.acx_stop.take() {
+            if let Some(stop) = self.big_repo_stop.take() {
                 stop.stop().await?;
             }
             Ok(())

@@ -373,7 +373,7 @@ impl TablesRepo {
         let store_val = TablesStore::load(&big_repo, &app_doc_id).await?;
         let store = crate::stores::AmStoreHandle::new(
             store_val,
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             app_doc_id.clone(),
             local_actor_id.clone(),
         );

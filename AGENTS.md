@@ -29,6 +29,10 @@
   - This is especially critical in Kotlin or UI code. 
     - If an error occurs that can't be handled, it should crash the program or show a toast if it's not critical. 
   - It's very hard to imagine cases where this is not true.
+  - Another case where this is critical, don't ignore channel send errors in Rust.
+    - Unless channel closure is a signal itself to the task to close, shutdown order should ascertain channels are always open.
+    - Shutdown order is to be reverse of construction of order which means the entity that constructs the channel will always close after it's child.
+    - Concealing channel errors hides lifecycle and liveness issues that are hard to diagnose in an actors based program like this.
 - Never add `skip` to tests unless asked to, they obscure broken tests for reviewers.
 
 ## Checks
@@ -78,7 +82,7 @@
 
 > [!INFO]
 >
-> You're trusted not to be lazy solutions.
+> You're trusted not to be lazy with solutions.
 
 - Top level symbol proliferation makes it more confusing and harder to read compared to any otehr code quality sin.
   - When working with an external library, imagine if it had a lot of small public classes and functions? Even if you're the AWS SDK, no one wants to learn what each one does.
@@ -86,5 +90,9 @@
   - It almost always implies that there's a terrible architecutre at play.
 
 ## Tool calls
+
+> [!INFO]
+>
+> You're begged not to be lazy wth solutions.
 
 - If you're not able to cleanly read a provided web link through tool calls, pause and ask for a copy/paste of the contents. NEVER ASSUME THE CONTENTS OF A LINK YOU HAVEN'T SEEN!

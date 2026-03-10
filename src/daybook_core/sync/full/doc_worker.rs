@@ -33,8 +33,6 @@ pub async fn spawn_doc_sync_worker(
                 worker.handle_missing_doc();
                 return eyre::Ok(());
             };
-            let broker_lease = big_repo.ensure_change_broker(handle.clone()).await?;
-            let mut heads_listener = broker_lease.get_head_listener().await?;
             let (peer_state, state_stream) = handle.peers();
             worker.handle_peer_state_update(peer_state);
 
@@ -46,15 +44,6 @@ pub async fn spawn_doc_sync_worker(
                     _ = cancel_token.cancelled() => {
                         debug!("cancel token lit");
                         break eyre::Ok(());
-                    }
-                    val = heads_listener.change_rx().recv() => {
-                        let Some(heads) = val else {
-                            break Err(eyre::eyre!("DocChangeBroker was removed from repo, weird!"));
-                        };
-                        worker.handle_heads_update(heads);
-                        idle_timeout
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + Duration::from_secs(120));
                     }
                     val = state_stream.next() => {
                         let Some(diff) = val else {
@@ -90,15 +79,6 @@ struct DocSyncWorker {
 }
 
 impl DocSyncWorker {
-    fn handle_heads_update(&self, heads: Arc<[automerge::ChangeHash]>) {
-        self.msg_tx
-            .send(Msg::DocHeadsUpdated {
-                doc_id: self.doc_id.clone(),
-                heads: ChangeHashSet(heads),
-            })
-            .expect("FullSyncWorker went down without cleaning boot_doc_sync_worker");
-    }
-
     fn handle_peer_state_update(&self, diff: DocPeerStateView) {
         self.msg_tx
             .send(Msg::DocPeerStateViewUpdated {
@@ -164,17 +144,17 @@ mod tests {
         let alice_peer_id = format!("alice-{}", Uuid::new_v4());
         let bob_peer_id = format!("bob-{}", Uuid::new_v4());
         let (alice_acx, alice_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: alice_peer_id.clone(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
         .await?;
         let (bob_acx, bob_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: bob_peer_id.clone(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -269,17 +249,17 @@ mod tests {
         let alice_peer_id = format!("alice-diverge-{}", Uuid::new_v4());
         let bob_peer_id = format!("bob-diverge-{}", Uuid::new_v4());
         let (alice_acx, alice_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: alice_peer_id.clone(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
         .await?;
         let (bob_acx, bob_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: bob_peer_id.clone(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )

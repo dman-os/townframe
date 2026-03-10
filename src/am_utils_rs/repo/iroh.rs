@@ -24,11 +24,11 @@ impl BigRepo {
         &self,
         endpoint: &iroh::Endpoint,
         to_addr: iroh::EndpointAddr,
-        end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<super::ConnFinishSignal>>,
+        end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::repo::ConnFinishSignal>>,
         // direction: samod::ConnDirection,
         // rx_from_peer: iroh::endpoint::RecvStream,
         // tx_to_peer: iroh::endpoint::SendStream,
-    ) -> Res<super::RepoConnection> {
+    ) -> Res<crate::repo::RepoConnection> {
         let endpoint_id = to_addr.id;
         let repo = self.samod_repo().clone();
         let dialer = IrohDialer {
@@ -91,7 +91,7 @@ impl BigRepo {
                                 DialerEvent::MaxRetriesReached => {
                                     info!("max retries reached, aborting");
                                     if let Some(tx) = end_signal_tx {
-                                        tx.send(super::ConnFinishSignal {
+                                        tx.send(crate::repo::ConnFinishSignal {
                                             conn_id,
                                             peer_id,
                                             // FIXME: find better reason type
@@ -118,7 +118,7 @@ impl BigRepo {
             fut.await.unwrap();
         });
 
-        Ok(super::RepoConnection {
+        Ok(crate::repo::RepoConnection {
             id: conn_id,
             peer_id,
             peer_info,
@@ -169,8 +169,8 @@ impl Dialer for IrohDialer {
 pub struct IrohRepoProtocol {
     pub big_repo: SharedBigRepo,
     pub cancel_token: CancellationToken,
-    pub conn_tx: tokio::sync::mpsc::UnboundedSender<crate::RepoConnection>,
-    pub end_signal_tx: tokio::sync::mpsc::UnboundedSender<super::ConnFinishSignal>,
+    pub conn_tx: tokio::sync::mpsc::UnboundedSender<crate::repo::RepoConnection>,
+    pub end_signal_tx: tokio::sync::mpsc::UnboundedSender<crate::repo::ConnFinishSignal>,
 }
 
 impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
@@ -237,7 +237,7 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
 
         let cancel_token = self.cancel_token.child_token();
         self.conn_tx
-            .send(crate::RepoConnection {
+            .send(crate::repo::RepoConnection {
                 id: conn_id,
                 peer_id: Arc::<str>::clone(&peer_id),
                 join_handle: None,
@@ -263,7 +263,7 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
                         ..
                     } => {
                         info!(?reason, "incoming connection finished");
-                        self.end_signal_tx.send(super::ConnFinishSignal {
+                        self.end_signal_tx.send(crate::repo::ConnFinishSignal {
                             conn_id,
                             peer_id,
                             reason: format!("{reason}"),

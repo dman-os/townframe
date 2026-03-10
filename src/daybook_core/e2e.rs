@@ -23,7 +23,7 @@ pub struct DaybookTestContext {
     pub plugs_stop: crate::repos::RepoStopToken,
     pub config_stop: crate::repos::RepoStopToken,
     pub dispatch_stop: crate::repos::RepoStopToken,
-    pub acx_stop: am_utils_rs::AmCtxStopToken,
+    pub acx_stop: am_utils_rs::BigRepoStopToken,
     pub rt_stop: crate::rt::RtStopToken,
     pub rt: Arc<crate::rt::Rt>,
     pub _temp_dir: tempfile::TempDir,
@@ -141,9 +141,9 @@ pub async fn test_cx_with_options(
 
     // Initialize SharedBigRepo with memory storage
     let (big_repo, acx_stop) = BigRepo::boot(
-        am_utils_rs::Config {
+        am_utils_rs::repo::Config {
             peer_id,
-            storage: am_utils_rs::StorageConfig::Memory,
+            storage: am_utils_rs::repo::StorageConfig::Memory,
         },
         Option::<samod::AlwaysAnnounce>::None,
     )
@@ -175,7 +175,7 @@ pub async fn test_cx_with_options(
             .await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
-        big_repo.clone(),
+        Arc::clone(&big_repo),
         Arc::clone(&blobs),
         app_doc_id.clone(),
         local_user_path.clone(),
@@ -183,7 +183,7 @@ pub async fn test_cx_with_options(
     .await?;
     let sql_ctx = crate::app::SqlCtx::new("sqlite::memory:").await?;
     let (config_repo, config_stop) = crate::config::ConfigRepo::load(
-        big_repo.clone(),
+        Arc::clone(&big_repo),
         app_doc_id.clone(),
         Arc::clone(&plugs_repo),
         local_user_path.clone(),
@@ -191,14 +191,14 @@ pub async fn test_cx_with_options(
     )
     .await?;
     let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
-        big_repo.clone(),
+        Arc::clone(&big_repo),
         app_doc_id.clone(),
         local_user_path.clone(),
     )
     .await?;
     let progress_repo = crate::progress::ProgressRepo::boot(sql_ctx.db_pool.clone()).await?;
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
-        big_repo.clone(),
+        Arc::clone(&big_repo),
         drawer_doc_id,
         local_user_path.clone(),
         temp_dir.path().join("local_states"),
@@ -231,7 +231,7 @@ pub async fn test_cx_with_options(
         },
         app_doc_id,
         wflow_db_url,
-        big_repo.clone(),
+        Arc::clone(&big_repo),
         Arc::clone(&drawer_repo),
         Arc::clone(&plugs_repo),
         Arc::clone(&dispatch_repo),

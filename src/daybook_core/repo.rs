@@ -180,8 +180,8 @@ impl RepoCtx {
         );
         let local_user_path = format!("/{repo_user_id}/{device_id}");
         let peer_id = format!("/{}/{}", identity.repo_id, iroh_public_key);
-        let am_config = am_utils_rs::Config {
-            storage: am_utils_rs::StorageConfig::Disk {
+        let am_config = am_utils_rs::repo::Config {
+            storage: am_utils_rs::repo::StorageConfig::Disk {
                 path: layout.samod_root.clone(),
             },
             peer_id,
@@ -193,7 +193,7 @@ impl RepoCtx {
         let peer_id = samod::PeerId::from_string(am_config.peer_id.clone());
         let repo_builder = samod::Repo::build_tokio().with_peer_id(peer_id);
         let samod_repo = match am_config.storage {
-            am_utils_rs::StorageConfig::Disk { path } => {
+            am_utils_rs::repo::StorageConfig::Disk { path } => {
                 std::fs::create_dir_all(&path).wrap_err_with(|| {
                     format!("Failed to create storage directory: {}", path.display())
                 })?;
@@ -204,7 +204,7 @@ impl RepoCtx {
                     .load()
                     .await
             }
-            am_utils_rs::StorageConfig::Memory => {
+            am_utils_rs::repo::StorageConfig::Memory => {
                 repo_builder
                     .with_storage(samod::storage::InMemoryStorage::new())
                     .load()
@@ -221,9 +221,7 @@ impl RepoCtx {
         )
         .await?;
         if let Some(ws_connector_url) = options.ws_connector_url {
-            let _ = big_repo
-                .spawn_ws_connector(ws_connector_url.parse()?)
-                .await?;
+            std::mem::drop(big_repo.spawn_ws_connector(ws_connector_url.parse()?).await?);
         }
 
         let doc_app_cell = tokio::sync::OnceCell::new();
@@ -292,7 +290,7 @@ impl RepoCtx {
 
         let init_result: Res<()> = async {
             let (repo, stop) = PlugsRepo::load(
-                big_repo.clone(),
+                Arc::clone(big_repo),
                 Arc::clone(&blobs_repo),
                 doc_app.document_id().clone(),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
@@ -303,7 +301,7 @@ impl RepoCtx {
             plugs_stop = Some(stop);
 
             let (_config_repo, stop) = ConfigRepo::load(
-                big_repo.clone(),
+                Arc::clone(big_repo),
                 doc_app.document_id().clone(),
                 Arc::clone(plugs_repo.as_ref().expect("plugs repo must be loaded")),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
@@ -313,7 +311,7 @@ impl RepoCtx {
             config_stop = Some(stop);
 
             let (_tables_repo, stop) = TablesRepo::load(
-                big_repo.clone(),
+                Arc::clone(big_repo),
                 doc_app.document_id().clone(),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
             )
@@ -321,7 +319,7 @@ impl RepoCtx {
             tables_stop = Some(stop);
 
             let (_dispatch_repo, stop) = DispatchRepo::load(
-                big_repo.clone(),
+                Arc::clone(big_repo),
                 doc_app.document_id().clone(),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
             )
@@ -329,7 +327,7 @@ impl RepoCtx {
             dispatch_stop = Some(stop);
 
             let (_drawer_repo, stop) = DrawerRepo::load(
-                big_repo.clone(),
+                Arc::clone(big_repo),
                 doc_drawer.document_id().clone(),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
                 blobs_root

@@ -632,11 +632,10 @@ impl DrawerRepo {
 
     async fn current_doc_branches(&self, doc_id: &DocId) -> Res<Option<DocNBranches>> {
         let branch_states = self.list_branch_states(doc_id).await?;
-        if branch_states.is_empty() {
-            if self.get_entry(doc_id).await?.is_none() {
+        if branch_states.is_empty()
+            && self.get_entry(doc_id).await?.is_none() {
                 return Ok(None);
             }
-        }
         let mut branches = HashMap::new();
         for branch_state in branch_states {
             branches.insert(branch_state.branch_path, branch_state.latest_heads);
@@ -1235,7 +1234,7 @@ impl DrawerRepo {
     }
 
     async fn prepare_add_doc(&self, args: AddDocArgs) -> Result<PreparedAddDoc, DrawerError> {
-        if args.branch_path != daybook_types::doc::BranchPath::from("main") {
+        if args.branch_path != "main" {
             return Err(ferr!("new docs must be created on main"))?;
         }
         let doc_am = automerge::Automerge::new();
@@ -1520,7 +1519,7 @@ impl DrawerRepo {
 
         self.upsert_branch_state(
             &patch.id,
-            &branch_path.to_string(),
+            branch_path.as_ref(),
             &branch_doc_id,
             &new_heads,
             branch_kind,
@@ -2856,9 +2855,9 @@ mod tests {
     async fn test_v2_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -2876,7 +2875,7 @@ mod tests {
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -2956,9 +2955,9 @@ mod tests {
     async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-partitions".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -2976,7 +2975,7 @@ mod tests {
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3064,9 +3063,9 @@ mod tests {
     async fn test_v2_batch_add_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-batch-add".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3084,7 +3083,7 @@ mod tests {
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3136,9 +3135,9 @@ mod tests {
     async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-batch-add-events".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3156,7 +3155,7 @@ mod tests {
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3249,9 +3248,9 @@ mod tests {
     async fn test_v2_merge() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-merge".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3269,7 +3268,7 @@ mod tests {
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3371,17 +3370,17 @@ mod tests {
     async fn test_v2_sync_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (client_acx, client_acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "client".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
         .await?;
         let (server_acx, server_acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "server".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3411,7 +3410,7 @@ mod tests {
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
 
         let (client_repo, client_stop) = DrawerRepo::load(
-            client_acx.clone(),
+            Arc::clone(&client_acx),
             drawer_doc_id.clone(),
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3421,7 +3420,7 @@ mod tests {
         )
         .await?;
         let (server_repo, server_stop) = DrawerRepo::load(
-            server_acx.clone(),
+            Arc::clone(&server_acx),
             drawer_doc_id.clone(),
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3493,9 +3492,9 @@ mod tests {
     async fn test_v2_additional_apis() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-apis".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3513,7 +3512,7 @@ mod tests {
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3650,9 +3649,9 @@ mod tests {
     async fn test_v2_metadata_maintenance() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-meta".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3670,7 +3669,7 @@ mod tests {
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3821,9 +3820,9 @@ mod tests {
     async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-update-actor".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3837,7 +3836,7 @@ mod tests {
             handle.document_id().clone()
         };
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3906,9 +3905,9 @@ mod tests {
     async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-merge-actor".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -3922,7 +3921,7 @@ mod tests {
             handle.document_id().clone()
         };
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4079,9 +4078,9 @@ mod tests {
     async fn test_v2_updated_at_merge() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-updated-at".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -4099,7 +4098,7 @@ mod tests {
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4211,9 +4210,9 @@ mod tests {
     async fn test_v2_facet_blame_maintenance() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-blame".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -4231,7 +4230,7 @@ mod tests {
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4342,9 +4341,9 @@ mod tests {
     async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-scope".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -4366,7 +4365,7 @@ mod tests {
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
 
         let (repo_a, stop_a) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id_a,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4376,7 +4375,7 @@ mod tests {
         )
         .await?;
         let (repo_b, stop_b) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id_b,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4421,9 +4420,9 @@ mod tests {
     async fn test_v2_doc_updated_includes_changed_facet_keys() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-changed-facets".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -4441,7 +4440,7 @@ mod tests {
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4520,9 +4519,9 @@ mod tests {
     async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-unknown-tag".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -4571,9 +4570,9 @@ mod tests {
     async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-self-ref".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -4634,9 +4633,9 @@ mod tests {
     {
         utils_rs::testing::setup_tracing_once();
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test-v2-body-empty-fragment-self".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             Some(samod::AlwaysAnnounce),
         )
@@ -4707,9 +4706,9 @@ mod tests {
         std::fs::create_dir_all(&storage_path)?;
 
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: format!("perf-drawer-raw-amctx-{}", Uuid::new_v4()),
-                storage: am_utils_rs::StorageConfig::Disk {
+                storage: am_utils_rs::repo::StorageConfig::Disk {
                     path: storage_path.clone(),
                 },
             },
@@ -4808,9 +4807,9 @@ mod tests {
         std::fs::create_dir_all(&storage_path)?;
 
         let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: format!("perf-drawer-add-{}", Uuid::new_v4()),
-                storage: am_utils_rs::StorageConfig::Disk {
+                storage: am_utils_rs::repo::StorageConfig::Disk {
                     path: storage_path.clone(),
                 },
             },
@@ -4830,7 +4829,7 @@ mod tests {
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(4000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(4000)));
         let (repo, stop_token) = DrawerRepo::load(
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4861,7 +4860,7 @@ mod tests {
                         ),
                         (
                             FacetKey::from(WellKnownFacetTag::PathGeneric),
-                            WellKnownFacet::PathGeneric(format!("/tmp/doc-{ii}").into()).into(),
+                            WellKnownFacet::PathGeneric(format!("/tmp/doc-{ii}")).into(),
                         ),
                     ]
                     .into(),

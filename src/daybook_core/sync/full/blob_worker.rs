@@ -13,6 +13,7 @@ impl BlobSyncWorkerStopToken {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_blob_sync_worker(
     hash: String,
     peers: Vec<EndpointId>,
@@ -219,7 +220,6 @@ pub fn spawn_blob_sync_worker(
                     })
                     .await;
                 worker.mark_synced(selected_endpoint);
-                return;
             }
             Err(err) => {
                 tracing::warn!(?err, hash = %worker.hash, "put_from_store failed after download");

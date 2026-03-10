@@ -44,7 +44,7 @@ impl ConfigRepoFfi {
     async fn load(fcx: SharedFfiCtx, plug_repo: Arc<PlugsRepoFfi>) -> Result<Arc<Self>, FfiError> {
         let (repo, stop_token) = fcx
             .do_on_rt(ConfigRepo::load(
-                fcx.rcx.acx.clone(),
+                Arc::clone(&fcx.rcx.big_repo),
                 fcx.rcx.doc_app.document_id().clone(),
                 Arc::clone(&plug_repo.repo),
                 daybook_types::doc::UserPath::from(fcx.rcx.local_user_path.to_string()),

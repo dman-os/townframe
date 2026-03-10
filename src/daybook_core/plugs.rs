@@ -791,7 +791,7 @@ impl PlugsRepo {
         let store_val = PlugsStore::load(&big_repo, &app_doc_id).await?;
         let store = crate::stores::AmStoreHandle::new(
             store_val,
-            big_repo.clone(),
+            Arc::clone(&big_repo),
             app_doc_id.clone(),
             local_actor_id.clone(),
         );
@@ -822,7 +822,7 @@ impl PlugsRepo {
         .await?;
 
         let repo = Self {
-            big_repo: big_repo.clone(),
+            big_repo: Arc::clone(&big_repo),
             app_doc_id: app_doc_id.clone(),
             app_am_handle,
             store,
@@ -1735,9 +1735,9 @@ mod tests {
     async fn setup_repo() -> Res<(SharedBigRepo, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
         let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
         let (big_repo, _acx_stop) = BigRepo::boot(
-            am_utils_rs::Config {
+            am_utils_rs::repo::Config {
                 peer_id: "test".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
+                storage: am_utils_rs::repo::StorageConfig::Memory,
             },
             None::<samod::AlwaysAnnounce>,
         )
@@ -1753,7 +1753,7 @@ mod tests {
                 .await?;
 
         let (repo, _repo_stop) =
-            PlugsRepo::load(big_repo.clone(), blobs, doc_id.clone(), local_user_path).await?;
+            PlugsRepo::load(Arc::clone(&big_repo), blobs, doc_id.clone(), local_user_path).await?;
         Ok((big_repo, repo, doc_id, temp_dir))
     }
 
