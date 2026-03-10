@@ -137,10 +137,10 @@ impl SyncStoreHandle {
 
 pub async fn spawn_sync_store(
     state_pool: sqlx::SqlitePool,
-    cancel_token: CancellationToken,
 ) -> Res<(SyncStoreHandle, SyncStoreStopToken)> {
     ensure_schema(&state_pool).await?;
     let (tx, mut rx) = mpsc::unbounded_channel();
+    let cancel_token = CancellationToken::new();
     let fut = {
         let cancel_token = cancel_token.clone();
         async move {
@@ -229,11 +229,12 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
         }
         StoreMsg::IsPeerRegistered { peer, resp } => {
             let out = async {
-                let exists: i64 =
-                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sync_known_peers WHERE peer_key = ?)")
-                        .bind(peer)
-                        .fetch_one(pool)
-                        .await?;
+                let exists: i64 = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM sync_known_peers WHERE peer_key = ?)",
+                )
+                .bind(peer)
+                .fetch_one(pool)
+                .await?;
                 Ok(exists == 1)
             }
             .await;

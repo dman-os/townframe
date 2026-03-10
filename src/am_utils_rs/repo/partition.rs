@@ -268,11 +268,12 @@ impl BigRepo {
         .execute(&mut *tx)
         .await?;
 
-        let partition_rows =
-            sqlx::query("SELECT partition_id FROM partition_membership_state WHERE doc_id = ? AND present = 1")
-                .bind(&doc_id)
-                .fetch_all(&mut *tx)
-                .await?;
+        let partition_rows = sqlx::query(
+            "SELECT partition_id FROM partition_membership_state WHERE doc_id = ? AND present = 1",
+        )
+        .bind(&doc_id)
+        .fetch_all(&mut *tx)
+        .await?;
 
         let mut emitted = Vec::with_capacity(partition_rows.len());
         for row in partition_rows {
@@ -429,7 +430,11 @@ impl BigRepo {
         Ok(GetPartitionDocEventsResponse { events, cursors })
     }
 
-    pub async fn get_docs_full_for_peer(&self, _peer: &PeerKey, doc_ids: &[String]) -> Res<Vec<FullDoc>> {
+    pub async fn get_docs_full_for_peer(
+        &self,
+        _peer: &PeerKey,
+        doc_ids: &[String],
+    ) -> Res<Vec<FullDoc>> {
         if doc_ids.len() > MAX_GET_DOCS_FULL_DOC_IDS {
             return Err(PartitionSyncError::TooManyDocIds {
                 requested: doc_ids.len(),
@@ -498,8 +503,12 @@ impl BigRepo {
                 .collect(),
             limit: u32::MAX,
         };
-        let replay_members = self.get_partition_member_events_for_peer(peer, &member_req).await?;
-        let replay_docs = self.get_partition_doc_events_for_peer(peer, &doc_req).await?;
+        let replay_members = self
+            .get_partition_member_events_for_peer(peer, &member_req)
+            .await?;
+        let replay_docs = self
+            .get_partition_doc_events_for_peer(peer, &doc_req)
+            .await?;
         let member_high_watermark = replay_members
             .events
             .iter()
@@ -818,9 +827,7 @@ async fn load_doc_partition_page(
                     let deets = match deleted {
                         0 => PartitionDocEventDeets::DocChanged {
                             doc_id,
-                            heads: serde_json::from_str(
-                                heads_json.as_deref().unwrap_or("[]"),
-                            )?,
+                            heads: serde_json::from_str(heads_json.as_deref().unwrap_or("[]"))?,
                             change_count_hint: change_count_hint.max(0) as u64,
                         },
                         1 => PartitionDocEventDeets::DocDeleted {
@@ -900,7 +907,10 @@ async fn load_doc_partition_page(
     }
 }
 
-fn cmp_member_events(left: &PartitionMemberEvent, right: &PartitionMemberEvent) -> std::cmp::Ordering {
+fn cmp_member_events(
+    left: &PartitionMemberEvent,
+    right: &PartitionMemberEvent,
+) -> std::cmp::Ordering {
     let left_txid = cursor::to_txid(&left.cursor).unwrap_or(0);
     let right_txid = cursor::to_txid(&right.cursor).unwrap_or(0);
     left_txid
@@ -921,10 +931,10 @@ mod tests {
     use super::*;
 
     use crate::repo::{BigRepo, BigRepoConfig};
-    use automerge::transaction::Transactable;
     use crate::sync::{
         GetPartitionDocEventsRequest, GetPartitionMemberEventsRequest, PartitionCursorRequest,
     };
+    use automerge::transaction::Transactable;
 
     async fn boot_big_repo() -> Res<Arc<BigRepo>> {
         let repo = samod::Repo::build_tokio()

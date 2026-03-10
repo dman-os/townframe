@@ -48,7 +48,7 @@ impl SyncNodeHandle {
                 peer,
                 resp: resp_tx,
             })
-            .wrap_err("sync node is closed")?;
+            .wrap_err(ERROR_ACTOR)?;
         resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
@@ -59,7 +59,7 @@ impl SyncNodeHandle {
                 peer,
                 resp: resp_tx,
             })
-            .wrap_err("sync node is closed")?;
+            .wrap_err(ERROR_ACTOR)?;
         resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
 }
@@ -82,12 +82,12 @@ pub async fn spawn_sync_node(
     big_repo: SharedBigRepo,
     sync_store: SyncStoreHandle,
     access_policy: Arc<dyn PartitionAccessPolicy>,
-    cancel_token: CancellationToken,
 ) -> Res<(SyncNodeHandle, SyncNodeStopToken)> {
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
     let (rpc_tx, mut rpc_rx) = tokio::sync::mpsc::channel(1024);
     let rpc_client = irpc::Client::<PartitionSyncRpc>::local(rpc_tx.clone());
 
+    let cancel_token = CancellationToken::new();
     let fut = {
         let cancel_token = cancel_token.clone();
         let mut worker = SyncNodeWorker {
@@ -251,7 +251,11 @@ impl SyncNodeWorker {
                         }
                     }
                     self.big_repo
-                        .subscribe_partition_events_for_peer(&peer, &req, DEFAULT_SUBSCRIPTION_CAPACITY)
+                        .subscribe_partition_events_for_peer(
+                            &peer,
+                            &req,
+                            DEFAULT_SUBSCRIPTION_CAPACITY,
+                        )
                         .await
                         .map_err(map_repo_err)
                 })

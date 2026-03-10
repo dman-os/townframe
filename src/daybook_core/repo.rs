@@ -378,6 +378,11 @@ impl RepoCtx {
             if let Some(stop) = dispatch_stop.take() {
                 let _ = stop.stop().await;
             }
+            if let Err(shutdown_err) = blobs_repo.shutdown().await {
+                return Err(err.wrap_err(format!(
+                    "error shutting down blobs repo during init cleanup: {shutdown_err:?}"
+                )));
+            }
             return Err(err);
         }
 
@@ -398,6 +403,7 @@ impl RepoCtx {
             .expect("dispatch stop token missing")
             .stop()
             .await?;
+        blobs_repo.shutdown().await?;
         Ok(())
     }
 }

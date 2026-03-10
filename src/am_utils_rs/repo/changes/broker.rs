@@ -44,8 +44,7 @@ struct HeadListener {
     change_tx: mpsc::Sender<Arc<[ChangeHash]>>,
 }
 
-type HasCandidateListener =
-    Arc<dyn Fn(&DocumentId, &ChangeOrigin) -> bool + Send + Sync + 'static>;
+type HasCandidateListener = Arc<dyn Fn(&DocumentId, &ChangeOrigin) -> bool + Send + Sync + 'static>;
 
 enum BrokerMsg {
     AddHeadListener {

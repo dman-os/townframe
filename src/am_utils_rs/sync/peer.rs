@@ -41,15 +41,27 @@ pub enum SamodSyncRequest {
 
 #[derive(Debug, Clone)]
 pub enum PeerSyncProgressEvent {
-    PhaseStarted { phase: &'static str },
-    PhaseFinished { phase: &'static str, elapsed: Duration },
-    CursorUpdated { partition_id: PartitionId },
+    PhaseStarted {
+        phase: &'static str,
+    },
+    PhaseFinished {
+        phase: &'static str,
+        elapsed: Duration,
+    },
+    CursorUpdated {
+        partition_id: PartitionId,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum PeerSyncWorkerEvent {
-    Bootstrapped { peer: PeerKey, partition_count: usize },
-    Live { peer: PeerKey },
+    Bootstrapped {
+        peer: PeerKey,
+        partition_count: usize,
+    },
+    Live {
+        peer: PeerKey,
+    },
 }
 
 pub struct PeerSyncWorkerHandle {
@@ -95,8 +107,14 @@ enum PeerMsg {
     Stop { resp: oneshot::Sender<Res<()>> },
 }
 
+struct RunnerTask {
+    cancel_token: CancellationToken,
+    join_handle: tokio::task::JoinHandle<()>,
+}
+
 pub async fn spawn_peer_sync_worker(
-    peer: PeerKey,
+    local_peer: PeerKey,
+    remote_peer: PeerKey,
     rpc_client: irpc::Client<PartitionSyncRpc>,
     local_repo: SharedBigRepo,
     sync_store: SyncStoreHandle,
@@ -107,8 +125,9 @@ pub async fn spawn_peer_sync_worker(
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
     let (progress_tx, progress_rx) = broadcast::channel(2048);
     let (events_tx, events_rx) = broadcast::channel(256);
-    let mut worker = PeerSyncWorker {
-        peer,
+    let config = PeerSyncWorkerConfig {
+        local_peer,
+        remote_peer,
         rpc_client,
         local_repo,
         sync_store,
@@ -116,31 +135,73 @@ pub async fn spawn_peer_sync_worker(
         target_partitions,
         progress_tx,
         events_tx,
-        running: false,
     };
 
     let fut = {
         let cancel_token = cancel_token.clone();
         async move {
+            let mut runner_task: Option<RunnerTask> = None;
             loop {
                 tokio::select! {
                     biased;
-                    _ = cancel_token.cancelled() => break,
+                    _ = cancel_token.cancelled() => {
+                        if let Some(task) = runner_task.take() {
+                            task.cancel_token.cancel();
+                            if let Err(err) = utils_rs::wait_on_handle_with_timeout(
+                                task.join_handle,
+                                Duration::from_secs(1),
+                            )
+                            .await
+                            {
+                                warn!(?err, "peer sync runner did not stop in time on cancel");
+                            }
+                        }
+                        break;
+                    }
                     msg = msg_rx.recv() => {
                         let Some(msg) = msg else {
                             break;
                         };
                         match msg {
                             PeerMsg::Start { resp } => {
-                                let out = worker.run_once().await;
-                                if out.is_ok() {
-                                    worker.running = true;
-                                }
+                                let out = if runner_task.is_none() {
+                                    let runner_cancel = cancel_token.child_token();
+                                    let mut runner = config.clone_with_cancel(runner_cancel.clone());
+                                    let join_handle = tokio::spawn(async move {
+                                        if let Err(err) = runner.run_loop().await {
+                                            warn!(?err, "peer sync runner exited with error");
+                                        }
+                                    });
+                                    runner_task = Some(RunnerTask {
+                                        cancel_token: runner_cancel,
+                                        join_handle,
+                                    });
+                                    Ok(())
+                                } else {
+                                    Ok(())
+                                };
                                 resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                             }
                             PeerMsg::Stop { resp } => {
-                                worker.running = false;
-                                resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                                let out = async {
+                                    if let Some(task) = runner_task.take() {
+                                        task.cancel_token.cancel();
+                                        if let Err(err) = utils_rs::wait_on_handle_with_timeout(
+                                            task.join_handle,
+                                            Duration::from_secs(1),
+                                        )
+                                        .await
+                                        {
+                                            warn!(
+                                                ?err,
+                                                "peer sync runner did not stop in time on explicit stop"
+                                            );
+                                        }
+                                    }
+                                    Ok(())
+                                }
+                                .await;
+                                resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                             }
                         }
                     }
@@ -164,8 +225,9 @@ pub async fn spawn_peer_sync_worker(
     ))
 }
 
-struct PeerSyncWorker {
-    peer: PeerKey,
+struct PeerSyncWorkerConfig {
+    local_peer: PeerKey,
+    remote_peer: PeerKey,
     rpc_client: irpc::Client<PartitionSyncRpc>,
     local_repo: SharedBigRepo,
     sync_store: SyncStoreHandle,
@@ -173,17 +235,81 @@ struct PeerSyncWorker {
     target_partitions: Vec<PartitionId>,
     progress_tx: broadcast::Sender<PeerSyncProgressEvent>,
     events_tx: broadcast::Sender<PeerSyncWorkerEvent>,
-    running: bool,
 }
 
-impl PeerSyncWorker {
-    async fn run_once(&mut self) -> Res<()> {
+impl PeerSyncWorkerConfig {
+    fn clone_with_cancel(&self, cancel_token: CancellationToken) -> PeerSyncRunner {
+        PeerSyncRunner {
+            local_peer: self.local_peer.clone(),
+            remote_peer: self.remote_peer.clone(),
+            rpc_client: self.rpc_client.clone(),
+            local_repo: Arc::clone(&self.local_repo),
+            sync_store: self.sync_store.clone(),
+            samod_sync_tx: self.samod_sync_tx.clone(),
+            target_partitions: self.target_partitions.clone(),
+            progress_tx: self.progress_tx.clone(),
+            events_tx: self.events_tx.clone(),
+            cancel_token,
+        }
+    }
+}
+
+enum RunDisposition {
+    Reconnect,
+    Idle,
+}
+
+struct PeerSyncRunner {
+    local_peer: PeerKey,
+    remote_peer: PeerKey,
+    rpc_client: irpc::Client<PartitionSyncRpc>,
+    local_repo: SharedBigRepo,
+    sync_store: SyncStoreHandle,
+    samod_sync_tx: mpsc::Sender<SamodSyncRequest>,
+    target_partitions: Vec<PartitionId>,
+    progress_tx: broadcast::Sender<PeerSyncProgressEvent>,
+    events_tx: broadcast::Sender<PeerSyncWorkerEvent>,
+    cancel_token: CancellationToken,
+}
+
+impl PeerSyncRunner {
+    async fn run_loop(&mut self) -> Res<()> {
+        loop {
+            if self.cancel_token.is_cancelled() {
+                break;
+            }
+            let disposition = match self.run_once().await {
+                Ok(disposition) => disposition,
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        local_peer = ?self.local_peer,
+                        remote_peer = ?self.remote_peer,
+                        "peer sync cycle failed, retrying"
+                    );
+                    RunDisposition::Reconnect
+                }
+            };
+            let delay = match disposition {
+                RunDisposition::Reconnect => Duration::from_millis(250),
+                RunDisposition::Idle => Duration::from_secs(2),
+            };
+            tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => break,
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_once(&mut self) -> Res<RunDisposition> {
         self.emit_phase_started("list_partitions");
         let t0 = Instant::now();
         let partitions = self
             .rpc_client
             .rpc(ListPartitionsRpcReq {
-                peer: self.peer.clone(),
+                peer: self.local_peer.clone(),
             })
             .await
             .map_err(|err| ferr!("list partitions rpc failed: {err}"))?
@@ -191,8 +317,11 @@ impl PeerSyncWorker {
             .partitions;
         self.emit_phase_finished("list_partitions", t0.elapsed());
 
-        let available: HashSet<PartitionId> =
-            partitions.into_iter().map(|item| item.partition_id).collect();
+        let available: HashSet<PartitionId> = partitions
+            .into_iter()
+            .map(|item| item.partition_id)
+            .collect();
+        let available_count = available.len();
         let selected = if self.target_partitions.is_empty() {
             available.into_iter().collect::<Vec<_>>()
         } else {
@@ -203,20 +332,27 @@ impl PeerSyncWorker {
                 .collect::<Vec<_>>()
         };
         if selected.is_empty() {
-            return Ok(());
+            debug!(
+                local_peer = ?self.local_peer,
+                remote_peer = ?self.remote_peer,
+                target_count = self.target_partitions.len(),
+                available_count,
+                "peer sync worker has no selected partitions"
+            );
+            return Ok(RunDisposition::Idle);
         }
 
         self.bootstrap_members(&selected).await?;
         self.bootstrap_docs(&selected).await?;
         let _ = self.events_tx.send(PeerSyncWorkerEvent::Bootstrapped {
-            peer: self.peer.clone(),
+            peer: self.remote_peer.clone(),
             partition_count: selected.len(),
         });
         self.live_subscribe(&selected).await?;
         let _ = self.events_tx.send(PeerSyncWorkerEvent::Live {
-            peer: self.peer.clone(),
+            peer: self.remote_peer.clone(),
         });
-        Ok(())
+        Ok(RunDisposition::Reconnect)
     }
 
     async fn bootstrap_members(&self, selected: &[PartitionId]) -> Res<()> {
@@ -227,7 +363,7 @@ impl PeerSyncWorker {
             for part in selected {
                 let cursor = self
                     .sync_store
-                    .get_partition_cursor(self.peer.clone(), part.clone())
+                    .get_partition_cursor(self.remote_peer.clone(), part.clone())
                     .await?;
                 req_parts.push(PartitionCursorRequest {
                     partition_id: part.clone(),
@@ -237,7 +373,7 @@ impl PeerSyncWorker {
             let response = self
                 .rpc_client
                 .rpc(GetPartitionMemberEventsRpcReq {
-                    peer: self.peer.clone(),
+                    peer: self.local_peer.clone(),
                     req: GetPartitionMemberEventsRequest {
                         partitions: req_parts,
                         limit: DEFAULT_EVENT_PAGE_LIMIT,
@@ -265,11 +401,11 @@ impl PeerSyncWorker {
             for page in &response.cursors {
                 let existing = self
                     .sync_store
-                    .get_partition_cursor(self.peer.clone(), page.partition_id.clone())
+                    .get_partition_cursor(self.remote_peer.clone(), page.partition_id.clone())
                     .await?;
                 self.sync_store
                     .set_partition_cursor(
-                        self.peer.clone(),
+                        self.remote_peer.clone(),
                         page.partition_id.clone(),
                         page.next_cursor.clone().or(existing.member_cursor),
                         existing.doc_cursor,
@@ -294,7 +430,7 @@ impl PeerSyncWorker {
             for part in selected {
                 let cursor = self
                     .sync_store
-                    .get_partition_cursor(self.peer.clone(), part.clone())
+                    .get_partition_cursor(self.remote_peer.clone(), part.clone())
                     .await?;
                 req_parts.push(PartitionCursorRequest {
                     partition_id: part.clone(),
@@ -304,7 +440,7 @@ impl PeerSyncWorker {
             let response = self
                 .rpc_client
                 .rpc(GetPartitionDocEventsRpcReq {
-                    peer: self.peer.clone(),
+                    peer: self.local_peer.clone(),
                     req: GetPartitionDocEventsRequest {
                         partitions: req_parts,
                         limit: DEFAULT_EVENT_PAGE_LIMIT,
@@ -318,11 +454,11 @@ impl PeerSyncWorker {
             for page in &response.cursors {
                 let existing = self
                     .sync_store
-                    .get_partition_cursor(self.peer.clone(), page.partition_id.clone())
+                    .get_partition_cursor(self.remote_peer.clone(), page.partition_id.clone())
                     .await?;
                 self.sync_store
                     .set_partition_cursor(
-                        self.peer.clone(),
+                        self.remote_peer.clone(),
                         page.partition_id.clone(),
                         existing.member_cursor,
                         page.next_cursor.clone().or(existing.doc_cursor),
@@ -342,11 +478,12 @@ impl PeerSyncWorker {
     async fn live_subscribe(&self, selected: &[PartitionId]) -> Res<()> {
         self.emit_phase_started("subscribe");
         let t0 = Instant::now();
+        let mut subscribe_phase_finished = false;
         let mut reqs = Vec::with_capacity(selected.len());
         for part in selected {
             let cursor = self
                 .sync_store
-                .get_partition_cursor(self.peer.clone(), part.clone())
+                .get_partition_cursor(self.remote_peer.clone(), part.clone())
                 .await?;
             reqs.push(PartitionStreamCursorRequest {
                 partition_id: part.clone(),
@@ -359,7 +496,7 @@ impl PeerSyncWorker {
             .rpc_client
             .server_streaming(
                 SubPartitionsRpcReq {
-                    peer: self.peer.clone(),
+                    peer: self.local_peer.clone(),
                     req: SubPartitionsRequest { partitions: reqs },
                 },
                 DEFAULT_SUBSCRIPTION_CAPACITY,
@@ -367,7 +504,15 @@ impl PeerSyncWorker {
             .await
             .map_err(|err| ferr!("subscription rpc failed: {err}"))?;
 
-        while let Ok(Some(item)) = rpc_rx.recv().await {
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => return Ok(()),
+                recv = rpc_rx.recv() => recv,
+            };
+            let Some(item) = item? else {
+                break;
+            };
             match item {
                 SubscriptionItem::MemberEvent(event) => {
                     self.apply_member_event(&event).await?;
@@ -378,15 +523,18 @@ impl PeerSyncWorker {
                     self.update_doc_cursor(&event).await?;
                 }
                 SubscriptionItem::SnapshotComplete { stream } => {
-                    if stream == SubscriptionStreamKind::Doc {
+                    if stream == SubscriptionStreamKind::Doc && !subscribe_phase_finished {
+                        subscribe_phase_finished = true;
                         self.emit_phase_finished("subscribe", t0.elapsed());
-                        break;
                     }
                 }
                 SubscriptionItem::Lagged { dropped } => {
                     eyre::bail!("partition subscription lagged; dropped={dropped}");
                 }
             }
+        }
+        if !subscribe_phase_finished {
+            self.emit_phase_finished("subscribe", t0.elapsed());
         }
         Ok(())
     }
@@ -420,7 +568,7 @@ impl PeerSyncWorker {
                         let _ = self
                             .samod_sync_tx
                             .send(SamodSyncRequest::RequestDocSync {
-                                peer_key: self.peer.clone(),
+                                peer_key: self.remote_peer.clone(),
                                 partition_id: event.partition_id.clone(),
                                 doc_id: doc_id.clone(),
                                 reason: "remote_doc_changed",
@@ -430,7 +578,7 @@ impl PeerSyncWorker {
                         let _ = self
                             .samod_sync_tx
                             .send(SamodSyncRequest::DocMissingLocal {
-                                peer_key: self.peer.clone(),
+                                peer_key: self.remote_peer.clone(),
                                 partition_id: event.partition_id.clone(),
                                 doc_id: doc_id.clone(),
                             })
@@ -442,7 +590,7 @@ impl PeerSyncWorker {
                     let _ = self
                         .samod_sync_tx
                         .send(SamodSyncRequest::DocDeleted {
-                            peer_key: self.peer.clone(),
+                            peer_key: self.remote_peer.clone(),
                             partition_id: event.partition_id.clone(),
                             doc_id: doc_id.clone(),
                         })
@@ -456,7 +604,7 @@ impl PeerSyncWorker {
             let docs = self
                 .rpc_client
                 .rpc(GetDocsFullRpcReq {
-                    peer: self.peer.clone(),
+                    peer: self.local_peer.clone(),
                     req: GetDocsFullRequest {
                         doc_ids: chunk.to_vec(),
                     },
@@ -480,11 +628,11 @@ impl PeerSyncWorker {
     async fn update_member_cursor(&self, event: &PartitionMemberEvent) -> Res<()> {
         let existing = self
             .sync_store
-            .get_partition_cursor(self.peer.clone(), event.partition_id.clone())
+            .get_partition_cursor(self.remote_peer.clone(), event.partition_id.clone())
             .await?;
         self.sync_store
             .set_partition_cursor(
-                self.peer.clone(),
+                self.remote_peer.clone(),
                 event.partition_id.clone(),
                 Some(event.cursor.clone()),
                 existing.doc_cursor,
@@ -497,11 +645,11 @@ impl PeerSyncWorker {
     async fn update_doc_cursor(&self, event: &PartitionDocEvent) -> Res<()> {
         let existing = self
             .sync_store
-            .get_partition_cursor(self.peer.clone(), event.partition_id.clone())
+            .get_partition_cursor(self.remote_peer.clone(), event.partition_id.clone())
             .await?;
         self.sync_store
             .set_partition_cursor(
-                self.peer.clone(),
+                self.remote_peer.clone(),
                 event.partition_id.clone(),
                 existing.member_cursor,
                 Some(event.cursor.clone()),
@@ -512,7 +660,9 @@ impl PeerSyncWorker {
     }
 
     fn emit_phase_started(&self, phase: &'static str) {
-        let _ = self.progress_tx.send(PeerSyncProgressEvent::PhaseStarted { phase });
+        let _ = self
+            .progress_tx
+            .send(PeerSyncProgressEvent::PhaseStarted { phase });
     }
 
     fn emit_phase_finished(&self, phase: &'static str, elapsed: Duration) {

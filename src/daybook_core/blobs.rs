@@ -45,7 +45,8 @@ impl BlobsRepo {
         root: PathBuf,
         src_local_user_path: String,
     ) -> Result<Arc<Self>, eyre::Report> {
-        tokio::fs::create_dir_all(root.join("objects")).await?;
+        let objects_root = root.join("objects");
+        tokio::fs::create_dir_all(&objects_root).await?;
         let iroh_root = root.join("iroh");
         tokio::fs::create_dir_all(&iroh_root).await?;
         let fs_store = FsStore::load(&iroh_root)
@@ -183,6 +184,14 @@ impl BlobsRepo {
 
     pub fn iroh_store(&self) -> iroh_blobs::api::Store {
         self.iroh_store.clone()
+    }
+
+    pub async fn shutdown(&self) -> Res<()> {
+        self.iroh_store
+            .shutdown()
+            .await
+            .map_err(|err| eyre::eyre!("error shutting down iroh blob store: {err:?}"))?;
+        Ok(())
     }
 
     pub async fn has_hash(&self, hash: &str) -> Res<bool> {

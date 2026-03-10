@@ -79,15 +79,12 @@ mod tests {
         }
 
         let cancel = CancellationToken::new();
-        let (src_store, src_store_stop) =
-            spawn_sync_store(src.state_pool().clone(), cancel.child_token()).await?;
-        let (dst_store, dst_store_stop) =
-            spawn_sync_store(dst.state_pool().clone(), cancel.child_token()).await?;
+        let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
+        let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
         let (node, node_stop) = spawn_sync_node(
             Arc::clone(&src),
             src_store.clone(),
             Arc::new(AllowAllPartitionAccessPolicy),
-            cancel.child_token(),
         )
         .await?;
         let peer_key: PeerKey = "peer-b".into();
@@ -97,6 +94,7 @@ mod tests {
         let (samod_tx, mut samod_rx) = mpsc::channel(128);
         let (worker, worker_stop) = spawn_peer_sync_worker(
             peer_key.clone(),
+            peer_key.clone(),
             node.rpc_client(),
             Arc::clone(&dst),
             dst_store.clone(),
@@ -105,12 +103,17 @@ mod tests {
             cancel.child_token(),
         )
         .await?;
-        timeout(Duration::from_secs(5), worker.start())
-            .await
-            .map_err(|_| ferr!("peer worker start timed out (phase 1)"))??;
+        timeout(Duration::from_secs(5), worker.start()).await??;
 
-        let member_count = dst.partition_member_count(&part_id).await?;
-        assert_eq!(member_count, 10);
+        wait_until(
+            Duration::from_secs(5),
+            || async {
+                let member_count = dst.partition_member_count(&part_id).await?;
+                Ok(member_count == 10)
+            },
+            "timed out waiting for initial member sync",
+        )
+        .await?;
 
         for doc_id in source_doc_ids.iter().take(5) {
             let parsed = DocumentId::from_str(doc_id)
@@ -132,11 +135,15 @@ mod tests {
             src.add_doc_to_partition(&part_id, doc_id).await?;
         }
 
-        timeout(Duration::from_secs(5), worker.start())
-            .await
-            .map_err(|_| ferr!("peer worker start timed out (phase 2)"))??;
-        let final_count = dst.partition_member_count(&part_id).await?;
-        assert_eq!(final_count, 15);
+        wait_until(
+            Duration::from_secs(5),
+            || async {
+                let final_count = dst.partition_member_count(&part_id).await?;
+                Ok(final_count == 15)
+            },
+            "timed out waiting for second member sync",
+        )
+        .await?;
 
         let mut saw_doc_sync_request = false;
         while let Ok(req) = samod_rx.try_recv() {
@@ -145,12 +152,36 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_doc_sync_request, "expected at least one samod sync request");
+        assert!(
+            saw_doc_sync_request,
+            "expected at least one samod sync request"
+        );
 
         worker_stop.stop().await?;
         node_stop.stop().await?;
         src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
         Ok(())
+    }
+
+    async fn wait_until<F, Fut>(
+        timeout_dur: Duration,
+        mut condition: F,
+        timeout_msg: &str,
+    ) -> Res<()>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Res<bool>>,
+    {
+        let deadline = tokio::time::Instant::now() + timeout_dur;
+        loop {
+            if condition().await? {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                eyre::bail!("{timeout_msg}");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 }

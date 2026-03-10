@@ -54,8 +54,12 @@ pub struct PartitionEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PartitionEventDeets {
-    MemberUpsert { doc_id: String },
-    MemberRemoved { doc_id: String },
+    MemberUpsert {
+        doc_id: String,
+    },
+    MemberRemoved {
+        doc_id: String,
+    },
     DocChanged {
         doc_id: String,
         heads: Vec<String>,

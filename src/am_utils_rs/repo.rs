@@ -3,6 +3,8 @@ use crate::interlude::*;
 use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
 use samod::DocumentId;
+use sqlx::sqlite::SqliteConnectOptions;
+use std::str::FromStr;
 use tokio::sync::broadcast;
 
 mod changes;
@@ -55,9 +57,12 @@ pub type SharedBigRepo = Arc<BigRepo>;
 
 impl BigRepo {
     pub async fn boot_with_repo(repo: samod::Repo, config: BigRepoConfig) -> Res<Arc<Self>> {
+        let connect_options = SqliteConnectOptions::from_str(&config.sqlite_url)
+            .wrap_err_with(|| format!("invalid sqlite url: {}", config.sqlite_url))?
+            .create_if_missing(true);
         let state_pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
-            .connect(&config.sqlite_url)
+            .connect_with(connect_options)
             .await
             .wrap_err("failed connecting big repo sqlite")?;
         let (partition_events_tx, _) = broadcast::channel(config.subscription_capacity.max(1));

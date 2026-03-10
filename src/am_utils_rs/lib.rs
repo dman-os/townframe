@@ -105,7 +105,17 @@ impl RepoConnection {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
         if let Some(join_handle) = self.join_handle {
-            utils_rs::wait_on_handle_with_timeout(join_handle, Duration::from_secs(5)).await?;
+            let mut join_handle = join_handle;
+            tokio::select! {
+                res = &mut join_handle => {
+                    res.wrap_err("connection task join failed")?;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    warn!("connection task did not stop in time; aborting");
+                    join_handle.abort();
+                    let _ = join_handle.await;
+                }
+            }
         }
         Ok(())
     }

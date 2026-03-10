@@ -63,6 +63,7 @@ impl BigRepo {
                     tokio::select! {
                         _ = cancel_token.cancelled() => {
                             debug!("cancel token lit");
+                            break;
                         }
                         evt = events.next() => {
                             let Some(evt) = evt else {
