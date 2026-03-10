@@ -15,7 +15,7 @@ impl DocSyncWorkerStopToken {
 
 pub async fn spawn_doc_sync_worker(
     doc_id: DocumentId,
-    acx: AmCtx,
+    big_repo: SharedBigRepo,
     cancel_token: CancellationToken,
     msg_tx: mpsc::UnboundedSender<Msg>,
     retry: RetryState,
@@ -29,13 +29,12 @@ pub async fn spawn_doc_sync_worker(
 
     let fut = {
         async move {
-            let Some(handle) = acx.repo().find(doc_id.clone()).await? else {
+            let Some(handle) = big_repo.samod_repo().find(doc_id.clone()).await? else {
                 worker.handle_missing_doc();
                 return eyre::Ok(());
             };
-            let (broker_handle, broker_stop_token) =
-                acx.change_manager().add_doc(handle.clone()).await?;
-            let mut heads_listener = broker_handle.get_head_listener().await?;
+            let broker_lease = big_repo.ensure_change_broker(handle.clone()).await?;
+            let mut heads_listener = broker_lease.get_head_listener().await?;
             let (peer_state, state_stream) = handle.peers();
             worker.handle_peer_state_update(peer_state);
 
@@ -72,9 +71,6 @@ pub async fn spawn_doc_sync_worker(
                     }
                 }
             };
-            if let Ok(token) = Arc::try_unwrap(broker_stop_token) {
-                token.stop().await?;
-            }
             loop_res
         }
     };
@@ -167,7 +163,7 @@ mod tests {
         utils_rs::testing::setup_tracing_once();
         let alice_peer_id = format!("alice-{}", Uuid::new_v4());
         let bob_peer_id = format!("bob-{}", Uuid::new_v4());
-        let (alice_acx, alice_stop) = AmCtx::boot(
+        let (alice_acx, alice_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: alice_peer_id.clone(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -175,7 +171,7 @@ mod tests {
             Some(samod::AlwaysAnnounce),
         )
         .await?;
-        let (bob_acx, bob_stop) = AmCtx::boot(
+        let (bob_acx, bob_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: bob_peer_id.clone(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -185,8 +181,8 @@ mod tests {
         .await?;
 
         #[allow(deprecated)]
-        fn repos(acx: &AmCtx) -> &samod::Repo {
-            acx.repo()
+        fn repos(big_repo: &SharedBigRepo) -> &samod::Repo {
+            big_repo.samod_repo()
         }
 
         let connected = crate::tincans::connect_repos(repos(&alice_acx), repos(&bob_acx));
@@ -199,7 +195,7 @@ mod tests {
 
         let alice_handle = alice_acx.add_doc(automerge::Automerge::new()).await?;
         let bob_handle = bob_acx
-            .find_doc(alice_handle.document_id())
+            .find_doc_handle(alice_handle.document_id())
             .await?
             .ok_or_eyre("bob could not find alice doc")?;
 
@@ -272,7 +268,7 @@ mod tests {
         utils_rs::testing::setup_tracing_once();
         let alice_peer_id = format!("alice-diverge-{}", Uuid::new_v4());
         let bob_peer_id = format!("bob-diverge-{}", Uuid::new_v4());
-        let (alice_acx, alice_stop) = AmCtx::boot(
+        let (alice_acx, alice_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: alice_peer_id.clone(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -280,7 +276,7 @@ mod tests {
             Some(samod::AlwaysAnnounce),
         )
         .await?;
-        let (bob_acx, bob_stop) = AmCtx::boot(
+        let (bob_acx, bob_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: bob_peer_id.clone(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -290,8 +286,8 @@ mod tests {
         .await?;
 
         #[allow(deprecated)]
-        fn repos(acx: &AmCtx) -> &samod::Repo {
-            acx.repo()
+        fn repos(big_repo: &SharedBigRepo) -> &samod::Repo {
+            big_repo.samod_repo()
         }
         // 1) Connect once so both peers share the same base document.
         let initial_connected = crate::tincans::connect_repos(repos(&alice_acx), repos(&bob_acx));
@@ -304,7 +300,7 @@ mod tests {
 
         let alice_handle = alice_acx.add_doc(automerge::Automerge::new()).await?;
         let bob_handle = bob_acx
-            .find_doc(alice_handle.document_id())
+            .find_doc_handle(alice_handle.document_id())
             .await?
             .ok_or_eyre("bob could not find alice doc")?;
         let _synced_base = wait_for_peer_doc_state(&bob_handle, alice_on_bob.id(), |state| {

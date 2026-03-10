@@ -133,6 +133,7 @@ iroh-gossip = "0.96.0"
 # os
 rand.workspace = true
 keyring = "3.6.3"
+irpc-iroh = "0.12.0"
 
 [build-dependencies]
 uniffi = { workspace = true, features = ["build"], optional = true }

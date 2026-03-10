@@ -164,7 +164,7 @@ pub mod version_updates {
 }
 
 pub async fn init_from_globals(
-    acx: &AmCtx,
+    big_repo: &SharedBigRepo,
     sql: &SqlitePool,
     doc_app_cell: &tokio::sync::OnceCell<samod::DocHandle>,
     doc_drawer_cell: &tokio::sync::OnceCell<samod::DocHandle>,
@@ -175,8 +175,10 @@ pub async fn init_from_globals(
         doc_id_drawer,
     } = init_state
     {
-        let (handle_app, handle_drawer) =
-            tokio::try_join!(acx.find_doc(&doc_id_app), acx.find_doc(&doc_id_drawer))?;
+        let (handle_app, handle_drawer) = tokio::try_join!(
+            big_repo.find_doc_handle(&doc_id_app),
+            big_repo.find_doc_handle(&doc_id_drawer)
+        )?;
         if handle_app.is_none() {
             warn!("doc not found locally for stored doc_id_app; creating new local document");
         }
@@ -211,7 +213,7 @@ pub async fn init_from_globals(
                 let doc = latest_fn()?;
                 let doc =
                     automerge::Automerge::load(&doc).wrap_err("error loading version_latest")?;
-                let handle = acx.add_doc(doc).await?;
+                let handle = big_repo.add_doc(doc).await?;
                 handle
             }
         };
@@ -219,9 +221,6 @@ pub async fn init_from_globals(
     }
     if doc_handles.len() != 2 {
         unreachable!();
-    }
-    for handle in &doc_handles {
-        let _ = acx.change_manager().add_doc(handle.clone()).await?;
     }
     if update_state {
         globals::set_init_state(

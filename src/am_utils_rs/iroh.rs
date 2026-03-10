@@ -10,19 +10,19 @@ use samod::{AcceptorEvent, Dialer, DialerEvent, Transport};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tokio_util::sync::CancellationToken;
 
-use super::AmCtx;
+use crate::repo::{BigRepo, SharedBigRepo};
 
 mod codec;
 
 const CONN_URL_SCHEME: &str = "db+iroh+samod";
 
-impl AmCtx {
+impl BigRepo {
     pub const SYNC_ALPN: &[u8] = b"townframe/automerge-repo/0";
 
     #[tracing::instrument(skip(self, endpoint, end_signal_tx))]
     pub async fn spawn_connection_iroh(
         &self,
-        endpoint: iroh::Endpoint,
+        endpoint: &iroh::Endpoint,
         to_addr: iroh::EndpointAddr,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<super::ConnFinishSignal>>,
         // direction: samod::ConnDirection,
@@ -30,14 +30,14 @@ impl AmCtx {
         // tx_to_peer: iroh::endpoint::SendStream,
     ) -> Res<super::RepoConnection> {
         let endpoint_id = to_addr.id;
-        let repo = self.repo.clone();
+        let repo = self.samod_repo().clone();
         let dialer = IrohDialer {
             url: Url::parse(&format!(
                 "{CONN_URL_SCHEME}:{}",
                 utils_rs::hash::encode_base58_multibase(endpoint_id)
             ))
             .expect(ERROR_IMPOSSIBLE),
-            endpoint,
+            endpoint: endpoint.clone(),
             endpoint_id,
             to_addr,
         };
@@ -153,7 +153,7 @@ impl Dialer for IrohDialer {
         let addr = self.to_addr.clone();
         let endpoint_id = self.endpoint_id;
         Box::pin(async move {
-            let conn = endpoint.connect(addr, AmCtx::SYNC_ALPN).await?;
+            let conn = endpoint.connect(addr, BigRepo::SYNC_ALPN).await?;
             let (tx, rx) = conn.open_bi().await?;
             // establish your transport here, then wrap it:
             Ok(Transport::new(
@@ -166,7 +166,7 @@ impl Dialer for IrohDialer {
 
 #[derive(Clone, Debug)]
 pub struct IrohRepoProtocol {
-    pub acx: AmCtx,
+    pub big_repo: SharedBigRepo,
     pub cancel_token: CancellationToken,
     pub conn_tx: tokio::sync::mpsc::UnboundedSender<crate::RepoConnection>,
     pub end_signal_tx: tokio::sync::mpsc::UnboundedSender<super::ConnFinishSignal>,
@@ -186,7 +186,7 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
 
         let (tx, rx) = connection.accept_bi().await?;
 
-        let repo = self.acx.repo.clone();
+        let repo = self.big_repo.samod_repo().clone();
         let acceptor = repo
             .make_acceptor(
                 Url::parse(&format!(
@@ -282,6 +282,6 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
 
     async fn shutdown(&self) {
         self.cancel_token.cancel();
-        // The AmCtx stop token owns repo shutdown; protocol shutdown only tears down routing.
+        // BigRepo shutdown owns samod repo shutdown; protocol shutdown only tears down routing.
     }
 }

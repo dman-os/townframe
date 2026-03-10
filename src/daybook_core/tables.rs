@@ -319,14 +319,15 @@ impl TablesStore {
 }
 
 pub struct TablesRepo {
-    pub acx: AmCtx,
+    pub big_repo: SharedBigRepo,
     pub app_doc_id: DocumentId,
     pub app_am_handle: samod::DocHandle,
     store: crate::stores::AmStoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub local_actor_id: ActorId,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
+    _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
+    _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
 }
 
 impl crate::repos::Repo for TablesRepo {
@@ -360,7 +361,7 @@ pub enum TablesEvent {
 
 impl TablesRepo {
     pub async fn load(
-        acx: AmCtx,
+        big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
         local_user_path: daybook_types::doc::UserPath,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
@@ -369,10 +370,10 @@ impl TablesRepo {
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let registry = crate::repos::ListenersRegistry::new();
 
-        let store_val = TablesStore::load(&acx, &app_doc_id).await?;
+        let store_val = TablesStore::load(&big_repo, &app_doc_id).await?;
         let store = crate::stores::AmStoreHandle::new(
             store_val,
-            acx.clone(),
+            big_repo.clone(),
             app_doc_id.clone(),
             local_actor_id.clone(),
         );
@@ -382,18 +383,19 @@ impl TablesRepo {
             })
             .await?;
 
-        let app_am_handle = acx
-            .find_doc(&app_doc_id)
+        let app_am_handle = big_repo
+            .find_doc_handle(&app_doc_id)
             .await?
             .ok_or_eyre("unable to find app doc in am")?;
 
-        let (broker, broker_stop) = acx.change_manager().add_doc(app_am_handle.clone()).await?;
+        let broker = big_repo.ensure_change_broker(app_am_handle.clone()).await?;
 
-        let (notif_tx, notif_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Vec<am_utils_rs::changes::ChangeNotification>>();
+        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
+            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
+        >();
         // Register change listener to automatically notify repo listeners
         let cancel_token = CancellationToken::new();
-        let ticket = TablesStore::register_change_listener(&acx, &broker, vec![], {
+        let ticket = TablesStore::register_change_listener(&big_repo, &app_doc_id, vec![], {
             let cancel_token = cancel_token.clone();
             move |notifs| {
                 if let Err(err) = notif_tx.send(notifs) {
@@ -406,7 +408,7 @@ impl TablesRepo {
         .await?;
 
         let repo = Self {
-            acx,
+            big_repo,
             app_doc_id,
             app_am_handle,
             store,
@@ -414,6 +416,7 @@ impl TablesRepo {
             local_actor_id,
             cancel_token: cancel_token.clone(),
             _change_listener_tickets: vec![ticket],
+            _change_broker_leases: vec![broker],
         };
         let repo = Arc::new(repo);
 
@@ -432,7 +435,6 @@ impl TablesRepo {
             crate::repos::RepoStopToken {
                 cancel_token,
                 worker_handle: Some(worker_handle),
-                broker_stop_tokens: vec![broker_stop],
             },
         ))
     }
@@ -440,7 +442,7 @@ impl TablesRepo {
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<am_utils_rs::changes::ChangeNotification>,
+            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -461,9 +463,24 @@ impl TablesRepo {
 
             events.clear();
             for notif in notifs {
+                let am_utils_rs::repo::BigRepoChangeNotification::DocChanged {
+                    patch,
+                    heads,
+                    origin,
+                    ..
+                } = notif
+                else {
+                    continue;
+                };
+                if !matches!(
+                    origin,
+                    am_utils_rs::repo::BigRepoChangeOrigin::Remote { .. }
+                ) {
+                    continue;
+                }
                 self.events_for_patch(
-                    &notif.patch,
-                    &notif.heads,
+                    &patch,
+                    &heads,
                     &mut events,
                     Some(self.local_actor_id.clone()),
                 )
@@ -475,7 +492,7 @@ impl TablesRepo {
                     TablesEvent::WindowAdded { id, heads }
                     | TablesEvent::WindowChanged { id, heads } => {
                         let (new_window, _) = self
-                            .acx
+                            .big_repo
                             .hydrate_path_at_heads::<Versioned<Window>>(
                                 &self.app_doc_id,
                                 &heads.0,
@@ -505,7 +522,7 @@ impl TablesRepo {
                     }
                     TablesEvent::TabAdded { id, heads } | TablesEvent::TabChanged { id, heads } => {
                         let (new_tab, _) = self
-                            .acx
+                            .big_repo
                             .hydrate_path_at_heads::<Versioned<Tab>>(
                                 &self.app_doc_id,
                                 &heads.0,
@@ -536,7 +553,7 @@ impl TablesRepo {
                     TablesEvent::PanelAdded { id, heads }
                     | TablesEvent::PanelChanged { id, heads } => {
                         let (new_panel, _) = self
-                            .acx
+                            .big_repo
                             .hydrate_path_at_heads::<Versioned<Panel>>(
                                 &self.app_doc_id,
                                 &heads.0,
@@ -567,7 +584,7 @@ impl TablesRepo {
                     TablesEvent::TableAdded { id, heads }
                     | TablesEvent::TableChanged { id, heads } => {
                         let (new_table, _) = self
-                            .acx
+                            .big_repo
                             .hydrate_path_at_heads::<Versioned<Table>>(
                                 &self.app_doc_id,
                                 &heads.0,

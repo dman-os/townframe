@@ -9,7 +9,6 @@ use tokio_util::sync::CancellationToken;
 pub struct RepoStopToken {
     pub cancel_token: CancellationToken,
     pub worker_handle: Option<JoinHandle<()>>,
-    pub broker_stop_tokens: Vec<Arc<am_utils_rs::changes::DocChangeBrokerStopToken>>,
 }
 
 impl RepoStopToken {
@@ -17,11 +16,6 @@ impl RepoStopToken {
         self.cancel_token.cancel();
         if let Some(handle) = self.worker_handle {
             handle.await?;
-        }
-        for token in self.broker_stop_tokens {
-            if let Ok(token) = Arc::try_unwrap(token) {
-                token.stop().await?;
-            }
         }
         Ok(())
     }

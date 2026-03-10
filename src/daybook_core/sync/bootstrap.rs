@@ -188,7 +188,7 @@ pub(super) async fn resolve_bootstrap_with_docs(
 }
 
 pub async fn pull_required_docs_once(
-    acx: &AmCtx,
+    big_repo: &SharedBigRepo,
     app_doc_id: &DocumentId,
     drawer_doc_id: &DocumentId,
     timeout: std::time::Duration,
@@ -197,8 +197,8 @@ pub async fn pull_required_docs_once(
     let drawer_doc_id = drawer_doc_id.clone();
     tokio::time::timeout(timeout, async move {
         loop {
-            let app = acx.find_doc(&app_doc_id).await?;
-            let drawer = acx.find_doc(&drawer_doc_id).await?;
+            let app = big_repo.find_doc_handle(&app_doc_id).await?;
+            let drawer = big_repo.find_doc_handle(&drawer_doc_id).await?;
             if app.is_some() && drawer.is_some() {
                 break;
             }
@@ -213,7 +213,7 @@ pub async fn pull_required_docs_once(
 }
 
 pub async fn connect_and_pull_required_docs_once(
-    acx: &AmCtx,
+    big_repo: &SharedBigRepo,
     iroh_secret_key: iroh::SecretKey,
     bootstrap: &SyncBootstrapState,
     timeout: std::time::Duration,
@@ -222,12 +222,12 @@ pub async fn connect_and_pull_required_docs_once(
         .secret_key(iroh_secret_key)
         .bind()
         .await?;
-    let conn = acx
+    let conn = big_repo
         .spawn_connection_iroh(&endpoint, bootstrap.endpoint_addr.clone(), None)
         .await?;
 
     let pull_res = pull_required_docs_once(
-        acx,
+        big_repo,
         &bootstrap.app_doc_id,
         &bootstrap.drawer_doc_id,
         timeout,

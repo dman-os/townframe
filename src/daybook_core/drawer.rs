@@ -18,8 +18,6 @@ use daybook_types::doc::{AddDocArgs, ChangeHashSet, Doc, DocId, DocPatch, FacetK
 use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
 mod facet_recovery;
 
-// FIXME: refactor by hand?
-use am_utils_rs::changes::ChangeNotification;
 use sqlx::Row;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -27,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 const DRAWER_BRANCH_STATE_DB_FILE: &str = "drawer_branch_state.sqlite";
 const DRAWER_BRANCH_STATE_META_INIT_KEY: &str = "drawer_branch_state_initialized";
+const DRAWER_REPLICATED_PARTITION_PREFIX: &str = "drawer.replicated";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BranchKind {
@@ -52,7 +51,7 @@ impl BranchKind {
 }
 
 pub struct DrawerRepo {
-    pub acx: AmCtx,
+    pub big_repo: SharedBigRepo,
     drawer_doc_id: DocumentId,
     local_actor_id: ActorId,
     local_user_path: daybook_types::doc::UserPath,
@@ -70,7 +69,8 @@ pub struct DrawerRepo {
 
     pub registry: Arc<crate::repos::ListenersRegistry>,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
+    _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
+    _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
     current_heads: std::sync::RwLock<ChangeHashSet>,
     drawer_am_handle: samod::DocHandle,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
@@ -116,7 +116,7 @@ struct BranchStateRow {
 
 impl DrawerRepo {
     pub async fn load(
-        acx: AmCtx,
+        big_repo: SharedBigRepo,
         drawer_doc_id: DocumentId,
         local_user_path: daybook_types::doc::UserPath,
         local_state_root: PathBuf,
@@ -128,8 +128,8 @@ impl DrawerRepo {
         let local_user_path =
             daybook_types::doc::user_path::for_repo(&local_user_path, "drawer-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
-        let drawer_am_handle = acx
-            .find_doc(&drawer_doc_id)
+        let drawer_am_handle = big_repo
+            .find_doc_handle(&drawer_doc_id)
             .await?
             .ok_or_eyre("drawer doc not found")?;
 
@@ -143,22 +143,23 @@ impl DrawerRepo {
                 .await?
                 .db_pool;
 
-        let (broker, broker_stop) = {
-            acx.change_manager()
-                .add_doc(drawer_am_handle.clone())
-                .await?
-        };
+        let broker = big_repo
+            .ensure_change_broker(drawer_am_handle.clone())
+            .await?;
 
-        let (notif_tx, notif_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Vec<ChangeNotification>>();
+        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
+            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
+        >();
 
         // Listen for changes to docs.map
-        let ticket = acx
-            .change_manager()
-            .add_listener(
-                am_utils_rs::changes::ChangeFilter {
-                    doc_id: Some(broker.filter()),
+        let ticket = big_repo
+            .add_change_listener(
+                am_utils_rs::repo::BigRepoChangeFilter {
+                    doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(
+                        drawer_doc_id.clone(),
+                    )),
                     path: vec!["docs".into(), "map".into()],
+                    origin: Some(am_utils_rs::repo::BigRepoOriginFilter::Remote),
                 },
                 Box::new(move |notifs| {
                     if let Err(err) = notif_tx.send(notifs) {
@@ -170,7 +171,7 @@ impl DrawerRepo {
 
         let main_cancel_token = CancellationToken::new();
         let repo = Arc::new(Self {
-            acx,
+            big_repo,
             drawer_doc_id,
             local_actor_id,
             local_user_path,
@@ -183,6 +184,7 @@ impl DrawerRepo {
             registry: crate::repos::ListenersRegistry::new(),
             cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
+            _change_broker_leases: vec![broker],
             current_heads: std::sync::RwLock::new(initial_heads),
             drawer_am_handle,
             #[cfg(not(test))]
@@ -209,7 +211,6 @@ impl DrawerRepo {
             crate::repos::RepoStopToken {
                 cancel_token: main_cancel_token,
                 worker_handle: Some(worker_handle),
-                broker_stop_tokens: vec![broker_stop],
             },
         ))
     }
@@ -217,7 +218,9 @@ impl DrawerRepo {
     #[tracing::instrument(skip(self, notif_rx, cancel_token))]
     async fn notifs_loop(
         &self,
-        mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<ChangeNotification>>,
+        mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
+            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
+        >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
         let mut events = vec![];
@@ -239,10 +242,25 @@ impl DrawerRepo {
             events.clear();
 
             for notif in notifs {
+                let am_utils_rs::repo::BigRepoChangeNotification::DocChanged {
+                    patch,
+                    heads,
+                    origin,
+                    ..
+                } = notif
+                else {
+                    continue;
+                };
+                if !matches!(
+                    origin,
+                    am_utils_rs::repo::BigRepoChangeOrigin::Remote { .. }
+                ) {
+                    continue;
+                }
                 if let Err(err) = self
                     .events_for_patch(
-                        &notif.patch,
-                        &notif.heads,
+                        &patch,
+                        &heads,
                         &mut events,
                         Some(self.local_actor_id.clone()),
                     )
@@ -394,6 +412,42 @@ impl DrawerRepo {
         eyre::bail!("invalid branch path '{}'", branch_path)
     }
 
+    pub(crate) fn replicated_partition_id_for_drawer(
+        drawer_doc_id: &DocumentId,
+    ) -> am_utils_rs::sync::PartitionId {
+        format!("{DRAWER_REPLICATED_PARTITION_PREFIX}:{drawer_doc_id}")
+    }
+
+    pub(crate) fn replicated_partition_id(&self) -> am_utils_rs::sync::PartitionId {
+        Self::replicated_partition_id_for_drawer(&self.drawer_doc_id)
+    }
+
+    async fn add_branch_to_partitions_if_needed(
+        &self,
+        branch_kind: BranchKind,
+        branch_doc_id: &str,
+    ) -> Res<()> {
+        if branch_kind == BranchKind::Replicated {
+            self.big_repo
+                .add_doc_to_partition(&self.replicated_partition_id(), branch_doc_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn remove_branch_from_partitions_if_needed(
+        &self,
+        branch_kind: BranchKind,
+        branch_doc_id: &str,
+    ) -> Res<()> {
+        if branch_kind == BranchKind::Replicated {
+            self.big_repo
+                .remove_doc_from_partition(&self.replicated_partition_id(), branch_doc_id)
+                .await?;
+        }
+        Ok(())
+    }
+
     fn content_actor_id(
         &self,
         user_path: Option<&daybook_types::doc::UserPath>,
@@ -539,7 +593,7 @@ impl DrawerRepo {
             return Ok(Some(handle.clone()));
         }
         let document_id = DocumentId::from_str(branch_doc_id)?;
-        let Some(handle) = self.acx.find_doc(&document_id).await? else {
+        let Some(handle) = self.big_repo.find_doc_handle(&document_id).await? else {
             return Ok(None);
         };
         self.branch_handles
@@ -638,7 +692,10 @@ impl DrawerRepo {
         exclude_actor_id: Option<ActorId>,
     ) -> Res<()> {
         // Prefix: docs.map
-        if !am_utils_rs::changes::path_prefix_matches(&["docs".into(), "map".into()], &patch.path) {
+        if !am_utils_rs::repo::big_repo_path_prefix_matches(
+            &["docs".into(), "map".into()],
+            &patch.path,
+        ) {
             return Ok(());
         }
 
@@ -675,7 +732,7 @@ impl DrawerRepo {
                 ];
 
                 let (new_entry, _) = self
-                    .acx
+                    .big_repo
                     .hydrate_path_at_heads::<DocEntry>(
                         &self.drawer_doc_id,
                         patch_heads,
@@ -1141,7 +1198,7 @@ impl DrawerRepo {
             return Err(ferr!("new docs must be created on main"))?;
         }
         let doc_am = automerge::Automerge::new();
-        let handle = self.acx.add_doc(doc_am).await?;
+        let handle = self.big_repo.add_doc(doc_am).await?;
         let doc_id = DocId::from(Uuid::new_v4().bs58());
         let branch_doc_id = handle.document_id().to_string();
         let mutation_actor_id = self.content_actor_id(args.user_path.as_ref(), &branch_doc_id);
@@ -1268,6 +1325,11 @@ impl DrawerRepo {
                 BranchKind::Replicated,
             )
             .await?;
+            self.add_branch_to_partitions_if_needed(
+                BranchKind::Replicated,
+                &prepared.branch_doc_id,
+            )
+            .await?;
             doc_ids.push(prepared.doc_id.clone());
             self.branch_handles
                 .insert(prepared.branch_doc_id.clone(), prepared.handle);
@@ -1365,7 +1427,7 @@ impl DrawerRepo {
                 };
                 let branch_doc = source_handle
                     .with_document(|am_doc| am_doc.fork_at(&heads).map_err(eyre::Report::from))?;
-                let handle = self.acx.add_doc(branch_doc).await?;
+                let handle = self.big_repo.add_doc(branch_doc).await?;
                 let branch_doc_id = handle.document_id().to_string();
                 (
                     handle,
@@ -1423,6 +1485,10 @@ impl DrawerRepo {
             branch_kind,
         )
         .await?;
+        if let Some(created_branch_doc_id) = &created_branch_doc_id {
+            self.add_branch_to_partitions_if_needed(branch_kind, created_branch_doc_id)
+                .await?;
+        }
 
         let mut drawer_heads = self.get_drawer_heads();
         let diff = if let Some(ref created_branch_doc_id) = created_branch_doc_id {
@@ -1691,7 +1757,15 @@ impl DrawerRepo {
         let (existed, drawer_heads, entry) = res?;
 
         if existed {
+            let branch_states = self.list_branch_states(id).await?;
             self.delete_doc_branch_states(id).await?;
+            for branch_state in &branch_states {
+                self.remove_branch_from_partitions_if_needed(
+                    branch_state.branch_kind,
+                    &branch_state.branch_doc_id,
+                )
+                .await?;
+            }
             self.invalidate_entry_cache(id);
             if let Some(entry) = &entry {
                 for branch_ref in entry.branches.values() {
@@ -1743,7 +1817,7 @@ impl DrawerRepo {
             autosurgeon::Prop::Key(doc_id.to_string().into()),
         ];
         let entry = self
-            .acx
+            .big_repo
             .hydrate_path_at_heads::<DocEntry>(&self.drawer_doc_id, heads, automerge::ROOT, path)
             .await?;
         Ok(entry.map(|(entry_value, _)| entry_value))
@@ -2111,6 +2185,11 @@ impl DrawerRepo {
         };
 
         self.delete_branch_state(id, branch_path).await?;
+        self.remove_branch_from_partitions_if_needed(
+            branch_state.branch_kind,
+            &branch_state.branch_doc_id,
+        )
+        .await?;
         self.branch_handles.remove(&branch_state.branch_doc_id);
 
         let mut drawer_heads = self.get_drawer_heads();
@@ -2735,7 +2814,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -2749,14 +2828,14 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -2833,9 +2912,117 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_partitions_track_non_tmp_branches() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let (big_repo, acx_stop) = BigRepo::boot(
+            am_utils_rs::Config {
+                peer_id: "test-v2-partitions".into(),
+                storage: am_utils_rs::StorageConfig::Memory,
+            },
+            Some(samod::AlwaysAnnounce),
+        )
+        .await?;
+
+        let drawer_doc_id = {
+            let mut doc = automerge::Automerge::new();
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+            let handle = big_repo.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+
+        let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+        let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+        let (repo, stop_token) = DrawerRepo::load(
+            big_repo.clone(),
+            drawer_doc_id,
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
+            entry_pool,
+            doc_pool,
+            None,
+        )
+        .await?;
+
+        let partition_id = repo.replicated_partition_id();
+        let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+
+        let doc_id = repo
+            .add(AddDocArgs {
+                branch_path: "main".into(),
+                facets: [(
+                    title_key.clone(),
+                    WellKnownFacet::TitleGeneric("Initial".into()).into(),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        assert_eq!(big_repo.partition_member_count(&partition_id).await?, 1);
+
+        let main_heads = repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .ok_or_eyre("missing doc branches after add")?
+            .branches
+            .get("main")
+            .ok_or_eyre("missing main branch")?
+            .clone();
+
+        repo.update_at_heads(
+            DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    title_key.clone(),
+                    WellKnownFacet::TitleGeneric("Tmp branch update".into()).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            daybook_types::doc::BranchPath::from("/tmp/job-1"),
+            Some(main_heads.clone()),
+        )
+        .await?;
+        assert_eq!(big_repo.partition_member_count(&partition_id).await?, 1);
+
+        repo.update_at_heads(
+            DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    title_key.clone(),
+                    WellKnownFacet::TitleGeneric("Replicated branch update".into()).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            local_branch("branch-a"),
+            Some(main_heads),
+        )
+        .await?;
+        assert_eq!(big_repo.partition_member_count(&partition_id).await?, 2);
+
+        assert!(
+            repo.delete_branch(&doc_id, &local_branch("branch-a"), None)
+                .await?
+        );
+        assert_eq!(big_repo.partition_member_count(&partition_id).await?, 1);
+
+        assert!(repo.del(&doc_id).await?);
+        assert_eq!(big_repo.partition_member_count(&partition_id).await?, 0);
+
+        stop_token.stop().await?;
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_batch_add_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2-batch-add".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -2849,14 +3036,14 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -2907,7 +3094,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2-batch-add-events".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -2921,14 +3108,14 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3020,7 +3207,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_merge() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2-merge".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -3034,14 +3221,14 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3142,7 +3329,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_sync_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (client_acx, client_acx_stop) = AmCtx::boot(
+        let (client_acx, client_acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "client".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -3150,7 +3337,7 @@ mod tests {
             Some(samod::AlwaysAnnounce),
         )
         .await?;
-        let (server_acx, server_acx_stop) = AmCtx::boot(
+        let (server_acx, server_acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "server".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -3162,8 +3349,8 @@ mod tests {
         // Connect repos
         {
             #[allow(deprecated)]
-            fn repos(acx: &AmCtx) -> &samod::Repo {
-                acx.repo()
+            fn repos(big_repo: &SharedBigRepo) -> &samod::Repo {
+                big_repo.samod_repo()
             }
             crate::tincans::connect_repos(repos(&client_acx), repos(&server_acx));
             repos(&client_acx).when_connected("server".into()).await?;
@@ -3249,7 +3436,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_additional_apis() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2-apis".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -3263,14 +3450,14 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3406,7 +3593,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_metadata_maintenance() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2-meta".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -3420,14 +3607,14 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3482,7 +3669,7 @@ mod tests {
                 .ok_or_eyre("missing main branch state")?
                 .branch_doc_id,
         )?;
-        let handle = acx.find_doc(&am_id).await?.unwrap();
+        let handle = big_repo.find_doc_handle(&am_id).await?.unwrap();
         handle.with_document(|doc| -> Res<()> {
             let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
             assert_eq!(heads.len(), 1, "should have 1 head for title");
@@ -3577,7 +3764,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-update-actor".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -3590,11 +3777,11 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3641,8 +3828,8 @@ mod tests {
                 .ok_or_eyre("missing main branch state")?
                 .branch_doc_id,
         );
-        let handle = acx
-            .find_doc(&DocumentId::from_str(
+        let handle = big_repo
+            .find_doc_handle(&DocumentId::from_str(
                 &repo
                     .get_branch_state(&doc_id, &"main".into())
                     .await?
@@ -3662,7 +3849,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-merge-actor".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -3675,11 +3862,11 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3751,8 +3938,8 @@ mod tests {
                 .ok_or_eyre("missing main branch state")?
                 .branch_doc_id,
         );
-        let handle = acx
-            .find_doc(&DocumentId::from_str(
+        let handle = big_repo
+            .find_doc_handle(&DocumentId::from_str(
                 &repo
                     .get_branch_state(&doc_id, &"main".into())
                     .await?
@@ -3835,7 +4022,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_updated_at_merge() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2-updated-at".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -3849,14 +4036,14 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -3943,7 +4130,7 @@ mod tests {
                 .ok_or_eyre("missing main branch state")?
                 .branch_doc_id,
         )?;
-        let handle = acx.find_doc(&am_id).await?.unwrap();
+        let handle = big_repo.find_doc_handle(&am_id).await?.unwrap();
         handle.with_document(|doc| -> Res<()> {
             // recover_facet_heads should return 2 change hashes
             let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
@@ -3967,7 +4154,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_facet_blame_maintenance() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2-blame".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -3981,14 +4168,14 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4098,7 +4285,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2-scope".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -4112,7 +4299,7 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             eyre::Ok(handle.document_id().clone())
         };
 
@@ -4123,7 +4310,7 @@ mod tests {
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
 
         let (repo_a, stop_a) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id_a,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4133,7 +4320,7 @@ mod tests {
         )
         .await?;
         let (repo_b, stop_b) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id_b,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4177,7 +4364,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_doc_updated_includes_changed_facet_keys() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2-changed-facets".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -4191,14 +4378,14 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4276,7 +4463,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2-unknown-tag".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -4290,12 +4477,12 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let (repo, stop_token) = DrawerRepo::load(
-            acx,
+            big_repo,
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4327,7 +4514,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2-self-ref".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -4341,12 +4528,12 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let (repo, stop_token) = DrawerRepo::load(
-            acx,
+            big_repo,
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4390,7 +4577,7 @@ mod tests {
     async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_target() -> Res<()>
     {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test-v2-body-empty-fragment-self".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -4404,12 +4591,12 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let (repo, stop_token) = DrawerRepo::load(
-            acx,
+            big_repo,
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),
@@ -4463,7 +4650,7 @@ mod tests {
         let storage_path = temp_dir.path().join("samod-amctx-disk");
         std::fs::create_dir_all(&storage_path)?;
 
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: format!("perf-drawer-raw-amctx-{}", Uuid::new_v4()),
                 storage: am_utils_rs::StorageConfig::Disk {
@@ -4483,7 +4670,7 @@ mod tests {
             tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?;
             tx.commit();
         }
-        let aggregate_handle = acx.add_doc(aggregate_doc).await?;
+        let aggregate_handle = big_repo.add_doc(aggregate_doc).await?;
 
         let total_docs: u64 = 80;
         let started_at = std::time::Instant::now();
@@ -4491,7 +4678,7 @@ mod tests {
         for ii in 0..total_docs {
             let mut content_doc = automerge::Automerge::new();
             content_doc.set_actor(automerge::ActorId::random());
-            let content_handle = acx.add_doc(content_doc).await?;
+            let content_handle = big_repo.add_doc(content_doc).await?;
             let content_doc_id = content_handle.document_id().to_string();
 
             let _content_heads = content_handle.with_document(|doc| -> Res<ChangeHashSet> {
@@ -4548,7 +4735,7 @@ mod tests {
         let elapsed = started_at.elapsed();
         let docs_per_sec = total_docs as f64 / elapsed.as_secs_f64();
         eprintln!(
-            "samod+automerge via AmCtx baseline: added {} docs in {:?} ({:.2} docs/sec)",
+            "samod+automerge via SharedBigRepo baseline: added {} docs in {:?} ({:.2} docs/sec)",
             total_docs, elapsed, docs_per_sec
         );
         assert!(docs_per_sec > 0.0);
@@ -4564,7 +4751,7 @@ mod tests {
         let storage_path = temp_dir.path().join("drawer-disk");
         std::fs::create_dir_all(&storage_path)?;
 
-        let (acx, acx_stop) = AmCtx::boot(
+        let (big_repo, acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: format!("perf-drawer-add-{}", Uuid::new_v4()),
                 storage: am_utils_rs::StorageConfig::Disk {
@@ -4580,14 +4767,14 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(4000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(4000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            big_repo.clone(),
             drawer_doc_id,
             daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
             std::env::temp_dir().join(Uuid::new_v4().to_string()),

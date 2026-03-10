@@ -44,6 +44,9 @@ struct HeadListener {
     change_tx: mpsc::Sender<Arc<[ChangeHash]>>,
 }
 
+type HasCandidateListener =
+    Arc<dyn Fn(&DocumentId, &ChangeOrigin) -> bool + Send + Sync + 'static>;
+
 enum BrokerMsg {
     AddHeadListener {
         resp: tokio::sync::oneshot::Sender<HeadListenerRegistration>,
@@ -79,7 +82,7 @@ pub fn spawn_doc_listener(
     handle: DocHandle,
     cancel_token: CancellationToken,
     change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
-    has_candidate_listener: Arc<dyn Fn(&DocumentId, &ChangeOrigin) -> bool + Send + Sync + 'static>,
+    has_candidate_listener: HasCandidateListener,
 ) -> Res<(DocChangeBrokerHandle, DocChangeBrokerStopToken)> {
     let doc_id = handle.document_id().clone();
 
@@ -144,7 +147,7 @@ struct DocChangeBroker {
     handle: DocHandle,
     change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
     cancel_token: CancellationToken,
-    has_candidate_listener: Arc<dyn Fn(&DocumentId, &ChangeOrigin) -> bool + Send + Sync + 'static>,
+    has_candidate_listener: HasCandidateListener,
 }
 
 impl DocChangeBroker {

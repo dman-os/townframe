@@ -119,10 +119,10 @@ pub async fn spawn_switch_worker(
     use crate::repos::{Repo, SubscribeOpts};
     use crate::stores::AmStore;
 
-    let store = SwitchStateStore::load(&rt.acx, &app_doc_id).await?;
+    let store = SwitchStateStore::load(&rt.big_repo, &app_doc_id).await?;
     let store = crate::stores::AmStoreHandle::new(
         store,
-        rt.acx.clone(),
+        rt.big_repo.clone(),
         app_doc_id.clone(),
         rt.local_actor_id.clone(),
     );

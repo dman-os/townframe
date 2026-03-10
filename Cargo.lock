@@ -2234,6 +2234,7 @@ dependencies = [
  "iroh-docs",
  "iroh-gossip",
  "iroh-tickets 0.3.0",
+ "irpc-iroh",
  "jsonschema",
  "keyring",
  "libsqlite3-sys",
@@ -4945,6 +4946,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.106",
+]
+
+[[package]]
+name = "irpc-iroh"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0f6bddffe7992adcfb793dca9711d86b31bd3427d2443eff90525ac8593f268"
+dependencies = [
+ "getrandom 0.3.4",
+ "iroh",
+ "iroh-base 0.96.1",
+ "irpc",
+ "n0-error",
+ "n0-future",
+ "postcard",
+ "serde",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -9599,9 +9618,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.48.0"
+version = "1.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408"
+checksum = "27ad5e34374e03cfffefc301becb44e9dc3c17584f414349ebe29ed26661822d"
 dependencies = [
  "bytes",
  "libc",

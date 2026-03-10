@@ -25,12 +25,11 @@
 
 - [ ] P2P
   - [x] iroh
-- [ ] Deterministic doc ids for main docs
+- [ ] Deterministic doc ids for main docs [LOST]
 - [ ] Prune dependencies
 - [ ] Blobs server
-  - [ ] Iroh blobs?
-  - [ ] Chunked hashing for transfers
-    - Chunks at rest?
+  - [x] Iroh blobs?
+  - [x] Chunked hashing for transfers
 - [ ] Good and local document classification
   - [ ] Receipt parsing
   - [ ] Collators

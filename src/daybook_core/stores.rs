@@ -10,69 +10,72 @@ pub trait AmStore: Hydrate + Reconcile + Send + Sync + 'static {
     // async fn flush(&mut self, args: &mut Self::FlushArgs) -> Res<()> {
     async fn flush(
         &mut self,
-        acx: &mut AmCtx,
+        big_repo: &mut SharedBigRepo,
         doc_id: &DocumentId,
         actor_id: Option<ActorId>,
     ) -> Res<Option<automerge::ChangeHash>> {
-        self.flush_with_prop(acx, doc_id, Self::prop(), actor_id)
+        self.flush_with_prop(big_repo, doc_id, Self::prop(), actor_id)
             .await
     }
 
     async fn flush_with_prop(
         &mut self,
-        acx: &mut AmCtx,
+        big_repo: &mut SharedBigRepo,
         doc_id: &DocumentId,
         prop: Cow<'static, str>,
         actor_id: Option<ActorId>,
     ) -> Res<Option<automerge::ChangeHash>> {
-        acx.reconcile_prop_with_actor(doc_id, automerge::ROOT, prop, self, actor_id)
+        big_repo
+            .reconcile_prop_with_actor(doc_id, automerge::ROOT, prop, self, actor_id)
             .await
     }
 
-    async fn load(acx: &AmCtx, app_doc_id: &DocumentId) -> Res<Self> {
-        Self::load_from_prop(acx, app_doc_id, Self::prop()).await
+    async fn load(big_repo: &SharedBigRepo, app_doc_id: &DocumentId) -> Res<Self> {
+        Self::load_from_prop(big_repo, app_doc_id, Self::prop()).await
     }
 
     async fn load_from_prop(
-        acx: &AmCtx,
+        big_repo: &SharedBigRepo,
         app_doc_id: &DocumentId,
         prop: Cow<'static, str>,
     ) -> Res<Self> {
-        acx.hydrate_path::<Self>(app_doc_id, automerge::ROOT, vec![prop.into()])
+        big_repo
+            .hydrate_path::<Self>(app_doc_id, automerge::ROOT, vec![prop.into()])
             .await?
             .ok_or_eyre("unable to find obj in am")
             .map(|(val, _heads)| val)
     }
 
     async fn register_change_listener<F>(
-        acx: &AmCtx,
-        broker: &am_utils_rs::changes::DocChangeBrokerHandle,
+        big_repo: &SharedBigRepo,
+        doc_id: &DocumentId,
         path: Vec<autosurgeon::Prop<'static>>,
         on_change: F,
-    ) -> Res<am_utils_rs::changes::ChangeListenerRegistration>
+    ) -> Res<am_utils_rs::repo::BigRepoChangeListenerRegistration>
     where
-        F: Fn(Vec<am_utils_rs::changes::ChangeNotification>) + Send + Sync + 'static,
+        F: Fn(Vec<am_utils_rs::repo::BigRepoChangeNotification>) + Send + Sync + 'static,
     {
-        Self::register_change_listener_for_prop(acx, broker, Self::prop(), path, on_change).await
+        Self::register_change_listener_for_prop(big_repo, doc_id, Self::prop(), path, on_change)
+            .await
     }
 
     async fn register_change_listener_for_prop<F>(
-        acx: &AmCtx,
-        broker: &am_utils_rs::changes::DocChangeBrokerHandle,
+        big_repo: &SharedBigRepo,
+        doc_id: &DocumentId,
         prop: Cow<'static, str>,
         mut path: Vec<autosurgeon::Prop<'static>>,
         on_change: F,
-    ) -> Res<am_utils_rs::changes::ChangeListenerRegistration>
+    ) -> Res<am_utils_rs::repo::BigRepoChangeListenerRegistration>
     where
-        F: Fn(Vec<am_utils_rs::changes::ChangeNotification>) + Send + Sync + 'static,
+        F: Fn(Vec<am_utils_rs::repo::BigRepoChangeNotification>) + Send + Sync + 'static,
     {
         path.insert(0, prop.into());
-        let ticket = acx
-            .change_manager()
-            .add_listener(
-                am_utils_rs::changes::ChangeFilter {
+        let ticket = big_repo
+            .add_change_listener(
+                am_utils_rs::repo::BigRepoChangeFilter {
                     path,
-                    doc_id: Some(broker.filter()),
+                    doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(doc_id.clone())),
+                    origin: Some(am_utils_rs::repo::BigRepoOriginFilter::Remote),
                 },
                 Box::new(on_change),
             )
@@ -83,7 +86,7 @@ pub trait AmStore: Hydrate + Reconcile + Send + Sync + 'static {
 
 struct Inner<S> {
     store: S,
-    acx: AmCtx,
+    big_repo: SharedBigRepo,
     doc_id: DocumentId,
     store_prop: Option<String>,
     local_actor_id: ActorId,
@@ -97,7 +100,7 @@ impl<S: AmStore> Inner<S> {
             Some(prop) => {
                 self.store
                     .flush_with_prop(
-                        &mut self.acx,
+                        &mut self.big_repo,
                         &self.doc_id,
                         Cow::Owned(prop.clone()),
                         Some(actor_id),
@@ -106,7 +109,7 @@ impl<S: AmStore> Inner<S> {
             }
             None => {
                 self.store
-                    .flush(&mut self.acx, &self.doc_id, Some(actor_id))
+                    .flush(&mut self.big_repo, &self.doc_id, Some(actor_id))
                     .await
             }
         }
@@ -131,16 +134,16 @@ where
     pub fn new(
         store: S,
         //flush_args: S::FlushArgs,
-        acx: AmCtx,
+        big_repo: SharedBigRepo,
         doc_id: DocumentId,
         local_actor_id: ActorId,
     ) -> Self {
-        Self::new_with_prop(store, acx, doc_id, None, local_actor_id)
+        Self::new_with_prop(store, big_repo, doc_id, None, local_actor_id)
     }
 
     pub fn new_with_prop(
         store: S,
-        acx: AmCtx,
+        big_repo: SharedBigRepo,
         doc_id: DocumentId,
         store_prop: Option<String>,
         local_actor_id: ActorId,
@@ -148,7 +151,7 @@ where
         Self {
             inner: Arc::new(tokio::sync::RwLock::new(Inner {
                 store,
-                acx,
+                big_repo,
                 doc_id,
                 store_prop,
                 local_actor_id,

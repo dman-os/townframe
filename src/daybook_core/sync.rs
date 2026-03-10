@@ -15,6 +15,7 @@ mod full;
 pub use bootstrap::*;
 
 pub const IROH_DOC_URL_SCHEME: &str = "db+iroh-doc";
+pub const PARTITION_SYNC_ALPN: &[u8] = b"townframe/partition-sync/0";
 
 enum ActivePeerState {
     Connecting,
@@ -58,7 +59,7 @@ pub enum IrohSyncEvent {
     },
     ConnectionClosed {
         endpoint_id: EndpointId,
-        reason: samod::ConnFinishedReason,
+        reason: String,
     },
     PeerFullySynced {
         endpoint_id: EndpointId,
@@ -97,6 +98,7 @@ pub struct IrohSyncRepoStopToken {
     cancel_token: CancellationToken,
     worker_handle: JoinHandle<()>,
     router: iroh::protocol::Router,
+    partition_sync_stop_token: am_utils_rs::sync::SyncNodeStopToken,
     full_stop_token: full::StopToken,
 }
 
@@ -104,6 +106,7 @@ impl IrohSyncRepoStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
         self.router.shutdown().await?;
+        self.partition_sync_stop_token.stop().await?;
         self.full_stop_token.stop().await?;
         utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(2)).await?;
         Ok(())
@@ -167,19 +170,33 @@ impl IrohSyncRepo {
             .spawn(endpoint.clone(), blobs.clone(), gossip.clone())
             .await
             .map_err(|err| ferr!("error booting iroh docs protocol: {err:?}"))?;
+        let cancel_token = CancellationToken::new();
 
         let (incoming_conn_tx, incoming_conn_rx) = tokio::sync::mpsc::unbounded_channel();
         let (conn_end_tx, conn_end_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (partition_sync_node, partition_sync_stop_token) = am_utils_rs::sync::spawn_sync_node(
+            rcx.big_repo.clone(),
+            Arc::new(am_utils_rs::sync::AllowAllPartitionAccessPolicy),
+            cancel_token.child_token(),
+        )
+        .await?;
+        let partition_sync_node = Arc::new(partition_sync_node);
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(
-                AmCtx::SYNC_ALPN,
+                am_utils_rs::BigRepo::SYNC_ALPN,
                 am_utils_rs::iroh::IrohRepoProtocol {
                     cancel_token: default(),
-                    acx: rcx.acx.clone(),
+                    big_repo: rcx.big_repo.clone(),
                     conn_tx: incoming_conn_tx,
                     end_signal_tx: conn_end_tx.clone(),
                 },
+            )
+            .accept(
+                PARTITION_SYNC_ALPN,
+                irpc_iroh::IrohProtocol::<am_utils_rs::sync::PartitionSyncRpc>::with_sender(
+                    partition_sync_node.local_sender(),
+                ),
             )
             .accept(
                 iroh_blobs::ALPN,
@@ -189,17 +206,16 @@ impl IrohSyncRepo {
             .accept(iroh_gossip::ALPN, gossip.clone())
             .spawn();
 
-        let cancel_token = CancellationToken::new();
         config_repo
             .ensure_local_sync_device(router.endpoint().id(), &rcx.local_device_name)
             .await?;
 
         let (mut full_sync_handle, full_stop_token) = full::start_full_sync_worker(
             Arc::clone(&rcx),
-            Arc::clone(&drawer_repo),
             Arc::clone(&blobs_repo),
             Arc::clone(&doc_blobs_index_repo),
             progress_repo.clone(),
+            Arc::clone(&partition_sync_node),
             endpoint.clone(),
             cancel_token.child_token(),
         )
@@ -219,7 +235,6 @@ impl IrohSyncRepo {
             cancel_token: cancel_token.clone(),
             registry: crate::repos::ListenersRegistry::new(),
             active_samod_peers: default(),
-
             conn_end_signal_tx: conn_end_tx,
             full_sync_handle,
             // bootstrap_docs: tokio::sync::Mutex::new(Vec::new()),
@@ -242,6 +257,7 @@ impl IrohSyncRepo {
                 cancel_token,
                 worker_handle,
                 router,
+                partition_sync_stop_token,
                 full_stop_token,
             },
         ))
@@ -252,6 +268,10 @@ impl IrohSyncRepo {
             eyre::bail!("repo is shutting down")
         }
         Ok(())
+    }
+
+    fn peer_partition_ids(&self, _peer_key: &str) -> HashSet<am_utils_rs::sync::PartitionId> {
+        [self.drawer_repo.replicated_partition_id()].into()
     }
 
     async fn machine_loop(
@@ -316,6 +336,7 @@ impl IrohSyncRepo {
         let endpoint_id = conn
             .endpoint_id
             .expect("incoming iroh connection missing endpoint_id");
+        let peer_key = conn.peer_id.to_string();
 
         {
             let mut active_samod_peers = self.active_samod_peers.write().await;
@@ -332,10 +353,11 @@ impl IrohSyncRepo {
             peer_id: Arc::<str>::clone(&conn.peer_id),
             conn_id: conn.id,
         }];
+        let partition_ids = self.peer_partition_ids(&peer_key);
 
         if let Err(err) = self
             .full_sync_handle
-            .set_connection(endpoint_id, conn.id)
+            .set_connection(endpoint_id, conn.id, peer_key, partition_ids)
             .await
         {
             let old = self.active_samod_peers.write().await.remove(&endpoint_id);
@@ -403,12 +425,14 @@ impl IrohSyncRepo {
     async fn finalize_outgoing_connection(
         &self,
         endpoint_id: EndpointId,
+        peer_key: am_utils_rs::sync::PeerKey,
         conn: am_utils_rs::RepoConnection,
     ) -> Res<()> {
         let conn_id = conn.id;
+        let partition_ids = self.peer_partition_ids(&peer_key);
         if let Err(err) = self
             .full_sync_handle
-            .set_connection(endpoint_id, conn_id)
+            .set_connection(endpoint_id, conn_id, peer_key, partition_ids)
             .await
         {
             self.clear_endpoint_if_connecting(endpoint_id).await;
@@ -438,7 +462,7 @@ impl IrohSyncRepo {
 
         let conn = match self
             .rcx
-            .acx
+            .big_repo
             .spawn_connection_iroh(
                 self.router.endpoint(),
                 endpoint_addr,
@@ -454,13 +478,15 @@ impl IrohSyncRepo {
         };
         let peer_id = conn.peer_info.peer_id.as_str().into();
         let conn_id = conn.id;
+        let peer_key = conn.peer_id.to_string();
         let events = [IrohSyncEvent::OutgoingConnection {
             endpoint_id,
             peer_id,
             conn_id,
         }];
 
-        self.finalize_outgoing_connection(endpoint_id, conn).await?;
+        self.finalize_outgoing_connection(endpoint_id, peer_key, conn)
+            .await?;
         self.registry.notify(events);
         Ok(())
     }
@@ -768,9 +794,7 @@ mod tests {
             self.config_stop.stop().await?;
             self.doc_blobs_index_stop.stop().await?;
             self.sqlite_local_state_stop.stop().await?;
-            if let Some(stop) = self.ctx.acx_stop.lock().await.take() {
-                stop.stop().await?;
-            }
+            self.ctx.shutdown().await?;
             Ok(())
         }
     }
@@ -1087,9 +1111,7 @@ mod tests {
         .await?;
         let source_repo_id = rtx.repo_id.clone();
         info!("stage=init_and_copy_repo_pair source_repo_id={source_repo_id}");
-        if let Some(stop) = rtx.acx_stop.lock().await.take() {
-            stop.stop().await?;
-        }
+        rtx.shutdown().await?;
         drop(rtx);
 
         copy_dir_all(repo_a_path, repo_b_path)?;
@@ -1135,14 +1157,14 @@ mod tests {
         let blobs_repo =
             BlobsRepo::new(rtx.layout.blobs_root.clone(), rtx.local_user_path.clone()).await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
-            rtx.acx.clone(),
+            rtx.big_repo.clone(),
             Arc::clone(&blobs_repo),
             rtx.doc_app.document_id().clone(),
             daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
         )
         .await?;
         let (drawer_repo, drawer_stop) = DrawerRepo::load(
-            rtx.acx.clone(),
+            rtx.big_repo.clone(),
             rtx.doc_drawer.document_id().clone(),
             daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
             rtx.layout.repo_root.join("local_state"),
@@ -1156,7 +1178,7 @@ mod tests {
         )
         .await?;
         let (config_repo, config_stop) = crate::config::ConfigRepo::load(
-            rtx.acx.clone(),
+            rtx.big_repo.clone(),
             rtx.doc_app.document_id().clone(),
             Arc::clone(&plugs_repo),
             daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),

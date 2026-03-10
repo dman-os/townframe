@@ -51,7 +51,6 @@ impl SqliteLocalStateRepo {
             crate::repos::RepoStopToken {
                 cancel_token: main_cancel_token,
                 worker_handle: None,
-                broker_stop_tokens: vec![],
             },
         ))
     }

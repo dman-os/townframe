@@ -1,5 +1,7 @@
 use crate::interlude::*;
 
+use automerge::ChangeHash;
+use autosurgeon::{Hydrate, Prop, Reconcile};
 use samod::DocumentId;
 use tokio::sync::broadcast;
 
@@ -7,12 +9,15 @@ mod changes;
 mod partition;
 
 pub use changes::{
-    BigRepoChangeNotification, BigRepoLocalNotification, ChangeFilter as BigRepoChangeFilter,
+    path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
+    BigRepoLocalNotification, ChangeFilter as BigRepoChangeFilter,
     ChangeListenerRegistration as BigRepoChangeListenerRegistration,
-    DocIdFilter as BigRepoDocIdFilter, LocalFilter as BigRepoLocalFilter,
+    DocChangeBrokerLease as BigRepoDocChangeBrokerLease, DocIdFilter as BigRepoDocIdFilter,
+    LocalFilter as BigRepoLocalFilter,
     LocalListenerRegistration as BigRepoLocalListenerRegistration,
     OriginFilter as BigRepoOriginFilter,
 };
+pub use samod_core::ChangeOrigin as BigRepoChangeOrigin;
 
 #[derive(Debug, Clone)]
 pub struct BigRepoConfig {
@@ -46,8 +51,10 @@ pub struct BigRepo {
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
 }
 
+pub type SharedBigRepo = Arc<BigRepo>;
+
 impl BigRepo {
-    pub async fn boot(repo: samod::Repo, config: BigRepoConfig) -> Res<Arc<Self>> {
+    pub async fn boot_with_repo(repo: samod::Repo, config: BigRepoConfig) -> Res<Arc<Self>> {
         let state_pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect(&config.sqlite_url)
@@ -68,12 +75,55 @@ impl BigRepo {
         Ok(out)
     }
 
-    // pub fn samod_repo(&self) -> &samod::Repo {
-    //     &self.repo
-    // }
+    pub async fn boot<A: samod::AnnouncePolicy>(
+        config: crate::Config,
+        announce_policy: Option<A>,
+    ) -> Res<(Arc<Self>, crate::AmCtxStopToken)> {
+        let peer_id = samod::PeerId::from_string(config.peer_id);
+        let repo = samod::Repo::build_tokio().with_peer_id(peer_id);
+        let (repo, sqlite_url) = match config.storage {
+            crate::StorageConfig::Disk { path } => {
+                std::fs::create_dir_all(&path).wrap_err_with(|| {
+                    format!("Failed to create storage directory: {}", path.display())
+                })?;
+                let repo = repo.with_storage(samod::storage::TokioFilesystemStorage::new(
+                    path.to_string_lossy().as_ref(),
+                ));
+                let loaded = if let Some(policy) = announce_policy {
+                    repo.with_announce_policy(policy).load().await
+                } else {
+                    repo.load().await
+                };
+                let sqlite_url = format!("sqlite://{}", path.join("big_repo.sqlite").display());
+                (loaded, sqlite_url)
+            }
+            crate::StorageConfig::Memory => {
+                let repo = repo.with_storage(samod::storage::InMemoryStorage::new());
+                let loaded = if let Some(policy) = announce_policy {
+                    repo.with_announce_policy(policy).load().await
+                } else {
+                    repo.load().await
+                };
+                (loaded, "sqlite::memory:".to_string())
+            }
+        };
+        let out = Self::boot_with_repo(repo.clone(), BigRepoConfig::new(sqlite_url)).await?;
+        Ok((out, crate::AmCtxStopToken { repo }))
+    }
+
+    pub fn samod_repo(&self) -> &samod::Repo {
+        &self.repo
+    }
 
     pub fn state_pool(&self) -> &sqlx::SqlitePool {
         &self.state_pool
+    }
+
+    pub async fn ensure_change_broker(
+        self: &Arc<Self>,
+        handle: samod::DocHandle,
+    ) -> Res<Arc<changes::DocChangeBrokerLease>> {
+        self.change_manager.add_doc(handle).await
     }
 
     pub async fn add_change_listener(
@@ -81,7 +131,23 @@ impl BigRepo {
         filter: BigRepoChangeFilter,
         on_change: Box<dyn Fn(Vec<BigRepoChangeNotification>) + Send + Sync + 'static>,
     ) -> Res<BigRepoChangeListenerRegistration> {
-        self.change_manager.add_listener(filter, on_change).await
+        let mut broker_leases = Vec::new();
+        if let Some(target_doc) = filter.doc_id.as_ref() {
+            let doc_key = target_doc.doc_id.to_string();
+            let handle = if let Some(handle) = self.handle_cache.get(&doc_key) {
+                Some(handle.clone())
+            } else {
+                self.find_doc_handle(&target_doc.doc_id).await?
+            };
+            if let Some(handle) = handle {
+                let lease = self.ensure_change_broker(handle).await?;
+                let ready = lease.get_head_listener().await?;
+                drop(ready);
+                broker_leases.push(lease);
+            }
+        }
+        let registration = self.change_manager.add_listener(filter, on_change).await?;
+        Ok(registration.with_broker_leases(broker_leases))
     }
 
     pub async fn add_local_listener(
@@ -109,7 +175,6 @@ impl BigRepo {
         };
         self.handle_cache
             .insert(out.document_id().to_string(), out.inner.clone());
-        self.change_manager.add_doc(out.inner.clone()).await?;
         let heads = out
             .inner
             .with_document(|doc| Arc::<[automerge::ChangeHash]>::from(doc.get_heads()));
@@ -117,6 +182,11 @@ impl BigRepo {
             .notify_doc_created(out.document_id().clone(), Arc::clone(&heads))?;
         self.change_manager
             .notify_local_doc_created(out.document_id().clone(), heads)?;
+        self.record_doc_heads_change(
+            out.document_id(),
+            out.inner.with_document(|doc| doc.get_heads()),
+        )
+        .await?;
         Ok(out)
     }
 
@@ -136,7 +206,6 @@ impl BigRepo {
         };
         self.handle_cache
             .insert(out.document_id().to_string(), out.inner.clone());
-        self.change_manager.add_doc(out.inner.clone()).await?;
         let heads = out
             .inner
             .with_document(|doc| Arc::<[automerge::ChangeHash]>::from(doc.get_heads()));
@@ -144,6 +213,11 @@ impl BigRepo {
             .notify_doc_imported(out.document_id().clone(), Arc::clone(&heads))?;
         self.change_manager
             .notify_local_doc_imported(out.document_id().clone(), heads)?;
+        self.record_doc_heads_change(
+            out.document_id(),
+            out.inner.with_document(|doc| doc.get_heads()),
+        )
+        .await?;
         Ok(out)
     }
 
@@ -158,11 +232,52 @@ impl BigRepo {
         };
         self.handle_cache
             .insert(inner.document_id().to_string(), inner.clone());
-        self.change_manager.add_doc(inner.clone()).await?;
         Ok(Some(BigDocHandle {
             repo: Arc::clone(self),
             inner,
         }))
+    }
+
+    pub async fn add_doc(
+        self: &Arc<Self>,
+        initial_content: automerge::Automerge,
+    ) -> Res<samod::DocHandle> {
+        let handle = self
+            .repo
+            .create(initial_content)
+            .await
+            .map_err(|err| ferr!("failed creating doc: {err}"))?;
+        self.handle_cache
+            .insert(handle.document_id().to_string(), handle.clone());
+        let heads =
+            handle.with_document(|doc| Arc::<[automerge::ChangeHash]>::from(doc.get_heads()));
+        self.change_manager
+            .notify_doc_created(handle.document_id().clone(), Arc::clone(&heads))?;
+        self.change_manager
+            .notify_local_doc_created(handle.document_id().clone(), heads)?;
+        self.record_doc_heads_change(
+            handle.document_id(),
+            handle.with_document(|doc| doc.get_heads()),
+        )
+        .await?;
+        Ok(handle)
+    }
+
+    pub async fn find_doc_handle(
+        self: &Arc<Self>,
+        document_id: &DocumentId,
+    ) -> Res<Option<samod::DocHandle>> {
+        let handle = self
+            .repo
+            .find(document_id.clone())
+            .await
+            .map_err(|err| ferr!("failed finding doc: {err}"))?;
+        let Some(handle) = handle else {
+            return Ok(None);
+        };
+        self.handle_cache
+            .insert(handle.document_id().to_string(), handle.clone());
+        Ok(Some(handle))
     }
 
     async fn on_doc_heads_changed(
@@ -175,6 +290,119 @@ impl BigRepo {
             Arc::<[automerge::ChangeHash]>::from(heads.clone()),
         )?;
         self.record_doc_heads_change(doc_id, heads).await
+    }
+
+    pub async fn spawn_ws_connector(&self, addr: Url) -> Res<tokio::task::JoinHandle<()>> {
+        let repo = self.repo.clone();
+        let handle = repo
+            .dial_websocket(addr, samod::BackoffConfig::default())
+            .wrap_err("error setting up dialer")?;
+        let fut = async move {
+            let mut events = handle.events();
+            while let Some(event) = events.next().await {
+                use samod::DialerEvent;
+                match event {
+                    DialerEvent::Connected { peer_info } => {
+                        info!(?peer_info, "connection established")
+                    }
+                    DialerEvent::Disconnected { reason } => {
+                        warn!(?reason, "error connecting to server")
+                    }
+                    DialerEvent::Reconnecting { attempt } => {
+                        warn!(?attempt, "retrying to conect to server")
+                    }
+                    DialerEvent::MaxRetriesReached => {
+                        unreachable!("we don't have max retries")
+                    }
+                }
+            }
+        };
+        Ok(tokio::spawn(fut.instrument(tracing::info_span!(
+            "websocket sync server connector task"
+        ))))
+    }
+
+    pub async fn reconcile_prop_with_actor<'a, T, P>(
+        self: &Arc<Self>,
+        doc_id: &DocumentId,
+        obj_id: automerge::ObjId,
+        prop_name: P,
+        update: &T,
+        actor_id: Option<automerge::ActorId>,
+    ) -> Res<Option<ChangeHash>>
+    where
+        T: Hydrate + Reconcile + Send + Sync + 'static,
+        P: Into<autosurgeon::Prop<'a>> + Send + Sync + 'static,
+    {
+        let handle = self
+            .find_doc_handle(doc_id)
+            .await?
+            .ok_or_eyre("doc not found")?;
+        let res = handle
+            .with_document(|doc| {
+                if let Some(actor) = &actor_id {
+                    doc.set_actor(actor.clone());
+                }
+                doc.transact(|tx| {
+                    autosurgeon::reconcile_prop(tx, obj_id, prop_name, update)
+                        .wrap_err("error reconciling")?;
+                    eyre::Ok(())
+                })
+            })
+            .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
+        Ok(res.hash)
+    }
+
+    pub async fn hydrate_path<T: Hydrate + Reconcile + Send + Sync + 'static>(
+        self: &Arc<Self>,
+        doc_id: &DocumentId,
+        obj_id: automerge::ObjId,
+        path: Vec<Prop<'static>>,
+    ) -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
+        let handle = self
+            .find_doc_handle(doc_id)
+            .await?
+            .ok_or_eyre("doc not found")?;
+        handle.with_document(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
+            let heads: Arc<[automerge::ChangeHash]> = Arc::from(doc.get_heads());
+            if path.is_empty() && obj_id == automerge::ROOT {
+                let value: T = autosurgeon::hydrate(doc).wrap_err("error hydrating")?;
+                Ok(Some((value, heads)))
+            } else {
+                match autosurgeon::hydrate_path(doc, &obj_id, path.clone()) {
+                    Ok(Some(value)) => Ok(Some((value, heads))),
+                    Ok(None) => Ok(None),
+                    Err(err) => Err(ferr!("error hydrating: {err:?}")),
+                }
+            }
+        })
+    }
+
+    pub async fn hydrate_path_at_heads<T: Hydrate + Reconcile + Send + Sync + 'static>(
+        self: &Arc<Self>,
+        doc_id: &DocumentId,
+        heads: &[automerge::ChangeHash],
+        obj_id: automerge::ObjId,
+        path: Vec<Prop<'static>>,
+    ) -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
+        let handle = self
+            .find_doc_handle(doc_id)
+            .await?
+            .ok_or_eyre("doc not found")?;
+        handle.with_document(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
+            let forked = doc.fork_at(heads).wrap_err("error forking at heads")?;
+            let heads: Arc<[automerge::ChangeHash]> = Arc::from(forked.get_heads());
+            if path.is_empty() && obj_id == automerge::ROOT {
+                let value: T = autosurgeon::hydrate(&forked).wrap_err("error hydrating")?;
+                Ok(Some((value, heads)))
+            } else {
+                match autosurgeon::hydrate_path(&forked, &obj_id, path.clone()) {
+                    Ok(Some(value)) => Ok(Some((value, heads))),
+                    Ok(None) => Ok(None),
+                    Err(err) => Err(ferr!("error hydrating: {err:?}")),
+                }
+            }
+        })
     }
 }
 
@@ -193,6 +421,7 @@ pub struct BigDocHandle {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -208,7 +437,7 @@ mod tests {
             .with_storage(samod::storage::InMemoryStorage::new())
             .load()
             .await;
-        BigRepo::boot(repo, BigRepoConfig::new("sqlite::memory:".to_string())).await
+        BigRepo::boot_with_repo(repo, BigRepoConfig::new("sqlite::memory:".to_string())).await
     }
 
     #[tokio::test]

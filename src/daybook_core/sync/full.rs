@@ -6,13 +6,14 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::blobs::BlobsRepo;
-use crate::drawer::{DrawerEvent, DrawerRepo};
 use crate::index::{DocBlobsIndexEvent, DocBlobsIndexRepo};
 use crate::progress::{
     CreateProgressTaskArgs, ProgressFinalState, ProgressRepo, ProgressRetentionPolicy,
     ProgressSeverity, ProgressUnit, ProgressUpdate, ProgressUpdateDeets,
 };
 use crate::repo::RepoCtx;
+use crate::sync::PARTITION_SYNC_ALPN;
+use am_utils_rs::sync::{PartitionCursorRequest, PartitionEventDeets, PartitionSyncProvider};
 
 mod blob_worker;
 mod doc_worker;
@@ -63,6 +64,8 @@ enum Msg {
         endpoint_id: EndpointId,
         conn_id: ConnectionId,
         partitions: HashSet<PartitionKey>,
+        peer_key: am_utils_rs::sync::PeerKey,
+        partition_ids: HashSet<am_utils_rs::sync::PartitionId>,
         resp: tokio::sync::oneshot::Sender<()>,
     },
     // OutgoingConn {
@@ -139,13 +142,27 @@ enum SyncProgressMsg {
 }
 
 impl WorkerHandle {
-    pub async fn set_connection(&self, endpoint_id: EndpointId, conn_id: ConnectionId) -> Res<()> {
+    pub async fn set_connection(
+        &self,
+        endpoint_id: EndpointId,
+        conn_id: ConnectionId,
+        peer_key: am_utils_rs::sync::PeerKey,
+        partition_ids: HashSet<am_utils_rs::sync::PartitionId>,
+    ) -> Res<()> {
+        let mut partitions: HashSet<PartitionKey> = partition_ids
+            .iter()
+            .cloned()
+            .map(PartitionKey::BigRepoPartition)
+            .collect();
+        partitions.insert(PartitionKey::DocBlobsFullSync);
         let (tx, rx) = tokio::sync::oneshot::channel();
         let msg = Msg::SetPeer {
             resp: tx,
             conn_id,
             endpoint_id,
-            partitions: [PartitionKey::FullSync, PartitionKey::DocBlobsFullSync].into(),
+            partitions,
+            peer_key,
+            partition_ids,
         };
         self.msg_tx.send(msg).wrap_err(ERROR_ACTOR)?;
         rx.await.wrap_err(ERROR_CHANNEL)
@@ -175,10 +192,10 @@ impl StopToken {
 
 pub async fn start_full_sync_worker(
     rcx: Arc<RepoCtx>,
-    drawer_repo: Arc<DrawerRepo>,
     blobs_repo: Arc<BlobsRepo>,
     doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
+    partition_sync_node: Arc<am_utils_rs::sync::SyncNodeHandle>,
     iroh_endpoint: iroh::Endpoint,
     cancel_token: CancellationToken,
 ) -> Res<(WorkerHandle, StopToken)> {
@@ -189,33 +206,24 @@ pub async fn start_full_sync_worker(
     let (events_tx, events_rx) = tokio::sync::broadcast::channel(16);
 
     let mut worker = Worker {
-        acx: rcx.acx.clone(),
+        big_repo: rcx.big_repo.clone(),
         cancel_token: cancel_token.clone(),
         msg_tx: msg_tx.clone(),
         sync_progress_tx: sync_progress_tx.clone(),
         events_tx,
-        partitions: [
-            //
-            (
-                PartitionKey::FullSync,
-                Partition {
-                    is_active: false,
-                    deets: ParitionDeets::FullSync { peers: default() },
-                },
-            ),
-            (
-                PartitionKey::DocBlobsFullSync,
-                Partition {
-                    is_active: false,
-                    deets: ParitionDeets::DocBlobsFullSync { peers: default() },
-                },
-            ),
-        ]
+        partitions: [(
+            PartitionKey::DocBlobsFullSync,
+            Partition {
+                is_active: false,
+                deets: ParitionDeets::DocBlobsFullSync { peers: default() },
+            },
+        )]
         .into(),
 
         blobs_repo,
         doc_blobs_index_repo,
         progress_repo,
+        partition_sync_node,
         iroh_endpoint,
         active_docs: default(),
         pending_docs: default(),
@@ -225,8 +233,10 @@ pub async fn start_full_sync_worker(
         synced_blobs: default(),
         known_peer_set: default(),
         conn_by_peer: default(),
-        known_doc_set: default(),
+        peer_partition_sessions: default(),
+        doc_ref_counts: default(),
         known_blob_set: default(),
+        peer_docs: default(),
         docs_to_boot: default(),
         docs_to_stop: default(),
         blobs_to_boot: default(),
@@ -234,19 +244,9 @@ pub async fn start_full_sync_worker(
         max_active_sync_workers: 24,
     };
 
-    let drawer_rx = drawer_repo.subscribe(crate::repos::SubscribeOpts { capacity: 1024 });
     let doc_blobs_rx = worker
         .doc_blobs_index_repo
         .subscribe(crate::repos::SubscribeOpts { capacity: 1024 });
-    let (_drawer_heads, known_docs) = drawer_repo.list_just_ids().await?;
-    worker.add_doc(rcx.doc_app.document_id().clone()).await?;
-    worker.add_doc(rcx.doc_drawer.document_id().clone()).await?;
-    for doc_id in known_docs {
-        let doc_id: DocumentId = doc_id
-            .parse()
-            .wrap_err("unable to parse doc_id from drawer")?;
-        worker.add_doc(doc_id.clone()).await?;
-    }
     for hash in worker.doc_blobs_index_repo.list_all_hashes().await? {
         worker
             .known_blob_set
@@ -256,11 +256,12 @@ pub async fn start_full_sync_worker(
         worker.blobs_to_boot.insert(hash);
     }
 
-    // let (peer_infos, mut peer_updates) = rcx.acx.repo().connected_peers();
-    // let (peer_observer, observer_stop) = acx.spawn_peer_sync_observer();
+    // let (peer_infos, mut peer_updates) = rcx.big_repo.repo().connected_peers();
+    // let (peer_observer, observer_stop) = big_repo.spawn_peer_sync_observer();
     let fut = {
         let cancel_token = cancel_token.clone();
         let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
+        let mut partition_refresh_tick = tokio::time::interval(Duration::from_secs(2));
         // let peer_observer = observer.subscribe();
         async move {
             let doc_blobs_rx = doc_blobs_rx;
@@ -285,7 +286,7 @@ pub async fn start_full_sync_worker(
                     }
                     // val = peer_updates.next() => {
                     //     let Some(connections) = val else {
-                    //         eyre::bail!("AmCtx is closed, wrong shutdown order");
+                    //         eyre::bail!("SharedBigRepo is closed, wrong shutdown order");
                     //     };
                     //     worker.handle_peer_conn_changes(connections).await?;
                     // },
@@ -315,20 +316,8 @@ pub async fn start_full_sync_worker(
                     _ = janitor_tick.tick() => {
                         worker.backoff_janitor_enqueue_due();
                     }
-                    val = drawer_rx.recv_async() => {
-                        let evt = match val {
-                            Ok(val) => val,
-                            Err(err) => match err {
-                                crate::repos::RecvError::Closed => {
-                                    warn!("DrawerRepo shutdown, closing loop");
-                                    break;
-                                },
-                                crate::repos::RecvError::Dropped { dropped_count } => {
-                                    eyre::bail!("we're dropping drawer events: dropped_count = {dropped_count}");
-                                }
-                            },
-                        };
-                        worker.handle_drawer_event(&evt).await?;
+                    _ = partition_refresh_tick.tick() => {
+                        worker.refresh_docs_for_all_peers_from_bigrepo().await?;
                     }
                     val = doc_blobs_rx.recv_async() => {
                         let evt = match val {
@@ -351,6 +340,7 @@ pub async fn start_full_sync_worker(
                 .docs_to_stop
                 .extend(worker.active_docs.keys().cloned());
             worker.batch_stop_docs().await?;
+            worker.stop_all_peer_partition_sessions().await?;
             eyre::Ok(())
         }
     };
@@ -373,11 +363,12 @@ pub async fn start_full_sync_worker(
 }
 
 struct Worker {
-    acx: AmCtx,
+    big_repo: SharedBigRepo,
     cancel_token: CancellationToken,
     blobs_repo: Arc<BlobsRepo>,
     doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
+    partition_sync_node: Arc<am_utils_rs::sync::SyncNodeHandle>,
     iroh_endpoint: iroh::Endpoint,
 
     partitions: HashMap<PartitionKey, Partition>,
@@ -387,8 +378,9 @@ struct Worker {
     blobs_to_boot: HashSet<String>,
     partitions_to_refresh: HashSet<PartitionKey>,
 
-    known_doc_set: HashMap<DocumentId, HashSet<PartitionKey>>,
+    doc_ref_counts: HashMap<DocumentId, usize>,
     known_blob_set: HashMap<String, HashSet<PartitionKey>>,
+    peer_docs: HashMap<EndpointId, HashSet<DocumentId>>,
 
     active_docs: HashMap<DocumentId, ActiveDocSyncState>,
     pending_docs: HashMap<DocumentId, PendingDocSyncState>,
@@ -405,21 +397,22 @@ struct Worker {
 
     known_peer_set: HashMap<ConnectionId, PeerSyncState>,
     conn_by_peer: HashMap<EndpointId, ConnectionId>,
+    peer_partition_sessions: HashMap<EndpointId, PeerPartitionSession>,
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PartitionKey {
-    FullSync,
+    BigRepoPartition(am_utils_rs::sync::PartitionId),
     DocBlobsFullSync,
     // Docs(Uuid),
     // Blobs(Uuid),
 }
 
 impl PartitionKey {
-    pub(crate) fn as_tag_value(self) -> &'static str {
+    pub(crate) fn as_tag_value(&self) -> String {
         match self {
-            Self::FullSync => "full",
-            Self::DocBlobsFullSync => "doc_blobs_full",
+            Self::BigRepoPartition(partition_id) => format!("big_repo_partition/{partition_id}"),
+            Self::DocBlobsFullSync => "doc_blobs_full".to_string(),
         }
     }
 }
@@ -430,7 +423,7 @@ struct Partition {
 }
 
 enum ParitionDeets {
-    FullSync { peers: HashSet<EndpointId> },
+    BigRepoPartition { peers: HashSet<EndpointId> },
     DocBlobsFullSync { peers: HashSet<EndpointId> },
     // Docs { include_set: HashSet<DocumentId> },
     // Blobs { include_set: HashMap<Uuid> },
@@ -440,7 +433,15 @@ struct PeerSyncState {
     endpoint_id: EndpointId,
     synced_docs: HashSet<DocumentId>,
     partitions: HashSet<PartitionKey>,
+    peer_key: am_utils_rs::sync::PeerKey,
+    partition_ids: HashSet<am_utils_rs::sync::PartitionId>,
     emitted_full_synced: bool,
+}
+
+struct PeerPartitionSession {
+    stop: am_utils_rs::sync::PeerSyncWorkerStopToken,
+    _samod_tx: tokio::sync::mpsc::Sender<am_utils_rs::sync::SamodSyncRequest>,
+    _partition_ids: HashSet<am_utils_rs::sync::PartitionId>,
 }
 
 #[derive(Clone, Copy)]
@@ -493,6 +494,56 @@ struct BlobProgressKey {
 }
 
 impl Worker {
+    async fn ensure_peer_partition_session(
+        &mut self,
+        endpoint_id: EndpointId,
+        peer_key: am_utils_rs::sync::PeerKey,
+        partition_ids: HashSet<am_utils_rs::sync::PartitionId>,
+    ) -> Res<()> {
+        let session = self.peer_partition_sessions.remove(&endpoint_id);
+        if let Some(session) = session {
+            session.stop.stop().await?;
+        }
+        let rpc_client = irpc_iroh::client::<am_utils_rs::sync::PartitionSyncRpc>(
+            self.iroh_endpoint.clone(),
+            iroh::EndpointAddr::new(endpoint_id),
+            PARTITION_SYNC_ALPN,
+        );
+        let (samod_tx, samod_rx) = tokio::sync::mpsc::channel(128);
+        let (_handle, stop) = am_utils_rs::sync::spawn_peer_sync_worker(
+            peer_key,
+            rpc_client,
+            samod_rx,
+            self.cancel_token.child_token(),
+        )
+        .await?;
+        self.peer_partition_sessions.insert(
+            endpoint_id,
+            PeerPartitionSession {
+                stop,
+                _samod_tx: samod_tx,
+                _partition_ids: partition_ids,
+            },
+        );
+        Ok(())
+    }
+
+    async fn remove_peer_partition_session(&mut self, endpoint_id: EndpointId) -> Res<()> {
+        let session = self.peer_partition_sessions.remove(&endpoint_id);
+        if let Some(session) = session {
+            session.stop.stop().await?;
+        }
+        Ok(())
+    }
+
+    async fn stop_all_peer_partition_sessions(&mut self) -> Res<()> {
+        let mut sessions = std::mem::take(&mut self.peer_partition_sessions);
+        for (_endpoint_id, session) in sessions.drain() {
+            session.stop.stop().await?;
+        }
+        Ok(())
+    }
+
     fn available_boot_budget(&self) -> usize {
         let active_count = self.active_docs.len() + self.active_blobs.len();
         self.max_active_sync_workers.saturating_sub(active_count)
@@ -505,6 +556,8 @@ impl Worker {
                 resp,
                 partitions,
                 conn_id,
+                peer_key,
+                partition_ids,
             } => {
                 let old_conn_id = self.conn_by_peer.get(&endpoint_id).copied();
                 let old_state = self
@@ -513,7 +566,8 @@ impl Worker {
                     .or_else(|| old_conn_id.and_then(|id| self.known_peer_set.remove(&id)));
                 let new_parts: Vec<_> = if let Some(old) = old_state {
                     for part_key in old.partitions.difference(&partitions) {
-                        self.remove_peer_from_part(*part_key, endpoint_id).await?;
+                        self.remove_peer_from_part(part_key.clone(), endpoint_id)
+                            .await?;
                     }
                     partitions.difference(&old.partitions).cloned().collect()
                 } else {
@@ -524,6 +578,8 @@ impl Worker {
                     PeerSyncState {
                         partitions,
                         endpoint_id,
+                        peer_key: peer_key.clone(),
+                        partition_ids: partition_ids.clone(),
                         synced_docs: default(),
                         emitted_full_synced: false,
                     },
@@ -532,6 +588,21 @@ impl Worker {
                 for part_key in new_parts {
                     self.add_peer_to_part(part_key, endpoint_id).await?;
                 }
+                self.refresh_docs_for_peer_from_bigrepo(endpoint_id, &peer_key, &partition_ids)
+                    .await?;
+                self.partition_sync_node
+                    .register_local_peer(peer_key.clone())
+                    .await?;
+                if let Err(err) = self
+                    .ensure_peer_partition_session(endpoint_id, peer_key, partition_ids)
+                    .await
+                {
+                    warn!(
+                        ?err,
+                        endpoint_id = ?endpoint_id,
+                        "failed starting peer partition session"
+                    );
+                }
                 resp.send(())
                     .inspect_err(|_| warn!("called dropped before finish"))
                     .ok();
@@ -539,6 +610,11 @@ impl Worker {
             Msg::DelPeer { endpoint_id, resp } => {
                 if let Some(conn_id) = self.conn_by_peer.remove(&endpoint_id) {
                     if let Some(state) = self.known_peer_set.remove(&conn_id) {
+                        self.partition_sync_node
+                            .unregister_local_peer(state.peer_key)
+                            .await?;
+                        self.remove_peer_partition_session(endpoint_id).await?;
+                        self.apply_peer_doc_snapshot(endpoint_id, HashSet::new());
                         for part_key in state.partitions {
                             self.remove_peer_from_part(part_key, endpoint_id).await?;
                         }
@@ -594,22 +670,18 @@ impl Worker {
     }
 
     async fn batch_refresh_paritions(&mut self) -> Res<()> {
-        let part_keys: Vec<_> = self.partitions_to_refresh.drain().collect();
-        for part_key in part_keys {
-            let (activate, is_active, deets_kind) = {
+        let mut double = std::mem::replace(&mut self.partitions_to_refresh, default());
+        for part_key in double.drain() {
+            let (activate, is_active) = {
                 let part = self
                     .partitions
                     .get(&part_key)
                     .ok_or_eyre("parition not found")?;
                 let activate = match &part.deets {
-                    ParitionDeets::FullSync { peers } => !peers.is_empty(),
+                    ParitionDeets::BigRepoPartition { peers } => !peers.is_empty(),
                     ParitionDeets::DocBlobsFullSync { peers } => !peers.is_empty(),
                 };
-                let deets_kind = match &part.deets {
-                    ParitionDeets::FullSync { .. } => PartitionKey::FullSync,
-                    ParitionDeets::DocBlobsFullSync { .. } => PartitionKey::DocBlobsFullSync,
-                };
-                (activate, part.is_active, deets_kind)
+                (activate, part.is_active)
             };
             self.partitions
                 .get_mut(&part_key)
@@ -618,16 +690,13 @@ impl Worker {
             if activate == is_active {
                 continue;
             }
-            match deets_kind {
-                PartitionKey::FullSync => {
+            match &part_key {
+                PartitionKey::BigRepoPartition(_) => {
                     if activate {
-                        self.invalidate_synced_docs_to_pending_for_partition(part_key);
+                        self.invalidate_all_synced_docs_to_pending();
                     }
-                    for (doc_id, parts) in &self.known_doc_set {
-                        if !parts.contains(&PartitionKey::FullSync) {
-                            continue;
-                        }
-                        if self.doc_required_by_any_active_partition(doc_id) {
+                    for doc_id in &self.known_doc_set {
+                        if self.doc_required_by_bigrepo_partition(doc_id) {
                             if !self.active_docs.contains_key(doc_id)
                                 && !self.pending_docs.contains_key(doc_id)
                                 && !self.synced_docs.contains_key(doc_id)
@@ -647,6 +716,7 @@ impl Worker {
                 }
             }
         }
+        self.partitions_to_refresh = double;
         Ok(())
     }
 
@@ -657,10 +727,20 @@ impl Worker {
     ) -> Res<()> {
         let part = self
             .partitions
-            .get_mut(&part_key)
-            .ok_or_eyre("parition not found")?;
+            .entry(part_key.clone())
+            .or_insert_with(|| Partition {
+                is_active: false,
+                deets: match &part_key {
+                    PartitionKey::BigRepoPartition(_) => {
+                        ParitionDeets::BigRepoPartition { peers: default() }
+                    }
+                    PartitionKey::DocBlobsFullSync => {
+                        ParitionDeets::DocBlobsFullSync { peers: default() }
+                    }
+                },
+            });
         match &mut part.deets {
-            ParitionDeets::FullSync { peers } => {
+            ParitionDeets::BigRepoPartition { peers } => {
                 peers.insert(endpoint_id);
                 self.docs_to_boot.extend(self.pending_docs.keys().cloned());
             }
@@ -681,10 +761,20 @@ impl Worker {
     ) -> Res<()> {
         let part = self
             .partitions
-            .get_mut(&part_key)
-            .ok_or_eyre("parition not found")?;
+            .entry(part_key.clone())
+            .or_insert_with(|| Partition {
+                is_active: false,
+                deets: match &part_key {
+                    PartitionKey::BigRepoPartition(_) => {
+                        ParitionDeets::BigRepoPartition { peers: default() }
+                    }
+                    PartitionKey::DocBlobsFullSync => {
+                        ParitionDeets::DocBlobsFullSync { peers: default() }
+                    }
+                },
+            });
         match &mut part.deets {
-            ParitionDeets::FullSync { peers } => {
+            ParitionDeets::BigRepoPartition { peers } => {
                 peers.remove(&endpoint_id);
             }
             ParitionDeets::DocBlobsFullSync { peers } => {
@@ -724,51 +814,123 @@ impl Worker {
             return;
         }
 
-        let due_blobs: Vec<_> = self
-            .pending_blobs
-            .iter()
-            .filter_map(|(hash, pending)| {
-                if pending.due_at <= now
-                    && !self.active_blobs.contains_key(hash)
-                    && !self.synced_blobs.contains_key(hash)
-                {
-                    Some(hash.clone())
-                } else {
-                    None
-                }
-            })
-            .take(budget)
-            .collect();
-        self.blobs_to_boot.extend(due_blobs);
+        self.blobs_to_boot.extend(
+            self.pending_blobs
+                .iter()
+                .filter_map(|(hash, pending)| {
+                    if pending.due_at <= now
+                        && !self.active_blobs.contains_key(hash)
+                        && !self.synced_blobs.contains_key(hash)
+                    {
+                        Some(hash.clone())
+                    } else {
+                        None
+                    }
+                })
+                .take(budget),
+        );
     }
 }
 
 // Docs related methods
 impl Worker {
-    async fn handle_drawer_event(&mut self, evt: &DrawerEvent) -> Res<()> {
-        match evt {
-            DrawerEvent::DocUpdated { id, .. } => {
-                let parsed: DocumentId = id.parse().wrap_err("invalid document id")?;
-                self.invalidate_doc_to_pending(&parsed);
-            }
-            DrawerEvent::ListChanged { .. } => {}
-            DrawerEvent::DocAdded { id, .. } => {
-                let parsed: DocumentId = id.parse().wrap_err("invalid document id")?;
-                self.add_doc(parsed).await?;
-            }
-            DrawerEvent::DocDeleted { id, .. } => {
-                let parsed: DocumentId = id.parse().wrap_err("invalid document id")?;
-                self.remove_doc(parsed).await?;
-            }
+    async fn refresh_docs_for_all_peers_from_bigrepo(&mut self) -> Res<()> {
+        for (endpoint_id, peer_key, partition_ids) in self.known_peer_set.values().map(|state| {
+            (
+                state.endpoint_id,
+                state.peer_key.clone(),
+                state.partition_ids.clone(),
+            )
+        }) {
+            self.refresh_docs_for_peer_from_bigrepo(endpoint_id, &peer_key, &partition_ids)
+                .await?;
         }
         Ok(())
+    }
+
+    async fn refresh_docs_for_peer_from_bigrepo(
+        &mut self,
+        endpoint_id: EndpointId,
+        peer_key: &str,
+        partition_ids: &HashSet<am_utils_rs::sync::PartitionId>,
+    ) -> Res<()> {
+        let reqs: Vec<_> = partition_ids
+            .iter()
+            .map(|partition_id| PartitionCursorRequest {
+                partition_id: partition_id.clone(),
+                since: None,
+            })
+            .collect();
+        let events = match self
+            .big_repo
+            .get_partition_events(&peer_key.to_owned(), &reqs)
+            .await
+        {
+            Ok(events) => events,
+            Err(err) => {
+                if err.to_string().contains("unknown partition") {
+                    self.apply_peer_doc_snapshot(endpoint_id, HashSet::new());
+                    return Ok(());
+                }
+                return Err(err);
+            }
+        };
+        let mut docs_for_peer = HashSet::new();
+        for event in events {
+            match event.deets {
+                PartitionEventDeets::MemberUpsert { doc_id }
+                | PartitionEventDeets::DocChanged { doc_id, .. } => {
+                    match doc_id.parse::<DocumentId>() {
+                        Ok(parsed) => {
+                            docs_for_peer.insert(parsed);
+                        }
+                        Err(err) => {
+                            warn!(?err, doc_id, "invalid doc id in partition snapshot");
+                        }
+                    }
+                }
+                PartitionEventDeets::MemberRemoved { .. }
+                | PartitionEventDeets::DocDeleted { .. } => {}
+            }
+        }
+        self.apply_peer_doc_snapshot(endpoint_id, docs_for_peer);
+        Ok(())
+    }
+
+    fn apply_peer_doc_snapshot(&mut self, endpoint_id: EndpointId, next_docs: HashSet<DocumentId>) {
+        let old_docs = self.peer_docs.remove(&endpoint_id).unwrap_or_default();
+        for doc_id in old_docs.difference(&next_docs) {
+            if let Some(count) = self.doc_ref_counts.get_mut(doc_id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.doc_ref_counts.remove(doc_id);
+                    self.docs_to_stop.insert(doc_id.clone());
+                }
+            }
+        }
+        for doc_id in next_docs.difference(&old_docs) {
+            let count = self.doc_ref_counts.entry(doc_id.clone()).or_insert(0);
+            *count = count.saturating_add(1);
+            if *count == 1 {
+                self.docs_to_boot.insert(doc_id.clone());
+            }
+        }
+        self.peer_docs.insert(endpoint_id, next_docs);
+    }
+
+    fn peer_progress_partition_key(peer: &PeerSyncState) -> PartitionKey {
+        if let Some(part_id) = peer.partition_ids.iter().next() {
+            PartitionKey::BigRepoPartition(part_id.clone())
+        } else {
+            PartitionKey::BigRepoPartition("unknown".to_string())
+        }
     }
 
     async fn batch_boot_docs(&mut self) -> Res<()> {
         let docs_part_active = self
             .partitions
-            .get(&PartitionKey::FullSync)
-            .is_some_and(|part| part.is_active);
+            .iter()
+            .any(|(key, part)| matches!(key, PartitionKey::BigRepoPartition(_)) && part.is_active);
         if !docs_part_active {
             return Ok(());
         }
@@ -815,7 +977,7 @@ impl Worker {
         let cancel_token = self.cancel_token.child_token();
         let stop_token = doc_worker::spawn_doc_sync_worker(
             doc_id.clone(),
-            self.acx.clone(),
+            self.big_repo.clone(),
             cancel_token.clone(),
             self.msg_tx.clone(),
             retry,
@@ -826,49 +988,14 @@ impl Worker {
             stop_token,
         })
     }
-    async fn add_doc(&mut self, doc_id: DocumentId) -> Res<()> {
-        if self.known_doc_set.contains_key(&doc_id) {
-            return Ok(());
-        }
-        let mut parts_to_add = vec![];
-        for (part_key, part) in &self.partitions {
-            match &part.deets {
-                ParitionDeets::FullSync { .. } => {
-                    parts_to_add.push(*part_key);
-                }
-                ParitionDeets::DocBlobsFullSync { .. } => {}
-            }
-        }
-        let boot_doc = !parts_to_add.is_empty();
-        self.known_doc_set.insert(doc_id.clone(), default());
-        self.add_doc_to_paritions(doc_id.clone(), parts_to_add.into_iter())
-            .await?;
-        if boot_doc {
-            self.docs_to_boot.insert(doc_id.clone());
-        }
-        Ok(())
-    }
-
-    async fn add_doc_to_paritions(
-        &mut self,
-        doc_id: DocumentId,
-        parts: impl Iterator<Item = PartitionKey>,
-    ) -> Res<()> {
-        let doc_state = self
-            .known_doc_set
-            .get_mut(&doc_id)
-            .ok_or_eyre("doc not found")?;
-        doc_state.extend(parts);
-        Ok(())
-    }
 
     async fn batch_stop_docs(&mut self) -> Res<()> {
         use futures::StreamExt;
         use futures_buffered::BufferedStreamExt;
 
-        let stopped_doc_ids: Vec<_> = self.docs_to_stop.drain().collect();
         let mut stop_futs = vec![];
 
+        let stopped_doc_ids = self.docs_to_stop.drain();
         for doc_id in &stopped_doc_ids {
             if let Some(active) = self.active_docs.remove(doc_id) {
                 stop_futs.push(active.stop_token.stop());
@@ -903,11 +1030,7 @@ impl Worker {
         } else {
             return Ok(());
         };
-        let fullsync_target_count = self
-            .known_doc_set
-            .iter()
-            .filter(|(_, parts)| parts.contains(&PartitionKey::FullSync))
-            .count();
+        let fullsync_target_count = self.known_doc_set.len();
         let mut events_to_emit = Vec::new();
         let mut amount_updates = Vec::new();
         for (conn_id, diff) in diff {
@@ -938,7 +1061,7 @@ impl Worker {
             }
             amount_updates.push((
                 peer_state.endpoint_id,
-                PartitionKey::FullSync,
+                Self::peer_progress_partition_key(peer_state),
                 peer_state.synced_docs.len(),
                 fullsync_target_count,
             ));
@@ -961,7 +1084,7 @@ impl Worker {
                 .await?;
         }
         if self.active_docs.contains_key(&doc_id)
-            && self.is_doc_fully_synced_for_fullsync_peers(&doc_id)
+            && self.is_doc_fully_synced_for_bigrepo_partition_peers(&doc_id)
         {
             let Some(active) = self.active_docs.remove(&doc_id) else {
                 return Ok(());
@@ -980,12 +1103,6 @@ impl Worker {
         Ok(())
     }
 
-    async fn remove_doc(&mut self, doc_id: DocumentId) -> Res<()> {
-        self.known_doc_set.remove(&doc_id);
-        self.docs_to_stop.insert(doc_id);
-        Ok(())
-    }
-
     async fn handle_doc_heads_change(
         &mut self,
         doc_id: DocumentId,
@@ -996,11 +1113,7 @@ impl Worker {
         } else {
             self.invalidate_doc_to_pending(&doc_id);
         }
-        let fullsync_target_count = self
-            .known_doc_set
-            .iter()
-            .filter(|(_, parts)| parts.contains(&PartitionKey::FullSync))
-            .count();
+        let fullsync_target_count = self.known_doc_set.len();
         let mut stale_peers = Vec::new();
         let mut amount_updates = Vec::new();
         for peer_state in self.known_peer_set.values_mut() {
@@ -1011,7 +1124,7 @@ impl Worker {
                 peer_state.emitted_full_synced = false;
                 amount_updates.push((
                     peer_state.endpoint_id,
-                    PartitionKey::FullSync,
+                    Self::peer_progress_partition_key(peer_state),
                     peer_state.synced_docs.len(),
                     fullsync_target_count,
                 ));
@@ -1053,10 +1166,14 @@ impl Worker {
         Ok(())
     }
 
-    fn is_doc_fully_synced_for_fullsync_peers(&self, doc_id: &DocumentId) -> bool {
+    fn is_doc_fully_synced_for_bigrepo_partition_peers(&self, doc_id: &DocumentId) -> bool {
         let mut has_peer = false;
         for peer in self.known_peer_set.values() {
-            if !peer.partitions.contains(&PartitionKey::FullSync) {
+            if !peer
+                .partitions
+                .iter()
+                .any(|part| matches!(part, PartitionKey::BigRepoPartition(_)))
+            {
                 continue;
             }
             has_peer = true;
@@ -1067,22 +1184,20 @@ impl Worker {
         has_peer
     }
 
-    fn doc_required_by_any_active_partition(&self, doc_id: &DocumentId) -> bool {
-        let Some(parts) = self.known_doc_set.get(doc_id) else {
+    fn doc_required_by_bigrepo_partition(&self, doc_id: &DocumentId) -> bool {
+        if !self.known_doc_set.contains(doc_id) {
             return false;
-        };
-        parts.iter().any(|part_key| {
-            self.partitions
-                .get(part_key)
-                .is_some_and(|partition| partition.is_active)
+        }
+        self.partitions.iter().any(|(key, partition)| {
+            matches!(key, PartitionKey::BigRepoPartition(_)) && partition.is_active
         })
     }
 
     fn invalidate_doc_to_pending(&mut self, doc_id: &DocumentId) {
-        if !self.known_doc_set.contains_key(doc_id) {
+        if !self.known_doc_set.contains(doc_id) {
             return;
         }
-        if !self.doc_required_by_any_active_partition(doc_id) {
+        if !self.doc_required_by_bigrepo_partition(doc_id) {
             return;
         }
         if self.pending_docs.contains_key(doc_id) {
@@ -1103,20 +1218,13 @@ impl Worker {
         );
     }
 
-    fn invalidate_synced_docs_to_pending_for_partition(&mut self, part_key: PartitionKey) {
-        let doc_ids: Vec<_> = self
+    fn invalidate_all_synced_docs_to_pending(&mut self) {
+        for doc_id in self
             .known_doc_set
             .iter()
-            .filter_map(|(doc_id, parts)| {
-                if parts.contains(&part_key) && self.synced_docs.contains_key(doc_id) {
-                    Some(doc_id.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for doc_id in doc_ids {
-            self.invalidate_doc_to_pending(&doc_id);
+            .filter(|doc_id| self.synced_docs.contains_key(doc_id))
+        {
+            self.invalidate_doc_to_pending(doc_id);
         }
     }
 }
@@ -1161,22 +1269,15 @@ impl Worker {
             .get(&PartitionKey::DocBlobsFullSync)
             .is_some_and(|part| part.is_active);
         if !has_active_part {
-            let hashes: Vec<_> = self
-                .active_blobs
-                .keys()
-                .chain(self.pending_blobs.keys())
-                .chain(self.synced_blobs.keys())
-                .cloned()
-                .collect();
-            for hash in hashes {
-                if self.blob_required_by_any_active_partition(&hash) {
+            for hash in self.known_blob_set.keys() {
+                if self.blob_required_by_any_active_partition(hash) {
                     continue;
                 }
-                if let Some(active) = self.active_blobs.remove(&hash) {
+                if let Some(active) = self.active_blobs.remove(hash) {
                     active.stop_token.stop().await?;
                 }
-                self.pending_blobs.remove(&hash);
-                self.synced_blobs.remove(&hash);
+                self.pending_blobs.remove(hash);
+                self.synced_blobs.remove(hash);
             }
             return Ok(());
         }

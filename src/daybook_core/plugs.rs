@@ -744,7 +744,7 @@ pub mod version_updates {
 
 pub struct PlugsRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
-    acx: AmCtx,
+    big_repo: SharedBigRepo,
     app_doc_id: DocumentId,
     app_am_handle: samod::DocHandle,
     store: crate::stores::AmStoreHandle<PlugsStore>,
@@ -752,7 +752,8 @@ pub struct PlugsRepo {
     mutation_mutex: tokio::sync::Mutex<()>,
     local_actor_id: ActorId,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
+    _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
+    _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
 }
 
 // Granular event enum for specific changes
@@ -777,7 +778,7 @@ impl crate::repos::Repo for PlugsRepo {
 
 impl PlugsRepo {
     pub async fn load(
-        acx: AmCtx,
+        big_repo: SharedBigRepo,
         blobs: Arc<crate::blobs::BlobsRepo>,
         app_doc_id: DocumentId,
         local_user_path: daybook_types::doc::UserPath,
@@ -787,27 +788,28 @@ impl PlugsRepo {
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let registry = crate::repos::ListenersRegistry::new();
 
-        let store_val = PlugsStore::load(&acx, &app_doc_id).await?;
+        let store_val = PlugsStore::load(&big_repo, &app_doc_id).await?;
         let store = crate::stores::AmStoreHandle::new(
             store_val,
-            acx.clone(),
+            big_repo.clone(),
             app_doc_id.clone(),
             local_actor_id.clone(),
         );
 
         store.mutate_sync(|store| store.rebuild_indices()).await?;
 
-        let app_am_handle = acx
-            .find_doc(&app_doc_id)
+        let app_am_handle = big_repo
+            .find_doc_handle(&app_doc_id)
             .await?
             .ok_or_eyre("unable to find app doc in am")?;
 
-        let (broker, broker_stop) = acx.change_manager().add_doc(app_am_handle.clone()).await?;
+        let broker = big_repo.ensure_change_broker(app_am_handle.clone()).await?;
 
-        let (notif_tx, notif_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Vec<am_utils_rs::changes::ChangeNotification>>();
+        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
+            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
+        >();
         let cancel_token = CancellationToken::new();
-        let ticket = PlugsStore::register_change_listener(&acx, &broker, vec![], {
+        let ticket = PlugsStore::register_change_listener(&big_repo, &app_doc_id, vec![], {
             let cancel_token = cancel_token.clone();
             move |notifs| {
                 if let Err(err) = notif_tx.send(notifs) {
@@ -820,7 +822,7 @@ impl PlugsRepo {
         .await?;
 
         let repo = Self {
-            acx: acx.clone(),
+            big_repo: big_repo.clone(),
             app_doc_id: app_doc_id.clone(),
             app_am_handle,
             store,
@@ -830,6 +832,7 @@ impl PlugsRepo {
             mutation_mutex: tokio::sync::Mutex::new(()),
             cancel_token: cancel_token.clone(),
             _change_listener_tickets: vec![ticket],
+            _change_broker_leases: vec![broker],
         };
         let repo = Arc::new(repo);
 
@@ -848,7 +851,6 @@ impl PlugsRepo {
             crate::repos::RepoStopToken {
                 cancel_token,
                 worker_handle: Some(worker_handle),
-                broker_stop_tokens: vec![broker_stop],
             },
         ))
     }
@@ -861,7 +863,7 @@ impl PlugsRepo {
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<am_utils_rs::changes::ChangeNotification>,
+            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -882,10 +884,25 @@ impl PlugsRepo {
 
             events.clear();
             for notif in notifs {
+                let am_utils_rs::repo::BigRepoChangeNotification::DocChanged {
+                    patch,
+                    heads,
+                    origin,
+                    ..
+                } = notif
+                else {
+                    continue;
+                };
+                if !matches!(
+                    origin,
+                    am_utils_rs::repo::BigRepoChangeOrigin::Remote { .. }
+                ) {
+                    continue;
+                }
                 // 3. Call events_for_patch (pure-ish).
                 self.events_for_patch(
-                    &notif.patch,
-                    &notif.heads,
+                    &patch,
+                    &heads,
                     &mut events,
                     Some(self.local_actor_id.clone()),
                 )
@@ -896,7 +913,7 @@ impl PlugsRepo {
                 match event {
                     PlugsEvent::PlugAdded { id, heads } | PlugsEvent::PlugChanged { id, heads } => {
                         let (new_versioned, _) = self
-                            .acx
+                            .big_repo
                             .hydrate_path_at_heads::<Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>(
                                 &self.app_doc_id,
                                 &heads.0,
@@ -1715,9 +1732,9 @@ fn validate_facet_reference_manifests(
 mod tests {
     use super::*;
 
-    async fn setup_repo() -> Res<(AmCtx, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
+    async fn setup_repo() -> Res<(SharedBigRepo, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
         let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
-        let (acx, _acx_stop) = AmCtx::boot(
+        let (big_repo, _acx_stop) = BigRepo::boot(
             am_utils_rs::Config {
                 peer_id: "test".into(),
                 storage: am_utils_rs::StorageConfig::Memory,
@@ -1727,7 +1744,7 @@ mod tests {
         .await?;
 
         let doc = automerge::Automerge::load(&version_updates::version_latest()?)?;
-        let handle = acx.add_doc(doc).await?;
+        let handle = big_repo.add_doc(doc).await?;
         let doc_id = handle.document_id().clone();
 
         let temp_dir = tempfile::tempdir()?;
@@ -1736,8 +1753,8 @@ mod tests {
                 .await?;
 
         let (repo, _repo_stop) =
-            PlugsRepo::load(acx.clone(), blobs, doc_id.clone(), local_user_path).await?;
-        Ok((acx, repo, doc_id, temp_dir))
+            PlugsRepo::load(big_repo.clone(), blobs, doc_id.clone(), local_user_path).await?;
+        Ok((big_repo, repo, doc_id, temp_dir))
     }
 
     fn mock_plug(name: &str) -> manifest::PlugManifest {

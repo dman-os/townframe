@@ -6,6 +6,8 @@ pub mod prelude {
     pub use crate::codecs::ThroughJson;
 
     #[cfg(feature = "repo")]
+    pub use crate::repo::{BigRepo, SharedBigRepo};
+    #[cfg(feature = "repo")]
     pub use crate::AmCtx;
     pub use automerge;
     pub use autosurgeon;
@@ -24,6 +26,8 @@ pub mod iroh;
 pub mod repo;
 #[cfg(feature = "repo")]
 pub mod sync;
+#[cfg(feature = "repo")]
+pub use repo::{BigDocHandle, BigRepo, SharedBigRepo};
 
 #[cfg(feature = "repo")]
 use automerge::Automerge;

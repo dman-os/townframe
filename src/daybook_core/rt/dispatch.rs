@@ -61,13 +61,14 @@ impl crate::stores::AmStore for DispatchStore {
 pub struct DispatchRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
 
-    acx: AmCtx,
+    big_repo: SharedBigRepo,
     app_doc_id: DocumentId,
     // drawer_doc_id: DocumentId,
     store: crate::stores::AmStoreHandle<DispatchStore>,
     local_actor_id: ActorId,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
+    _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
+    _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
     dispatch_am_handle: samod::DocHandle,
 }
 
@@ -91,7 +92,7 @@ impl crate::repos::Repo for DispatchRepo {
 
 impl DispatchRepo {
     pub async fn load(
-        acx: AmCtx,
+        big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
         local_user_path: daybook_types::doc::UserPath,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
@@ -100,28 +101,27 @@ impl DispatchRepo {
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let registry = crate::repos::ListenersRegistry::new();
 
-        let store_val = DispatchStore::load(&acx, &app_doc_id).await?;
+        let store_val = DispatchStore::load(&big_repo, &app_doc_id).await?;
         let store = crate::stores::AmStoreHandle::new(
             store_val,
-            acx.clone(),
+            big_repo.clone(),
             app_doc_id.clone(),
             local_actor_id.clone(),
         );
 
-        let dispatch_am_handle = acx
-            .find_doc(&app_doc_id)
+        let dispatch_am_handle = big_repo
+            .find_doc_handle(&app_doc_id)
             .await?
             .expect("doc should have been loaded");
-        let (broker, broker_stop) = {
-            acx.change_manager()
-                .add_doc(dispatch_am_handle.clone())
-                .await?
-        };
+        let broker = big_repo
+            .ensure_change_broker(dispatch_am_handle.clone())
+            .await?;
 
-        let (notif_tx, notif_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Vec<am_utils_rs::changes::ChangeNotification>>();
+        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
+            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
+        >();
         let cancel_token = CancellationToken::new();
-        let ticket = DispatchStore::register_change_listener(&acx, &broker, vec![], {
+        let ticket = DispatchStore::register_change_listener(&big_repo, &app_doc_id, vec![], {
             let cancel_token = cancel_token.clone();
             move |notifs| {
                 if let Err(err) = notif_tx.send(notifs) {
@@ -134,13 +134,14 @@ impl DispatchRepo {
         .await?;
 
         let repo = Self {
-            acx,
+            big_repo,
             app_doc_id,
             store,
             registry: Arc::clone(&registry),
             local_actor_id,
             cancel_token: cancel_token.clone(),
             _change_listener_tickets: vec![ticket],
+            _change_broker_leases: vec![broker],
             dispatch_am_handle,
         };
         let repo = Arc::new(repo);
@@ -160,7 +161,6 @@ impl DispatchRepo {
             crate::repos::RepoStopToken {
                 cancel_token,
                 worker_handle: Some(worker_handle),
-                broker_stop_tokens: vec![broker_stop],
             },
         ))
     }
@@ -168,7 +168,7 @@ impl DispatchRepo {
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<am_utils_rs::changes::ChangeNotification>,
+            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -190,9 +190,24 @@ impl DispatchRepo {
             events.clear();
 
             for notif in notifs {
+                let am_utils_rs::repo::BigRepoChangeNotification::DocChanged {
+                    patch,
+                    heads,
+                    origin,
+                    ..
+                } = notif
+                else {
+                    continue;
+                };
+                if !matches!(
+                    origin,
+                    am_utils_rs::repo::BigRepoChangeOrigin::Remote { .. }
+                ) {
+                    continue;
+                }
                 self.events_for_patch(
-                    &notif.patch,
-                    &notif.heads,
+                    &patch,
+                    &heads,
                     &mut events,
                     Some(self.local_actor_id.clone()),
                 )
@@ -204,7 +219,7 @@ impl DispatchRepo {
                     DispatchEvent::DispatchAdded { id, heads } => {
                         // Hydrate the new dispatch at heads
                         let (new_versioned, _) = self
-                            .acx
+                            .big_repo
                             .hydrate_path_at_heads::<Versioned<ThroughJson<Arc<ActiveDispatch>>>>(
                                 &self.app_doc_id,
                                 &heads.0,
@@ -248,7 +263,7 @@ impl DispatchRepo {
         out: &mut Vec<DispatchEvent>,
         exclude_actor_id: Option<ActorId>,
     ) -> Res<()> {
-        if !am_utils_rs::changes::path_prefix_matches(
+        if !am_utils_rs::repo::big_repo_path_prefix_matches(
             &[DispatchStore::prop().into(), "active_dispatches".into()],
             &patch.path,
         ) {

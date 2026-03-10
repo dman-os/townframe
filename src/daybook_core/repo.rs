@@ -96,8 +96,7 @@ pub struct RepoCtx {
 
     pub sql: SqlCtx,
 
-    pub acx: AmCtx,
-    pub acx_stop: tokio::sync::Mutex<Option<am_utils_rs::AmCtxStopToken>>,
+    pub big_repo: SharedBigRepo,
 
     pub doc_app: samod::DocHandle,
     pub doc_drawer: samod::DocHandle,
@@ -113,9 +112,7 @@ pub struct RepoCtx {
 
 impl RepoCtx {
     pub async fn shutdown(&self) -> Res<()> {
-        if let Some(stop) = self.acx_stop.lock().await.take() {
-            stop.stop().await?;
-        }
+        self.big_repo.samod_repo().stop().await;
         Ok(())
     }
 
@@ -193,15 +190,45 @@ impl RepoCtx {
             &daybook_types::doc::UserPath::from(local_user_path.clone()),
         );
 
-        let (acx, acx_stop) =
-            am_utils_rs::AmCtx::boot(am_config, Option::<samod::AlwaysAnnounce>::None).await?;
+        let peer_id = samod::PeerId::from_string(am_config.peer_id.clone());
+        let repo_builder = samod::Repo::build_tokio().with_peer_id(peer_id);
+        let samod_repo = match am_config.storage {
+            am_utils_rs::StorageConfig::Disk { path } => {
+                std::fs::create_dir_all(&path).wrap_err_with(|| {
+                    format!("Failed to create storage directory: {}", path.display())
+                })?;
+                repo_builder
+                    .with_storage(samod::storage::TokioFilesystemStorage::new(
+                        path.to_string_lossy().as_ref(),
+                    ))
+                    .load()
+                    .await
+            }
+            am_utils_rs::StorageConfig::Memory => {
+                repo_builder
+                    .with_storage(samod::storage::InMemoryStorage::new())
+                    .load()
+                    .await
+            }
+        };
+        let big_repo_state_url = format!(
+            "sqlite://{}",
+            layout.repo_root.join("big_repo.sqlite").display()
+        );
+        let big_repo = am_utils_rs::BigRepo::boot_with_repo(
+            samod_repo,
+            am_utils_rs::repo::BigRepoConfig::new(big_repo_state_url),
+        )
+        .await?;
         if let Some(ws_connector_url) = options.ws_connector_url {
-            acx.spawn_ws_connector(ws_connector_url.parse());
+            let _ = big_repo
+                .spawn_ws_connector(ws_connector_url.parse()?)
+                .await?;
         }
 
         let doc_app_cell = tokio::sync::OnceCell::new();
         let doc_drawer_cell = tokio::sync::OnceCell::new();
-        init_from_globals(&acx, &sql.db_pool, &doc_app_cell, &doc_drawer_cell).await?;
+        init_from_globals(&big_repo, &sql.db_pool, &doc_app_cell, &doc_drawer_cell).await?;
         let doc_app = doc_app_cell
             .get()
             .expect("doc_app cell should be initialized")
@@ -213,7 +240,7 @@ impl RepoCtx {
 
         if initialize_repo {
             Self::run_repo_init_dance(
-                &acx,
+                &big_repo,
                 &doc_app,
                 &doc_drawer,
                 &local_user_path,
@@ -228,8 +255,7 @@ impl RepoCtx {
             layout,
             lock_guard,
             sql,
-            acx,
-            acx_stop: Some(acx_stop).into(),
+            big_repo,
             doc_app,
             doc_drawer,
             local_actor_id,
@@ -242,7 +268,7 @@ impl RepoCtx {
     }
 
     async fn run_repo_init_dance(
-        acx: &AmCtx,
+        big_repo: &SharedBigRepo,
         doc_app: &samod::DocHandle,
         doc_drawer: &samod::DocHandle,
         local_user_path: &str,
@@ -266,7 +292,7 @@ impl RepoCtx {
 
         let init_result: Res<()> = async {
             let (repo, stop) = PlugsRepo::load(
-                acx.clone(),
+                big_repo.clone(),
                 Arc::clone(&blobs_repo),
                 doc_app.document_id().clone(),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
@@ -277,7 +303,7 @@ impl RepoCtx {
             plugs_stop = Some(stop);
 
             let (_config_repo, stop) = ConfigRepo::load(
-                acx.clone(),
+                big_repo.clone(),
                 doc_app.document_id().clone(),
                 Arc::clone(plugs_repo.as_ref().expect("plugs repo must be loaded")),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
@@ -287,7 +313,7 @@ impl RepoCtx {
             config_stop = Some(stop);
 
             let (_tables_repo, stop) = TablesRepo::load(
-                acx.clone(),
+                big_repo.clone(),
                 doc_app.document_id().clone(),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
             )
@@ -295,7 +321,7 @@ impl RepoCtx {
             tables_stop = Some(stop);
 
             let (_dispatch_repo, stop) = DispatchRepo::load(
-                acx.clone(),
+                big_repo.clone(),
                 doc_app.document_id().clone(),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
             )
@@ -303,7 +329,7 @@ impl RepoCtx {
             dispatch_stop = Some(stop);
 
             let (_drawer_repo, stop) = DrawerRepo::load(
-                acx.clone(),
+                big_repo.clone(),
                 doc_drawer.document_id().clone(),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
                 blobs_root

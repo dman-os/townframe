@@ -1,7 +1,7 @@
 use crate::interlude::*;
 use automerge::transaction::Transactable;
 
-use am_utils_rs::AmCtx;
+use am_utils_rs::SharedBigRepo;
 
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
@@ -15,7 +15,7 @@ mod ocr_image_wflow;
 mod plugin_local_index_wflow;
 
 pub struct DaybookTestContext {
-    pub _acx: AmCtx,
+    pub _acx: SharedBigRepo,
     pub drawer_repo: Arc<DrawerRepo>,
     pub dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
     pub _config_repo: Arc<crate::config::ConfigRepo>,
@@ -139,8 +139,8 @@ pub async fn test_cx_with_options(
     let device_id = format!("test_{}", uuid::Uuid::new_v4().simple());
     let peer_id = format!("test_{}", uuid::Uuid::new_v4().simple());
 
-    // Initialize AmCtx with memory storage
-    let (acx, acx_stop) = AmCtx::boot(
+    // Initialize SharedBigRepo with memory storage
+    let (big_repo, acx_stop) = BigRepo::boot(
         am_utils_rs::Config {
             peer_id,
             storage: am_utils_rs::StorageConfig::Memory,
@@ -155,14 +155,14 @@ pub async fn test_cx_with_options(
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = acx.add_doc(doc).await?;
+        let handle = big_repo.add_doc(doc).await?;
         handle.document_id().clone()
     };
 
     // Create an app document for all stores (config, plugs, dispatch, triage)
     let app_doc_id = {
         let doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
-        let handle = acx.add_doc(doc).await?;
+        let handle = big_repo.add_doc(doc).await?;
         handle.document_id().clone()
     };
 
@@ -175,7 +175,7 @@ pub async fn test_cx_with_options(
             .await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
-        acx.clone(),
+        big_repo.clone(),
         Arc::clone(&blobs),
         app_doc_id.clone(),
         local_user_path.clone(),
@@ -183,7 +183,7 @@ pub async fn test_cx_with_options(
     .await?;
     let sql_ctx = crate::app::SqlCtx::new("sqlite::memory:").await?;
     let (config_repo, config_stop) = crate::config::ConfigRepo::load(
-        acx.clone(),
+        big_repo.clone(),
         app_doc_id.clone(),
         Arc::clone(&plugs_repo),
         local_user_path.clone(),
@@ -191,14 +191,14 @@ pub async fn test_cx_with_options(
     )
     .await?;
     let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
-        acx.clone(),
+        big_repo.clone(),
         app_doc_id.clone(),
         local_user_path.clone(),
     )
     .await?;
     let progress_repo = crate::progress::ProgressRepo::boot(sql_ctx.db_pool.clone()).await?;
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
-        acx.clone(),
+        big_repo.clone(),
         drawer_doc_id,
         local_user_path.clone(),
         temp_dir.path().join("local_states"),
@@ -231,7 +231,7 @@ pub async fn test_cx_with_options(
         },
         app_doc_id,
         wflow_db_url,
-        acx.clone(),
+        big_repo.clone(),
         Arc::clone(&drawer_repo),
         Arc::clone(&plugs_repo),
         Arc::clone(&dispatch_repo),
@@ -246,7 +246,7 @@ pub async fn test_cx_with_options(
     plugs_repo.ensure_system_plugs().await?;
 
     Ok(DaybookTestContext {
-        _acx: acx,
+        _acx: big_repo,
         drawer_repo,
         rt,
         dispatch_repo,

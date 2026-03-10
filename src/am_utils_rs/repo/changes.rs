@@ -80,19 +80,13 @@ pub struct ChangeListenerManager {
     change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
     local_listeners: Mutex<Vec<LocalListener>>,
     local_tx: mpsc::UnboundedSender<Vec<BigRepoLocalNotification>>,
-    brokers: DHashMap<
-        DocumentId,
-        (
-            Arc<broker::DocChangeBrokerHandle>,
-            Arc<broker::DocChangeBrokerStopToken>,
-        ),
-    >,
+    brokers: DHashMap<DocumentId, std::sync::Weak<DocChangeBrokerLease>>,
     cancel_token: CancellationToken,
 }
 
 pub struct ChangeListenerManagerStopToken {
     pub cancel_token: CancellationToken,
-    pub switchboard_handle: Option<JoinHandle<()>>,
+    pub _switchboard_handle: Option<JoinHandle<()>>,
 }
 
 impl ChangeListenerManagerStopToken {
@@ -104,6 +98,36 @@ impl ChangeListenerManagerStopToken {
 #[non_exhaustive]
 pub struct DocIdFilter {
     pub doc_id: DocumentId,
+}
+
+impl DocIdFilter {
+    pub fn new(doc_id: DocumentId) -> Self {
+        Self { doc_id }
+    }
+}
+
+pub struct DocChangeBrokerLease {
+    handle: Arc<broker::DocChangeBrokerHandle>,
+    stop_token: std::sync::Mutex<Option<broker::DocChangeBrokerStopToken>>,
+}
+
+impl DocChangeBrokerLease {
+    pub fn filter(&self) -> DocIdFilter {
+        self.handle.filter()
+    }
+
+    pub async fn get_head_listener(&self) -> Res<broker::HeadListenerRegistration> {
+        self.handle.get_head_listener().await
+    }
+}
+
+impl Drop for DocChangeBrokerLease {
+    fn drop(&mut self) {
+        if let Some(stop_token) = self.stop_token.lock().expect(ERROR_MUTEX).take() {
+            stop_token.cancel_token.cancel();
+            stop_token.join_handle.abort();
+        }
+    }
 }
 
 impl ChangeListenerManager {
@@ -127,7 +151,7 @@ impl ChangeListenerManager {
             out,
             ChangeListenerManagerStopToken {
                 cancel_token,
-                switchboard_handle: Some(handle),
+                _switchboard_handle: Some(handle),
             },
         )
     }
@@ -139,14 +163,47 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    pub async fn add_doc(&self, handle: DocHandle) -> Res<Arc<broker::DocChangeBrokerHandle>> {
+    pub async fn add_doc(&self, handle: DocHandle) -> Res<Arc<DocChangeBrokerLease>> {
         self.ensure_live()?;
 
         let doc_id = handle.document_id().clone();
         match self.brokers.entry(doc_id) {
-            dashmap::mapref::entry::Entry::Occupied(occupied) => {
-                let (broker, _) = occupied.get();
-                Ok(Arc::clone(broker))
+            dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
+                if let Some(lease) = occupied.get().upgrade() {
+                    return Ok(lease);
+                }
+                let (broker, stop_token) = broker::spawn_doc_listener(
+                    handle,
+                    self.cancel_token.child_token(),
+                    self.change_tx.clone(),
+                    Arc::new({
+                        let listeners = Arc::clone(&self.listeners);
+                        move |doc_id, origin| {
+                            let listeners = listeners.lock().expect(ERROR_MUTEX);
+                            listeners.iter().any(|listener| {
+                                let doc_ok = listener
+                                    .filter
+                                    .doc_id
+                                    .as_ref()
+                                    .map(|target| target.doc_id == *doc_id)
+                                    .unwrap_or(true);
+                                let origin_ok = listener
+                                    .filter
+                                    .origin
+                                    .as_ref()
+                                    .map(|target| origin_matches_filter(origin, *target))
+                                    .unwrap_or(true);
+                                doc_ok && origin_ok
+                            })
+                        }
+                    }),
+                )?;
+                let lease = Arc::new(DocChangeBrokerLease {
+                    handle: Arc::new(broker),
+                    stop_token: std::sync::Mutex::new(Some(stop_token)),
+                });
+                occupied.insert(Arc::downgrade(&lease));
+                Ok(lease)
             }
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 let (broker, stop_token) = broker::spawn_doc_listener(
@@ -175,10 +232,12 @@ impl ChangeListenerManager {
                         }
                     }),
                 )?;
-                let broker = Arc::new(broker);
-                let stop_token = Arc::new(stop_token);
-                vacant.insert((Arc::clone(&broker), stop_token));
-                Ok(broker)
+                let lease = Arc::new(DocChangeBrokerLease {
+                    handle: Arc::new(broker),
+                    stop_token: std::sync::Mutex::new(Some(stop_token)),
+                });
+                vacant.insert(Arc::downgrade(&lease));
+                Ok(lease)
             }
         }
     }
@@ -263,6 +322,7 @@ impl ChangeListenerManager {
         Ok(ChangeListenerRegistration {
             manager: Arc::downgrade(self),
             id,
+            _broker_leases: Vec::new(),
         })
     }
 
@@ -435,6 +495,14 @@ fn origin_matches_filter(origin: &ChangeOrigin, filter: OriginFilter) -> bool {
 pub struct ChangeListenerRegistration {
     manager: std::sync::Weak<ChangeListenerManager>,
     id: Uuid,
+    _broker_leases: Vec<Arc<DocChangeBrokerLease>>,
+}
+
+impl ChangeListenerRegistration {
+    pub fn with_broker_leases(mut self, broker_leases: Vec<Arc<DocChangeBrokerLease>>) -> Self {
+        self._broker_leases = broker_leases;
+        self
+    }
 }
 
 impl Drop for ChangeListenerRegistration {
