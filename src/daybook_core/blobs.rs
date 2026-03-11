@@ -67,27 +67,32 @@ impl BlobsRepo {
             eyre::bail!("source path is not a file: {}", source_path.display());
         }
 
+        let source_snapshot = self.create_source_snapshot(&source_path).await?;
         let hash =
-            utils_rs::hash::blake3_hash_reader(tokio::fs::File::open(&source_path).await?).await?;
+            utils_rs::hash::blake3_hash_reader(tokio::fs::File::open(&source_snapshot).await?)
+                .await?;
         let object_paths = self.object_paths(&hash)?;
 
         tokio::fs::create_dir_all(&object_paths.dir).await?;
         if !tokio::fs::try_exists(&object_paths.blob).await? {
-            self.atomic_copy_file(&source_path, &object_paths.blob)
+            self.atomic_copy_file(&source_snapshot, &object_paths.blob)
                 .await?;
         }
 
         let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
-        let meta = self.build_meta(
+        let mut meta = self.build_meta(
             hash.clone(),
             BlobMode::OwnedCopy,
             blob_meta.len(),
             None,
-            true,
+            false,
         );
         self.write_meta(&object_paths.meta, &meta).await?;
         self.ingest_path_with_iroh(&object_paths.blob, &hash)
             .await?;
+        meta.iroh_ingested = true;
+        self.write_meta(&object_paths.meta, &meta).await?;
+        tokio::fs::remove_file(&source_snapshot).await?;
 
         Ok(hash)
     }
@@ -102,20 +107,26 @@ impl BlobsRepo {
             eyre::bail!("source path is not a file: {}", source_path.display());
         }
 
+        let source_snapshot = self.create_source_snapshot(source_path).await?;
+        let snapshot_meta = tokio::fs::metadata(&source_snapshot).await?;
         let hash =
-            utils_rs::hash::blake3_hash_reader(tokio::fs::File::open(source_path).await?).await?;
+            utils_rs::hash::blake3_hash_reader(tokio::fs::File::open(&source_snapshot).await?)
+                .await?;
         let object_paths = self.object_paths(&hash)?;
         tokio::fs::create_dir_all(&object_paths.dir).await?;
 
-        let meta = self.build_meta(
+        let mut meta = self.build_meta(
             hash.clone(),
             BlobMode::Reference,
-            source_meta.len(),
+            snapshot_meta.len(),
             Some(source_path.to_string_lossy().to_string()),
-            true,
+            false,
         );
         self.write_meta(&object_paths.meta, &meta).await?;
-        self.ingest_path_with_iroh(source_path, &hash).await?;
+        self.ingest_path_with_iroh(&source_snapshot, &hash).await?;
+        meta.iroh_ingested = true;
+        self.write_meta(&object_paths.meta, &meta).await?;
+        tokio::fs::remove_file(&source_snapshot).await?;
 
         Ok(hash)
     }
@@ -131,16 +142,18 @@ impl BlobsRepo {
         }
 
         let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
-        let meta = self.build_meta(
+        let mut meta = self.build_meta(
             hash.clone(),
             BlobMode::OwnedCopy,
             blob_meta.len(),
             None,
-            true,
+            false,
         );
         self.write_meta(&object_paths.meta, &meta).await?;
         self.ingest_path_with_iroh(&object_paths.blob, &hash)
             .await?;
+        meta.iroh_ingested = true;
+        self.write_meta(&object_paths.meta, &meta).await?;
 
         Ok(hash)
     }
@@ -174,7 +187,22 @@ impl BlobsRepo {
                     .ok_or_eyre("reference metadata missing source_path")?;
                 let source_path = PathBuf::from(source_path);
                 if tokio::fs::try_exists(&source_path).await? {
-                    Ok(source_path)
+                    let source_hash = utils_rs::hash::blake3_hash_reader(
+                        tokio::fs::File::open(&source_path).await?,
+                    )
+                    .await?;
+                    if source_hash == meta.hash {
+                        Ok(source_path)
+                    } else if tokio::fs::try_exists(&object_paths.blob).await? {
+                        Ok(object_paths.blob)
+                    } else {
+                        eyre::bail!(
+                            "Referenced blob hash diverged for {}: expected={}, got={}",
+                            source_path.display(),
+                            meta.hash,
+                            source_hash
+                        );
+                    }
                 } else {
                     eyre::bail!("Referenced blob source missing for hash {hash}");
                 }
@@ -225,11 +253,15 @@ impl BlobsRepo {
     }
 
     fn object_paths(&self, hash: &str) -> Res<ObjectPaths> {
-        if hash.len() < 4 {
+        if !hash.is_ascii() || hash.len() < 4 {
             eyre::bail!("invalid blob hash: {hash}");
         }
-        let l0 = &hash[0..2];
-        let l1 = &hash[2..4];
+        let Some(l0) = hash.get(0..2) else {
+            eyre::bail!("invalid blob hash: {hash}");
+        };
+        let Some(l1) = hash.get(2..4) else {
+            eyre::bail!("invalid blob hash: {hash}");
+        };
         let dir = self.root.join("objects").join(l0).join(l1);
         Ok(ObjectPaths {
             blob: dir.join(format!("{hash}.blob")),
@@ -243,10 +275,9 @@ impl BlobsRepo {
             return Ok(None);
         }
         let raw = tokio::fs::read(path).await?;
-        match serde_json::from_slice::<BlobMetaV1>(&raw) {
-            Ok(meta) => Ok(Some(meta)),
-            Err(_) => Ok(None),
-        }
+        let meta = serde_json::from_slice::<BlobMetaV1>(&raw)
+            .wrap_err_with(|| format!("invalid blob metadata json at {}", path.display()))?;
+        Ok(Some(meta))
     }
 
     async fn write_meta(&self, path: &Path, meta: &BlobMetaV1) -> Res<()> {
@@ -319,6 +350,18 @@ impl BlobsRepo {
         tokio::fs::rename(&temp, dest).await?;
         self.sync_dir(dir).await?;
         Ok(())
+    }
+
+    async fn create_source_snapshot(&self, source: &Path) -> Res<PathBuf> {
+        let snapshot_dir = self.root.join("snapshots");
+        tokio::fs::create_dir_all(&snapshot_dir).await?;
+        let snapshot_path = snapshot_dir.join(format!(
+            "blob-src-{}-{}.snapshot",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        self.atomic_copy_file(source, &snapshot_path).await?;
+        Ok(snapshot_path)
     }
 
     async fn atomic_write(&self, path: &Path, data: &[u8]) -> Res<()> {

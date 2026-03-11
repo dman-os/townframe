@@ -5,7 +5,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::blobs::BlobsRepo;
-use crate::drawer::DrawerRepo;
 use crate::index::DocBlobsIndexRepo;
 use crate::progress::ProgressRepo;
 use crate::repo::RepoCtx;
@@ -30,7 +29,6 @@ pub struct IrohSyncRepo {
     router: iroh::protocol::Router,
 
     config_repo: Arc<crate::config::ConfigRepo>,
-    drawer_repo: Arc<DrawerRepo>,
     doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
 
@@ -108,9 +106,9 @@ impl IrohSyncRepoStopToken {
         tokio::time::timeout(Duration::from_secs(5), self.full_stop_token.stop())
             .await
             .map_err(|_| eyre::eyre!("timeout waiting full stop"))??;
-        tokio::time::timeout(Duration::from_secs(5), self.router.shutdown())
+        tokio::time::timeout(Duration::from_secs(10), self.router.shutdown())
             .await
-            .map_err(|_| eyre::eyre!("timeout waiting router shutdown"))??;
+            .map_err(|_| eyre::eyre!("timeout for waiting router shutdown"))??;
         tokio::time::timeout(
             Duration::from_secs(5),
             self.partition_sync_stop_token.stop(),
@@ -136,7 +134,6 @@ impl IrohSyncRepoStopToken {
 impl IrohSyncRepo {
     pub async fn boot(
         rcx: Arc<RepoCtx>,
-        drawer_repo: Arc<DrawerRepo>,
         config_repo: Arc<crate::config::ConfigRepo>,
         blobs_repo: Arc<BlobsRepo>,
         doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
@@ -210,7 +207,6 @@ impl IrohSyncRepo {
             rcx,
             router: router.clone(),
             config_repo,
-            drawer_repo,
             doc_blobs_index_repo,
             progress_repo,
             iroh_docs: docs.api().clone(),
@@ -255,13 +251,20 @@ impl IrohSyncRepo {
     }
 
     fn peer_partition_ids(&self, _peer_key: &str) -> HashSet<am_utils_rs::sync::PartitionId> {
-        [self.drawer_repo.replicated_partition_id()].into()
+        [
+            crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
+                self.rcx.doc_drawer.document_id(),
+            ),
+        ]
+        .into()
     }
 
     async fn machine_loop(
         &self,
         mut full_sync_rx: tokio::sync::broadcast::Receiver<full::FullSyncEvent>,
-        mut incoming_conn_rx: tokio::sync::mpsc::UnboundedReceiver<am_utils_rs::repo::RepoConnection>,
+        mut incoming_conn_rx: tokio::sync::mpsc::UnboundedReceiver<
+            am_utils_rs::repo::RepoConnection,
+        >,
         mut conn_end_rx: tokio::sync::mpsc::UnboundedReceiver<am_utils_rs::repo::ConnFinishSignal>,
     ) -> Res<()> {
         loop {
@@ -530,7 +533,6 @@ impl IrohSyncRepo {
         Ok(())
     }
 
-
     pub async fn connect_url(&self, iroh_doc_url: &str) -> Res<bootstrap::SyncBootstrapState> {
         self.ensure_repo_live()?;
 
@@ -573,40 +575,47 @@ impl IrohSyncRepo {
         use crate::repos::Repo;
 
         self.ensure_repo_live()?;
-        if self.progress_repo.is_none() {
+        let Some(progress_repo) = self.progress_repo.clone() else {
             eyre::bail!("wait_for_full_sync requires a progress-enabled IrohSyncRepo");
-        }
+        };
         let target_peers: HashSet<EndpointId> = endpoint_ids.iter().cloned().collect();
-        let mut remaining = target_peers.clone();
         if target_peers.is_empty() {
             return Ok(());
         }
+        let initial_snapshot = self
+            .full_sync_handle
+            .get_peer_sync_snapshot(endpoint_ids)
+            .await?;
+        let mut remaining = target_peers
+            .iter()
+            .filter(|endpoint_id| {
+                !initial_snapshot
+                    .get(*endpoint_id)
+                    .is_some_and(|snapshot| snapshot.emitted_full_synced)
+            })
+            .copied()
+            .collect::<HashSet<_>>();
+        debug!(
+            target_peers = ?target_peers,
+            initial_snapshot = ?initial_snapshot,
+            remaining = ?remaining,
+            "wait_for_full_sync initial state"
+        );
         let listener = self
             .registry
             .subscribe::<IrohSyncEvent>(crate::repos::SubscribeOpts { capacity: 1024 });
         let doc_blobs_listener = self
             .doc_blobs_index_repo
             .subscribe(crate::repos::SubscribeOpts { capacity: 1024 });
-        tokio::time::timeout(timeout, async {
+        let timeout_outcome = tokio::time::timeout(timeout, async {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
             let listener = listener;
             let doc_blobs_listener = doc_blobs_listener;
             let mut quiet_since: Option<std::time::Instant> = None;
-            let mut saw_peer_full_synced = false;
+            let mut heartbeat_at = std::time::Instant::now();
             loop {
                 let now = std::time::Instant::now();
-                if saw_peer_full_synced {
-                    match quiet_since {
-                        None => quiet_since = Some(now),
-                        Some(since)
-                            if remaining.is_empty()
-                                && now.duration_since(since) >= Duration::from_millis(3000) =>
-                        {
-                            break;
-                        }
-                        Some(_) => {}
-                    }
-                } else {
+                if remaining.is_empty() {
                     match quiet_since {
                         None => quiet_since = Some(now),
                         Some(since) if now.duration_since(since) >= Duration::from_millis(3000) => {
@@ -614,6 +623,8 @@ impl IrohSyncRepo {
                         }
                         Some(_) => {}
                     }
+                } else {
+                    quiet_since = None;
                 }
                 tokio::select! {
                     val = listener.recv_async() => {
@@ -625,7 +636,6 @@ impl IrohSyncRepo {
                         })?;
                         match event.as_ref() {
                             IrohSyncEvent::PeerFullySynced { endpoint_id, .. } => {
-                                saw_peer_full_synced = true;
                                 remaining.remove(endpoint_id);
                                 quiet_since = None;
                             }
@@ -657,17 +667,78 @@ impl IrohSyncRepo {
                             }
                         }
                     }
-                    _ = tick.tick() => {}
+                    _ = tick.tick() => {
+                        if !remaining.is_empty()
+                            && now.duration_since(heartbeat_at) >= Duration::from_secs(2)
+                        {
+                            heartbeat_at = now;
+                            let latest_snapshot = self
+                                .full_sync_handle
+                                .get_peer_sync_snapshot(endpoint_ids)
+                                .await?;
+                            for endpoint_id in &target_peers {
+                                let emitted_full_synced = latest_snapshot
+                                    .get(endpoint_id)
+                                    .is_some_and(|snapshot| snapshot.emitted_full_synced);
+                                if emitted_full_synced {
+                                    remaining.remove(endpoint_id);
+                                }
+                            }
+                            let tasks = progress_repo
+                                .list_by_tag_prefix("sync/full/")
+                                .await
+                                .map(|tasks| {
+                                    let active = tasks
+                                        .iter()
+                                        .filter(|task| task.state == crate::progress::ProgressTaskState::Active)
+                                        .count();
+                                    let ids = tasks.iter().map(|task| task.id.clone()).take(12).collect::<Vec<_>>();
+                                    (tasks.len(), active, ids)
+                                });
+                            match tasks {
+                                Ok((task_count, active_count, ids)) => {
+                                    debug!(
+                                        remaining = ?remaining,
+                                        latest_snapshot = ?latest_snapshot,
+                                        task_count,
+                                        active_count,
+                                        task_ids = ?ids,
+                                        "wait_for_full_sync heartbeat"
+                                    );
+                                }
+                                Err(err) => {
+                                    warn!(?err, remaining = ?remaining, "wait_for_full_sync heartbeat failed listing progress tasks");
+                                }
+                            }
+                        }
+                    }
                 }
             }
             eyre::Ok(())
         })
-        .await
-        .map_err(|_| {
-            eyre::eyre!(
-                "timed out waiting for full sync: remaining={remaining:?}"
-            )
-        })??;
+        .await;
+        match timeout_outcome {
+            Ok(out) => out?,
+            Err(_) => {
+                let tasks = progress_repo.list_by_tag_prefix("sync/full/").await;
+                let diag = match tasks {
+                    Ok(tasks) => {
+                        let active = tasks
+                            .iter()
+                            .filter(|task| task.state == crate::progress::ProgressTaskState::Active)
+                            .count();
+                        let ids = tasks
+                            .iter()
+                            .map(|task| task.id.clone())
+                            .take(16)
+                            .collect::<Vec<_>>();
+                        format!("full_sync_tasks_total={}; full_sync_tasks_active={active}; sample_task_ids={ids:?}", tasks.len())
+                    }
+                    Err(err) => format!("failed_listing_full_sync_tasks={err:?}"),
+                };
+                eyre::bail!("timed out waiting for full sync: remaining={remaining:?}; {diag}");
+            }
+        }
         Ok(())
     }
 
@@ -692,6 +763,7 @@ impl crate::repos::Repo for IrohSyncRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod stress;
 
     use crate::blobs::BlobsRepo;
     use crate::drawer::DrawerRepo;
@@ -787,19 +859,16 @@ mod tests {
 
         let sync_url = node_a.sync_repo.get_ticket_url().await?;
         let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
-
-        node_b
-            .sync_repo
-            .wait_for_full_sync(
-                std::slice::from_ref(&bootstrap.endpoint_id),
-                Duration::from_secs(20),
-            )
-            .await?;
+        wait_for_sync_convergence(
+            &node_a,
+            &node_b,
+            bootstrap.endpoint_id,
+            Duration::from_secs(20),
+        )
+        .await?;
         for doc_id in &created_doc_ids {
             wait_for_doc_presence_with_activity(&node_b, doc_id, Duration::from_secs(60)).await?;
         }
-
-        wait_for_doc_set_parity(&node_a.drawer, &node_b.drawer, Duration::from_secs(20)).await?;
 
         let ids_a = list_doc_ids(&node_a.drawer).await?;
         let ids_b = list_doc_ids(&node_b.drawer).await?;
@@ -827,13 +896,13 @@ mod tests {
 
         let sync_url = node_a.sync_repo.get_ticket_url().await?;
         let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
-        node_b
-            .sync_repo
-            .wait_for_full_sync(
-                std::slice::from_ref(&bootstrap.endpoint_id),
-                Duration::from_secs(20),
-            )
-            .await?;
+        wait_for_sync_convergence(
+            &node_a,
+            &node_b,
+            bootstrap.endpoint_id,
+            Duration::from_secs(20),
+        )
+        .await?;
 
         let doc_on_a = node_a
             .drawer
@@ -867,6 +936,63 @@ mod tests {
 
         node_b.stop().await?;
         node_a.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cloned_repo_does_not_derive_drawer_replicated_partition_on_open() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+        let temp_root = tempfile::tempdir()?;
+        let repo_a_path = temp_root.path().join("repo-a");
+        let repo_b_path = temp_root.path().join("repo-b");
+
+        tokio::fs::create_dir_all(&repo_a_path).await?;
+        let rtx = RepoCtx::init(
+            &repo_a_path,
+            RepoOpenOptions {
+                ws_connector_url: None,
+            },
+            "test-device".into(),
+        )
+        .await?;
+        rtx.shutdown().await?;
+        drop(rtx);
+
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let created_doc_id = node_a
+            .drawer
+            .add(daybook_types::doc::AddDocArgs {
+                branch_path: daybook_types::doc::BranchPath::from("main"),
+                facets: default(),
+                user_path: Some(daybook_types::doc::UserPath::from(
+                    node_a.ctx.local_user_path.clone(),
+                )),
+            })
+            .await?;
+        wait_for_doc_presence_with_activity(&node_a, &created_doc_id, Duration::from_secs(30))
+            .await?;
+        let sync_url = node_a.sync_repo.get_ticket_url().await?;
+        bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
+        node_a.stop().await?;
+
+        let node_b = open_sync_node(&repo_b_path).await?;
+        let partitions = node_b
+            .ctx
+            .big_repo
+            .list_partitions_for_peer(&"peer-partition-visibility".into())
+            .await?;
+        assert!(
+            !partitions.iter().any(|summary| {
+                summary.partition_id
+                    == crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
+                        &node_b.ctx.doc_drawer.document_id().clone(),
+                    )
+            }),
+            "cloned repo incorrectly derived drawer replicated partition from observed drawer state: {partitions:?}"
+        );
+
+        node_b.stop().await?;
         Ok(())
     }
 
@@ -909,15 +1035,13 @@ mod tests {
 
         let sync_url = node_a.sync_repo.get_ticket_url().await?;
         let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
-        node_b
-            .sync_repo
-            .wait_for_full_sync(
-                std::slice::from_ref(&bootstrap.endpoint_id),
-                Duration::from_secs(120),
-            )
-            .await?;
-
-        wait_for_doc_set_parity(&node_a.drawer, &node_b.drawer, Duration::from_secs(120)).await?;
+        wait_for_sync_convergence(
+            &node_a,
+            &node_b,
+            bootstrap.endpoint_id,
+            Duration::from_secs(120),
+        )
+        .await?;
         let ids_a = list_doc_ids(&node_a.drawer).await?;
         let ids_b = list_doc_ids(&node_b.drawer).await?;
         assert_eq!(
@@ -970,13 +1094,13 @@ mod tests {
 
         let sync_url = node_a.sync_repo.get_ticket_url().await?;
         let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
-        node_b
-            .sync_repo
-            .wait_for_full_sync(
-                std::slice::from_ref(&bootstrap.endpoint_id),
-                Duration::from_secs(60),
-            )
-            .await?;
+        wait_for_sync_convergence(
+            &node_a,
+            &node_b,
+            bootstrap.endpoint_id,
+            Duration::from_secs(60),
+        )
+        .await?;
 
         for (hash, expected) in &blob_payloads {
             let got =
@@ -992,21 +1116,102 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+        let temp_root = tempfile::tempdir()?;
+        let repo_a_path = temp_root.path().join("repo-a");
+        let repo_b_path = temp_root.path().join("repo-b");
+
+        tokio::fs::create_dir_all(&repo_a_path).await?;
+        let rtx = RepoCtx::init(
+            &repo_a_path,
+            RepoOpenOptions {
+                ws_connector_url: None,
+            },
+            "test-device".into(),
+        )
+        .await?;
+        rtx.shutdown().await?;
+        drop(rtx);
+
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let mut created_doc_ids = Vec::new();
+        for _ in 0..8 {
+            let new_doc_id = node_a
+                .drawer
+                .add(daybook_types::doc::AddDocArgs {
+                    branch_path: daybook_types::doc::BranchPath::from("main"),
+                    facets: default(),
+                    user_path: Some(daybook_types::doc::UserPath::from(
+                        node_a.ctx.local_user_path.clone(),
+                    )),
+                })
+                .await?;
+            created_doc_ids.push(new_doc_id);
+        }
+
+        let sync_url = node_a.sync_repo.get_ticket_url().await?;
+        bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
+
+        let node_b = open_sync_node(&repo_b_path).await?;
+        let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(
+            &node_a,
+            &node_b,
+            bootstrap.endpoint_id,
+            Duration::from_secs(30),
+        )
+        .await?;
+
+        for doc_id in &created_doc_ids {
+            wait_for_doc_presence_with_activity(&node_b, doc_id, Duration::from_secs(60)).await?;
+        }
+
+        wait_for_doc_set_parity(&node_a.drawer, &node_b.drawer, Duration::from_secs(30)).await?;
+
+        let ids_a = list_doc_ids(&node_a.drawer).await?;
+        let ids_b = list_doc_ids(&node_b.drawer).await?;
+        assert_eq!(
+            ids_a, ids_b,
+            "sync after bootstrap clone did not converge to equal doc sets"
+        );
+
+        node_b.stop().await?;
+        node_a.stop().await?;
+        Ok(())
+    }
+
     fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Res<()> {
-        std::fs::create_dir_all(dst)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
+        std::fs::create_dir_all(dst)
+            .wrap_err_with(|| format!("failed creating copy destination {}", dst.display()))?;
+        for entry in std::fs::read_dir(src)
+            .wrap_err_with(|| format!("failed reading source directory {}", src.display()))?
+        {
+            let entry = entry
+                .wrap_err_with(|| format!("failed reading directory entry in {}", src.display()))?;
+            let file_type = entry.file_type().wrap_err_with(|| {
+                format!("failed getting file type for source entry {}", entry.path().display())
+            })?;
             let src_path = entry.path();
             let dst_path = dst.join(entry.file_name());
             if file_type.is_dir() {
-                copy_dir_all(&src_path, &dst_path)?;
+                copy_dir_all(&src_path, &dst_path).wrap_err_with(|| {
+                    format!(
+                        "failed recursively copying directory {} -> {}",
+                        src_path.display(),
+                        dst_path.display()
+                    )
+                })?;
             } else if file_type.is_file() {
-                if let Err(err) = std::fs::copy(&src_path, &dst_path) {
-                    if err.kind() != std::io::ErrorKind::NotFound {
-                        return Err(err.into());
-                    }
-                }
+                std::fs::copy(&src_path, &dst_path).wrap_err_with(|| {
+                    format!(
+                        "failed copying file {} -> {}",
+                        src_path.display(),
+                        dst_path.display()
+                    )
+                })?;
             }
         }
         Ok(())
@@ -1052,6 +1257,61 @@ mod tests {
             &iroh::SecretKey::generate(&mut rand::rng()),
         )
         .await?;
+        Ok(())
+    }
+
+    async fn bootstrap_clone_repo_from_url_for_tests(
+        source_url: &str,
+        destination: &std::path::Path,
+    ) -> Res<()> {
+        if destination.exists() {
+            let mut read_dir = tokio::fs::read_dir(destination).await?;
+            if read_dir.next_entry().await?.is_some() {
+                eyre::bail!(
+                    "bootstrap clone destination must be empty: {}",
+                    destination.display()
+                );
+            }
+        } else {
+            tokio::fs::create_dir_all(destination).await?;
+        }
+
+        let bootstrap = crate::sync::resolve_bootstrap_from_url(source_url).await?;
+        let sqlite_path = destination.join("sqlite.db");
+        let sql = crate::app::SqlCtx::new(&format!("sqlite://{}", sqlite_path.display())).await?;
+        crate::app::globals::set_repo_id(&sql.db_pool, &bootstrap.repo_id).await?;
+        let identity =
+            crate::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &bootstrap.repo_id)
+                .await?;
+        let _repo_user_id = crate::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
+
+        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(
+            am_utils_rs::repo::Config {
+                storage: am_utils_rs::repo::StorageConfig::Disk {
+                    path: destination.join("samod"),
+                },
+                peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
+            },
+            Option::<samod::AlwaysAnnounce>::None,
+        )
+        .await?;
+        crate::sync::connect_and_pull_required_docs_once(
+            &big_repo,
+            identity.iroh_secret_key.clone(),
+            &bootstrap,
+            Duration::from_secs(30),
+        )
+        .await?;
+        crate::app::globals::set_init_state(
+            &sql.db_pool,
+            &crate::app::globals::InitState::Created {
+                doc_id_app: bootstrap.app_doc_id,
+                doc_id_drawer: bootstrap.drawer_doc_id,
+            },
+        )
+        .await?;
+        crate::repo::mark_repo_initialized(destination).await?;
+        big_repo_stop.stop().await?;
         Ok(())
     }
 
@@ -1112,7 +1372,6 @@ mod tests {
         let progress_repo = ProgressRepo::boot(rtx.sql.db_pool.clone()).await?;
         let (sync_repo, sync_stop) = IrohSyncRepo::boot(
             Arc::clone(&rtx),
-            Arc::clone(&drawer_repo),
             Arc::clone(&config_repo),
             Arc::clone(&blobs_repo),
             Arc::clone(&doc_blobs_index_repo),
@@ -1260,25 +1519,115 @@ mod tests {
         Ok(())
     }
 
+    async fn wait_for_sync_convergence(
+        source: &SyncTestNode,
+        target: &SyncTestNode,
+        endpoint_id: EndpointId,
+        timeout: Duration,
+    ) -> Res<()> {
+        tokio::try_join!(
+            target
+                .sync_repo
+                .wait_for_full_sync(std::slice::from_ref(&endpoint_id), timeout),
+            wait_for_doc_set_parity(&source.drawer, &target.drawer, timeout),
+        )?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+
+        let temp_root = tempfile::tempdir()?;
+        let repo_a_path = temp_root.path().join("repo-a");
+        let repo_b_path = temp_root.path().join("repo-b");
+        init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
+
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let node_b = open_sync_node(&repo_b_path).await?;
+
+        let ticket_a = node_a.sync_repo.get_ticket_url().await?;
+        let bootstrap_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
+
+        wait_for_sync_convergence(
+            &node_a,
+            &node_b,
+            bootstrap_ba.endpoint_id,
+            Duration::from_secs(20),
+        )
+        .await?;
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        node_b
+            .sync_repo
+            .wait_for_full_sync(std::slice::from_ref(&bootstrap_ba.endpoint_id), Duration::from_secs(5))
+            .await?;
+
+        node_b.stop().await?;
+        node_a.stop().await?;
+        Ok(())
+    }
+
     async fn wait_for_doc_set_parity(
         left: &DrawerRepo,
         right: &DrawerRepo,
         timeout: Duration,
     ) -> Res<()> {
-        tokio::time::timeout(timeout, async {
+        let mut last_left = HashSet::<String>::new();
+        let mut last_right = HashSet::<String>::new();
+        let timeout_outcome = tokio::time::timeout(timeout, async {
+            let mut last_heartbeat = std::time::Instant::now();
             loop {
-                let l = list_doc_ids(left).await;
-                let r = list_doc_ids(right).await;
-                if let (Ok(lset), Ok(rset)) = (l, r) {
-                    if lset == rset {
-                        break;
-                    }
+                let lset = list_doc_ids(left).await?;
+                let rset = list_doc_ids(right).await?;
+                last_left = lset.clone();
+                last_right = rset.clone();
+                if lset == rset {
+                    debug!(count = lset.len(), "drawer doc-set parity reached");
+                    break;
+                }
+                let now = std::time::Instant::now();
+                if now.duration_since(last_heartbeat) >= Duration::from_secs(2) {
+                    last_heartbeat = now;
+                    let missing_on_right =
+                        lset.difference(&rset).take(8).cloned().collect::<Vec<_>>();
+                    let missing_on_left =
+                        rset.difference(&lset).take(8).cloned().collect::<Vec<_>>();
+                    debug!(
+                        left_count = lset.len(),
+                        right_count = rset.len(),
+                        missing_on_right = ?missing_on_right,
+                        missing_on_left = ?missing_on_left,
+                        "waiting for drawer doc-set parity"
+                    );
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
+            eyre::Ok(())
         })
-        .await
-        .map_err(|_| eyre::eyre!("timed out waiting for drawer doc-set parity"))?;
+        .await;
+        match timeout_outcome {
+            Ok(out) => out?,
+            Err(_) => {
+                let missing_on_right = last_left
+                    .difference(&last_right)
+                    .take(12)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let missing_on_left = last_right
+                    .difference(&last_left)
+                    .take(12)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                eyre::bail!(
+                    "timed out waiting for drawer doc-set parity: left_count={} right_count={} missing_on_right={missing_on_right:?} missing_on_left={missing_on_left:?}",
+                    last_left.len(),
+                    last_right.len()
+                );
+            }
+        }
         Ok(())
     }
 

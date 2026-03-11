@@ -3,44 +3,75 @@ use automerge::{Automerge, ChangeHash, ObjType, ReadDoc, Value};
 use daybook_types::doc::{FacetKey, WellKnownFacetTag};
 
 pub fn recover_facet_heads(doc: &Automerge, facet_key: &FacetKey) -> Res<Vec<ChangeHash>> {
+    recover_facet_heads_inner(doc, facet_key, None)
+}
+
+pub fn recover_facet_heads_at(
+    doc: &Automerge,
+    facet_key: &FacetKey,
+    heads: &[ChangeHash],
+) -> Res<Vec<ChangeHash>> {
+    recover_facet_heads_inner(doc, facet_key, Some(heads))
+}
+
+fn recover_facet_heads_inner(
+    doc: &Automerge,
+    facet_key: &FacetKey,
+    read_heads: Option<&[ChangeHash]>,
+) -> Res<Vec<ChangeHash>> {
     // Path: facets -> org.example.daybook.dmeta/main -> facets -> <facet_key> -> updatedAt
-    let facets_obj = match doc.get(automerge::ROOT, "facets")? {
+    let facets_obj = match get(doc, automerge::ROOT, "facets", read_heads)? {
         Some((Value::Object(ObjType::Map), id)) => id,
         _ => eyre::bail!("facets object not found"),
     };
 
     let dmeta_key = format!("{}/main", WellKnownFacetTag::Dmeta.as_str());
-    let dmeta_obj = match doc.get(&facets_obj, &dmeta_key)? {
+    let dmeta_obj = match get(doc, &facets_obj, &dmeta_key, read_heads)? {
         Some((Value::Object(ObjType::Map), id)) => id,
         _ => eyre::bail!("dmeta facet not found"),
     };
 
-    let dmeta_facets_obj = match doc.get(&dmeta_obj, "facets")? {
+    let dmeta_facets_obj = match get(doc, &dmeta_obj, "facets", read_heads)? {
         Some((Value::Object(ObjType::Map), id)) => id,
         _ => eyre::bail!("dmeta.facets map not found"),
     };
 
-    let facet_meta_obj = match doc.get(&dmeta_facets_obj, facet_key.to_string())? {
+    let facet_meta_obj = match get(doc, &dmeta_facets_obj, facet_key.to_string(), read_heads)? {
         Some((Value::Object(ObjType::Map), id)) => id,
         _ => eyre::bail!("facet meta not found for key: {}", facet_key),
     };
 
-    let updated_at_list = match doc.get(&facet_meta_obj, "updatedAt")? {
+    let updated_at_list = match get(doc, &facet_meta_obj, "updatedAt", read_heads)? {
         Some((Value::Object(ObjType::List), id)) => id,
         _ => eyre::bail!("updatedAt list not found for facet: {}", facet_key),
     };
 
-    let mut heads = Vec::new();
-    let length = doc.length(&updated_at_list);
+    let mut recovered = Vec::new();
+    let length = match read_heads {
+        Some(read_heads) => doc.length_at(&updated_at_list, read_heads),
+        None => doc.length(&updated_at_list),
+    };
     for ii in 0..length {
-        if let Some((_, exid)) = doc.get(&updated_at_list, ii)? {
+        if let Some((_, exid)) = get(doc, &updated_at_list, ii, read_heads)? {
             if let Some(hash) = doc.hash_for_opid(&exid) {
-                heads.push(hash);
+                recovered.push(hash);
             }
         }
     }
 
-    Ok(heads)
+    Ok(recovered)
+}
+
+fn get<'a, P: Into<automerge::Prop>>(
+    doc: &'a Automerge,
+    obj: impl AsRef<automerge::ObjId>,
+    prop: P,
+    heads: Option<&'a [ChangeHash]>,
+) -> Result<Option<(Value<'a>, automerge::ObjId)>, automerge::AutomergeError> {
+    match heads {
+        Some(read_heads) => doc.get_at(obj, prop, read_heads),
+        None => doc.get(obj, prop),
+    }
 }
 
 #[cfg(test)]

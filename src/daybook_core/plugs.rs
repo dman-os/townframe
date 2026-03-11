@@ -812,6 +812,9 @@ impl PlugsRepo {
         let ticket = PlugsStore::register_change_listener(&big_repo, &app_doc_id, vec![], {
             let cancel_token = cancel_token.clone();
             move |notifs| {
+                if cancel_token.is_cancelled() {
+                    return;
+                }
                 if let Err(err) = notif_tx.send(notifs) {
                     if !cancel_token.is_cancelled() {
                         warn!("failed to send change notifications: {err}");
@@ -1752,8 +1755,13 @@ mod tests {
             crate::blobs::BlobsRepo::new(temp_dir.path().to_path_buf(), "/test-user".to_string())
                 .await?;
 
-        let (repo, _repo_stop) =
-            PlugsRepo::load(Arc::clone(&big_repo), blobs, doc_id.clone(), local_user_path).await?;
+        let (repo, _repo_stop) = PlugsRepo::load(
+            Arc::clone(&big_repo),
+            blobs,
+            doc_id.clone(),
+            local_user_path,
+        )
+        .await?;
         Ok((big_repo, repo, doc_id, temp_dir))
     }
 

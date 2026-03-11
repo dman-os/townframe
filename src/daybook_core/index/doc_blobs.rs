@@ -5,6 +5,7 @@ use crate::repos::Repo;
 use daybook_types::doc::{
     BranchPath, ChangeHashSet, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag,
 };
+use sqlx::QueryBuilder;
 use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 
@@ -206,21 +207,17 @@ impl DocBlobsIndexRepo {
             serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
                 .expect(ERROR_JSON);
 
-        for hash in hashes {
-            sqlx::query(
-                r#"
-                INSERT INTO doc_blob_refs (doc_id, blob_hash, origin_heads)
-                VALUES (?1, ?2, ?3)
-                ON CONFLICT(doc_id, blob_hash)
-                DO UPDATE SET origin_heads = excluded.origin_heads
-                "#,
-            )
-            .bind(doc_id)
-            .bind(hash)
-            .bind(&serialized_heads)
-            .execute(&self.db_pool)
-            .await?;
-        }
+        let mut query_builder =
+            QueryBuilder::new("INSERT INTO doc_blob_refs (doc_id, blob_hash, origin_heads) ");
+        query_builder.push_values(hashes.iter(), |mut row, hash| {
+            row.push_bind(doc_id)
+                .push_bind(hash)
+                .push_bind(&serialized_heads);
+        });
+        query_builder.push(
+            " ON CONFLICT(doc_id, blob_hash) DO UPDATE SET origin_heads = excluded.origin_heads",
+        );
+        query_builder.build().execute(&self.db_pool).await?;
         Ok(())
     }
 

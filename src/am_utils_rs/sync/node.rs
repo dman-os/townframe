@@ -213,10 +213,23 @@ impl SyncNodeWorker {
                 let GetDocsFullRpcReq { peer, req } = inner;
                 let out = (async {
                     self.ensure_known_peer(&peer).await?;
+                    let mut allowed_partitions = self
+                        .big_repo
+                        .list_partitions_for_peer(&peer)
+                        .await
+                        .map_err(map_repo_err)?;
+                    allowed_partitions.retain(|part| {
+                        self.access_policy
+                            .can_access_partition(&peer, &part.partition_id)
+                    });
+                    let allowed_partition_ids = allowed_partitions
+                        .into_iter()
+                        .map(|part| part.partition_id)
+                        .collect::<Vec<_>>();
                     for doc_id in &req.doc_ids {
                         let allowed = self
                             .big_repo
-                            .is_doc_accessible_for_peer(&peer, doc_id)
+                            .is_doc_accessible_in_partitions(doc_id, &allowed_partition_ids)
                             .await
                             .map_err(map_repo_err)?;
                         if !allowed {
@@ -227,7 +240,7 @@ impl SyncNodeWorker {
                     }
                     let docs = self
                         .big_repo
-                        .get_docs_full_for_peer(&peer, &req.doc_ids)
+                        .get_docs_full_in_partitions(&req.doc_ids, &allowed_partition_ids)
                         .await
                         .map_err(map_repo_err)?;
                     Ok::<_, PartitionSyncError>(GetDocsFullResponse { docs })

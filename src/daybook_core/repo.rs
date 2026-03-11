@@ -221,7 +221,11 @@ impl RepoCtx {
         )
         .await?;
         if let Some(ws_connector_url) = options.ws_connector_url {
-            std::mem::drop(big_repo.spawn_ws_connector(ws_connector_url.parse()?).await?);
+            std::mem::drop(
+                big_repo
+                    .spawn_ws_connector(ws_connector_url.parse()?)
+                    .await?,
+            );
         }
 
         let doc_app_cell = tokio::sync::OnceCell::new();
@@ -451,7 +455,7 @@ fn repo_layout(repo_root: &std::path::Path) -> Res<RepoLayout> {
     })
 }
 
-async fn mark_repo_initialized(repo_root: &std::path::Path) -> Res<()> {
+pub async fn mark_repo_initialized(repo_root: &std::path::Path) -> Res<()> {
     let layout = repo_layout(repo_root)?;
     if let Some(parent) = layout.marker_path.parent() {
         tokio::fs::create_dir_all(parent).await?;

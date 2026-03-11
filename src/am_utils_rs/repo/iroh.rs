@@ -31,6 +31,7 @@ impl BigRepo {
     ) -> Res<crate::repo::RepoConnection> {
         let endpoint_id = to_addr.id;
         let repo = self.samod_repo().clone();
+        let maybe_conn: Arc<std::sync::Mutex<Option<Arc<iroh::endpoint::Connection>>>> = default();
         let dialer = IrohDialer {
             url: Url::parse(&format!(
                 "{CONN_URL_SCHEME}:{}",
@@ -40,6 +41,7 @@ impl BigRepo {
             endpoint: endpoint.clone(),
             endpoint_id,
             to_addr,
+            conn: Arc::clone(&maybe_conn),
         };
         let handle = repo
             .dial(samod::BackoffConfig::default(), Arc::new(dialer))
@@ -63,10 +65,20 @@ impl BigRepo {
                     tokio::select! {
                         _ = cancel_token.cancelled() => {
                             debug!("cancel token lit");
+                            handle.close();
+                            let cloned = maybe_conn.lock().expect(ERROR_MUTEX).clone();
+                            if let Some(conn) = cloned {
+                                conn.close(220u32.into(), b"we are shutting down");
+                            }
                             break;
                         }
                         evt = events.next() => {
                             let Some(evt) = evt else {
+                                handle.close();
+                                let cloned = maybe_conn.lock().expect(ERROR_MUTEX).clone();
+                                if let Some(conn) = cloned {
+                                    conn.close(500u32.into(), b"samod connection stream ended absruptly");
+                                }
                                 eyre::bail!(
                                     "connection stream ended befor disconnect"
                                 );
@@ -90,6 +102,11 @@ impl BigRepo {
                                 }
                                 DialerEvent::MaxRetriesReached => {
                                     info!("max retries reached, aborting");
+                                    handle.close();
+                                    let cloned = maybe_conn.lock().expect(ERROR_MUTEX).clone();
+                                    if let Some(conn) = cloned {
+                                        conn.close(500u32.into(), b"samod connection stream ended absruptly");
+                                    }
                                     if let Some(tx) = end_signal_tx {
                                         tx.send(crate::repo::ConnFinishSignal {
                                             conn_id,
@@ -108,15 +125,17 @@ impl BigRepo {
                 }
                 eyre::Ok(())
             }
+        };
+        let join_handle = tokio::spawn(
+            async {
+                fut.await.unwrap();
+            }
             .instrument(tracing::info_span!(
                 "iroh connector task",
                 peer = ?peer_info,
                 endpoint_id = ?endpoint_id,
-            ))
-        };
-        let join_handle = tokio::spawn(async {
-            fut.await.unwrap();
-        });
+            )),
+        );
 
         Ok(crate::repo::RepoConnection {
             id: conn_id,
@@ -134,8 +153,10 @@ struct IrohDialer {
     endpoint: iroh::Endpoint,
     endpoint_id: iroh::PublicKey,
     to_addr: iroh::EndpointAddr,
+    conn: Arc<std::sync::Mutex<Option<Arc<iroh::endpoint::Connection>>>>,
 }
 
+// FIXME: dialer doesn't support aborting dials
 impl Dialer for IrohDialer {
     fn url(&self) -> Url {
         self.url.clone()
@@ -153,10 +174,36 @@ impl Dialer for IrohDialer {
         let endpoint = self.endpoint.clone();
         let addr = self.to_addr.clone();
         let endpoint_id = self.endpoint_id;
+        let conn = Arc::clone(&self.conn);
         Box::pin(async move {
-            let conn = endpoint.connect(addr, BigRepo::SYNC_ALPN).await?;
-            let (tx, rx) = conn.open_bi().await?;
-            // establish your transport here, then wrap it:
+            let cloned = conn.lock().expect(ERROR_MUTEX).clone();
+            if let Some(conn) = cloned {
+                if let Some(close_reason) = conn.close_reason() {
+                    error!(?close_reason, "connection was closed");
+                    match close_reason {
+                        iroh::endpoint::ConnectionError::ApplicationClosed(application_close) => {
+                            if application_close.error_code == 220_u32.into() {
+                                warn!("the peer signalled that they're shutting down");
+                            }
+                        }
+                        iroh::endpoint::ConnectionError::LocallyClosed => {
+                            debug!("we're shutting down locally");
+                        }
+                        _ => {}
+                    }
+                } else {
+                    warn!("re-dialing on a still open connection??");
+                    let (tx, rx) = conn.open_bi().await?;
+                    return Ok(Transport::new(
+                        FramedRead::new(rx, Codec::new(endpoint_id)),
+                        FramedWrite::new(tx, Codec::new(endpoint_id)),
+                    ));
+                }
+            }
+            let new_conn = endpoint.connect(addr, BigRepo::SYNC_ALPN).await?;
+            let new_conn = Arc::new(new_conn);
+            let (tx, rx) = new_conn.open_bi().await?;
+            conn.lock().expect(ERROR_MUTEX).replace(new_conn);
             Ok(Transport::new(
                 FramedRead::new(rx, Codec::new(endpoint_id)),
                 FramedWrite::new(tx, Codec::new(endpoint_id)),
@@ -174,7 +221,7 @@ pub struct IrohRepoProtocol {
 }
 
 impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
-    #[tracing::instrument(skip(connection))]
+    #[tracing::instrument(skip(self, connection))]
     async fn accept(
         &self,
         connection: iroh::endpoint::Connection,
@@ -203,15 +250,19 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
                 FramedWrite::new(tx, Codec::new(endpoint_id)),
             ))
             .map_err(|err| {
-                Box::from(format!(
-                    "failed making samod acceptor for {endpoint_id}: {err:?}"
-                ))
+                let msg = format!("failed making samod acceptor for {endpoint_id}: {err:?}");
+                connection.close(500u32.into(), msg.as_bytes());
+                Box::from(msg)
             })
             .map_err(iroh::protocol::AcceptError::from_boxed)?;
 
         let mut events = acceptor.events();
         let event = events.next().await;
         let Some(event) = event else {
+            connection.close(
+                500u32.into(),
+                b"samod connection stream ended absruptly before connection",
+            );
             return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
                 "connection stream ended befor disconnect with {endpoint_id}"
             ))));
@@ -222,9 +273,9 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
                 peer_info,
             } => (connection_id, peer_info),
             AcceptorEvent::ClientDisconnected { reason, .. } => {
-                return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
-                    "failed on handshake with {endpoint_id}: {reason:?}"
-                ))));
+                let msg = format!("failed on samod handshake with {endpoint_id}: {reason}");
+                connection.close(500u32.into(), msg.as_bytes());
+                return Err(iroh::protocol::AcceptError::from_boxed(Box::from(msg)));
             }
         };
 
@@ -249,10 +300,12 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
 
         tokio::select! {
             _ = cancel_token.cancelled() => {
+                connection.close(220u32.into(), b"we are shutting down");
                 debug!("cancel token lit");
             }
             evt = events.next() => {
                 let Some(evt) = evt else {
+                    connection.close(500u32.into(), b"samod connection stream ended absruptly");
                     return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
                         "connection stream ended befor disconnect with {endpoint_id}"
                     ))));
@@ -262,13 +315,14 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
                         reason,
                         ..
                     } => {
+                        connection.close(200u32.into(), b"you disconnected");
                         info!(?reason, "incoming connection finished");
                         self.end_signal_tx.send(crate::repo::ConnFinishSignal {
                             conn_id,
                             peer_id,
                             reason: format!("{reason}"),
                         })
-                        .inspect_err(|_| warn!("connection owner closed before finish"))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
                         .ok();
                     },
                     AcceptorEvent::ClientConnected {..} => {

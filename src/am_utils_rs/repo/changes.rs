@@ -4,6 +4,7 @@ mod broker;
 
 use automerge::ChangeHash;
 use autosurgeon::Prop;
+use futures::future::BoxFuture;
 use samod::{DocHandle, DocumentId};
 use samod_core::ChangeOrigin;
 use std::sync::Mutex;
@@ -74,6 +75,13 @@ struct LocalListener {
     filter: LocalFilter,
     on_change: Box<dyn Fn(Vec<BigRepoLocalNotification>) + Send + Sync + 'static>,
 }
+
+type OnRemoteHeadsChanged = Arc<
+    dyn Fn(DocumentId, Vec<ChangeHash>) -> BoxFuture<'static, Res<()>>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 pub struct ChangeListenerManager {
     listeners: Arc<Mutex<Vec<ChangeListener>>>,
@@ -163,7 +171,11 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    pub async fn add_doc(&self, handle: DocHandle) -> Res<Arc<DocChangeBrokerLease>> {
+    pub async fn add_doc_with_remote_heads_callback(
+        &self,
+        handle: DocHandle,
+        on_remote_heads_changed: OnRemoteHeadsChanged,
+    ) -> Res<Arc<DocChangeBrokerLease>> {
         self.ensure_live()?;
 
         let doc_id = handle.document_id().clone();
@@ -197,6 +209,7 @@ impl ChangeListenerManager {
                             })
                         }
                     }),
+                    Arc::clone(&on_remote_heads_changed),
                 )?;
                 let lease = Arc::new(DocChangeBrokerLease {
                     handle: Arc::new(broker),
@@ -231,6 +244,7 @@ impl ChangeListenerManager {
                             })
                         }
                     }),
+                    Arc::clone(&on_remote_heads_changed),
                 )?;
                 let lease = Arc::new(DocChangeBrokerLease {
                     handle: Arc::new(broker),

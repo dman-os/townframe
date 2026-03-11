@@ -4,7 +4,7 @@ use irpc::{channel, rpc_requests};
 
 pub type PartitionId = String;
 pub type PeerKey = String;
-pub type OpaqueCursor = String;
+pub type CursorIndex = u64;
 
 pub const MAX_GET_DOCS_FULL_DOC_IDS: usize = 256;
 pub const DEFAULT_EVENT_PAGE_LIMIT: u32 = 512;
@@ -14,40 +14,40 @@ pub const DEFAULT_DOC_BATCH_LIMIT: usize = 128;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartitionSummary {
     pub partition_id: PartitionId,
-    pub latest_cursor: OpaqueCursor,
+    pub latest_cursor: CursorIndex,
     pub member_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartitionCursorRequest {
     pub partition_id: PartitionId,
-    pub since: Option<OpaqueCursor>,
+    pub since: Option<CursorIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartitionStreamCursorRequest {
     pub partition_id: PartitionId,
-    pub since_member: Option<OpaqueCursor>,
-    pub since_doc: Option<OpaqueCursor>,
+    pub since_member: Option<CursorIndex>,
+    pub since_doc: Option<CursorIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartitionCursorPage {
     pub partition_id: PartitionId,
-    pub next_cursor: Option<OpaqueCursor>,
+    pub next_cursor: Option<CursorIndex>,
     pub has_more: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartitionMemberEvent {
-    pub cursor: OpaqueCursor,
+    pub cursor: CursorIndex,
     pub partition_id: PartitionId,
     pub deets: PartitionMemberEventDeets,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartitionEvent {
-    pub cursor: OpaqueCursor,
+    pub cursor: CursorIndex,
     pub partition_id: PartitionId,
     pub deets: PartitionEventDeets,
 }
@@ -79,7 +79,7 @@ pub enum PartitionMemberEventDeets {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartitionDocEvent {
-    pub cursor: OpaqueCursor,
+    pub cursor: CursorIndex,
     pub partition_id: PartitionId,
     pub deets: PartitionDocEventDeets,
 }
@@ -160,7 +160,7 @@ pub enum SubscriptionStreamKind {
 pub enum SubscriptionItem {
     MemberEvent(PartitionMemberEvent),
     DocEvent(PartitionDocEvent),
-    SnapshotComplete { stream: SubscriptionStreamKind },
+    ReplayComplete { stream: SubscriptionStreamKind },
     Lagged { dropped: u64 },
 }
 
@@ -178,7 +178,7 @@ pub enum PartitionSyncError {
     /// access denied for partition {partition_id:?}
     AccessDenied { partition_id: PartitionId },
     /// invalid cursor {cursor:?}
-    InvalidCursor { cursor: OpaqueCursor },
+    InvalidCursor { cursor: CursorIndex },
     /// requested too many docs: requested={requested} max={max}
     TooManyDocIds { requested: usize, max: usize },
     /// unknown partition {partition_id:?}
@@ -237,30 +237,4 @@ pub enum PartitionSyncRpc {
     GetDocsFull(GetDocsFullRpcReq),
     #[rpc(tx = channel::mpsc::Sender<SubscriptionItem>)]
     SubPartitions(SubPartitionsRpcReq),
-}
-
-pub mod cursor {
-    use super::*;
-
-    pub fn from_txid(txid: u64) -> String {
-        utils_rs::hash::encode_base58_multibase(txid.to_be_bytes())
-    }
-
-    pub fn to_txid(val: &str) -> Res<u64> {
-        let raw = utils_rs::hash::decode_base58_multibase(val)
-            .wrap_err_with(|| format!("invalid cursor encoding '{}'", val))?;
-        let raw: [u8; 8] = raw
-            .as_slice()
-            .try_into()
-            .map_err(|_| ferr!("invalid cursor byte length: expected 8 got {}", raw.len()))?;
-        Ok(u64::from_be_bytes(raw))
-    }
-
-    #[test]
-    fn cursor_roundtrip() {
-        let raw = 42_u64;
-        let enc = from_txid(raw);
-        let dec = to_txid(&enc).unwrap();
-        assert_eq!(raw, dec);
-    }
 }

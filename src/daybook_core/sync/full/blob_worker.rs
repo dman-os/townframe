@@ -55,25 +55,45 @@ pub fn spawn_blob_sync_worker(
                         reason: "invalid hash".to_string(),
                     })
                     .await;
-                worker.request_backoff(Duration::from_secs(5));
                 return;
             }
         };
 
-        let has_in_store = worker
-            .blobs_repo
-            .iroh_store()
-            .blobs()
-            .has(iroh_hash)
-            .await
-            .unwrap_or(false);
+        let has_in_store = match worker.blobs_repo.iroh_store().blobs().has(iroh_hash).await {
+            Ok(has) => has,
+            Err(err) => {
+                tracing::warn!(?err, hash = %worker.hash, "error checking iroh blob store");
+                worker
+                    .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                        partition: PartitionKey::DocBlobsFullSync,
+                        hash: worker.hash.clone(),
+                        success: false,
+                        reason: "iroh store lookup failed".to_string(),
+                    })
+                    .await;
+                worker.request_backoff(Duration::from_secs(2));
+                return;
+            }
+        };
 
-        if worker
-            .blobs_repo
-            .has_hash(&worker.hash)
-            .await
-            .unwrap_or(false)
-        {
+        let has_local_hash = match worker.blobs_repo.has_hash(&worker.hash).await {
+            Ok(has) => has,
+            Err(err) => {
+                tracing::warn!(?err, hash = %worker.hash, "error checking local blob presence");
+                worker
+                    .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                        partition: PartitionKey::DocBlobsFullSync,
+                        hash: worker.hash.clone(),
+                        success: false,
+                        reason: "local blob lookup failed".to_string(),
+                    })
+                    .await;
+                worker.request_backoff(Duration::from_secs(2));
+                return;
+            }
+        };
+
+        if has_local_hash {
             worker.mark_synced(None);
             worker
                 .send_progress(SyncProgressMsg::BlobWorkerFinished {
@@ -290,6 +310,8 @@ impl BlobSyncWorker {
     }
 
     async fn send_progress(&self, msg: SyncProgressMsg) {
-        self.sync_progress_tx.send(msg).await.unwrap_or_log();
+        if let Err(err) = self.sync_progress_tx.try_send(msg) {
+            tracing::debug!(?err, hash = %self.hash, "dropping blob worker progress message");
+        }
     }
 }

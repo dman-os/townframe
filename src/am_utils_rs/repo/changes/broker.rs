@@ -3,6 +3,7 @@ use crate::interlude::*;
 use crate::repo::changes::{BigRepoChangeNotification, DocIdFilter};
 
 use automerge::ChangeHash;
+use futures::future::BoxFuture;
 use samod::{DocHandle, DocumentId};
 use samod_core::ChangeOrigin;
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -45,6 +46,12 @@ struct HeadListener {
 }
 
 type HasCandidateListener = Arc<dyn Fn(&DocumentId, &ChangeOrigin) -> bool + Send + Sync + 'static>;
+type OnRemoteHeadsChanged = Arc<
+    dyn Fn(DocumentId, Vec<ChangeHash>) -> BoxFuture<'static, Res<()>>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 enum BrokerMsg {
     AddHeadListener {
@@ -82,6 +89,7 @@ pub fn spawn_doc_listener(
     cancel_token: CancellationToken,
     change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
     has_candidate_listener: HasCandidateListener,
+    on_remote_heads_changed: OnRemoteHeadsChanged,
 ) -> Res<(DocChangeBrokerHandle, DocChangeBrokerStopToken)> {
     let doc_id = handle.document_id().clone();
 
@@ -99,6 +107,7 @@ pub fn spawn_doc_listener(
                 change_tx,
                 cancel_token,
                 has_candidate_listener,
+                on_remote_heads_changed,
             };
 
             let mut doc_change_stream = handle.changes();
@@ -147,6 +156,7 @@ struct DocChangeBroker {
     change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
     cancel_token: CancellationToken,
     has_candidate_listener: HasCandidateListener,
+    on_remote_heads_changed: OnRemoteHeadsChanged,
 }
 
 impl DocChangeBroker {
@@ -177,6 +187,7 @@ impl DocChangeBroker {
         if matches!(changes.origin, ChangeOrigin::Bootstrap) {
             return Ok(());
         }
+        let doc_id = self.handle.document_id().clone();
         let new_heads: Arc<[ChangeHash]> = Arc::from(&changes.new_heads[..]);
         self.heads_listeners
             .lock()
@@ -196,6 +207,9 @@ impl DocChangeBroker {
                     }
                 },
             );
+        if matches!(changes.origin, ChangeOrigin::Remote { .. }) {
+            (self.on_remote_heads_changed)(doc_id.clone(), changes.new_heads.clone()).await?;
+        }
         if !(self.has_candidate_listener)(self.handle.document_id(), &changes.origin) {
             return Ok(());
         }
@@ -206,7 +220,7 @@ impl DocChangeBroker {
                 .map(|patch| {
                     let patch = Arc::new(patch);
                     BigRepoChangeNotification::DocChanged {
-                        doc_id: self.handle.document_id().clone(),
+                        doc_id: doc_id.clone(),
                         patch,
                         heads: Arc::clone(&new_heads),
                         origin: changes.origin.clone(),

@@ -536,19 +536,20 @@ dependencies = [
 [[package]]
 name = "autosurgeon"
 version = "0.10.1"
-source = "git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006#28d9b6db96f09a34967a0941950f6753fd73a006"
+source = "git+https://github.com/dman-os/autosurgeon?rev=2896663de0e23f789cffe8e98bbbcbcbf21f23ad#2896663de0e23f789cffe8e98bbbcbcbf21f23ad"
 dependencies = [
  "automerge",
  "autosurgeon-derive",
+ "pastey",
  "similar",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
  "uuid",
 ]
 
 [[package]]
 name = "autosurgeon-derive"
 version = "0.10.1"
-source = "git+https://github.com/dman-os/autosurgeon?rev=28d9b6db96f09a34967a0941950f6753fd73a006#28d9b6db96f09a34967a0941950f6753fd73a006"
+source = "git+https://github.com/dman-os/autosurgeon?rev=2896663de0e23f789cffe8e98bbbcbcbf21f23ad#2896663de0e23f789cffe8e98bbbcbcbf21f23ad"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8325,7 +8326,7 @@ dependencies = [
 [[package]]
 name = "samod"
 version = "0.8.0"
-source = "git+https://github.com/dman-os/samod?rev=13f5dc6207e3138e49f9ea688165585f793eee31#13f5dc6207e3138e49f9ea688165585f793eee31"
+source = "git+https://github.com/dman-os/samod?rev=cbd70b59f693b625a02f7a387ccc65eab1c81692#cbd70b59f693b625a02f7a387ccc65eab1c81692"
 dependencies = [
  "async-channel",
  "automerge",
@@ -8347,7 +8348,7 @@ dependencies = [
 [[package]]
 name = "samod-core"
 version = "0.8.0"
-source = "git+https://github.com/dman-os/samod?rev=13f5dc6207e3138e49f9ea688165585f793eee31#13f5dc6207e3138e49f9ea688165585f793eee31"
+source = "git+https://github.com/dman-os/samod?rev=cbd70b59f693b625a02f7a387ccc65eab1c81692#cbd70b59f693b625a02f7a387ccc65eab1c81692"
 dependencies = [
  "automerge",
  "base64 0.21.7",
@@ -12544,12 +12545,17 @@ dependencies = [
  "heck",
  "http",
  "indenter",
+ "iroh",
+ "irpc",
+ "irpc-iroh",
  "libsqlite3-sys",
  "mltools",
  "ollama-rs",
+ "serde",
  "sqlite-vec",
  "sqlx",
  "tokio",
+ "tracing",
  "utils_rs",
 ]
 

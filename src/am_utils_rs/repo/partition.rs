@@ -1,15 +1,17 @@
 use crate::interlude::*;
 
-use sqlx::Row;
+use sqlx::{QueryBuilder, Row};
+use std::collections::HashMap;
+use std::str::FromStr;
 
 use crate::repo::BigRepo;
 use crate::sync::{
-    cursor, FullDoc, GetPartitionDocEventsRequest, GetPartitionDocEventsResponse,
+    FullDoc, GetPartitionDocEventsRequest, GetPartitionDocEventsResponse,
     GetPartitionMemberEventsRequest, GetPartitionMemberEventsResponse, PartitionCursorPage,
     PartitionCursorRequest, PartitionDocEvent, PartitionDocEventDeets, PartitionEvent,
     PartitionEventDeets, PartitionId, PartitionMemberEvent, PartitionMemberEventDeets,
     PartitionSummary, PartitionSyncError, PeerKey, SubPartitionsRequest, SubscriptionItem,
-    SubscriptionStreamKind, MAX_GET_DOCS_FULL_DOC_IDS,
+    SubscriptionStreamKind, DEFAULT_EVENT_PAGE_LIMIT, MAX_GET_DOCS_FULL_DOC_IDS,
 };
 
 const META_NEXT_TXID_KEY: &str = "next_txid";
@@ -95,6 +97,16 @@ impl BigRepo {
     }
 
     pub async fn add_doc_to_partition(&self, partition_id: &PartitionId, doc_id: &str) -> Res<()> {
+        let existing_present: Option<i64> = sqlx::query_scalar(
+            "SELECT present FROM partition_membership_state WHERE partition_id = ? AND doc_id = ?",
+        )
+        .bind(partition_id)
+        .bind(doc_id)
+        .fetch_optional(&self.state_pool)
+        .await?;
+        if existing_present == Some(1) {
+            return Ok(());
+        }
         let mut tx = self.state_pool.begin().await?;
         let membership_txid = alloc_txid(tx.as_mut()).await?;
         sqlx::query(
@@ -116,53 +128,54 @@ impl BigRepo {
         .execute(&mut *tx)
         .await?;
 
-        let mut initial_doc_event: Option<(u64, Vec<String>, u64)> = None;
-        if let Some((heads_json, change_count_hint)) = sqlx::query_as::<_, (String, i64)>(
+        let doc_ver_row = sqlx::query_as::<_, (String, i64)>(
             "SELECT latest_heads_json, change_count_hint FROM doc_version_state WHERE doc_id = ?",
         )
         .bind(doc_id)
         .fetch_optional(&mut *tx)
-        .await?
-        {
-            let doc_txid = alloc_txid(tx.as_mut()).await?;
-            sqlx::query(
-                r#"
-                INSERT INTO partition_doc_state(
-                    partition_id, doc_id, deleted, latest_txid
-                ) VALUES(?, ?, 0, ?)
-                ON CONFLICT(partition_id, doc_id) DO UPDATE SET
-                    deleted = 0,
-                    latest_txid = excluded.latest_txid
-                "#,
+        .await?;
+        let doc_txid = alloc_txid(tx.as_mut()).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO partition_doc_state(
+                partition_id, doc_id, deleted, latest_txid
+            ) VALUES(?, ?, 0, ?)
+            ON CONFLICT(partition_id, doc_id) DO UPDATE SET
+                deleted = 0,
+                latest_txid = excluded.latest_txid
+            "#,
+        )
+        .bind(partition_id)
+        .bind(doc_id)
+        .bind(doc_txid as i64)
+        .execute(&mut *tx)
+        .await?;
+        let (heads, change_count_hint) = if let Some((heads_json, change_count_hint)) = doc_ver_row {
+            (
+                serde_json::from_str::<Vec<String>>(&heads_json)?,
+                change_count_hint.max(0) as u64,
             )
-            .bind(partition_id)
-            .bind(doc_id)
-            .bind(doc_txid as i64)
-            .execute(&mut *tx)
-            .await?;
-            let heads: Vec<String> = serde_json::from_str(&heads_json)?;
-            initial_doc_event = Some((doc_txid, heads, change_count_hint.max(0) as u64));
-        }
+        } else {
+            (Vec::new(), 0)
+        };
         tx.commit().await?;
 
         let _ = self.partition_events_tx.send(PartitionEvent {
-            cursor: cursor::from_txid(membership_txid),
+            cursor: membership_txid,
             partition_id: partition_id.clone(),
             deets: PartitionEventDeets::MemberUpsert {
                 doc_id: doc_id.to_owned(),
             },
         });
-        if let Some((doc_txid, heads, change_count_hint)) = initial_doc_event {
-            let _ = self.partition_events_tx.send(PartitionEvent {
-                cursor: cursor::from_txid(doc_txid),
-                partition_id: partition_id.clone(),
-                deets: PartitionEventDeets::DocChanged {
-                    doc_id: doc_id.to_owned(),
-                    heads,
-                    change_count_hint,
-                },
-            });
-        }
+        let _ = self.partition_events_tx.send(PartitionEvent {
+            cursor: doc_txid,
+            partition_id: partition_id.clone(),
+            deets: PartitionEventDeets::DocChanged {
+                doc_id: doc_id.to_owned(),
+                heads,
+                change_count_hint,
+            },
+        });
         Ok(())
     }
 
@@ -171,6 +184,16 @@ impl BigRepo {
         partition_id: &PartitionId,
         doc_id: &str,
     ) -> Res<()> {
+        let existing_present: Option<i64> = sqlx::query_scalar(
+            "SELECT present FROM partition_membership_state WHERE partition_id = ? AND doc_id = ?",
+        )
+        .bind(partition_id)
+        .bind(doc_id)
+        .fetch_optional(&self.state_pool)
+        .await?;
+        if existing_present != Some(1) {
+            return Ok(());
+        }
         let mut tx = self.state_pool.begin().await?;
         let membership_txid = alloc_txid(tx.as_mut()).await?;
         sqlx::query(
@@ -212,7 +235,7 @@ impl BigRepo {
         tx.commit().await?;
 
         let _ = self.partition_events_tx.send(PartitionEvent {
-            cursor: cursor::from_txid(membership_txid),
+            cursor: membership_txid,
             partition_id: partition_id.clone(),
             deets: PartitionEventDeets::MemberRemoved {
                 doc_id: doc_id.to_owned(),
@@ -220,7 +243,7 @@ impl BigRepo {
         });
         if let Some((doc_txid, change_count_hint)) = doc_deleted_event {
             let _ = self.partition_events_tx.send(PartitionEvent {
-                cursor: cursor::from_txid(doc_txid),
+                cursor: doc_txid,
                 partition_id: partition_id.clone(),
                 deets: PartitionEventDeets::DocDeleted {
                     doc_id: doc_id.to_owned(),
@@ -300,7 +323,7 @@ impl BigRepo {
         tx.commit().await?;
         for (partition_id, txid) in emitted {
             let _ = self.partition_events_tx.send(PartitionEvent {
-                cursor: cursor::from_txid(txid),
+                cursor: txid,
                 partition_id,
                 deets: PartitionEventDeets::DocChanged {
                     doc_id: doc_id.clone(),
@@ -377,7 +400,7 @@ impl BigRepo {
                 let latest_txid: i64 = row.try_get("latest_txid")?;
                 eyre::Ok(PartitionSummary {
                     partition_id,
-                    latest_cursor: cursor::from_txid(latest_txid.max(0) as u64),
+                    latest_cursor: latest_txid.max(0) as u64,
                     member_count: member_count.max(0) as u64,
                 })
             })
@@ -430,10 +453,10 @@ impl BigRepo {
         Ok(GetPartitionDocEventsResponse { events, cursors })
     }
 
-    pub async fn get_docs_full_for_peer(
+    pub async fn get_docs_full_in_partitions(
         &self,
-        _peer: &PeerKey,
         doc_ids: &[String],
+        allowed_partitions: &[PartitionId],
     ) -> Res<Vec<FullDoc>> {
         if doc_ids.len() > MAX_GET_DOCS_FULL_DOC_IDS {
             return Err(PartitionSyncError::TooManyDocIds {
@@ -442,35 +465,79 @@ impl BigRepo {
             }
             .into_report());
         }
-        let mut out = Vec::new();
-        for doc_id in doc_ids {
-            let is_member: i64 = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM partition_membership_state WHERE doc_id = ? AND present = 1)",
-            )
-            .bind(doc_id)
-            .fetch_one(&self.state_pool)
-            .await?;
-            if is_member != 1 {
-                continue;
+
+        let mut dedup = HashSet::new();
+        let requested_doc_ids: Vec<String> = doc_ids
+            .iter()
+            .filter(|doc_id| dedup.insert((*doc_id).clone()))
+            .cloned()
+            .collect();
+
+        use futures::StreamExt;
+        let rows = futures::stream::iter(requested_doc_ids.into_iter().map(|doc_id| async move {
+            if !self
+                .is_doc_accessible_in_partitions(&doc_id, allowed_partitions)
+                .await?
+            {
+                return Ok(None);
             }
-            let Some(handle) = self.handle_cache.get(doc_id) else {
-                continue;
+            let parsed = match samod::DocumentId::from_str(&doc_id) {
+                Ok(val) => val,
+                Err(_) => return Ok(None),
             };
-            let bytes = handle.with_document(|doc| doc.save());
-            out.push(FullDoc {
-                doc_id: doc_id.clone(),
-                automerge_save: bytes,
-            });
+            let contains = self
+                .repo
+                .local_contains_document(parsed.clone())
+                .await
+                .map_err(|err| ferr!("failed checking local doc presence: {err}"))?;
+            if !contains {
+                return Ok(None);
+            }
+            let doc = self
+                .repo
+                .local_export(parsed)
+                .await
+                .map_err(|err| ferr!("failed local-exporting doc: {err}"))?;
+            Ok(Some(FullDoc {
+                doc_id,
+                automerge_save: doc.save(),
+            }))
+        }))
+        .buffer_unordered(16)
+        .collect::<Vec<Res<Option<FullDoc>>>>()
+        .await;
+
+        let mut out = Vec::new();
+        for row in rows {
+            if let Some(doc) = row? {
+                out.push(doc);
+            }
         }
         Ok(out)
     }
 
-    pub async fn is_doc_accessible_for_peer(&self, _peer: &PeerKey, doc_id: &str) -> Res<bool> {
-        let exists: i64 =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM partition_membership_state WHERE doc_id = ? AND present = 1)")
-                .bind(doc_id)
-                .fetch_one(&self.state_pool)
-                .await?;
+    pub async fn is_doc_accessible_in_partitions(
+        &self,
+        doc_id: &str,
+        allowed_partitions: &[PartitionId],
+    ) -> Res<bool> {
+        if allowed_partitions.is_empty() {
+            return Ok(false);
+        }
+        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT EXISTS(SELECT 1 FROM partition_membership_state WHERE doc_id = ",
+        );
+        query.push_bind(doc_id);
+        query.push(" AND present = 1 AND partition_id IN (");
+        let mut separated = query.separated(", ");
+        for partition_id in allowed_partitions {
+            separated.push_bind(partition_id);
+        }
+        separated.push_unseparated("))");
+        let exists: i64 = query
+            .build_query_scalar()
+            .fetch_one(&self.state_pool)
+            .await?;
         Ok(exists == 1)
     }
 
@@ -481,106 +548,152 @@ impl BigRepo {
         capacity: usize,
     ) -> Res<tokio::sync::mpsc::Receiver<SubscriptionItem>> {
         let mut live_rx = self.partition_events_tx.subscribe();
-        let member_req = GetPartitionMemberEventsRequest {
-            partitions: reqs
-                .partitions
-                .iter()
-                .map(|item| PartitionCursorRequest {
-                    partition_id: item.partition_id.clone(),
-                    since: item.since_member.clone(),
-                })
-                .collect(),
-            limit: u32::MAX,
-        };
-        let doc_req = GetPartitionDocEventsRequest {
-            partitions: reqs
-                .partitions
-                .iter()
-                .map(|item| PartitionCursorRequest {
-                    partition_id: item.partition_id.clone(),
-                    since: item.since_doc.clone(),
-                })
-                .collect(),
-            limit: u32::MAX,
-        };
-        let replay_members = self
-            .get_partition_member_events_for_peer(peer, &member_req)
-            .await?;
-        let replay_docs = self
-            .get_partition_doc_events_for_peer(peer, &doc_req)
-            .await?;
-        let member_high_watermark = replay_members
-            .events
+        let mut member_parts: Vec<PartitionCursorRequest> = reqs
+            .partitions
             .iter()
-            .filter_map(|event| cursor::to_txid(&event.cursor).ok())
-            .max()
-            .unwrap_or(0);
-        let doc_high_watermark = replay_docs
-            .events
+            .map(|item| PartitionCursorRequest {
+                partition_id: item.partition_id.clone(),
+                since: item.since_member,
+            })
+            .collect();
+        let mut doc_parts: Vec<PartitionCursorRequest> = reqs
+            .partitions
             .iter()
-            .filter_map(|event| cursor::to_txid(&event.cursor).ok())
-            .max()
-            .unwrap_or(0);
+            .map(|item| PartitionCursorRequest {
+                partition_id: item.partition_id.clone(),
+                since: item.since_doc,
+            })
+            .collect();
         let requested: HashSet<PartitionId> = reqs
             .partitions
             .iter()
             .map(|item| item.partition_id.clone())
             .collect();
         let (tx, rx) = tokio::sync::mpsc::channel(capacity.max(1));
-        tokio::spawn(async move {
+        let mut member_high_watermark: HashMap<PartitionId, u64> = reqs
+            .partitions
+            .iter()
+            .map(|item| (item.partition_id.clone(), item.since_member.unwrap_or_default()))
+            .collect();
+        loop {
+            let replay_members = self
+                .get_partition_member_events_for_peer(
+                    peer,
+                    &GetPartitionMemberEventsRequest {
+                        partitions: member_parts.clone(),
+                        limit: DEFAULT_EVENT_PAGE_LIMIT,
+                    },
+                )
+                .await?;
             for event in replay_members.events {
+                let entry = member_high_watermark
+                    .entry(event.partition_id.clone())
+                    .or_default();
+                *entry = (*entry).max(event.cursor);
                 if tx.send(SubscriptionItem::MemberEvent(event)).await.is_err() {
-                    return;
+                    return Ok(rx);
                 }
             }
-            if tx
-                .send(SubscriptionItem::SnapshotComplete {
-                    stream: SubscriptionStreamKind::Member,
-                })
-                .await
-                .is_err()
-            {
-                return;
+            let mut any_more = false;
+            for cursor_page in replay_members.cursors {
+                let Some(part) = member_parts
+                    .iter_mut()
+                    .find(|part| part.partition_id == cursor_page.partition_id)
+                else {
+                    continue;
+                };
+                part.since = cursor_page.next_cursor.or(part.since);
+                any_more |= cursor_page.has_more;
             }
+            if !any_more {
+                break;
+            }
+        }
+        if tx
+            .send(SubscriptionItem::ReplayComplete {
+                stream: SubscriptionStreamKind::Member,
+            })
+            .await
+            .is_err()
+        {
+            return Ok(rx);
+        }
+        let mut doc_high_watermark: HashMap<PartitionId, u64> = reqs
+            .partitions
+            .iter()
+            .map(|item| (item.partition_id.clone(), item.since_doc.unwrap_or_default()))
+            .collect();
+        loop {
+            let replay_docs = self
+                .get_partition_doc_events_for_peer(
+                    peer,
+                    &GetPartitionDocEventsRequest {
+                        partitions: doc_parts.clone(),
+                        limit: DEFAULT_EVENT_PAGE_LIMIT,
+                    },
+                )
+                .await?;
             for event in replay_docs.events {
+                let entry = doc_high_watermark
+                    .entry(event.partition_id.clone())
+                    .or_default();
+                *entry = (*entry).max(event.cursor);
                 if tx.send(SubscriptionItem::DocEvent(event)).await.is_err() {
-                    return;
+                    return Ok(rx);
                 }
             }
-            if tx
-                .send(SubscriptionItem::SnapshotComplete {
-                    stream: SubscriptionStreamKind::Doc,
-                })
-                .await
-                .is_err()
-            {
-                return;
+            let mut any_more = false;
+            for cursor_page in replay_docs.cursors {
+                let Some(part) = doc_parts
+                    .iter_mut()
+                    .find(|part| part.partition_id == cursor_page.partition_id)
+                else {
+                    continue;
+                };
+                part.since = cursor_page.next_cursor.or(part.since);
+                any_more |= cursor_page.has_more;
             }
+            if !any_more {
+                break;
+            }
+        }
+        if tx
+            .send(SubscriptionItem::ReplayComplete {
+                stream: SubscriptionStreamKind::Doc,
+            })
+            .await
+            .is_err()
+        {
+            return Ok(rx);
+        }
+        tokio::spawn(async move {
             // FIXME: this will error on lagged, not just on closed
             loop {
                 let event = match live_rx.recv().await {
                     Ok(event) => event,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
-                        let _ = tx.send(SubscriptionItem::Lagged { dropped }).await;
+                        if tx.send(SubscriptionItem::Lagged { dropped }).await.is_err() {
+                            return;
+                        }
                         return;
                     }
                 };
                 if !requested.contains(&event.partition_id) {
                     continue;
                 }
-                let Ok(txid) = cursor::to_txid(&event.cursor) else {
-                    continue;
-                };
+                let txid = event.cursor;
+                let partition_id = event.partition_id.clone();
                 match event.deets {
                     PartitionEventDeets::MemberUpsert { doc_id } => {
-                        if txid <= member_high_watermark {
+                        let high_watermark = *member_high_watermark.get(&partition_id).unwrap_or(&0);
+                        if txid <= high_watermark {
                             continue;
                         }
                         if tx
                             .send(SubscriptionItem::MemberEvent(PartitionMemberEvent {
                                 cursor: event.cursor,
-                                partition_id: event.partition_id,
+                                partition_id: partition_id.clone(),
                                 deets: PartitionMemberEventDeets::MemberUpsert { doc_id },
                             }))
                             .await
@@ -588,15 +701,17 @@ impl BigRepo {
                         {
                             return;
                         }
+                        member_high_watermark.insert(partition_id, txid);
                     }
                     PartitionEventDeets::MemberRemoved { doc_id } => {
-                        if txid <= member_high_watermark {
+                        let high_watermark = *member_high_watermark.get(&partition_id).unwrap_or(&0);
+                        if txid <= high_watermark {
                             continue;
                         }
                         if tx
                             .send(SubscriptionItem::MemberEvent(PartitionMemberEvent {
                                 cursor: event.cursor,
-                                partition_id: event.partition_id,
+                                partition_id: partition_id.clone(),
                                 deets: PartitionMemberEventDeets::MemberRemoved { doc_id },
                             }))
                             .await
@@ -604,19 +719,21 @@ impl BigRepo {
                         {
                             return;
                         }
+                        member_high_watermark.insert(partition_id, txid);
                     }
                     PartitionEventDeets::DocChanged {
                         doc_id,
                         heads,
                         change_count_hint,
                     } => {
-                        if txid <= doc_high_watermark {
+                        let high_watermark = *doc_high_watermark.get(&partition_id).unwrap_or(&0);
+                        if txid <= high_watermark {
                             continue;
                         }
                         if tx
                             .send(SubscriptionItem::DocEvent(PartitionDocEvent {
                                 cursor: event.cursor,
-                                partition_id: event.partition_id,
+                                partition_id: partition_id.clone(),
                                 deets: PartitionDocEventDeets::DocChanged {
                                     doc_id,
                                     heads,
@@ -628,18 +745,20 @@ impl BigRepo {
                         {
                             return;
                         }
+                        doc_high_watermark.insert(partition_id, txid);
                     }
                     PartitionEventDeets::DocDeleted {
                         doc_id,
                         change_count_hint,
                     } => {
-                        if txid <= doc_high_watermark {
+                        let high_watermark = *doc_high_watermark.get(&partition_id).unwrap_or(&0);
+                        if txid <= high_watermark {
                             continue;
                         }
                         if tx
                             .send(SubscriptionItem::DocEvent(PartitionDocEvent {
                                 cursor: event.cursor,
-                                partition_id: event.partition_id,
+                                partition_id: partition_id.clone(),
                                 deets: PartitionDocEventDeets::DocDeleted {
                                     doc_id,
                                     change_count_hint,
@@ -650,6 +769,7 @@ impl BigRepo {
                         {
                             return;
                         }
+                        doc_high_watermark.insert(partition_id, txid);
                     }
                 }
             }
@@ -700,229 +820,180 @@ async fn load_member_partition_page(
     pool: &sqlx::SqlitePool,
     req: &PartitionCursorRequest,
     limit: usize,
-) -> Res<(Vec<PartitionMemberEvent>, Option<String>, bool)> {
-    match &req.since {
-        Some(cursor) => {
-            let since_txid =
-                cursor::to_txid(cursor).map_err(|_| PartitionSyncError::InvalidCursor {
-                    cursor: cursor.clone(),
-                })?;
-            let rows = sqlx::query(
-                "SELECT latest_txid AS txid, doc_id, present FROM partition_membership_state WHERE partition_id = ? AND latest_txid > ? ORDER BY latest_txid LIMIT ?",
+) -> Res<(Vec<PartitionMemberEvent>, Option<u64>, bool)> {
+    let rows = if let Some(since) = req.since {
+        sqlx::query(
+            r#"
+            SELECT txid, doc_id, kind FROM (
+                SELECT added_at_txid AS txid, doc_id, 1 AS kind
+                FROM partition_membership_state
+                WHERE partition_id = ? AND added_at_txid IS NOT NULL AND added_at_txid > ?
+                UNION ALL
+                SELECT removed_at_txid AS txid, doc_id, 0 AS kind
+                FROM partition_membership_state
+                WHERE partition_id = ? AND removed_at_txid IS NOT NULL AND removed_at_txid > ?
             )
-            .bind(&req.partition_id)
-            .bind(since_txid as i64)
-            .bind((limit + 1) as i64)
-            .fetch_all(pool)
-            .await?;
-            let has_more = rows.len() > limit;
-            let rows = rows.into_iter().take(limit).collect::<Vec<_>>();
-            let events = rows
-                .iter()
-                .map(|row| -> Res<PartitionMemberEvent> {
-                    let txid: i64 = row.try_get("txid")?;
-                    let doc_id: String = row.try_get("doc_id")?;
-                    let present: i64 = row.try_get("present")?;
-                    let deets = match present {
-                        1 => PartitionMemberEventDeets::MemberUpsert { doc_id },
-                        0 => PartitionMemberEventDeets::MemberRemoved { doc_id },
-                        other => eyre::bail!("invalid membership present flag '{other}'"),
-                    };
-                    Ok(PartitionMemberEvent {
-                        cursor: cursor::from_txid(txid.max(0) as u64),
-                        partition_id: req.partition_id.clone(),
-                        deets,
-                    })
-                })
-                .collect::<Res<Vec<_>>>()?;
-            let next_cursor = events.last().map(|item| item.cursor.clone());
-            Ok((events, next_cursor, has_more))
-        }
-        None => {
-            let latest_txid: i64 = sqlx::query_scalar(
-                r#"
-                SELECT COALESCE(MAX(txid), 0) FROM (
-                    SELECT latest_txid AS txid FROM partition_membership_state WHERE partition_id = ?
-                    UNION ALL
-                    SELECT latest_txid AS txid FROM partition_doc_state WHERE partition_id = ?
-                )
-                "#,
-            )
-            .bind(&req.partition_id)
-            .bind(&req.partition_id)
-            .fetch_one(pool)
-            .await?;
-            let snapshot_cursor = cursor::from_txid(latest_txid.max(0) as u64);
-            let rows = sqlx::query(
-                "SELECT doc_id FROM partition_membership_state WHERE partition_id = ? AND present = 1 ORDER BY doc_id LIMIT ?",
-            )
-            .bind(&req.partition_id)
-            .bind((limit + 1) as i64)
-            .fetch_all(pool)
-            .await?;
-            let has_more = rows.len() > limit;
-            let rows = rows.into_iter().take(limit).collect::<Vec<_>>();
-            let events = rows
-                .into_iter()
-                .map(|row| -> Res<PartitionMemberEvent> {
-                    let doc_id: String = row.try_get("doc_id")?;
-                    Ok(PartitionMemberEvent {
-                        cursor: snapshot_cursor.clone(),
-                        partition_id: req.partition_id.clone(),
-                        deets: PartitionMemberEventDeets::MemberUpsert { doc_id },
-                    })
-                })
-                .collect::<Res<Vec<_>>>()?;
-            let next_cursor = if events.is_empty() {
-                None
-            } else {
-                Some(snapshot_cursor)
+            ORDER BY txid, doc_id, kind
+            LIMIT ?
+            "#,
+        )
+        .bind(&req.partition_id)
+        .bind(since as i64)
+        .bind(&req.partition_id)
+        .bind(since as i64)
+        .bind((limit + 1) as i64)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT COALESCE(added_at_txid, latest_txid) AS txid, doc_id, 1 AS kind
+            FROM partition_membership_state
+            WHERE partition_id = ? AND present = 1
+            ORDER BY txid, doc_id
+            LIMIT ?
+            "#,
+        )
+        .bind(&req.partition_id)
+        .bind((limit + 1) as i64)
+        .fetch_all(pool)
+        .await?
+    };
+
+    let has_more = rows.len() > limit;
+    let rows = rows.into_iter().take(limit).collect::<Vec<_>>();
+    let events = rows
+        .into_iter()
+        .map(|row| -> Res<PartitionMemberEvent> {
+            let txid: i64 = row.try_get("txid")?;
+            let doc_id: String = row.try_get("doc_id")?;
+            let kind: i64 = row.try_get("kind")?;
+            let deets = match kind {
+                1 => PartitionMemberEventDeets::MemberUpsert { doc_id },
+                0 => PartitionMemberEventDeets::MemberRemoved { doc_id },
+                other => eyre::bail!("invalid membership kind '{other}'"),
             };
-            Ok((events, next_cursor, has_more))
-        }
-    }
+            Ok(PartitionMemberEvent {
+                cursor: txid.max(0) as u64,
+                partition_id: req.partition_id.clone(),
+                deets,
+            })
+        })
+        .collect::<Res<Vec<_>>>()?;
+    let next_cursor = events.last().map(|item| item.cursor);
+    Ok((events, next_cursor, has_more))
 }
 
 async fn load_doc_partition_page(
     pool: &sqlx::SqlitePool,
     req: &PartitionCursorRequest,
     limit: usize,
-) -> Res<(Vec<PartitionDocEvent>, Option<String>, bool)> {
-    match &req.since {
-        Some(cursor) => {
-            let since_txid =
-                cursor::to_txid(cursor).map_err(|_| PartitionSyncError::InvalidCursor {
-                    cursor: cursor.clone(),
-                })?;
-            let rows = sqlx::query(
-                r#"
-                SELECT
-                    ds.latest_txid AS txid,
-                    ds.doc_id AS doc_id,
-                    ds.deleted AS deleted,
-                    dv.latest_heads_json AS heads_json,
-                    COALESCE(dv.change_count_hint, 0) AS change_count_hint
-                FROM partition_doc_state ds
-                LEFT JOIN doc_version_state dv ON dv.doc_id = ds.doc_id
-                WHERE ds.partition_id = ? AND ds.latest_txid > ?
-                ORDER BY ds.latest_txid
-                LIMIT ?
-                "#,
-            )
-            .bind(&req.partition_id)
-            .bind(since_txid as i64)
-            .bind((limit + 1) as i64)
-            .fetch_all(pool)
-            .await?;
-            let has_more = rows.len() > limit;
-            let rows = rows.into_iter().take(limit).collect::<Vec<_>>();
-            let events = rows
-                .iter()
-                .map(|row| -> Res<PartitionDocEvent> {
-                    let txid: i64 = row.try_get("txid")?;
-                    let doc_id: String = row.try_get("doc_id")?;
-                    let heads_json: Option<String> = row.try_get("heads_json")?;
-                    let change_count_hint: i64 = row.try_get("change_count_hint")?;
-                    let deleted: i64 = row.try_get("deleted")?;
-                    let deets = match deleted {
-                        0 => PartitionDocEventDeets::DocChanged {
-                            doc_id,
-                            heads: serde_json::from_str(heads_json.as_deref().unwrap_or("[]"))?,
-                            change_count_hint: change_count_hint.max(0) as u64,
-                        },
-                        1 => PartitionDocEventDeets::DocDeleted {
-                            doc_id,
-                            change_count_hint: change_count_hint.max(0) as u64,
-                        },
-                        other => eyre::bail!("invalid deleted flag '{other}'"),
-                    };
-                    Ok(PartitionDocEvent {
-                        cursor: cursor::from_txid(txid.max(0) as u64),
-                        partition_id: req.partition_id.clone(),
-                        deets,
-                    })
-                })
-                .collect::<Res<Vec<_>>>()?;
-            let next_cursor = events.last().map(|item| item.cursor.clone());
-            Ok((events, next_cursor, has_more))
-        }
-        None => {
-            let latest_txid: i64 = sqlx::query_scalar(
-                r#"
-                SELECT COALESCE(MAX(txid), 0) FROM (
-                    SELECT latest_txid AS txid FROM partition_membership_state WHERE partition_id = ?
-                    UNION ALL
-                    SELECT latest_txid AS txid FROM partition_doc_state WHERE partition_id = ?
-                )
-                "#,
-            )
-            .bind(&req.partition_id)
-            .bind(&req.partition_id)
-            .fetch_one(pool)
-            .await?;
-            let snapshot_cursor = cursor::from_txid(latest_txid.max(0) as u64);
-            let rows = sqlx::query(
-                r#"
-                SELECT
-                    ds.doc_id AS doc_id,
-                    dv.latest_heads_json AS heads_json,
-                    COALESCE(dv.change_count_hint, 0) AS change_count_hint
-                FROM partition_doc_state ds
-                JOIN doc_version_state dv ON dv.doc_id = ds.doc_id
-                WHERE ds.partition_id = ? AND ds.deleted = 0
-                ORDER BY ds.doc_id
-                LIMIT ?
-                "#,
-            )
-            .bind(&req.partition_id)
-            .bind((limit + 1) as i64)
-            .fetch_all(pool)
-            .await?;
-            let has_more = rows.len() > limit;
-            let rows = rows.into_iter().take(limit).collect::<Vec<_>>();
-            let events = rows
-                .into_iter()
-                .map(|row| -> Res<PartitionDocEvent> {
-                    let doc_id: String = row.try_get("doc_id")?;
-                    let heads_json: String = row.try_get("heads_json")?;
-                    let change_count_hint: i64 = row.try_get("change_count_hint")?;
-                    Ok(PartitionDocEvent {
-                        cursor: snapshot_cursor.clone(),
-                        partition_id: req.partition_id.clone(),
-                        deets: PartitionDocEventDeets::DocChanged {
-                            doc_id,
-                            heads: serde_json::from_str(&heads_json)?,
-                            change_count_hint: change_count_hint.max(0) as u64,
-                        },
-                    })
-                })
-                .collect::<Res<Vec<_>>>()?;
-            let next_cursor = if events.is_empty() {
-                None
-            } else {
-                Some(snapshot_cursor)
+) -> Res<(Vec<PartitionDocEvent>, Option<u64>, bool)> {
+    let rows = if let Some(since) = req.since {
+        sqlx::query(
+            r#"
+            SELECT
+                ds.doc_id AS doc_id,
+                ds.deleted AS deleted,
+                ds.latest_txid AS state_txid,
+                COALESCE(dv.latest_txid, 0) AS doc_txid,
+                COALESCE(dv.latest_heads_json, '[]') AS heads_json,
+                COALESCE(dv.change_count_hint, 0) AS change_count_hint,
+                CASE
+                    WHEN ds.deleted = 1 THEN ds.latest_txid
+                    WHEN ds.latest_txid > ? THEN ds.latest_txid
+                    ELSE COALESCE(dv.latest_txid, 0)
+                END AS event_txid
+            FROM partition_doc_state ds
+            LEFT JOIN doc_version_state dv ON dv.doc_id = ds.doc_id
+            WHERE ds.partition_id = ?
+            AND (
+                CASE
+                    WHEN ds.deleted = 1 THEN ds.latest_txid
+                    WHEN ds.latest_txid > ? THEN ds.latest_txid
+                    ELSE COALESCE(dv.latest_txid, 0)
+                END
+            ) > ?
+            ORDER BY event_txid, ds.doc_id
+            LIMIT ?
+            "#,
+        )
+        .bind(since as i64)
+        .bind(&req.partition_id)
+        .bind(since as i64)
+        .bind(since as i64)
+        .bind((limit + 1) as i64)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT
+                ds.doc_id AS doc_id,
+                0 AS deleted,
+                ds.latest_txid AS state_txid,
+                COALESCE(dv.latest_txid, ds.latest_txid) AS doc_txid,
+                COALESCE(dv.latest_heads_json, '[]') AS heads_json,
+                COALESCE(dv.change_count_hint, 0) AS change_count_hint,
+                COALESCE(dv.latest_txid, ds.latest_txid) AS event_txid
+            FROM partition_doc_state ds
+            LEFT JOIN doc_version_state dv ON dv.doc_id = ds.doc_id
+            WHERE ds.partition_id = ? AND ds.deleted = 0
+            ORDER BY event_txid, ds.doc_id
+            LIMIT ?
+            "#,
+        )
+        .bind(&req.partition_id)
+        .bind((limit + 1) as i64)
+        .fetch_all(pool)
+        .await?
+    };
+
+    let has_more = rows.len() > limit;
+    let rows = rows.into_iter().take(limit).collect::<Vec<_>>();
+    let events = rows
+        .into_iter()
+        .map(|row| -> Res<PartitionDocEvent> {
+            let event_txid: i64 = row.try_get("event_txid")?;
+            let doc_id: String = row.try_get("doc_id")?;
+            let heads_json: String = row.try_get("heads_json")?;
+            let change_count_hint: i64 = row.try_get("change_count_hint")?;
+            let deleted: i64 = row.try_get("deleted")?;
+            let deets = match deleted {
+                0 => PartitionDocEventDeets::DocChanged {
+                    doc_id,
+                    heads: serde_json::from_str(&heads_json)?,
+                    change_count_hint: change_count_hint.max(0) as u64,
+                },
+                1 => PartitionDocEventDeets::DocDeleted {
+                    doc_id,
+                    change_count_hint: change_count_hint.max(0) as u64,
+                },
+                other => eyre::bail!("invalid deleted flag '{other}'"),
             };
-            Ok((events, next_cursor, has_more))
-        }
-    }
+            Ok(PartitionDocEvent {
+                cursor: event_txid.max(0) as u64,
+                partition_id: req.partition_id.clone(),
+                deets,
+            })
+        })
+        .collect::<Res<Vec<_>>>()?;
+    let next_cursor = events.last().map(|item| item.cursor);
+    Ok((events, next_cursor, has_more))
 }
 
 fn cmp_member_events(
     left: &PartitionMemberEvent,
     right: &PartitionMemberEvent,
 ) -> std::cmp::Ordering {
-    let left_txid = cursor::to_txid(&left.cursor).unwrap_or(0);
-    let right_txid = cursor::to_txid(&right.cursor).unwrap_or(0);
-    left_txid
-        .cmp(&right_txid)
+    left.cursor
+        .cmp(&right.cursor)
         .then_with(|| left.partition_id.cmp(&right.partition_id))
 }
 
 fn cmp_doc_events(left: &PartitionDocEvent, right: &PartitionDocEvent) -> std::cmp::Ordering {
-    let left_txid = cursor::to_txid(&left.cursor).unwrap_or(0);
-    let right_txid = cursor::to_txid(&right.cursor).unwrap_or(0);
-    left_txid
-        .cmp(&right_txid)
+    left.cursor
+        .cmp(&right.cursor)
         .then_with(|| left.partition_id.cmp(&right.partition_id))
 }
 
@@ -1030,6 +1101,149 @@ mod tests {
             }),
             "removed doc should not remain in snapshot membership"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bigrepo_member_snapshot_paginates_all_docs() -> Res<()> {
+        let big_repo = boot_big_repo().await?;
+        let partition_id: PartitionId = "p-snapshot-members".into();
+        let mut expected = std::collections::HashSet::new();
+        for _ in 0..7 {
+            let handle = big_repo.create_doc(automerge::Automerge::new()).await?;
+            let doc_id = handle.document_id().to_string();
+            big_repo
+                .add_doc_to_partition(&partition_id, &doc_id)
+                .await?;
+            expected.insert(doc_id);
+        }
+
+        let mut since = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let page = big_repo
+                .get_partition_member_events_for_peer(
+                    &"peer-a".into(),
+                    &GetPartitionMemberEventsRequest {
+                        partitions: vec![PartitionCursorRequest {
+                            partition_id: partition_id.clone(),
+                            since,
+                        }],
+                        limit: 3,
+                    },
+                )
+                .await?;
+            for evt in &page.events {
+                if let PartitionMemberEventDeets::MemberUpsert { doc_id } = &evt.deets {
+                    seen.insert(doc_id.clone());
+                }
+            }
+            let cursor = page
+                .cursors
+                .iter()
+                .find(|item| item.partition_id == partition_id)
+                .expect(ERROR_IMPOSSIBLE);
+            since = cursor.next_cursor;
+            if !cursor.has_more {
+                break;
+            }
+        }
+
+        assert_eq!(seen, expected, "snapshot paging dropped member docs");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bigrepo_doc_snapshot_paginates_all_docs() -> Res<()> {
+        let big_repo = boot_big_repo().await?;
+        let partition_id: PartitionId = "p-snapshot-docs".into();
+        let mut expected = std::collections::HashSet::new();
+        for i in 0..7_u64 {
+            let handle = big_repo.create_doc(automerge::Automerge::new()).await?;
+            handle
+                .with_document(move |doc| {
+                    let mut tx = doc.transaction();
+                    tx.put(automerge::ROOT, "idx", i)
+                        .expect("failed setting test key");
+                    tx.commit();
+                })
+                .await?;
+            let doc_id = handle.document_id().to_string();
+            big_repo
+                .add_doc_to_partition(&partition_id, &doc_id)
+                .await?;
+            expected.insert(doc_id);
+        }
+
+        let mut since = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let page = big_repo
+                .get_partition_doc_events_for_peer(
+                    &"peer-a".into(),
+                    &GetPartitionDocEventsRequest {
+                        partitions: vec![PartitionCursorRequest {
+                            partition_id: partition_id.clone(),
+                            since,
+                        }],
+                        limit: 3,
+                    },
+                )
+                .await?;
+            for evt in &page.events {
+                if let PartitionDocEventDeets::DocChanged { doc_id, .. } = &evt.deets {
+                    seen.insert(doc_id.clone());
+                }
+            }
+            let cursor = page
+                .cursors
+                .iter()
+                .find(|item| item.partition_id == partition_id)
+                .expect(ERROR_IMPOSSIBLE);
+            since = cursor.next_cursor;
+            if !cursor.has_more {
+                break;
+            }
+        }
+
+        assert_eq!(seen, expected, "snapshot paging dropped doc events");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_docs_full_respects_allowed_partitions() -> Res<()> {
+        let big_repo = boot_big_repo().await?;
+        let p1: PartitionId = "p-allowed".into();
+        let p2: PartitionId = "p-denied".into();
+
+        let d1 = big_repo.create_doc(automerge::Automerge::new()).await?;
+        let d1_id = d1.document_id().to_string();
+        big_repo.add_doc_to_partition(&p1, &d1_id).await?;
+
+        let d2 = big_repo.create_doc(automerge::Automerge::new()).await?;
+        let d2_id = d2.document_id().to_string();
+        big_repo.add_doc_to_partition(&p2, &d2_id).await?;
+
+        assert!(
+            big_repo
+                .is_doc_accessible_in_partitions(&d1_id, std::slice::from_ref(&p1))
+                .await?
+        );
+        assert!(
+            !big_repo
+                .is_doc_accessible_in_partitions(&d2_id, std::slice::from_ref(&p1))
+                .await?
+        );
+
+        let docs = big_repo
+            .get_docs_full_in_partitions(&[d1_id.clone(), d2_id.clone()], &[p1])
+            .await?;
+        let returned = docs
+            .into_iter()
+            .map(|doc| doc.doc_id)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(returned.contains(&d1_id));
+        assert!(!returned.contains(&d2_id));
         Ok(())
     }
 }

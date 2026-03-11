@@ -398,6 +398,9 @@ impl TablesRepo {
         let ticket = TablesStore::register_change_listener(&big_repo, &app_doc_id, vec![], {
             let cancel_token = cancel_token.clone();
             move |notifs| {
+                if cancel_token.is_cancelled() {
+                    return;
+                }
                 if let Err(err) = notif_tx.send(notifs) {
                     if !cancel_token.is_cancelled() {
                         warn!("failed to send change notifications: {err}");

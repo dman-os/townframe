@@ -64,7 +64,12 @@ pub async fn spawn_doc_sync_worker(
         }
     };
     let join_handle = tokio::spawn(
-        async move { fut.await.unwrap() }.instrument(tracing::info_span!("DocSyncWorker task")),
+        async move {
+            if let Err(err) = fut.await {
+                warn!(?err, "DocSyncWorker task exited with error");
+            }
+        }
+        .instrument(tracing::info_span!("DocSyncWorker task")),
     );
     Ok(DocSyncWorkerStopToken {
         cancel_token: stop_cancel_token,
@@ -102,12 +107,8 @@ impl DocSyncWorker {
 
     fn handle_missing_doc(&self) {
         self.msg_tx
-            .send(Msg::DocSyncRequestBackoff {
+            .send(Msg::DocSyncMissingLocal {
                 doc_id: self.doc_id.clone(),
-                delay: Duration::from_millis(500),
-                previous_attempt_no: self.retry.attempt_no,
-                previous_backoff: self.retry.last_backoff,
-                previous_attempt_at: self.retry.last_attempt_at,
             })
             .expect("FullSyncWorker went down without cleaning boot_doc_sync_worker");
     }
