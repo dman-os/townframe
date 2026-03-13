@@ -322,6 +322,14 @@ impl BigRepo {
 
         tx.commit().await?;
         for (partition_id, txid) in emitted {
+            debug!(
+                partition_id,
+                doc_id,
+                cursor = txid,
+                head_count = serialized_heads.len(),
+                change_count_hint,
+                "emitting partition doc changed event"
+            );
             let _ = self.partition_events_tx.send(PartitionEvent {
                 cursor: txid,
                 partition_id,

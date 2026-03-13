@@ -1189,7 +1189,7 @@ impl Worker {
                     .or_default();
                 let was_empty_for_peer = requested_parts.values().all(|cursors| cursors.is_empty());
                 requested_parts
-                    .entry(PartitionKey::BigRepoPartition(partition_id))
+                    .entry(PartitionKey::BigRepoPartition(partition_id.clone()))
                     .or_default()
                     .insert(cursor);
                 if was_empty_for_peer {
@@ -1202,6 +1202,13 @@ impl Worker {
                     self.refresh_peer_fully_synced_state(endpoint_id).await?;
                 }
                 debug!(peer_key, %doc_id, "received samod doc sync request");
+                debug!(
+                    peer_key,
+                    partition_id = %partition_id,
+                    %doc_id,
+                    cursor,
+                    "full worker queued samod doc sync request"
+                );
                 if !self.active_docs.contains_key(&doc_id)
                     && !self.pending_docs.contains_key(&doc_id)
                 {
@@ -1358,10 +1365,20 @@ impl Worker {
         doc_id: DocumentId,
         diff: DocPeerStateView,
     ) -> Res<()> {
-        let Some(active_state) = self.active_docs.get(&doc_id) else {
+        if !self.active_docs.contains_key(&doc_id) {
             return Ok(());
-        };
-        let local_heads = &active_state.latest_heads;
+        }
+        let local_heads = self
+            .big_repo
+            .find_doc(&doc_id)
+            .await?
+            .ok_or_eyre("active doc sync state missing local doc handle")?
+            .with_document_local(|doc| ChangeHashSet(Arc::from(doc.get_heads())))
+            .await?;
+        self.active_docs
+            .get_mut(&doc_id)
+            .expect("active doc sync state should exist")
+            .latest_heads = local_heads.clone();
         let mut events_to_emit = Vec::new();
         let mut peers_to_refresh = Vec::new();
         let mut acks_to_emit = Vec::new();
@@ -1373,7 +1390,7 @@ impl Worker {
             let they_have_our_changes = diff
                 .shared_heads
                 .as_ref()
-                .map(|heads| heads_equal_as_set(heads, local_heads))
+                .map(|heads| heads_equal_as_set(heads, &local_heads))
                 .unwrap_or_default();
             let we_have_their_changes = diff
                 .their_heads
@@ -1383,6 +1400,12 @@ impl Worker {
                 .unwrap_or_default();
 
             if they_have_our_changes && we_have_their_changes {
+                debug!(
+                    endpoint_id = ?peer_state.endpoint_id,
+                    %doc_id,
+                    local_head_count = local_heads.len(),
+                    "full worker observed doc synced with peer"
+                );
                 events_to_emit.push(FullSyncEvent::DocSyncedWithPeer {
                     endpoint_id: peer_state.endpoint_id,
                     doc_id: doc_id.clone(),
@@ -1396,6 +1419,13 @@ impl Worker {
                             continue;
                         };
                         for cursor in cursors {
+                            debug!(
+                                endpoint_id = ?peer_state.endpoint_id,
+                                partition_id = %partition_id,
+                                %doc_id,
+                                cursor,
+                                "full worker emitting samod ack"
+                            );
                             acks_to_emit.push((
                                 peer_state.endpoint_id,
                                 am_utils_rs::sync::SamodSyncAck::DocSynced {

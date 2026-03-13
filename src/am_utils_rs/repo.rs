@@ -144,6 +144,10 @@ impl BigRepo {
         &self.state_pool
     }
 
+    pub fn subscribe_partition_events(&self) -> broadcast::Receiver<crate::sync::PartitionEvent> {
+        self.partition_events_tx.subscribe()
+    }
+
     pub async fn ensure_change_broker(
         self: &Arc<Self>,
         handle: samod::DocHandle,
@@ -344,6 +348,14 @@ impl BigRepo {
             doc_id.clone(),
             Arc::<[automerge::ChangeHash]>::from(heads.clone()),
         )?;
+        self.record_doc_heads_change(doc_id, heads).await
+    }
+
+    pub async fn record_external_doc_heads_change(
+        &self,
+        doc_id: &DocumentId,
+        heads: Vec<automerge::ChangeHash>,
+    ) -> Res<()> {
         self.record_doc_heads_change(doc_id, heads).await
     }
 

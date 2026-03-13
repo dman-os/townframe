@@ -18,13 +18,10 @@ use daybook_types::doc::{AddDocArgs, ChangeHashSet, Doc, DocId, DocPatch, FacetK
 use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
 mod facet_recovery;
 
-use sqlx::Row;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-const DRAWER_BRANCH_STATE_DB_FILE: &str = "drawer_branch_state.sqlite";
-const DRAWER_BRANCH_STATE_META_INIT_KEY: &str = "drawer_branch_state_initialized";
 const DRAWER_REPLICATED_PARTITION_PREFIX: &str = "drawer.replicated";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,30 +29,11 @@ enum BranchKind {
     Replicated,
     Tmp,
 }
-
-impl BranchKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Replicated => "replicated",
-            Self::Tmp => "tmp",
-        }
-    }
-
-    fn parse(raw: &str) -> Res<Self> {
-        match raw {
-            "replicated" => Ok(Self::Replicated),
-            "tmp" => Ok(Self::Tmp),
-            _ => eyre::bail!("invalid branch_kind '{raw}'"),
-        }
-    }
-}
-
 pub struct DrawerRepo {
     pub big_repo: SharedBigRepo,
     drawer_doc_id: DocumentId,
     local_actor_id: ActorId,
     local_user_path: daybook_types::doc::UserPath,
-    branch_state_pool: sqlx::SqlitePool,
 
     // LRU Caches
     entry_cache: Arc<DHashMap<DocId, DocEntry>>,
@@ -119,7 +97,7 @@ impl DrawerRepo {
         big_repo: SharedBigRepo,
         drawer_doc_id: DocumentId,
         local_user_path: daybook_types::doc::UserPath,
-        local_state_root: PathBuf,
+        _local_state_root: PathBuf,
         entry_pool: SharedKeyedLruPool<DocId>,
         doc_pool: SharedKeyedLruPool<FacetCacheKey>,
         #[cfg(not(test))] plugs_repo: Arc<PlugsRepo>,
@@ -135,13 +113,6 @@ impl DrawerRepo {
 
         let initial_heads =
             drawer_am_handle.with_document(|doc| ChangeHashSet(doc.get_heads().into()));
-
-        tokio::fs::create_dir_all(&local_state_root).await?;
-        let branch_state_path = local_state_root.join(DRAWER_BRANCH_STATE_DB_FILE);
-        let branch_state_pool =
-            crate::app::SqlCtx::new(&format!("sqlite://{}", branch_state_path.display()))
-                .await?
-                .db_pool;
 
         let broker = big_repo
             .ensure_change_broker(drawer_am_handle.clone())
@@ -175,7 +146,6 @@ impl DrawerRepo {
             drawer_doc_id,
             local_actor_id,
             local_user_path,
-            branch_state_pool,
             entry_cache: Arc::new(DHashMap::new()),
             facet_cache: std::sync::Mutex::new(FacetCacheState::new(doc_pool)),
             facet_schema_validators: std::sync::Mutex::new(HashMap::new()),
@@ -192,9 +162,6 @@ impl DrawerRepo {
             #[cfg(test)]
             plugs_repo,
         });
-
-        repo.ensure_branch_state_schema().await?;
-        repo.initialize_branch_state_if_needed().await?;
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
@@ -304,113 +271,6 @@ impl DrawerRepo {
         Ok(())
     }
 
-    async fn ensure_branch_state_schema(&self) -> Res<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS drawer_branch_docs (
-                doc_id TEXT NOT NULL,
-                branch_path TEXT NOT NULL,
-                branch_doc_id TEXT NOT NULL,
-                latest_heads_json TEXT NOT NULL,
-                branch_kind TEXT NOT NULL,
-                updated_at_unix_ms INTEGER NOT NULL,
-                PRIMARY KEY (doc_id, branch_path)
-            )
-            "#,
-        )
-        .execute(&self.branch_state_pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_drawer_branch_docs_doc_id ON drawer_branch_docs(doc_id)",
-        )
-        .execute(&self.branch_state_pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_drawer_branch_docs_branch_doc_id ON drawer_branch_docs(branch_doc_id)",
-        )
-        .execute(&self.branch_state_pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS drawer_branch_state_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-        )
-        .execute(&self.branch_state_pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn initialize_branch_state_if_needed(&self) -> Res<()> {
-        let initialized: Option<String> =
-            sqlx::query_scalar("SELECT value FROM drawer_branch_state_meta WHERE key = ?")
-                .bind(DRAWER_BRANCH_STATE_META_INIT_KEY)
-                .fetch_optional(&self.branch_state_pool)
-                .await?;
-        if initialized.as_deref() == Some("1") {
-            return Ok(());
-        }
-
-        let entries = self.drawer_am_handle.with_document(|doc| {
-            let map_id = match doc.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
-                    match doc.get(&id, "map")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => eyre::bail!("invalid drawer shape"),
-                    }
-                }
-                None => return eyre::Ok(Vec::new()),
-                _ => eyre::bail!("invalid drawer shape"),
-            };
-
-            let mut entries = Vec::new();
-            for item in doc.map_range(&map_id, ..) {
-                let doc_id = DocId::from(item.key.clone());
-                let entry: Option<DocEntry> = autosurgeon::hydrate_prop(doc, &map_id, item.key)?;
-                if let Some(entry) = entry {
-                    entries.push((doc_id, entry));
-                }
-            }
-            eyre::Ok(entries)
-        })?;
-
-        for (doc_id, entry) in entries {
-            for (branch_path, branch_ref) in entry.branches {
-                let branch_kind = self.branch_kind_for_path(
-                    &daybook_types::doc::BranchPath::from(branch_path.clone()),
-                )?;
-                let Some(handle) = self
-                    .get_handle_by_branch_doc_id(&branch_ref.branch_doc_id)
-                    .await?
-                else {
-                    debug!(
-                        doc_id = %doc_id,
-                        branch_path = %branch_path,
-                        branch_doc_id = %branch_ref.branch_doc_id,
-                        "skipping branch state bootstrap; branch doc not available locally"
-                    );
-                    continue;
-                };
-                let latest_heads =
-                    handle.with_document(|doc| ChangeHashSet(doc.get_heads().into()));
-                self.upsert_branch_state(
-                    &doc_id,
-                    &branch_path,
-                    &branch_ref.branch_doc_id,
-                    &latest_heads,
-                    branch_kind,
-                )
-                .await?;
-            }
-        }
-
-        sqlx::query(
-            "INSERT INTO drawer_branch_state_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        )
-        .bind(DRAWER_BRANCH_STATE_META_INIT_KEY)
-        .bind("1")
-        .execute(&self.branch_state_pool)
-        .await?;
-        Ok(())
-    }
-
     fn branch_kind_for_path(
         &self,
         branch_path: &daybook_types::doc::BranchPath,
@@ -475,59 +335,41 @@ impl DrawerRepo {
         daybook_types::doc::user_path::to_actor_id(&scoped_user_path)
     }
 
-    async fn upsert_branch_state(
-        &self,
-        doc_id: &DocId,
-        branch_path: &str,
-        branch_doc_id: &str,
-        latest_heads: &ChangeHashSet,
-        branch_kind: BranchKind,
-    ) -> Res<()> {
-        let latest_heads_json = serde_json::to_string(latest_heads)?;
-        sqlx::query(
-            r#"
-            INSERT INTO drawer_branch_docs(
-                doc_id, branch_path, branch_doc_id, latest_heads_json, branch_kind, updated_at_unix_ms
-            ) VALUES(?, ?, ?, ?, ?, ?)
-            ON CONFLICT(doc_id, branch_path) DO UPDATE SET
-                branch_doc_id = excluded.branch_doc_id,
-                latest_heads_json = excluded.latest_heads_json,
-                branch_kind = excluded.branch_kind,
-                updated_at_unix_ms = excluded.updated_at_unix_ms
-            "#,
-        )
-        .bind(&**doc_id)
-        .bind(branch_path)
-        .bind(branch_doc_id)
-        .bind(latest_heads_json)
-        .bind(branch_kind.as_str())
-        .bind(Timestamp::now().as_millisecond())
-        .execute(&self.branch_state_pool)
-        .await?;
-        Ok(())
-    }
-
     async fn get_branch_state(
         &self,
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<BranchStateRow>> {
-        let branch_path_str = branch_path.to_string();
-        if let Some(row) = sqlx::query(
-            "SELECT doc_id, branch_path, branch_doc_id, latest_heads_json, branch_kind FROM drawer_branch_docs WHERE doc_id = ? AND branch_path = ?",
-        )
-        .bind(&**doc_id)
-        .bind(&branch_path_str)
-        .fetch_optional(&self.branch_state_pool)
-        .await?
-        {
-            return Ok(Some(Self::branch_state_row_from_sql(row)?));
-        }
+        self.derive_branch_state(doc_id, branch_path).await
+    }
 
+    async fn list_branch_states(&self, doc_id: &DocId) -> Res<Vec<BranchStateRow>> {
+        self.derive_branch_states(doc_id).await
+    }
+
+    async fn get_entry_branch_ref(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+    ) -> Res<Option<(StoredBranchRef, BranchKind)>> {
         let Some(entry) = self.get_entry(doc_id).await? else {
             return Ok(None);
         };
+        let branch_path_str = branch_path.to_string();
         let Some(branch_ref) = entry.branches.get(&branch_path_str) else {
+            return Ok(None);
+        };
+        let branch_kind = self.branch_kind_for_path(branch_path)?;
+        Ok(Some((branch_ref.clone(), branch_kind)))
+    }
+
+    async fn derive_branch_state(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+    ) -> Res<Option<BranchStateRow>> {
+        let Some((branch_ref, branch_kind)) = self.get_entry_branch_ref(doc_id, branch_path).await?
+        else {
             return Ok(None);
         };
         let Some(handle) = self
@@ -536,70 +378,35 @@ impl DrawerRepo {
         else {
             debug!(
                 doc_id = %doc_id,
-                branch_path = %branch_path_str,
+                branch_path = %branch_path,
                 branch_doc_id = %branch_ref.branch_doc_id,
                 "branch state unresolved; branch doc not available locally"
             );
             return Ok(None);
         };
-        let branch_kind = self.branch_kind_for_path(branch_path)?;
         let latest_heads = handle.with_document(|doc| ChangeHashSet(doc.get_heads().into()));
-        self.upsert_branch_state(
-            doc_id,
-            &branch_path_str,
-            &branch_ref.branch_doc_id,
-            &latest_heads,
-            branch_kind,
-        )
-        .await?;
         Ok(Some(BranchStateRow {
-            branch_path: branch_path_str,
-            branch_doc_id: branch_ref.branch_doc_id.clone(),
+            branch_path: branch_path.to_string(),
+            branch_doc_id: branch_ref.branch_doc_id,
             latest_heads,
             branch_kind,
         }))
     }
 
-    async fn list_branch_states(&self, doc_id: &DocId) -> Res<Vec<BranchStateRow>> {
-        let rows = sqlx::query(
-            "SELECT doc_id, branch_path, branch_doc_id, latest_heads_json, branch_kind FROM drawer_branch_docs WHERE doc_id = ? ORDER BY branch_path",
-        )
-        .bind(&**doc_id)
-        .fetch_all(&self.branch_state_pool)
-        .await?;
-        rows.into_iter()
-            .map(Self::branch_state_row_from_sql)
-            .collect::<Res<Vec<_>>>()
-    }
-
-    fn branch_state_row_from_sql(row: sqlx::sqlite::SqliteRow) -> Res<BranchStateRow> {
-        Ok(BranchStateRow {
-            branch_path: row.try_get("branch_path")?,
-            branch_doc_id: row.try_get("branch_doc_id")?,
-            latest_heads: serde_json::from_str(&row.try_get::<String, _>("latest_heads_json")?)?,
-            branch_kind: BranchKind::parse(&row.try_get::<String, _>("branch_kind")?)?,
-        })
-    }
-
-    async fn delete_branch_state(
-        &self,
-        doc_id: &DocId,
-        branch_path: &daybook_types::doc::BranchPath,
-    ) -> Res<()> {
-        sqlx::query("DELETE FROM drawer_branch_docs WHERE doc_id = ? AND branch_path = ?")
-            .bind(&**doc_id)
-            .bind(branch_path.to_string())
-            .execute(&self.branch_state_pool)
-            .await?;
-        Ok(())
-    }
-
-    async fn delete_doc_branch_states(&self, doc_id: &DocId) -> Res<()> {
-        sqlx::query("DELETE FROM drawer_branch_docs WHERE doc_id = ?")
-            .bind(&**doc_id)
-            .execute(&self.branch_state_pool)
-            .await?;
-        Ok(())
+    async fn derive_branch_states(&self, doc_id: &DocId) -> Res<Vec<BranchStateRow>> {
+        let Some(entry) = self.get_entry(doc_id).await? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        let mut branch_names = entry.branches.keys().cloned().collect::<Vec<_>>();
+        branch_names.sort();
+        for branch_path in branch_names {
+            let branch_path = daybook_types::doc::BranchPath::from(branch_path);
+            if let Some(branch_state) = self.derive_branch_state(doc_id, &branch_path).await? {
+                out.push(branch_state);
+            }
+        }
+        Ok(out)
     }
 
     async fn get_handle_by_branch_doc_id(
@@ -632,7 +439,8 @@ impl DrawerRepo {
         doc_id: &DocId,
         heads: &ChangeHashSet,
     ) -> Res<Option<samod::DocHandle>> {
-        for branch_state in self.list_branch_states(doc_id).await? {
+        let branch_states = self.list_branch_states(doc_id).await?;
+        for branch_state in &branch_states {
             if &branch_state.latest_heads == heads {
                 return self
                     .get_handle_by_branch_doc_id(&branch_state.branch_doc_id)
@@ -640,7 +448,7 @@ impl DrawerRepo {
             }
         }
 
-        for branch_state in self.list_branch_states(doc_id).await? {
+        for branch_state in branch_states {
             let Some(handle) = self
                 .get_handle_by_branch_doc_id(&branch_state.branch_doc_id)
                 .await?
@@ -674,44 +482,30 @@ impl DrawerRepo {
         }))
     }
 
-    async fn backfill_branch_state_from_entry(&self, doc_id: &DocId, entry: &DocEntry) -> Res<()> {
-        for (branch_path, branch_ref) in &entry.branches {
-            if sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(1) FROM drawer_branch_docs WHERE doc_id = ? AND branch_path = ?",
-            )
-            .bind(&**doc_id)
-            .bind(branch_path)
-            .fetch_one(&self.branch_state_pool)
-            .await?
-                > 0
-            {
-                continue;
-            }
-            let Some(handle) = self
-                .get_handle_by_branch_doc_id(&branch_ref.branch_doc_id)
-                .await?
-            else {
-                debug!(
-                    doc_id = %doc_id,
-                    branch_path = %branch_path,
-                    branch_doc_id = %branch_ref.branch_doc_id,
-                    "skipping branch state backfill; branch doc not available locally"
-                );
-                continue;
+    fn current_drawer_entries(&self) -> Res<(ChangeHashSet, Vec<(DocId, DocEntry)>)> {
+        self.drawer_am_handle.with_document(|doc| {
+            let drawer_heads = ChangeHashSet(doc.get_heads().into());
+            let map_id = match doc.get(automerge::ROOT, "docs")? {
+                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
+                    match doc.get(&id, "map")? {
+                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                        _ => eyre::bail!("invalid drawer shape"),
+                    }
+                }
+                None => return eyre::Ok((drawer_heads, Vec::new())),
+                _ => eyre::bail!("invalid drawer shape"),
             };
-            let branch_kind = self
-                .branch_kind_for_path(&daybook_types::doc::BranchPath::from(branch_path.clone()))?;
-            let latest_heads = handle.with_document(|doc| ChangeHashSet(doc.get_heads().into()));
-            self.upsert_branch_state(
-                doc_id,
-                branch_path,
-                &branch_ref.branch_doc_id,
-                &latest_heads,
-                branch_kind,
-            )
-            .await?;
-        }
-        Ok(())
+
+            let mut entries = Vec::new();
+            for item in doc.map_range(&map_id, ..) {
+                let doc_id = DocId::from(item.key.clone());
+                let entry: Option<DocEntry> = autosurgeon::hydrate_prop(doc, &map_id, item.key)?;
+                if let Some(entry) = entry {
+                    entries.push((doc_id, entry));
+                }
+            }
+            eyre::Ok((drawer_heads, entries))
+        })
     }
 
     async fn events_for_patch(
@@ -776,8 +570,6 @@ impl DrawerRepo {
                         )
                     })?;
                 let drawer_heads = ChangeHashSet(drawer_heads);
-                self.backfill_branch_state_from_entry(&doc_id, &new_entry)
-                    .await?;
 
                 if new_entry.previous_version_heads.is_none() {
                     let entry = self
@@ -859,29 +651,7 @@ impl DrawerRepo {
             eyre::bail!("repo is stopped");
         }
 
-        let (drawer_heads, entries) = self.drawer_am_handle.with_document(|doc| {
-            let drawer_heads = ChangeHashSet(doc.get_heads().into());
-            let map_id = match doc.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
-                    match doc.get(&id, "map")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => eyre::bail!("invalid drawer shape"),
-                    }
-                }
-                None => return eyre::Ok((drawer_heads, Vec::new())),
-                _ => eyre::bail!("invalid drawer shape"),
-            };
-
-            let mut entries = Vec::new();
-            for item in doc.map_range(&map_id, ..) {
-                let doc_id = DocId::from(item.key.clone());
-                let entry: Option<DocEntry> = autosurgeon::hydrate_prop(doc, &map_id, item.key)?;
-                if let Some(entry) = entry {
-                    entries.push((doc_id, entry));
-                }
-            }
-            eyre::Ok((drawer_heads, entries))
-        })?;
+        let (drawer_heads, entries) = self.current_drawer_entries()?;
 
         {
             let mut pool = self.entry_pool.lock().unwrap();
@@ -895,8 +665,7 @@ impl DrawerRepo {
         }
 
         let mut events = Vec::with_capacity(entries.len() + 1);
-        for (id, entry) in entries {
-            self.backfill_branch_state_from_entry(&id, &entry).await?;
+        for (id, _entry) in entries {
             events.push(DrawerEvent::DocAdded {
                 id: id.clone(),
                 entry: self
@@ -1214,55 +983,23 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let mut rows =
-            sqlx::query("SELECT DISTINCT doc_id FROM drawer_branch_docs ORDER BY doc_id")
-                .fetch_all(&self.branch_state_pool)
-                .await?;
-        if rows.is_empty() {
-            let entries = self.drawer_am_handle.with_document(|doc| {
-                let map_id = match doc.get(automerge::ROOT, "docs")? {
-                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
-                        match doc.get(&id, "map")? {
-                            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                            _ => eyre::bail!("invalid drawer shape"),
-                        }
-                    }
-                    None => return eyre::Ok(Vec::new()),
-                    _ => eyre::bail!("invalid drawer shape"),
-                };
-
-                let mut entries = Vec::new();
-                for item in doc.map_range(&map_id, ..) {
-                    let doc_id = DocId::from(item.key.clone());
-                    let entry: Option<DocEntry> =
-                        autosurgeon::hydrate_prop(doc, &map_id, item.key)?;
-                    if let Some(entry) = entry {
-                        entries.push((doc_id, entry));
-                    }
-                }
-                eyre::Ok(entries)
-            })?;
-
+        let (drawer_heads, entries) = self.current_drawer_entries()?;
+        {
+            let mut pool = self.entry_pool.lock().unwrap();
             for (doc_id, entry) in &entries {
-                self.backfill_branch_state_from_entry(doc_id, entry).await?;
-                let mut pool = self.entry_pool.lock().unwrap();
                 let pruned = pool.insert_key(doc_id, 1);
-                drop(pool);
                 for pkey in pruned {
                     self.entry_cache.remove(&pkey);
                 }
                 self.entry_cache.insert(doc_id.clone(), entry.clone());
             }
-
-            rows = sqlx::query("SELECT DISTINCT doc_id FROM drawer_branch_docs ORDER BY doc_id")
-                .fetch_all(&self.branch_state_pool)
-                .await?;
         }
-        let results = rows
+        let mut results = entries
             .into_iter()
-            .map(|row| row.try_get::<String, _>("doc_id"))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((self.get_drawer_heads(), results))
+            .map(|(doc_id, _)| doc_id.to_string())
+            .collect::<Vec<_>>();
+        results.sort();
+        Ok((drawer_heads, results))
     }
     pub async fn list(&self) -> Res<Vec<DocNBranches>> {
         if self.cancel_token.is_cancelled() {
@@ -1402,14 +1139,6 @@ impl DrawerRepo {
         }
 
         for prepared in prepared_docs {
-            self.upsert_branch_state(
-                &prepared.doc_id,
-                "main",
-                &prepared.branch_doc_id,
-                &prepared.branch_heads,
-                BranchKind::Replicated,
-            )
-            .await?;
             self.add_branch_to_partitions_if_needed(
                 BranchKind::Replicated,
                 &prepared.branch_doc_id,
@@ -1562,14 +1291,9 @@ impl DrawerRepo {
             eyre::Ok((ChangeHashSet(Arc::from([heads])), invalidated_uuids))
         })?;
 
-        self.upsert_branch_state(
-            &patch.id,
-            branch_path.as_ref(),
-            &branch_doc_id,
-            &new_heads,
-            branch_kind,
-        )
-        .await?;
+        self.big_repo
+            .record_external_doc_heads_change(handle.document_id(), new_heads.iter().cloned().collect())
+            .await?;
         if let Some(created_branch_doc_id) = &created_branch_doc_id {
             self.add_branch_to_partitions_if_needed(branch_kind, created_branch_doc_id)
                 .await?;
@@ -1762,14 +1486,9 @@ impl DrawerRepo {
             eyre::Ok((new_heads, modified_facets, invalidated_uuids))
         })?;
 
-        self.upsert_branch_state(
-            id,
-            &to_branch_name,
-            &to_branch_state.branch_doc_id,
-            &new_heads,
-            to_branch_state.branch_kind,
-        )
-        .await?;
+        self.big_repo
+            .record_external_doc_heads_change(handle.document_id(), new_heads.iter().cloned().collect())
+            .await?;
         let drawer_heads = self.get_drawer_heads();
         let diff = DocEntryDiff {
             changed_facet_keys: modified_facets.into_iter().map(FacetKey::from).collect(),
@@ -1842,26 +1561,27 @@ impl DrawerRepo {
         let (existed, drawer_heads, entry) = res?;
 
         if existed {
-            let branch_states = self.list_branch_states(id).await?;
-            self.delete_doc_branch_states(id).await?;
-            for branch_state in &branch_states {
+            let Some(entry) = &entry else {
+                return Err(ferr!("deleted drawer entry must be returned with deletion result"))?;
+            };
+            for (branch_path, branch_ref) in &entry.branches {
                 self.remove_branch_from_partitions_if_needed(
-                    branch_state.branch_kind,
-                    &branch_state.branch_doc_id,
+                    self.branch_kind_for_path(&daybook_types::doc::BranchPath::from(
+                        branch_path.clone(),
+                    ))?,
+                    &branch_ref.branch_doc_id,
                 )
                 .await?;
             }
             self.invalidate_entry_cache(id);
-            if let Some(entry) = &entry {
-                for branch_ref in entry.branches.values() {
-                    self.branch_handles.remove(&branch_ref.branch_doc_id);
-                }
+            for branch_ref in entry.branches.values() {
+                self.branch_handles.remove(&branch_ref.branch_doc_id);
             }
             self.invalidate_facet_cache_doc(id);
             self.registry.notify([
                 DrawerEvent::DocDeleted {
                     id: id.clone(),
-                    entry,
+                    entry: Some(entry.clone()),
                     drawer_heads: drawer_heads.clone(),
                 },
                 DrawerEvent::ListChanged {
@@ -2272,7 +1992,6 @@ impl DrawerRepo {
             return Ok(false);
         };
 
-        self.delete_branch_state(id, branch_path).await?;
         self.remove_branch_from_partitions_if_needed(
             branch_state.branch_kind,
             &branch_state.branch_doc_id,

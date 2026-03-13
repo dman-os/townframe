@@ -358,6 +358,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_ignores_stale_samod_ack_behind_persisted_doc_cursor() -> Res<()> {
+        let part_id: PartitionId = "sync-part-stale-ack".into();
+        let src = boot_big_repo("src-stale-ack").await?;
+        let dst = boot_big_repo("dst-stale-ack").await?;
+
+        let handle = src.create_doc(automerge::Automerge::new()).await?;
+        handle
+            .with_document_local(|doc| {
+                let mut tx = doc.transaction();
+                tx.put(automerge::ROOT, "seed", 1_i64)
+                    .expect("failed writing seed");
+                tx.commit();
+            })
+            .await?;
+        let doc_id = handle.document_id().to_string();
+        src.add_doc_to_partition(&part_id, &doc_id).await?;
+
+        let parsed = DocumentId::from_str(&doc_id)
+            .map_err(|err| ferr!("invalid source doc id {doc_id}: {err}"))?;
+        let exported = src
+            .samod_repo()
+            .local_export(parsed.clone())
+            .await
+            .map_err(|err| ferr!("failed exporting source doc: {err}"))?;
+        let _ = dst.import_doc_fast(parsed.clone(), exported).await?;
+
+        let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
+        let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
+        let (node, node_stop) = spawn_sync_node(
+            Arc::clone(&src),
+            src_store.clone(),
+            Arc::new(AllowAllPartitionAccessPolicy),
+        )
+        .await?;
+        let peer_key: PeerKey = "peer-stale-ack".into();
+        src_store.register_peer(peer_key.clone()).await?;
+        node.register_local_peer(peer_key.clone()).await?;
+
+        let (samod_tx, mut samod_rx) = mpsc::channel(128);
+        let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
+        let (_worker, worker_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
+            local_peer: peer_key.clone(),
+            remote_peer: peer_key.clone(),
+            rpc_client: node.rpc_client(),
+            local_repo: Arc::clone(&dst),
+            sync_store: dst_store.clone(),
+            samod_sync_tx: samod_tx,
+            samod_ack_rx,
+            target_partitions: vec![part_id.clone()],
+        })
+        .await?;
+
+        let req = wait_for_samod_request(
+            &mut samod_rx,
+            Duration::from_secs(5),
+            |req| match req {
+                SamodSyncRequest::RequestDocSync {
+                    doc_id: req_doc_id, ..
+                } => req_doc_id == &doc_id,
+                _ => false,
+            },
+            "timed out waiting for samod RequestDocSync for stale-ack test",
+        )
+        .await?;
+        let req_cursor = match req {
+            SamodSyncRequest::RequestDocSync { cursor, .. } => cursor,
+            _ => unreachable!(),
+        };
+
+        dst_store
+            .set_partition_cursor(peer_key.clone(), part_id.clone(), Some(req_cursor), Some(req_cursor + 10))
+            .await?;
+
+        samod_ack_tx
+            .send(SamodSyncAck::DocSynced {
+                partition_id: part_id.clone(),
+                doc_id: doc_id.clone(),
+                cursor: req_cursor,
+            })
+            .await
+            .map_err(|err| ferr!("failed sending stale samod ack in test: {err}"))?;
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let cursor = dst_store
+            .get_partition_cursor(peer_key.clone(), part_id.clone())
+            .await?;
+        assert_eq!(
+            cursor.doc_cursor,
+            Some(req_cursor + 10),
+            "stale ack must not regress persisted doc cursor"
+        );
+
+        worker_stop.stop().await?;
+        node_stop.stop().await?;
+        src_store_stop.stop().await?;
+        dst_store_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sync_resets_stale_remote_peer_cursor_before_replay() -> Res<()> {
         let part_id: PartitionId = "sync-part-reset-stale".into();
         let src = boot_big_repo("src-reset-stale").await?;

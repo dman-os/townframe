@@ -940,6 +940,97 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn iroh_live_sync_propagates_repeated_doc_updates() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+        let temp_root = tempfile::tempdir()?;
+        let repo_a_path = temp_root.path().join("repo-a");
+        let repo_b_path = temp_root.path().join("repo-b");
+
+        tokio::fs::create_dir_all(&repo_a_path).await?;
+        let rtx = RepoCtx::init(
+            &repo_a_path,
+            RepoOpenOptions {
+                ws_connector_url: None,
+            },
+            "test-device".into(),
+        )
+        .await?;
+        rtx.shutdown().await?;
+        drop(rtx);
+
+        let seed_node = open_sync_node(&repo_a_path).await?;
+        let ticket = seed_node.sync_repo.get_ticket_url().await?;
+        bootstrap_clone_repo_from_url_for_tests(&ticket, &repo_b_path).await?;
+        seed_node.stop().await?;
+
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let node_b = open_sync_node(&repo_b_path).await?;
+
+        let sync_url = node_a.sync_repo.get_ticket_url().await?;
+        let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(
+            &node_a,
+            &node_b,
+            bootstrap.endpoint_id,
+            Duration::from_secs(20),
+        )
+        .await?;
+
+        let doc_id = node_a
+            .drawer
+            .add(daybook_types::doc::AddDocArgs {
+                branch_path: daybook_types::doc::BranchPath::from("main"),
+                facets: default(),
+                user_path: Some(daybook_types::doc::UserPath::from(
+                    node_a.ctx.local_user_path.clone(),
+                )),
+            })
+            .await?;
+        wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
+
+        for idx in 0..6 {
+            let branch = daybook_types::doc::BranchPath::from("main");
+            let Some((_doc, heads)) = node_a.drawer.get_with_heads(&doc_id, &branch, None).await? else {
+                eyre::bail!("missing source doc after initial sync: {doc_id}");
+            };
+            let mut facets_set = std::collections::HashMap::new();
+            facets_set.insert(
+                FacetKey::from(WellKnownFacetTag::TitleGeneric),
+                FacetRaw::from(WellKnownFacet::TitleGeneric(format!("repeat-{idx}"))),
+            );
+            node_a
+                .drawer
+                .update_at_heads(
+                    daybook_types::doc::DocPatch {
+                        id: doc_id.clone(),
+                        facets_set,
+                        facets_remove: vec![],
+                        user_path: Some(daybook_types::doc::UserPath::from(
+                            node_a.ctx.local_user_path.clone(),
+                        )),
+                    },
+                    branch.clone(),
+                    Some(heads),
+                )
+                .await?;
+        }
+
+        wait_for_doc_head_parity(
+            &node_a,
+            &node_b,
+            &doc_id,
+            &daybook_types::doc::BranchPath::from("main"),
+            Duration::from_secs(30),
+        )
+        .await?;
+
+        node_b.stop().await?;
+        node_a.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn cloned_repo_does_not_derive_drawer_replicated_partition_on_open() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         std::env::set_var("DAYB_DISABLE_KEYRING", "1");
@@ -1628,6 +1719,58 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    async fn wait_for_doc_head_parity(
+        left: &SyncTestNode,
+        right: &SyncTestNode,
+        doc_id: &String,
+        branch: &daybook_types::doc::BranchPath,
+        timeout: Duration,
+    ) -> Res<()> {
+        let mut last_left = None::<Vec<String>>;
+        let mut last_right = None::<Vec<String>>;
+        tokio::time::timeout(timeout, async {
+            loop {
+                let left_heads = left
+                    .drawer
+                    .get_with_heads(doc_id, branch, None)
+                    .await?
+                    .map(|(_, heads)| {
+                        let mut out = heads.iter().map(ToString::to_string).collect::<Vec<_>>();
+                        out.sort_unstable();
+                        out
+                    })
+                    .ok_or_else(|| eyre::eyre!("left missing doc heads for {doc_id}"))?;
+                let right_heads = right
+                    .drawer
+                    .get_with_heads(doc_id, branch, None)
+                    .await?
+                    .map(|(_, heads)| {
+                        let mut out = heads.iter().map(ToString::to_string).collect::<Vec<_>>();
+                        out.sort_unstable();
+                        out
+                    })
+                    .ok_or_else(|| eyre::eyre!("right missing doc heads for {doc_id}"))?;
+                last_left = Some(left_heads.clone());
+                last_right = Some(right_heads.clone());
+                if left_heads == right_heads {
+                    break eyre::Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            eyre::eyre!(
+                "timed out waiting for doc head parity: doc_id={} branch={} left={:?} right={:?}",
+                doc_id,
+                branch,
+                last_left,
+                last_right
+            )
+        })??;
         Ok(())
     }
 
