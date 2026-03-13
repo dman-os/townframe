@@ -439,12 +439,7 @@ mod tests {
 
         store.register_peer(peer.clone()).await?;
         store
-            .set_partition_cursor(
-                peer.clone(),
-                partition.clone(),
-                Some(10),
-                Some(20),
-            )
+            .set_partition_cursor(peer.clone(), partition.clone(), Some(10), Some(20))
             .await?;
         store.unregister_peer(peer.clone()).await?;
         store.register_peer(peer.clone()).await?;

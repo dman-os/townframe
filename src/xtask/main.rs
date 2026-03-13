@@ -579,7 +579,10 @@ async fn irpc_disconnect_probe() -> Res<()> {
     let client_endpoint = iroh::Endpoint::bind().await?;
     let client = irpc_iroh::client::<ProbeProtocol>(client_endpoint, server_addr, IRPC_PROBE_ALPN);
 
-    let first = client.rpc(PingReq(41)).await.wrap_err("initial rpc failed")?;
+    let first = client
+        .rpc(PingReq(41))
+        .await
+        .wrap_err("initial rpc failed")?;
     if first != 42 {
         eyre::bail!("probe invariant failed: expected 42, got {first}");
     }

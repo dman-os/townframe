@@ -158,7 +158,9 @@ impl BigRepo {
                 Arc::new({
                     let repo = Arc::downgrade(self);
                     move |doc_id, heads| {
-                        let repo = repo.upgrade().expect("BigRepo should outlive change broker");
+                        let repo = repo
+                            .upgrade()
+                            .expect("BigRepo should outlive change broker");
                         async move { repo.record_doc_heads_change(&doc_id, heads).await }.boxed()
                     }
                 }),
@@ -259,8 +261,8 @@ impl BigRepo {
     ) -> Res<ImportDocFastOutcome> {
         match self.repo.import(document_id, initial_content).await {
             Ok(handle) => {
-                let heads =
-                    handle.with_document(|doc| Arc::<[automerge::ChangeHash]>::from(doc.get_heads()));
+                let heads = handle
+                    .with_document(|doc| Arc::<[automerge::ChangeHash]>::from(doc.get_heads()));
                 self.change_manager
                     .notify_doc_imported(handle.document_id().clone(), Arc::clone(&heads))?;
                 self.change_manager
@@ -459,8 +461,7 @@ impl BigRepo {
         handle.with_document(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
             let heads: Arc<[automerge::ChangeHash]> = Arc::from(heads.to_vec());
             if path.is_empty() && obj_id == automerge::ROOT {
-                let value: T =
-                    autosurgeon::hydrate_at(doc, &heads).wrap_err("error hydrating")?;
+                let value: T = autosurgeon::hydrate_at(doc, &heads).wrap_err("error hydrating")?;
                 Ok(Some((value, heads)))
             } else {
                 match autosurgeon::hydrate_path_at(doc, &obj_id, path.clone(), &heads) {
@@ -712,7 +713,8 @@ mod tests {
             .await
             .map_err(|err| ferr!("failed exporting source doc: {err}"))?;
 
-        dst.add_doc_to_partition(&part_id, &doc_id.to_string()).await?;
+        dst.add_doc_to_partition(&part_id, &doc_id.to_string())
+            .await?;
 
         let outcome = dst.import_doc_fast(doc_id.clone(), exported).await?;
         assert!(

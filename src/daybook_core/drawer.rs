@@ -1,5 +1,6 @@
 // FIXME: use nested ids for facet keys
 // FIXME: use ensure_alive method for cancellation checks
+// FIXME: break aprart file, NVIM is lagging like 500ms on each scroll
 
 use crate::interlude::*;
 use crate::plugs::PlugsRepo;
@@ -49,7 +50,7 @@ pub struct DrawerRepo {
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
-    current_heads: std::sync::RwLock<ChangeHashSet>,
+    current_heads: std::sync::Mutex<ChangeHashSet>,
     drawer_am_handle: samod::DocHandle,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
 }
@@ -155,7 +156,7 @@ impl DrawerRepo {
             cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
             _change_broker_leases: vec![broker],
-            current_heads: std::sync::RwLock::new(initial_heads),
+            current_heads: initial_heads.into(),
             drawer_am_handle,
             #[cfg(not(test))]
             plugs_repo: Some(plugs_repo),
@@ -232,7 +233,7 @@ impl DrawerRepo {
                         doc_id
                     );
                 }
-                *self.current_heads.write().unwrap() = ChangeHashSet(heads.clone());
+                *self.current_heads.lock().expect(ERROR_MUTEX) = ChangeHashSet(Arc::clone(&heads));
                 if let Err(err) = self
                     .events_for_patch(
                         &patch,
@@ -368,7 +369,8 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<BranchStateRow>> {
-        let Some((branch_ref, branch_kind)) = self.get_entry_branch_ref(doc_id, branch_path).await?
+        let Some((branch_ref, branch_kind)) =
+            self.get_entry_branch_ref(doc_id, branch_path).await?
         else {
             return Ok(None);
         };
@@ -976,7 +978,7 @@ impl DrawerRepo {
     }
 
     pub fn get_drawer_heads(&self) -> ChangeHashSet {
-        self.current_heads.read().unwrap().clone()
+        self.current_heads.lock().expect(ERROR_MUTEX).clone()
     }
 
     pub async fn list_just_ids(&self) -> Res<(ChangeHashSet, Vec<String>)> {
@@ -1160,7 +1162,7 @@ impl DrawerRepo {
             drawer_heads: drawer_heads.clone(),
         });
         self.registry.notify(events);
-        *self.current_heads.write().unwrap() = drawer_heads;
+        *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
 
         Ok(doc_ids)
     }
@@ -1292,7 +1294,10 @@ impl DrawerRepo {
         })?;
 
         self.big_repo
-            .record_external_doc_heads_change(handle.document_id(), new_heads.iter().cloned().collect())
+            .record_external_doc_heads_change(
+                handle.document_id(),
+                new_heads.iter().cloned().collect(),
+            )
             .await?;
         if let Some(created_branch_doc_id) = &created_branch_doc_id {
             self.add_branch_to_partitions_if_needed(branch_kind, created_branch_doc_id)
@@ -1301,7 +1306,7 @@ impl DrawerRepo {
 
         let mut drawer_heads = self.get_drawer_heads();
         let diff = if let Some(ref created_branch_doc_id) = created_branch_doc_id {
-            let latest_drawer_heads = self.current_heads.read().unwrap().clone();
+            let latest_drawer_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
             let entry = self
                 .get_entry_at_heads(&patch.id, &latest_drawer_heads)
                 .await?
@@ -1374,13 +1379,15 @@ impl DrawerRepo {
             self.invalidate_facet_cache_entry(&patch.id, &uuid);
         }
 
+        *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
+        let updated_entry = self
+            .current_doc_branches(&patch.id)
+            .await?
+            .ok_or_eyre("branch state missing after update")?;
         self.registry.notify([
             DrawerEvent::DocUpdated {
                 id: patch.id.clone(),
-                entry: self
-                    .current_doc_branches(&patch.id)
-                    .await?
-                    .ok_or_eyre("branch state missing after update")?,
+                entry: updated_entry,
                 diff,
                 drawer_heads: drawer_heads.clone(),
             },
@@ -1388,12 +1395,9 @@ impl DrawerRepo {
                 drawer_heads: drawer_heads.clone(),
             },
         ]);
-        *self.current_heads.write().unwrap() = drawer_heads;
 
-        if created_branch_doc_id.is_none() {
-            self.branch_handles
-                .insert(handle.document_id().to_string(), handle);
-        }
+        self.branch_handles
+            .insert(handle.document_id().to_string(), handle);
 
         Ok(())
     }
@@ -1487,7 +1491,10 @@ impl DrawerRepo {
         })?;
 
         self.big_repo
-            .record_external_doc_heads_change(handle.document_id(), new_heads.iter().cloned().collect())
+            .record_external_doc_heads_change(
+                handle.document_id(),
+                new_heads.iter().cloned().collect(),
+            )
             .await?;
         let drawer_heads = self.get_drawer_heads();
         let diff = DocEntryDiff {
@@ -1509,13 +1516,15 @@ impl DrawerRepo {
             self.invalidate_facet_cache_entry(id, &uuid);
         }
 
+        *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
+        let updated_entry = self
+            .current_doc_branches(id)
+            .await?
+            .ok_or_eyre("branch state missing after merge")?;
         self.registry.notify([
             DrawerEvent::DocUpdated {
                 id: id.clone(),
-                entry: self
-                    .current_doc_branches(id)
-                    .await?
-                    .ok_or_eyre("branch state missing after merge")?,
+                entry: updated_entry,
                 diff,
                 drawer_heads: drawer_heads.clone(),
             },
@@ -1523,7 +1532,6 @@ impl DrawerRepo {
                 drawer_heads: drawer_heads.clone(),
             },
         ]);
-        *self.current_heads.write().unwrap() = drawer_heads;
 
         Ok(())
     }
@@ -1562,7 +1570,9 @@ impl DrawerRepo {
 
         if existed {
             let Some(entry) = &entry else {
-                return Err(ferr!("deleted drawer entry must be returned with deletion result"))?;
+                return Err(ferr!(
+                    "deleted drawer entry must be returned with deletion result"
+                ))?;
             };
             for (branch_path, branch_ref) in &entry.branches {
                 self.remove_branch_from_partitions_if_needed(
@@ -1588,7 +1598,7 @@ impl DrawerRepo {
                     drawer_heads: drawer_heads.clone(),
                 },
             ]);
-            *self.current_heads.write().unwrap() = drawer_heads;
+            *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads;
         }
 
         Ok(existed)
@@ -1602,7 +1612,7 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let current_heads = self.current_heads.read().unwrap().clone();
+        let current_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
         if heads == &current_heads {
             return self.get_entry(doc_id).await;
         }
@@ -1636,7 +1646,7 @@ impl DrawerRepo {
             return Ok(Some(cached.clone()));
         }
 
-        let heads = self.current_heads.read().unwrap().clone();
+        let heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
         let entry = self.hydrate_entry_at_heads(doc_id, &heads).await?;
 
         if let Some(entry) = entry {
@@ -1685,15 +1695,12 @@ impl DrawerRepo {
                     }
                 }
                 Some(keys) => {
-                    let facets_obj = match automerge::ReadDoc::get_at(
-                        am_doc,
-                        automerge::ROOT,
-                        "facets",
-                        heads,
-                    )? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => eyre::bail!("facets object not found in content doc"),
-                    };
+                    let facets_obj =
+                        match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", heads)?
+                        {
+                            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                            _ => eyre::bail!("facets object not found in content doc"),
+                        };
                     for key in keys {
                         let facet_uuid = dmeta::facet_uuid_for_key_at(am_doc, key, heads)?;
                         let facet_heads = if facet_uuid.is_some() {
@@ -1755,7 +1762,7 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let current_heads = self.current_heads.read().unwrap().clone();
+        let current_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
         if heads != &current_heads {
             let entry = self.get_entry_at_heads(doc_id, heads).await?;
             return Ok(entry.map(|entry_value| DocNBranches {
@@ -1870,7 +1877,7 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let drawer_heads = self.current_heads.read().unwrap().clone();
+        let drawer_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
         self.get_if_latest_at_heads(doc_id, branch_path, heads, &drawer_heads, facet_keys)
             .await
     }
@@ -1888,11 +1895,11 @@ impl DrawerRepo {
             return Ok(None);
         };
         let keys = handle.with_document(|am_doc| {
-            let facets_obj = match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", heads)?
-            {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                _ => return Ok::<HashSet<FacetKey>, eyre::Report>(HashSet::new()),
-            };
+            let facets_obj =
+                match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", heads)? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => return Ok::<HashSet<FacetKey>, eyre::Report>(HashSet::new()),
+                };
             let mut out = HashSet::new();
             for item in automerge::ReadDoc::map_range_at(am_doc, &facets_obj, .., heads) {
                 let key_str = item.key.to_string();
@@ -2001,7 +2008,7 @@ impl DrawerRepo {
 
         let mut drawer_heads = self.get_drawer_heads();
         let diff = if branch_state.branch_kind == BranchKind::Replicated {
-            let latest_drawer_heads = self.current_heads.read().unwrap().clone();
+            let latest_drawer_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
             let entry = self
                 .get_entry_at_heads(id, &latest_drawer_heads)
                 .await?
@@ -2050,13 +2057,15 @@ impl DrawerRepo {
             self.entry_cache.remove(id);
         }
 
+        *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
+        let updated_entry = self
+            .current_doc_branches(id)
+            .await?
+            .ok_or_eyre("branch state missing after delete_branch")?;
         self.registry.notify([
             DrawerEvent::DocUpdated {
                 id: id.clone(),
-                entry: self
-                    .current_doc_branches(id)
-                    .await?
-                    .ok_or_eyre("branch state missing after delete_branch")?,
+                entry: updated_entry,
                 diff,
                 drawer_heads: drawer_heads.clone(),
             },
@@ -2064,7 +2073,6 @@ impl DrawerRepo {
                 drawer_heads: drawer_heads.clone(),
             },
         ]);
-        *self.current_heads.write().unwrap() = drawer_heads;
 
         Ok(true)
     }
@@ -2081,7 +2089,9 @@ impl DrawerRepo {
         let Some(handle) = self.resolve_handle_for_heads(doc_id, heads).await? else {
             eyre::bail!("doc not found");
         };
-        handle.with_document(|am_doc| facet_recovery::recover_facet_heads_at(am_doc, facet_key, heads))
+        handle.with_document(|am_doc| {
+            facet_recovery::recover_facet_heads_at(am_doc, facet_key, heads)
+        })
     }
 
     pub async fn get_facet_heads_at_branch(

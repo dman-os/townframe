@@ -991,7 +991,8 @@ mod tests {
 
         for idx in 0..6 {
             let branch = daybook_types::doc::BranchPath::from("main");
-            let Some((_doc, heads)) = node_a.drawer.get_with_heads(&doc_id, &branch, None).await? else {
+            let Some((_doc, heads)) = node_a.drawer.get_with_heads(&doc_id, &branch, None).await?
+            else {
                 eyre::bail!("missing source doc after initial sync: {doc_id}");
             };
             let mut facets_set = std::collections::HashMap::new();
@@ -1283,7 +1284,10 @@ mod tests {
             let entry = entry
                 .wrap_err_with(|| format!("failed reading directory entry in {}", src.display()))?;
             let file_type = entry.file_type().wrap_err_with(|| {
-                format!("failed getting file type for source entry {}", entry.path().display())
+                format!(
+                    "failed getting file type for source entry {}",
+                    entry.path().display()
+                )
             })?;
             let src_path = entry.path();
             let dst_path = dst.join(entry.file_name());
@@ -1653,7 +1657,10 @@ mod tests {
 
         node_b
             .sync_repo
-            .wait_for_full_sync(std::slice::from_ref(&bootstrap_ba.endpoint_id), Duration::from_secs(5))
+            .wait_for_full_sync(
+                std::slice::from_ref(&bootstrap_ba.endpoint_id),
+                Duration::from_secs(5),
+            )
             .await?;
 
         node_b.stop().await?;

@@ -428,7 +428,12 @@ mod tests {
         };
 
         dst_store
-            .set_partition_cursor(peer_key.clone(), part_id.clone(), Some(req_cursor), Some(req_cursor + 10))
+            .set_partition_cursor(
+                peer_key.clone(),
+                part_id.clone(),
+                Some(req_cursor),
+                Some(req_cursor + 10),
+            )
             .await?;
 
         samod_ack_tx
@@ -527,7 +532,9 @@ mod tests {
             &mut samod_rx,
             Duration::from_secs(5),
             |req| match req {
-                SamodSyncRequest::RequestDocSync { doc_id: req_doc_id, .. } => req_doc_id == &doc_id,
+                SamodSyncRequest::RequestDocSync {
+                    doc_id: req_doc_id, ..
+                } => req_doc_id == &doc_id,
                 _ => false,
             },
             "timed out waiting for doc replay after stale cursor reset",

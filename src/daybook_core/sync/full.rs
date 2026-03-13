@@ -794,7 +794,8 @@ impl Worker {
                         ))
                     })
                     .collect();
-                resp.send(snapshot).expect("full worker snapshot caller dropped");
+                resp.send(snapshot)
+                    .expect("full worker snapshot caller dropped");
             }
         }
         eyre::Ok(())
@@ -1413,7 +1414,8 @@ impl Worker {
                 let Some(samod_doc) = self.samod_doc_set.get_mut(&doc_id) else {
                     continue;
                 };
-                if let Some(partitions) = samod_doc.requested_peers.remove(&peer_state.endpoint_id) {
+                if let Some(partitions) = samod_doc.requested_peers.remove(&peer_state.endpoint_id)
+                {
                     for (partition_key, cursors) in partitions {
                         let PartitionKey::BigRepoPartition(partition_id) = partition_key else {
                             continue;

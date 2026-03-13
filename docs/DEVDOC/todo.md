@@ -25,6 +25,9 @@
 
 - [ ] P2P
   - [x] iroh
+  - [ ] better URLs
+  - [ ] auto-peer discovery
+  - [ ] QR based clone
 - [ ] Deterministic doc ids for main docs [LOST]
 - [ ] Prune dependencies
 - [ ] Blobs server
@@ -69,6 +72,7 @@
 
 - [ ] Cleanup and show it to people
  
+- [ ] Get rid of all RwLocks and all async mutexes
 - [ ] Use Arc<str> for progress.tags
 - [ ] Consider using lmdb or redb for the kvstore on wflow_tokio
 - [ ] Draft Buffer

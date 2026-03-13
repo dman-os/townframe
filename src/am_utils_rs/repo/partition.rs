@@ -150,7 +150,8 @@ impl BigRepo {
         .bind(doc_txid as i64)
         .execute(&mut *tx)
         .await?;
-        let (heads, change_count_hint) = if let Some((heads_json, change_count_hint)) = doc_ver_row {
+        let (heads, change_count_hint) = if let Some((heads_json, change_count_hint)) = doc_ver_row
+        {
             (
                 serde_json::from_str::<Vec<String>>(&heads_json)?,
                 change_count_hint.max(0) as u64,
@@ -581,7 +582,12 @@ impl BigRepo {
         let mut member_high_watermark: HashMap<PartitionId, u64> = reqs
             .partitions
             .iter()
-            .map(|item| (item.partition_id.clone(), item.since_member.unwrap_or_default()))
+            .map(|item| {
+                (
+                    item.partition_id.clone(),
+                    item.since_member.unwrap_or_default(),
+                )
+            })
             .collect();
         loop {
             let replay_members = self
@@ -629,7 +635,12 @@ impl BigRepo {
         let mut doc_high_watermark: HashMap<PartitionId, u64> = reqs
             .partitions
             .iter()
-            .map(|item| (item.partition_id.clone(), item.since_doc.unwrap_or_default()))
+            .map(|item| {
+                (
+                    item.partition_id.clone(),
+                    item.since_doc.unwrap_or_default(),
+                )
+            })
             .collect();
         loop {
             let replay_docs = self
@@ -694,7 +705,8 @@ impl BigRepo {
                 let partition_id = event.partition_id.clone();
                 match event.deets {
                     PartitionEventDeets::MemberUpsert { doc_id } => {
-                        let high_watermark = *member_high_watermark.get(&partition_id).unwrap_or(&0);
+                        let high_watermark =
+                            *member_high_watermark.get(&partition_id).unwrap_or(&0);
                         if txid <= high_watermark {
                             continue;
                         }
@@ -712,7 +724,8 @@ impl BigRepo {
                         member_high_watermark.insert(partition_id, txid);
                     }
                     PartitionEventDeets::MemberRemoved { doc_id } => {
-                        let high_watermark = *member_high_watermark.get(&partition_id).unwrap_or(&0);
+                        let high_watermark =
+                            *member_high_watermark.get(&partition_id).unwrap_or(&0);
                         if txid <= high_watermark {
                             continue;
                         }

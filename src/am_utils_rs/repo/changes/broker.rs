@@ -46,12 +46,8 @@ struct HeadListener {
 }
 
 type HasCandidateListener = Arc<dyn Fn(&DocumentId, &ChangeOrigin) -> bool + Send + Sync + 'static>;
-type OnRemoteHeadsChanged = Arc<
-    dyn Fn(DocumentId, Vec<ChangeHash>) -> BoxFuture<'static, Res<()>>
-        + Send
-        + Sync
-        + 'static,
->;
+type OnRemoteHeadsChanged =
+    Arc<dyn Fn(DocumentId, Vec<ChangeHash>) -> BoxFuture<'static, Res<()>> + Send + Sync + 'static>;
 
 enum BrokerMsg {
     AddHeadListener {
@@ -71,7 +67,7 @@ impl DocChangeBrokerHandle {
     }
 }
 
-pub struct DocChangeBrokerStopToken {
+pub(super) struct DocChangeBrokerStopToken {
     pub join_handle: JoinHandle<()>,
     pub cancel_token: CancellationToken,
 }

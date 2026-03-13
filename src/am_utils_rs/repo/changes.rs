@@ -76,17 +76,14 @@ struct LocalListener {
     on_change: Box<dyn Fn(Vec<BigRepoLocalNotification>) + Send + Sync + 'static>,
 }
 
-type OnRemoteHeadsChanged = Arc<
-    dyn Fn(DocumentId, Vec<ChangeHash>) -> BoxFuture<'static, Res<()>>
-        + Send
-        + Sync
-        + 'static,
->;
+type OnRemoteHeadsChanged =
+    Arc<dyn Fn(DocumentId, Vec<ChangeHash>) -> BoxFuture<'static, Res<()>> + Send + Sync + 'static>;
 
 pub struct ChangeListenerManager {
     listeners: Arc<Mutex<Vec<ChangeListener>>>,
     change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
     local_listeners: Mutex<Vec<LocalListener>>,
+    /// used to send local ops to the switchboard
     local_tx: mpsc::UnboundedSender<Vec<BigRepoLocalNotification>>,
     brokers: DHashMap<DocumentId, std::sync::Weak<DocChangeBrokerLease>>,
     cancel_token: CancellationToken,
@@ -144,7 +141,7 @@ impl ChangeListenerManager {
         let (local_tx, local_rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let out = Self {
-            listeners: Arc::new(default()),
+            listeners: default(),
             change_tx,
             local_listeners: default(),
             local_tx,
@@ -256,7 +253,11 @@ impl ChangeListenerManager {
         }
     }
 
-    pub fn notify_doc_created(&self, doc_id: DocumentId, heads: Arc<[ChangeHash]>) -> Res<()> {
+    pub(super) fn notify_doc_created(
+        &self,
+        doc_id: DocumentId,
+        heads: Arc<[ChangeHash]>,
+    ) -> Res<()> {
         self.ensure_live()?;
         self.change_tx
             .send(vec![BigRepoChangeNotification::DocCreated {
@@ -267,7 +268,11 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    pub fn notify_doc_imported(&self, doc_id: DocumentId, heads: Arc<[ChangeHash]>) -> Res<()> {
+    pub(super) fn notify_doc_imported(
+        &self,
+        doc_id: DocumentId,
+        heads: Arc<[ChangeHash]>,
+    ) -> Res<()> {
         self.ensure_live()?;
         self.change_tx
             .send(vec![BigRepoChangeNotification::DocImported {
@@ -278,7 +283,7 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    pub fn notify_local_doc_created(
+    pub(super) fn notify_local_doc_created(
         &self,
         doc_id: DocumentId,
         heads: Arc<[ChangeHash]>,
@@ -289,7 +294,7 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    pub fn notify_local_doc_imported(
+    pub(super) fn notify_local_doc_imported(
         &self,
         doc_id: DocumentId,
         heads: Arc<[ChangeHash]>,
@@ -303,7 +308,7 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    pub fn notify_local_doc_heads_updated(
+    pub(super) fn notify_local_doc_heads_updated(
         &self,
         doc_id: DocumentId,
         heads: Arc<[ChangeHash]>,
