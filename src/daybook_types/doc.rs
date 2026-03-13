@@ -20,6 +20,7 @@ pub struct UserMeta {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct FacetMeta {
     pub created_at: Timestamp,
+    // TODO: consider VersionTags here
     pub uuid: Vec<Uuid>,
     // NOTE: field oredring is important for reconcilation order
     pub updated_at: Vec<Timestamp>,

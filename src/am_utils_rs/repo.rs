@@ -168,11 +168,13 @@ impl BigRepo {
             .await
     }
 
-    pub async fn add_change_listener(
+    pub async fn subscribe_change_listener(
         self: &Arc<Self>,
         filter: BigRepoChangeFilter,
-        on_change: Box<dyn Fn(Vec<BigRepoChangeNotification>) + Send + Sync + 'static>,
-    ) -> Res<BigRepoChangeListenerRegistration> {
+    ) -> Res<(
+        BigRepoChangeListenerRegistration,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
+    )> {
         let mut broker_leases = Vec::new();
         if let Some(target_doc) = filter.doc_id.as_ref() {
             let handle = self.find_doc_handle(&target_doc.doc_id).await?;
@@ -183,18 +185,18 @@ impl BigRepo {
                 broker_leases.push(lease);
             }
         }
-        let registration = self.change_manager.add_listener(filter, on_change).await?;
-        Ok(registration.with_broker_leases(broker_leases))
+        let (registration, change_rx) = self.change_manager.subscribe_listener(filter).await?;
+        Ok((registration.with_broker_leases(broker_leases), change_rx))
     }
 
-    pub async fn add_local_listener(
+    pub async fn subscribe_local_listener(
         self: &Arc<Self>,
         filter: BigRepoLocalFilter,
-        on_change: Box<dyn Fn(Vec<BigRepoLocalNotification>) + Send + Sync + 'static>,
-    ) -> Res<BigRepoLocalListenerRegistration> {
-        self.change_manager
-            .add_local_listener(filter, on_change)
-            .await
+    ) -> Res<(
+        BigRepoLocalListenerRegistration,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
+    )> {
+        self.change_manager.subscribe_local_listener(filter).await
     }
 
     pub async fn create_doc(
@@ -353,14 +355,6 @@ impl BigRepo {
         self.record_doc_heads_change(doc_id, heads).await
     }
 
-    pub async fn record_external_doc_heads_change(
-        &self,
-        doc_id: &DocumentId,
-        heads: Vec<automerge::ChangeHash>,
-    ) -> Res<()> {
-        self.record_doc_heads_change(doc_id, heads).await
-    }
-
     pub async fn spawn_ws_connector(&self, addr: Url) -> Res<tokio::task::JoinHandle<()>> {
         let repo = self.repo.clone();
         let handle = repo
@@ -390,7 +384,10 @@ impl BigRepo {
             "websocket sync server connector task"
         ))))
     }
+}
 
+// autosurgeon helpers
+impl BigRepo {
     pub async fn reconcile_prop_with_actor<'a, T, P>(
         self: &Arc<Self>,
         doc_id: &DocumentId,
@@ -515,7 +512,13 @@ pub struct ConnFinishSignal {
 impl Drop for BigRepo {
     fn drop(&mut self) {
         if let Some(stop_token) = self.change_manager_stop.lock().expect(ERROR_MUTEX).take() {
-            stop_token.cancel();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = stop_token.stop().await;
+                });
+            } else {
+                stop_token.cancel();
+            }
         }
     }
 }
@@ -612,18 +615,12 @@ mod tests {
     #[tokio::test]
     async fn create_doc_emits_created_notification() -> Res<()> {
         let repo = boot_big_repo("create").await?;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let _registration = repo
-            .add_change_listener(
-                BigRepoChangeFilter {
-                    doc_id: None,
-                    origin: None,
-                    path: vec![],
-                },
-                Box::new(move |events| {
-                    tx.send(events).expect(ERROR_CHANNEL);
-                }),
-            )
+        let (_registration, mut rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: None,
+                origin: None,
+                path: vec![],
+            })
             .await?;
 
         let handle = repo.create_doc(automerge::Automerge::new()).await?;
@@ -646,18 +643,12 @@ mod tests {
     async fn import_doc_emits_imported_notification() -> Res<()> {
         let src = boot_big_repo("src").await?;
         let dst = boot_big_repo("dst").await?;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let _registration = dst
-            .add_change_listener(
-                BigRepoChangeFilter {
-                    doc_id: None,
-                    origin: None,
-                    path: vec![],
-                },
-                Box::new(move |events| {
-                    tx.send(events).expect(ERROR_CHANNEL);
-                }),
-            )
+        let (_registration, mut rx) = dst
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: None,
+                origin: None,
+                path: vec![],
+            })
             .await?;
 
         let src_handle = src.create_doc(automerge::Automerge::new()).await?;
@@ -763,20 +754,14 @@ mod tests {
         let handle = repo.create_doc(automerge::Automerge::new()).await?;
         let target = handle.document_id().clone();
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let _registration = repo
-            .add_change_listener(
-                BigRepoChangeFilter {
-                    doc_id: Some(BigRepoDocIdFilter {
-                        doc_id: target.clone(),
-                    }),
-                    origin: None,
-                    path: vec![],
-                },
-                Box::new(move |events| {
-                    tx.send(events).expect(ERROR_CHANNEL);
+        let (_registration, mut rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: Some(BigRepoDocIdFilter {
+                    doc_id: target.clone(),
                 }),
-            )
+                origin: None,
+                path: vec![],
+            })
             .await?;
 
         handle
@@ -813,20 +798,14 @@ mod tests {
         let doc_a_id = doc_a.document_id().clone();
         let doc_b_id = doc_b.document_id().clone();
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let _registration = repo
-            .add_change_listener(
-                BigRepoChangeFilter {
-                    doc_id: Some(BigRepoDocIdFilter {
-                        doc_id: doc_a_id.clone(),
-                    }),
-                    origin: None,
-                    path: vec![],
-                },
-                Box::new(move |events| {
-                    tx.send(events).expect(ERROR_CHANNEL);
+        let (_registration, mut rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: Some(BigRepoDocIdFilter {
+                    doc_id: doc_a_id.clone(),
                 }),
-            )
+                origin: None,
+                path: vec![],
+            })
             .await?;
 
         doc_b
@@ -885,20 +864,14 @@ mod tests {
         let handle = repo.create_doc(automerge::Automerge::new()).await?;
         let target_id = handle.document_id().clone();
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let _registration = repo
-            .add_change_listener(
-                BigRepoChangeFilter {
-                    doc_id: Some(BigRepoDocIdFilter {
-                        doc_id: target_id.clone(),
-                    }),
-                    origin: None,
-                    path: vec!["container".into()],
-                },
-                Box::new(move |events| {
-                    tx.send(events).expect(ERROR_CHANNEL);
+        let (_registration, mut rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: Some(BigRepoDocIdFilter {
+                    doc_id: target_id.clone(),
                 }),
-            )
+                origin: None,
+                path: vec!["container".into()],
+            })
             .await?;
 
         // Create is not a DocChanged patch and should not match non-empty path filters.
@@ -957,32 +930,20 @@ mod tests {
     async fn change_listener_origin_filter_works_for_local_events() -> Res<()> {
         let repo = boot_big_repo("origin-filter").await?;
 
-        let (remote_tx, mut remote_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _remote_registration = repo
-            .add_change_listener(
-                BigRepoChangeFilter {
-                    doc_id: None,
-                    origin: Some(BigRepoOriginFilter::Remote),
-                    path: vec![],
-                },
-                Box::new(move |events| {
-                    remote_tx.send(events).expect(ERROR_CHANNEL);
-                }),
-            )
+        let (_remote_registration, mut remote_rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: None,
+                origin: Some(BigRepoOriginFilter::Remote),
+                path: vec![],
+            })
             .await?;
 
-        let (local_tx, mut local_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _local_registration = repo
-            .add_change_listener(
-                BigRepoChangeFilter {
-                    doc_id: None,
-                    origin: Some(BigRepoOriginFilter::Local),
-                    path: vec![],
-                },
-                Box::new(move |events| {
-                    local_tx.send(events).expect(ERROR_CHANNEL);
-                }),
-            )
+        let (_local_registration, mut local_rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: None,
+                origin: Some(BigRepoOriginFilter::Local),
+                path: vec![],
+            })
             .await?;
 
         let handle = repo.create_doc(automerge::Automerge::new()).await?;
@@ -1012,14 +973,8 @@ mod tests {
     async fn local_listener_receives_create_import_and_heads_updates() -> Res<()> {
         let src = boot_big_repo("localsrc").await?;
         let dst = boot_big_repo("localdst").await?;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let _registration = dst
-            .add_local_listener(
-                BigRepoLocalFilter { doc_id: None },
-                Box::new(move |events| {
-                    tx.send(events).expect(ERROR_CHANNEL);
-                }),
-            )
+        let (_registration, mut rx) = dst
+            .subscribe_local_listener(BigRepoLocalFilter { doc_id: None })
             .await?;
 
         let created = dst.create_doc(automerge::Automerge::new()).await?;
@@ -1097,18 +1052,12 @@ mod tests {
         let doc_a_id = doc_a.document_id().clone();
         let doc_b_id = doc_b.document_id().clone();
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let _registration = repo
-            .add_local_listener(
-                BigRepoLocalFilter {
-                    doc_id: Some(BigRepoDocIdFilter {
-                        doc_id: doc_a_id.clone(),
-                    }),
-                },
-                Box::new(move |events| {
-                    tx.send(events).expect(ERROR_CHANNEL);
+        let (_registration, mut rx) = repo
+            .subscribe_local_listener(BigRepoLocalFilter {
+                doc_id: Some(BigRepoDocIdFilter {
+                    doc_id: doc_a_id.clone(),
                 }),
-            )
+            })
             .await?;
 
         doc_b
@@ -1166,18 +1115,12 @@ mod tests {
         let handle = repo.create_doc(automerge::Automerge::new()).await?;
         let target_id = handle.document_id().clone();
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let _registration = repo
-            .add_local_listener(
-                BigRepoLocalFilter {
-                    doc_id: Some(BigRepoDocIdFilter {
-                        doc_id: target_id.clone(),
-                    }),
-                },
-                Box::new(move |events| {
-                    tx.send(events).expect(ERROR_CHANNEL);
+        let (_registration, mut rx) = repo
+            .subscribe_local_listener(BigRepoLocalFilter {
+                doc_id: Some(BigRepoDocIdFilter {
+                    doc_id: target_id.clone(),
                 }),
-            )
+            })
             .await?;
 
         // Drain create event from listener setup lifecycle

@@ -16,6 +16,7 @@ pub struct DocChangeBrokerHandle {
     msg_tx: mpsc::Sender<BrokerMsg>,
 }
 
+#[derive(Debug)]
 pub struct HeadListenerRegistration {
     change_rx: mpsc::Receiver<Arc<[ChangeHash]>>,
     list: std::sync::Weak<Mutex<Vec<HeadListener>>>,
@@ -56,13 +57,12 @@ enum BrokerMsg {
 }
 
 impl DocChangeBrokerHandle {
-    pub async fn get_head_listener(&self) -> Res<HeadListenerRegistration> {
+    pub async fn add_head_listener(&self) -> Res<HeadListenerRegistration> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.msg_tx
             .send(BrokerMsg::AddHeadListener { resp: tx })
             .await
-            .ok()
-            .ok_or_eyre(ERROR_ACTOR)?;
+            .expect(ERROR_ACTOR);
         rx.await.wrap_err(ERROR_CHANNEL)
     }
 }
@@ -172,9 +172,7 @@ impl DocChangeBroker {
                         id: registration.id,
                         change_tx,
                     });
-                resp.send(registration)
-                    .inspect_err(|_| error!(ERROR_CALLER))
-                    .ok();
+                resp.send(registration).expect(ERROR_CHANNEL);
             }
         }
         Ok(())
@@ -195,11 +193,8 @@ impl DocChangeBroker {
                         panic!("HeadListenerRegistration is full");
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
-                        warn!(
-                            id = ?listener.id,
-                            "HeadListenerRegistration dropped without cleanup"
-                        );
-                        false
+                        panic!("HeadListenerRegistration dropped without cleanup");
+                        //false
                     }
                 },
             );
@@ -228,11 +223,7 @@ impl DocChangeBroker {
         });
 
         if !all_changes.is_empty() {
-            if let Err(err) = self.change_tx.send(all_changes) {
-                if !self.cancel_token.is_cancelled() {
-                    eyre::bail!("failed to send change notifications: {err}");
-                }
-            }
+            self.change_tx.send(all_changes).expect(ERROR_CHANNEL);
         }
 
         Ok(())

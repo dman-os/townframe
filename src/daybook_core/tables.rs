@@ -390,25 +390,10 @@ impl TablesRepo {
 
         let broker = big_repo.ensure_change_broker(app_am_handle.clone()).await?;
 
-        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<
-            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
-        >();
         // Register change listener to automatically notify repo listeners
         let cancel_token = CancellationToken::new();
-        let ticket = TablesStore::register_change_listener(&big_repo, &app_doc_id, vec![], {
-            let cancel_token = cancel_token.clone();
-            move |notifs| {
-                if cancel_token.is_cancelled() {
-                    return;
-                }
-                if let Err(err) = notif_tx.send(notifs) {
-                    if !cancel_token.is_cancelled() {
-                        warn!("failed to send change notifications: {err}");
-                    }
-                }
-            }
-        })
-        .await?;
+        let (ticket, notif_rx) =
+            TablesStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
 
         let repo = Self {
             big_repo,

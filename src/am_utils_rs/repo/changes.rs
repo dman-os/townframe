@@ -67,13 +67,13 @@ pub struct LocalFilter {
 struct ChangeListener {
     id: Uuid,
     filter: ChangeFilter,
-    on_change: Box<dyn Fn(Vec<BigRepoChangeNotification>) + Send + Sync + 'static>,
+    change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
 }
 
 struct LocalListener {
     id: Uuid,
     filter: LocalFilter,
-    on_change: Box<dyn Fn(Vec<BigRepoLocalNotification>) + Send + Sync + 'static>,
+    change_tx: mpsc::UnboundedSender<Vec<BigRepoLocalNotification>>,
 }
 
 type OnRemoteHeadsChanged =
@@ -90,13 +90,20 @@ pub struct ChangeListenerManager {
 }
 
 pub struct ChangeListenerManagerStopToken {
-    pub cancel_token: CancellationToken,
-    pub _switchboard_handle: Option<JoinHandle<()>>,
+    cancel_token: CancellationToken,
+    switchboard_handle: JoinHandle<()>,
 }
 
 impl ChangeListenerManagerStopToken {
     pub fn cancel(&self) {
         self.cancel_token.cancel();
+    }
+
+    pub async fn stop(self) -> Res<()> {
+        self.cancel_token.cancel();
+        utils_rs::wait_on_handle_with_timeout(self.switchboard_handle, Duration::from_secs(5))
+            .await
+            .map_err(eyre::Report::from)
     }
 }
 
@@ -122,7 +129,7 @@ impl DocChangeBrokerLease {
     }
 
     pub async fn get_head_listener(&self) -> Res<broker::HeadListenerRegistration> {
-        self.handle.get_head_listener().await
+        self.handle.add_head_listener().await
     }
 }
 
@@ -156,7 +163,7 @@ impl ChangeListenerManager {
             out,
             ChangeListenerManagerStopToken {
                 cancel_token,
-                _switchboard_handle: Some(handle),
+                switchboard_handle: handle,
             },
         )
     }
@@ -322,13 +329,16 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    pub async fn add_listener(
+    pub async fn subscribe_listener(
         self: &Arc<Self>,
         filter: ChangeFilter,
-        on_change: Box<dyn Fn(Vec<BigRepoChangeNotification>) + Send + Sync + 'static>,
-    ) -> Res<ChangeListenerRegistration> {
+    ) -> Res<(
+        ChangeListenerRegistration,
+        mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
+    )> {
         self.ensure_live()?;
 
+        let (change_tx, change_rx) = mpsc::unbounded_channel();
         let id = Uuid::new_v4();
         self.listeners
             .lock()
@@ -336,22 +346,28 @@ impl ChangeListenerManager {
             .push(ChangeListener {
                 id,
                 filter,
-                on_change,
+                change_tx,
             });
-        Ok(ChangeListenerRegistration {
-            manager: Arc::downgrade(self),
-            id,
-            _broker_leases: Vec::new(),
-        })
+        Ok((
+            ChangeListenerRegistration {
+                manager: Arc::downgrade(self),
+                id,
+                _broker_leases: Vec::new(),
+            },
+            change_rx,
+        ))
     }
 
-    pub async fn add_local_listener(
+    pub async fn subscribe_local_listener(
         self: &Arc<Self>,
         filter: LocalFilter,
-        on_change: Box<dyn Fn(Vec<BigRepoLocalNotification>) + Send + Sync + 'static>,
-    ) -> Res<LocalListenerRegistration> {
+    ) -> Res<(
+        LocalListenerRegistration,
+        mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
+    )> {
         self.ensure_live()?;
 
+        let (change_tx, change_rx) = mpsc::unbounded_channel();
         let id = Uuid::new_v4();
         self.local_listeners
             .lock()
@@ -359,12 +375,15 @@ impl ChangeListenerManager {
             .push(LocalListener {
                 id,
                 filter,
-                on_change,
+                change_tx,
             });
-        Ok(LocalListenerRegistration {
-            manager: Arc::downgrade(self),
-            id,
-        })
+        Ok((
+            LocalListenerRegistration {
+                manager: Arc::downgrade(self),
+                id,
+            },
+            change_rx,
+        ))
     }
 
     fn spawn_switchboard(
@@ -373,14 +392,6 @@ impl ChangeListenerManager {
         mut local_rx: mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
     ) -> JoinHandle<()> {
         let fut = async move {
-            let mut listener_notifications: std::collections::HashMap<
-                usize,
-                Vec<BigRepoChangeNotification>,
-            > = std::collections::HashMap::new();
-            let mut local_listener_notifications: std::collections::HashMap<
-                usize,
-                Vec<BigRepoLocalNotification>,
-            > = std::collections::HashMap::new();
             loop {
                 enum SwitchboardInput {
                     Remote(Vec<BigRepoChangeNotification>),
@@ -408,29 +419,23 @@ impl ChangeListenerManager {
 
                 match input {
                     SwitchboardInput::Remote(notifications) => {
-                        listener_notifications.clear();
-                        let listeners = self.listeners.lock().expect(ERROR_MUTEX);
-                        for (listener_idx, listener) in listeners.iter().enumerate() {
+                        let mut listeners = self.listeners.lock().expect(ERROR_MUTEX);
+                        listeners.retain(|listener| {
                             let mut relevant_notifications = Vec::new();
                             for notification in &notifications {
                                 if notification_matches_filter(notification, &listener.filter) {
                                     relevant_notifications.push(notification.clone());
                                 }
                             }
-                            if !relevant_notifications.is_empty() {
-                                listener_notifications.insert(listener_idx, relevant_notifications);
+                            if relevant_notifications.is_empty() {
+                                return true;
                             }
-                        }
-                        for (listener_idx, notifications) in listener_notifications.drain() {
-                            if let Some(listener) = listeners.get(listener_idx) {
-                                (listener.on_change)(notifications);
-                            }
-                        }
+                            listener.change_tx.send(relevant_notifications).is_ok()
+                        });
                     }
                     SwitchboardInput::Local(notifications) => {
-                        local_listener_notifications.clear();
-                        let listeners = self.local_listeners.lock().expect(ERROR_MUTEX);
-                        for (listener_idx, listener) in listeners.iter().enumerate() {
+                        let mut listeners = self.local_listeners.lock().expect(ERROR_MUTEX);
+                        listeners.retain(|listener| {
                             let mut relevant_notifications = Vec::new();
                             for notification in &notifications {
                                 if local_notification_matches_filter(notification, &listener.filter)
@@ -438,16 +443,11 @@ impl ChangeListenerManager {
                                     relevant_notifications.push(notification.clone());
                                 }
                             }
-                            if !relevant_notifications.is_empty() {
-                                local_listener_notifications
-                                    .insert(listener_idx, relevant_notifications);
+                            if relevant_notifications.is_empty() {
+                                return true;
                             }
-                        }
-                        for (listener_idx, notifications) in local_listener_notifications.drain() {
-                            if let Some(listener) = listeners.get(listener_idx) {
-                                (listener.on_change)(notifications);
-                            }
-                        }
+                            listener.change_tx.send(relevant_notifications).is_ok()
+                        });
                     }
                 }
             }

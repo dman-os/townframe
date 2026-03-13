@@ -1,10 +1,6 @@
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var("DAYBOOK_SKIP_WFLOW_BUILD").as_deref() == Ok("1") {
-        return Ok(());
-    }
-
     let cwd = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
     let profile = std::env::var("PROFILE")?;

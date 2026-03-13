@@ -46,41 +46,34 @@ pub trait AmStore: Hydrate + Reconcile + Send + Sync + 'static {
             .map(|(val, _heads)| val)
     }
 
-    async fn register_change_listener<F>(
+    async fn register_change_listener(
         big_repo: &SharedBigRepo,
         doc_id: &DocumentId,
         path: Vec<autosurgeon::Prop<'static>>,
-        on_change: F,
-    ) -> Res<am_utils_rs::repo::BigRepoChangeListenerRegistration>
-    where
-        F: Fn(Vec<am_utils_rs::repo::BigRepoChangeNotification>) + Send + Sync + 'static,
-    {
-        Self::register_change_listener_for_prop(big_repo, doc_id, Self::prop(), path, on_change)
-            .await
+    ) -> Res<(
+        am_utils_rs::repo::BigRepoChangeListenerRegistration,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<am_utils_rs::repo::BigRepoChangeNotification>>,
+    )> {
+        Self::register_change_listener_for_prop(big_repo, doc_id, Self::prop(), path).await
     }
 
-    async fn register_change_listener_for_prop<F>(
+    async fn register_change_listener_for_prop(
         big_repo: &SharedBigRepo,
         doc_id: &DocumentId,
         prop: Cow<'static, str>,
         mut path: Vec<autosurgeon::Prop<'static>>,
-        on_change: F,
-    ) -> Res<am_utils_rs::repo::BigRepoChangeListenerRegistration>
-    where
-        F: Fn(Vec<am_utils_rs::repo::BigRepoChangeNotification>) + Send + Sync + 'static,
-    {
+    ) -> Res<(
+        am_utils_rs::repo::BigRepoChangeListenerRegistration,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<am_utils_rs::repo::BigRepoChangeNotification>>,
+    )> {
         path.insert(0, prop.into());
-        let ticket = big_repo
-            .add_change_listener(
-                am_utils_rs::repo::BigRepoChangeFilter {
-                    path,
-                    doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(doc_id.clone())),
-                    origin: Some(am_utils_rs::repo::BigRepoOriginFilter::Remote),
-                },
-                Box::new(on_change),
-            )
-            .await?;
-        Ok(ticket)
+        big_repo
+            .subscribe_change_listener(am_utils_rs::repo::BigRepoChangeFilter {
+                path,
+                doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(doc_id.clone())),
+                origin: Some(am_utils_rs::repo::BigRepoOriginFilter::Remote),
+            })
+            .await
     }
 }
 
