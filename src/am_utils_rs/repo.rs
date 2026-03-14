@@ -52,7 +52,7 @@ impl BigRepoConfig {
     pub fn new(sqlite_url: impl Into<String>) -> Self {
         Self {
             sqlite_url: sqlite_url.into(),
-            subscription_capacity: crate::sync::DEFAULT_SUBSCRIPTION_CAPACITY,
+            subscription_capacity: crate::sync::protocol::DEFAULT_SUBSCRIPTION_CAPACITY,
         }
     }
 }
@@ -65,7 +65,7 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     state_pool: sqlx::SqlitePool,
     #[educe(Debug(ignore))]
-    partition_events_tx: broadcast::Sender<crate::sync::PartitionEvent>,
+    partition_events_tx: broadcast::Sender<crate::sync::protocol::PartitionEvent>,
     #[educe(Debug(ignore))]
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
@@ -164,14 +164,21 @@ impl BigRepo {
                 let repo = repo.with_storage(samod::storage::TokioFilesystemStorage::new(
                     path.to_string_lossy().as_ref(),
                 ));
-                let loaded = repo.with_announce_policy(samod::AlwaysAnnounce).load().await;
-                let sqlite_url = big_repo_sqlite_url
-                    .unwrap_or_else(|| format!("sqlite://{}", path.join("big_repo.sqlite").display()));
+                let loaded = repo
+                    .with_announce_policy(samod::AlwaysAnnounce)
+                    .load()
+                    .await;
+                let sqlite_url = big_repo_sqlite_url.unwrap_or_else(|| {
+                    format!("sqlite://{}", path.join("big_repo.sqlite").display())
+                });
                 (loaded, sqlite_url)
             }
             StorageConfig::Memory => {
                 let repo = repo.with_storage(samod::storage::InMemoryStorage::new());
-                let loaded = repo.with_announce_policy(samod::AlwaysAnnounce).load().await;
+                let loaded = repo
+                    .with_announce_policy(samod::AlwaysAnnounce)
+                    .load()
+                    .await;
                 (loaded, "sqlite::memory:".to_string())
             }
         };
@@ -201,7 +208,10 @@ impl BigRepo {
         &self.state_pool
     }
 
-    pub fn subscribe_partition_events(&self) -> broadcast::Receiver<crate::sync::PartitionEvent> {
+    // NOTE: this method has no users
+    pub fn subscribe_partition_events(
+        &self,
+    ) -> broadcast::Receiver<crate::sync::protocol::PartitionEvent> {
         self.partition_events_tx.subscribe()
     }
 
@@ -797,8 +807,8 @@ mod tests {
         let events = dst
             .get_partition_doc_events_for_peer(
                 &"peer-fast-import".into(),
-                &crate::sync::GetPartitionDocEventsRequest {
-                    partitions: vec![crate::sync::PartitionCursorRequest {
+                &crate::sync::protocol::GetPartitionDocEventsRequest {
+                    partitions: vec![crate::sync::protocol::PartitionCursorRequest {
                         partition_id: part_id.clone(),
                         since: None,
                     }],
@@ -811,7 +821,7 @@ mod tests {
                 event.partition_id == part_id
                     && matches!(
                         &event.deets,
-                        crate::sync::PartitionDocEventDeets::DocChanged {
+                        crate::sync::protocol::PartitionDocEventDeets::DocChanged {
                             doc_id: event_doc_id,
                             heads,
                             ..

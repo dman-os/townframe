@@ -1,5 +1,6 @@
 use crate::interlude::*;
 
+use am_utils_rs::sync::protocol::PartitionId;
 use iroh::EndpointId;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -95,38 +96,24 @@ pub struct IrohSyncRepoStopToken {
     cancel_token: CancellationToken,
     worker_handle: JoinHandle<()>,
     router: iroh::protocol::Router,
-    partition_sync_stop_token: am_utils_rs::sync::SyncNodeStopToken,
-    partition_sync_store_stop_token: am_utils_rs::sync::SyncStoreStopToken,
+    partition_sync_stop_token: am_utils_rs::sync::node::SyncNodeStopToken,
+    partition_sync_store_stop_token: am_utils_rs::sync::store::SyncStoreStopToken,
     full_stop_token: full::StopToken,
 }
 
 impl IrohSyncRepoStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
-        tokio::time::timeout(Duration::from_secs(5), self.full_stop_token.stop())
-            .await
-            .map_err(|_| eyre::eyre!("timeout waiting full stop"))??;
+        self.full_stop_token.stop().await?;
+        // NOTE: we only add timeouts for stop tokens that don't have internal
+        // timeouts
         tokio::time::timeout(Duration::from_secs(10), self.router.shutdown())
             .await
             .map_err(|_| eyre::eyre!("timeout for waiting router shutdown"))??;
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.partition_sync_stop_token.stop(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting partition sync stop"))??;
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.partition_sync_store_stop_token.stop(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting partition sync store stop"))??;
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(2)),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting iroh sync worker join"))??;
+        self.partition_sync_stop_token.stop().await?;
+
+        self.partition_sync_store_stop_token.stop().await?;
+        utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(2)).await?;
         Ok(())
     }
 }
@@ -154,13 +141,14 @@ impl IrohSyncRepo {
         let (incoming_conn_tx, incoming_conn_rx) = tokio::sync::mpsc::unbounded_channel();
         let (conn_end_tx, conn_end_rx) = tokio::sync::mpsc::unbounded_channel();
         let (partition_sync_store, partition_sync_store_stop_token) =
-            am_utils_rs::sync::spawn_sync_store(rcx.big_repo.state_pool().clone()).await?;
-        let (partition_sync_node, partition_sync_stop_token) = am_utils_rs::sync::spawn_sync_node(
-            Arc::clone(&rcx.big_repo),
-            partition_sync_store.clone(),
-            Arc::new(am_utils_rs::sync::AllowAllPartitionAccessPolicy),
-        )
-        .await?;
+            am_utils_rs::sync::store::spawn_sync_store(rcx.big_repo.state_pool().clone()).await?;
+        let (partition_sync_node, partition_sync_stop_token) =
+            am_utils_rs::sync::node::spawn_sync_node(
+                Arc::clone(&rcx.big_repo),
+                partition_sync_store.clone(),
+                Arc::new(am_utils_rs::sync::AllowAllPartitionAccessPolicy),
+            )
+            .await?;
         let partition_sync_node = Arc::new(partition_sync_node);
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
@@ -175,7 +163,7 @@ impl IrohSyncRepo {
             )
             .accept(
                 PARTITION_SYNC_ALPN,
-                irpc_iroh::IrohProtocol::<am_utils_rs::sync::PartitionSyncRpc>::with_sender(
+                irpc_iroh::IrohProtocol::<am_utils_rs::sync::protocol::PartitionSyncRpc>::with_sender(
                     partition_sync_node.local_sender(),
                 ),
             )
@@ -250,7 +238,7 @@ impl IrohSyncRepo {
         Ok(())
     }
 
-    fn peer_partition_ids(&self, _peer_key: &str) -> HashSet<am_utils_rs::sync::PartitionId> {
+    fn peer_partition_ids(&self, _peer_key: &str) -> HashSet<PartitionId> {
         [
             crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
                 self.rcx.doc_drawer.document_id(),
@@ -304,17 +292,30 @@ impl IrohSyncRepo {
         {
             let mut active_samod_peers =
                 std::mem::replace(&mut *self.active_samod_peers.write().await, default());
-            for (endpoint_id, state) in active_samod_peers.drain() {
-                if let ActivePeerState::Connected(conn) = state {
-                    if let Err(err) = conn.stop().await {
-                        warn!(
-                            ?endpoint_id,
-                            ?err,
-                            "error stopping peer connection during cleanup"
-                        );
-                    }
-                }
-            }
+            use futures_buffered::BufferedStreamExt;
+            futures::stream::iter(active_samod_peers.drain().filter_map(
+                |(_endpoint_id, state)| match state {
+                    ActivePeerState::Connected(conn) => Some(conn.stop()),
+                    ActivePeerState::Connecting => None,
+                },
+            ))
+            .buffered_unordered(16)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Res<Vec<_>>>()?;
+            // FIXME: why was the futures_buffered based code replaced here?
+            // for (endpoint_id, state) in active_samod_peers.drain() {
+            //     if let ActivePeerState::Connected(conn) = state {
+            //         if let Err(err) = conn.stop().await {
+            //             warn!(
+            //                 ?endpoint_id,
+            //                 ?err,
+            //                 "error stopping peer connection during cleanup"
+            //             );
+            //         }
+            //     }
+            // }
         }
         eyre::Ok(())
     }
@@ -412,7 +413,7 @@ impl IrohSyncRepo {
     async fn finalize_outgoing_connection(
         &self,
         endpoint_id: EndpointId,
-        peer_key: am_utils_rs::sync::PeerKey,
+        peer_key: am_utils_rs::sync::protocol::PeerKey,
         conn: am_utils_rs::repo::RepoConnection,
     ) -> Res<()> {
         let conn_id = conn.id;
@@ -1380,15 +1381,13 @@ mod tests {
                 .await?;
         let _repo_user_id = crate::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
 
-        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(
-            am_utils_rs::repo::Config {
-                storage: am_utils_rs::repo::StorageConfig::Disk {
-                    path: destination.join("samod"),
-                    big_repo_sqlite_url: None,
-                },
-                peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
+        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
+            storage: am_utils_rs::repo::StorageConfig::Disk {
+                path: destination.join("samod"),
+                big_repo_sqlite_url: None,
             },
-        )
+            peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
+        })
         .await?;
         crate::sync::connect_and_pull_required_docs_once(
             &big_repo,

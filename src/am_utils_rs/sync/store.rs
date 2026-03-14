@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
-use crate::sync::{CursorIndex, PartitionId, PeerKey};
+use crate::sync::protocol::{CursorIndex, PartitionId, PeerKey};
+
 use sqlx::Row;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -60,20 +61,6 @@ enum StoreMsg {
         partition_id: PartitionId,
         member_cursor: Option<CursorIndex>,
         doc_cursor: Option<CursorIndex>,
-        resp: oneshot::Sender<Res<()>>,
-    },
-    UpsertUnresolvedDoc {
-        peer: PeerKey,
-        partition_id: PartitionId,
-        doc_id: String,
-        cursor: CursorIndex,
-        reason: String,
-        resp: oneshot::Sender<Res<()>>,
-    },
-    ResolveUnresolvedDoc {
-        peer: PeerKey,
-        partition_id: PartitionId,
-        doc_id: String,
         resp: oneshot::Sender<Res<()>>,
     },
 }
@@ -148,45 +135,6 @@ impl SyncStoreHandle {
         resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
-    pub async fn upsert_unresolved_doc(
-        &self,
-        peer: PeerKey,
-        partition_id: PartitionId,
-        doc_id: String,
-        cursor: CursorIndex,
-        reason: String,
-    ) -> Res<()> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        self.tx
-            .send(StoreMsg::UpsertUnresolvedDoc {
-                peer,
-                partition_id,
-                doc_id,
-                cursor,
-                reason,
-                resp: resp_tx,
-            })
-            .wrap_err("sync store closed")?;
-        resp_rx.await.wrap_err(ERROR_CHANNEL)?
-    }
-
-    pub async fn resolve_unresolved_doc(
-        &self,
-        peer: PeerKey,
-        partition_id: PartitionId,
-        doc_id: String,
-    ) -> Res<()> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        self.tx
-            .send(StoreMsg::ResolveUnresolvedDoc {
-                peer,
-                partition_id,
-                doc_id,
-                resp: resp_tx,
-            })
-            .wrap_err("sync store closed")?;
-        resp_rx.await.wrap_err(ERROR_CHANNEL)?
-    }
 }
 
 pub async fn spawn_sync_store(
@@ -241,23 +189,6 @@ async fn ensure_schema(pool: &sqlx::SqlitePool) -> Res<()> {
             member_cursor INTEGER NULL,
             doc_cursor INTEGER NULL,
             PRIMARY KEY(peer_key, partition_id)
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS sync_unresolved_docs(
-            peer_key TEXT NOT NULL,
-            partition_id TEXT NOT NULL,
-            doc_id TEXT NOT NULL,
-            first_cursor INTEGER NOT NULL,
-            latest_cursor INTEGER NOT NULL,
-            attempts INTEGER NOT NULL,
-            reason TEXT NOT NULL,
-            updated_at_unix_ms INTEGER NOT NULL,
-            PRIMARY KEY(peer_key, partition_id, doc_id)
         )
         "#,
     )
@@ -361,61 +292,6 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
                 .bind(partition_id)
                 .bind(member_cursor.map(|val| val as i64))
                 .bind(doc_cursor.map(|val| val as i64))
-                .execute(pool)
-                .await?;
-                Ok(())
-            }
-            .await;
-            resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-        }
-        StoreMsg::UpsertUnresolvedDoc {
-            peer,
-            partition_id,
-            doc_id,
-            cursor,
-            reason,
-            resp,
-        } => {
-            let out = async {
-                sqlx::query(
-                    r#"
-                    INSERT INTO sync_unresolved_docs(
-                        peer_key, partition_id, doc_id, first_cursor, latest_cursor, attempts, reason, updated_at_unix_ms
-                    ) VALUES(?, ?, ?, ?, ?, 1, ?, ?)
-                    ON CONFLICT(peer_key, partition_id, doc_id) DO UPDATE SET
-                        latest_cursor = excluded.latest_cursor,
-                        attempts = attempts + 1,
-                        reason = excluded.reason,
-                        updated_at_unix_ms = excluded.updated_at_unix_ms
-                    "#,
-                )
-                .bind(peer)
-                .bind(partition_id)
-                .bind(doc_id)
-                .bind(cursor as i64)
-                .bind(cursor as i64)
-                .bind(reason)
-                .bind(Timestamp::now().as_millisecond())
-                .execute(pool)
-                .await?;
-                Ok(())
-            }
-            .await;
-            resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-        }
-        StoreMsg::ResolveUnresolvedDoc {
-            peer,
-            partition_id,
-            doc_id,
-            resp,
-        } => {
-            let out = async {
-                sqlx::query(
-                    "DELETE FROM sync_unresolved_docs WHERE peer_key = ? AND partition_id = ? AND doc_id = ?",
-                )
-                .bind(peer)
-                .bind(partition_id)
-                .bind(doc_id)
                 .execute(pool)
                 .await?;
                 Ok(())

@@ -55,6 +55,7 @@ use crate::interlude::*;
 // the hope is to ban unwrap and use these for the common
 // unwrap cases
 pub mod expect_tags {
+    pub const ERROR_CANCELLED: &str = "cancel token was lit";
     pub const ERROR_IMPOSSIBLE: &str = "pigs are flying";
     pub const ERROR_CHANNEL: &str = "channel error: closed?";
     pub const ERROR_JSON: &str = "json error: oom?";

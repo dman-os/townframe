@@ -2,6 +2,8 @@ use crate::interlude::*;
 
 use irpc::{channel, rpc_requests};
 
+// FIXME: make these either a [u8; 32] or Arc<str>, they get cloned
+// incredilbly frequently
 pub type PartitionId = String;
 pub type PeerKey = String;
 pub type CursorIndex = u64;
@@ -35,6 +37,7 @@ pub struct PartitionStreamCursorRequest {
 pub struct PartitionCursorPage {
     pub partition_id: PartitionId,
     pub next_cursor: Option<CursorIndex>,
+    // FIXME: do we need has_more where next_cursor being optional will suffice?
     pub has_more: bool,
 }
 
@@ -187,12 +190,6 @@ pub enum PartitionSyncError {
     DocAccessDenied { doc_id: String },
     /// internal error: {message}
     Internal { message: String },
-}
-
-impl PartitionSyncError {
-    pub(crate) fn into_report(self) -> eyre::Report {
-        ferr!("{self}")
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

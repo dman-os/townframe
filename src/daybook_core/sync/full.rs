@@ -2,6 +2,15 @@
 
 use crate::interlude::*;
 
+use am_utils_rs::sync::{
+    node::SyncNodeHandle,
+    peer::{
+        PeerSyncProgressEvent, PeerSyncWorkerEvent, PeerSyncWorkerStopToken, SamodSyncAck,
+        SamodSyncRequest, SpawnPeerSyncWorkerArgs,
+    },
+    protocol::{PartitionId, PartitionSyncRpc, PeerKey},
+    store::SyncStoreHandle,
+};
 use iroh::EndpointId;
 use samod::ConnectionId;
 use tokio::sync::mpsc;
@@ -65,7 +74,7 @@ enum Msg {
         endpoint_id: EndpointId,
         conn_id: ConnectionId,
         partitions: HashSet<PartitionKey>,
-        peer_key: am_utils_rs::sync::PeerKey,
+        peer_key: PeerKey,
         resp: tokio::sync::oneshot::Sender<()>,
     },
     // OutgoingConn {
@@ -104,11 +113,11 @@ enum Msg {
     },
     PeerSyncWorkerProgress {
         endpoint_id: EndpointId,
-        event: am_utils_rs::sync::PeerSyncProgressEvent,
+        event: PeerSyncProgressEvent,
     },
     PeerSyncWorkerEvent {
         endpoint_id: EndpointId,
-        event: am_utils_rs::sync::PeerSyncWorkerEvent,
+        event: PeerSyncWorkerEvent,
     },
     GetPeerSyncSnapshot {
         endpoint_ids: Vec<EndpointId>,
@@ -162,8 +171,8 @@ impl WorkerHandle {
         &self,
         endpoint_id: EndpointId,
         conn_id: ConnectionId,
-        peer_key: am_utils_rs::sync::PeerKey,
-        partition_ids: HashSet<am_utils_rs::sync::PartitionId>,
+        peer_key: PeerKey,
+        partition_ids: HashSet<PartitionId>,
     ) -> Res<()> {
         let mut partitions: HashSet<PartitionKey> = partition_ids
             .iter()
@@ -223,16 +232,15 @@ pub async fn start_full_sync_worker(
     blobs_repo: Arc<BlobsRepo>,
     doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
-    partition_sync_node: Arc<am_utils_rs::sync::SyncNodeHandle>,
-    sync_store: am_utils_rs::sync::SyncStoreHandle,
+    partition_sync_node: Arc<SyncNodeHandle>,
+    sync_store: SyncStoreHandle,
     iroh_endpoint: iroh::Endpoint,
 ) -> Res<(WorkerHandle, StopToken)> {
     use crate::repos::Repo;
 
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
     let (sync_progress_tx, mut sync_progress_rx) = mpsc::channel::<SyncProgressMsg>(8192);
-    let (samod_sync_tx, mut samod_sync_rx) =
-        mpsc::channel::<am_utils_rs::sync::SamodSyncRequest>(8192);
+    let (samod_sync_tx, mut samod_sync_rx) = mpsc::channel::<SamodSyncRequest>(8192);
     let (events_tx, events_rx) = tokio::sync::broadcast::channel(16);
 
     let cancel_token = CancellationToken::new();
@@ -296,12 +304,9 @@ pub async fn start_full_sync_worker(
         worker.blobs_to_boot.insert(hash);
     }
 
-    // let (peer_infos, mut peer_updates) = rcx.big_repo.repo().connected_peers();
-    // let (peer_observer, observer_stop) = big_repo.spawn_peer_sync_observer();
     let fut = {
         let cancel_token = cancel_token.clone();
         let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
-        // let peer_observer = observer.subscribe();
         async move {
             let doc_blobs_rx = doc_blobs_rx;
             let mut sync_progress_buf = Vec::with_capacity(512);
@@ -327,22 +332,6 @@ pub async fn start_full_sync_worker(
                     _ = cancel_token.cancelled() => {
                         break;
                     }
-                    // val = peer_updates.next() => {
-                    //     let Some(connections) = val else {
-                    //         eyre::bail!("SharedBigRepo is closed, wrong shutdown order");
-                    //     };
-                    //     worker.handle_peer_conn_changes(connections).await?;
-                    // },
-                    // val = peer_observer.recv() => {
-                    //     let evt = match val {
-                    //         Ok(val) => val,
-                    //         Err(tokio::sync::broadcast::error::RecvError::Closed) => todo!(),
-                    //         Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped_count)) => {
-                    //             eyre::bail!("we're laggingn on peer events: dropped_count = {dropped_count}");
-                    //         },
-                    //     };
-                    //     worker.handle_peer_evt(evt).await?;
-                    // }
                     val = msg_rx.recv() => {
                         let Some(msg) = val else {
                             warn!("FullSyncWorkerHandle dropped, closing loop");
@@ -431,13 +420,13 @@ pub async fn start_full_sync_worker(
 
 struct Worker {
     big_repo: SharedBigRepo,
-    local_peer_key: am_utils_rs::sync::PeerKey,
+    local_peer_key: PeerKey,
     cancel_token: CancellationToken,
     blobs_repo: Arc<BlobsRepo>,
     doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
-    partition_sync_node: Arc<am_utils_rs::sync::SyncNodeHandle>,
-    sync_store: am_utils_rs::sync::SyncStoreHandle,
+    partition_sync_node: Arc<SyncNodeHandle>,
+    sync_store: SyncStoreHandle,
     iroh_endpoint: iroh::Endpoint,
 
     partitions: HashMap<PartitionKey, Partition>,
@@ -461,19 +450,19 @@ struct Worker {
 
     msg_tx: mpsc::UnboundedSender<Msg>,
     sync_progress_tx: mpsc::Sender<SyncProgressMsg>,
-    samod_sync_tx: mpsc::Sender<am_utils_rs::sync::SamodSyncRequest>,
+    samod_sync_tx: mpsc::Sender<SamodSyncRequest>,
     events_tx: tokio::sync::broadcast::Sender<FullSyncEvent>,
     max_active_sync_workers: usize,
 
     known_peer_set: HashMap<ConnectionId, PeerSyncState>,
     conn_by_peer: HashMap<EndpointId, ConnectionId>,
-    endpoint_by_peer_key: HashMap<am_utils_rs::sync::PeerKey, EndpointId>,
+    endpoint_by_peer_key: HashMap<PeerKey, EndpointId>,
     peer_partition_sessions: HashMap<EndpointId, PeerPartitionSession>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PartitionKey {
-    BigRepoPartition(am_utils_rs::sync::PartitionId),
+    BigRepoPartition(PartitionId),
     DocBlobsFullSync,
     // Docs(Uuid),
     // Blobs(Uuid),
@@ -503,7 +492,7 @@ enum ParitionDeets {
 struct PeerSyncState {
     endpoint_id: EndpointId,
     partitions: HashSet<PartitionKey>,
-    peer_key: am_utils_rs::sync::PeerKey,
+    peer_key: PeerKey,
     bootstrap_ready: bool,
     live_ready: bool,
     bootstrap_synced_docs: u64,
@@ -513,8 +502,8 @@ struct PeerSyncState {
 }
 
 struct PeerPartitionSession {
-    stop: am_utils_rs::sync::PeerSyncWorkerStopToken,
-    samod_ack_tx: mpsc::Sender<am_utils_rs::sync::SamodSyncAck>,
+    stop: PeerSyncWorkerStopToken,
+    samod_ack_tx: mpsc::Sender<SamodSyncAck>,
     forward_cancel_token: CancellationToken,
     forward_handles: Vec<tokio::task::JoinHandle<()>>,
     partitions: HashSet<PartitionKey>,
@@ -573,19 +562,16 @@ impl Worker {
     async fn handle_peer_sync_worker_progress(
         &mut self,
         endpoint_id: EndpointId,
-        event: am_utils_rs::sync::PeerSyncProgressEvent,
+        event: PeerSyncProgressEvent,
     ) -> Res<()> {
         match event {
-            am_utils_rs::sync::PeerSyncProgressEvent::PhaseStarted { phase } => {
+            PeerSyncProgressEvent::PhaseStarted { phase } => {
                 debug!(endpoint_id = ?endpoint_id, phase, "peer sync phase started");
             }
-            am_utils_rs::sync::PeerSyncProgressEvent::PhaseFinished { phase, elapsed } => {
+            PeerSyncProgressEvent::PhaseFinished { phase, elapsed } => {
                 debug!(endpoint_id = ?endpoint_id, phase, elapsed_ms = elapsed.as_millis(), "peer sync phase finished");
             }
-            am_utils_rs::sync::PeerSyncProgressEvent::CursorUpdated { partition_id } => {
-                debug!(endpoint_id = ?endpoint_id, partition_id, "peer sync cursor updated");
-            }
-            am_utils_rs::sync::PeerSyncProgressEvent::DocSyncStatus {
+            PeerSyncProgressEvent::DocSyncStatus {
                 synced_docs,
                 remaining_docs,
             } => {
@@ -610,10 +596,10 @@ impl Worker {
     async fn handle_peer_sync_worker_event(
         &mut self,
         endpoint_id: EndpointId,
-        event: am_utils_rs::sync::PeerSyncWorkerEvent,
+        event: PeerSyncWorkerEvent,
     ) -> Res<()> {
         match event {
-            am_utils_rs::sync::PeerSyncWorkerEvent::Bootstrapped {
+            PeerSyncWorkerEvent::Bootstrapped {
                 peer,
                 partition_count,
             } => {
@@ -626,7 +612,7 @@ impl Worker {
                 }
                 self.refresh_peer_fully_synced_state(endpoint_id).await?;
             }
-            am_utils_rs::sync::PeerSyncWorkerEvent::LiveReady { peer } => {
+            PeerSyncWorkerEvent::LiveReady { peer } => {
                 debug!(endpoint_id = ?endpoint_id, peer, "peer sync worker entered live mode");
                 if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
                     if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
@@ -635,7 +621,7 @@ impl Worker {
                 }
                 self.refresh_peer_fully_synced_state(endpoint_id).await?;
             }
-            am_utils_rs::sync::PeerSyncWorkerEvent::AbnormalExit { peer, reason } => {
+            PeerSyncWorkerEvent::AbnormalExit { peer, reason } => {
                 warn!(endpoint_id = ?endpoint_id, peer, reason, "peer sync worker exited abnormally");
                 self.emit_stale_peer(endpoint_id).await?;
                 self.peer_sessions_to_refresh.insert(endpoint_id);
@@ -1045,7 +1031,7 @@ impl Worker {
     async fn refresh_peer_partition_session(
         &mut self,
         endpoint_id: EndpointId,
-        peer_key: am_utils_rs::sync::PeerKey,
+        peer_key: PeerKey,
         partitions: HashSet<PartitionKey>,
     ) -> Res<()> {
         let session = self.peer_partition_sessions.remove(&endpoint_id);
@@ -1055,14 +1041,14 @@ impl Worker {
         if partitions.is_empty() {
             return Ok(());
         }
-        let rpc_client = irpc_iroh::client::<am_utils_rs::sync::PartitionSyncRpc>(
+        let rpc_client = irpc_iroh::client::<PartitionSyncRpc>(
             self.iroh_endpoint.clone(),
             iroh::EndpointAddr::new(endpoint_id),
             PARTITION_SYNC_ALPN,
         );
         let (samod_ack_tx, samod_ack_rx) = mpsc::channel(8192);
         let (mut handle, stop) =
-            am_utils_rs::sync::spawn_peer_sync_worker(am_utils_rs::sync::SpawnPeerSyncWorkerArgs {
+            am_utils_rs::sync::peer::spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
                 local_peer: self.local_peer_key.clone(),
                 remote_peer: peer_key,
                 rpc_client,
@@ -1154,22 +1140,16 @@ impl Worker {
         Ok(())
     }
 
-    async fn handle_samod_sync_batch(
-        &mut self,
-        buffer: &mut Vec<am_utils_rs::sync::SamodSyncRequest>,
-    ) -> Res<()> {
+    async fn handle_samod_sync_batch(&mut self, buffer: &mut Vec<SamodSyncRequest>) -> Res<()> {
         for req in buffer.drain(..) {
             self.handle_samod_sync_request(req).await?;
         }
         Ok(())
     }
 
-    async fn handle_samod_sync_request(
-        &mut self,
-        req: am_utils_rs::sync::SamodSyncRequest,
-    ) -> Res<()> {
+    async fn handle_samod_sync_request(&mut self, req: SamodSyncRequest) -> Res<()> {
         match req {
-            am_utils_rs::sync::SamodSyncRequest::RequestDocSync {
+            SamodSyncRequest::RequestDocSync {
                 peer_key,
                 partition_id,
                 doc_id,
@@ -1225,7 +1205,7 @@ impl Worker {
                     self.docs_to_boot.insert(doc_id);
                 }
             }
-            am_utils_rs::sync::SamodSyncRequest::DocDeleted {
+            SamodSyncRequest::DocDeleted {
                 peer_key,
                 partition_id: _,
                 doc_id,
@@ -1430,7 +1410,7 @@ impl Worker {
                             );
                             acks_to_emit.push((
                                 peer_state.endpoint_id,
-                                am_utils_rs::sync::SamodSyncAck::DocSynced {
+                                SamodSyncAck::DocSynced {
                                     partition_id: partition_id.clone(),
                                     doc_id: doc_id.to_string(),
                                     cursor,

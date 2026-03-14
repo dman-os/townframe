@@ -1,43 +1,34 @@
-mod node;
-mod peer;
-mod protocol;
-mod store;
-
-pub use node::{spawn_sync_node, SyncNodeHandle, SyncNodeStopToken};
-pub use peer::{
-    spawn_peer_sync_worker, PeerSyncProgressEvent, PeerSyncWorkerEvent, PeerSyncWorkerHandle,
-    PeerSyncWorkerStopToken, SamodSyncAck, SamodSyncRequest, SpawnPeerSyncWorkerArgs,
-};
-pub use protocol::{
-    CursorIndex, FullDoc, GetDocsFullRequest, GetDocsFullResponse, GetPartitionDocEventsRequest,
-    GetPartitionDocEventsResponse, GetPartitionMemberEventsRequest,
-    GetPartitionMemberEventsResponse, ListPartitionsRequest, ListPartitionsResponse,
-    PartitionCursorPage, PartitionCursorRequest, PartitionDocEvent, PartitionDocEventDeets,
-    PartitionEvent, PartitionEventDeets, PartitionId, PartitionMemberEvent,
-    PartitionMemberEventDeets, PartitionStreamCursorRequest, PartitionSummary, PartitionSyncError,
-    PartitionSyncRpc, PeerKey, SubPartitionsRequest, SubscriptionItem, SubscriptionStreamKind,
-    DEFAULT_DOC_BATCH_LIMIT, DEFAULT_EVENT_PAGE_LIMIT, DEFAULT_SUBSCRIPTION_CAPACITY,
-    MAX_GET_DOCS_FULL_DOC_IDS,
-};
-pub use store::{spawn_sync_store, SyncStoreHandle, SyncStoreStopToken};
+pub mod node;
+pub mod peer;
+pub mod protocol;
+pub mod store;
 
 pub trait PartitionAccessPolicy: Send + Sync + 'static {
-    fn can_access_partition(&self, peer: &PeerKey, partition_id: &PartitionId) -> bool;
+    fn can_access_partition(
+        &self,
+        peer: &protocol::PeerKey,
+        partition_id: &protocol::PartitionId,
+    ) -> bool;
 }
 
 pub struct AllowAllPartitionAccessPolicy;
 
 impl PartitionAccessPolicy for AllowAllPartitionAccessPolicy {
-    fn can_access_partition(&self, _peer: &PeerKey, _partition_id: &PartitionId) -> bool {
+    fn can_access_partition(
+        &self,
+        _peer: &protocol::PeerKey,
+        _partition_id: &protocol::PartitionId,
+    ) -> bool {
         true
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use crate::interlude::*;
+
+    use crate::sync::{node::*, peer::*, protocol::*, store::*, *};
+
     use crate::repo::{BigRepo, BigRepoConfig};
     use automerge::transaction::Transactable;
     use samod::DocumentId;

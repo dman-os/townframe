@@ -5,14 +5,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use crate::repo::BigRepo;
-use crate::sync::{
-    FullDoc, GetPartitionDocEventsRequest, GetPartitionDocEventsResponse,
-    GetPartitionMemberEventsRequest, GetPartitionMemberEventsResponse, PartitionCursorPage,
-    PartitionCursorRequest, PartitionDocEvent, PartitionDocEventDeets, PartitionEvent,
-    PartitionEventDeets, PartitionId, PartitionMemberEvent, PartitionMemberEventDeets,
-    PartitionSummary, PartitionSyncError, PeerKey, SubPartitionsRequest, SubscriptionItem,
-    SubscriptionStreamKind, DEFAULT_EVENT_PAGE_LIMIT, MAX_GET_DOCS_FULL_DOC_IDS,
-};
+use crate::sync::protocol::*;
 
 const META_NEXT_TXID_KEY: &str = "next_txid";
 
@@ -482,7 +475,7 @@ impl BigRepo {
                 requested: doc_ids.len(),
                 max: MAX_GET_DOCS_FULL_DOC_IDS,
             }
-            .into_report());
+            .into());
         }
 
         let mut dedup = HashSet::new();
@@ -495,7 +488,7 @@ impl BigRepo {
             .find_first_inaccessible_doc_in_partitions(&requested_doc_ids, allowed_partitions)
             .await?;
         if let Some(denied) = denied_doc_id {
-            return Err(PartitionSyncError::DocAccessDenied { doc_id: denied }.into_report());
+            return Err(PartitionSyncError::DocAccessDenied { doc_id: denied }.into());
         }
 
         use futures::StreamExt;
@@ -660,11 +653,9 @@ impl BigRepo {
             }
         }
         if tx.is_closed() {
-            return Ok(
-                rx_opt
-                    .take()
-                    .expect("partition subscription response channel should exist"),
-            );
+            return Ok(rx_opt
+                .take()
+                .expect("partition subscription response channel should exist"));
         }
         if tx
             .send(SubscriptionItem::ReplayComplete {
@@ -673,11 +664,9 @@ impl BigRepo {
             .await
             .is_err()
         {
-            return Ok(
-                rx_opt
-                    .take()
-                    .expect("partition subscription response channel should exist"),
-            );
+            return Ok(rx_opt
+                .take()
+                .expect("partition subscription response channel should exist"));
         }
         let mut doc_high_watermark: HashMap<PartitionId, u64> = reqs
             .partitions
@@ -724,11 +713,9 @@ impl BigRepo {
             }
         }
         if tx.is_closed() {
-            return Ok(
-                rx_opt
-                    .take()
-                    .expect("partition subscription response channel should exist"),
-            );
+            return Ok(rx_opt
+                .take()
+                .expect("partition subscription response channel should exist"));
         }
         if tx
             .send(SubscriptionItem::ReplayComplete {
@@ -737,11 +724,9 @@ impl BigRepo {
             .await
             .is_err()
         {
-            return Ok(
-                rx_opt
-                    .take()
-                    .expect("partition subscription response channel should exist"),
-            );
+            return Ok(rx_opt
+                .take()
+                .expect("partition subscription response channel should exist"));
         }
 
         let cancel_token = self.partition_forwarder_cancel.clone();
@@ -904,7 +889,7 @@ async fn ensure_partition_exists(pool: &sqlx::SqlitePool, partition_id: &Partiti
     Err(PartitionSyncError::UnknownPartition {
         partition_id: partition_id.clone(),
     }
-    .into_report())
+    .into())
 }
 
 async fn load_member_partition_page(
@@ -1093,7 +1078,7 @@ mod tests {
     use super::*;
 
     use crate::repo::{BigRepo, BigRepoConfig};
-    use crate::sync::{
+    use crate::sync::protocol::{
         GetPartitionDocEventsRequest, GetPartitionMemberEventsRequest, PartitionCursorRequest,
     };
     use automerge::transaction::Transactable;

@@ -1,15 +1,9 @@
 use crate::interlude::*;
 
 use crate::repo::SharedBigRepo;
-use crate::sync::protocol::{
-    GetDocsFullRpcReq, GetPartitionDocEventsRpcReq, GetPartitionMemberEventsRpcReq,
-    ListPartitionsRpcReq, PartitionSyncRpc, PartitionSyncRpcMessage, SubPartitionsRpcReq,
-};
-use crate::sync::{
-    GetDocsFullResponse, GetPartitionDocEventsResponse, GetPartitionMemberEventsResponse,
-    ListPartitionsResponse, PartitionAccessPolicy, PartitionSyncError, PeerKey, SyncStoreHandle,
-    DEFAULT_SUBSCRIPTION_CAPACITY,
-};
+use crate::sync::protocol::*;
+use crate::sync::store::SyncStoreHandle;
+use crate::sync::PartitionAccessPolicy;
 
 use irpc::WithChannels;
 use tokio::sync::{mpsc, oneshot};
@@ -308,7 +302,7 @@ impl SyncNodeWorker {
     fn ensure_partition_access(
         &self,
         peer: &PeerKey,
-        reqs: &[crate::sync::PartitionCursorRequest],
+        reqs: &[PartitionCursorRequest],
     ) -> Result<(), PartitionSyncError> {
         for req in reqs {
             if !self

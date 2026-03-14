@@ -279,11 +279,11 @@ impl DrawerRepo {
 
     pub(crate) fn replicated_partition_id_for_drawer(
         _drawer_doc_id: &DocumentId,
-    ) -> am_utils_rs::sync::PartitionId {
+    ) -> am_utils_rs::sync::protocol::PartitionId {
         DRAWER_REPLICATED_PARTITION_PREFIX.to_string()
     }
 
-    pub(crate) fn replicated_partition_id(&self) -> am_utils_rs::sync::PartitionId {
+    pub(crate) fn replicated_partition_id(&self) -> am_utils_rs::sync::protocol::PartitionId {
         Self::replicated_partition_id_for_drawer(&self.drawer_doc_id)
     }
 
@@ -2689,12 +2689,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -2788,12 +2786,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-partitions".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-partitions".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -2895,12 +2891,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_batch_add_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-batch-add".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-batch-add".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -2966,12 +2960,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-batch-add-events".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-batch-add-events".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -3078,12 +3070,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_merge() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-merge".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-merge".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -3199,19 +3189,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_sync_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (client_acx, client_acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "client".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (client_acx, client_acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "client".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
-        let (server_acx, server_acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "server".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (server_acx, server_acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "server".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         // Connect repos
@@ -3319,12 +3305,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_additional_apis() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-apis".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-apis".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -3475,12 +3459,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_metadata_maintenance() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-meta".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-meta".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -3645,12 +3627,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-update-actor".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-update-actor".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
         let drawer_doc_id = {
             let mut doc = automerge::Automerge::new();
@@ -3729,12 +3709,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-merge-actor".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-merge-actor".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
         let drawer_doc_id = {
             let mut doc = automerge::Automerge::new();
@@ -3901,12 +3879,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_updated_at_merge() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-updated-at".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-updated-at".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -4032,12 +4008,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_facet_blame_maintenance() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-blame".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-blame".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -4162,12 +4136,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-scope".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-scope".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let make_drawer_doc = || async {
@@ -4240,12 +4212,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_doc_updated_includes_changed_facet_keys() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-changed-facets".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-changed-facets".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -4338,12 +4308,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-unknown-tag".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-unknown-tag".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -4388,12 +4356,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-self-ref".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-self-ref".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -4450,12 +4416,10 @@ mod tests {
     async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_target() -> Res<()>
     {
         utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test-v2-body-empty-fragment-self".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-body-empty-fragment-self".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -4522,15 +4486,13 @@ mod tests {
         let storage_path = temp_dir.path().join("samod-amctx-disk");
         std::fs::create_dir_all(&storage_path)?;
 
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: format!("perf-drawer-raw-amctx-{}", Uuid::new_v4()),
-                storage: am_utils_rs::repo::StorageConfig::Disk {
-                    path: storage_path.clone(),
-                    big_repo_sqlite_url: None,
-                },
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: format!("perf-drawer-raw-amctx-{}", Uuid::new_v4()),
+            storage: am_utils_rs::repo::StorageConfig::Disk {
+                path: storage_path.clone(),
+                big_repo_sqlite_url: None,
             },
-        )
+        })
         .await?;
 
         let local_actor_id = automerge::ActorId::random();
@@ -4623,15 +4585,13 @@ mod tests {
         let storage_path = temp_dir.path().join("drawer-disk");
         std::fs::create_dir_all(&storage_path)?;
 
-        let (big_repo, acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: format!("perf-drawer-add-{}", Uuid::new_v4()),
-                storage: am_utils_rs::repo::StorageConfig::Disk {
-                    path: storage_path.clone(),
-                    big_repo_sqlite_url: None,
-                },
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: format!("perf-drawer-add-{}", Uuid::new_v4()),
+            storage: am_utils_rs::repo::StorageConfig::Disk {
+                path: storage_path.clone(),
+                big_repo_sqlite_url: None,
             },
-        )
+        })
         .await?;
 
         let drawer_doc_id = {
