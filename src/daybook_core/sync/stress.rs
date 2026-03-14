@@ -72,7 +72,9 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
             .filter(|idx| nodes[*idx].is_some())
             .collect::<Vec<_>>();
         active.shuffle(&mut rng);
-        let node_idx = *active.first().ok_or_eyre("no active nodes in transfer phase")?;
+        let node_idx = *active
+            .first()
+            .ok_or_eyre("no active nodes in transfer phase")?;
         let node = nodes[node_idx]
             .as_ref()
             .ok_or_eyre("active node unexpectedly missing")?;
@@ -211,8 +213,12 @@ async fn connect_topology(
 ) -> Res<Vec<HashSet<EndpointId>>> {
     let mut endpoint_sets = vec![HashSet::<EndpointId>::new(); NODE_COUNT];
     for (a, b) in edges {
-        let node_a = nodes[*a].as_ref().ok_or_eyre("node missing while connecting")?;
-        let node_b = nodes[*b].as_ref().ok_or_eyre("node missing while connecting")?;
+        let node_a = nodes[*a]
+            .as_ref()
+            .ok_or_eyre("node missing while connecting")?;
+        let node_b = nodes[*b]
+            .as_ref()
+            .ok_or_eyre("node missing while connecting")?;
 
         let ticket_b = node_b.sync_repo.get_ticket_url().await?;
         let bootstrap_ab = node_a.sync_repo.connect_url(&ticket_b).await?;
@@ -415,13 +421,17 @@ async fn apply_event(
                 return Ok(None);
             };
             let branch = daybook_types::doc::BranchPath::from("main");
-            let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await? else {
+            let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await?
+            else {
                 return Ok(None);
             };
             let mut facets_set = std::collections::HashMap::new();
             facets_set.insert(
                 FacetKey::from(WellKnownFacetTag::TitleGeneric),
-                FacetRaw::from(WellKnownFacet::TitleGeneric(format!("mut-{idx}-{}", rng.random::<u64>()))),
+                FacetRaw::from(WellKnownFacet::TitleGeneric(format!(
+                    "mut-{idx}-{}",
+                    rng.random::<u64>()
+                ))),
             );
             node.drawer
                 .update_at_heads(
@@ -479,7 +489,8 @@ async fn apply_event(
             let Some((doc_id, branch)) = pick_doc_and_branch(node, rng).await? else {
                 return Ok(None);
             };
-            let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await? else {
+            let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await?
+            else {
                 return Ok(None);
             };
             let mut facets_set = std::collections::HashMap::new();
@@ -518,7 +529,8 @@ async fn apply_event(
                 return Ok(None);
             };
             let branch = daybook_types::doc::BranchPath::from("main");
-            let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await? else {
+            let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await?
+            else {
                 return Ok(None);
             };
             let payload = format!("blob-stress-{idx}-{}", rng.random::<u64>()).into_bytes();
@@ -554,7 +566,10 @@ async fn apply_event(
 }
 
 async fn pick_doc_id(node: &SyncTestNode, rng: &mut StdRng) -> Res<Option<String>> {
-    let mut docs = list_doc_ids(&node.drawer).await?.into_iter().collect::<Vec<_>>();
+    let mut docs = list_doc_ids(&node.drawer)
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
     if docs.is_empty() {
         return Ok(None);
     }
@@ -577,14 +592,20 @@ async fn pick_doc_and_branch(
         return Ok(None);
     }
     names.shuffle(rng);
-    Ok(Some((doc_id, daybook_types::doc::BranchPath::from(names[0].clone()))))
+    Ok(Some((
+        doc_id,
+        daybook_types::doc::BranchPath::from(names[0].clone()),
+    )))
 }
 
 async fn pick_doc_and_non_main_branch(
     node: &SyncTestNode,
     rng: &mut StdRng,
 ) -> Res<Option<(String, daybook_types::doc::BranchPath)>> {
-    let mut docs = list_doc_ids(&node.drawer).await?.into_iter().collect::<Vec<_>>();
+    let mut docs = list_doc_ids(&node.drawer)
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
     docs.shuffle(rng);
     for doc_id in docs {
         let Some(branches) = node.drawer.get_doc_branches(&doc_id).await? else {

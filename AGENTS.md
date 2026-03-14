@@ -96,3 +96,12 @@
 > You're begged not to be lazy wth solutions.
 
 - If you're not able to cleanly read a provided web link through tool calls, pause and ask for a copy/paste of the contents. NEVER ASSUME THE CONTENTS OF A LINK YOU HAVEN'T SEEN!
+
+## Cheating
+
+Cheat code is bad code.
+Cheat code is code that tires to get the test green by writing shallow or buggy fixes.
+Cheat code reads the whole database in a memory HashSet to avoid writing the right SQL.
+Cheat code ignores errors with warnings logs and moves on.
+
+THIS IS A NO CHEAT REPO!

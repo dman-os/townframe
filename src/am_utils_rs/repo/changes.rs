@@ -4,7 +4,6 @@ mod broker;
 
 use automerge::ChangeHash;
 use autosurgeon::Prop;
-use futures::future::BoxFuture;
 use samod::{DocHandle, DocumentId};
 use samod_core::ChangeOrigin;
 use std::sync::Mutex;
@@ -47,6 +46,15 @@ pub enum BigRepoLocalNotification {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum BigRepoHeadNotification {
+    DocHeadsChanged {
+        doc_id: DocumentId,
+        heads: Arc<[ChangeHash]>,
+        origin: ChangeOrigin,
+    },
+}
+
 pub struct ChangeFilter {
     pub doc_id: Option<DocIdFilter>,
     pub origin: Option<OriginFilter>,
@@ -64,6 +72,10 @@ pub struct LocalFilter {
     pub doc_id: Option<DocIdFilter>,
 }
 
+pub struct HeadFilter {
+    pub doc_id: Option<DocIdFilter>,
+}
+
 struct ChangeListener {
     id: Uuid,
     filter: ChangeFilter,
@@ -76,12 +88,11 @@ struct LocalListener {
     change_tx: mpsc::UnboundedSender<Vec<BigRepoLocalNotification>>,
 }
 
-type OnRemoteHeadsChanged =
-    Arc<dyn Fn(DocumentId, Vec<ChangeHash>) -> BoxFuture<'static, Res<()>> + Send + Sync + 'static>;
-
 pub struct ChangeListenerManager {
     listeners: Arc<Mutex<Vec<ChangeListener>>>,
     change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
+    head_listeners: Mutex<Vec<HeadListener>>,
+    head_tx: mpsc::UnboundedSender<Vec<BigRepoHeadNotification>>,
     local_listeners: Mutex<Vec<LocalListener>>,
     /// used to send local ops to the switchboard
     local_tx: mpsc::UnboundedSender<Vec<BigRepoLocalNotification>>,
@@ -128,8 +139,8 @@ impl DocChangeBrokerLease {
         self.handle.filter()
     }
 
-    pub async fn get_head_listener(&self) -> Res<broker::HeadListenerRegistration> {
-        self.handle.add_head_listener().await
+    pub(crate) async fn wait_until_ready(&self) {
+        self.handle.ensure_ready().await
     }
 }
 
@@ -145,19 +156,21 @@ impl Drop for DocChangeBrokerLease {
 impl ChangeListenerManager {
     pub fn boot() -> (Arc<Self>, ChangeListenerManagerStopToken) {
         let (change_tx, change_rx) = mpsc::unbounded_channel();
+        let (head_tx, head_rx) = mpsc::unbounded_channel();
         let (local_tx, local_rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let out = Self {
             listeners: default(),
             change_tx,
+            head_listeners: default(),
+            head_tx: head_tx.clone(),
             local_listeners: default(),
             local_tx,
             brokers: default(),
             cancel_token: cancel_token.clone(),
         };
         let out = Arc::new(out);
-
-        let handle = Arc::clone(&out).spawn_switchboard(change_rx, local_rx);
+        let handle = Arc::clone(&out).spawn_switchboard(change_rx, head_rx, local_rx);
 
         (
             out,
@@ -175,11 +188,7 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    pub async fn add_doc_with_remote_heads_callback(
-        &self,
-        handle: DocHandle,
-        on_remote_heads_changed: OnRemoteHeadsChanged,
-    ) -> Res<Arc<DocChangeBrokerLease>> {
+    pub async fn add_doc_listener(&self, handle: DocHandle) -> Res<Arc<DocChangeBrokerLease>> {
         self.ensure_live()?;
 
         let doc_id = handle.document_id().clone();
@@ -192,6 +201,7 @@ impl ChangeListenerManager {
                     handle,
                     self.cancel_token.child_token(),
                     self.change_tx.clone(),
+                    self.head_tx.clone(),
                     Arc::new({
                         let listeners = Arc::clone(&self.listeners);
                         move |doc_id, origin| {
@@ -213,7 +223,6 @@ impl ChangeListenerManager {
                             })
                         }
                     }),
-                    Arc::clone(&on_remote_heads_changed),
                 )?;
                 let lease = Arc::new(DocChangeBrokerLease {
                     handle: Arc::new(broker),
@@ -227,6 +236,7 @@ impl ChangeListenerManager {
                     handle,
                     self.cancel_token.child_token(),
                     self.change_tx.clone(),
+                    self.head_tx.clone(),
                     Arc::new({
                         let listeners = Arc::clone(&self.listeners);
                         move |doc_id, origin| {
@@ -248,7 +258,6 @@ impl ChangeListenerManager {
                             })
                         }
                     }),
-                    Arc::clone(&on_remote_heads_changed),
                 )?;
                 let lease = Arc::new(DocChangeBrokerLease {
                     handle: Arc::new(broker),
@@ -386,15 +395,45 @@ impl ChangeListenerManager {
         ))
     }
 
+    pub async fn subscribe_head_listener(
+        self: &Arc<Self>,
+        filter: HeadFilter,
+    ) -> Res<(
+        HeadListenerRegistration,
+        mpsc::UnboundedReceiver<Vec<BigRepoHeadNotification>>,
+    )> {
+        self.ensure_live()?;
+        let (change_tx, change_rx) = mpsc::unbounded_channel();
+        let id = Uuid::new_v4();
+        self.head_listeners
+            .lock()
+            .expect(ERROR_MUTEX)
+            .push(HeadListener {
+                id,
+                filter,
+                change_tx,
+            });
+        Ok((
+            HeadListenerRegistration {
+                manager: Arc::downgrade(self),
+                id,
+                _broker_leases: Vec::new(),
+            },
+            change_rx,
+        ))
+    }
+
     fn spawn_switchboard(
         self: Arc<Self>,
         mut change_rx: mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
+        mut head_rx: mpsc::UnboundedReceiver<Vec<BigRepoHeadNotification>>,
         mut local_rx: mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
     ) -> JoinHandle<()> {
         let fut = async move {
             loop {
                 enum SwitchboardInput {
                     Remote(Vec<BigRepoChangeNotification>),
+                    Heads(Vec<BigRepoHeadNotification>),
                     Local(Vec<BigRepoLocalNotification>),
                 }
                 let input = tokio::select! {
@@ -408,6 +447,12 @@ impl ChangeListenerManager {
                             continue;
                         };
                         SwitchboardInput::Remote(val)
+                    },
+                    val = head_rx.recv() => {
+                        let Some(val) = val else {
+                            continue;
+                        };
+                        SwitchboardInput::Heads(val)
                     },
                     val = local_rx.recv() => {
                         let Some(val) = val else {
@@ -424,6 +469,22 @@ impl ChangeListenerManager {
                             let mut relevant_notifications = Vec::new();
                             for notification in &notifications {
                                 if notification_matches_filter(notification, &listener.filter) {
+                                    relevant_notifications.push(notification.clone());
+                                }
+                            }
+                            if relevant_notifications.is_empty() {
+                                return true;
+                            }
+                            listener.change_tx.send(relevant_notifications).is_ok()
+                        });
+                    }
+                    SwitchboardInput::Heads(notifications) => {
+                        let mut listeners = self.head_listeners.lock().expect(ERROR_MUTEX);
+                        listeners.retain(|listener| {
+                            let mut relevant_notifications = Vec::new();
+                            for notification in &notifications {
+                                if head_notification_matches_filter(notification, &listener.filter)
+                                {
                                     relevant_notifications.push(notification.clone());
                                 }
                             }
@@ -537,6 +598,38 @@ impl Drop for ChangeListenerRegistration {
     }
 }
 
+struct HeadListener {
+    id: Uuid,
+    filter: HeadFilter,
+    change_tx: mpsc::UnboundedSender<Vec<BigRepoHeadNotification>>,
+}
+
+pub struct HeadListenerRegistration {
+    manager: std::sync::Weak<ChangeListenerManager>,
+    id: Uuid,
+    _broker_leases: Vec<Arc<DocChangeBrokerLease>>,
+}
+
+impl HeadListenerRegistration {
+    pub fn with_broker_leases(mut self, broker_leases: Vec<Arc<DocChangeBrokerLease>>) -> Self {
+        self._broker_leases = broker_leases;
+        self
+    }
+}
+
+impl Drop for HeadListenerRegistration {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            let id = self.id;
+            manager
+                .head_listeners
+                .lock()
+                .expect(ERROR_MUTEX)
+                .retain(|listener| listener.id != id);
+        }
+    }
+}
+
 fn local_notification_matches_filter(
     notification: &BigRepoLocalNotification,
     filter: &LocalFilter,
@@ -569,6 +662,20 @@ impl Drop for LocalListenerRegistration {
                 .retain(|listener| listener.id != id);
         }
     }
+}
+
+fn head_notification_matches_filter(
+    notification: &BigRepoHeadNotification,
+    filter: &HeadFilter,
+) -> bool {
+    let doc_id = match notification {
+        BigRepoHeadNotification::DocHeadsChanged { doc_id, .. } => doc_id,
+    };
+    !filter
+        .doc_id
+        .as_ref()
+        .map(|target| target.doc_id != *doc_id)
+        .unwrap_or_default()
 }
 
 pub fn path_prefix_matches(

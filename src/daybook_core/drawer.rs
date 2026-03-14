@@ -121,15 +121,13 @@ impl DrawerRepo {
 
         // Listen for changes to docs.map
         let (ticket, notif_rx) = big_repo
-            .subscribe_change_listener(
-                am_utils_rs::repo::BigRepoChangeFilter {
-                    doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(
-                        drawer_doc_id.clone(),
-                    )),
-                    path: vec!["docs".into(), "map".into()],
-                    origin: Some(am_utils_rs::repo::BigRepoOriginFilter::Remote),
-                },
-            )
+            .subscribe_change_listener(am_utils_rs::repo::BigRepoChangeFilter {
+                doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(
+                    drawer_doc_id.clone(),
+                )),
+                path: vec!["docs".into(), "map".into()],
+                origin: Some(am_utils_rs::repo::BigRepoOriginFilter::Remote),
+            })
             .await?;
 
         let main_cancel_token = CancellationToken::new();
@@ -1031,7 +1029,8 @@ impl DrawerRepo {
                 tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
                 tx.put(automerge::ROOT, "id", &doc_id)?;
 
-                let facets_obj = tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?;
+                let facets_obj =
+                    tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?;
 
                 for (key, value) in &args.facets {
                     let key_str = key.to_string();
@@ -1239,7 +1238,9 @@ impl DrawerRepo {
                     });
                 };
                 let branch_doc = source_handle
-                    .with_document_local(|am_doc| am_doc.fork_at(&heads).map_err(eyre::Report::from))
+                    .with_document_local(|am_doc| {
+                        am_doc.fork_at(&heads).map_err(eyre::Report::from)
+                    })
                     .await??;
                 let handle = self.big_repo.create_doc(branch_doc).await?;
                 let branch_doc_id = handle.document_id().to_string();
@@ -1429,7 +1430,9 @@ impl DrawerRepo {
         // 1. Merge content docs
         let user_path_for_dmeta = user_path.clone();
         let mut am_from = from_handle
-            .with_document_local(|from_doc| from_doc.fork_at(from_heads).map_err(eyre::Report::from))
+            .with_document_local(|from_doc| {
+                from_doc.fork_at(from_heads).map_err(eyre::Report::from)
+            })
             .await??;
         let (_new_heads, modified_facets, invalidated_uuids) = handle
             .with_document_local(move |am_doc| {
@@ -1437,50 +1440,51 @@ impl DrawerRepo {
                 let mut am_to = am_doc.fork_at(to_heads)?;
                 am_to.set_actor(mutation_actor_id.clone());
 
-            let mut patch_log = automerge::PatchLog::active();
-            am_to.merge_and_log_patches(&mut am_from, &mut patch_log)?;
+                let mut patch_log = automerge::PatchLog::active();
+                am_to.merge_and_log_patches(&mut am_from, &mut patch_log)?;
 
-            let patches = am_to.make_patches(&mut patch_log);
-            let heads = am_to.get_heads();
-            let new_heads = ChangeHashSet(heads.into());
+                let patches = am_to.make_patches(&mut patch_log);
+                let heads = am_to.get_heads();
+                let new_heads = ChangeHashSet(heads.into());
 
-            // Merge back to main doc handle
-            am_doc.merge(&mut am_to)?;
+                // Merge back to main doc handle
+                am_doc.merge(&mut am_to)?;
 
-            // Identify modified facets from patches
-            let mut modified_facets = HashSet::new();
-            for patch in patches {
-                if patch.path.len() >= 2 {
-                    if let (_, automerge::Prop::Map(ref p0)) = &patch.path[0] {
-                        if p0 == "facets" {
-                            if let (_, automerge::Prop::Map(ref facet_key_str)) = &patch.path[1] {
-                                modified_facets.insert(facet_key_str.to_string());
+                // Identify modified facets from patches
+                let mut modified_facets = HashSet::new();
+                for patch in patches {
+                    if patch.path.len() >= 2 {
+                        if let (_, automerge::Prop::Map(ref p0)) = &patch.path[0] {
+                            if p0 == "facets" {
+                                if let (_, automerge::Prop::Map(ref facet_key_str)) = &patch.path[1]
+                                {
+                                    modified_facets.insert(facet_key_str.to_string());
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            let invalidated_uuids = if modified_facets.is_empty() {
-                Vec::new()
-            } else {
-                let mut tx = am_doc.transaction();
-                let facets_obj = match tx.get(automerge::ROOT, "facets")? {
-                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                    _ => eyre::bail!("facets object not found in content doc"),
+                let invalidated_uuids = if modified_facets.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut tx = am_doc.transaction();
+                    let facets_obj = match tx.get(automerge::ROOT, "facets")? {
+                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                        _ => eyre::bail!("facets object not found in content doc"),
+                    };
+                    let now = Timestamp::now();
+                    let invalidated = dmeta::apply_merge(
+                        &mut tx,
+                        &facets_obj,
+                        &modified_facets,
+                        now,
+                        user_path_for_dmeta.as_ref(),
+                        &mutation_actor_id,
+                    )?;
+                    tx.commit();
+                    invalidated
                 };
-                let now = Timestamp::now();
-                let invalidated = dmeta::apply_merge(
-                    &mut tx,
-                    &facets_obj,
-                    &modified_facets,
-                    now,
-                    user_path_for_dmeta.as_ref(),
-                    &mutation_actor_id,
-                )?;
-                tx.commit();
-                invalidated
-            };
 
                 eyre::Ok((new_heads, modified_facets, invalidated_uuids))
             })
@@ -1672,54 +1676,64 @@ impl DrawerRepo {
                 let mut facets = HashMap::new();
                 let mut to_cache = Vec::new();
 
-            match &facet_keys {
-                None => {
-                    let full: ThroughJson<Doc> = autosurgeon::hydrate_at(am_doc, heads)?;
-                    for (key, value) in full.0.facets {
-                        let value = Arc::new(value);
-                        facets.insert(key.clone(), Arc::clone(&value));
-                        if let Some(facet_uuid) = dmeta::facet_uuid_for_key_at(am_doc, &key, heads)?
-                        {
-                            let facet_heads = dmeta::facet_heads_for_key_at(am_doc, &key, heads)?;
-                            to_cache.push((facet_uuid, facet_heads, value));
+                match &facet_keys {
+                    None => {
+                        let full: ThroughJson<Doc> = autosurgeon::hydrate_at(am_doc, heads)?;
+                        for (key, value) in full.0.facets {
+                            let value = Arc::new(value);
+                            facets.insert(key.clone(), Arc::clone(&value));
+                            if let Some(facet_uuid) =
+                                dmeta::facet_uuid_for_key_at(am_doc, &key, heads)?
+                            {
+                                let facet_heads =
+                                    dmeta::facet_heads_for_key_at(am_doc, &key, heads)?;
+                                to_cache.push((facet_uuid, facet_heads, value));
+                            }
                         }
                     }
-                }
-                Some(keys) => {
-                    let facets_obj =
-                        match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", heads)?
-                        {
+                    Some(keys) => {
+                        let facets_obj = match automerge::ReadDoc::get_at(
+                            am_doc,
+                            automerge::ROOT,
+                            "facets",
+                            heads,
+                        )? {
                             Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
                             _ => eyre::bail!("facets object not found in content doc"),
                         };
-                    for key in keys {
-                        let facet_uuid = dmeta::facet_uuid_for_key_at(am_doc, key, heads)?;
-                        let facet_heads = if facet_uuid.is_some() {
-                            Some(dmeta::facet_heads_for_key_at(am_doc, key, heads)?)
-                        } else {
-                            None
-                        };
+                        for key in keys {
+                            let facet_uuid = dmeta::facet_uuid_for_key_at(am_doc, key, heads)?;
+                            let facet_heads = if facet_uuid.is_some() {
+                                Some(dmeta::facet_heads_for_key_at(am_doc, key, heads)?)
+                            } else {
+                                None
+                            };
 
-                        if let (Some(uuid), Some(heads)) = (facet_uuid, &facet_heads) {
-                            if let Some(cached) = self.facet_cache_get(doc_id, &uuid, heads) {
-                                facets.insert(key.clone(), cached);
-                                continue;
+                            if let (Some(uuid), Some(heads)) = (facet_uuid, &facet_heads) {
+                                if let Some(cached) = self.facet_cache_get(doc_id, &uuid, heads) {
+                                    facets.insert(key.clone(), cached);
+                                    continue;
+                                }
                             }
-                        }
 
-                        let key_str = key.to_string();
-                        let value: Option<ThroughJson<FacetRaw>> =
-                            autosurgeon::hydrate_prop_at(am_doc, &facets_obj, &*key_str, heads)?;
-                        if let Some(facet_value) = value {
-                            let facet_value = Arc::new(facet_value.0);
-                            facets.insert(key.clone(), Arc::clone(&facet_value));
-                            if let (Some(uuid), Some(heads)) = (facet_uuid, facet_heads) {
-                                to_cache.push((uuid, heads, facet_value));
+                            let key_str = key.to_string();
+                            let value: Option<ThroughJson<FacetRaw>> =
+                                autosurgeon::hydrate_prop_at(
+                                    am_doc,
+                                    &facets_obj,
+                                    &*key_str,
+                                    heads,
+                                )?;
+                            if let Some(facet_value) = value {
+                                let facet_value = Arc::new(facet_value.0);
+                                facets.insert(key.clone(), Arc::clone(&facet_value));
+                                if let (Some(uuid), Some(heads)) = (facet_uuid, facet_heads) {
+                                    to_cache.push((uuid, heads, facet_value));
+                                }
                             }
                         }
                     }
                 }
-            }
                 eyre::Ok((facets, to_cache))
             })
             .await??;
@@ -2084,7 +2098,9 @@ impl DrawerRepo {
             eyre::bail!("doc not found");
         };
         handle
-            .with_document_local(|am_doc| facet_recovery::recover_facet_heads_at(am_doc, facet_key, heads))
+            .with_document_local(|am_doc| {
+                facet_recovery::recover_facet_heads_at(am_doc, facet_key, heads)
+            })
             .await?
     }
 

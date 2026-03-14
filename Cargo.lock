@@ -115,6 +115,7 @@ dependencies = [
  "bytes",
  "camino",
  "data-encoding",
+ "futures-buffered",
  "iroh",
  "irpc",
  "samod",

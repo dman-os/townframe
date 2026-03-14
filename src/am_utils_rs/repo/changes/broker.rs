@@ -1,69 +1,33 @@
 use crate::interlude::*;
 
-use crate::repo::changes::{BigRepoChangeNotification, DocIdFilter};
+use crate::repo::changes::{BigRepoChangeNotification, BigRepoHeadNotification, DocIdFilter};
 
-use automerge::ChangeHash;
-use futures::future::BoxFuture;
 use samod::{DocHandle, DocumentId};
 use samod_core::ChangeOrigin;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use std::sync::Mutex;
-
-pub struct DocChangeBrokerHandle {
+pub(super) struct DocChangeBrokerHandle {
     doc_id: DocumentId,
     msg_tx: mpsc::Sender<BrokerMsg>,
 }
 
-#[derive(Debug)]
-pub struct HeadListenerRegistration {
-    change_rx: mpsc::Receiver<Arc<[ChangeHash]>>,
-    list: std::sync::Weak<Mutex<Vec<HeadListener>>>,
-    id: Uuid,
-}
-
-impl HeadListenerRegistration {
-    pub fn change_rx(&mut self) -> &mut mpsc::Receiver<Arc<[ChangeHash]>> {
-        &mut self.change_rx
-    }
-}
-
-impl Drop for HeadListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(listeners) = self.list.upgrade() {
-            let id = self.id;
-            listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
-        }
-    }
-}
-
-struct HeadListener {
-    id: Uuid,
-    change_tx: mpsc::Sender<Arc<[ChangeHash]>>,
-}
-
 type HasCandidateListener = Arc<dyn Fn(&DocumentId, &ChangeOrigin) -> bool + Send + Sync + 'static>;
-type OnRemoteHeadsChanged =
-    Arc<dyn Fn(DocumentId, Vec<ChangeHash>) -> BoxFuture<'static, Res<()>> + Send + Sync + 'static>;
 
 enum BrokerMsg {
-    AddHeadListener {
-        resp: tokio::sync::oneshot::Sender<HeadListenerRegistration>,
+    EnsureReady {
+        resp: tokio::sync::oneshot::Sender<()>,
     },
 }
 
 impl DocChangeBrokerHandle {
-    pub async fn add_head_listener(&self) -> Res<HeadListenerRegistration> {
+    pub async fn ensure_ready(&self) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.msg_tx
-            .send(BrokerMsg::AddHeadListener { resp: tx })
+            .send(BrokerMsg::EnsureReady { resp: tx })
             .await
             .expect(ERROR_ACTOR);
-        rx.await.wrap_err(ERROR_CHANNEL)
+        rx.await.expect(ERROR_CHANNEL);
     }
 }
 
@@ -84,8 +48,8 @@ pub fn spawn_doc_listener(
     handle: DocHandle,
     cancel_token: CancellationToken,
     change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
+    head_tx: mpsc::UnboundedSender<Vec<BigRepoHeadNotification>>,
     has_candidate_listener: HasCandidateListener,
-    on_remote_heads_changed: OnRemoteHeadsChanged,
 ) -> Res<(DocChangeBrokerHandle, DocChangeBrokerStopToken)> {
     let doc_id = handle.document_id().clone();
 
@@ -98,12 +62,11 @@ pub fn spawn_doc_listener(
             debug!("listening on doc");
 
             let mut worker = DocChangeBroker {
-                heads_listeners: default(),
                 handle: handle.clone(),
                 change_tx,
+                head_tx,
                 cancel_token,
                 has_candidate_listener,
-                on_remote_heads_changed,
             };
 
             let mut doc_change_stream = handle.changes();
@@ -147,32 +110,18 @@ pub fn spawn_doc_listener(
 }
 
 struct DocChangeBroker {
-    heads_listeners: Arc<Mutex<Vec<HeadListener>>>,
     handle: DocHandle,
     change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
+    head_tx: mpsc::UnboundedSender<Vec<BigRepoHeadNotification>>,
     cancel_token: CancellationToken,
     has_candidate_listener: HasCandidateListener,
-    on_remote_heads_changed: OnRemoteHeadsChanged,
 }
 
 impl DocChangeBroker {
     async fn handle_msg(&mut self, msg: BrokerMsg) -> Res<()> {
         match msg {
-            BrokerMsg::AddHeadListener { resp } => {
-                let (change_tx, change_rx) = mpsc::channel(16);
-                let registration = HeadListenerRegistration {
-                    id: Uuid::new_v4(),
-                    list: Arc::downgrade(&self.heads_listeners),
-                    change_rx,
-                };
-                self.heads_listeners
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .push(HeadListener {
-                        id: registration.id,
-                        change_tx,
-                    });
-                resp.send(registration).expect(ERROR_CHANNEL);
+            BrokerMsg::EnsureReady { resp } => {
+                resp.send(()).expect(ERROR_CHANNEL);
             }
         }
         Ok(())
@@ -182,25 +131,14 @@ impl DocChangeBroker {
             return Ok(());
         }
         let doc_id = self.handle.document_id().clone();
-        let new_heads: Arc<[ChangeHash]> = Arc::from(&changes.new_heads[..]);
-        self.heads_listeners
-            .lock()
-            .expect(ERROR_MUTEX)
-            .retain(
-                |listener| match listener.change_tx.try_send(Arc::clone(&new_heads)) {
-                    Ok(()) => true,
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        panic!("HeadListenerRegistration is full");
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        panic!("HeadListenerRegistration dropped without cleanup");
-                        //false
-                    }
-                },
-            );
-        if matches!(changes.origin, ChangeOrigin::Remote { .. }) {
-            (self.on_remote_heads_changed)(doc_id.clone(), changes.new_heads.clone()).await?;
-        }
+        let new_heads: Arc<[automerge::ChangeHash]> = Arc::from(&changes.new_heads[..]);
+        self.head_tx
+            .send(vec![BigRepoHeadNotification::DocHeadsChanged {
+                doc_id: doc_id.clone(),
+                heads: Arc::clone(&new_heads),
+                origin: changes.origin.clone(),
+            }])
+            .expect(ERROR_CHANNEL);
         if !(self.has_candidate_listener)(self.handle.document_id(), &changes.origin) {
             return Ok(());
         }

@@ -226,18 +226,6 @@ impl SyncNodeWorker {
                         .into_iter()
                         .map(|part| part.partition_id)
                         .collect::<Vec<_>>();
-                    for doc_id in &req.doc_ids {
-                        let allowed = self
-                            .big_repo
-                            .is_doc_accessible_in_partitions(doc_id, &allowed_partition_ids)
-                            .await
-                            .map_err(map_repo_err)?;
-                        if !allowed {
-                            return Err(PartitionSyncError::DocAccessDenied {
-                                doc_id: doc_id.clone(),
-                            });
-                        }
-                    }
                     let docs = self
                         .big_repo
                         .get_docs_full_in_partitions(&req.doc_ids, &allowed_partition_ids)

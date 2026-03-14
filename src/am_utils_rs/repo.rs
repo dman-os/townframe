@@ -14,9 +14,10 @@ mod partition;
 
 pub use changes::{
     path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
-    BigRepoLocalNotification, ChangeFilter as BigRepoChangeFilter,
+    BigRepoHeadNotification, BigRepoLocalNotification, ChangeFilter as BigRepoChangeFilter,
     ChangeListenerRegistration as BigRepoChangeListenerRegistration,
     DocChangeBrokerLease as BigRepoDocChangeBrokerLease, DocIdFilter as BigRepoDocIdFilter,
+    HeadFilter as BigRepoHeadFilter, HeadListenerRegistration as BigRepoHeadListenerRegistration,
     LocalFilter as BigRepoLocalFilter,
     LocalListenerRegistration as BigRepoLocalListenerRegistration,
     OriginFilter as BigRepoOriginFilter,
@@ -66,6 +67,13 @@ pub struct BigRepo {
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
+    #[educe(Debug(ignore))]
+    remote_heads_worker_stop: std::sync::Mutex<Option<RemoteHeadsWorkerStopToken>>,
+}
+
+struct RemoteHeadsWorkerStopToken {
+    cancel_token: CancellationToken,
+    join_handle: tokio::task::JoinHandle<()>,
 }
 
 pub type SharedBigRepo = Arc<BigRepo>;
@@ -95,7 +103,49 @@ impl BigRepo {
             partition_events_tx,
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
+            remote_heads_worker_stop: std::sync::Mutex::new(None),
         });
+        let (_head_reg, mut head_rx) = out
+            .subscribe_head_listener(BigRepoHeadFilter { doc_id: None })
+            .await?;
+        let remote_heads_cancel = CancellationToken::new();
+        let remote_heads_handle = {
+            let cancel_token = remote_heads_cancel.clone();
+            let repo = Arc::downgrade(&out);
+            tokio::spawn(async move {
+                let _head_reg = _head_reg;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => break,
+                        val = head_rx.recv() => {
+                            let Some(batch) = val else {
+                                break;
+                            };
+                            let Some(repo) = repo.upgrade() else {
+                                break;
+                            };
+                            for msg in batch {
+                                let BigRepoHeadNotification::DocHeadsChanged { doc_id, heads, origin } = msg;
+                                if !matches!(origin, samod_core::ChangeOrigin::Remote { .. }) {
+                                    continue;
+                                }
+                                repo.record_doc_heads_change(&doc_id, heads.to_vec())
+                                    .await
+                                    .expect("failed recording remote doc heads change");
+                            }
+                        }
+                    }
+                }
+            })
+        };
+        out.remote_heads_worker_stop
+            .lock()
+            .expect(ERROR_MUTEX)
+            .replace(RemoteHeadsWorkerStopToken {
+                cancel_token: remote_heads_cancel,
+                join_handle: remote_heads_handle,
+            });
         out.ensure_schema().await?;
         Ok(out)
     }
@@ -152,20 +202,7 @@ impl BigRepo {
         self: &Arc<Self>,
         handle: samod::DocHandle,
     ) -> Res<Arc<changes::DocChangeBrokerLease>> {
-        self.change_manager
-            .add_doc_with_remote_heads_callback(
-                handle,
-                Arc::new({
-                    let repo = Arc::downgrade(self);
-                    move |doc_id, heads| {
-                        let repo = repo
-                            .upgrade()
-                            .expect("BigRepo should outlive change broker");
-                        async move { repo.record_doc_heads_change(&doc_id, heads).await }.boxed()
-                    }
-                }),
-            )
-            .await
+        self.change_manager.add_doc_listener(handle).await
     }
 
     pub async fn subscribe_change_listener(
@@ -180,8 +217,7 @@ impl BigRepo {
             let handle = self.find_doc_handle(&target_doc.doc_id).await?;
             if let Some(handle) = handle {
                 let lease = self.ensure_change_broker(handle).await?;
-                let ready = lease.get_head_listener().await?;
-                drop(ready);
+                lease.wait_until_ready().await;
                 broker_leases.push(lease);
             }
         }
@@ -197,6 +233,26 @@ impl BigRepo {
         tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
     )> {
         self.change_manager.subscribe_local_listener(filter).await
+    }
+
+    pub async fn subscribe_head_listener(
+        self: &Arc<Self>,
+        filter: BigRepoHeadFilter,
+    ) -> Res<(
+        BigRepoHeadListenerRegistration,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoHeadNotification>>,
+    )> {
+        let mut broker_leases = Vec::new();
+        if let Some(target_doc) = filter.doc_id.as_ref() {
+            let handle = self.find_doc_handle(&target_doc.doc_id).await?;
+            if let Some(handle) = handle {
+                let lease = self.ensure_change_broker(handle).await?;
+                lease.wait_until_ready().await;
+                broker_leases.push(lease);
+            }
+        }
+        let (registration, rx) = self.change_manager.subscribe_head_listener(filter).await?;
+        Ok((registration.with_broker_leases(broker_leases), rx))
     }
 
     pub async fn create_doc(
@@ -511,12 +567,32 @@ pub struct ConnFinishSignal {
 
 impl Drop for BigRepo {
     fn drop(&mut self) {
-        if let Some(stop_token) = self.change_manager_stop.lock().expect(ERROR_MUTEX).take() {
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
+        let remote_heads_worker = self
+            .remote_heads_worker_stop
+            .lock()
+            .expect(ERROR_MUTEX)
+            .take();
+        let change_manager_stop = self.change_manager_stop.lock().expect(ERROR_MUTEX).take();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Some(worker) = remote_heads_worker {
+                    worker.cancel_token.cancel();
+                    let _ = utils_rs::wait_on_handle_with_timeout(
+                        worker.join_handle,
+                        Duration::from_secs(5),
+                    )
+                    .await;
+                }
+                if let Some(stop_token) = change_manager_stop {
                     let _ = stop_token.stop().await;
-                });
-            } else {
+                }
+            });
+        } else {
+            if let Some(worker) = remote_heads_worker {
+                worker.cancel_token.cancel();
+                worker.join_handle.abort();
+            }
+            if let Some(stop_token) = change_manager_stop {
                 stop_token.cancel();
             }
         }
@@ -687,6 +763,7 @@ mod tests {
         let part_id = "fast-import-part".to_string();
         let src = boot_big_repo("fast-import-src").await?;
         let dst = boot_big_repo("fast-import-dst").await?;
+        let _partition_events_rx = dst.subscribe_partition_events();
 
         let src_handle = src.create_doc(automerge::Automerge::new()).await?;
         src_handle

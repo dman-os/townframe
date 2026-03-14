@@ -161,22 +161,26 @@ impl BigRepo {
         };
         tx.commit().await?;
 
-        let _ = self.partition_events_tx.send(PartitionEvent {
-            cursor: membership_txid,
-            partition_id: partition_id.clone(),
-            deets: PartitionEventDeets::MemberUpsert {
-                doc_id: doc_id.to_owned(),
-            },
-        });
-        let _ = self.partition_events_tx.send(PartitionEvent {
-            cursor: doc_txid,
-            partition_id: partition_id.clone(),
-            deets: PartitionEventDeets::DocChanged {
-                doc_id: doc_id.to_owned(),
-                heads,
-                change_count_hint,
-            },
-        });
+        self.partition_events_tx
+            .send(PartitionEvent {
+                cursor: membership_txid,
+                partition_id: partition_id.clone(),
+                deets: PartitionEventDeets::MemberUpsert {
+                    doc_id: doc_id.to_owned(),
+                },
+            })
+            .expect(ERROR_CHANNEL);
+        self.partition_events_tx
+            .send(PartitionEvent {
+                cursor: doc_txid,
+                partition_id: partition_id.clone(),
+                deets: PartitionEventDeets::DocChanged {
+                    doc_id: doc_id.to_owned(),
+                    heads,
+                    change_count_hint,
+                },
+            })
+            .expect(ERROR_CHANNEL);
         Ok(())
     }
 
@@ -235,22 +239,26 @@ impl BigRepo {
         }
         tx.commit().await?;
 
-        let _ = self.partition_events_tx.send(PartitionEvent {
-            cursor: membership_txid,
-            partition_id: partition_id.clone(),
-            deets: PartitionEventDeets::MemberRemoved {
-                doc_id: doc_id.to_owned(),
-            },
-        });
-        if let Some((doc_txid, change_count_hint)) = doc_deleted_event {
-            let _ = self.partition_events_tx.send(PartitionEvent {
-                cursor: doc_txid,
+        self.partition_events_tx
+            .send(PartitionEvent {
+                cursor: membership_txid,
                 partition_id: partition_id.clone(),
-                deets: PartitionEventDeets::DocDeleted {
+                deets: PartitionEventDeets::MemberRemoved {
                     doc_id: doc_id.to_owned(),
-                    change_count_hint,
                 },
-            });
+            })
+            .expect(ERROR_CHANNEL);
+        if let Some((doc_txid, change_count_hint)) = doc_deleted_event {
+            self.partition_events_tx
+                .send(PartitionEvent {
+                    cursor: doc_txid,
+                    partition_id: partition_id.clone(),
+                    deets: PartitionEventDeets::DocDeleted {
+                        doc_id: doc_id.to_owned(),
+                        change_count_hint,
+                    },
+                })
+                .expect(ERROR_CHANNEL);
         }
         Ok(())
     }
@@ -331,15 +339,17 @@ impl BigRepo {
                 change_count_hint,
                 "emitting partition doc changed event"
             );
-            let _ = self.partition_events_tx.send(PartitionEvent {
-                cursor: txid,
-                partition_id,
-                deets: PartitionEventDeets::DocChanged {
-                    doc_id: doc_id.clone(),
-                    heads: serialized_heads.clone(),
-                    change_count_hint,
-                },
-            });
+            self.partition_events_tx
+                .send(PartitionEvent {
+                    cursor: txid,
+                    partition_id,
+                    deets: PartitionEventDeets::DocChanged {
+                        doc_id: doc_id.clone(),
+                        heads: serialized_heads.clone(),
+                        change_count_hint,
+                    },
+                })
+                .expect(ERROR_CHANNEL);
         }
         Ok(())
     }
@@ -481,38 +491,33 @@ impl BigRepo {
             .filter(|doc_id| dedup.insert((*doc_id).clone()))
             .cloned()
             .collect();
+        let denied_doc_id = self
+            .find_first_inaccessible_doc_in_partitions(&requested_doc_ids, allowed_partitions)
+            .await?;
+        if let Some(denied) = denied_doc_id {
+            return Err(PartitionSyncError::DocAccessDenied { doc_id: denied }.into_report());
+        }
 
         use futures::StreamExt;
+        use futures_buffered::BufferedStreamExt;
         let rows = futures::stream::iter(requested_doc_ids.into_iter().map(|doc_id| async move {
-            if !self
-                .is_doc_accessible_in_partitions(&doc_id, allowed_partitions)
-                .await?
-            {
-                return Ok(None);
-            }
             let parsed = match samod::DocumentId::from_str(&doc_id) {
                 Ok(val) => val,
                 Err(_) => return Ok(None),
             };
-            let contains = self
-                .repo
-                .local_contains_document(parsed.clone())
-                .await
-                .map_err(|err| ferr!("failed checking local doc presence: {err}"))?;
-            if !contains {
-                return Ok(None);
-            }
-            let doc = self
-                .repo
-                .local_export(parsed)
-                .await
-                .map_err(|err| ferr!("failed local-exporting doc: {err}"))?;
+            let doc = match self.repo.local_export(parsed).await {
+                Ok(doc) => doc,
+                Err(samod::LocalExportError::NotFound { .. }) => return Ok(None),
+                Err(err) => {
+                    return Err(eyre::Report::from(err).wrap_err("failed local-exporting doc"));
+                }
+            };
             Ok(Some(FullDoc {
                 doc_id,
                 automerge_save: doc.save(),
             }))
         }))
-        .buffer_unordered(16)
+        .buffered_unordered(16)
         .collect::<Vec<Res<Option<FullDoc>>>>()
         .await;
 
@@ -548,6 +553,36 @@ impl BigRepo {
             .fetch_one(&self.state_pool)
             .await?;
         Ok(exists == 1)
+    }
+
+    async fn find_first_inaccessible_doc_in_partitions(
+        &self,
+        doc_ids: &[String],
+        allowed_partitions: &[PartitionId],
+    ) -> Res<Option<String>> {
+        if doc_ids.is_empty() || allowed_partitions.is_empty() {
+            return Ok(doc_ids.first().cloned());
+        }
+        let mut query = QueryBuilder::<sqlx::Sqlite>::new("WITH requested(doc_id) AS (SELECT ");
+        for (idx, doc_id) in doc_ids.iter().enumerate() {
+            if idx > 0 {
+                query.push(" UNION ALL SELECT ");
+            }
+            query.push_bind(doc_id);
+        }
+        query.push(") SELECT requested.doc_id FROM requested WHERE NOT EXISTS (");
+        query.push("SELECT 1 FROM partition_membership_state m WHERE m.doc_id = requested.doc_id");
+        query.push(" AND m.present = 1 AND m.partition_id IN (");
+        let mut partitions = query.separated(", ");
+        for partition_id in allowed_partitions {
+            partitions.push_bind(partition_id);
+        }
+        partitions.push_unseparated(")) LIMIT 1");
+        let denied = query
+            .build_query_scalar::<String>()
+            .fetch_optional(&self.state_pool)
+            .await?;
+        Ok(denied)
     }
 
     pub async fn subscribe_partition_events_for_peer(
@@ -604,9 +639,9 @@ impl BigRepo {
                     .entry(event.partition_id.clone())
                     .or_default();
                 *entry = (*entry).max(event.cursor);
-                if tx.send(SubscriptionItem::MemberEvent(event)).await.is_err() {
-                    return Ok(rx);
-                }
+                tx.send(SubscriptionItem::MemberEvent(event))
+                    .await
+                    .expect(ERROR_CHANNEL);
             }
             let mut any_more = false;
             for cursor_page in replay_members.cursors {
@@ -623,15 +658,11 @@ impl BigRepo {
                 break;
             }
         }
-        if tx
-            .send(SubscriptionItem::ReplayComplete {
-                stream: SubscriptionStreamKind::Member,
-            })
-            .await
-            .is_err()
-        {
-            return Ok(rx);
-        }
+        tx.send(SubscriptionItem::ReplayComplete {
+            stream: SubscriptionStreamKind::Member,
+        })
+        .await
+        .expect(ERROR_CHANNEL);
         let mut doc_high_watermark: HashMap<PartitionId, u64> = reqs
             .partitions
             .iter()
@@ -657,9 +688,9 @@ impl BigRepo {
                     .entry(event.partition_id.clone())
                     .or_default();
                 *entry = (*entry).max(event.cursor);
-                if tx.send(SubscriptionItem::DocEvent(event)).await.is_err() {
-                    return Ok(rx);
-                }
+                tx.send(SubscriptionItem::DocEvent(event))
+                    .await
+                    .expect(ERROR_CHANNEL);
             }
             let mut any_more = false;
             for cursor_page in replay_docs.cursors {
@@ -676,83 +707,73 @@ impl BigRepo {
                 break;
             }
         }
-        if tx
-            .send(SubscriptionItem::ReplayComplete {
-                stream: SubscriptionStreamKind::Doc,
-            })
-            .await
-            .is_err()
-        {
-            return Ok(rx);
-        }
-        tokio::spawn(async move {
-            // FIXME: this will error on lagged, not just on closed
-            loop {
-                let event = match live_rx.recv().await {
-                    Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
-                        if tx.send(SubscriptionItem::Lagged { dropped }).await.is_err() {
-                            return;
+        tx.send(SubscriptionItem::ReplayComplete {
+            stream: SubscriptionStreamKind::Doc,
+        })
+        .await
+        .expect(ERROR_CHANNEL);
+
+        let fut = {
+            let span = tracing::info_span!("partition live forwarder");
+            async move {
+                loop {
+                    let event = match live_rx.recv().await {
+                        Ok(event) => event,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
+                            tx.send(SubscriptionItem::Lagged { dropped })
+                                .await
+                                .expect(ERROR_CHANNEL);
+                            break;
                         }
-                        return;
+                    };
+                    if !requested.contains(&event.partition_id) {
+                        continue;
                     }
-                };
-                if !requested.contains(&event.partition_id) {
-                    continue;
-                }
-                let txid = event.cursor;
-                let partition_id = event.partition_id.clone();
-                match event.deets {
-                    PartitionEventDeets::MemberUpsert { doc_id } => {
-                        let high_watermark =
-                            *member_high_watermark.get(&partition_id).unwrap_or(&0);
-                        if txid <= high_watermark {
-                            continue;
-                        }
-                        if tx
-                            .send(SubscriptionItem::MemberEvent(PartitionMemberEvent {
+                    let txid = event.cursor;
+                    let partition_id = event.partition_id.clone();
+                    match event.deets {
+                        PartitionEventDeets::MemberUpsert { doc_id } => {
+                            let high_watermark =
+                                *member_high_watermark.get(&partition_id).unwrap_or(&0);
+                            if txid <= high_watermark {
+                                continue;
+                            }
+                            tx.send(SubscriptionItem::MemberEvent(PartitionMemberEvent {
                                 cursor: event.cursor,
                                 partition_id: partition_id.clone(),
                                 deets: PartitionMemberEventDeets::MemberUpsert { doc_id },
                             }))
                             .await
-                            .is_err()
-                        {
-                            return;
+                            .expect(ERROR_CHANNEL);
+                            member_high_watermark.insert(partition_id, txid);
                         }
-                        member_high_watermark.insert(partition_id, txid);
-                    }
-                    PartitionEventDeets::MemberRemoved { doc_id } => {
-                        let high_watermark =
-                            *member_high_watermark.get(&partition_id).unwrap_or(&0);
-                        if txid <= high_watermark {
-                            continue;
-                        }
-                        if tx
-                            .send(SubscriptionItem::MemberEvent(PartitionMemberEvent {
+                        PartitionEventDeets::MemberRemoved { doc_id } => {
+                            let high_watermark =
+                                *member_high_watermark.get(&partition_id).unwrap_or(&0);
+                            if txid <= high_watermark {
+                                continue;
+                            }
+                            tx.send(SubscriptionItem::MemberEvent(PartitionMemberEvent {
                                 cursor: event.cursor,
                                 partition_id: partition_id.clone(),
                                 deets: PartitionMemberEventDeets::MemberRemoved { doc_id },
                             }))
                             .await
-                            .is_err()
-                        {
-                            return;
+                            .expect(ERROR_CHANNEL);
+                            member_high_watermark.insert(partition_id, txid);
                         }
-                        member_high_watermark.insert(partition_id, txid);
-                    }
-                    PartitionEventDeets::DocChanged {
-                        doc_id,
-                        heads,
-                        change_count_hint,
-                    } => {
-                        let high_watermark = *doc_high_watermark.get(&partition_id).unwrap_or(&0);
-                        if txid <= high_watermark {
-                            continue;
-                        }
-                        if tx
-                            .send(SubscriptionItem::DocEvent(PartitionDocEvent {
+                        PartitionEventDeets::DocChanged {
+                            doc_id,
+                            heads,
+                            change_count_hint,
+                        } => {
+                            let high_watermark =
+                                *doc_high_watermark.get(&partition_id).unwrap_or(&0);
+                            if txid <= high_watermark {
+                                continue;
+                            }
+                            tx.send(SubscriptionItem::DocEvent(PartitionDocEvent {
                                 cursor: event.cursor,
                                 partition_id: partition_id.clone(),
                                 deets: PartitionDocEventDeets::DocChanged {
@@ -762,22 +783,19 @@ impl BigRepo {
                                 },
                             }))
                             .await
-                            .is_err()
-                        {
-                            return;
+                            .expect(ERROR_CHANNEL);
+                            doc_high_watermark.insert(partition_id, txid);
                         }
-                        doc_high_watermark.insert(partition_id, txid);
-                    }
-                    PartitionEventDeets::DocDeleted {
-                        doc_id,
-                        change_count_hint,
-                    } => {
-                        let high_watermark = *doc_high_watermark.get(&partition_id).unwrap_or(&0);
-                        if txid <= high_watermark {
-                            continue;
-                        }
-                        if tx
-                            .send(SubscriptionItem::DocEvent(PartitionDocEvent {
+                        PartitionEventDeets::DocDeleted {
+                            doc_id,
+                            change_count_hint,
+                        } => {
+                            let high_watermark =
+                                *doc_high_watermark.get(&partition_id).unwrap_or(&0);
+                            if txid <= high_watermark {
+                                continue;
+                            }
+                            tx.send(SubscriptionItem::DocEvent(PartitionDocEvent {
                                 cursor: event.cursor,
                                 partition_id: partition_id.clone(),
                                 deets: PartitionDocEventDeets::DocDeleted {
@@ -786,15 +804,16 @@ impl BigRepo {
                                 },
                             }))
                             .await
-                            .is_err()
-                        {
-                            return;
+                            .expect(ERROR_CHANNEL);
+                            doc_high_watermark.insert(partition_id, txid);
                         }
-                        doc_high_watermark.insert(partition_id, txid);
                     }
                 }
+                eyre::Ok(())
             }
-        });
+            .instrument(span)
+        };
+        tokio::spawn(async move { fut.await.unwrap() });
         Ok(rx)
     }
 }
@@ -1040,6 +1059,7 @@ mod tests {
     #[tokio::test]
     async fn bigrepo_emits_partition_doc_events_on_doc_write() -> Res<()> {
         let big_repo = boot_big_repo().await?;
+        let _partition_events_rx = big_repo.subscribe_partition_events();
         let handle = big_repo.create_doc(automerge::Automerge::new()).await?;
         let doc_id = handle.document_id().to_string();
         let partition_id = "p-main".into();
@@ -1083,6 +1103,7 @@ mod tests {
     #[tokio::test]
     async fn bigrepo_member_snapshot_excludes_removed_docs() -> Res<()> {
         let big_repo = boot_big_repo().await?;
+        let _partition_events_rx = big_repo.subscribe_partition_events();
         let handle = big_repo.create_doc(automerge::Automerge::new()).await?;
         let target_doc_id = handle.document_id().to_string();
         let partition_id = "p-remove".into();
@@ -1128,6 +1149,7 @@ mod tests {
     #[tokio::test]
     async fn bigrepo_member_snapshot_paginates_all_docs() -> Res<()> {
         let big_repo = boot_big_repo().await?;
+        let _partition_events_rx = big_repo.subscribe_partition_events();
         let partition_id: PartitionId = "p-snapshot-members".into();
         let mut expected = std::collections::HashSet::new();
         for _ in 0..7 {
@@ -1177,6 +1199,7 @@ mod tests {
     #[tokio::test]
     async fn bigrepo_doc_snapshot_paginates_all_docs() -> Res<()> {
         let big_repo = boot_big_repo().await?;
+        let _partition_events_rx = big_repo.subscribe_partition_events();
         let partition_id: PartitionId = "p-snapshot-docs".into();
         let mut expected = std::collections::HashSet::new();
         for i in 0..7_u64 {
@@ -1234,6 +1257,7 @@ mod tests {
     #[tokio::test]
     async fn get_docs_full_respects_allowed_partitions() -> Res<()> {
         let big_repo = boot_big_repo().await?;
+        let _partition_events_rx = big_repo.subscribe_partition_events();
         let p1: PartitionId = "p-allowed".into();
         let p2: PartitionId = "p-denied".into();
 
@@ -1256,15 +1280,14 @@ mod tests {
                 .await?
         );
 
-        let docs = big_repo
+        let err = big_repo
             .get_docs_full_in_partitions(&[d1_id.clone(), d2_id.clone()], &[p1])
-            .await?;
-        let returned = docs
-            .into_iter()
-            .map(|doc| doc.doc_id)
-            .collect::<std::collections::HashSet<_>>();
-        assert!(returned.contains(&d1_id));
-        assert!(!returned.contains(&d2_id));
+            .await
+            .expect_err("request should be denied when one requested doc is inaccessible");
+        assert!(
+            err.to_string().contains("access denied for doc"),
+            "expected access denied error, got: {err}"
+        );
         Ok(())
     }
 }

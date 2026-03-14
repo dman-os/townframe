@@ -25,6 +25,9 @@ pub enum SamodSyncRequest {
         doc_id: String,
         cursor: u64,
     },
+    /// NOTE: this doesn't mean a request for deletion from repo (since that's not yet
+    /// an avail thing in the repo). It only means to cleanup any resources associated
+    /// with a document.
     DocDeleted {
         peer_key: PeerKey,
         partition_id: PartitionId,
@@ -182,11 +185,9 @@ pub async fn spawn_peer_sync_worker(
                         .await
                         .ok_or_else(|| eyre::eyre!("operation cancelled"))?
                     .wrap_err("subscription rpc failed")?;
-                    if let Err(err) = worker.events_tx.send(PeerSyncWorkerEvent::LiveReady {
+                    worker.events_tx.send(PeerSyncWorkerEvent::LiveReady {
                         peer: worker.remote_peer.clone(),
-                    }) {
-                        debug!(?err, "dropping peer live-ready event with no subscribers");
-                    }
+                    }).expect(ERROR_CHANNEL);
 
                     loop {
                         tokio::select! {
@@ -335,12 +336,13 @@ impl PeerSyncWorker {
                 "peer sync worker has no selected partitions"
             );
             self.emit_doc_sync_status(0, 0);
-            if let Err(err) = self.events_tx.send(PeerSyncWorkerEvent::Bootstrapped {
-                peer: self.remote_peer.clone(),
-                partition_count: 0,
-            }) {
-                debug!(?err, "dropping peer bootstrapped event with no subscribers");
-            }
+            self.events_tx
+                .send(PeerSyncWorkerEvent::Bootstrapped {
+                    peer: self.remote_peer.clone(),
+                    partition_count: 0,
+                })
+                .expect(ERROR_CHANNEL);
+
             return Ok(vec![]);
         }
 
@@ -348,12 +350,13 @@ impl PeerSyncWorker {
             .await?;
         self.bootstrap_members(&selected).await?;
         self.bootstrap_docs(&selected).await?;
-        if let Err(err) = self.events_tx.send(PeerSyncWorkerEvent::Bootstrapped {
-            peer: self.remote_peer.clone(),
-            partition_count: selected.len(),
-        }) {
-            debug!(?err, "dropping peer bootstrapped event with no subscribers");
-        }
+        self.events_tx
+            .send(PeerSyncWorkerEvent::Bootstrapped {
+                peer: self.remote_peer.clone(),
+                partition_count: selected.len(),
+            })
+            .expect(ERROR_CHANNEL);
+
         Ok(selected)
     }
 
@@ -833,51 +836,30 @@ impl PeerSyncWorker {
     }
 
     fn emit_phase_started(&self, phase: &'static str) {
-        if let Err(err) = self
-            .progress_tx
+        self.progress_tx
             .send(PeerSyncProgressEvent::PhaseStarted { phase })
-        {
-            debug!(
-                ?err,
-                "dropping peer progress phase-started with no subscribers"
-            );
-        }
+            .expect(ERROR_CHANNEL);
     }
 
     fn emit_phase_finished(&self, phase: &'static str, elapsed: Duration) {
-        if let Err(err) = self
-            .progress_tx
+        self.progress_tx
             .send(PeerSyncProgressEvent::PhaseFinished { phase, elapsed })
-        {
-            debug!(
-                ?err,
-                "dropping peer progress phase-finished with no subscribers"
-            );
-        }
+            .expect(ERROR_CHANNEL);
     }
 
     fn emit_cursor_updated(&self, partition_id: PartitionId) {
-        if let Err(err) = self
-            .progress_tx
+        self.progress_tx
             .send(PeerSyncProgressEvent::CursorUpdated { partition_id })
-        {
-            debug!(
-                ?err,
-                "dropping peer progress cursor-updated with no subscribers"
-            );
-        }
+            .expect(ERROR_CHANNEL);
     }
 
     fn emit_doc_sync_status(&self, synced_docs: u64, remaining_docs: u64) {
-        if let Err(err) = self.progress_tx.send(PeerSyncProgressEvent::DocSyncStatus {
-            synced_docs,
-            remaining_docs,
-        }) {
-            debug!(
-                ?err,
-                "dropping peer progress doc-sync-status with no subscribers"
-            );
-        }
+        self.progress_tx
+            .send(PeerSyncProgressEvent::DocSyncStatus {
+                synced_docs,
+                remaining_docs,
+            })
+            .expect(ERROR_CHANNEL);
     }
 
     fn assert_cursor_monotonic(&self, current: Option<u64>, next: u64) -> Res<()> {
@@ -929,15 +911,12 @@ impl PeerSyncWorker {
     }
 
     fn emit_abnormal_exit(&self, reason: String) {
-        if let Err(err) = self.events_tx.send(PeerSyncWorkerEvent::AbnormalExit {
-            peer: self.remote_peer.clone(),
-            reason,
-        }) {
-            debug!(
-                ?err,
-                "dropping peer abnormal-exit event with no subscribers"
-            );
-        }
+        self.events_tx
+            .send(PeerSyncWorkerEvent::AbnormalExit {
+                peer: self.remote_peer.clone(),
+                reason,
+            })
+            .expect(ERROR_CHANNEL);
     }
 
     async fn handle_samod_ack(&mut self, ack: SamodSyncAck) -> Res<()> {

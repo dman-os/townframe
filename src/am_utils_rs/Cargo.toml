@@ -31,6 +31,7 @@ tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread
 tokio-util = { workspace = true }
 tokio-tungstenite = { version = "0.27.0", features = ["url"], optional = true }
 async-trait.workspace = true
+futures-buffered = { version = "0.2.13", features = ["tokio-coop"] }
 
 #
 # automerge

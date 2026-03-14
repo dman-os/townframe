@@ -81,6 +81,8 @@ Feel free to throw yourself or tokens at the code though I'd personally apprecia
 - Do not use the cargo integration tests features.
   - I.e. avoid making tests in crate_root::tests.
 - Git submodules? I'm using `jj` :'/
+- Prefer `futures_buffered::BufferedStreamExt::buffered_unordered` over
+  `futures::StreamExt::buffer_unordered` for unordered buffered async stream work.
 
 - Avoid adding dependencies if possible
   - `wc -l Cargo.lock` is around 10k lines. Let's keep it that way.
