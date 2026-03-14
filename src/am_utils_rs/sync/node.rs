@@ -66,13 +66,18 @@ impl SyncNodeHandle {
 
 pub struct SyncNodeStopToken {
     cancel_token: CancellationToken,
+    subscription_tasks: Arc<utils_rs::AbortableJoinSet>,
     join_handle: tokio::task::JoinHandle<()>,
 }
 
 impl SyncNodeStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
-        utils_rs::wait_on_handle_with_timeout(self.join_handle, Duration::from_secs(1))
+        self.subscription_tasks
+            .stop(Duration::from_secs(5))
+            .await
+            .wrap_err("failed stopping sync node subscription forwarders")?;
+        utils_rs::wait_on_handle_with_timeout(self.join_handle, Duration::from_secs(5))
             .await
             .wrap_err("failed stopping sync node")
     }
@@ -88,13 +93,16 @@ pub async fn spawn_sync_node(
     let rpc_client = irpc::Client::<PartitionSyncRpc>::local(rpc_tx.clone());
 
     let cancel_token = CancellationToken::new();
+    let subscription_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
     let fut = {
         let cancel_token = cancel_token.clone();
+        let subscription_tasks = Arc::clone(&subscription_tasks);
         let mut worker = SyncNodeWorker {
             big_repo,
             sync_store,
             access_policy,
             cancel_token: cancel_token.clone(),
+            subscription_tasks,
         };
         async move {
             loop {
@@ -136,6 +144,7 @@ pub async fn spawn_sync_node(
         },
         SyncNodeStopToken {
             cancel_token,
+            subscription_tasks,
             join_handle,
         },
     ))
@@ -146,6 +155,7 @@ struct SyncNodeWorker {
     sync_store: SyncStoreHandle,
     access_policy: Arc<dyn PartitionAccessPolicy>,
     cancel_token: CancellationToken,
+    subscription_tasks: Arc<utils_rs::AbortableJoinSet>,
 }
 
 impl SyncNodeWorker {
@@ -262,9 +272,30 @@ impl SyncNodeWorker {
                 })
                 .await;
                 match maybe_sub {
-                    Ok(sub) => {
+                    Ok(mut sub) => {
                         let child_token = self.cancel_token.child_token();
-                        spawn_forward_subscription(child_token, sub, tx);
+                        self.subscription_tasks
+                            .spawn(async move {
+                                let fut = async move {
+                                    loop {
+                                        tokio::select! {
+                                            biased;
+                                            _ = child_token.cancelled() => break,
+                                            item = sub.recv() => {
+                                                let Some(item) = item else {
+                                                    break;
+                                                };
+                                                if tx.send(item).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    eyre::Ok(())
+                                };
+                                fut.await.unwrap();
+                            })
+                            .expect("failed spawning sync node subscription forwarder");
                     }
                     Err(err) => {
                         warn!(?err, "failed opening partition subscription");
@@ -315,27 +346,4 @@ fn map_repo_err(err: eyre::Report) -> PartitionSyncError {
     PartitionSyncError::Internal {
         message: err.to_string(),
     }
-}
-
-fn spawn_forward_subscription(
-    cancel_token: CancellationToken,
-    mut sub: tokio::sync::mpsc::Receiver<crate::sync::SubscriptionItem>,
-    tx: irpc::channel::mpsc::Sender<crate::sync::SubscriptionItem>,
-) {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => break,
-                item = sub.recv() => {
-                    let Some(item) = item else {
-                        break;
-                    };
-                    if tx.send(item).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
 }

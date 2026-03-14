@@ -28,7 +28,7 @@ colored = "2"
 dotenv-flow.workspace = true
 
 # async 
-tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "tracing"] }
 
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 

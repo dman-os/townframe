@@ -665,3 +665,72 @@ pub async fn wait_on_handle<T>(
 ) -> Result<T, tokio::task::JoinError> {
     join_handle.await
 }
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum AbortableJoinSetError {
+    /// task set aborted
+    Aborted,
+}
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum AbortableJoinSetStopError {
+    /// task set aborted
+    Aborted,
+    /// task error: {0:?}
+    JoinError(#[from] tokio::task::JoinError),
+    /// task set was aborted due to timeout
+    Timeout(#[from] tokio::time::error::Elapsed),
+}
+
+#[derive(Default, Debug)]
+pub struct AbortableJoinSet {
+    inner: std::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
+}
+
+impl AbortableJoinSet {
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+        }
+    }
+
+    pub fn spawn<F>(&self, fut: F) -> Result<(), AbortableJoinSetError>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut guard = self.inner.lock().expect(ERROR_MUTEX);
+        let Some(join_set) = guard.as_mut() else {
+            return Err(AbortableJoinSetError::Aborted);
+        };
+        join_set.spawn(fut);
+        Ok(())
+    }
+
+    pub fn abort(&self) {
+        let Some(mut join_set) = self.inner.lock().expect(ERROR_MUTEX).take() else {
+            return;
+        };
+        join_set.abort_all();
+    }
+
+    pub async fn stop(&self, timeout: Duration) -> Result<(), AbortableJoinSetStopError> {
+        let Some(mut join_set) = self.inner.lock().expect(ERROR_MUTEX).take() else {
+            return Err(AbortableJoinSetStopError::Aborted);
+        };
+        match tokio::time::timeout(timeout, async {
+            while let Some(out) = join_set.join_next().await {
+                out?;
+            }
+            Ok::<(), tokio::task::JoinError>(())
+        })
+        .await
+        {
+            Ok(out) => out.map_err(Into::into),
+            Err(err) => {
+                join_set.abort_all();
+                let _ = join_set.join_all().await;
+                Err(err.into())
+            }
+        }
+    }
+}

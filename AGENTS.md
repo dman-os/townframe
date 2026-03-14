@@ -33,6 +33,7 @@
     - Unless channel closure is a signal itself to the task to close, shutdown order should ascertain channels are always open.
     - Shutdown order is to be reverse of construction of order which means the entity that constructs the channel will always close after it's child.
     - Concealing channel errors hides lifecycle and liveness issues that are hard to diagnose in an actors based program like this.
+    - The only good exception is broadcast channels that support 0..N listeners. A broadcast channel can be re-opened and thus failure to send is not an invariant break.
 - Never add `skip` to tests unless asked to, they obscure broken tests for reviewers.
 
 ## Checks

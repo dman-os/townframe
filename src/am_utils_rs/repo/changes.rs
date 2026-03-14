@@ -106,10 +106,6 @@ pub struct ChangeListenerManagerStopToken {
 }
 
 impl ChangeListenerManagerStopToken {
-    pub fn cancel(&self) {
-        self.cancel_token.cancel();
-    }
-
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
         utils_rs::wait_on_handle_with_timeout(self.switchboard_handle, Duration::from_secs(5))

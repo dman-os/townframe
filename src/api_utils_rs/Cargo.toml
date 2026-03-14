@@ -21,7 +21,7 @@ automerge = { workspace = true, optional = true }
 
 # futures
 async-trait.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "tracing"] }
 
 # serde
 serde.workspace = true

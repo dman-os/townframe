@@ -47,7 +47,7 @@ garde.workspace = true
 
 
 # async
-tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs", "tracing"] }
 tokio-util.workspace = true
 futures = { workspace = true }
 regex = "1"

@@ -23,7 +23,7 @@ dotenv-flow.workspace = true
 utils_rs = { workspace = true, features = ["native", "hash"] }
 mltools = { workspace = true, default-features = true, features = ["tests"] }
 
-tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "tracing"] }
 serde = { workspace = true, features = ["derive"] }
 iroh = { workspace = true }
 irpc = { version = "0.12.0", features = ["derive"] }

@@ -837,8 +837,12 @@ mod tests {
         for doc_id in &b_new_doc_ids {
             let parsed = DocumentId::from_str(doc_id)
                 .map_err(|err| ferr!("invalid doc id '{doc_id}' in role reversal test: {err}"))?;
-            let has = repo_a.local_contains_document(&parsed).await?;
-            assert!(has, "repo_a missing role-reversed doc {doc_id}");
+            wait_until(
+                Duration::from_secs(5),
+                || async { repo_a.local_contains_document(&parsed).await },
+                &format!("repo_a missing role-reversed doc {doc_id}"),
+            )
+            .await?;
         }
 
         worker_a_stop.stop().await?;

@@ -66,14 +66,11 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
-    change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
+    partition_forwarder_cancel: CancellationToken,
     #[educe(Debug(ignore))]
-    remote_heads_worker_stop: std::sync::Mutex<Option<RemoteHeadsWorkerStopToken>>,
-}
-
-struct RemoteHeadsWorkerStopToken {
-    cancel_token: CancellationToken,
-    join_handle: tokio::task::JoinHandle<()>,
+    partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
+    #[educe(Debug(ignore))]
+    change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
 }
 
 pub type SharedBigRepo = Arc<BigRepo>;
@@ -102,50 +99,49 @@ impl BigRepo {
             state_pool,
             partition_events_tx,
             change_manager,
+            partition_forwarder_cancel: CancellationToken::new(),
+            partition_forwarders: Arc::new(utils_rs::AbortableJoinSet::new()),
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
-            remote_heads_worker_stop: std::sync::Mutex::new(None),
         });
         let (_head_reg, mut head_rx) = out
             .subscribe_head_listener(BigRepoHeadFilter { doc_id: None })
             .await?;
-        let remote_heads_cancel = CancellationToken::new();
-        let remote_heads_handle = {
-            let cancel_token = remote_heads_cancel.clone();
+        {
+            let cancel_token = out.partition_forwarder_cancel.child_token();
             let repo = Arc::downgrade(&out);
-            tokio::spawn(async move {
-                let _head_reg = _head_reg;
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = cancel_token.cancelled() => break,
-                        val = head_rx.recv() => {
-                            let Some(batch) = val else {
-                                break;
-                            };
-                            let Some(repo) = repo.upgrade() else {
-                                break;
-                            };
-                            for msg in batch {
-                                let BigRepoHeadNotification::DocHeadsChanged { doc_id, heads, origin } = msg;
-                                if !matches!(origin, samod_core::ChangeOrigin::Remote { .. }) {
-                                    continue;
+            out.partition_forwarders
+                .spawn(async move {
+                    let _head_reg = _head_reg;
+                    let fut = async {
+                        loop {
+                            tokio::select! {
+                                biased;
+                                _ = cancel_token.cancelled() => break,
+                                val = head_rx.recv() => {
+                                    let Some(batch) = val else {
+                                        eyre::bail!("head listener channel closed")
+                                    };
+                                    let Some(repo) = repo.upgrade() else {
+                                        break;
+                                    };
+                                    for msg in batch {
+                                        let BigRepoHeadNotification::DocHeadsChanged { doc_id, heads, origin } = msg;
+                                        if !matches!(origin, samod_core::ChangeOrigin::Remote { .. }) {
+                                            continue;
+                                        }
+                                        repo.record_doc_heads_change(&doc_id, heads.to_vec())
+                                            .await
+                                            .expect("failed recording remote doc heads change");
+                                    }
                                 }
-                                repo.record_doc_heads_change(&doc_id, heads.to_vec())
-                                    .await
-                                    .expect("failed recording remote doc heads change");
                             }
                         }
-                    }
-                }
-            })
-        };
-        out.remote_heads_worker_stop
-            .lock()
-            .expect(ERROR_MUTEX)
-            .replace(RemoteHeadsWorkerStopToken {
-                cancel_token: remote_heads_cancel,
-                join_handle: remote_heads_handle,
-            });
+                        eyre::Ok(())
+                    };
+                    fut.await.unwrap();
+                })
+                .expect("failed spawning remote heads forwarding worker");
+        }
         out.ensure_schema().await?;
         Ok(out)
     }
@@ -183,7 +179,21 @@ impl BigRepo {
             }
         };
         let out = Self::boot_with_repo(repo.clone(), BigRepoConfig::new(sqlite_url)).await?;
-        Ok((out, BigRepoStopToken { repo }))
+        let change_manager_stop = out
+            .change_manager_stop
+            .lock()
+            .expect(ERROR_MUTEX)
+            .take()
+            .expect("BigRepo change manager stop token missing");
+        Ok((
+            Arc::clone(&out),
+            BigRepoStopToken {
+                repo,
+                change_manager_stop: Some(change_manager_stop),
+                partition_forwarder_cancel: out.partition_forwarder_cancel.clone(),
+                partition_forwarders: Arc::clone(&out.partition_forwarders),
+            },
+        ))
     }
 
     pub fn samod_repo(&self) -> &samod::Repo {
@@ -529,10 +539,20 @@ impl BigRepo {
 
 pub struct BigRepoStopToken {
     pub repo: samod::Repo,
+    change_manager_stop: Option<changes::ChangeListenerManagerStopToken>,
+    partition_forwarder_cancel: CancellationToken,
+    partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
 }
 
 impl BigRepoStopToken {
-    pub async fn stop(self) -> Res<()> {
+    pub async fn stop(mut self) -> Res<()> {
+        self.partition_forwarder_cancel.cancel();
+        self.partition_forwarders
+            .stop(Duration::from_secs(5))
+            .await?;
+        if let Some(stop_token) = self.change_manager_stop.take() {
+            stop_token.stop().await?;
+        }
         self.repo.stop().await;
         Ok(())
     }
@@ -563,40 +583,6 @@ pub struct ConnFinishSignal {
     pub conn_id: samod::ConnectionId,
     pub peer_id: Arc<str>,
     pub reason: String,
-}
-
-impl Drop for BigRepo {
-    fn drop(&mut self) {
-        let remote_heads_worker = self
-            .remote_heads_worker_stop
-            .lock()
-            .expect(ERROR_MUTEX)
-            .take();
-        let change_manager_stop = self.change_manager_stop.lock().expect(ERROR_MUTEX).take();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                if let Some(worker) = remote_heads_worker {
-                    worker.cancel_token.cancel();
-                    let _ = utils_rs::wait_on_handle_with_timeout(
-                        worker.join_handle,
-                        Duration::from_secs(5),
-                    )
-                    .await;
-                }
-                if let Some(stop_token) = change_manager_stop {
-                    let _ = stop_token.stop().await;
-                }
-            });
-        } else {
-            if let Some(worker) = remote_heads_worker {
-                worker.cancel_token.cancel();
-                worker.join_handle.abort();
-            }
-            if let Some(stop_token) = change_manager_stop {
-                stop_token.cancel();
-            }
-        }
-    }
 }
 
 #[derive(Clone)]

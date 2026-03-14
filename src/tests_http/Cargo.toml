@@ -12,7 +12,7 @@ path = "lib.rs"
 [dependencies]
 reqwest.workspace = true
 serde = { workspace = true, features = ["derive"] }
-tokio = { workspace = true, features = ["rt", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "time", "macros", "tracing"] }
 
 utils_rs.workspace = true
 wadm-client = "0.10.0"

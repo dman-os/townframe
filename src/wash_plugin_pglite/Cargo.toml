@@ -23,7 +23,7 @@ wasmtime-wasi.workspace = true
 wash-runtime.workspace = true
 
 # async
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "tracing"] }
 async-trait.workspace = true
 
 # error

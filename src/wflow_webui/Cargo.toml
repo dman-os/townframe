@@ -60,7 +60,7 @@ leptos_meta.workspace = true
 leptos_axum = { version = "0.8.7", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 
-tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "tracing"], optional = true }
 
 wasm-bindgen = { version = "=0.2.104", optional = true }
 axum-extra = { workspace = true, features = ["cookie", "cookie-signed"], optional = true }

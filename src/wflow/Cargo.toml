@@ -36,7 +36,7 @@ displaydoc.workspace = true
 
 # async
 async-trait.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "fs", "tracing"] }
 tokio-util.workspace = true
 futures.workspace = true
 
