@@ -410,12 +410,7 @@ impl DrawerRepo {
             return Ok(Some(handle.clone()));
         }
         let document_id = DocumentId::from_str(branch_doc_id)?;
-        let has_local = self
-            .big_repo
-            .samod_repo()
-            .local_contains_document(document_id.clone())
-            .await
-            .map_err(|err| ferr!("failed checking local branch doc presence: {err}"))?;
+        let has_local = self.big_repo.local_contains_document(&document_id).await?;
         if !has_local {
             return Ok(None);
         }
@@ -2699,7 +2694,6 @@ mod tests {
                 peer_id: "test-v2".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -2799,7 +2793,6 @@ mod tests {
                 peer_id: "test-v2-partitions".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -2907,7 +2900,6 @@ mod tests {
                 peer_id: "test-v2-batch-add".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -2979,7 +2971,6 @@ mod tests {
                 peer_id: "test-v2-batch-add-events".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -3092,7 +3083,6 @@ mod tests {
                 peer_id: "test-v2-merge".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -3214,7 +3204,6 @@ mod tests {
                 peer_id: "client".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
         let (server_acx, server_acx_stop) = BigRepo::boot(
@@ -3222,7 +3211,6 @@ mod tests {
                 peer_id: "server".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -3336,7 +3324,6 @@ mod tests {
                 peer_id: "test-v2-apis".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -3493,7 +3480,6 @@ mod tests {
                 peer_id: "test-v2-meta".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -3664,7 +3650,6 @@ mod tests {
                 peer_id: "test-update-actor".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
         let drawer_doc_id = {
@@ -3749,7 +3734,6 @@ mod tests {
                 peer_id: "test-merge-actor".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
         let drawer_doc_id = {
@@ -3922,7 +3906,6 @@ mod tests {
                 peer_id: "test-v2-updated-at".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -4054,7 +4037,6 @@ mod tests {
                 peer_id: "test-v2-blame".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -4185,7 +4167,6 @@ mod tests {
                 peer_id: "test-v2-scope".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -4264,7 +4245,6 @@ mod tests {
                 peer_id: "test-v2-changed-facets".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -4363,7 +4343,6 @@ mod tests {
                 peer_id: "test-v2-unknown-tag".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -4414,7 +4393,6 @@ mod tests {
                 peer_id: "test-v2-self-ref".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -4477,7 +4455,6 @@ mod tests {
                 peer_id: "test-v2-body-empty-fragment-self".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -4550,9 +4527,9 @@ mod tests {
                 peer_id: format!("perf-drawer-raw-amctx-{}", Uuid::new_v4()),
                 storage: am_utils_rs::repo::StorageConfig::Disk {
                     path: storage_path.clone(),
+                    big_repo_sqlite_url: None,
                 },
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -4651,9 +4628,9 @@ mod tests {
                 peer_id: format!("perf-drawer-add-{}", Uuid::new_v4()),
                 storage: am_utils_rs::repo::StorageConfig::Disk {
                     path: storage_path.clone(),
+                    big_repo_sqlite_url: None,
                 },
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 

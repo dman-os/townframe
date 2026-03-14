@@ -41,7 +41,10 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub enum StorageConfig {
-    Disk { path: PathBuf },
+    Disk {
+        path: PathBuf,
+        big_repo_sqlite_url: Option<String>,
+    },
     Memory,
 }
 
@@ -146,35 +149,29 @@ impl BigRepo {
         Ok(out)
     }
 
-    pub async fn boot<A: samod::AnnouncePolicy>(
-        config: Config,
-        announce_policy: Option<A>,
-    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
-        let peer_id = samod::PeerId::from_string(config.peer_id);
+    pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
+        let Config { peer_id, storage } = config;
+        let peer_id = samod::PeerId::from_string(peer_id);
         let repo = samod::Repo::build_tokio().with_peer_id(peer_id);
-        let (repo, sqlite_url) = match config.storage {
-            StorageConfig::Disk { path } => {
+        let (repo, sqlite_url) = match storage {
+            StorageConfig::Disk {
+                path,
+                big_repo_sqlite_url,
+            } => {
                 std::fs::create_dir_all(&path).wrap_err_with(|| {
                     format!("Failed to create storage directory: {}", path.display())
                 })?;
                 let repo = repo.with_storage(samod::storage::TokioFilesystemStorage::new(
                     path.to_string_lossy().as_ref(),
                 ));
-                let loaded = if let Some(policy) = announce_policy {
-                    repo.with_announce_policy(policy).load().await
-                } else {
-                    repo.load().await
-                };
-                let sqlite_url = format!("sqlite://{}", path.join("big_repo.sqlite").display());
+                let loaded = repo.with_announce_policy(samod::AlwaysAnnounce).load().await;
+                let sqlite_url = big_repo_sqlite_url
+                    .unwrap_or_else(|| format!("sqlite://{}", path.join("big_repo.sqlite").display()));
                 (loaded, sqlite_url)
             }
             StorageConfig::Memory => {
                 let repo = repo.with_storage(samod::storage::InMemoryStorage::new());
-                let loaded = if let Some(policy) = announce_policy {
-                    repo.with_announce_policy(policy).load().await
-                } else {
-                    repo.load().await
-                };
+                let loaded = repo.with_announce_policy(samod::AlwaysAnnounce).load().await;
                 (loaded, "sqlite::memory:".to_string())
             }
         };
@@ -651,6 +648,21 @@ impl BigDocHandle {
                 .await?;
         }
         Ok(out)
+    }
+
+    pub fn peers(
+        &self,
+    ) -> (
+        std::collections::HashMap<samod::ConnectionId, samod::PeerDocState>,
+        futures::stream::BoxStream<
+            'static,
+            std::collections::HashMap<samod::ConnectionId, samod::PeerDocState>,
+        >,
+    ) {
+        use futures::StreamExt as _;
+
+        let (peer_state, state_stream) = self.inner.peers();
+        (peer_state, state_stream.boxed())
     }
 }
 

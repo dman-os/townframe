@@ -145,7 +145,6 @@ pub async fn test_cx_with_options(
             peer_id,
             storage: am_utils_rs::repo::StorageConfig::Memory,
         },
-        Option::<samod::AlwaysAnnounce>::None,
     )
     .await?;
 

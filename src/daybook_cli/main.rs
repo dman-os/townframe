@@ -689,10 +689,10 @@ async fn clone_repo_from_url(source_url: &str, destination: &std::path::Path) ->
             am_utils_rs::repo::Config {
                 storage: am_utils_rs::repo::StorageConfig::Disk {
                     path: destination.join("samod"),
+                    big_repo_sqlite_url: None,
                 },
                 peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
             },
-            Option::<samod::AlwaysAnnounce>::None,
         )
         .await?;
         daybook_core::sync::connect_and_pull_required_docs_once(

@@ -1727,7 +1727,6 @@ mod tests {
                 peer_id: "test".into(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            None::<samod::AlwaysAnnounce>,
         )
         .await?;
 

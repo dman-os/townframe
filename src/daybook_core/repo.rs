@@ -97,6 +97,7 @@ pub struct RepoCtx {
     pub sql: SqlCtx,
 
     pub big_repo: SharedBigRepo,
+    big_repo_stop: std::sync::Mutex<Option<am_utils_rs::BigRepoStopToken>>,
 
     pub doc_app: samod::DocHandle,
     pub doc_drawer: samod::DocHandle,
@@ -112,7 +113,13 @@ pub struct RepoCtx {
 
 impl RepoCtx {
     pub async fn shutdown(&self) -> Res<()> {
-        self.big_repo.samod_repo().stop().await;
+        let stop = self
+            .big_repo_stop
+            .lock()
+            .expect(ERROR_MUTEX)
+            .take()
+            .ok_or_eyre("big repo stop token missing")?;
+        stop.stop().await?;
         Ok(())
     }
 
@@ -183,6 +190,10 @@ impl RepoCtx {
         let am_config = am_utils_rs::repo::Config {
             storage: am_utils_rs::repo::StorageConfig::Disk {
                 path: layout.samod_root.clone(),
+                big_repo_sqlite_url: Some(format!(
+                    "sqlite://{}",
+                    layout.repo_root.join("big_repo.sqlite").display()
+                )),
             },
             peer_id,
         };
@@ -190,36 +201,7 @@ impl RepoCtx {
             &daybook_types::doc::UserPath::from(local_user_path.clone()),
         );
 
-        let peer_id = samod::PeerId::from_string(am_config.peer_id.clone());
-        let repo_builder = samod::Repo::build_tokio().with_peer_id(peer_id);
-        let samod_repo = match am_config.storage {
-            am_utils_rs::repo::StorageConfig::Disk { path } => {
-                std::fs::create_dir_all(&path).wrap_err_with(|| {
-                    format!("Failed to create storage directory: {}", path.display())
-                })?;
-                repo_builder
-                    .with_storage(samod::storage::TokioFilesystemStorage::new(
-                        path.to_string_lossy().as_ref(),
-                    ))
-                    .load()
-                    .await
-            }
-            am_utils_rs::repo::StorageConfig::Memory => {
-                repo_builder
-                    .with_storage(samod::storage::InMemoryStorage::new())
-                    .load()
-                    .await
-            }
-        };
-        let big_repo_state_url = format!(
-            "sqlite://{}",
-            layout.repo_root.join("big_repo.sqlite").display()
-        );
-        let big_repo = am_utils_rs::BigRepo::boot_with_repo(
-            samod_repo,
-            am_utils_rs::repo::BigRepoConfig::new(big_repo_state_url),
-        )
-        .await?;
+        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_config).await?;
         if let Some(ws_connector_url) = options.ws_connector_url {
             std::mem::drop(
                 big_repo
@@ -258,6 +240,7 @@ impl RepoCtx {
             lock_guard,
             sql,
             big_repo,
+            big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
             doc_app,
             doc_drawer,
             local_actor_id,

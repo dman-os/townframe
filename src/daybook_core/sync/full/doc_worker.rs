@@ -29,7 +29,7 @@ pub async fn spawn_doc_sync_worker(
 
     let fut = {
         async move {
-            let Some(handle) = big_repo.samod_repo().find(doc_id.clone()).await? else {
+            let Some(handle) = big_repo.find_doc(&doc_id).await? else {
                 worker.handle_missing_doc();
                 return eyre::Ok(());
             };
@@ -37,7 +37,7 @@ pub async fn spawn_doc_sync_worker(
             worker.handle_peer_state_update(peer_state);
 
             let mut idle_timeout = Box::pin(tokio::time::sleep(Duration::from_secs(120)));
-            let mut state_stream = state_stream.boxed();
+            let mut state_stream = state_stream;
             let loop_res: Res<()> = loop {
                 tokio::select! {
                     biased;
@@ -149,7 +149,6 @@ mod tests {
                 peer_id: alice_peer_id.clone(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
         let (bob_acx, bob_stop) = BigRepo::boot(
@@ -157,7 +156,6 @@ mod tests {
                 peer_id: bob_peer_id.clone(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 
@@ -254,7 +252,6 @@ mod tests {
                 peer_id: alice_peer_id.clone(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
         let (bob_acx, bob_stop) = BigRepo::boot(
@@ -262,7 +259,6 @@ mod tests {
                 peer_id: bob_peer_id.clone(),
                 storage: am_utils_rs::repo::StorageConfig::Memory,
             },
-            Some(samod::AlwaysAnnounce),
         )
         .await?;
 

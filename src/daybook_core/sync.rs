@@ -1384,10 +1384,10 @@ mod tests {
             am_utils_rs::repo::Config {
                 storage: am_utils_rs::repo::StorageConfig::Disk {
                     path: destination.join("samod"),
+                    big_repo_sqlite_url: None,
                 },
                 peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
             },
-            Option::<samod::AlwaysAnnounce>::None,
         )
         .await?;
         crate::sync::connect_and_pull_required_docs_once(
