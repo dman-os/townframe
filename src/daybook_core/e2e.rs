@@ -140,12 +140,10 @@ pub async fn test_cx_with_options(
     let peer_id = format!("test_{}", uuid::Uuid::new_v4().simple());
 
     // Initialize SharedBigRepo with memory storage
-    let (big_repo, acx_stop) = BigRepo::boot(
-        am_utils_rs::repo::Config {
-            peer_id,
-            storage: am_utils_rs::repo::StorageConfig::Memory,
-        },
-    )
+    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+        peer_id,
+        storage: am_utils_rs::repo::StorageConfig::Memory,
+    })
     .await?;
 
     // Create a drawer document

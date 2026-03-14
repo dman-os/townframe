@@ -1722,12 +1722,10 @@ mod tests {
 
     async fn setup_repo() -> Res<(SharedBigRepo, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
         let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
-        let (big_repo, _acx_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "test".into(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let doc = automerge::Automerge::load(&version_updates::version_latest()?)?;

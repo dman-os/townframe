@@ -296,11 +296,9 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     ctx.local_user_path.clone(),
                 )),
             };
-            for ii in 0..100 {
-                let id = drawer_repo.add(doc.clone()).await?;
-                info!(id, "created document");
-                println!("{id}");
-            }
+            let id = drawer_repo.add(doc).await?;
+            info!(id, "created document");
+            println!("{id}");
         }
         StaticCommands::Ed { id, branch } => {
             let Ok(Some(branches)) = drawer_repo.get_doc_branches(&id).await else {
@@ -685,15 +683,13 @@ async fn clone_repo_from_url(source_url: &str, destination: &std::path::Path) ->
     let _repo_user_id = daybook_core::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
 
     {
-        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(
-            am_utils_rs::repo::Config {
-                storage: am_utils_rs::repo::StorageConfig::Disk {
-                    path: destination.join("samod"),
-                    big_repo_sqlite_url: None,
-                },
-                peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
+        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
+            storage: am_utils_rs::repo::StorageConfig::Disk {
+                path: destination.join("samod"),
+                big_repo_sqlite_url: None,
             },
-        )
+            peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
+        })
         .await?;
         daybook_core::sync::connect_and_pull_required_docs_once(
             &big_repo,

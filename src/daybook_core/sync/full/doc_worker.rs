@@ -144,19 +144,15 @@ mod tests {
         utils_rs::testing::setup_tracing_once();
         let alice_peer_id = format!("alice-{}", Uuid::new_v4());
         let bob_peer_id = format!("bob-{}", Uuid::new_v4());
-        let (alice_acx, alice_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: alice_peer_id.clone(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (alice_acx, alice_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: alice_peer_id.clone(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
-        let (bob_acx, bob_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: bob_peer_id.clone(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (bob_acx, bob_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: bob_peer_id.clone(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         #[allow(deprecated)]
@@ -247,19 +243,15 @@ mod tests {
         utils_rs::testing::setup_tracing_once();
         let alice_peer_id = format!("alice-diverge-{}", Uuid::new_v4());
         let bob_peer_id = format!("bob-diverge-{}", Uuid::new_v4());
-        let (alice_acx, alice_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: alice_peer_id.clone(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (alice_acx, alice_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: alice_peer_id.clone(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
-        let (bob_acx, bob_stop) = BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: bob_peer_id.clone(),
-                storage: am_utils_rs::repo::StorageConfig::Memory,
-            },
-        )
+        let (bob_acx, bob_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: bob_peer_id.clone(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         #[allow(deprecated)]

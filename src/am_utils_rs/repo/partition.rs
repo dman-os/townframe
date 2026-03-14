@@ -372,6 +372,7 @@ impl BigRepo {
         Ok(exists == 1)
     }
 
+    // TODO: proper peer based permissioning
     pub async fn list_partitions_for_peer(&self, _peer: &PeerKey) -> Res<Vec<PartitionSummary>> {
         let rows = sqlx::query(
             r#"

@@ -101,15 +101,13 @@ impl Ctx {
 
         let (_doc_setup_req_tx, mut doc_setup_req_rx) =
             mpsc::unbounded_channel::<DocSetupRequest>();
-        let (big_repo, _big_repo_stop) = am_utils_rs::BigRepo::boot(
-            am_utils_rs::repo::Config {
-                peer_id: "daybook_sync".to_string(),
-                storage: am_utils_rs::repo::StorageConfig::Disk {
-                    path: "/tmp/samod-sync".into(),
-                    big_repo_sqlite_url: None,
-                },
+        let (big_repo, _big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "daybook_sync".to_string(),
+            storage: am_utils_rs::repo::StorageConfig::Disk {
+                path: "/tmp/samod-sync".into(),
+                big_repo_sqlite_url: None,
             },
-        )
+        })
         .await?;
 
         use generational_box::AnyStorage;

@@ -32,7 +32,7 @@
   - Another case where this is critical, don't ignore channel send errors in Rust.
     - Unless channel closure is a signal itself to the task to close, shutdown order should ascertain channels are always open.
     - Shutdown order is to be reverse of construction of order which means the entity that constructs the channel will always close after it's child.
-    - Concealing channel errors hides lifecycle and liveness issues that are hard to diagnose in an actors based program like this.
+    - Concealing channel errors hides lifecycle and liveness issues that are hard to diagnose in an actor-based program like this.
     - The only good exception is broadcast channels that support 0..N listeners. A broadcast channel can be re-opened and thus failure to send is not an invariant break.
 - Never add `skip` to tests unless asked to, they obscure broken tests for reviewers.
 
@@ -94,7 +94,7 @@
 
 > [!INFO]
 >
-> You're begged not to be lazy wth solutions.
+> You're begged not to be lazy with solutions.
 
 - If you're not able to cleanly read a provided web link through tool calls, pause and ask for a copy/paste of the contents. NEVER ASSUME THE CONTENTS OF A LINK YOU HAVEN'T SEEN!
 
@@ -106,3 +106,14 @@ Cheat code reads the whole database in a memory HashSet to avoid writing the rig
 Cheat code ignores errors with warnings logs and moves on.
 
 THIS IS A NO CHEAT REPO!
+
+## Test code
+
+Human auditors of this repo don't really read test code or mantain it.
+So when working on tests, take a gardening hand to it and assume they've been less strictly audited in the past.
+See a useless or too shallow a test?
+Flag it for removal.
+Are tests repeating too much setup code?
+Consider using TDD or common cleanup code.
+
+Tools like snapshot tests, TDD and the macros for TDD found in the repo can help the in the longevity of a tests usefulness.

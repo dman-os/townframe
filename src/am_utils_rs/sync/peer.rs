@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::repo::{ImportDocFastOutcome, SharedBigRepo};
+use crate::repo::SharedBigRepo;
 use crate::sync::protocol::*;
 use crate::sync::store::SyncStoreHandle;
 
@@ -730,15 +730,10 @@ impl PeerSyncWorker {
             .map_err(|err| ferr!("invalid remote doc id '{}': {err}", doc.doc_id))?;
         let loaded = automerge::Automerge::load(&doc.automerge_save)
             .map_err(|err| ferr!("invalid automerge payload for '{}': {err}", doc.doc_id))?;
-        match self
-            .local_repo
+        self.local_repo
             .import_doc_fast(parsed.clone(), loaded)
-            .await
-        {
-            Ok(ImportDocFastOutcome::Imported(_)) => Ok(()),
-            Ok(ImportDocFastOutcome::AlreadyExists) => Ok(()),
-            Err(err) => Err(err),
-        }
+            .await?;
+        Ok(())
     }
 
     async fn update_member_cursor(&self, event: &PartitionMemberEvent) -> Res<()> {

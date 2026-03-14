@@ -781,7 +781,8 @@ impl Worker {
                     })
                     .collect();
                 resp.send(snapshot)
-                    .expect("full worker snapshot caller dropped");
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
             }
         }
         eyre::Ok(())

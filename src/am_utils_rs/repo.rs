@@ -329,7 +329,7 @@ impl BigRepo {
         Ok(out)
     }
 
-    pub async fn import_doc_fast(
+    pub(crate) async fn import_doc_fast(
         self: &Arc<Self>,
         document_id: DocumentId,
         initial_content: automerge::Automerge,
@@ -473,12 +473,11 @@ impl BigRepo {
         T: Hydrate + Reconcile + Send + Sync + 'static,
         P: Into<autosurgeon::Prop<'a>> + Send + Sync + 'static,
     {
-        let handle = self
-            .find_doc_handle(doc_id)
-            .await?
-            .ok_or_eyre("doc not found")?;
+        let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         let res = handle
-            .with_document(|doc| {
+            .with_document_local(|doc| {
+                // FIXME: consider re-setting found actor id at the end
+                // or better yet, use big repo wide actor id defaults
                 if let Some(actor) = &actor_id {
                     doc.set_actor(actor.clone());
                 }
@@ -488,8 +487,12 @@ impl BigRepo {
                     eyre::Ok(())
                 })
             })
-            .map_err(|err| ferr!("error on samod txn: {err:?}"))?;
-        Ok(res.hash)
+            .await
+            .wrap_err("error on reconcile transaction")?;
+        match res {
+            Ok(success) => Ok(success.hash),
+            Err(failure) => Err(ferr!("error on reconcile transaction: {failure:?}")),
+        }
     }
 
     pub async fn hydrate_path<T: Hydrate + Reconcile + Send + Sync + 'static>(

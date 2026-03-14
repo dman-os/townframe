@@ -492,15 +492,13 @@ mod tests {
             )
             .await?;
 
-            let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(
-                am_utils_rs::repo::Config {
-                    storage: am_utils_rs::repo::StorageConfig::Disk {
-                        path: am_path,
-                        big_repo_sqlite_url: None,
-                    },
-                    peer_id: "daybook_fuse_test".to_string(),
+            let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
+                storage: am_utils_rs::repo::StorageConfig::Disk {
+                    path: am_path,
+                    big_repo_sqlite_url: None,
                 },
-            )
+                peer_id: "daybook_fuse_test".to_string(),
+            })
             .await?;
 
             let doc_app = tokio::sync::OnceCell::new();

@@ -134,7 +134,6 @@ impl SyncStoreHandle {
             .wrap_err("sync store closed")?;
         resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
-
 }
 
 pub async fn spawn_sync_store(

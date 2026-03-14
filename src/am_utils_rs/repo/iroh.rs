@@ -17,11 +17,7 @@ mod codec;
 
 const CONN_URL_SCHEME: &str = "db+iroh+samod";
 
-fn close_iroh_conn(
-    conn: Option<&iroh::endpoint::Connection>,
-    code: u32,
-    reason: &'static [u8],
-) {
+fn close_iroh_conn(conn: Option<&iroh::endpoint::Connection>, code: u32, reason: &'static [u8]) {
     if let Some(conn) = conn {
         conn.close(code.into(), reason);
     }
@@ -91,10 +87,10 @@ impl BigRepo {
                                 close_iroh_conn(
                                     cloned.as_deref(),
                                     500,
-                                    b"samod connection stream ended absruptly",
+                                    b"samod connection stream ended abruptly",
                                 );
                                 eyre::bail!(
-                                    "connection stream ended befor disconnect"
+                                    "connection stream ended before disconnect"
                                 );
                             };
                             match evt {
@@ -125,14 +121,14 @@ impl BigRepo {
                                     close_iroh_conn(
                                         cloned.as_deref(),
                                         500,
-                                        b"samod connection stream ended absruptly",
+                                        b"samod connection stream ended abruptly",
                                     );
                                     if let Some(tx) = end_signal_tx {
                                         tx.send(crate::repo::ConnFinishSignal {
                                             conn_id,
                                             peer_id,
                                             // FIXME: find better reason type
-                                            reason: last_reason.unwrap_or_else(|| "max re-connention atttempts reached".into()),
+                                            reason: last_reason.unwrap_or_else(|| "max re-connention attempts reached".into()),
                                         })
                                         .inspect_err(|_| warn!("connection owner closed before finish"))
                                         .ok();
@@ -291,10 +287,10 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
             close_iroh_conn(
                 Some(&connection),
                 500,
-                b"samod connection stream ended absruptly before connection",
+                b"samod connection stream ended abruptly before connection",
             );
             return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
-                "connection stream ended befor disconnect with {endpoint_id}"
+                "connection stream ended before disconnect with {endpoint_id}"
             ))));
         };
         let (conn_id, peer_info) = match event {
@@ -335,9 +331,9 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
             }
             evt = events.next() => {
                 let Some(evt) = evt else {
-                    close_iroh_conn(Some(&connection), 500, b"samod connection stream ended absruptly");
+                    close_iroh_conn(Some(&connection), 500, b"samod connection stream ended abruptly");
                     return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
-                        "connection stream ended befor disconnect with {endpoint_id}"
+                        "connection stream ended before disconnect with {endpoint_id}"
                     ))));
                 };
                 match evt {
