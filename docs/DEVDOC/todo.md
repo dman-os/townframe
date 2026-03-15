@@ -28,6 +28,7 @@
   - [ ] better URLs
   - [ ] auto-peer discovery
   - [ ] QR based clone
+  - [ ] RPC api versioning scheme
 - [ ] Deterministic doc ids for main docs [LOST]
 - [ ] Prune dependencies
 - [ ] Blobs server

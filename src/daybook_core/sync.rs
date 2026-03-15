@@ -366,16 +366,20 @@ impl IrohSyncRepo {
     }
 
     async fn handle_conn_end(&self, signal: am_utils_rs::repo::ConnFinishSignal) -> Res<()> {
-        let endpoint_id = self
-            .active_samod_peers
-            .read()
-            .await
-            .iter()
-            .find_map(|(endpoint_id, state)| match state {
+        let Some(endpoint_id) = self.active_samod_peers.read().await.iter().find_map(
+            |(endpoint_id, state)| match state {
                 ActivePeerState::Connected(conn) if conn.id == signal.conn_id => Some(*endpoint_id),
                 ActivePeerState::Connected(_) | ActivePeerState::Connecting => None,
-            })
-            .expect("connection finished for unknown conn_id");
+            },
+        ) else {
+            debug!(
+                conn_id = ?signal.conn_id,
+                peer_id = %signal.peer_id,
+                reason = %signal.reason,
+                "ignoring finish signal for unknown connection"
+            );
+            return Ok(());
+        };
 
         let events = [IrohSyncEvent::ConnectionClosed {
             endpoint_id,

@@ -223,6 +223,13 @@ impl DispatchRepo {
 
                         self.store
                             .mutate_sync(|store| {
+                                match &new_versioned.deets {
+                                    ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
+                                        store
+                                            .wflow_to_dispatch
+                                            .insert(wflow_job_id.clone(), id.clone());
+                                    }
+                                }
                                 store.active_dispatches.insert(id.clone(), new_versioned);
                             })
                             .await?;
@@ -230,7 +237,13 @@ impl DispatchRepo {
                     DispatchEvent::DispatchDeleted { id, .. } => {
                         self.store
                             .mutate_sync(|store| {
-                                store.active_dispatches.remove(id);
+                                if let Some(old_dispatch) = store.active_dispatches.remove(id) {
+                                    match &old_dispatch.deets {
+                                        ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
+                                            store.wflow_to_dispatch.remove(wflow_job_id);
+                                        }
+                                    }
+                                }
                             })
                             .await?;
                     }

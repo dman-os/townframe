@@ -8,6 +8,7 @@ use crate::repo::BigRepo;
 use crate::sync::protocol::*;
 
 const META_NEXT_TXID_KEY: &str = "next_txid";
+const MAX_PAGE_LIMIT: u32 = 1_024;
 
 impl BigRepo {
     pub(super) async fn ensure_schema(&self) -> Res<()> {
@@ -424,8 +425,8 @@ impl BigRepo {
         _peer: &PeerKey,
         req: &GetPartitionMemberEventsRequest,
     ) -> Res<GetPartitionMemberEventsResponse> {
-        let limit = req.limit.max(1) as usize;
-        let mut events = Vec::new();
+        let limit = req.limit.clamp(1, MAX_PAGE_LIMIT) as usize;
+        let mut events = Vec::with_capacity(req.partitions.len().saturating_mul(limit));
         let mut cursors = Vec::with_capacity(req.partitions.len());
         for part in &req.partitions {
             ensure_partition_exists(&self.state_pool, &part.partition_id).await?;
@@ -447,8 +448,8 @@ impl BigRepo {
         _peer: &PeerKey,
         req: &GetPartitionDocEventsRequest,
     ) -> Res<GetPartitionDocEventsResponse> {
-        let limit = req.limit.max(1) as usize;
-        let mut events = Vec::new();
+        let limit = req.limit.clamp(1, MAX_PAGE_LIMIT) as usize;
+        let mut events = Vec::with_capacity(req.partitions.len().saturating_mul(limit));
         let mut cursors = Vec::with_capacity(req.partitions.len());
         for part in &req.partitions {
             ensure_partition_exists(&self.state_pool, &part.partition_id).await?;
@@ -855,17 +856,17 @@ impl BigRepo {
 }
 
 async fn alloc_txid(conn: &mut sqlx::SqliteConnection) -> Res<u64> {
-    let current: String = sqlx::query_scalar("SELECT value FROM big_repo_meta WHERE key = ?")
+    let next_value: i64 = sqlx::query_scalar(
+        "UPDATE big_repo_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = ? RETURNING CAST(value AS INTEGER)",
+    )
         .bind(META_NEXT_TXID_KEY)
         .fetch_one(&mut *conn)
         .await?;
-    let out: u64 = current.parse().wrap_err("invalid next_txid in sqlite")?;
-    let next = out.saturating_add(1);
-    sqlx::query("UPDATE big_repo_meta SET value = ? WHERE key = ?")
-        .bind(next.to_string())
-        .bind(META_NEXT_TXID_KEY)
-        .execute(&mut *conn)
-        .await?;
+    let out = next_value.saturating_sub(1);
+    if out < 0 {
+        eyre::bail!("invalid next_txid in sqlite: {next_value}");
+    }
+    let out = out as u64;
     Ok(out)
 }
 

@@ -132,6 +132,7 @@ pub(crate) struct PeerSyncSnapshot {
 }
 
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 enum SyncProgressMsg {
     BlobWorkerStarted {
         partition: PartitionKey,
@@ -1014,14 +1015,14 @@ impl Worker {
     async fn batch_refresh_peer_sessions(&mut self) -> Res<()> {
         let mut double = std::mem::replace(&mut self.peer_sessions_to_refresh, default());
         for endpoint_id in double.drain() {
-            let (peer_key, parts) = {
-                let conn_id = self.conn_by_peer.get(&endpoint_id).expect(ERROR_IMPOSSIBLE);
-                let peer_state = self
-                    .known_peer_set
-                    .get_mut(conn_id)
-                    .expect(ERROR_IMPOSSIBLE);
-                (peer_state.peer_key.clone(), peer_state.partitions.clone())
+            let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
+                continue;
             };
+            let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) else {
+                continue;
+            };
+            let peer_key = peer_state.peer_key.clone();
+            let parts = peer_state.partitions.clone();
             self.refresh_peer_partition_session(endpoint_id, peer_key, parts)
                 .await?;
         }
@@ -1208,7 +1209,7 @@ impl Worker {
             }
             SamodSyncRequest::DocDeleted {
                 peer_key,
-                partition_id: _,
+                partition_id,
                 doc_id,
             } => {
                 let doc_id = doc_id
@@ -1219,8 +1220,37 @@ impl Worker {
                     return Ok(());
                 };
                 self.emit_stale_peer(endpoint_id).await?;
-                debug!(peer_key, %doc_id, "received samod doc deleted request");
-                self.docs_to_stop.insert(doc_id);
+                debug!(
+                    peer_key,
+                    partition_id = %partition_id,
+                    %doc_id,
+                    "received samod doc deleted request"
+                );
+                self.docs_to_stop.insert(doc_id.clone());
+
+                let mut refresh_peer = false;
+                let mut clear_doc_request = false;
+                if let Some(sync_state) = self.samod_doc_set.get_mut(&doc_id) {
+                    let had_peer_entry = sync_state.requested_peers.remove(&endpoint_id).is_some();
+                    clear_doc_request = sync_state.requested_peers.is_empty();
+                    if had_peer_entry {
+                        if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
+                            if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
+                                peer_state.samod_pending_docs =
+                                    peer_state.samod_pending_docs.saturating_sub(1);
+                                refresh_peer = true;
+                            }
+                        }
+                    }
+                }
+                if clear_doc_request {
+                    self.samod_doc_set.remove(&doc_id);
+                    self.pending_docs.remove(&doc_id);
+                    self.docs_to_boot.remove(&doc_id);
+                }
+                if refresh_peer {
+                    self.refresh_peer_fully_synced_state(endpoint_id).await?;
+                }
             }
         }
         Ok(())
@@ -1260,10 +1290,16 @@ impl Worker {
                     .as_ref()
                     .map_or(now, |prior| prior.last_attempt_at),
             };
-            let active = self.boot_doc_sync_worker(doc_id.clone(), retry).await?;
-            self.pending_docs.remove(&doc_id);
-            self.active_docs.insert(doc_id, active);
-            budget = budget.saturating_sub(1);
+            match self.boot_doc_sync_worker(doc_id.clone(), retry).await? {
+                Some(active) => {
+                    self.pending_docs.remove(&doc_id);
+                    self.active_docs.insert(doc_id, active);
+                    budget = budget.saturating_sub(1);
+                }
+                None => {
+                    self.handle_doc_missing_local(doc_id).await?;
+                }
+            }
         }
         double.extend(self.docs_to_boot.drain());
         self.docs_to_boot = double;
@@ -1274,13 +1310,12 @@ impl Worker {
         &self,
         doc_id: DocumentId,
         retry: RetryState,
-    ) -> Res<ActiveDocSyncState> {
+    ) -> Res<Option<ActiveDocSyncState>> {
         let cancel_token = self.cancel_token.child_token();
-        let latest_heads = self
-            .big_repo
-            .find_doc(&doc_id)
-            .await?
-            .ok_or_eyre("boot_doc_sync_worker missing local doc handle")?
+        let Some(local_doc) = self.big_repo.find_doc(&doc_id).await? else {
+            return Ok(None);
+        };
+        let latest_heads = local_doc
             .with_document_local(|doc| ChangeHashSet(Arc::from(doc.get_heads())))
             .await?;
         let stop_token = doc_worker::spawn_doc_sync_worker(
@@ -1291,10 +1326,10 @@ impl Worker {
             retry,
         )
         .await?;
-        Ok(ActiveDocSyncState {
+        Ok(Some(ActiveDocSyncState {
             latest_heads,
             stop_token,
-        })
+        }))
     }
 
     async fn batch_stop_docs(&mut self) -> Res<()> {
@@ -1707,10 +1742,9 @@ impl Worker {
         previous_backoff: Duration,
         _previous_attempt_at: std::time::Instant,
     ) -> Res<()> {
-        let active = self
-            .active_blobs
-            .remove(&hash)
-            .expect("blob backoff requested by non-active worker");
+        let Some(active) = self.active_blobs.remove(&hash) else {
+            return Ok(());
+        };
         active.stop_token.stop().await?;
         let now = std::time::Instant::now();
         let delay = delay.min(Duration::from_secs(600));

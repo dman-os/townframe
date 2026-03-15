@@ -158,7 +158,11 @@ impl DocBlobsIndexRepo {
         Ok(())
     }
 
-    pub async fn reindex_doc(&self, doc_id: &DocId, heads: &ChangeHashSet) -> Res<ReindexDocOutcome> {
+    pub async fn reindex_doc(
+        &self,
+        doc_id: &DocId,
+        heads: &ChangeHashSet,
+    ) -> Res<ReindexDocOutcome> {
         let Some(facet_keys) = self.drawer_repo.facet_keys_at_heads(doc_id, heads).await? else {
             self.delete_doc(doc_id).await?;
             return Ok(ReindexDocOutcome::Evicted);

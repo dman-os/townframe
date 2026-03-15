@@ -168,9 +168,8 @@ impl BigRepo {
                 let storage_path = path
                     .to_str()
                     .ok_or_else(|| eyre::eyre!("storage path contains invalid UTF-8"))?;
-                let repo = repo.with_storage(samod::storage::TokioFilesystemStorage::new(
-                    storage_path,
-                ));
+                let repo =
+                    repo.with_storage(samod::storage::TokioFilesystemStorage::new(storage_path));
                 let loaded = repo
                     .with_announce_policy(samod::AlwaysAnnounce)
                     .load()
@@ -293,7 +292,8 @@ impl BigRepo {
             }
             leases
         } else {
-            self.ensure_persistent_change_brokers_for_known_docs().await?
+            self.ensure_persistent_change_brokers_for_known_docs()
+                .await?
         };
         let (registration, change_rx) = self.change_manager.subscribe_listener(filter).await?;
         Ok((registration.with_broker_leases(broker_leases), change_rx))
@@ -324,7 +324,8 @@ impl BigRepo {
             }
             leases
         } else {
-            self.ensure_persistent_change_brokers_for_known_docs().await?
+            self.ensure_persistent_change_brokers_for_known_docs()
+                .await?
         };
         let (registration, rx) = self.change_manager.subscribe_head_listener(filter).await?;
         Ok((registration.with_broker_leases(broker_leases), rx))
@@ -767,8 +768,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
 
         let non_utf8_component = std::ffi::OsString::from_vec(vec![0xff, b'x']);
-        let storage_path = std::env::temp_dir()
-            .join(std::path::PathBuf::from(non_utf8_component));
+        let storage_path = std::env::temp_dir().join(std::path::PathBuf::from(non_utf8_component));
         let res = BigRepo::boot(Config {
             peer_id: "bigrepo-nonutf8".to_string(),
             storage: StorageConfig::Disk {
@@ -782,7 +782,8 @@ mod tests {
             Err(err) => err,
         };
         assert!(
-            err.to_string().contains("storage path contains invalid UTF-8"),
+            err.to_string()
+                .contains("storage path contains invalid UTF-8"),
             "unexpected error: {err:?}"
         );
         Ok(())

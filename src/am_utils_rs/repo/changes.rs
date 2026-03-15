@@ -460,51 +460,112 @@ impl ChangeListenerManager {
 
                 match input {
                     SwitchboardInput::Remote(notifications) => {
-                        let mut listeners = self.listeners.lock().expect(ERROR_MUTEX);
-                        listeners.retain(|listener| {
-                            let mut relevant_notifications = Vec::new();
-                            for notification in &notifications {
-                                if notification_matches_filter(notification, &listener.filter) {
-                                    relevant_notifications.push(notification.clone());
+                        let to_send = {
+                            let listeners = self.listeners.lock().expect(ERROR_MUTEX);
+                            let mut to_send = Vec::new();
+                            for listener in listeners.iter() {
+                                let mut relevant_notifications = Vec::new();
+                                for notification in &notifications {
+                                    if notification_matches_filter(notification, &listener.filter) {
+                                        relevant_notifications.push(notification.clone());
+                                    }
                                 }
+                                if relevant_notifications.is_empty() {
+                                    continue;
+                                }
+                                to_send.push((
+                                    listener.id,
+                                    listener.change_tx.clone(),
+                                    relevant_notifications,
+                                ));
                             }
-                            if relevant_notifications.is_empty() {
-                                return true;
+                            to_send
+                        };
+                        let mut failed_listener_ids = Vec::new();
+                        for (listener_id, change_tx, relevant_notifications) in to_send {
+                            if change_tx.send(relevant_notifications).is_err() {
+                                failed_listener_ids.push(listener_id);
                             }
-                            listener.change_tx.send(relevant_notifications).is_ok()
-                        });
+                        }
+                        if !failed_listener_ids.is_empty() {
+                            let mut listeners = self.listeners.lock().expect(ERROR_MUTEX);
+                            listeners
+                                .retain(|listener| !failed_listener_ids.contains(&listener.id));
+                        }
                     }
                     SwitchboardInput::Heads(notifications) => {
-                        let mut listeners = self.head_listeners.lock().expect(ERROR_MUTEX);
-                        listeners.retain(|listener| {
-                            let mut relevant_notifications = Vec::new();
-                            for notification in &notifications {
-                                if head_notification_matches_filter(notification, &listener.filter)
-                                {
-                                    relevant_notifications.push(notification.clone());
+                        let to_send = {
+                            let listeners = self.head_listeners.lock().expect(ERROR_MUTEX);
+                            let mut to_send = Vec::new();
+                            for listener in listeners.iter() {
+                                let mut relevant_notifications = Vec::new();
+                                for notification in &notifications {
+                                    if head_notification_matches_filter(
+                                        notification,
+                                        &listener.filter,
+                                    ) {
+                                        relevant_notifications.push(notification.clone());
+                                    }
                                 }
+                                if relevant_notifications.is_empty() {
+                                    continue;
+                                }
+                                to_send.push((
+                                    listener.id,
+                                    listener.change_tx.clone(),
+                                    relevant_notifications,
+                                ));
                             }
-                            if relevant_notifications.is_empty() {
-                                return true;
+                            to_send
+                        };
+                        let mut failed_listener_ids = Vec::new();
+                        for (listener_id, change_tx, relevant_notifications) in to_send {
+                            if change_tx.send(relevant_notifications).is_err() {
+                                failed_listener_ids.push(listener_id);
                             }
-                            listener.change_tx.send(relevant_notifications).is_ok()
-                        });
+                        }
+                        if !failed_listener_ids.is_empty() {
+                            let mut listeners = self.head_listeners.lock().expect(ERROR_MUTEX);
+                            listeners
+                                .retain(|listener| !failed_listener_ids.contains(&listener.id));
+                        }
                     }
                     SwitchboardInput::Local(notifications) => {
-                        let mut listeners = self.local_listeners.lock().expect(ERROR_MUTEX);
-                        listeners.retain(|listener| {
-                            let mut relevant_notifications = Vec::new();
-                            for notification in &notifications {
-                                if local_notification_matches_filter(notification, &listener.filter)
-                                {
-                                    relevant_notifications.push(notification.clone());
+                        let to_send = {
+                            let listeners = self.local_listeners.lock().expect(ERROR_MUTEX);
+                            let mut to_send = Vec::new();
+                            for listener in listeners.iter() {
+                                let mut relevant_notifications = Vec::new();
+                                for notification in &notifications {
+                                    if local_notification_matches_filter(
+                                        notification,
+                                        &listener.filter,
+                                    ) {
+                                        relevant_notifications.push(notification.clone());
+                                    }
                                 }
+                                if relevant_notifications.is_empty() {
+                                    continue;
+                                }
+                                to_send.push((
+                                    listener.id,
+                                    listener.change_tx.clone(),
+                                    relevant_notifications,
+                                ));
                             }
-                            if relevant_notifications.is_empty() {
-                                return true;
+                            to_send
+                        };
+                        let mut failed_listener_ids = Vec::new();
+                        for (listener_id, change_tx, relevant_notifications) in to_send {
+                            if change_tx.send(relevant_notifications).is_err() {
+                                failed_listener_ids.push(listener_id);
                             }
-                            listener.change_tx.send(relevant_notifications).is_ok()
-                        });
+                        }
+                        if !failed_listener_ids.is_empty() {
+                            let mut listeners = self.local_listeners.lock().expect(ERROR_MUTEX);
+                            listeners
+                                .retain(|listener| !failed_listener_ids.contains(&listener.id));
+                        }
                     }
                 }
             }
