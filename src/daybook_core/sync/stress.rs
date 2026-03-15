@@ -5,12 +5,14 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Once;
 
 const NODE_COUNT: usize = 4;
 const EVENT_COUNT: usize = 64;
 const PHASE_TIMEOUT: Duration = Duration::from_secs(90);
 const FULL_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_STRESS_SEED: u64 = 0xD4B5_51C0_0001;
+static TEST_ENV_INIT: Once = Once::new();
 
 #[derive(Clone, Copy, Debug)]
 enum EventKind {
@@ -22,10 +24,12 @@ enum EventKind {
     PutBlobAttach,
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+    TEST_ENV_INIT.call_once(|| {
+        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+    });
 
     let seed = std::env::var("DAYB_SYNC_TEST_SEED")
         .ok()
@@ -37,63 +41,64 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
     let temp_root = tempfile::tempdir()?;
     let repo_paths = init_and_copy_repo_cluster(temp_root.path()).await?;
     let mut nodes = open_cluster_nodes(&repo_paths).await?;
+    let result = async {
+        let topology_1 = generate_connected_edges(&mut rng);
+        info!(?topology_1, "phase-1 topology");
+        let mut endpoints = connect_topology(&nodes, &topology_1).await?;
+        wait_network_rest(&nodes, &endpoints, FULL_SYNC_TIMEOUT).await?;
 
-    let topology_1 = generate_connected_edges(&mut rng);
-    info!(?topology_1, "phase-1 topology");
-    let mut endpoints = connect_topology(&nodes, &topology_1).await?;
-    wait_network_rest(&nodes, &endpoints, FULL_SYNC_TIMEOUT).await?;
-
-    let mut applied = Vec::new();
-    for idx in 0..EVENT_COUNT {
-        let node_idx = rng.random_range(0..NODE_COUNT);
-        if let Some(node) = nodes[node_idx].as_ref() {
-            let kind = random_event_kind(&mut rng);
-            if let Some(detail) = apply_event(node, kind, idx, &mut rng).await? {
-                applied.push(format!("#{idx} node={node_idx} kind={kind:?} {detail}"));
+        let mut applied = Vec::new();
+        for idx in 0..EVENT_COUNT {
+            let node_idx = rng.random_range(0..NODE_COUNT);
+            if let Some(node) = nodes[node_idx].as_ref() {
+                let kind = random_event_kind(&mut rng);
+                if let Some(detail) = apply_event(node, kind, idx, &mut rng).await? {
+                    applied.push(format!("#{idx} node={node_idx} kind={kind:?} {detail}"));
+                }
             }
         }
+        info!(
+            applied_count = applied.len(),
+            sample = ?applied.iter().take(12).collect::<Vec<_>>(),
+            "phase-1 events applied"
+        );
+        wait_network_rest(&nodes, &endpoints, PHASE_TIMEOUT).await?;
+
+        let leaving_idx = rng.random_range(0..NODE_COUNT);
+        info!(leaving_idx, "transfer phase: leaving node");
+        let leaving_node = nodes[leaving_idx]
+            .take()
+            .ok_or_eyre("leaving node missing from cluster state")?;
+        leaving_node.stop().await?;
+
+        for _ in 0..(EVENT_COUNT / 2) {
+            let mut active = (0..NODE_COUNT)
+                .filter(|idx| nodes[*idx].is_some())
+                .collect::<Vec<_>>();
+            active.shuffle(&mut rng);
+            let node_idx = *active
+                .first()
+                .ok_or_eyre("no active nodes in transfer phase")?;
+            let node = nodes[node_idx]
+                .as_ref()
+                .ok_or_eyre("active node unexpectedly missing")?;
+            let kind = random_event_kind(&mut rng);
+            let _ = apply_event(node, kind, EVENT_COUNT, &mut rng).await?;
+        }
+
+        let reopened = open_sync_node(&repo_paths[leaving_idx]).await?;
+        nodes[leaving_idx] = Some(reopened);
+
+        let topology_2 = generate_connected_edges(&mut rng);
+        info!(?topology_2, "phase-2 topology");
+        endpoints = connect_topology(&nodes, &topology_2).await?;
+        wait_network_rest(&nodes, &endpoints, PHASE_TIMEOUT).await
     }
-    info!(
-        applied_count = applied.len(),
-        sample = ?applied.iter().take(12).collect::<Vec<_>>(),
-        "phase-1 events applied"
-    );
-    wait_network_rest(&nodes, &endpoints, PHASE_TIMEOUT).await?;
-
-    let leaving_idx = rng.random_range(0..NODE_COUNT);
-    info!(leaving_idx, "transfer phase: leaving node");
-    let leaving_node = nodes[leaving_idx]
-        .take()
-        .ok_or_eyre("leaving node missing from cluster state")?;
-    leaving_node.stop().await?;
-
-    for _ in 0..(EVENT_COUNT / 2) {
-        let mut active = (0..NODE_COUNT)
-            .filter(|idx| nodes[*idx].is_some())
-            .collect::<Vec<_>>();
-        active.shuffle(&mut rng);
-        let node_idx = *active
-            .first()
-            .ok_or_eyre("no active nodes in transfer phase")?;
-        let node = nodes[node_idx]
-            .as_ref()
-            .ok_or_eyre("active node unexpectedly missing")?;
-        let kind = random_event_kind(&mut rng);
-        let _ = apply_event(node, kind, EVENT_COUNT, &mut rng).await?;
-    }
-
-    let reopened = open_sync_node(&repo_paths[leaving_idx]).await?;
-    nodes[leaving_idx] = Some(reopened);
-
-    let topology_2 = generate_connected_edges(&mut rng);
-    info!(?topology_2, "phase-2 topology");
-    endpoints = connect_topology(&nodes, &topology_2).await?;
-    wait_network_rest(&nodes, &endpoints, PHASE_TIMEOUT).await?;
-
+    .await;
     for node in nodes.into_iter().flatten() {
         node.stop().await?;
     }
-    Ok(())
+    result
 }
 
 fn random_event_kind(rng: &mut StdRng) -> EventKind {
@@ -160,43 +165,47 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
     drop(rtx);
 
     let seed_node = open_sync_node(&paths[0]).await?;
-    let ticket = seed_node.sync_repo.get_ticket_url().await?;
-    for dst in paths.iter().skip(1) {
-        bootstrap_clone_repo_from_url_for_tests(&ticket, dst).await?;
+    let result = async {
+        let ticket = seed_node.sync_repo.get_ticket_url().await?;
+        for dst in paths.iter().skip(1) {
+            bootstrap_clone_repo_from_url_for_tests(&ticket, dst).await?;
 
-        let ctx = RepoCtx::open(
-            dst,
-            RepoOpenOptions {
-                ws_connector_url: None,
-            },
-            "stress-test-device".into(),
-        )
-        .await?;
-        if ctx.repo_id != source_repo_id {
-            eyre::bail!(
-                "stress init repo_id mismatch after clone (source={}, cloned={})",
-                source_repo_id,
-                ctx.repo_id
-            );
+            let ctx = RepoCtx::open(
+                dst,
+                RepoOpenOptions {
+                    ws_connector_url: None,
+                },
+                "stress-test-device".into(),
+            )
+            .await?;
+            if ctx.repo_id != source_repo_id {
+                eyre::bail!(
+                    "stress init repo_id mismatch after clone (source={}, cloned={})",
+                    source_repo_id,
+                    ctx.repo_id
+                );
+            }
+            if ctx.doc_app.document_id() != &source_app_doc_id {
+                eyre::bail!(
+                    "stress init app doc mismatch after clone (source={}, cloned={})",
+                    source_app_doc_id,
+                    ctx.doc_app.document_id()
+                );
+            }
+            if ctx.doc_drawer.document_id() != &source_drawer_doc_id {
+                eyre::bail!(
+                    "stress init drawer doc mismatch after clone (source={}, cloned={})",
+                    source_drawer_doc_id,
+                    ctx.doc_drawer.document_id()
+                );
+            }
+            ctx.shutdown().await?;
         }
-        if ctx.doc_app.document_id() != &source_app_doc_id {
-            eyre::bail!(
-                "stress init app doc mismatch after clone (source={}, cloned={})",
-                source_app_doc_id,
-                ctx.doc_app.document_id()
-            );
-        }
-        if ctx.doc_drawer.document_id() != &source_drawer_doc_id {
-            eyre::bail!(
-                "stress init drawer doc mismatch after clone (source={}, cloned={})",
-                source_drawer_doc_id,
-                ctx.doc_drawer.document_id()
-            );
-        }
-        ctx.shutdown().await?;
+        Ok(paths)
     }
+    .await;
     seed_node.stop().await?;
-    Ok(paths)
+    result
 }
 
 async fn open_cluster_nodes(paths: &[PathBuf]) -> Res<Vec<Option<SyncTestNode>>> {

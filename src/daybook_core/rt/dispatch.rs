@@ -66,6 +66,7 @@ pub struct DispatchRepo {
     // drawer_doc_id: DocumentId,
     store: crate::stores::AmStoreHandle<DispatchStore>,
     local_actor_id: ActorId,
+    local_peer_id: String,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
@@ -120,6 +121,7 @@ impl DispatchRepo {
         let cancel_token = CancellationToken::new();
         let (ticket, notif_rx) =
             DispatchStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
+        let local_peer_id = big_repo.samod_repo().peer_id().to_string();
 
         let repo = Self {
             big_repo,
@@ -127,6 +129,7 @@ impl DispatchRepo {
             store,
             registry: Arc::clone(&registry),
             local_actor_id,
+            local_peer_id,
             cancel_token: cancel_token.clone(),
             _change_listener_tickets: vec![ticket],
             _change_broker_leases: vec![broker],
@@ -187,17 +190,12 @@ impl DispatchRepo {
                 else {
                     continue;
                 };
-                if !matches!(
-                    origin,
-                    am_utils_rs::repo::BigRepoChangeOrigin::Remote { .. }
-                ) {
-                    continue;
-                }
                 self.events_for_patch(
                     &patch,
                     &heads,
                     &mut events,
-                    Some(self.local_actor_id.clone()),
+                    Some(&origin),
+                    Some(self.local_peer_id.as_str()),
                 )
                 .await?;
             }
@@ -206,7 +204,7 @@ impl DispatchRepo {
                 match &event {
                     DispatchEvent::DispatchAdded { id, heads } => {
                         // Hydrate the new dispatch at heads
-                        let (new_versioned, _) = self
+                        let Some((new_versioned, _)) = self
                             .big_repo
                             .hydrate_path_at_heads::<Versioned<ThroughJson<Arc<ActiveDispatch>>>>(
                                 &self.app_doc_id,
@@ -219,7 +217,10 @@ impl DispatchRepo {
                                 ],
                             )
                             .await?
-                            .expect(ERROR_INVALID_PATCH);
+                        else {
+                            warn!(dispatch_id = id, "ignoring stale dispatch patch: entry missing at heads");
+                            continue;
+                        };
 
                         self.store
                             .mutate_sync(|store| {
@@ -262,8 +263,16 @@ impl DispatchRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<DispatchEvent>,
-        exclude_actor_id: Option<ActorId>,
+        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer: Option<&str>,
     ) -> Res<()> {
+        if let Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) = origin {
+            if let Some(exclude_peer) = exclude_peer {
+                if peer_id.to_string() == exclude_peer {
+                    return Ok(());
+                }
+            }
+        }
         if !am_utils_rs::repo::big_repo_path_prefix_matches(
             &[DispatchStore::prop().into(), "active_dispatches".into()],
             &patch.path,
@@ -291,10 +300,6 @@ impl DispatchRepo {
                     _ => return Ok(()),
                 };
                 let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
-                if Some(vtag.actor_id) == exclude_actor_id {
-                    return Ok(());
-                }
-
                 out.push(if vtag.version.is_nil() {
                     DispatchEvent::DispatchAdded {
                         id: dispatch_id.clone(),
@@ -338,7 +343,7 @@ impl DispatchRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
-            self.events_for_patch(&patch, &heads, &mut events, None)
+            self.events_for_patch(&patch, &heads, &mut events, None, None)
                 .await?;
         }
         Ok(events)

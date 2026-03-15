@@ -101,6 +101,7 @@ pub struct ConfigRepo {
     plug_repo: Arc<PlugsRepo>,
     local_user_path: daybook_types::doc::UserPath,
     local_actor_id: ActorId,
+    local_peer_id: String,
     sql_pool: sqlx::SqlitePool,
     cancel_token: CancellationToken,
     global_props_doc_init_lock: tokio::sync::Mutex<()>,
@@ -179,6 +180,7 @@ impl ConfigRepo {
             plug_repo,
             local_user_path,
             local_actor_id,
+            local_peer_id: big_repo.samod_repo().peer_id().to_string(),
             sql_pool,
             cancel_token: cancel_token.clone(),
             global_props_doc_init_lock: tokio::sync::Mutex::new(()),
@@ -242,18 +244,13 @@ impl ConfigRepo {
                 else {
                     continue;
                 };
-                if !matches!(
-                    origin,
-                    am_utils_rs::repo::BigRepoChangeOrigin::Remote { .. }
-                ) {
-                    continue;
-                }
                 let len = events.len();
                 self.events_for_patch(
                     &patch,
                     &heads,
                     &mut events,
-                    Some(self.local_actor_id.clone()),
+                    Some(&origin),
+                    Some(self.local_peer_id.as_str()),
                 )
                 .await?;
                 // events were added
@@ -314,7 +311,7 @@ impl ConfigRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
-            self.events_for_patch(&patch, &heads, &mut events, None)
+            self.events_for_patch(&patch, &heads, &mut events, None, None)
                 .await?;
         }
         Ok(events)
@@ -331,8 +328,16 @@ impl ConfigRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<ConfigEvent>,
-        exclude_actor_id: Option<ActorId>,
+        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer: Option<&str>,
     ) -> Res<()> {
+        if let Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) = origin {
+            if let Some(exclude_peer) = exclude_peer {
+                if peer_id.to_string() == exclude_peer {
+                    return Ok(());
+                }
+            }
+        }
         let heads = ChangeHashSet(Arc::clone(patch_heads));
 
         match &patch.action {
@@ -344,15 +349,11 @@ impl ConfigRepo {
                 let Some((_obj, automerge::Prop::Map(section_key))) = patch.path.get(1) else {
                     return Ok(());
                 };
-                let vtag = match val {
-                    automerge::Value::Scalar(scalar) => match &**scalar {
-                        automerge::ScalarValue::Bytes(bytes) => bytes,
-                        _ => return Ok(()),
-                    },
-                    _ => return Ok(()),
-                };
-                let vtag = VersionTag::hydrate_bytes(vtag)?;
-                if Some(vtag.actor_id) == exclude_actor_id {
+                if !matches!(
+                    val,
+                    automerge::Value::Scalar(scalar)
+                    if matches!(&**scalar, automerge::ScalarValue::Bytes(_))
+                ) {
                     return Ok(());
                 }
 

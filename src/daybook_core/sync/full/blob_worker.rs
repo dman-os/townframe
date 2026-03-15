@@ -172,6 +172,7 @@ pub fn spawn_blob_sync_worker(
 
         let mut selected_endpoint: Option<EndpointId> = None;
         let mut saw_download_signal = false;
+        let mut saw_download_error = false;
         use futures::StreamExt;
         while let Some(item) = tokio::select! {
             _ = worker.cancel_token.cancelled() => return,
@@ -207,8 +208,53 @@ pub fn spawn_blob_sync_worker(
                 }
                 iroh_blobs::api::downloader::DownloadProgressItem::ProviderFailed { .. } => {}
                 iroh_blobs::api::downloader::DownloadProgressItem::DownloadError
-                | iroh_blobs::api::downloader::DownloadProgressItem::Error(_) => {}
+                | iroh_blobs::api::downloader::DownloadProgressItem::Error(_) => {
+                    saw_download_error = true;
+                }
             }
+        }
+
+        if saw_download_error {
+            worker
+                .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                    partition: PartitionKey::DocBlobsFullSync,
+                    hash: worker.hash.clone(),
+                    success: false,
+                    reason: "download reported error".to_string(),
+                })
+                .await;
+            worker.request_backoff(Duration::from_secs(2));
+            return;
+        }
+
+        let has_in_store_after_download = match worker.blobs_repo.iroh_store().blobs().has(iroh_hash).await {
+            Ok(has) => has,
+            Err(err) => {
+                tracing::warn!(?err, hash = %worker.hash, "error checking iroh blob store after download");
+                worker
+                    .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                        partition: PartitionKey::DocBlobsFullSync,
+                        hash: worker.hash.clone(),
+                        success: false,
+                        reason: "iroh store lookup failed after download".to_string(),
+                    })
+                    .await;
+                worker.request_backoff(Duration::from_secs(2));
+                return;
+            }
+        };
+
+        if !has_in_store_after_download {
+            worker
+                .send_progress(SyncProgressMsg::BlobWorkerFinished {
+                    partition: PartitionKey::DocBlobsFullSync,
+                    hash: worker.hash.clone(),
+                    success: false,
+                    reason: "download completed but blob missing from store".to_string(),
+                })
+                .await;
+            worker.request_backoff(Duration::from_secs(2));
+            return;
         }
 
         worker

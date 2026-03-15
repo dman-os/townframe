@@ -151,6 +151,7 @@ pub async fn spawn_peer_sync_worker(
         let subscribe_started_at = Instant::now();
 
         let mut replay_phase_finished = false;
+        let mut replay_phase_transition_emitted = false;
         worker.emit_phase_started("subscribe_replay");
 
         let reqs = {
@@ -188,9 +189,10 @@ pub async fn spawn_peer_sync_worker(
             .expect(ERROR_CHANNEL);
 
         loop {
-            if replay_phase_finished {
+            if replay_phase_finished && !replay_phase_transition_emitted {
                 worker.emit_phase_finished("subscribe_replay", subscribe_started_at.elapsed());
                 worker.emit_phase_started("subscribe_tail");
+                replay_phase_transition_emitted = true;
             }
             tokio::select! {
                 biased;
@@ -446,6 +448,11 @@ impl PeerSyncWorker {
                     "bootstrap_docs page received"
                 );
                 let stats = self.apply_doc_events(&response.events).await?;
+                let next_cursor = self
+                    .sync_store
+                    .get_partition_cursor(self.remote_peer.clone(), part.clone())
+                    .await?
+                    .doc_cursor;
                 let unresolved = stats
                     .unresolved_by_partition
                     .get(part)
@@ -466,6 +473,12 @@ impl PeerSyncWorker {
                     any_more |= page.has_more;
                 }
                 self.emit_doc_sync_status(synced_docs, unresolved);
+                if any_more && next_cursor == cursor.doc_cursor {
+                    eyre::bail!(
+                        "bootstrap doc cursor stalled for partition {part}: has_more=true but cursor did not advance (cursor={:?})",
+                        next_cursor
+                    );
+                }
                 if !any_more {
                     break;
                 }

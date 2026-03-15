@@ -177,7 +177,13 @@ impl RepoCtx {
         let identity =
             crate::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &repo_id).await?;
         let iroh_public_key = identity.iroh_public_key.to_string();
-        let repo_user_id = get_or_init_repo_user_id(&sql.db_pool).await?;
+        let repo_user_id = if initialize_repo {
+            get_or_init_repo_user_id(&sql.db_pool).await?
+        } else {
+            get_repo_user_id(&sql.db_pool)
+                .await?
+                .ok_or_eyre("repo_user_id missing in initialized repo; migration required")?
+        };
         let device_bs58 =
             utils_rs::hash::encode_base58_multibase(identity.iroh_public_key.as_bytes());
         let device_id = format!(

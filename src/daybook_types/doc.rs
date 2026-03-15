@@ -403,15 +403,6 @@ pub mod user_path {
         parse(&format!("/{user_id}/{device_id}/{plug_id}/{routine_id}"))
     }
 
-    pub fn device(path: &UserPath) -> &str {
-        path.as_str()
-            .trim_start_matches('/')
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .nth(1)
-            .unwrap_or("")
-    }
-
     pub fn plug(path: &UserPath) -> Option<&str> {
         path.as_str()
             .trim_start_matches('/')

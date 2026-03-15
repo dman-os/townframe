@@ -683,9 +683,15 @@ pub enum AbortableJoinSetStopError {
     Timeout(#[from] tokio::time::error::Elapsed),
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct AbortableJoinSet {
     inner: std::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
+}
+
+impl Default for AbortableJoinSet {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AbortableJoinSet {
@@ -729,7 +735,6 @@ impl AbortableJoinSet {
             Ok(out) => out.map_err(Into::into),
             Err(err) => {
                 join_set.abort_all();
-                let _ = join_set.join_all().await;
                 Err(err.into())
             }
         }

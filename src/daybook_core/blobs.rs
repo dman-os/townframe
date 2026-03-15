@@ -120,7 +120,10 @@ impl BlobsRepo {
             let object_paths = self.object_paths(&hash)?;
             tokio::fs::create_dir_all(&object_paths.dir).await?;
 
-            let source_path_string = source_path.to_string_lossy().to_string();
+            let source_path_string = source_path
+                .to_str()
+                .ok_or_else(|| eyre::eyre!("reference path must be valid UTF-8"))?
+                .to_string();
             let mut meta = self.build_meta(
                 hash.clone(),
                 BlobMode::Reference,

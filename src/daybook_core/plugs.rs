@@ -751,6 +751,7 @@ pub struct PlugsRepo {
     blobs: Arc<crate::blobs::BlobsRepo>,
     mutation_mutex: tokio::sync::Mutex<()>,
     local_actor_id: ActorId,
+    local_peer_id: String,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
@@ -816,6 +817,7 @@ impl PlugsRepo {
             store,
             blobs,
             local_actor_id,
+            local_peer_id: big_repo.samod_repo().peer_id().to_string(),
             registry: Arc::clone(&registry),
             mutation_mutex: tokio::sync::Mutex::new(()),
             cancel_token: cancel_token.clone(),
@@ -881,18 +883,13 @@ impl PlugsRepo {
                 else {
                     continue;
                 };
-                if !matches!(
-                    origin,
-                    am_utils_rs::repo::BigRepoChangeOrigin::Remote { .. }
-                ) {
-                    continue;
-                }
                 // 3. Call events_for_patch (pure-ish).
                 self.events_for_patch(
                     &patch,
                     &heads,
                     &mut events,
-                    Some(self.local_actor_id.clone()),
+                    Some(&origin),
+                    Some(self.local_peer_id.as_str()),
                 )
                 .await?;
             }
@@ -900,7 +897,7 @@ impl PlugsRepo {
             for event in &events {
                 match event {
                     PlugsEvent::PlugAdded { id, heads } | PlugsEvent::PlugChanged { id, heads } => {
-                        let (new_versioned, _) = self
+                        let Some((new_versioned, _)) = self
                             .big_repo
                             .hydrate_path_at_heads::<Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>(
                                 &self.app_doc_id,
@@ -912,7 +909,10 @@ impl PlugsRepo {
                                 ],
                             )
                             .await?
-                            .expect(ERROR_INVALID_PATCH);
+                        else {
+                            warn!(plug_id = id, "ignoring stale plug patch: entry missing at heads");
+                            continue;
+                        };
 
                         self.store
                             .mutate_sync(|store| {
@@ -955,7 +955,7 @@ impl PlugsRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
-            self.events_for_patch(&patch, &heads, &mut events, None)
+            self.events_for_patch(&patch, &heads, &mut events, None, None)
                 .await?;
         }
         Ok(events)
@@ -982,8 +982,16 @@ impl PlugsRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<PlugsEvent>,
-        exclude_actor_id: Option<ActorId>,
+        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer: Option<&str>,
     ) -> Res<()> {
+        if let Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) = origin {
+            if let Some(exclude_peer) = exclude_peer {
+                if peer_id.to_string() == exclude_peer {
+                    return Ok(());
+                }
+            }
+        }
         let heads = ChangeHashSet(Arc::clone(patch_heads));
         match &patch.action {
             automerge::PatchAction::PutMap {
@@ -1006,10 +1014,6 @@ impl PlugsRepo {
                         _ => return Ok(()),
                     };
                     let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
-                    if Some(vtag.actor_id) == exclude_actor_id {
-                        return Ok(());
-                    }
-
                     if vtag.version.is_nil() {
                         out.push(PlugsEvent::PlugAdded {
                             id: plug_id.clone(),

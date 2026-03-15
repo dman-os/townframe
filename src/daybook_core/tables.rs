@@ -325,6 +325,7 @@ pub struct TablesRepo {
     store: crate::stores::AmStoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub local_actor_id: ActorId,
+    local_peer_id: String,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
@@ -394,6 +395,7 @@ impl TablesRepo {
         let cancel_token = CancellationToken::new();
         let (ticket, notif_rx) =
             TablesStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
+        let local_peer_id = big_repo.samod_repo().peer_id().to_string();
 
         let repo = Self {
             big_repo,
@@ -402,6 +404,7 @@ impl TablesRepo {
             store,
             registry: Arc::clone(&registry),
             local_actor_id,
+            local_peer_id,
             cancel_token: cancel_token.clone(),
             _change_listener_tickets: vec![ticket],
             _change_broker_leases: vec![broker],
@@ -460,17 +463,12 @@ impl TablesRepo {
                 else {
                     continue;
                 };
-                if !matches!(
-                    origin,
-                    am_utils_rs::repo::BigRepoChangeOrigin::Remote { .. }
-                ) {
-                    continue;
-                }
                 self.events_for_patch(
                     &patch,
                     &heads,
                     &mut events,
-                    Some(self.local_actor_id.clone()),
+                    Some(&origin),
+                    Some(self.local_peer_id.as_str()),
                 )
                 .await?;
             }
@@ -479,7 +477,7 @@ impl TablesRepo {
                 match &event {
                     TablesEvent::WindowAdded { id, heads }
                     | TablesEvent::WindowChanged { id, heads } => {
-                        let (new_window, _) = self
+                        let Some((new_window, _)) = self
                             .big_repo
                             .hydrate_path_at_heads::<Versioned<Window>>(
                                 &self.app_doc_id,
@@ -492,7 +490,10 @@ impl TablesRepo {
                                 ],
                             )
                             .await?
-                            .expect(ERROR_INVALID_PATCH);
+                        else {
+                            warn!(window_id = %id, "ignoring stale table patch: window missing at heads");
+                            continue;
+                        };
                         self.store
                             .mutate_sync(|store| {
                                 store.windows.insert(*id, new_window);
@@ -509,7 +510,7 @@ impl TablesRepo {
                             .await?;
                     }
                     TablesEvent::TabAdded { id, heads } | TablesEvent::TabChanged { id, heads } => {
-                        let (new_tab, _) = self
+                        let Some((new_tab, _)) = self
                             .big_repo
                             .hydrate_path_at_heads::<Versioned<Tab>>(
                                 &self.app_doc_id,
@@ -522,7 +523,10 @@ impl TablesRepo {
                                 ],
                             )
                             .await?
-                            .expect(ERROR_INVALID_PATCH);
+                        else {
+                            warn!(tab_id = %id, "ignoring stale table patch: tab missing at heads");
+                            continue;
+                        };
                         self.store
                             .mutate_sync(|store| {
                                 store.tabs.insert(*id, new_tab);
@@ -540,7 +544,7 @@ impl TablesRepo {
                     }
                     TablesEvent::PanelAdded { id, heads }
                     | TablesEvent::PanelChanged { id, heads } => {
-                        let (new_panel, _) = self
+                        let Some((new_panel, _)) = self
                             .big_repo
                             .hydrate_path_at_heads::<Versioned<Panel>>(
                                 &self.app_doc_id,
@@ -553,7 +557,10 @@ impl TablesRepo {
                                 ],
                             )
                             .await?
-                            .expect(ERROR_INVALID_PATCH);
+                        else {
+                            warn!(panel_id = %id, "ignoring stale table patch: panel missing at heads");
+                            continue;
+                        };
                         self.store
                             .mutate_sync(|store| {
                                 store.panels.insert(*id, new_panel);
@@ -571,7 +578,7 @@ impl TablesRepo {
                     }
                     TablesEvent::TableAdded { id, heads }
                     | TablesEvent::TableChanged { id, heads } => {
-                        let (new_table, _) = self
+                        let Some((new_table, _)) = self
                             .big_repo
                             .hydrate_path_at_heads::<Versioned<Table>>(
                                 &self.app_doc_id,
@@ -584,7 +591,10 @@ impl TablesRepo {
                                 ],
                             )
                             .await?
-                            .expect(ERROR_INVALID_PATCH);
+                        else {
+                            warn!(table_id = %id, "ignoring stale table patch: table missing at heads");
+                            continue;
+                        };
                         self.store
                             .mutate_sync(|store| {
                                 store.tables.insert(*id, new_table);
@@ -629,7 +639,7 @@ impl TablesRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
-            self.events_for_patch(&patch, &heads, &mut events, None)
+            self.events_for_patch(&patch, &heads, &mut events, None, None)
                 .await?;
         }
         Ok(events)
@@ -640,8 +650,16 @@ impl TablesRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<TablesEvent>,
-        exclude_actor_id: Option<ActorId>,
+        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer: Option<&str>,
     ) -> Res<()> {
+        if let Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) = origin {
+            if let Some(exclude_peer) = exclude_peer {
+                if peer_id.to_string() == exclude_peer {
+                    return Ok(());
+                }
+            }
+        }
         let heads = ChangeHashSet(Arc::clone(patch_heads));
         match &patch.action {
             automerge::PatchAction::PutMap {
@@ -667,9 +685,6 @@ impl TablesRepo {
                     _ => return Ok(()),
                 };
                 let vtag = VersionTag::hydrate_bytes(vtag)?;
-                if Some(vtag.actor_id) == exclude_actor_id {
-                    return Ok(());
-                }
 
                 match collection.as_ref() {
                     "windows" => out.push(if vtag.version.is_nil() {

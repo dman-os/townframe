@@ -28,6 +28,9 @@ use crate::sync::PARTITION_SYNC_ALPN;
 mod blob_worker;
 mod doc_worker;
 
+const MIN_DOC_WORKER_FLOOR: usize = 8;
+const MIN_BLOB_WORKER_FLOOR: usize = 8;
+
 pub struct WorkerHandle {
     msg_tx: mpsc::UnboundedSender<Msg>,
     /// Option allows you to take it out
@@ -275,6 +278,7 @@ pub async fn start_full_sync_worker(
         pending_docs: default(),
 
         known_blob_set: default(),
+        doc_to_known_hashes: default(),
         active_blobs: default(),
         pending_blobs: default(),
         synced_blobs: default(),
@@ -440,6 +444,7 @@ struct Worker {
 
     // doc_ref_counts: HashMap<DocumentId, usize>,
     known_blob_set: HashMap<String, HashSet<PartitionKey>>,
+    doc_to_known_hashes: HashMap<String, HashSet<String>>,
     // peer_docs: HashMap<EndpointId, HashSet<DocumentId>>,
     samod_doc_set: HashMap<DocumentId, SamodSyncedDoc>,
     active_docs: HashMap<DocumentId, ActiveDocSyncState>,
@@ -635,9 +640,37 @@ impl Worker {
         self.endpoint_by_peer_key.get(peer_key).copied()
     }
 
-    fn available_boot_budget(&self) -> usize {
-        let active_count = self.active_docs.len() + self.active_blobs.len();
-        self.max_active_sync_workers.saturating_sub(active_count)
+    fn active_worker_count(&self) -> usize {
+        self.active_docs.len() + self.active_blobs.len()
+    }
+
+    fn available_total_boot_budget(&self) -> usize {
+        self.max_active_sync_workers
+            .saturating_sub(self.active_worker_count())
+    }
+
+    fn available_doc_boot_budget(&self) -> usize {
+        let remaining_total = self.available_total_boot_budget();
+        if remaining_total == 0 {
+            return 0;
+        }
+        let doc_cap = self
+            .max_active_sync_workers
+            .saturating_sub(MIN_BLOB_WORKER_FLOOR);
+        let remaining_doc_cap = doc_cap.saturating_sub(self.active_docs.len());
+        remaining_total.min(remaining_doc_cap)
+    }
+
+    fn available_blob_boot_budget(&self) -> usize {
+        let remaining_total = self.available_total_boot_budget();
+        if remaining_total == 0 {
+            return 0;
+        }
+        let blob_cap = self
+            .max_active_sync_workers
+            .saturating_sub(MIN_DOC_WORKER_FLOOR);
+        let remaining_blob_cap = blob_cap.saturating_sub(self.active_blobs.len());
+        remaining_total.min(remaining_blob_cap)
     }
 
     async fn handle_msg(&mut self, msg: Msg) -> Res<()> {
@@ -968,10 +1001,8 @@ impl Worker {
 
     fn backoff_janitor_enqueue_due(&mut self) {
         let now = std::time::Instant::now();
-        let mut budget = self.available_boot_budget();
-        if budget == 0 {
-            return;
-        }
+        let doc_budget = self.available_doc_boot_budget();
+        let blob_budget = self.available_blob_boot_budget();
 
         let due_docs: Vec<_> = self
             .pending_docs
@@ -983,14 +1014,9 @@ impl Worker {
                     None
                 }
             })
-            .take(budget)
+            .take(doc_budget)
             .collect();
-        budget = budget.saturating_sub(due_docs.len());
         self.docs_to_boot.extend(due_docs);
-
-        if budget == 0 {
-            return;
-        }
 
         self.blobs_to_boot.extend(
             self.pending_blobs
@@ -1005,7 +1031,7 @@ impl Worker {
                         None
                     }
                 })
-                .take(budget),
+                .take(blob_budget),
         );
     }
 }
@@ -1266,7 +1292,7 @@ impl Worker {
         }
 
         let mut double = std::mem::replace(&mut self.docs_to_boot, default());
-        let mut budget = self.available_boot_budget();
+        let mut budget = self.available_doc_boot_budget();
         if budget == 0 {
             self.docs_to_boot = double;
             return Ok(());
@@ -1551,6 +1577,19 @@ impl Worker {
 
 // Blobs related methods
 impl Worker {
+    fn remove_blob_tracking_if_unused(&mut self, hash: &str) {
+        let should_drop = match self.known_blob_set.get(hash) {
+            Some(parts) => parts.is_empty(),
+            None => true,
+        };
+        if should_drop {
+            self.known_blob_set.remove(hash);
+            self.synced_blobs.remove(hash);
+            self.blobs_to_boot.remove(hash);
+            self.pending_blobs.remove(hash);
+        }
+    }
+
     fn blob_required_by_any_active_partition(&self, hash: &str) -> bool {
         let Some(parts) = self.known_blob_set.get(hash) else {
             return false;
@@ -1569,7 +1608,18 @@ impl Worker {
                     .doc_blobs_index_repo
                     .list_hashes_for_doc(doc_id)
                     .await?;
-                for hash in hashes {
+                let next_hashes: HashSet<String> = hashes.into_iter().collect();
+                let prev_hashes = self
+                    .doc_to_known_hashes
+                    .insert(doc_id.clone(), next_hashes.clone())
+                    .unwrap_or_default();
+                for stale in prev_hashes.difference(&next_hashes) {
+                    if let Some(parts) = self.known_blob_set.get_mut(stale) {
+                        parts.remove(&PartitionKey::DocBlobsFullSync);
+                    }
+                    self.remove_blob_tracking_if_unused(stale);
+                }
+                for hash in next_hashes {
                     self.known_blob_set
                         .entry(hash.clone())
                         .or_default()
@@ -1579,7 +1629,16 @@ impl Worker {
                     }
                 }
             }
-            DocBlobsIndexEvent::Deleted { .. } => {}
+            DocBlobsIndexEvent::Deleted { doc_id } => {
+                if let Some(hashes) = self.doc_to_known_hashes.remove(doc_id) {
+                    for hash in hashes {
+                        if let Some(parts) = self.known_blob_set.get_mut(&hash) {
+                            parts.remove(&PartitionKey::DocBlobsFullSync);
+                        }
+                        self.remove_blob_tracking_if_unused(&hash);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1622,7 +1681,7 @@ impl Worker {
         }
 
         let mut double = std::mem::replace(&mut self.blobs_to_boot, default());
-        let mut budget = self.available_boot_budget();
+        let mut budget = self.available_blob_boot_budget();
         if budget == 0 {
             self.blobs_to_boot = double;
             return Ok(());

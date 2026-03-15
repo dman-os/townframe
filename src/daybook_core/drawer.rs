@@ -35,6 +35,7 @@ pub struct DrawerRepo {
     pub big_repo: SharedBigRepo,
     drawer_doc_id: DocumentId,
     local_actor_id: ActorId,
+    local_peer_id: String,
     local_user_path: daybook_types::doc::UserPath,
 
     // LRU Caches
@@ -127,12 +128,13 @@ impl DrawerRepo {
                     drawer_doc_id.clone(),
                 )),
                 path: vec!["docs".into(), "map".into()],
-                origin: Some(am_utils_rs::repo::BigRepoOriginFilter::Remote),
+                origin: None,
             })
             .await?;
 
         let main_cancel_token = CancellationToken::new();
         let repo = Arc::new(Self {
+            local_peer_id: big_repo.samod_repo().peer_id().to_string(),
             big_repo,
             drawer_doc_id,
             local_actor_id,
@@ -210,12 +212,6 @@ impl DrawerRepo {
                 else {
                     continue;
                 };
-                if !matches!(
-                    origin,
-                    am_utils_rs::repo::BigRepoChangeOrigin::Remote { .. }
-                ) {
-                    eyre::bail!("invariant break: drawer listener received non-remote change");
-                }
                 if doc_id != self.drawer_doc_id {
                     eyre::bail!(
                         "invariant break: drawer listener received change for wrong doc id: expected={} got={}",
@@ -229,7 +225,8 @@ impl DrawerRepo {
                         &patch,
                         &heads,
                         &mut events,
-                        Some(self.local_actor_id.clone()),
+                        Some(&origin),
+                        Some(self.local_peer_id.as_str()),
                     )
                     .await
                 {
@@ -504,8 +501,16 @@ impl DrawerRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<DrawerEvent>,
-        exclude_actor_id: Option<ActorId>,
+        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer: Option<&str>,
     ) -> Res<()> {
+        if let Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) = origin {
+            if let Some(exclude_peer) = exclude_peer {
+                if peer_id.to_string() == exclude_peer {
+                    return Ok(());
+                }
+            }
+        }
         // Prefix: docs.map
         if !am_utils_rs::repo::big_repo_path_prefix_matches(
             &["docs".into(), "map".into()],
@@ -527,10 +532,7 @@ impl DrawerRepo {
                     },
                     _ => return Ok(()),
                 };
-                let vtag = VersionTag::hydrate_bytes(vtag)?;
-                if Some(vtag.actor_id) == exclude_actor_id {
-                    return Ok(());
-                }
+                let _ = VersionTag::hydrate_bytes(vtag)?;
                 // docs.map.<doc_id>.version changed
                 let Some((_obj, automerge::Prop::Map(doc_id_str))) = patch.path.get(2) else {
                     return Ok(());
@@ -631,7 +633,7 @@ impl DrawerRepo {
 
         let mut events = vec![];
         for patch in patches {
-            self.events_for_patch(&patch, &heads.0, &mut events, None)
+            self.events_for_patch(&patch, &heads.0, &mut events, None, None)
                 .await?;
         }
         Ok(events)
