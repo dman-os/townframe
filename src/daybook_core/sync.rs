@@ -119,6 +119,21 @@ impl IrohSyncRepoStopToken {
 }
 
 impl IrohSyncRepo {
+    async fn ensure_local_drawer_partition_seeded(rcx: &RepoCtx) -> Res<()> {
+        let partition_id = crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
+            rcx.doc_drawer.document_id(),
+        );
+        let drawer_doc_id = rcx.doc_drawer.document_id().to_string();
+        let app_doc_id = rcx.doc_app.document_id().to_string();
+        rcx.big_repo
+            .add_doc_to_partition(&partition_id, &drawer_doc_id)
+            .await?;
+        rcx.big_repo
+            .add_doc_to_partition(&partition_id, &app_doc_id)
+            .await?;
+        Ok(())
+    }
+
     pub async fn boot(
         rcx: Arc<RepoCtx>,
         config_repo: Arc<crate::config::ConfigRepo>,
@@ -126,10 +141,12 @@ impl IrohSyncRepo {
         doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
         progress_repo: Option<Arc<ProgressRepo>>,
     ) -> Res<(Arc<Self>, IrohSyncRepoStopToken)> {
-        let endpoint = iroh::Endpoint::builder()
-            .secret_key(rcx.iroh_secret_key.clone())
-            .bind()
-            .await?;
+        let endpoint_builder = iroh::Endpoint::builder().secret_key(rcx.iroh_secret_key.clone());
+        #[cfg(test)]
+        let endpoint_builder = endpoint_builder
+            .relay_mode(iroh::RelayMode::Disabled)
+            .clear_address_lookup();
+        let endpoint = endpoint_builder.bind().await?;
         let blobs = blobs_repo.iroh_store();
         let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
         let docs = iroh_docs::protocol::Docs::memory()
@@ -178,6 +195,7 @@ impl IrohSyncRepo {
         config_repo
             .ensure_local_sync_device(router.endpoint().id(), &rcx.local_device_name)
             .await?;
+        Self::ensure_local_drawer_partition_seeded(&rcx).await?;
 
         let (mut full_sync_handle, full_stop_token) = full::start_full_sync_worker(
             Arc::clone(&rcx),
@@ -1037,7 +1055,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cloned_repo_does_not_derive_drawer_replicated_partition_on_open() -> Res<()> {
+    async fn cloned_repo_registers_drawer_replicated_partition_on_open() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         std::env::set_var("DAYB_DISABLE_KEYRING", "1");
         let temp_root = tempfile::tempdir()?;
@@ -1079,17 +1097,54 @@ mod tests {
             .big_repo
             .list_partitions_for_peer(&"peer-partition-visibility".into())
             .await?;
+        let drawer_partition_id = crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
+            &node_b.ctx.doc_drawer.document_id().clone(),
+        );
+        let drawer_partition = partitions
+            .iter()
+            .find(|summary| summary.partition_id == drawer_partition_id);
         assert!(
-            !partitions.iter().any(|summary| {
-                summary.partition_id
-                    == crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
-                        &node_b.ctx.doc_drawer.document_id().clone(),
-                    )
-            }),
-            "cloned repo incorrectly derived drawer replicated partition from observed drawer state: {partitions:?}"
+            drawer_partition.is_some(),
+            "cloned repo should register drawer replicated partition on open: {partitions:?}"
+        );
+        let drawer_partition = drawer_partition.expect("checked above");
+        assert!(
+            drawer_partition.member_count >= 2,
+            "drawer replicated partition should include drawer/app docs after sync boot: {drawer_partition:?}"
         );
 
         node_b.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bootstrap_ticket_in_tests_omits_relay_addresses() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+        let temp_root = tempfile::tempdir()?;
+        let repo_path = temp_root.path().join("repo-a");
+        tokio::fs::create_dir_all(&repo_path).await?;
+
+        let rtx = RepoCtx::init(
+            &repo_path,
+            RepoOpenOptions {
+                ws_connector_url: None,
+            },
+            "test-device".into(),
+        )
+        .await?;
+        rtx.shutdown().await?;
+        drop(rtx);
+
+        let node = open_sync_node(&repo_path).await?;
+        let ticket = node.sync_repo.get_ticket_url().await?;
+        let bootstrap = crate::sync::resolve_bootstrap_from_url(&ticket).await?;
+        let addr_debug = format!("{:?}", bootstrap.endpoint_addr);
+        assert!(
+            !addr_debug.contains("Relay("),
+            "test bootstrap endpoint should not advertise relay addresses: {addr_debug}"
+        );
+        node.stop().await?;
         Ok(())
     }
 
@@ -1305,13 +1360,22 @@ mod tests {
                     )
                 })?;
             } else if file_type.is_file() {
-                std::fs::copy(&src_path, &dst_path).wrap_err_with(|| {
-                    format!(
-                        "failed copying file {} -> {}",
-                        src_path.display(),
-                        dst_path.display()
-                    )
-                })?;
+                match std::fs::copy(&src_path, &dst_path) {
+                    Ok(_) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        // Source files such as sqlite WAL/SHM can disappear between read_dir and copy.
+                        continue;
+                    }
+                    Err(err) => {
+                        return Err(err).wrap_err_with(|| {
+                            format!(
+                                "failed copying file {} -> {}",
+                                src_path.display(),
+                                dst_path.display()
+                            )
+                        });
+                    }
+                }
             }
         }
         Ok(())
@@ -1791,7 +1855,19 @@ mod tests {
     ) -> Res<Vec<u8>> {
         tokio::time::timeout(timeout, async {
             loop {
-                let path = blobs_repo.get_path(hash).await?;
+                let path = match blobs_repo.get_path(hash).await {
+                    Ok(path) => path,
+                    Err(err) => {
+                        let msg = err.to_string();
+                        if msg.contains("Blob not found:")
+                            || msg.contains("Referenced blob source missing for hash")
+                        {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                };
                 if tokio::fs::try_exists(&path).await? {
                     return tokio::fs::read(path).await.map_err(Into::into);
                 }
@@ -1800,5 +1876,33 @@ mod tests {
         })
         .await
         .map_err(|_| eyre::eyre!("timed out waiting for blob bytes: {hash}"))?
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wait_for_blob_bytes_retries_until_blob_arrives() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+
+        let temp_root = tempfile::tempdir()?;
+        let blobs_repo = BlobsRepo::new(
+            temp_root.path().join("blobs"),
+            "/u/stress-test/dev-local".to_string(),
+        )
+        .await?;
+        let payload = b"delayed-blob-arrival".to_vec();
+        let expected_hash = utils_rs::hash::blake3_hash_bytes(&payload);
+
+        let repo_bg = Arc::clone(&blobs_repo);
+        let payload_bg = payload.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            repo_bg.put(&payload_bg).await.expect("put should succeed");
+        });
+
+        let got = wait_for_blob_bytes(&blobs_repo, &expected_hash, Duration::from_secs(5)).await?;
+        assert_eq!(got, payload);
+
+        blobs_repo.shutdown().await?;
+        Ok(())
     }
 }

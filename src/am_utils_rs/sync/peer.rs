@@ -317,6 +317,8 @@ impl PeerSyncWorker {
             .map(|item| (item.partition_id.clone(), item.latest_cursor))
             .collect();
 
+        info!(?partitions, "XXX");
+
         let mut frontiers: HashMap<PartitionId, u64> = default();
         for part in &self.target_partitions {
             let Some((id, remote_latest)) = remote_latest_by_partition.remove_entry(part) else {

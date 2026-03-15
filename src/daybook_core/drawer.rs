@@ -1,6 +1,7 @@
 // FIXME: use nested ids for facet keys
 // FIXME: use ensure_alive method for cancellation checks
 // FIXME: break aprart file, NVIM is lagging like 500ms on each scroll
+// FIXME: remove tmp branches from the branch doc and use sqliite
 
 use crate::interlude::*;
 use crate::plugs::PlugsRepo;
@@ -2009,46 +2010,36 @@ impl DrawerRepo {
         .await?;
         self.branch_handles.remove(&branch_state.branch_doc_id);
 
-        let mut drawer_heads = self.get_drawer_heads();
-        let diff = if branch_state.branch_kind == BranchKind::Replicated {
-            let latest_drawer_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
-            let entry = self
-                .get_entry_at_heads(id, &latest_drawer_heads)
-                .await?
-                .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
-            let mut new_entry = entry.clone();
-            new_entry.branches.remove(&branch_name);
-            new_entry.vtag = VersionTag::update(self.local_actor_id.clone());
+        let latest_drawer_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
+        let entry = self
+            .get_entry_at_heads(id, &latest_drawer_heads)
+            .await?
+            .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
+        let mut new_entry = entry.clone();
+        new_entry.branches.remove(&branch_name);
+        new_entry.vtag = VersionTag::update(self.local_actor_id.clone());
 
-            drawer_heads = self.drawer_am_handle.with_document(|doc| {
-                let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
-                new_entry.previous_version_heads = Some(current_drawer_heads);
+        let drawer_heads = self.drawer_am_handle.with_document(|doc| {
+            let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
+            new_entry.previous_version_heads = Some(current_drawer_heads);
 
-                let mut tx = doc.transaction();
-                let map_id = match tx.get(automerge::ROOT, "docs")? {
-                    Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => {
-                        match tx.get(&docs_id, "map")? {
-                            Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => {
-                                map_id
-                            }
-                            _ => eyre::bail!("drawer map not found"),
-                        }
+            let mut tx = doc.transaction();
+            let map_id = match tx.get(automerge::ROOT, "docs")? {
+                Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => {
+                    match tx.get(&docs_id, "map")? {
+                        Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => map_id,
+                        _ => eyre::bail!("drawer map not found"),
                     }
-                    _ => eyre::bail!("drawer docs not found"),
-                };
+                }
+                _ => eyre::bail!("drawer docs not found"),
+            };
 
-                autosurgeon::reconcile_prop(&mut tx, &map_id, &**id, &new_entry)?;
-                let (heads, _) = tx.commit();
-                let heads = heads.expect("commit failed");
-                eyre::Ok(ChangeHashSet(Arc::from([heads])))
-            })?;
-            DocEntryDiff::new(&entry, &new_entry, Vec::new())
-        } else {
-            DocEntryDiff {
-                changed_facet_keys: Vec::new(),
-                moved_branch_names: vec![branch_name.clone()],
-            }
-        };
+            autosurgeon::reconcile_prop(&mut tx, &map_id, &**id, &new_entry)?;
+            let (heads, _) = tx.commit();
+            let heads = heads.expect("commit failed");
+            eyre::Ok(ChangeHashSet(Arc::from([heads])))
+        })?;
+        let diff = DocEntryDiff::new(&entry, &new_entry, Vec::new());
 
         // Update caches and notify
         {

@@ -104,10 +104,14 @@ pub async fn resolve_bootstrap_from_url(iroh_doc_url: &str) -> Res<SyncBootstrap
 
     impl TempDocsSession {
         async fn boot(secret_key: Option<iroh::SecretKey>) -> Res<Self> {
-            let mut endpoint_builder = iroh::Endpoint::builder();
-            if let Some(secret_key) = secret_key {
-                endpoint_builder = endpoint_builder.secret_key(secret_key);
-            }
+            let endpoint_builder = match secret_key {
+                Some(secret_key) => iroh::Endpoint::builder().secret_key(secret_key),
+                None => iroh::Endpoint::builder(),
+            };
+            #[cfg(test)]
+            let endpoint_builder = endpoint_builder
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_address_lookup();
             let endpoint = endpoint_builder.bind().await?;
             let blobs = (*iroh_blobs::store::mem::MemStore::new()).clone();
             let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
@@ -195,10 +199,12 @@ pub async fn connect_and_pull_required_docs_once(
     bootstrap: &SyncBootstrapState,
     timeout: std::time::Duration,
 ) -> Res<()> {
-    let endpoint = iroh::Endpoint::builder()
-        .secret_key(iroh_secret_key)
-        .bind()
-        .await?;
+    let endpoint_builder = iroh::Endpoint::builder().secret_key(iroh_secret_key);
+    #[cfg(test)]
+    let endpoint_builder = endpoint_builder
+        .relay_mode(iroh::RelayMode::Disabled)
+        .clear_address_lookup();
+    let endpoint = endpoint_builder.bind().await?;
     let conn = big_repo
         .spawn_connection_iroh(&endpoint, bootstrap.endpoint_addr.clone(), None)
         .await?;
