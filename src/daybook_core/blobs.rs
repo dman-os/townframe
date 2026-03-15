@@ -27,7 +27,7 @@ struct BlobMetaV1 {
     size_bytes: u64,
     mime: Option<String>,
     src_local_user_path: String,
-    source_path: Option<String>,
+    source_paths: Vec<String>,
     created_at_unix_secs: i64,
     iroh_ingested: bool,
 }
@@ -68,33 +68,37 @@ impl BlobsRepo {
         }
 
         let source_snapshot = self.create_source_snapshot(&source_path).await?;
-        let hash =
-            utils_rs::hash::blake3_hash_reader(tokio::fs::File::open(&source_snapshot).await?)
-                .await?;
-        let object_paths = self.object_paths(&hash)?;
+        let result = async {
+            let hash =
+                utils_rs::hash::blake3_hash_reader(tokio::fs::File::open(&source_snapshot).await?)
+                    .await?;
+            let object_paths = self.object_paths(&hash)?;
 
-        tokio::fs::create_dir_all(&object_paths.dir).await?;
-        if !tokio::fs::try_exists(&object_paths.blob).await? {
-            self.atomic_copy_file(&source_snapshot, &object_paths.blob)
+            tokio::fs::create_dir_all(&object_paths.dir).await?;
+            if !tokio::fs::try_exists(&object_paths.blob).await? {
+                self.atomic_copy_file(&source_snapshot, &object_paths.blob)
+                    .await?;
+            }
+
+            let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
+            let mut meta = self.build_meta(
+                hash.clone(),
+                BlobMode::OwnedCopy,
+                blob_meta.len(),
+                Vec::new(),
+                false,
+            );
+            self.write_meta(&object_paths.meta, &meta).await?;
+            self.ingest_path_with_iroh(&object_paths.blob, &hash)
                 .await?;
+            meta.iroh_ingested = true;
+            self.write_meta(&object_paths.meta, &meta).await?;
+
+            Ok(hash)
         }
-
-        let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
-        let mut meta = self.build_meta(
-            hash.clone(),
-            BlobMode::OwnedCopy,
-            blob_meta.len(),
-            None,
-            false,
-        );
-        self.write_meta(&object_paths.meta, &meta).await?;
-        self.ingest_path_with_iroh(&object_paths.blob, &hash)
-            .await?;
-        meta.iroh_ingested = true;
-        self.write_meta(&object_paths.meta, &meta).await?;
-        tokio::fs::remove_file(&source_snapshot).await?;
-
-        Ok(hash)
+        .await;
+        let _ = tokio::fs::remove_file(&source_snapshot).await;
+        result
     }
 
     pub async fn put_path_reference(&self, source_path: &Path) -> Res<String> {
@@ -108,27 +112,39 @@ impl BlobsRepo {
         }
 
         let source_snapshot = self.create_source_snapshot(source_path).await?;
-        let snapshot_meta = tokio::fs::metadata(&source_snapshot).await?;
-        let hash =
-            utils_rs::hash::blake3_hash_reader(tokio::fs::File::open(&source_snapshot).await?)
-                .await?;
-        let object_paths = self.object_paths(&hash)?;
-        tokio::fs::create_dir_all(&object_paths.dir).await?;
+        let result = async {
+            let snapshot_meta = tokio::fs::metadata(&source_snapshot).await?;
+            let hash =
+                utils_rs::hash::blake3_hash_reader(tokio::fs::File::open(&source_snapshot).await?)
+                    .await?;
+            let object_paths = self.object_paths(&hash)?;
+            tokio::fs::create_dir_all(&object_paths.dir).await?;
 
-        let mut meta = self.build_meta(
-            hash.clone(),
-            BlobMode::Reference,
-            snapshot_meta.len(),
-            Some(source_path.to_string_lossy().to_string()),
-            false,
-        );
-        self.write_meta(&object_paths.meta, &meta).await?;
-        self.ingest_path_with_iroh(&source_snapshot, &hash).await?;
-        meta.iroh_ingested = true;
-        self.write_meta(&object_paths.meta, &meta).await?;
-        tokio::fs::remove_file(&source_snapshot).await?;
+            let source_path_string = source_path.to_string_lossy().to_string();
+            let mut meta = self.build_meta(
+                hash.clone(),
+                BlobMode::Reference,
+                snapshot_meta.len(),
+                vec![source_path_string.clone()],
+                false,
+            );
+            if let Some(existing) = self.read_meta(&object_paths.meta).await? {
+                let mut merged = existing.source_paths;
+                if !merged.iter().any(|value| value == &source_path_string) {
+                    merged.push(source_path_string);
+                }
+                meta.source_paths = merged;
+            }
 
-        Ok(hash)
+            self.write_meta(&object_paths.meta, &meta).await?;
+            self.ingest_path_with_iroh(&source_snapshot, &hash).await?;
+            meta.iroh_ingested = true;
+            self.write_meta(&object_paths.meta, &meta).await?;
+            Ok(hash)
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&source_snapshot).await;
+        result
     }
 
     /// Compatibility alias that ingests bytes as an owned blob.
@@ -146,7 +162,7 @@ impl BlobsRepo {
             hash.clone(),
             BlobMode::OwnedCopy,
             blob_meta.len(),
-            None,
+            Vec::new(),
             false,
         );
         self.write_meta(&object_paths.meta, &meta).await?;
@@ -167,7 +183,7 @@ impl BlobsRepo {
                     hash.to_string(),
                     BlobMode::OwnedCopy,
                     blob_meta.len(),
-                    None,
+                    Vec::new(),
                     false,
                 );
                 self.write_meta(&object_paths.meta, &recovered).await?;
@@ -182,30 +198,36 @@ impl BlobsRepo {
         match meta.mode {
             BlobMode::OwnedCopy => eyre::bail!("Blob not found: {hash}"),
             BlobMode::Reference => {
-                let source_path = meta
-                    .source_path
-                    .ok_or_eyre("reference metadata missing source_path")?;
-                let source_path = PathBuf::from(source_path);
-                if tokio::fs::try_exists(&source_path).await? {
+                if meta.source_paths.is_empty() {
+                    eyre::bail!("reference metadata missing source_paths");
+                }
+                let mut drift_error: Option<String> = None;
+                for source_path in &meta.source_paths {
+                    let source_path = PathBuf::from(source_path);
+                    if !tokio::fs::try_exists(&source_path).await? {
+                        continue;
+                    }
                     let source_hash = utils_rs::hash::blake3_hash_reader(
                         tokio::fs::File::open(&source_path).await?,
                     )
                     .await?;
                     if source_hash == meta.hash {
-                        Ok(source_path)
+                        return Ok(source_path);
                     } else if tokio::fs::try_exists(&object_paths.blob).await? {
-                        Ok(object_paths.blob)
-                    } else {
-                        eyre::bail!(
+                        return Ok(object_paths.blob);
+                    } else if drift_error.is_none() {
+                        drift_error = Some(format!(
                             "Referenced blob hash diverged for {}: expected={}, got={}",
                             source_path.display(),
                             meta.hash,
                             source_hash
-                        );
+                        ));
                     }
-                } else {
-                    eyre::bail!("Referenced blob source missing for hash {hash}");
                 }
+                if let Some(err) = drift_error {
+                    eyre::bail!(err);
+                }
+                eyre::bail!("Referenced blob source missing for hash {hash}");
             }
         }
     }
@@ -244,7 +266,7 @@ impl BlobsRepo {
             hash.to_string(),
             BlobMode::OwnedCopy,
             blob_meta.len(),
-            None,
+            Vec::new(),
             true,
         );
         self.write_meta(&object_paths.meta, &meta).await?;
@@ -253,9 +275,10 @@ impl BlobsRepo {
     }
 
     fn object_paths(&self, hash: &str) -> Res<ObjectPaths> {
-        if !hash.is_ascii() || hash.len() < 4 {
+        if hash.len() < 4 {
             eyre::bail!("invalid blob hash: {hash}");
         }
+        utils_rs::hash::decode_base58_multibase(hash)?;
         let Some(l0) = hash.get(0..2) else {
             eyre::bail!("invalid blob hash: {hash}");
         };
@@ -290,7 +313,7 @@ impl BlobsRepo {
         hash: String,
         mode: BlobMode,
         size_bytes: u64,
-        source_path: Option<String>,
+        source_paths: Vec<String>,
         iroh_ingested: bool,
     ) -> BlobMetaV1 {
         BlobMetaV1 {
@@ -300,7 +323,7 @@ impl BlobsRepo {
             size_bytes,
             mime: None,
             src_local_user_path: self.src_local_user_path.clone(),
-            source_path,
+            source_paths,
             created_at_unix_secs: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system time should be after unix epoch")
@@ -384,7 +407,18 @@ impl BlobsRepo {
         file.sync_all().await?;
         drop(file);
 
-        tokio::fs::rename(&temp, path).await?;
+        match tokio::fs::rename(&temp, path).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                match tokio::fs::remove_file(path).await {
+                    Ok(_) => {}
+                    Err(remove_err) if remove_err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(remove_err) => return Err(remove_err.into()),
+                }
+                tokio::fs::rename(&temp, path).await?;
+            }
+            Err(err) => return Err(err.into()),
+        }
         self.sync_dir(dir).await?;
         Ok(())
     }
@@ -397,7 +431,7 @@ impl BlobsRepo {
 }
 
 pub(crate) fn daybook_hash_to_iroh_hash(hash: &str) -> Res<iroh_blobs::Hash> {
-    let decoded = utils_rs::hash::decode_base32_multibase(hash)?;
+    let decoded = utils_rs::hash::decode_base58_multibase(hash)?;
     if decoded.len() < 34 {
         eyre::bail!("invalid daybook blob hash bytes");
     }
@@ -511,7 +545,7 @@ mod tests {
             size_bytes: 123,
             mime: None,
             src_local_user_path: "/local/test-user".to_string(),
-            source_path: Some("/tmp/does/not/exist".to_string()),
+            source_paths: vec!["/tmp/does/not/exist".to_string()],
             created_at_unix_secs: 1,
             iroh_ingested: true,
         };
@@ -628,6 +662,34 @@ mod tests {
         let (repo, _temp) = setup().await;
         let res = repo.get_path("nonexistent").await;
         assert!(res.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_path_reference_keeps_multiple_source_candidates() -> Res<()> {
+        let (repo, temp) = setup().await;
+        let source_a = temp.path().join("source-a.bin");
+        let source_b = temp.path().join("source-b.bin");
+        tokio::fs::write(&source_a, b"same-bytes").await?;
+        tokio::fs::write(&source_b, b"same-bytes").await?;
+        let source_a_abs = source_a.canonicalize()?;
+        let source_b_abs = source_b.canonicalize()?;
+
+        let hash_a = repo.put_path_reference(&source_a_abs).await?;
+        let hash_b = repo.put_path_reference(&source_b_abs).await?;
+        assert_eq!(hash_a, hash_b);
+
+        tokio::fs::remove_file(&source_a_abs).await?;
+        let got = repo.get_path(&hash_a).await?;
+        assert_eq!(got, source_b_abs);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blob_hash_must_be_base58_multibase() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        assert!(repo.get_path("bafakehash").await.is_err());
+        assert!(repo.put_from_store("bafakehash").await.is_err());
         Ok(())
     }
 }

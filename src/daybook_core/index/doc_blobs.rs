@@ -138,9 +138,16 @@ impl DocBlobsIndexRepo {
     async fn handle_worker_item(&self, item: DocBlobsIndexWorkItem) -> Res<()> {
         match item {
             DocBlobsIndexWorkItem::Upsert { doc_id, heads } => {
-                self.reindex_doc(&doc_id, &heads).await?;
-                self.registry
-                    .notify([DocBlobsIndexEvent::Updated { doc_id }]);
+                match self.reindex_doc(&doc_id, &heads).await? {
+                    ReindexDocOutcome::Present => {
+                        self.registry
+                            .notify([DocBlobsIndexEvent::Updated { doc_id }]);
+                    }
+                    ReindexDocOutcome::Evicted => {
+                        self.registry
+                            .notify([DocBlobsIndexEvent::Deleted { doc_id }]);
+                    }
+                }
             }
             DocBlobsIndexWorkItem::DeleteDoc { doc_id } => {
                 self.delete_doc(&doc_id).await?;
@@ -151,10 +158,10 @@ impl DocBlobsIndexRepo {
         Ok(())
     }
 
-    pub async fn reindex_doc(&self, doc_id: &DocId, heads: &ChangeHashSet) -> Res<()> {
+    pub async fn reindex_doc(&self, doc_id: &DocId, heads: &ChangeHashSet) -> Res<ReindexDocOutcome> {
         let Some(facet_keys) = self.drawer_repo.facet_keys_at_heads(doc_id, heads).await? else {
             self.delete_doc(doc_id).await?;
-            return Ok(());
+            return Ok(ReindexDocOutcome::Evicted);
         };
         let selected_blob_keys: Vec<FacetKey> = facet_keys
             .into_iter()
@@ -162,7 +169,7 @@ impl DocBlobsIndexRepo {
             .collect();
         if selected_blob_keys.is_empty() {
             self.delete_doc(doc_id).await?;
-            return Ok(());
+            return Ok(ReindexDocOutcome::Evicted);
         }
         let facets = self
             .drawer_repo
@@ -193,14 +200,14 @@ impl DocBlobsIndexRepo {
         doc_id: &DocId,
         heads: &ChangeHashSet,
         hashes: &HashSet<String>,
-    ) -> Res<()> {
+    ) -> Res<ReindexDocOutcome> {
         sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1")
             .bind(doc_id)
             .execute(&self.db_pool)
             .await?;
 
         if hashes.is_empty() {
-            return Ok(());
+            return Ok(ReindexDocOutcome::Evicted);
         }
 
         let serialized_heads =
@@ -218,7 +225,7 @@ impl DocBlobsIndexRepo {
             " ON CONFLICT(doc_id, blob_hash) DO UPDATE SET origin_heads = excluded.origin_heads",
         );
         query_builder.build().execute(&self.db_pool).await?;
-        Ok(())
+        Ok(ReindexDocOutcome::Present)
     }
 
     pub async fn delete_doc(&self, doc_id: &DocId) -> Res<()> {
@@ -318,7 +325,16 @@ fn parse_db_blob_hash(raw_url: &str) -> Option<String> {
     if hash.is_empty() {
         return None;
     }
+    if utils_rs::hash::decode_base58_multibase(hash).is_err() {
+        return None;
+    }
     Some(hash.to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReindexDocOutcome {
+    Present,
+    Evicted,
 }
 
 #[derive(Debug, Clone)]
@@ -416,6 +432,7 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
 mod tests {
     use super::*;
     use crate::e2e::test_cx;
+    use crate::repos::SubscribeOpts;
     use daybook_types::doc::{AddDocArgs, FacetRaw};
 
     async fn wait_for_hash(repo: &DocBlobsIndexRepo, doc_id: &DocId, hash: &str) -> Res<()> {
@@ -435,8 +452,8 @@ mod tests {
         let test_context = test_cx(utils_rs::function_full!()).await?;
         let repo = Arc::clone(&test_context.rt.doc_blobs_index_repo);
 
-        let hash_a = "bafakehasha";
-        let hash_b = "bafakehashb";
+        let hash_a = utils_rs::hash::encode_base58_multibase(b"fakehasha");
+        let hash_b = utils_rs::hash::encode_base58_multibase(b"fakehashb");
         let doc_id = test_context
             .drawer_repo
             .add(AddDocArgs {
@@ -459,13 +476,38 @@ mod tests {
             })
             .await?;
 
-        wait_for_hash(&repo, &doc_id, hash_a).await?;
+        wait_for_hash(&repo, &doc_id, &hash_a).await?;
         let hashes = repo.list_hashes_for_doc(&doc_id).await?;
-        assert!(hashes.contains(&hash_a.to_string()));
-        assert!(hashes.contains(&hash_b.to_string()));
+        assert!(hashes.contains(&hash_a));
+        assert!(hashes.contains(&hash_b));
 
-        let memberships = repo.list_docs_for_hash(hash_a).await?;
+        let memberships = repo.list_docs_for_hash(&hash_a).await?;
         assert!(memberships.iter().any(|value| value.doc_id == doc_id));
+
+        test_context.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upsert_for_missing_doc_emits_deleted_event() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let repo = Arc::clone(&test_context.rt.doc_blobs_index_repo);
+        let listener = repo.subscribe(SubscribeOpts::new(16));
+        let missing_doc_id = "doc-missing-for-blob-index".to_string();
+
+        repo.enqueue_upsert(missing_doc_id.clone(), ChangeHashSet(default()))?;
+
+        let evt = listener
+            .recv_async()
+            .await
+            .map_err(|err| ferr!("listener recv failed: {err:?}"))?;
+        assert!(
+            matches!(
+                &*evt,
+                DocBlobsIndexEvent::Deleted { doc_id } if *doc_id == missing_doc_id
+            ),
+            "upsert for a missing doc should emit Deleted, got: {evt:?}"
+        );
 
         test_context.stop().await?;
         Ok(())

@@ -74,6 +74,9 @@ pub struct BigRepo {
     partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
     #[educe(Debug(ignore))]
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
+    #[educe(Debug(ignore))]
+    persistent_change_brokers:
+        std::sync::Mutex<std::collections::HashMap<DocumentId, Arc<changes::DocChangeBrokerLease>>>,
 }
 
 pub type SharedBigRepo = Arc<BigRepo>;
@@ -105,7 +108,9 @@ impl BigRepo {
             partition_forwarder_cancel: CancellationToken::new(),
             partition_forwarders: Arc::new(utils_rs::AbortableJoinSet::new()),
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
+            persistent_change_brokers: std::sync::Mutex::new(default()),
         });
+        out.ensure_schema().await?;
         let (_head_reg, mut head_rx) = out
             .subscribe_head_listener(BigRepoHeadFilter { doc_id: None })
             .await?;
@@ -145,7 +150,6 @@ impl BigRepo {
                 })
                 .expect("failed spawning remote heads forwarding worker");
         }
-        out.ensure_schema().await?;
         Ok(out)
     }
 
@@ -161,16 +165,25 @@ impl BigRepo {
                 std::fs::create_dir_all(&path).wrap_err_with(|| {
                     format!("Failed to create storage directory: {}", path.display())
                 })?;
+                let storage_path = path
+                    .to_str()
+                    .ok_or_else(|| eyre::eyre!("storage path contains invalid UTF-8"))?;
                 let repo = repo.with_storage(samod::storage::TokioFilesystemStorage::new(
-                    path.to_string_lossy().as_ref(),
+                    storage_path,
                 ));
                 let loaded = repo
                     .with_announce_policy(samod::AlwaysAnnounce)
                     .load()
                     .await;
-                let sqlite_url = big_repo_sqlite_url.unwrap_or_else(|| {
-                    format!("sqlite://{}", path.join("big_repo.sqlite").display())
-                });
+                let sqlite_url = if let Some(sqlite_url) = big_repo_sqlite_url {
+                    sqlite_url
+                } else {
+                    let sqlite_sidecar = path.join("big_repo.sqlite");
+                    let sqlite_sidecar = sqlite_sidecar
+                        .to_str()
+                        .ok_or_else(|| eyre::eyre!("storage path contains invalid UTF-8"))?;
+                    format!("sqlite://{sqlite_sidecar}")
+                };
                 (loaded, sqlite_url)
             }
             StorageConfig::Memory => {
@@ -222,6 +235,49 @@ impl BigRepo {
         self.change_manager.add_doc_listener(handle).await
     }
 
+    async fn ensure_persistent_change_broker(
+        self: &Arc<Self>,
+        handle: samod::DocHandle,
+    ) -> Res<Arc<changes::DocChangeBrokerLease>> {
+        let doc_id = handle.document_id().clone();
+        if let Some(existing) = self
+            .persistent_change_brokers
+            .lock()
+            .expect(ERROR_MUTEX)
+            .get(&doc_id)
+            .cloned()
+        {
+            return Ok(existing);
+        }
+        let lease = self.ensure_change_broker(handle).await?;
+        lease.wait_until_ready().await;
+        let mut persistent = self.persistent_change_brokers.lock().expect(ERROR_MUTEX);
+        if let Some(existing) = persistent.get(&doc_id).cloned() {
+            return Ok(existing);
+        }
+        persistent.insert(doc_id, Arc::clone(&lease));
+        Ok(lease)
+    }
+
+    async fn ensure_persistent_change_brokers_for_known_docs(
+        self: &Arc<Self>,
+    ) -> Res<Vec<Arc<changes::DocChangeBrokerLease>>> {
+        let doc_ids: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT doc_id FROM doc_version_state")
+                .fetch_all(&self.state_pool)
+                .await?;
+        let mut leases = Vec::new();
+        for raw_doc_id in doc_ids {
+            let doc_id = DocumentId::from_str(&raw_doc_id)
+                .map_err(|err| ferr!("invalid stored doc id in doc_version_state: {err}"))?;
+            if let Some(handle) = self.find_doc_handle(&doc_id).await? {
+                let lease = self.ensure_persistent_change_broker(handle).await?;
+                leases.push(lease);
+            }
+        }
+        Ok(leases)
+    }
+
     pub async fn subscribe_change_listener(
         self: &Arc<Self>,
         filter: BigRepoChangeFilter,
@@ -229,15 +285,16 @@ impl BigRepo {
         BigRepoChangeListenerRegistration,
         tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
     )> {
-        let mut broker_leases = Vec::new();
-        if let Some(target_doc) = filter.doc_id.as_ref() {
+        let broker_leases = if let Some(target_doc) = filter.doc_id.as_ref() {
+            let mut leases = Vec::new();
             let handle = self.find_doc_handle(&target_doc.doc_id).await?;
             if let Some(handle) = handle {
-                let lease = self.ensure_change_broker(handle).await?;
-                lease.wait_until_ready().await;
-                broker_leases.push(lease);
+                leases.push(self.ensure_persistent_change_broker(handle).await?);
             }
-        }
+            leases
+        } else {
+            self.ensure_persistent_change_brokers_for_known_docs().await?
+        };
         let (registration, change_rx) = self.change_manager.subscribe_listener(filter).await?;
         Ok((registration.with_broker_leases(broker_leases), change_rx))
     }
@@ -259,15 +316,16 @@ impl BigRepo {
         BigRepoHeadListenerRegistration,
         tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoHeadNotification>>,
     )> {
-        let mut broker_leases = Vec::new();
-        if let Some(target_doc) = filter.doc_id.as_ref() {
+        let broker_leases = if let Some(target_doc) = filter.doc_id.as_ref() {
+            let mut leases = Vec::new();
             let handle = self.find_doc_handle(&target_doc.doc_id).await?;
             if let Some(handle) = handle {
-                let lease = self.ensure_change_broker(handle).await?;
-                lease.wait_until_ready().await;
-                broker_leases.push(lease);
+                leases.push(self.ensure_persistent_change_broker(handle).await?);
             }
-        }
+            leases
+        } else {
+            self.ensure_persistent_change_brokers_for_known_docs().await?
+        };
         let (registration, rx) = self.change_manager.subscribe_head_listener(filter).await?;
         Ok((registration.with_broker_leases(broker_leases), rx))
     }
@@ -281,6 +339,7 @@ impl BigRepo {
             .create(initial_content)
             .await
             .map_err(|err| ferr!("failed creating doc: {err}"))?;
+        let _lease = self.ensure_persistent_change_broker(handle.clone()).await?;
         let out = BigDocHandle {
             repo: Arc::clone(self),
             inner: handle,
@@ -310,6 +369,7 @@ impl BigRepo {
             .import(document_id, initial_content)
             .await
             .map_err(|err| ferr!("failed importing doc: {err}"))?;
+        let _lease = self.ensure_persistent_change_broker(handle.clone()).await?;
         let out = BigDocHandle {
             repo: Arc::clone(self),
             inner: handle,
@@ -336,6 +396,7 @@ impl BigRepo {
     ) -> Res<ImportDocFastOutcome> {
         match self.repo.import(document_id, initial_content).await {
             Ok(handle) => {
+                let _lease = self.ensure_persistent_change_broker(handle.clone()).await?;
                 let heads = handle
                     .with_document(|doc| Arc::<[automerge::ChangeHash]>::from(doc.get_heads()));
                 self.change_manager
@@ -380,6 +441,7 @@ impl BigRepo {
             .create(initial_content)
             .await
             .map_err(|err| ferr!("failed creating doc: {err}"))?;
+        let _lease = self.ensure_persistent_change_broker(handle.clone()).await?;
         let heads =
             handle.with_document(|doc| Arc::<[automerge::ChangeHash]>::from(doc.get_heads()));
         self.change_manager
@@ -697,6 +759,60 @@ mod tests {
             .load()
             .await;
         BigRepo::boot_with_repo(repo, BigRepoConfig::new("sqlite::memory:".to_string())).await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn boot_rejects_non_utf8_storage_path() -> Res<()> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let non_utf8_component = std::ffi::OsString::from_vec(vec![0xff, b'x']);
+        let storage_path = std::env::temp_dir()
+            .join(std::path::PathBuf::from(non_utf8_component));
+        let res = BigRepo::boot(Config {
+            peer_id: "bigrepo-nonutf8".to_string(),
+            storage: StorageConfig::Disk {
+                path: storage_path,
+                big_repo_sqlite_url: None,
+            },
+        })
+        .await;
+        let err = match res {
+            Ok(_) => eyre::bail!("boot should reject non-UTF8 storage paths"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("storage path contains invalid UTF-8"),
+            "unexpected error: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn change_and_head_listener_subscriptions_bootstrap_brokers() -> Res<()> {
+        let repo = boot_big_repo("broker-subscribe").await?;
+        let handle = repo.create_doc(automerge::Automerge::new()).await?;
+        let target_doc_id = handle.document_id().clone();
+
+        let (_change_reg, _change_rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: None,
+                origin: None,
+                path: vec![],
+            })
+            .await?;
+        let (_head_reg, _head_rx) = repo
+            .subscribe_head_listener(BigRepoHeadFilter { doc_id: None })
+            .await?;
+
+        assert!(
+            repo.persistent_change_brokers
+                .lock()
+                .expect(ERROR_MUTEX)
+                .contains_key(&target_doc_id),
+            "global change/head listener subscriptions should keep doc brokers alive"
+        );
+        Ok(())
     }
 
     #[tokio::test]

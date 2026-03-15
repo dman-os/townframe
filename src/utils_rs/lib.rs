@@ -343,7 +343,7 @@ pub mod hash {
         let hash = blake3::hash(bytes);
         let hash =
             multihash::Multihash::<32>::wrap(BLAKE3, hash.as_bytes()).expect("error multihashing");
-        encode_base32_multibase(hash.to_bytes())
+        encode_base58_multibase(hash.to_bytes())
     }
 
     #[cfg(feature = "hash")]
@@ -366,7 +366,7 @@ pub mod hash {
 
         let hash =
             multihash::Multihash::<32>::wrap(BLAKE3, hash.as_bytes()).expect("error multihashing");
-        Ok(encode_base32_multibase(hash.to_bytes()))
+        Ok(encode_base58_multibase(hash.to_bytes()))
     }
 
     #[cfg(feature = "hash")]

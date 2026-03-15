@@ -211,25 +211,25 @@ impl BigRepo {
         .bind(membership_txid as i64)
         .execute(&mut *tx)
         .await?;
-        let mut doc_deleted_event: Option<(u64, u64)> = None;
-        if let Some(change_count_hint) = sqlx::query_scalar::<_, i64>(
+        let change_count_hint = sqlx::query_scalar::<_, i64>(
             "SELECT change_count_hint FROM doc_version_state WHERE doc_id = ?",
         )
         .bind(doc_id)
         .fetch_optional(&mut *tx)
-        .await?
-        {
-            let doc_txid = alloc_txid(tx.as_mut()).await?;
-            sqlx::query(
-                "UPDATE partition_doc_state SET deleted = 1, latest_txid = ? WHERE partition_id = ? AND doc_id = ?",
-            )
-            .bind(doc_txid as i64)
-            .bind(partition_id)
-            .bind(doc_id)
-            .execute(&mut *tx)
-            .await?;
-            doc_deleted_event = Some((doc_txid, change_count_hint.max(0) as u64));
-        }
+        .await?;
+        let doc_txid = alloc_txid(tx.as_mut()).await?;
+        sqlx::query(
+            "UPDATE partition_doc_state SET deleted = 1, latest_txid = ? WHERE partition_id = ? AND doc_id = ?",
+        )
+        .bind(doc_txid as i64)
+        .bind(partition_id)
+        .bind(doc_id)
+        .execute(&mut *tx)
+        .await?;
+        let doc_deleted_event = (
+            doc_txid,
+            change_count_hint.map_or(0, |count_hint| count_hint.max(0) as u64),
+        );
         tx.commit().await?;
 
         self.partition_events_tx
@@ -241,18 +241,17 @@ impl BigRepo {
                 },
             })
             .ok();
-        if let Some((doc_txid, change_count_hint)) = doc_deleted_event {
-            self.partition_events_tx
-                .send(PartitionEvent {
-                    cursor: doc_txid,
-                    partition_id: partition_id.clone(),
-                    deets: PartitionEventDeets::DocDeleted {
-                        doc_id: doc_id.to_owned(),
-                        change_count_hint,
-                    },
-                })
-                .ok();
-        }
+        let (doc_txid, change_count_hint) = doc_deleted_event;
+        self.partition_events_tx
+            .send(PartitionEvent {
+                cursor: doc_txid,
+                partition_id: partition_id.clone(),
+                deets: PartitionEventDeets::DocDeleted {
+                    doc_id: doc_id.to_owned(),
+                    change_count_hint,
+                },
+            })
+            .ok();
         Ok(())
     }
 
@@ -1180,6 +1179,35 @@ mod tests {
             }),
             "removed doc should not remain in snapshot membership"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_doc_without_doc_version_state_tombstones_partition_doc_state() -> Res<()> {
+        let big_repo = boot_big_repo().await?;
+        let partition_id = "p-remove-no-doc-version".to_string();
+        let unknown_doc_id = "doc-no-version-state".to_string();
+
+        big_repo
+            .add_doc_to_partition(&partition_id, &unknown_doc_id)
+            .await?;
+        assert!(
+            big_repo
+                .is_doc_present_in_partition_state(&partition_id, &unknown_doc_id)
+                .await?,
+            "doc should be present in partition_doc_state after add"
+        );
+
+        big_repo
+            .remove_doc_from_partition(&partition_id, &unknown_doc_id)
+            .await?;
+        assert!(
+            !big_repo
+                .is_doc_present_in_partition_state(&partition_id, &unknown_doc_id)
+                .await?,
+            "doc should be tombstoned in partition_doc_state even when doc_version_state is absent"
+        );
+
         Ok(())
     }
 

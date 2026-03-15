@@ -53,9 +53,14 @@ fn recover_facet_heads_inner(
     };
     for ii in 0..length {
         if let Some((_, exid)) = get(doc, &updated_at_list, ii, read_heads)? {
-            if let Some(hash) = doc.hash_for_opid(&exid) {
-                recovered.push(hash);
-            }
+            let Some(hash) = doc.hash_for_opid(&exid) else {
+                eyre::bail!(
+                    "failed recovering facet heads: missing hash for updatedAt entry index={} opid={}",
+                    ii,
+                    exid
+                );
+            };
+            recovered.push(hash);
         }
     }
 
