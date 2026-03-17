@@ -7,7 +7,7 @@ Currently intended for contributors.
 
 In daybook, all of our documents go in a single repo.
 We can clone our repo on other devices to get access to our docs.
-Changes can be made on any replicas of the same repo, weather it is to add a new document or to modify an existing one.
+Changes can be made on any replicas of the same repo, whether it is to add a new document or to modify an existing one.
 Daybook ensures then that these changes are synced to other replicas whenever a working connection between devices.
 
 ## Docs
@@ -16,7 +16,7 @@ Documents are a the main units of information in a repo and have a unique ids.
 
 ### Facets
 
-Documents are mainly made up of facets which are JSON objects describing the different peices of the document.
+Documents are mainly made up of facets which are JSON objects describing the different pieces of the document.
 Facets are stored in a map with unordered keys that have a format of `facet.tag/key-id`.
 The facet tag indicates expected schema of the value of under that key.
 The key-id allows multiple facets of the same kind in the doc and is an untyped string.
@@ -91,7 +91,7 @@ As a special convention, `self` can be used instead of the document id to indica
 We use change hash sets to refer to commit of the facet we're referring to.
 These can be put in the URL query params or be put in another field.
 
-If the heads set is empty, it's assumed that the referred to facet exists at the same change hash of the facet holding the refefrence. 
+If the heads set is empty, it's assumed that the referred to facet exists at the same change hash of the facet holding the reference. 
 I.e. part of the same transaction.
 This means that when updating a facet, if it previously had an empty hash set as a reference, unless the other facet is also being updated in that change, we must shift to a proper hash set reference.
 Changes that violate self references will be rejected.

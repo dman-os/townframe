@@ -227,7 +227,13 @@ pub fn spawn_blob_sync_worker(
             return;
         }
 
-        let has_in_store_after_download = match worker.blobs_repo.iroh_store().blobs().has(iroh_hash).await {
+        let has_in_store_after_download = match worker
+            .blobs_repo
+            .iroh_store()
+            .blobs()
+            .has(iroh_hash)
+            .await
+        {
             Ok(has) => has,
             Err(err) => {
                 tracing::warn!(?err, hash = %worker.hash, "error checking iroh blob store after download");

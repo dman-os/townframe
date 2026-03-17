@@ -1716,25 +1716,8 @@ impl Worker {
                     _ => None,
                 })
                 .unwrap_or_default();
-            // FIXME: why are we adding it to pending
-            // if there are no peers?
             if peers.is_empty() {
-                let prior = prior_pending.unwrap_or(PendingBlobSyncState {
-                    attempt_no: 0,
-                    last_backoff: Duration::from_millis(0),
-                    last_attempt_at: std::time::Instant::now(),
-                    due_at: std::time::Instant::now(),
-                });
-                let delay = next_backoff_delay(prior.last_backoff, Duration::from_millis(500));
-                self.pending_blobs.insert(
-                    hash.clone(),
-                    PendingBlobSyncState {
-                        attempt_no: prior.attempt_no + 1,
-                        last_backoff: delay,
-                        last_attempt_at: std::time::Instant::now(),
-                        due_at: std::time::Instant::now() + delay,
-                    },
-                );
+                self.blobs_to_boot.insert(hash);
             } else {
                 let now = std::time::Instant::now();
                 let retry = RetryState {

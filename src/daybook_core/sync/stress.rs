@@ -71,7 +71,7 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
             .ok_or_eyre("leaving node missing from cluster state")?;
         leaving_node.stop().await?;
 
-        for _ in 0..(EVENT_COUNT / 2) {
+        for idx in 0..(EVENT_COUNT / 2) {
             let mut active = (0..NODE_COUNT)
                 .filter(|idx| nodes[*idx].is_some())
                 .collect::<Vec<_>>();
@@ -83,7 +83,8 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
                 .as_ref()
                 .ok_or_eyre("active node unexpectedly missing")?;
             let kind = random_event_kind(&mut rng);
-            let _ = apply_event(node, kind, EVENT_COUNT, &mut rng).await?;
+            let transfer_idx = EVENT_COUNT + idx;
+            let _ = apply_event(node, kind, transfer_idx, &mut rng).await?;
         }
 
         let reopened = open_sync_node(&repo_paths[leaving_idx]).await?;

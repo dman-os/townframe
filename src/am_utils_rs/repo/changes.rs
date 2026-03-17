@@ -184,6 +184,40 @@ impl ChangeListenerManager {
         Ok(())
     }
 
+    fn spawn_doc_change_lease(&self, handle: DocHandle) -> Res<Arc<DocChangeBrokerLease>> {
+        let (broker, stop_token) = broker::spawn_doc_listener(
+            handle,
+            self.cancel_token.child_token(),
+            self.change_tx.clone(),
+            self.head_tx.clone(),
+            Arc::new({
+                let listeners = Arc::clone(&self.listeners);
+                move |doc_id, origin| {
+                    let listeners = listeners.lock().expect(ERROR_MUTEX);
+                    listeners.iter().any(|listener| {
+                        let doc_ok = listener
+                            .filter
+                            .doc_id
+                            .as_ref()
+                            .map(|target| target.doc_id == *doc_id)
+                            .unwrap_or(true);
+                        let origin_ok = listener
+                            .filter
+                            .origin
+                            .as_ref()
+                            .map(|target| origin_matches_filter(origin, *target))
+                            .unwrap_or(true);
+                        doc_ok && origin_ok
+                    })
+                }
+            }),
+        )?;
+        Ok(Arc::new(DocChangeBrokerLease {
+            handle: Arc::new(broker),
+            stop_token: std::sync::Mutex::new(Some(stop_token)),
+        }))
+    }
+
     pub async fn add_doc_listener(&self, handle: DocHandle) -> Res<Arc<DocChangeBrokerLease>> {
         self.ensure_live()?;
 
@@ -193,72 +227,12 @@ impl ChangeListenerManager {
                 if let Some(lease) = occupied.get().upgrade() {
                     return Ok(lease);
                 }
-                let (broker, stop_token) = broker::spawn_doc_listener(
-                    handle,
-                    self.cancel_token.child_token(),
-                    self.change_tx.clone(),
-                    self.head_tx.clone(),
-                    Arc::new({
-                        let listeners = Arc::clone(&self.listeners);
-                        move |doc_id, origin| {
-                            let listeners = listeners.lock().expect(ERROR_MUTEX);
-                            listeners.iter().any(|listener| {
-                                let doc_ok = listener
-                                    .filter
-                                    .doc_id
-                                    .as_ref()
-                                    .map(|target| target.doc_id == *doc_id)
-                                    .unwrap_or(true);
-                                let origin_ok = listener
-                                    .filter
-                                    .origin
-                                    .as_ref()
-                                    .map(|target| origin_matches_filter(origin, *target))
-                                    .unwrap_or(true);
-                                doc_ok && origin_ok
-                            })
-                        }
-                    }),
-                )?;
-                let lease = Arc::new(DocChangeBrokerLease {
-                    handle: Arc::new(broker),
-                    stop_token: std::sync::Mutex::new(Some(stop_token)),
-                });
+                let lease = self.spawn_doc_change_lease(handle)?;
                 occupied.insert(Arc::downgrade(&lease));
                 Ok(lease)
             }
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                let (broker, stop_token) = broker::spawn_doc_listener(
-                    handle,
-                    self.cancel_token.child_token(),
-                    self.change_tx.clone(),
-                    self.head_tx.clone(),
-                    Arc::new({
-                        let listeners = Arc::clone(&self.listeners);
-                        move |doc_id, origin| {
-                            let listeners = listeners.lock().expect(ERROR_MUTEX);
-                            listeners.iter().any(|listener| {
-                                let doc_ok = listener
-                                    .filter
-                                    .doc_id
-                                    .as_ref()
-                                    .map(|target| target.doc_id == *doc_id)
-                                    .unwrap_or(true);
-                                let origin_ok = listener
-                                    .filter
-                                    .origin
-                                    .as_ref()
-                                    .map(|target| origin_matches_filter(origin, *target))
-                                    .unwrap_or(true);
-                                doc_ok && origin_ok
-                            })
-                        }
-                    }),
-                )?;
-                let lease = Arc::new(DocChangeBrokerLease {
-                    handle: Arc::new(broker),
-                    stop_token: std::sync::Mutex::new(Some(stop_token)),
-                });
+                let lease = self.spawn_doc_change_lease(handle)?;
                 vacant.insert(Arc::downgrade(&lease));
                 Ok(lease)
             }

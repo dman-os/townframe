@@ -440,7 +440,7 @@ mod tests {
     use daybook_types::doc::{AddDocArgs, FacetRaw};
 
     async fn wait_for_hash(repo: &DocBlobsIndexRepo, doc_id: &DocId, hash: &str) -> Res<()> {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         while tokio::time::Instant::now() < deadline {
             let hashes = repo.list_hashes_for_doc(doc_id).await?;
             if hashes.iter().any(|value| value == hash) {

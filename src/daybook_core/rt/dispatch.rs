@@ -218,7 +218,10 @@ impl DispatchRepo {
                             )
                             .await?
                         else {
-                            warn!(dispatch_id = id, "ignoring stale dispatch patch: entry missing at heads");
+                            warn!(
+                                dispatch_id = id,
+                                "ignoring stale dispatch patch: entry missing at heads"
+                            );
                             continue;
                         };
 
