@@ -8327,7 +8327,7 @@ dependencies = [
 [[package]]
 name = "samod"
 version = "0.8.0"
-source = "git+https://github.com/dman-os/samod?rev=cbd70b59f693b625a02f7a387ccc65eab1c81692#cbd70b59f693b625a02f7a387ccc65eab1c81692"
+source = "git+https://github.com/dman-os/samod?rev=e9ec8b0d70cb48161854e70116f261148917336b#e9ec8b0d70cb48161854e70116f261148917336b"
 dependencies = [
  "async-channel",
  "automerge",
@@ -8349,7 +8349,7 @@ dependencies = [
 [[package]]
 name = "samod-core"
 version = "0.8.0"
-source = "git+https://github.com/dman-os/samod?rev=cbd70b59f693b625a02f7a387ccc65eab1c81692#cbd70b59f693b625a02f7a387ccc65eab1c81692"
+source = "git+https://github.com/dman-os/samod?rev=e9ec8b0d70cb48161854e70116f261148917336b#e9ec8b0d70cb48161854e70116f261148917336b"
 dependencies = [
  "automerge",
  "base64 0.21.7",
@@ -9649,16 +9649,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-native-tls"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
-dependencies = [
- "native-tls",
- "tokio",
-]
-
-[[package]]
 name = "tokio-postgres"
 version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9740,10 +9730,12 @@ checksum = "489a59b6730eda1b0171fcfda8b121f4bee2b35cba8645ca35c5f7ba3eb736c1"
 dependencies = [
  "futures-util",
  "log",
- "native-tls",
+ "rustls 0.23.37",
+ "rustls-pki-types",
  "tokio",
- "tokio-native-tls",
+ "tokio-rustls 0.26.1",
  "tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -10163,8 +10155,9 @@ dependencies = [
  "http",
  "httparse",
  "log",
- "native-tls",
  "rand 0.9.2",
+ "rustls 0.23.37",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.18",
  "url",

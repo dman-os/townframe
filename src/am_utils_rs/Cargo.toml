@@ -15,7 +15,7 @@ repo = [
     "dep:samod",
     "dep:samod-core",
     "samod/tokio",
-    "samod/tungstenite",
+    "samod/tungstenite-rustls-webpki-roots",
     "dep:tokio-tungstenite",
     "dep:sqlx",
     "dep:serde_json",

@@ -19,7 +19,7 @@ macros.workspace = true
 
 autosurgeon = { workspace = true, features = ["uuid"] }
 automerge = { workspace = true }
-samod = { workspace = true, features = ["tokio", "tungstenite", "axum"] }
+samod = { workspace = true, features = ["tokio", "tungstenite-rustls-webpki-roots", "axum"] }
 
 serde.workspace = true
 
