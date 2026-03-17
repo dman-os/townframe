@@ -222,8 +222,8 @@ iroh = "0.96.1"
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 wash-runtime = { git = "https://github.com/wasmcloud/wash", rev = "e3cbff002a7922f83af02ce546286d4530203a6b" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "2896663de0e23f789cffe8e98bbbcbcbf21f23ad" }
-samod = { git = "https://github.com/dman-os/samod", rev = "e9ec8b0d70cb48161854e70116f261148917336b" }
-samod-core = { git = "https://github.com/dman-os/samod", rev = "e9ec8b0d70cb48161854e70116f261148917336b" }
+samod = { git = "https://github.com/dman-os/samod", rev = "2cf21c6654c60872080dc73be2bf344f3cf3269f" }
+samod-core = { git = "https://github.com/dman-os/samod", rev = "2cf21c6654c60872080dc73be2bf344f3cf3269f" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
 
