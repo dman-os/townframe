@@ -482,10 +482,13 @@ impl PeerSyncWorker {
                 }
                 self.emit_doc_sync_status(synced_docs, unresolved);
                 if any_more && next_cursor == cursor.doc_cursor {
-                    eyre::bail!(
-                        "bootstrap doc cursor stalled for partition {part}: has_more=true but cursor did not advance (cursor={:?})",
-                        next_cursor
+                    debug!(
+                        partition = %part,
+                        cursor = ?cursor.doc_cursor,
+                        next_cursor = ?next_cursor,
+                        "bootstrap doc cursor paused: has_more=true with unchanged cursor (likely waiting for samod ack)"
                     );
+                    break;
                 }
                 if !any_more {
                     break;
