@@ -16,35 +16,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cwd.join("../daybook_wflows/")
             .canonicalize()
             .unwrap()
-            .to_string_lossy()
+            .display()
     );
     println!(
         "cargo:rerun-if-changed={}",
-        cwd.join("../wflow_sdk/")
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
+        cwd.join("../wflow_sdk/").canonicalize().unwrap().display()
     );
     println!(
         "cargo:rerun-if-changed={}",
         cwd.join("../wash_plugin_wflow/wit/")
             .canonicalize()
             .unwrap()
-            .to_string_lossy()
+            .display()
     );
     println!(
         "cargo:rerun-if-changed={}",
         cwd.join("../daybook_core/wit/")
             .canonicalize()
             .unwrap()
-            .to_string_lossy()
+            .display()
     );
     println!(
         "cargo:rerun-if-changed={}",
         cwd.join("../api_utils_rs/wit/")
             .canonicalize()
             .unwrap()
-            .to_string_lossy()
+            .display()
     );
     // TODO: use wasmtools on resulting wasm
     let mut build_wflows = std::process::Command::new("cargo");
@@ -75,10 +72,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //         .args([
     //             "compile",
     //             "-o",
-    //             &cwasm_path.as_os_str().to_string_lossy(),
+    //             &cwasm_path.as_os_str().to_string(),
     //             "--target",
     //             &target,
-    //             &wasm_path.as_os_str().to_string_lossy()
+    //             &wasm_path.as_os_str().to_string()
     //         ])
     //         .current_dir(cwd.join("../../"))
     //         .spawn()

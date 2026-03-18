@@ -35,9 +35,10 @@ impl DrawerRepoFfi {
     async fn load(fcx: SharedFfiCtx, plugs_repo: Arc<PlugsRepoFfi>) -> Result<Arc<Self>, FfiError> {
         let (repo, stop_token) = fcx
             .do_on_rt(DrawerRepo::load(
-                fcx.rcx.acx.clone(),
+                Arc::clone(&fcx.rcx.big_repo),
                 fcx.rcx.doc_drawer.document_id().clone(),
-                fcx.rcx.local_actor_id.clone(),
+                fcx.rcx.local_user_path.clone().into(),
+                fcx.rcx.layout.repo_root.join("local_state"),
                 Arc::new(std::sync::Mutex::new(
                     daybook_core::drawer::lru::KeyedLruPool::new(1000),
                 )),
@@ -102,6 +103,15 @@ impl DrawerRepoFfi {
         Ok(self
             .fcx
             .do_on_rt(async move { this.repo.add(args).await.map_err(eyre::Report::from) })
+            .await?)
+    }
+
+    #[tracing::instrument(err, skip(self), ret)]
+    async fn batch_add(self: Arc<Self>, args: Vec<AddDocArgs>) -> Result<Vec<DocId>, FfiError> {
+        let this = Arc::clone(&self);
+        Ok(self
+            .fcx
+            .do_on_rt(async move { this.repo.batch_add(args).await.map_err(eyre::Report::from) })
             .await?)
     }
 

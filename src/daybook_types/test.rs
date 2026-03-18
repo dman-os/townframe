@@ -145,7 +145,7 @@ fn test_doc_with_all_prop_types() -> Res<()> {
     );
     props.insert(
         FacetKey::from(WellKnownFacetTag::PathGeneric),
-        FacetRaw::from(WellKnownFacet::PathGeneric(PathBuf::from("/path/to/file"))),
+        FacetRaw::from(WellKnownFacet::PathGeneric("/path/to/file".to_string())),
     );
     props.insert(
         FacetKey::from(WellKnownFacetTag::TitleGeneric),

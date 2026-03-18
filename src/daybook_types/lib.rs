@@ -36,10 +36,11 @@ macro_rules! custom_type_set {
                 .map_err(|err| uniffi::deps::anyhow::anyhow!(err))
         });
 
-        uniffi::custom_type!(PathBuf, String, {
+        type Utf8PathBuf = $crate::doc::UserPath;
+        uniffi::custom_type!(Utf8PathBuf, String, {
             remote,
-            lower: |path| path.into_os_string().into_string().expect(ERROR_UTF8),
-            try_lift: |str| Ok(PathBuf::from(str)),
+            lower: |path| path.into_string(),
+            try_lift: |str| Ok(Utf8PathBuf::from(str)),
         });
 
         uniffi::custom_type!(Url, String, {

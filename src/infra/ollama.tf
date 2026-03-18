@@ -32,6 +32,7 @@ resource "helm_release" "ollama" {
       persistentVolume = {
         enabled = true
         size    = "20Gi"
+        storageClass = "csi-cinder-sc-delete"
       }
       # Exclude the model PVC from Velero filesystem backups.
       podAnnotations = {

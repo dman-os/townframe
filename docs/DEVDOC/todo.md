@@ -24,13 +24,16 @@
 ## Stack
 
 - [ ] P2P
-  - [ ] iroh
-- [ ] Deterministic doc ids for main docs
+  - [x] iroh
+  - [ ] better URLs
+  - [ ] auto-peer discovery
+  - [ ] QR based clone
+  - [ ] RPC api versioning scheme
+- [ ] Deterministic doc ids for main docs [LOST]
 - [ ] Prune dependencies
 - [ ] Blobs server
-  - [ ] Iroh blobs?
-  - [ ] Chunked hashing for transfers
-    - Chunks at rest?
+  - [x] Iroh blobs?
+  - [x] Chunked hashing for transfers
 - [ ] Good and local document classification
   - [ ] Receipt parsing
   - [ ] Collators
@@ -66,12 +69,20 @@
   - [ ] Notification handling
     - [ ] How to avoid missing triage work?
 - [ ] Keychains for secrets
+- [ ] Predicates for losing/gaining facets
 
 - [ ] Cleanup and show it to people
  
+- [ ] Get rid of all RwLocks and all async mutexes
+- [ ] Use Arc<str> for progress.tags
+- [ ] Consider using lmdb or redb for the kvstore on wflow_tokio
 - [ ] Draft Buffer
+- [ ] /commands
+- [ ] Grouped facets `Body { order: ["db://self/facet", ["db://self/facet2", "db://self/facet2], ]}`
 - [ ] Avoid automerge perf footguns
   - [ ] fork_at
+    - We don't need to use fork_at for ReadDoc
+      - Does autosurgeon support this?
   - [ ] get_changes
 - [ ] Adopt an rust actor framework
   - [ ] IRPC!

@@ -47,7 +47,7 @@ garde.workspace = true
 
 
 # async
-tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs", "tracing"] }
 tokio-util.workspace = true
 futures = { workspace = true }
 regex = "1"
@@ -58,7 +58,7 @@ uniffi = { workspace = true, features = ["cli"] }
 # sync
 autosurgeon = { workspace = true, features = ["uuid"] }
 automerge = { workspace = true }
-samod = { workspace = true, features = ["tokio", "tungstenite"] }
+samod = { workspace = true, features = ["tokio", "tungstenite-rustls-webpki-roots"] }
 
 sqlx = { workspace = true, features = ["sqlite"] }
 

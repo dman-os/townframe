@@ -34,7 +34,7 @@ wit-bindgen.workspace = true
 bon.workspace = true
 
 # async
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "tracing"] }
 
 # ml
 genai = { version = "0.6.0-beta.2" }

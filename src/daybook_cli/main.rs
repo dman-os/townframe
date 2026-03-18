@@ -20,6 +20,8 @@ use clap::*;
 use daybook_core::blobs::BlobsRepo;
 use daybook_core::config::ConfigRepo;
 use daybook_core::drawer::DrawerRepo;
+use daybook_core::index::DocBlobsIndexRepo;
+use daybook_core::local_state::SqliteLocalStateRepo;
 use daybook_core::plugs::{manifest, PlugsRepo};
 use daybook_core::progress::ProgressRepo;
 use daybook_core::repos::Repo;
@@ -96,9 +98,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         let ctx = context::open_repo_ctx(&conf, true, None).await?;
-        if let Some(stop) = ctx.acx_stop.lock().await.take() {
-            stop.stop().await?;
-        }
+        ctx.shutdown().await?;
         info!(
             path = ?conf.cli_config.repo_path,
             "repo initialization success"
@@ -111,7 +111,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         destination,
     } = &cli.command
     {
-        clone_repo_from_url(&conf.acx, source, &std::path::PathBuf::from(destination)).await?;
+        clone_repo_from_url(source, &std::path::PathBuf::from(destination)).await?;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -126,19 +126,21 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     // configured repo is Initialized since `init`
     // initializes the repo
     let ctx = context::open_repo_ctx(&conf, false, None).await?;
-    let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone()).await?;
+    let blobs_repo =
+        BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
-        ctx.acx.clone(),
+        Arc::clone(&ctx.big_repo),
         Arc::clone(&blobs_repo),
         ctx.doc_app.document_id().clone(),
-        ctx.local_actor_id.clone(),
+        daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
     )
     .await?;
     let drawer_doc_id = ctx.doc_drawer.document_id().clone();
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
-        ctx.acx.clone(),
+        Arc::clone(&ctx.big_repo),
         drawer_doc_id,
-        ctx.local_actor_id.clone(),
+        ctx.local_user_path.clone().into(),
+        ctx.layout.repo_root.join("local_state"),
         Arc::new(std::sync::Mutex::new(
             daybook_core::drawer::lru::KeyedLruPool::new(1000),
         )),
@@ -201,7 +203,6 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         }
         StaticCommands::Ls => {
             let doc_entries = drawer_repo.list().await?;
-
             let mut docs = Vec::new();
             for entry in &doc_entries {
                 let Some(main_branch) = entry.main_branch_path() else {
@@ -435,23 +436,50 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             exit_when_synced,
         } => {
             let (config_repo, config_stop) = ConfigRepo::load(
-                ctx.acx.clone(),
+                Arc::clone(&ctx.big_repo),
                 ctx.doc_app.document_id().clone(),
                 Arc::clone(&plugs_repo),
                 daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
                 ctx.sql.db_pool.clone(),
             )
             .await?;
+            let (sqlite_local_state_repo, sqlite_local_state_stop) =
+                SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
+            let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
+                Arc::clone(&drawer_repo),
+                Arc::clone(&sqlite_local_state_repo),
+            )
+            .await?;
+            let progress_repo = ProgressRepo::boot(ctx.sql.db_pool.clone()).await?;
             let (sync_repo, sync_stop) = IrohSyncRepo::boot(
                 Arc::clone(&ctx),
-                Arc::clone(&drawer_repo),
                 Arc::clone(&config_repo),
+                Arc::clone(&blobs_repo),
+                Arc::clone(&doc_blobs_index_repo),
+                Some(Arc::clone(&progress_repo)),
             )
             .await?;
             let local_ticket_url = sync_repo.get_ticket_url().await?;
-            println!(
-                "=== TICKET ===\n=== === == ===\n{local_ticket_url}\n=== === == ===\n=== TICKET ===",
-            );
+            {
+                use qrcode::render::unicode;
+                use qrcode::QrCode;
+                let code = QrCode::new(&local_ticket_url[..]).unwrap();
+                let image = code
+                    .render::<unicode::Dense1x2>()
+                    .dark_color(unicode::Dense1x2::Light)
+                    .light_color(unicode::Dense1x2::Dark)
+                    .build();
+                println!("Scan the following QR code to clone this repo");
+                println!();
+                println!("{image}");
+                println!();
+                println!("Or copy the following ticket:");
+                println!();
+                println!();
+                println!("{local_ticket_url}");
+                println!();
+                println!();
+            }
 
             let mut endpoint_ids = Vec::with_capacity(sync_urls.len());
             for sync_url in &sync_urls {
@@ -466,9 +494,16 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     config_stop.stop().await?;
                     return Ok(ExitCode::FAILURE);
                 }
-                sync_repo
-                    .wait_for_full_sync(&endpoint_ids, std::time::Duration::from_secs(30))
-                    .await?;
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        // no-op
+                    }
+                    res = sync_repo
+                            // TODO: parametrize timeout
+                            .wait_for_full_sync(&endpoint_ids, std::time::Duration::from_secs(30)) => {
+                        res?;
+                    }
+                }
             } else {
                 let listener = sync_repo.subscribe(daybook_core::repos::SubscribeOpts::new(512));
                 sync_repo.connect_known_devices_once().await?;
@@ -510,6 +545,31 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                                         } => {
                                             info!(?endpoint_id, ?doc_id, "doc synced with peer");
                                         }
+                                        IrohSyncEvent::BlobSynced { hash, endpoint_id } => {
+                                            info!(?endpoint_id, %hash, "blob synced");
+                                        }
+                                        IrohSyncEvent::BlobSyncBackoff {
+                                            hash,
+                                            delay,
+                                            attempt_no,
+                                        } => {
+                                            info!(%hash, ?delay, ?attempt_no, "blob sync backoff");
+                                        }
+                                        IrohSyncEvent::BlobDownloadStarted {
+                                            endpoint_id,
+                                            partition,
+                                            hash,
+                                        } => {
+                                            info!(?endpoint_id, ?partition, %hash, "blob download started");
+                                        }
+                                        IrohSyncEvent::BlobDownloadFinished {
+                                            endpoint_id,
+                                            partition,
+                                            hash,
+                                            success,
+                                        } => {
+                                            info!(?endpoint_id, ?partition, %hash, ?success, "blob download finished");
+                                        }
                                         IrohSyncEvent::StalePeer { endpoint_id } => {
                                             warn!(?endpoint_id, "stale sync peer");
                                         }
@@ -526,11 +586,13 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             }
 
             sync_stop.stop().await?;
+            doc_blobs_index_stop.stop().await?;
+            sqlite_local_state_stop.stop().await?;
             config_stop.stop().await?;
         }
         StaticCommands::Devices { command } => {
             let (config_repo, config_stop) = ConfigRepo::load(
-                ctx.acx.clone(),
+                Arc::clone(&ctx.big_repo),
                 ctx.doc_app.document_id().clone(),
                 Arc::clone(&plugs_repo),
                 daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
@@ -594,18 +656,12 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     }
     drawer_stop.stop().await?;
     plugs_stop.stop().await?;
-    if let Some(stop) = ctx.acx_stop.lock().await.take() {
-        stop.stop().await?;
-    }
+    ctx.shutdown().await?;
 
     Ok(ExitCode::SUCCESS)
 }
 
-async fn clone_repo_from_url(
-    acx: &daybook_core::app::AppCtx,
-    source_url: &str,
-    destination: &std::path::Path,
-) -> Res<()> {
+async fn clone_repo_from_url(source_url: &str, destination: &std::path::Path) -> Res<()> {
     let destination = std::path::absolute(destination)?;
     if destination.exists() {
         let mut read_dir = tokio::fs::read_dir(&destination).await?;
@@ -624,22 +680,19 @@ async fn clone_repo_from_url(
     let identity =
         daybook_core::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &bootstrap.repo_id)
             .await?;
-    let local_user_path = format!("/{}", identity.iroh_public_key);
-    daybook_core::app::globals::set_local_user_path(&sql.db_pool, &local_user_path).await?;
+    let _repo_user_id = daybook_core::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
 
     {
-        let (acx, acx_stop) = am_utils_rs::AmCtx::boot(
-            am_utils_rs::Config {
-                storage: am_utils_rs::StorageConfig::Disk {
-                    path: destination.join("samod"),
-                },
-                peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
+        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
+            storage: am_utils_rs::repo::StorageConfig::Disk {
+                path: destination.join("samod"),
+                big_repo_sqlite_url: None,
             },
-            Option::<samod::AlwaysAnnounce>::None,
-        )
+            peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
+        })
         .await?;
         daybook_core::sync::connect_and_pull_required_docs_once(
-            &acx,
+            &big_repo,
             identity.iroh_secret_key.clone(),
             &bootstrap,
             std::time::Duration::from_secs(30),
@@ -654,77 +707,85 @@ async fn clone_repo_from_url(
             },
         )
         .await?;
-        acx_stop.stop().await?;
+        daybook_core::repo::mark_repo_initialized(&destination).await?;
+        big_repo_stop.stop().await?;
     }
 
-    let rcx = Arc::new(
-        acx.open_repo(
-            &destination,
-            daybook_core::repo::RepoOpenOptions {
-                ws_connector_url: None,
-            },
-            format!("daybook-cli-{}", std::env::consts::ARCH),
+    // After bootstrap docs are present, run one full sync pass so clone includes
+    // regular drawer/content docs before returning.
+    {
+        let ctx = Arc::new(
+            daybook_core::repo::RepoCtx::open(
+                &destination,
+                daybook_core::repo::RepoOpenOptions {
+                    ws_connector_url: None,
+                },
+                format!("daybook-cli-{}", std::env::consts::ARCH),
+            )
+            .await?,
+        );
+        let blobs_repo =
+            BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
+        let (plugs_repo, plugs_stop) = PlugsRepo::load(
+            Arc::clone(&ctx.big_repo),
+            Arc::clone(&blobs_repo),
+            ctx.doc_app.document_id().clone(),
+            daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
         )
-        .await?,
-    );
-
-    let blobs_repo = BlobsRepo::new(rcx.layout.blobs_root.clone()).await?;
-
-    let (plugs_repo, plugs_stop) = PlugsRepo::load(
-        rcx.acx.clone(),
-        Arc::clone(&blobs_repo),
-        rcx.doc_app.document_id().clone(),
-        rcx.local_actor_id.clone(),
-    )
-    .await?;
-
-    let (drawer_repo, drawer_stop) = DrawerRepo::load(
-        rcx.acx.clone(),
-        rcx.doc_drawer.document_id().clone(),
-        rcx.local_actor_id.clone(),
-        Arc::new(std::sync::Mutex::new(
-            daybook_core::drawer::lru::KeyedLruPool::new(1000),
-        )),
-        Arc::new(std::sync::Mutex::new(
-            daybook_core::drawer::lru::KeyedLruPool::new(1000),
-        )),
-        Arc::clone(&plugs_repo),
-    )
-    .await?;
-
-    let (config_repo, config_stop) = ConfigRepo::load(
-        rcx.acx.clone(),
-        rcx.doc_app.document_id().clone(),
-        Arc::clone(&plugs_repo),
-        daybook_types::doc::UserPath::from(rcx.local_user_path.clone()),
-        rcx.sql.db_pool.clone(),
-    )
-    .await?;
-
-    let (sync_repo, sync_stop) = IrohSyncRepo::boot(
-        Arc::clone(&rcx),
-        Arc::clone(&drawer_repo),
-        Arc::clone(&config_repo),
-    )
-    .await?;
-
-    sync_repo
-        .connect_endpoint_addr(bootstrap.endpoint_addr)
         .await?;
-    info!("starting full sync XXX");
-    sync_repo
-        .wait_for_full_sync(&[bootstrap.endpoint_id], std::time::Duration::from_secs(30))
+        let (drawer_repo, drawer_stop) = DrawerRepo::load(
+            Arc::clone(&ctx.big_repo),
+            ctx.doc_drawer.document_id().clone(),
+            daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+            ctx.layout.repo_root.join("local_state"),
+            Arc::new(std::sync::Mutex::new(
+                daybook_core::drawer::lru::KeyedLruPool::new(1000),
+            )),
+            Arc::new(std::sync::Mutex::new(
+                daybook_core::drawer::lru::KeyedLruPool::new(1000),
+            )),
+            Arc::clone(&plugs_repo),
+        )
         .await?;
-    info!("full sync done");
+        let (config_repo, config_stop) = ConfigRepo::load(
+            Arc::clone(&ctx.big_repo),
+            ctx.doc_app.document_id().clone(),
+            Arc::clone(&plugs_repo),
+            daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+            ctx.sql.db_pool.clone(),
+        )
+        .await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
+        let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
+            Arc::clone(&drawer_repo),
+            Arc::clone(&sqlite_local_state_repo),
+        )
+        .await?;
+        let progress_repo = ProgressRepo::boot(ctx.sql.db_pool.clone()).await?;
+        let (sync_repo, sync_stop) = IrohSyncRepo::boot(
+            Arc::clone(&ctx),
+            Arc::clone(&config_repo),
+            Arc::clone(&blobs_repo),
+            Arc::clone(&doc_blobs_index_repo),
+            Some(Arc::clone(&progress_repo)),
+        )
+        .await?;
+        let bootstrap = sync_repo.connect_url(source_url).await?;
+        sync_repo
+            .wait_for_full_sync(
+                std::slice::from_ref(&bootstrap.endpoint_id),
+                std::time::Duration::from_secs(60),
+            )
+            .await?;
 
-    sync_stop.stop().await?;
-    config_stop.stop().await?;
-    drawer_stop.stop().await?;
-    plugs_stop.stop().await?;
-
-    // FIXME: let's provide a stop method on the repo ctx?
-    if let Some(stop) = rcx.acx_stop.lock().await.take() {
-        stop.stop().await?;
+        sync_stop.stop().await?;
+        doc_blobs_index_stop.stop().await?;
+        sqlite_local_state_stop.stop().await?;
+        config_stop.stop().await?;
+        drawer_stop.stop().await?;
+        plugs_stop.stop().await?;
+        ctx.shutdown().await?;
     }
 
     Ok(())
@@ -751,12 +812,13 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     }
 
     let ctx = context::open_repo_ctx(&conf, false, None).await?;
-    let blobs_repo = BlobsRepo::new(ctx.layout.blobs_root.clone()).await?;
+    let blobs_repo =
+        BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
-        ctx.acx.clone(),
+        Arc::clone(&ctx.big_repo),
         Arc::clone(&blobs_repo),
         ctx.doc_app.document_id().clone(),
-        ctx.local_actor_id.clone(),
+        daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
     )
     .await?;
     let (
@@ -767,9 +829,10 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         (config_repo, config_stop),
     ) = tokio::try_join!(
         DrawerRepo::load(
-            ctx.acx.clone(),
+            Arc::clone(&ctx.big_repo),
             ctx.doc_drawer.document_id().clone(),
-            ctx.local_actor_id.clone(),
+            ctx.local_user_path.clone().into(),
+            ctx.layout.repo_root.join("local_state"),
             Arc::new(std::sync::Mutex::new(
                 daybook_core::drawer::lru::KeyedLruPool::new(1000)
             )),
@@ -779,13 +842,13 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             Arc::clone(&plugs_repo)
         ),
         DispatchRepo::load(
-            ctx.acx.clone(),
+            Arc::clone(&ctx.big_repo),
             ctx.doc_app.document_id().clone(),
-            ctx.local_actor_id.clone()
+            daybook_types::doc::UserPath::from(ctx.local_user_path.clone())
         ),
         ProgressRepo::boot(ctx.sql.db_pool.clone()),
         ConfigRepo::load(
-            ctx.acx.clone(),
+            Arc::clone(&ctx.big_repo),
             ctx.doc_app.document_id().clone(),
             Arc::clone(&plugs_repo),
             daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
@@ -799,9 +862,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             plugs_stop.stop().await?;
             dispatch_stop.stop().await?;
             config_stop.stop().await?;
-            if let Some(stop) = ctx.acx_stop.lock().await.take() {
-                stop.stop().await?;
-            }
+            ctx.shutdown().await?;
         };
     }
 
@@ -892,7 +953,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
                     },
                     ctx.doc_app.document_id().clone(),
                     format!("sqlite://{}", ctx.layout.sqlite_path.display()),
-                    ctx.acx.clone(),
+                    Arc::clone(&ctx.big_repo),
                     Arc::clone(&drawer),
                     Arc::clone(&plugs_repo),
                     Arc::clone(&dispatch_repo),
@@ -1142,10 +1203,7 @@ Routine impl: {routine_impl:?}
                                 branch
                             }
                         };
-                        let heads = branches
-                            .branches
-                            .get(&branch_path.to_string_lossy().to_string())
-                            .unwrap();
+                        let heads = branches.branches.get(&branch_path.to_string()).unwrap();
 
                         let job_id = ecx
                             .rt
@@ -1179,6 +1237,180 @@ Routine impl: {routine_impl:?}
         src_plug_id: Arc::clone(&plug_id),
         action,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use daybook_core::repo::{RepoCtx, RepoOpenOptions};
+    use daybook_core::repos::RepoStopToken;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    struct CliSyncNode {
+        ctx: Arc<RepoCtx>,
+        drawer: Arc<DrawerRepo>,
+        sync_repo: Arc<IrohSyncRepo>,
+        sync_stop: daybook_core::sync::IrohSyncRepoStopToken,
+        plugs_stop: daybook_core::repos::RepoStopToken,
+        drawer_stop: daybook_core::repos::RepoStopToken,
+        config_stop: daybook_core::repos::RepoStopToken,
+        doc_blobs_index_stop: daybook_core::index::doc_blobs::DocBlobsIndexStopToken,
+        sqlite_local_state_stop: RepoStopToken,
+    }
+
+    impl CliSyncNode {
+        async fn stop(self) -> Res<()> {
+            self.sync_stop.stop().await?;
+            self.drawer_stop.stop().await?;
+            self.plugs_stop.stop().await?;
+            self.config_stop.stop().await?;
+            self.doc_blobs_index_stop.stop().await?;
+            self.sqlite_local_state_stop.stop().await?;
+            self.ctx.shutdown().await?;
+            Ok(())
+        }
+    }
+
+    async fn list_doc_ids(drawer: &DrawerRepo) -> Res<HashSet<String>> {
+        let (_, ids) = drawer.list_just_ids().await?;
+        Ok(ids.into_iter().collect())
+    }
+
+    async fn open_cli_sync_node(repo_root: &std::path::Path) -> Res<CliSyncNode> {
+        let ctx = Arc::new(
+            RepoCtx::open(
+                repo_root,
+                RepoOpenOptions {
+                    ws_connector_url: None,
+                },
+                "cli-test-device".into(),
+            )
+            .await?,
+        );
+        let blobs_repo =
+            BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
+        let (plugs_repo, plugs_stop) = PlugsRepo::load(
+            Arc::clone(&ctx.big_repo),
+            Arc::clone(&blobs_repo),
+            ctx.doc_app.document_id().clone(),
+            daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+        )
+        .await?;
+        let (drawer_repo, drawer_stop) = DrawerRepo::load(
+            Arc::clone(&ctx.big_repo),
+            ctx.doc_drawer.document_id().clone(),
+            ctx.local_user_path.clone().into(),
+            ctx.layout.repo_root.join("local_state"),
+            Arc::new(std::sync::Mutex::new(
+                daybook_core::drawer::lru::KeyedLruPool::new(1000),
+            )),
+            Arc::new(std::sync::Mutex::new(
+                daybook_core::drawer::lru::KeyedLruPool::new(1000),
+            )),
+            Arc::clone(&plugs_repo),
+        )
+        .await?;
+        let (config_repo, config_stop) = ConfigRepo::load(
+            Arc::clone(&ctx.big_repo),
+            ctx.doc_app.document_id().clone(),
+            Arc::clone(&plugs_repo),
+            daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+            ctx.sql.db_pool.clone(),
+        )
+        .await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
+        let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
+            Arc::clone(&drawer_repo),
+            Arc::clone(&sqlite_local_state_repo),
+        )
+        .await?;
+        let progress_repo = ProgressRepo::boot(ctx.sql.db_pool.clone()).await?;
+        let (sync_repo, sync_stop) = IrohSyncRepo::boot(
+            Arc::clone(&ctx),
+            Arc::clone(&config_repo),
+            Arc::clone(&blobs_repo),
+            Arc::clone(&doc_blobs_index_repo),
+            Some(Arc::clone(&progress_repo)),
+        )
+        .await?;
+
+        Ok(CliSyncNode {
+            ctx,
+            drawer: drawer_repo,
+            sync_repo,
+            sync_stop,
+            plugs_stop,
+            drawer_stop,
+            config_stop,
+            doc_blobs_index_stop,
+            sqlite_local_state_stop,
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cli_clone_and_wait_until_synced_smoke() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+        let temp_root = std::env::temp_dir().join(format!(
+            "daybook-cli-sync-test-{}-{}",
+            std::process::id(),
+            jiff::Timestamp::now().as_second()
+        ));
+        let repo_a_path = temp_root.join("repo-a");
+        let repo_b_path = temp_root.join("repo-b");
+
+        tokio::fs::create_dir_all(&repo_a_path).await?;
+        let init = RepoCtx::init(
+            &repo_a_path,
+            RepoOpenOptions {
+                ws_connector_url: None,
+            },
+            "cli-test-device".into(),
+        )
+        .await?;
+        init.shutdown().await?;
+        drop(init);
+
+        let node_a = open_cli_sync_node(&repo_a_path).await?;
+        for _ in 0..4 {
+            node_a
+                .drawer
+                .add(daybook_types::doc::AddDocArgs {
+                    branch_path: daybook_types::doc::BranchPath::from("main"),
+                    facets: default(),
+                    user_path: Some(daybook_types::doc::UserPath::from(
+                        node_a.ctx.local_user_path.clone(),
+                    )),
+                })
+                .await?;
+        }
+        let ticket = node_a.sync_repo.get_ticket_url().await?;
+
+        clone_repo_from_url(&ticket, &repo_b_path).await?;
+
+        let node_b = open_cli_sync_node(&repo_b_path).await?;
+        let bootstrap = node_b.sync_repo.connect_url(&ticket).await?;
+        node_b
+            .sync_repo
+            .wait_for_full_sync(
+                std::slice::from_ref(&bootstrap.endpoint_id),
+                Duration::from_secs(30),
+            )
+            .await?;
+
+        let ids_a = list_doc_ids(&node_a.drawer).await?;
+        let ids_b = list_doc_ids(&node_b.drawer).await?;
+        assert_eq!(ids_a, ids_b, "cli clone+sync did not converge");
+
+        node_b.stop().await?;
+        node_a.stop().await?;
+        if let Err(err) = tokio::fs::remove_dir_all(&temp_root).await {
+            warn!(?err, path = %temp_root.display(), "failed cleaning test temp root");
+        }
+        Ok(())
+    }
 }
 
 mod lazy {

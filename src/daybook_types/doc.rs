@@ -1,8 +1,18 @@
 use crate::interlude::*;
+use camino::Utf8PathBuf;
 
 pub type Multihash = String;
 
 pub type MimeType = String;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct UserMeta {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub user_path: UserPath,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -10,6 +20,7 @@ pub type MimeType = String;
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct FacetMeta {
     pub created_at: Timestamp,
+    // TODO: consider VersionTags here
     pub uuid: Vec<Uuid>,
     // NOTE: field oredring is important for reconcilation order
     pub updated_at: Vec<Timestamp>,
@@ -74,6 +85,7 @@ crate::define_enum_and_tag!(
             // FIXME: unix timestamp codec
             pub created_at: Timestamp,
             pub updated_at: Vec<Timestamp>,
+            pub actors: HashMap<String, UserMeta>,
             pub facet_uuids: HashMap<Uuid,FacetKey>,
             pub facets: HashMap<FacetKey, FacetMeta>
         },
@@ -82,7 +94,7 @@ crate::define_enum_and_tag!(
         PseudoLabel type (Vec<String>),
         PseudoLabelCandidates type (PseudoLabelCandidatesFacet),
         TitleGeneric type (String),
-        PathGeneric type (PathBuf),
+        PathGeneric type (String),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
@@ -347,14 +359,17 @@ pub type DocId = String;
 pub type DocUserId = automerge::ActorId;
 pub type FacetBlame = HashMap<FacetKey, DocUserId>;
 
-pub type UserPath = std::path::PathBuf;
-pub type BranchPath = std::path::PathBuf;
+pub type UserPath = camino::Utf8PathBuf;
+pub type BranchPath = camino::Utf8PathBuf;
 
 pub mod user_path {
     use super::*;
 
+    pub const USER_ID_PREFIX: &str = "duser-wip-";
+    pub const DEVICE_ID_PREFIX: &str = "ddev-wip-iroh-";
+
     pub fn new(device: &str, plug: Option<&str>, routine: Option<&str>) -> UserPath {
-        let mut path = PathBuf::from("/");
+        let mut path = Utf8PathBuf::from("/");
         path.push(device);
         if let Some(plug) = plug {
             path.push(plug);
@@ -366,43 +381,103 @@ pub mod user_path {
     }
 
     pub fn to_actor_id(path: &UserPath) -> automerge::ActorId {
-        let path_str = path.to_string_lossy();
-        let hash = blake3::hash(path_str.as_bytes());
+        let hash = blake3::hash(path.as_str().as_bytes());
         let mut bytes = [0u8; 16];
         bytes.copy_from_slice(&hash.as_bytes()[..16]);
         automerge::ActorId::from(bytes)
     }
 
-    pub fn device(path: &UserPath) -> &str {
-        path.components()
-            .nth(1)
-            .and_then(|component| component.as_os_str().to_str())
-            .unwrap_or("")
+    pub fn for_repo(base_user_path: &UserPath, repo_scope: &str) -> Res<UserPath> {
+        validate_segment("repo_scope", repo_scope)?;
+        let mut path = base_user_path.clone();
+        path.push(repo_scope);
+        parse(path.as_str())
+    }
+
+    pub fn for_plug_routine(
+        user_id: &str,
+        device_id: &str,
+        plug_id: &str,
+        routine_id: &str,
+    ) -> Res<UserPath> {
+        validate_segment("user_id", user_id)?;
+        validate_segment("device_id", device_id)?;
+        validate_segment("plug_id", plug_id)?;
+        validate_segment("routine_id", routine_id)?;
+        let mut path = Utf8PathBuf::from("/");
+        path.push(user_id);
+        path.push(device_id);
+        path.push(plug_id);
+        path.push(routine_id);
+        parse(path.as_str())
+    }
+
+    fn validate_segment(label: &str, value: &str) -> Res<()> {
+        if value.is_empty() {
+            eyre::bail!("{label} must not be empty");
+        }
+        if value.contains('/') {
+            eyre::bail!("{label} must not contain '/'");
+        }
+        if matches!(value, "." | "..") {
+            eyre::bail!("{label} must not be '.' or '..'");
+        }
+        Ok(())
     }
 
     pub fn plug(path: &UserPath) -> Option<&str> {
-        path.components()
+        path.as_str()
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
             .nth(2)
-            .and_then(|component| component.as_os_str().to_str())
     }
 
     pub fn routine(path: &UserPath) -> Option<&str> {
-        path.components()
+        path.as_str()
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
             .nth(3)
-            .and_then(|component| component.as_os_str().to_str())
     }
 
     pub fn parse(input: &str) -> Res<UserPath> {
-        let path = PathBuf::from(input);
-        if !path.as_path().has_root() {
+        let path = Utf8PathBuf::from(input);
+        if !path.is_absolute() {
             eyre::bail!("UserPath must start with /");
+        }
+        if path.as_str() != "/" && path.as_str().ends_with('/') {
+            eyre::bail!("UserPath must not end with /");
         }
         Ok(path)
     }
-}
 
-pub struct Users {
-    pub users: HashMap<String, DocUserId>,
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn for_repo_rejects_invalid_segment() {
+            let base = Utf8PathBuf::from("/");
+            assert!(for_repo(&base, "").is_err());
+            assert!(for_repo(&base, "a/b").is_err());
+            assert!(for_repo(&base, "..").is_err());
+        }
+
+        #[test]
+        fn for_plug_routine_rejects_invalid_segments() {
+            assert!(for_plug_routine("", "dev", "plug", "routine").is_err());
+            assert!(for_plug_routine("user", "dev/seg", "plug", "routine").is_err());
+            assert!(for_plug_routine("user", "dev", ".", "routine").is_err());
+        }
+
+        #[test]
+        fn for_repo_handles_root_base_with_push() {
+            let base = Utf8PathBuf::from("/");
+            let path = for_repo(&base, "config-repo").expect("expected valid repo path");
+            assert_eq!(path.as_str(), "/config-repo");
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1057,7 +1132,7 @@ mod tests {
         let tag_path = FacetTag::WellKnown(WellKnownFacetTag::PathGeneric);
         new.facets.insert(
             tag_path.clone().into(),
-            WellKnownFacet::PathGeneric(std::path::PathBuf::from("/tmp")).into(),
+            WellKnownFacet::PathGeneric("/tmp".to_string()).into(),
         );
 
         let patch = Doc::diff(&old, &new);

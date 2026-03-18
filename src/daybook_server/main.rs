@@ -14,7 +14,6 @@ use std::collections::HashSet;
 
 use crate::interlude::*;
 
-use am_utils_rs::changes::ChangeFilter;
 use axum::Router;
 use generational_box::SyncStorage;
 use samod::{DocumentId, PeerId};
@@ -87,7 +86,7 @@ struct Config {}
 
 struct Ctx {
     _config: Config,
-    acx: am_utils_rs::AmCtx,
+    big_repo: am_utils_rs::repo::SharedBigRepo,
     _peer_docs: Arc<DHashMap<PeerId, HashSet<DocumentId>>>,
     _doc_peers: Arc<DHashMap<DocumentId, PeerId>>,
     _gen_store: generational_box::Owner<SyncStorage>,
@@ -100,45 +99,20 @@ impl Ctx {
         let peer_docs: Arc<DHashMap<PeerId, HashSet<DocumentId>>> = default();
         let doc_peers: Arc<DHashMap<DocumentId, PeerId>> = default();
 
-        let (doc_setup_req_tx, mut doc_setup_req_rx) = mpsc::unbounded_channel::<DocSetupRequest>();
-        let announcer_tx = doc_setup_req_tx.clone();
-        let (acx, _acx_stop) = am_utils_rs::AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "daybook_sync".to_string(),
-                storage: am_utils_rs::StorageConfig::Disk {
-                    path: "/tmp/samod-sync".into(),
-                },
+        let (_doc_setup_req_tx, mut doc_setup_req_rx) =
+            mpsc::unbounded_channel::<DocSetupRequest>();
+        let (big_repo, _big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "daybook_sync".to_string(),
+            storage: am_utils_rs::repo::StorageConfig::Disk {
+                path: "/tmp/samod-sync".into(),
+                big_repo_sqlite_url: None,
             },
-            // we only announce docs to peers that forwarded them in the first place
-            // FIXME: this gets run at startup for all doc/peers leading to the first
-            // peer getting access to all docs. put it behind a kv store
-            Some({
-                let peer_docs = peer_docs.clone();
-                let doc_peers = doc_peers.clone();
-                let doc_setup_req_tx = announcer_tx.clone();
-                move |doc_id: DocumentId, peer_id| {
-                    if let Some(peer_of_doc) = doc_peers.get(&doc_id) {
-                        if *peer_of_doc.value() != peer_id {
-                            return false;
-                        }
-                    }
-                    doc_setup_req_tx
-                        .send(DocSetupRequest::new(peer_id.clone(), doc_id.clone()))
-                        .expect(ERROR_CHANNEL);
-                    peer_docs
-                        .entry(peer_id.clone())
-                        .or_default()
-                        .insert(doc_id.clone());
-                    doc_peers.insert(doc_id, peer_id);
-                    true
-                }
-            }),
-        )
+        })
         .await?;
 
         use generational_box::AnyStorage;
         let cx = Arc::new(Self {
-            acx,
+            big_repo,
             _config: config,
             _peer_docs: peer_docs,
             _doc_peers: doc_peers,
@@ -150,21 +124,6 @@ impl Ctx {
                 doc_setup_worker.request_tx.send(req).expect(ERROR_CHANNEL)
             }
         });
-        cx.acx
-            .change_manager()
-            .add_listener(
-                ChangeFilter {
-                    path: vec![],
-                    doc_id: None,
-                },
-                {
-                    // let cx = cx.clone();
-                    Box::new(move |changes| {
-                        info!(?changes, "XXX change");
-                    })
-                },
-            )
-            .await;
         Ok(cx)
     }
 }
@@ -220,7 +179,7 @@ fn spawn_doc_setup_worker(cx: SharedCtx) -> DocSetupWorker {
                 if listen_list.contains(&request.doc_id) {
                     continue;
                 }
-                match cx.acx.find_doc(&request.doc_id).await {
+                match cx.big_repo.find_doc_handle(&request.doc_id).await {
                     Err(err) => {
                         warn!(?request, "error looking up doc_id: {err}");
                         retry(request);
@@ -237,10 +196,9 @@ fn spawn_doc_setup_worker(cx: SharedCtx) -> DocSetupWorker {
                 };
 
                 // inspect schema and attach schema-specific listeners
-                // Try to hydrate the $schema property via AmCtx helper
 
                 let schema_opt = cx
-                    .acx
+                    .big_repo
                     .hydrate_path::<String>(
                         &request.doc_id,
                         automerge::ROOT,
@@ -249,7 +207,7 @@ fn spawn_doc_setup_worker(cx: SharedCtx) -> DocSetupWorker {
                     .await
                     .wrap_err("error hydrating added docment")?;
 
-                if let Some(schema) = schema_opt {
+                if let Some((schema, _heads)) = schema_opt {
                     if schema == "daybook.drawer" {
                         // TODO: spawn doc changes worker
                     }
@@ -283,7 +241,7 @@ async fn connect(
 #[tracing::instrument(skip(cx))]
 async fn handle_socket(cx: SharedCtx, socket: axum::extract::ws::WebSocket) {
     let _handle = tokio::spawn(async move {
-        let fin = cx.acx.repo().accept_axum(socket).await;
+        let fin = cx.big_repo.samod_repo().accept_axum(socket).await;
         info!(?fin, "connection finsihed");
     });
 }

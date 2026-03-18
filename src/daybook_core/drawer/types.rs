@@ -1,4 +1,3 @@
-use crate::config::UserMeta;
 use crate::interlude::*;
 use daybook_types::doc::{ChangeHashSet, DocId, FacetKey};
 
@@ -34,19 +33,16 @@ pub struct UpdateDocBatchErrV2 {
     pub map: HashMap<u64, DrawerError>,
 }
 
-#[derive(Debug, Clone, PartialEq, Reconcile, Hydrate)]
+#[derive(Debug, Clone, PartialEq, Eq, Reconcile, Hydrate)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct FacetBlame {
-    pub heads: ChangeHashSet,
+pub struct StoredBranchRef {
+    pub branch_doc_id: String,
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DocEntry {
-    pub branches: HashMap<String, ChangeHashSet>,
-    pub facet_blames: HashMap<String, FacetBlame>,
-    // Mapping from ActorId string to UserMeta
-    pub users: HashMap<String, UserMeta>,
+    pub branches: HashMap<String, StoredBranchRef>,
     // WARN: field ordering is imporant here, we want reconciliation
     // to create changes on the map before the atomic map so that changes
     // to the atmoic version increment will be always observed after the
@@ -83,23 +79,13 @@ pub struct DocEntryDiff {
 }
 
 impl DocEntryDiff {
-    pub fn new(old_entry: &DocEntry, new_entry: &DocEntry) -> Self {
-        let mut changed_facet_keys = Vec::new();
-        let all_facet_keys: HashSet<String> = old_entry
-            .facet_blames
-            .keys()
-            .chain(new_entry.facet_blames.keys())
-            .cloned()
-            .collect();
-        for key in all_facet_keys {
-            let old_value = old_entry.facet_blames.get(&key);
-            let new_value = new_entry.facet_blames.get(&key);
-            if old_value != new_value {
-                changed_facet_keys.push(FacetKey::from(key));
-            }
-        }
+    pub fn new(
+        old_entry: &DocEntry,
+        new_entry: &DocEntry,
+        mut changed_facet_keys: Vec<FacetKey>,
+    ) -> Self {
         changed_facet_keys.sort();
-
+        changed_facet_keys.dedup();
         let mut moved_branch_names = Vec::new();
         let all_branch_names: HashSet<String> = old_entry
             .branches
@@ -131,12 +117,12 @@ pub enum DrawerEvent {
     },
     DocAdded {
         id: DocId,
-        entry: DocEntry,
+        entry: DocNBranches,
         drawer_heads: ChangeHashSet,
     },
     DocUpdated {
         id: DocId,
-        entry: DocEntry,
+        entry: DocNBranches,
         diff: DocEntryDiff,
         drawer_heads: ChangeHashSet,
     },

@@ -7,6 +7,7 @@ use fs4::fs_std::FileExt;
 use sqlx::SqlitePool;
 
 const REPO_MARKER_FILE: &str = "db.repo.txt";
+const REPO_USER_ID_KEY: &str = "repo.user_id";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoLayout {
@@ -95,8 +96,8 @@ pub struct RepoCtx {
 
     pub sql: SqlCtx,
 
-    pub acx: AmCtx,
-    pub acx_stop: tokio::sync::Mutex<Option<am_utils_rs::AmCtxStopToken>>,
+    pub big_repo: SharedBigRepo,
+    big_repo_stop: std::sync::Mutex<Option<am_utils_rs::BigRepoStopToken>>,
 
     pub doc_app: samod::DocHandle,
     pub doc_drawer: samod::DocHandle,
@@ -112,9 +113,13 @@ pub struct RepoCtx {
 
 impl RepoCtx {
     pub async fn shutdown(&self) -> Res<()> {
-        if let Some(stop) = self.acx_stop.lock().await.take() {
-            stop.stop().await?;
-        }
+        let stop = self
+            .big_repo_stop
+            .lock()
+            .expect(ERROR_MUTEX)
+            .take()
+            .ok_or_eyre("big repo stop token missing")?;
+        stop.stop().await?;
         Ok(())
     }
 
@@ -172,12 +177,29 @@ impl RepoCtx {
         let identity =
             crate::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &repo_id).await?;
         let iroh_public_key = identity.iroh_public_key.to_string();
-        let local_user_path = format!("/{}", iroh_public_key);
-        globals::set_local_user_path(&sql.db_pool, &local_user_path).await?;
+        let repo_user_id = if initialize_repo {
+            get_or_init_repo_user_id(&sql.db_pool).await?
+        } else {
+            get_repo_user_id(&sql.db_pool)
+                .await?
+                .ok_or_eyre("repo_user_id missing in initialized repo; migration required")?
+        };
+        let device_bs58 =
+            utils_rs::hash::encode_base58_multibase(identity.iroh_public_key.as_bytes());
+        let device_id = format!(
+            "{}{}",
+            daybook_types::doc::user_path::DEVICE_ID_PREFIX,
+            device_bs58
+        );
+        let local_user_path = format!("/{repo_user_id}/{device_id}");
         let peer_id = format!("/{}/{}", identity.repo_id, iroh_public_key);
-        let am_config = am_utils_rs::Config {
-            storage: am_utils_rs::StorageConfig::Disk {
+        let am_config = am_utils_rs::repo::Config {
+            storage: am_utils_rs::repo::StorageConfig::Disk {
                 path: layout.samod_root.clone(),
+                big_repo_sqlite_url: Some(format!(
+                    "sqlite://{}",
+                    layout.repo_root.join("big_repo.sqlite").display()
+                )),
             },
             peer_id,
         };
@@ -185,15 +207,18 @@ impl RepoCtx {
             &daybook_types::doc::UserPath::from(local_user_path.clone()),
         );
 
-        let (acx, acx_stop) =
-            am_utils_rs::AmCtx::boot(am_config, Option::<samod::AlwaysAnnounce>::None).await?;
+        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_config).await?;
         if let Some(ws_connector_url) = options.ws_connector_url {
-            acx.spawn_ws_connector(ws_connector_url.into());
+            std::mem::drop(
+                big_repo
+                    .spawn_ws_connector(ws_connector_url.parse()?)
+                    .await?,
+            );
         }
 
         let doc_app_cell = tokio::sync::OnceCell::new();
         let doc_drawer_cell = tokio::sync::OnceCell::new();
-        init_from_globals(&acx, &sql.db_pool, &doc_app_cell, &doc_drawer_cell).await?;
+        init_from_globals(&big_repo, &sql.db_pool, &doc_app_cell, &doc_drawer_cell).await?;
         let doc_app = doc_app_cell
             .get()
             .expect("doc_app cell should be initialized")
@@ -205,10 +230,9 @@ impl RepoCtx {
 
         if initialize_repo {
             Self::run_repo_init_dance(
-                &acx,
+                &big_repo,
                 &doc_app,
                 &doc_drawer,
-                &local_actor_id,
                 &local_user_path,
                 &sql.db_pool,
                 layout.blobs_root.clone(),
@@ -221,8 +245,8 @@ impl RepoCtx {
             layout,
             lock_guard,
             sql,
-            acx,
-            acx_stop: Some(acx_stop).into(),
+            big_repo,
+            big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
             doc_app,
             doc_drawer,
             local_actor_id,
@@ -235,10 +259,9 @@ impl RepoCtx {
     }
 
     async fn run_repo_init_dance(
-        acx: &AmCtx,
+        big_repo: &SharedBigRepo,
         doc_app: &samod::DocHandle,
         doc_drawer: &samod::DocHandle,
-        local_actor_id: &automerge::ActorId,
         local_user_path: &str,
         sql: &SqlitePool,
         blobs_root: std::path::PathBuf,
@@ -250,7 +273,7 @@ impl RepoCtx {
         use crate::rt::dispatch::DispatchRepo;
         use crate::tables::TablesRepo;
 
-        let blobs_repo = BlobsRepo::new(blobs_root).await?;
+        let blobs_repo = BlobsRepo::new(blobs_root.clone(), local_user_path.to_string()).await?;
         let mut plugs_repo: Option<Arc<PlugsRepo>> = None;
         let mut plugs_stop: Option<crate::repos::RepoStopToken> = None;
         let mut config_stop: Option<crate::repos::RepoStopToken> = None;
@@ -260,10 +283,10 @@ impl RepoCtx {
 
         let init_result: Res<()> = async {
             let (repo, stop) = PlugsRepo::load(
-                acx.clone(),
+                Arc::clone(big_repo),
                 Arc::clone(&blobs_repo),
                 doc_app.document_id().clone(),
-                local_actor_id.clone(),
+                daybook_types::doc::UserPath::from(local_user_path.to_string()),
             )
             .await
             .wrap_err("error loading plugs repo during init dance")?;
@@ -271,7 +294,7 @@ impl RepoCtx {
             plugs_stop = Some(stop);
 
             let (_config_repo, stop) = ConfigRepo::load(
-                acx.clone(),
+                Arc::clone(big_repo),
                 doc_app.document_id().clone(),
                 Arc::clone(plugs_repo.as_ref().expect("plugs repo must be loaded")),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
@@ -281,25 +304,29 @@ impl RepoCtx {
             config_stop = Some(stop);
 
             let (_tables_repo, stop) = TablesRepo::load(
-                acx.clone(),
+                Arc::clone(big_repo),
                 doc_app.document_id().clone(),
-                local_actor_id.clone(),
+                daybook_types::doc::UserPath::from(local_user_path.to_string()),
             )
             .await?;
             tables_stop = Some(stop);
 
             let (_dispatch_repo, stop) = DispatchRepo::load(
-                acx.clone(),
+                Arc::clone(big_repo),
                 doc_app.document_id().clone(),
-                local_actor_id.clone(),
+                daybook_types::doc::UserPath::from(local_user_path.to_string()),
             )
             .await?;
             dispatch_stop = Some(stop);
 
             let (_drawer_repo, stop) = DrawerRepo::load(
-                acx.clone(),
+                Arc::clone(big_repo),
                 doc_drawer.document_id().clone(),
-                local_actor_id.clone(),
+                daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                blobs_root
+                    .parent()
+                    .ok_or_eyre("blobs root missing parent")?
+                    .join("local_state"),
                 Arc::new(std::sync::Mutex::new(
                     crate::drawer::lru::KeyedLruPool::new(1000),
                 )),
@@ -342,6 +369,11 @@ impl RepoCtx {
             if let Some(stop) = dispatch_stop.take() {
                 let _ = stop.stop().await;
             }
+            if let Err(shutdown_err) = blobs_repo.shutdown().await {
+                return Err(err.wrap_err(format!(
+                    "error shutting down blobs repo during init cleanup: {shutdown_err:?}"
+                )));
+            }
             return Err(err);
         }
 
@@ -362,8 +394,41 @@ impl RepoCtx {
             .expect("dispatch stop token missing")
             .stop()
             .await?;
+        blobs_repo.shutdown().await?;
         Ok(())
     }
+}
+
+pub async fn get_repo_user_id(sql: &SqlitePool) -> Res<Option<String>> {
+    let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
+        .bind(REPO_USER_ID_KEY)
+        .fetch_optional(sql)
+        .await?;
+    Ok(rec)
+}
+
+pub async fn set_repo_user_id(sql: &SqlitePool, user_id: &str) -> Res<()> {
+    sqlx::query(
+        "INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(REPO_USER_ID_KEY)
+    .bind(user_id)
+    .execute(sql)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_or_init_repo_user_id(sql: &SqlitePool) -> Res<String> {
+    if let Some(user_id) = get_repo_user_id(sql).await? {
+        return Ok(user_id);
+    }
+    let user_id = format!(
+        "{}{}",
+        daybook_types::doc::user_path::USER_ID_PREFIX,
+        Uuid::new_v4().bs58()
+    );
+    set_repo_user_id(sql, &user_id).await?;
+    Ok(user_id)
 }
 
 fn repo_layout(repo_root: &std::path::Path) -> Res<RepoLayout> {
@@ -379,7 +444,7 @@ fn repo_layout(repo_root: &std::path::Path) -> Res<RepoLayout> {
     })
 }
 
-async fn mark_repo_initialized(repo_root: &std::path::Path) -> Res<()> {
+pub async fn mark_repo_initialized(repo_root: &std::path::Path) -> Res<()> {
     let layout = repo_layout(repo_root)?;
     if let Some(parent) = layout.marker_path.parent() {
         tokio::fs::create_dir_all(parent).await?;

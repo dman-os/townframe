@@ -29,6 +29,11 @@
   - This is especially critical in Kotlin or UI code. 
     - If an error occurs that can't be handled, it should crash the program or show a toast if it's not critical. 
   - It's very hard to imagine cases where this is not true.
+  - Another case where this is critical, don't ignore channel send errors in Rust.
+    - Unless channel closure is a signal itself to the task to close, shutdown order should ascertain channels are always open.
+    - Shutdown order is to be reverse of construction of order which means the entity that constructs the channel will always close after it's child.
+    - Concealing channel errors hides lifecycle and liveness issues that are hard to diagnose in an actor-based program like this.
+    - The only good exception is broadcast channels that support 0..N listeners. A broadcast channel can be re-opened and thus failure to send is not an invariant break.
 - Never add `skip` to tests unless asked to, they obscure broken tests for reviewers.
 
 ## Checks
@@ -78,7 +83,7 @@
 
 > [!INFO]
 >
-> You're trusted not to be lazy solutions.
+> You're trusted not to be lazy with solutions.
 
 - Top level symbol proliferation makes it more confusing and harder to read compared to any otehr code quality sin.
   - When working with an external library, imagine if it had a lot of small public classes and functions? Even if you're the AWS SDK, no one wants to learn what each one does.
@@ -87,4 +92,28 @@
 
 ## Tool calls
 
+> [!INFO]
+>
+> You're begged not to be lazy with solutions.
+
 - If you're not able to cleanly read a provided web link through tool calls, pause and ask for a copy/paste of the contents. NEVER ASSUME THE CONTENTS OF A LINK YOU HAVEN'T SEEN!
+
+## Cheating
+
+Avoid cheating through hacks that violate common sensibilities just to get a task done.
+
+- Code that tires to get tests green by writing shallow or buggy fixes.
+- Code that reads the whole database in a memory HashSet to avoid writing the right SQL.
+
+THIS IS A NO CHEAT REPO!
+
+## Test code
+
+Test code is often less consistently audited than production code.
+So when working on tests, take a gardening hand to it and proactively improve them.
+See a useless or too shallow a test?
+Flag it for removal.
+Are tests repeating too much setup code?
+Consider using TDD or common cleanup code.
+
+Tools like snapshot tests, TDD and the macros for TDD found in the repo can help the in the longevity of a tests usefulness.

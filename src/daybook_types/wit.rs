@@ -6,6 +6,11 @@ pub mod doc {
     pub use root_doc::{Blob, DocId, FacetKey, MimeType, Multihash, Note, UserPath};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct UserMeta {
+        pub user_path: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Pending {
         pub key: String,
     }
@@ -34,6 +39,7 @@ pub mod doc {
         pub created_at: Datetime,
         #[serde_as(as = "Vec<Datetime>")]
         pub updated_at: Vec<Datetime>,
+        pub actors: String,
         pub facet_uuids: Vec<(String, String)>,
         pub facets: Vec<(String, FacetMeta)>,
     }
@@ -177,7 +183,7 @@ pub mod doc {
                     .into_iter()
                     .map(|key| key.to_string())
                     .collect(),
-                user_path: val.user_path.map(|path| path.to_string_lossy().to_string()),
+                user_path: val.user_path.map(|path| path.to_string()),
             }
         }
     }
@@ -223,9 +229,7 @@ pub mod doc {
                     })
                 }
                 root_doc::WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
-                root_doc::WellKnownFacet::PathGeneric(val) => {
-                    Self::PathGeneric(val.to_string_lossy().into_owned())
-                }
+                root_doc::WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val.to_string()),
                 root_doc::WellKnownFacet::ImageMetadata(val) => {
                     Self::ImageMetadata(ImageMetadata {
                         facet_ref: val.facet_ref.to_string(),
@@ -284,6 +288,7 @@ pub mod doc {
                     id: dmeta.id,
                     created_at: dmeta.created_at.into(),
                     updated_at: dmeta.updated_at.into_iter().map(Into::into).collect(),
+                    actors: serde_json::to_string(&dmeta.actors).expect(ERROR_JSON),
                     facet_uuids: dmeta
                         .facet_uuids
                         .into_iter()
@@ -339,7 +344,7 @@ pub mod doc {
                     })
                 }
                 WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
-                WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val.into()),
+                WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val),
                 WellKnownFacet::ImageMetadata(val) => {
                     Self::ImageMetadata(root_doc::ImageMetadata {
                         facet_ref: val.facet_ref.parse()?,
@@ -408,6 +413,7 @@ pub mod doc {
                     id: dmeta.id,
                     created_at: dmeta.created_at.into(),
                     updated_at: dmeta.updated_at.into_iter().map(Into::into).collect(),
+                    actors: serde_json::from_str(&dmeta.actors)?,
                     facet_uuids: dmeta
                         .facet_uuids
                         .into_iter()

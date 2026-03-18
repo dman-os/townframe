@@ -77,10 +77,12 @@ Feel free to throw yourself or tokens at the code though I'd personally apprecia
 - Don't use single char variable names, they make harder to use `sed` for replacement.
 - DHashMaps shouldn't not be used for sync across tasks/threads. 
   - They easily deadlock if modified across multiple tasks.
-  - They're only a good fit for single modifier situation where a normal HashMap won't due to do async problems.
+  - They're only a good fit for single modifier situation where a normal HashMap won't work due to do async problems.
 - Do not use the cargo integration tests features.
   - I.e. avoid making tests in crate_root::tests.
 - Git submodules? I'm using `jj` :'/
+- Prefer `futures_buffered::BufferedStreamExt::buffered_unordered` over
+  `futures::StreamExt::buffer_unordered` for unordered buffered async stream work.
 
 - Avoid adding dependencies if possible
   - `wc -l Cargo.lock` is around 10k lines. Let's keep it that way.

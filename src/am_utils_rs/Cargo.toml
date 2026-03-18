@@ -13,9 +13,13 @@ path = "lib.rs"
 default = ["repo", "iroh"]
 repo = [
     "dep:samod",
+    "dep:samod-core",
     "samod/tokio",
-    "samod/tungstenite",
-    "dep:tokio-tungstenite"
+    "samod/tungstenite-rustls-webpki-roots",
+    "dep:tokio-tungstenite",
+    "dep:sqlx",
+    "dep:serde_json",
+    "dep:irpc"
 ]
 
 [dependencies]
@@ -23,27 +27,33 @@ utils_rs = { workspace = true, features = ["hash"] }
 
 #
 # async
-tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread", "time", "tracing"] }
 tokio-util = { workspace = true }
 tokio-tungstenite = { version = "0.27.0", features = ["url"], optional = true }
+async-trait.workspace = true
+futures-buffered = { version = "0.2.13", features = ["tokio-coop"] }
 
 #
 # automerge
 automerge = { workspace = true }
 autosurgeon = { workspace = true }
 samod = { workspace = true, optional = true }
-samod-core = "*"
+samod-core = { workspace = true, optional = true }
 
 #
 # encoding
 serde.workspace = true
+serde_json = { workspace = true, optional = true }
 data-encoding.workspace = true
 bytes.workspace = true
+camino = "1.2.2"
+sqlx = { workspace = true, optional = true, features = ["sqlite", "runtime-tokio"] }
 
 #
 # errors
 thiserror.workspace = true
 iroh = { workspace = true, optional = true }
+irpc = { version = "0.12.0", optional = true, features = ["derive"] }
 
 #
 # logging

@@ -932,6 +932,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_add(
     ): Short
+    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_batch_add(
+    ): Short
     external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_del(
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_ffi_register_listener(
@@ -1194,6 +1196,8 @@ external fun uniffi_daybook_ffi_fn_free_drawerrepoffi(`handle`: Long,uniffi_out_
 external fun uniffi_daybook_ffi_fn_constructor_drawerrepoffi_load(`fcx`: Long,`plugsRepo`: Long,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_add(`ptr`: Long,`args`: RustBufferAddDocArgs.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_batch_add(`ptr`: Long,`args`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_del(`ptr`: Long,`id`: RustBuffer.ByValue,
 ): Long
@@ -1525,6 +1529,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_add() != 51475.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_batch_add() != 38639.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_del() != 52435.toShort()) {
@@ -5082,6 +5089,8 @@ public interface DrawerRepoFfiInterface {
     
     suspend fun `add`(`args`: AddDocArgs): kotlin.String
     
+    suspend fun `batchAdd`(`args`: List<AddDocArgs>): List<kotlin.String>
+    
     suspend fun `del`(`id`: kotlin.String): kotlin.Boolean
     
     fun `ffiRegisterListener`(`listener`: DrawerEventListener): ListenerRegistration
@@ -5213,6 +5222,27 @@ open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterString.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `batchAdd`(`args`: List<AddDocArgs>) : List<kotlin.String> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_batch_add(
+                uniffiHandle,
+                FfiConverterSequenceTypeAddDocArgs.lower(`args`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceString.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -9401,6 +9431,34 @@ public object FfiConverterSequenceTypeCameraDeviceInfo: FfiConverterRustBuffer<L
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeCameraDeviceInfo.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeAddDocArgs: FfiConverterRustBuffer<List<AddDocArgs>> {
+    override fun read(buf: ByteBuffer): List<AddDocArgs> {
+        val len = buf.getInt()
+        return List<AddDocArgs>(len) {
+            FfiConverterTypeAddDocArgs.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<AddDocArgs>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeAddDocArgs.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<AddDocArgs>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeAddDocArgs.write(it, buf)
         }
     }
 }

@@ -308,7 +308,7 @@ impl SwitchSink for DocProcessorTriageListener {
                 } => {
                     for (branch_name, heads) in &entry.branches {
                         let branch_path = BranchPath::from(branch_name.as_str());
-                        if branch_path.to_string_lossy().starts_with("/tmp/") {
+                        if branch_path.to_string().starts_with("/tmp/") {
                             continue;
                         }
                         let rt = ctx
@@ -368,7 +368,7 @@ impl SwitchSink for DocProcessorTriageListener {
                     };
                     for (branch_name, heads) in &entry.branches {
                         let branch_path = BranchPath::from(branch_name.as_str());
-                        if branch_path.to_string_lossy().starts_with("/tmp/") {
+                        if branch_path.to_string().starts_with("/tmp/") {
                             continue;
                         }
                         if branch_name != "main"

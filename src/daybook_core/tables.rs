@@ -319,14 +319,16 @@ impl TablesStore {
 }
 
 pub struct TablesRepo {
-    pub acx: AmCtx,
+    pub big_repo: SharedBigRepo,
     pub app_doc_id: DocumentId,
     pub app_am_handle: samod::DocHandle,
     store: crate::stores::AmStoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub local_actor_id: ActorId,
+    local_peer_id: String,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
+    _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
+    _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
 }
 
 impl crate::repos::Repo for TablesRepo {
@@ -360,16 +362,19 @@ pub enum TablesEvent {
 
 impl TablesRepo {
     pub async fn load(
-        acx: AmCtx,
+        big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
-        local_actor_id: ActorId,
+        local_user_path: daybook_types::doc::UserPath,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
+        let local_user_path =
+            daybook_types::doc::user_path::for_repo(&local_user_path, "tables-repo")?;
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let registry = crate::repos::ListenersRegistry::new();
 
-        let store_val = TablesStore::load(&acx, &app_doc_id).await?;
+        let store_val = TablesStore::load(&big_repo, &app_doc_id).await?;
         let store = crate::stores::AmStoreHandle::new(
             store_val,
-            acx.clone(),
+            Arc::clone(&big_repo),
             app_doc_id.clone(),
             local_actor_id.clone(),
         );
@@ -379,41 +384,36 @@ impl TablesRepo {
             })
             .await?;
 
-        let app_am_handle = acx
-            .find_doc(&app_doc_id)
+        let app_am_handle = big_repo
+            .find_doc_handle(&app_doc_id)
             .await?
             .ok_or_eyre("unable to find app doc in am")?;
 
-        let (broker, broker_stop) = acx.change_manager().add_doc(app_am_handle.clone()).await?;
+        let broker = big_repo.ensure_change_broker(app_am_handle.clone()).await?;
 
-        let (notif_tx, notif_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Vec<am_utils_rs::changes::ChangeNotification>>();
         // Register change listener to automatically notify repo listeners
-        let ticket = TablesStore::register_change_listener(&acx, &broker, vec![], {
-            move |notifs| {
-                if let Err(err) = notif_tx.send(notifs) {
-                    warn!("failed to send change notifications: {err}");
-                }
-            }
-        })
-        .await?;
+        let cancel_token = CancellationToken::new();
+        let (ticket, notif_rx) =
+            TablesStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
+        let local_peer_id = big_repo.samod_repo().peer_id().to_string();
 
-        let main_cancel_token = CancellationToken::new();
         let repo = Self {
-            acx,
+            big_repo,
             app_doc_id,
             app_am_handle,
             store,
             registry: Arc::clone(&registry),
             local_actor_id,
-            cancel_token: main_cancel_token.child_token(),
+            local_peer_id,
+            cancel_token: cancel_token.clone(),
             _change_listener_tickets: vec![ticket],
+            _change_broker_leases: vec![broker],
         };
         let repo = Arc::new(repo);
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
-            let cancel_token = main_cancel_token.clone();
+            let cancel_token = cancel_token.child_token();
             async move {
                 repo.notifs_loop(notif_rx, cancel_token)
                     .await
@@ -424,9 +424,8 @@ impl TablesRepo {
         Ok((
             repo,
             crate::repos::RepoStopToken {
-                cancel_token: main_cancel_token,
+                cancel_token,
                 worker_handle: Some(worker_handle),
-                broker_stop_tokens: vec![broker_stop],
             },
         ))
     }
@@ -434,7 +433,7 @@ impl TablesRepo {
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<am_utils_rs::changes::ChangeNotification>,
+            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -455,11 +454,21 @@ impl TablesRepo {
 
             events.clear();
             for notif in notifs {
+                let am_utils_rs::repo::BigRepoChangeNotification::DocChanged {
+                    patch,
+                    heads,
+                    origin,
+                    ..
+                } = notif
+                else {
+                    continue;
+                };
                 self.events_for_patch(
-                    &notif.patch,
-                    &notif.heads,
+                    &patch,
+                    &heads,
                     &mut events,
-                    Some(self.local_actor_id.clone()),
+                    Some(&origin),
+                    Some(self.local_peer_id.as_str()),
                 )
                 .await?;
             }
@@ -468,8 +477,8 @@ impl TablesRepo {
                 match &event {
                     TablesEvent::WindowAdded { id, heads }
                     | TablesEvent::WindowChanged { id, heads } => {
-                        let (new_window, _) = self
-                            .acx
+                        let Some((new_window, _)) = self
+                            .big_repo
                             .hydrate_path_at_heads::<Versioned<Window>>(
                                 &self.app_doc_id,
                                 &heads.0,
@@ -481,7 +490,10 @@ impl TablesRepo {
                                 ],
                             )
                             .await?
-                            .expect(ERROR_INVALID_PATCH);
+                        else {
+                            warn!(window_id = %id, "ignoring stale table patch: window missing at heads");
+                            continue;
+                        };
                         self.store
                             .mutate_sync(|store| {
                                 store.windows.insert(*id, new_window);
@@ -498,8 +510,8 @@ impl TablesRepo {
                             .await?;
                     }
                     TablesEvent::TabAdded { id, heads } | TablesEvent::TabChanged { id, heads } => {
-                        let (new_tab, _) = self
-                            .acx
+                        let Some((new_tab, _)) = self
+                            .big_repo
                             .hydrate_path_at_heads::<Versioned<Tab>>(
                                 &self.app_doc_id,
                                 &heads.0,
@@ -511,7 +523,10 @@ impl TablesRepo {
                                 ],
                             )
                             .await?
-                            .expect(ERROR_INVALID_PATCH);
+                        else {
+                            warn!(tab_id = %id, "ignoring stale table patch: tab missing at heads");
+                            continue;
+                        };
                         self.store
                             .mutate_sync(|store| {
                                 store.tabs.insert(*id, new_tab);
@@ -529,8 +544,8 @@ impl TablesRepo {
                     }
                     TablesEvent::PanelAdded { id, heads }
                     | TablesEvent::PanelChanged { id, heads } => {
-                        let (new_panel, _) = self
-                            .acx
+                        let Some((new_panel, _)) = self
+                            .big_repo
                             .hydrate_path_at_heads::<Versioned<Panel>>(
                                 &self.app_doc_id,
                                 &heads.0,
@@ -542,7 +557,10 @@ impl TablesRepo {
                                 ],
                             )
                             .await?
-                            .expect(ERROR_INVALID_PATCH);
+                        else {
+                            warn!(panel_id = %id, "ignoring stale table patch: panel missing at heads");
+                            continue;
+                        };
                         self.store
                             .mutate_sync(|store| {
                                 store.panels.insert(*id, new_panel);
@@ -560,8 +578,8 @@ impl TablesRepo {
                     }
                     TablesEvent::TableAdded { id, heads }
                     | TablesEvent::TableChanged { id, heads } => {
-                        let (new_table, _) = self
-                            .acx
+                        let Some((new_table, _)) = self
+                            .big_repo
                             .hydrate_path_at_heads::<Versioned<Table>>(
                                 &self.app_doc_id,
                                 &heads.0,
@@ -573,7 +591,10 @@ impl TablesRepo {
                                 ],
                             )
                             .await?
-                            .expect(ERROR_INVALID_PATCH);
+                        else {
+                            warn!(table_id = %id, "ignoring stale table patch: table missing at heads");
+                            continue;
+                        };
                         self.store
                             .mutate_sync(|store| {
                                 store.tables.insert(*id, new_table);
@@ -618,7 +639,7 @@ impl TablesRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
-            self.events_for_patch(&patch, &heads, &mut events, None)
+            self.events_for_patch(&patch, &heads, &mut events, None, None)
                 .await?;
         }
         Ok(events)
@@ -629,8 +650,22 @@ impl TablesRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<TablesEvent>,
-        exclude_actor_id: Option<ActorId>,
+        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer: Option<&str>,
     ) -> Res<()> {
+        if let Some(origin) = origin {
+            match origin {
+                am_utils_rs::repo::BigRepoChangeOrigin::Local => return Ok(()),
+                am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. } => {
+                    if let Some(exclude_peer) = exclude_peer {
+                        if peer_id.to_string() == exclude_peer {
+                            return Ok(());
+                        }
+                    }
+                }
+                am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap => {}
+            }
+        }
         let heads = ChangeHashSet(Arc::clone(patch_heads));
         match &patch.action {
             automerge::PatchAction::PutMap {
@@ -656,9 +691,6 @@ impl TablesRepo {
                     _ => return Ok(()),
                 };
                 let vtag = VersionTag::hydrate_bytes(vtag)?;
-                if Some(vtag.actor_id) == exclude_actor_id {
-                    return Ok(());
-                }
 
                 match collection.as_ref() {
                     "windows" => out.push(if vtag.version.is_nil() {

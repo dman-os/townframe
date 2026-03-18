@@ -47,9 +47,7 @@ mod binds_guest {
             root_doc::WellKnownFacet::TitleGeneric(val) => {
                 wit_doc::WellKnownFacet::TitleGeneric(val)
             }
-            root_doc::WellKnownFacet::PathGeneric(val) => {
-                wit_doc::WellKnownFacet::PathGeneric(val.to_string_lossy().into_owned())
-            }
+            root_doc::WellKnownFacet::PathGeneric(val) => wit_doc::WellKnownFacet::PathGeneric(val),
             root_doc::WellKnownFacet::ImageMetadata(val) => {
                 wit_doc::WellKnownFacet::ImageMetadata(wit_doc::ImageMetadata {
                     facet_ref: val.facet_ref.to_string(),
@@ -126,6 +124,7 @@ mod binds_guest {
                     id: dmeta.id,
                     created_at: dmeta.created_at.into(),
                     updated_at: dmeta.updated_at.into_iter().map(Into::into).collect(),
+                    actors: serde_json::to_string(&dmeta.actors).expect(ERROR_JSON),
                     facet_uuids: dmeta
                         .facet_uuids
                         .into_iter()
@@ -186,9 +185,7 @@ mod binds_guest {
             wit_doc::WellKnownFacet::TitleGeneric(val) => {
                 root_doc::WellKnownFacet::TitleGeneric(val)
             }
-            wit_doc::WellKnownFacet::PathGeneric(val) => {
-                root_doc::WellKnownFacet::PathGeneric(val.into())
-            }
+            wit_doc::WellKnownFacet::PathGeneric(val) => root_doc::WellKnownFacet::PathGeneric(val),
             wit_doc::WellKnownFacet::ImageMetadata(val) => {
                 root_doc::WellKnownFacet::ImageMetadata(root_doc::ImageMetadata {
                     facet_ref: val.facet_ref.parse()?,
@@ -272,6 +269,7 @@ mod binds_guest {
                         .into_iter()
                         .map(|dt| Timestamp::from_second(dt.seconds as i64))
                         .collect::<Result<_, _>>()?,
+                    actors: serde_json::from_str(&dmeta.actors)?,
                     facet_uuids: dmeta
                         .facet_uuids
                         .into_iter()

@@ -55,11 +55,14 @@ use crate::interlude::*;
 // the hope is to ban unwrap and use these for the common
 // unwrap cases
 pub mod expect_tags {
+    pub const ERROR_CANCELLED: &str = "cancel token was lit";
+    pub const ERROR_IMPOSSIBLE: &str = "pigs are flying";
     pub const ERROR_CHANNEL: &str = "channel error: closed?";
     pub const ERROR_JSON: &str = "json error: oom?";
     pub const ERROR_UTF8: &str = "utf8 error";
     pub const ERROR_MUTEX: &str = "poisioned mutex";
     pub const ERROR_ACTOR: &str = "task was found dead";
+    pub const ERROR_TOKIO: &str = "tokio error: shutting down?";
     pub const ERROR_CALLER: &str = "caller dropped before response";
     pub const ERROR_INVALID_PATCH: &str = "invalid patch: hydration failed";
 }
@@ -340,7 +343,7 @@ pub mod hash {
         let hash = blake3::hash(bytes);
         let hash =
             multihash::Multihash::<32>::wrap(BLAKE3, hash.as_bytes()).expect("error multihashing");
-        encode_base32_multibase(hash.to_bytes())
+        encode_base58_multibase(hash.to_bytes())
     }
 
     #[cfg(feature = "hash")]
@@ -363,7 +366,7 @@ pub mod hash {
 
         let hash =
             multihash::Multihash::<32>::wrap(BLAKE3, hash.as_bytes()).expect("error multihashing");
-        Ok(encode_base32_multibase(hash.to_bytes()))
+        Ok(encode_base58_multibase(hash.to_bytes()))
     }
 
     #[cfg(feature = "hash")]
@@ -662,4 +665,78 @@ pub async fn wait_on_handle<T>(
     join_handle: tokio::task::JoinHandle<T>,
 ) -> Result<T, tokio::task::JoinError> {
     join_handle.await
+}
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum AbortableJoinSetError {
+    /// task set aborted
+    Aborted,
+}
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum AbortableJoinSetStopError {
+    /// task set aborted
+    Aborted,
+    /// task error: {0:?}
+    JoinError(#[from] tokio::task::JoinError),
+    /// task set was aborted due to timeout
+    Timeout(#[from] tokio::time::error::Elapsed),
+}
+
+#[derive(Debug)]
+pub struct AbortableJoinSet {
+    inner: std::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
+}
+
+impl Default for AbortableJoinSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AbortableJoinSet {
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+        }
+    }
+
+    pub fn spawn<F>(&self, fut: F) -> Result<(), AbortableJoinSetError>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut guard = self.inner.lock().expect(ERROR_MUTEX);
+        let Some(join_set) = guard.as_mut() else {
+            return Err(AbortableJoinSetError::Aborted);
+        };
+        join_set.spawn(fut);
+        Ok(())
+    }
+
+    pub fn abort(&self) {
+        let Some(mut join_set) = self.inner.lock().expect(ERROR_MUTEX).take() else {
+            return;
+        };
+        join_set.abort_all();
+    }
+
+    pub async fn stop(&self, timeout: Duration) -> Result<(), AbortableJoinSetStopError> {
+        let Some(mut join_set) = self.inner.lock().expect(ERROR_MUTEX).take() else {
+            return Err(AbortableJoinSetStopError::Aborted);
+        };
+        match tokio::time::timeout(timeout, async {
+            while let Some(out) = join_set.join_next().await {
+                out?;
+            }
+            Ok::<(), tokio::task::JoinError>(())
+        })
+        .await
+        {
+            Ok(out) => out.map_err(Into::into),
+            Err(err) => {
+                join_set.abort_all();
+                Err(err.into())
+            }
+        }
+    }
 }

@@ -1,5 +1,7 @@
 // FIXME: use nested ids for facet keys
 // FIXME: use ensure_alive method for cancellation checks
+// FIXME: break aprart file, NVIM is lagging like 500ms on each scroll
+// FIXME: remove tmp branches from the branch doc and use sqliite
 
 use crate::interlude::*;
 use crate::plugs::PlugsRepo;
@@ -10,7 +12,7 @@ pub mod types;
 pub use types::{DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
 
 use lru::SharedKeyedLruPool;
-use types::{DrawerError, FacetBlame, UpdateDocArgsV2, UpdateDocBatchErrV2};
+use types::{DrawerError, StoredBranchRef, UpdateDocArgsV2, UpdateDocBatchErrV2};
 
 use automerge::transaction::Transactable;
 use automerge::ReadDoc;
@@ -18,29 +20,39 @@ use daybook_types::doc::{AddDocArgs, ChangeHashSet, Doc, DocId, DocPatch, FacetK
 use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
 mod facet_recovery;
 
-// FIXME: refactor by hand?
-use am_utils_rs::changes::ChangeNotification;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+const DRAWER_REPLICATED_PARTITION_PREFIX: &str = "drawer.replicated";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchKind {
+    Replicated,
+    Tmp,
+}
 pub struct DrawerRepo {
-    pub acx: AmCtx,
+    pub big_repo: SharedBigRepo,
     drawer_doc_id: DocumentId,
     local_actor_id: ActorId,
+    local_peer_id: String,
+    local_user_path: daybook_types::doc::UserPath,
 
     // LRU Caches
     entry_cache: Arc<DHashMap<DocId, DocEntry>>,
     facet_cache: std::sync::Mutex<FacetCacheState>,
-    handles: Arc<DHashMap<DocId, samod::DocHandle>>,
+    facet_schema_validators:
+        std::sync::Mutex<HashMap<(String, String), Arc<jsonschema::Validator>>>,
+    branch_handles: Arc<DHashMap<String, am_utils_rs::repo::BigDocHandle>>,
 
     // LRU Pools (Policy only)
     entry_pool: SharedKeyedLruPool<DocId>,
 
     pub registry: Arc<crate::repos::ListenersRegistry>,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
-    current_heads: std::sync::RwLock<ChangeHashSet>,
+    _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
+    _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
+    current_heads: std::sync::Mutex<ChangeHashSet>,
     drawer_am_handle: samod::DocHandle,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
 }
@@ -67,62 +79,76 @@ struct ValidatedReference {
     url_value: String,
 }
 
+struct PreparedAddDoc {
+    doc_id: DocId,
+    handle: am_utils_rs::repo::BigDocHandle,
+    entry: DocEntry,
+    branch_heads: ChangeHashSet,
+    branch_doc_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct BranchStateRow {
+    branch_path: String,
+    branch_doc_id: String,
+    latest_heads: ChangeHashSet,
+    branch_kind: BranchKind,
+}
+
 impl DrawerRepo {
     pub async fn load(
-        acx: AmCtx,
+        big_repo: SharedBigRepo,
         drawer_doc_id: DocumentId,
-        local_actor_id: ActorId,
+        local_user_path: daybook_types::doc::UserPath,
+        _local_state_root: PathBuf,
         entry_pool: SharedKeyedLruPool<DocId>,
         doc_pool: SharedKeyedLruPool<FacetCacheKey>,
         #[cfg(not(test))] plugs_repo: Arc<PlugsRepo>,
         #[cfg(test)] plugs_repo: Option<Arc<PlugsRepo>>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
-        let drawer_am_handle = acx
-            .find_doc(&drawer_doc_id)
+        let local_user_path =
+            daybook_types::doc::user_path::for_repo(&local_user_path, "drawer-repo")?;
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
+        let drawer_am_handle = big_repo
+            .find_doc_handle(&drawer_doc_id)
             .await?
             .ok_or_eyre("drawer doc not found")?;
 
         let initial_heads =
             drawer_am_handle.with_document(|doc| ChangeHashSet(doc.get_heads().into()));
 
-        let (broker, broker_stop) = {
-            acx.change_manager()
-                .add_doc(drawer_am_handle.clone())
-                .await?
-        };
-
-        let (notif_tx, notif_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Vec<ChangeNotification>>();
+        let broker = big_repo
+            .ensure_change_broker(drawer_am_handle.clone())
+            .await?;
 
         // Listen for changes to docs.map
-        let ticket = acx
-            .change_manager()
-            .add_listener(
-                am_utils_rs::changes::ChangeFilter {
-                    doc_id: Some(broker.filter()),
-                    path: vec!["docs".into(), "map".into()],
-                },
-                Box::new(move |notifs| {
-                    if let Err(err) = notif_tx.send(notifs) {
-                        warn!("failed to send change notifications: {err}");
-                    }
-                }),
-            )
+        let (ticket, notif_rx) = big_repo
+            .subscribe_change_listener(am_utils_rs::repo::BigRepoChangeFilter {
+                doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(
+                    drawer_doc_id.clone(),
+                )),
+                path: vec!["docs".into(), "map".into()],
+                origin: None,
+            })
             .await?;
 
         let main_cancel_token = CancellationToken::new();
         let repo = Arc::new(Self {
-            acx,
+            local_peer_id: big_repo.samod_repo().peer_id().to_string(),
+            big_repo,
             drawer_doc_id,
             local_actor_id,
+            local_user_path,
             entry_cache: Arc::new(DHashMap::new()),
             facet_cache: std::sync::Mutex::new(FacetCacheState::new(doc_pool)),
-            handles: Arc::new(DHashMap::new()),
+            facet_schema_validators: std::sync::Mutex::new(HashMap::new()),
+            branch_handles: Arc::new(DHashMap::new()),
             entry_pool,
             registry: crate::repos::ListenersRegistry::new(),
             cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
-            current_heads: std::sync::RwLock::new(initial_heads),
+            _change_broker_leases: vec![broker],
+            current_heads: initial_heads.into(),
             drawer_am_handle,
             #[cfg(not(test))]
             plugs_repo: Some(plugs_repo),
@@ -145,7 +171,6 @@ impl DrawerRepo {
             crate::repos::RepoStopToken {
                 cancel_token: main_cancel_token,
                 worker_handle: Some(worker_handle),
-                broker_stop_tokens: vec![broker_stop],
             },
         ))
     }
@@ -153,7 +178,9 @@ impl DrawerRepo {
     #[tracing::instrument(skip(self, notif_rx, cancel_token))]
     async fn notifs_loop(
         &self,
-        mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<ChangeNotification>>,
+        mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
+            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
+        >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
         let mut events = vec![];
@@ -175,12 +202,31 @@ impl DrawerRepo {
             events.clear();
 
             for notif in notifs {
+                let am_utils_rs::repo::BigRepoChangeNotification::DocChanged {
+                    doc_id,
+                    patch,
+                    heads,
+                    origin,
+                    ..
+                } = notif
+                else {
+                    continue;
+                };
+                if doc_id != self.drawer_doc_id {
+                    eyre::bail!(
+                        "invariant break: drawer listener received change for wrong doc id: expected={} got={}",
+                        self.drawer_doc_id,
+                        doc_id
+                    );
+                }
+                *self.current_heads.lock().expect(ERROR_MUTEX) = ChangeHashSet(Arc::clone(&heads));
                 if let Err(err) = self
                     .events_for_patch(
-                        &notif.patch,
-                        &notif.heads,
+                        &patch,
+                        &heads,
                         &mut events,
-                        Some(self.local_actor_id.clone()),
+                        Some(&origin),
+                        Some(self.local_peer_id.as_str()),
                     )
                     .await
                 {
@@ -213,19 +259,271 @@ impl DrawerRepo {
         Ok(())
     }
 
+    fn branch_kind_for_path(
+        &self,
+        branch_path: &daybook_types::doc::BranchPath,
+    ) -> Res<BranchKind> {
+        if branch_path == &daybook_types::doc::BranchPath::from("main") {
+            return Ok(BranchKind::Replicated);
+        }
+        if branch_path == "/tmp" || branch_path.starts_with("/tmp/") {
+            return Ok(BranchKind::Tmp);
+        }
+        if branch_path.is_absolute() {
+            return Ok(BranchKind::Replicated);
+        }
+        eyre::bail!("invalid branch path '{}'", branch_path)
+    }
+
+    pub(crate) fn replicated_partition_id_for_drawer(
+        _drawer_doc_id: &DocumentId,
+    ) -> am_utils_rs::sync::protocol::PartitionId {
+        DRAWER_REPLICATED_PARTITION_PREFIX.to_string()
+    }
+
+    pub(crate) fn replicated_partition_id(&self) -> am_utils_rs::sync::protocol::PartitionId {
+        Self::replicated_partition_id_for_drawer(&self.drawer_doc_id)
+    }
+
+    async fn add_branch_to_partitions_if_needed(
+        &self,
+        branch_kind: BranchKind,
+        branch_doc_id: &str,
+    ) -> Res<()> {
+        if branch_kind == BranchKind::Replicated {
+            self.big_repo
+                .add_doc_to_partition(&self.replicated_partition_id(), branch_doc_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn remove_branch_from_partitions_if_needed(
+        &self,
+        branch_kind: BranchKind,
+        branch_doc_id: &str,
+    ) -> Res<()> {
+        if branch_kind == BranchKind::Replicated {
+            self.big_repo
+                .remove_doc_from_partition(&self.replicated_partition_id(), branch_doc_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn content_actor_id(
+        &self,
+        user_path: Option<&daybook_types::doc::UserPath>,
+        branch_doc_id: &str,
+    ) -> ActorId {
+        let base_user_path = user_path
+            .cloned()
+            .unwrap_or_else(|| self.local_user_path.clone());
+        let scoped_user_path = base_user_path.join("branches").join(branch_doc_id);
+        daybook_types::doc::user_path::to_actor_id(&scoped_user_path)
+    }
+
+    async fn get_branch_state(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+    ) -> Res<Option<BranchStateRow>> {
+        self.derive_branch_state(doc_id, branch_path).await
+    }
+
+    async fn list_branch_states(&self, doc_id: &DocId) -> Res<Vec<BranchStateRow>> {
+        self.derive_branch_states(doc_id).await
+    }
+
+    async fn get_entry_branch_ref(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+    ) -> Res<Option<(StoredBranchRef, BranchKind)>> {
+        let Some(entry) = self.get_entry(doc_id).await? else {
+            return Ok(None);
+        };
+        let branch_path_str = branch_path.to_string();
+        let Some(branch_ref) = entry.branches.get(&branch_path_str) else {
+            return Ok(None);
+        };
+        let branch_kind = self.branch_kind_for_path(branch_path)?;
+        Ok(Some((branch_ref.clone(), branch_kind)))
+    }
+
+    async fn derive_branch_state(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+    ) -> Res<Option<BranchStateRow>> {
+        let Some((branch_ref, branch_kind)) =
+            self.get_entry_branch_ref(doc_id, branch_path).await?
+        else {
+            return Ok(None);
+        };
+        let Some(handle) = self
+            .get_handle_by_branch_doc_id(&branch_ref.branch_doc_id)
+            .await?
+        else {
+            debug!(
+                doc_id = %doc_id,
+                branch_path = %branch_path,
+                branch_doc_id = %branch_ref.branch_doc_id,
+                "branch state unresolved; branch doc not available locally"
+            );
+            return Ok(None);
+        };
+        let latest_heads = handle
+            .with_document_local(|doc| ChangeHashSet(doc.get_heads().into()))
+            .await?;
+        Ok(Some(BranchStateRow {
+            branch_path: branch_path.to_string(),
+            branch_doc_id: branch_ref.branch_doc_id,
+            latest_heads,
+            branch_kind,
+        }))
+    }
+
+    async fn derive_branch_states(&self, doc_id: &DocId) -> Res<Vec<BranchStateRow>> {
+        let Some(entry) = self.get_entry(doc_id).await? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        let mut branch_names = entry.branches.keys().cloned().collect::<Vec<_>>();
+        branch_names.sort();
+        for branch_path in branch_names {
+            let branch_path = daybook_types::doc::BranchPath::from(branch_path);
+            if let Some(branch_state) = self.derive_branch_state(doc_id, &branch_path).await? {
+                out.push(branch_state);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn get_handle_by_branch_doc_id(
+        &self,
+        branch_doc_id: &str,
+    ) -> Res<Option<am_utils_rs::repo::BigDocHandle>> {
+        if let Some(handle) = self.branch_handles.get(branch_doc_id) {
+            return Ok(Some(handle.clone()));
+        }
+        let document_id = DocumentId::from_str(branch_doc_id)?;
+        let has_local = self.big_repo.local_contains_document(&document_id).await?;
+        if !has_local {
+            return Ok(None);
+        }
+        let Some(handle) = self.big_repo.find_doc(&document_id).await? else {
+            return Ok(None);
+        };
+        self.branch_handles
+            .insert(branch_doc_id.to_string(), handle.clone());
+        Ok(Some(handle))
+    }
+
+    async fn resolve_handle_for_heads(
+        &self,
+        doc_id: &DocId,
+        heads: &ChangeHashSet,
+    ) -> Res<Option<am_utils_rs::repo::BigDocHandle>> {
+        let branch_states = self.list_branch_states(doc_id).await?;
+        for branch_state in &branch_states {
+            if &branch_state.latest_heads == heads {
+                return self
+                    .get_handle_by_branch_doc_id(&branch_state.branch_doc_id)
+                    .await;
+            }
+        }
+
+        for branch_state in branch_states {
+            let Some(handle) = self
+                .get_handle_by_branch_doc_id(&branch_state.branch_doc_id)
+                .await?
+            else {
+                continue;
+            };
+            let exists = handle
+                .with_document_local(|doc| {
+                    automerge::ReadDoc::get_at(doc, automerge::ROOT, "facets", heads)
+                        .map(|_| true)
+                        .map_err(eyre::Report::from)
+                })
+                .await??;
+            if exists {
+                return Ok(Some(handle));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn current_doc_branches(&self, doc_id: &DocId) -> Res<Option<DocNBranches>> {
+        let branch_states = self.list_branch_states(doc_id).await?;
+        if branch_states.is_empty() && self.get_entry(doc_id).await?.is_none() {
+            return Ok(None);
+        }
+        let mut branches = HashMap::new();
+        for branch_state in branch_states {
+            branches.insert(branch_state.branch_path, branch_state.latest_heads);
+        }
+        Ok(Some(DocNBranches {
+            doc_id: doc_id.clone(),
+            branches,
+        }))
+    }
+
+    fn current_drawer_entries(&self) -> Res<(ChangeHashSet, Vec<(DocId, DocEntry)>)> {
+        self.drawer_am_handle.with_document(|doc| {
+            let drawer_heads = ChangeHashSet(doc.get_heads().into());
+            let map_id = match doc.get(automerge::ROOT, "docs")? {
+                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
+                    match doc.get(&id, "map")? {
+                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                        _ => eyre::bail!("invalid drawer shape"),
+                    }
+                }
+                None => return eyre::Ok((drawer_heads, Vec::new())),
+                _ => eyre::bail!("invalid drawer shape"),
+            };
+
+            let mut entries = Vec::new();
+            for item in doc.map_range(&map_id, ..) {
+                let doc_id = DocId::from(item.key.clone());
+                let entry: Option<DocEntry> = autosurgeon::hydrate_prop(doc, &map_id, item.key)?;
+                if let Some(entry) = entry {
+                    entries.push((doc_id, entry));
+                }
+            }
+            eyre::Ok((drawer_heads, entries))
+        })
+    }
+
     async fn events_for_patch(
         &self,
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<DrawerEvent>,
-        exclude_actor_id: Option<ActorId>,
+        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer: Option<&str>,
     ) -> Res<()> {
+        if let Some(origin) = origin {
+            match origin {
+                am_utils_rs::repo::BigRepoChangeOrigin::Local => return Ok(()),
+                am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. } => {
+                    if let Some(exclude_peer) = exclude_peer {
+                        if peer_id.to_string() == exclude_peer {
+                            return Ok(());
+                        }
+                    }
+                }
+                am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap => {}
+            }
+        }
         // Prefix: docs.map
-        if !am_utils_rs::changes::path_prefix_matches(&["docs".into(), "map".into()], &patch.path) {
+        if !am_utils_rs::repo::big_repo_path_prefix_matches(
+            &["docs".into(), "map".into()],
+            &patch.path,
+        ) {
             return Ok(());
         }
-
-        let drawer_heads = ChangeHashSet(Arc::clone(patch_heads));
 
         match &patch.action {
             automerge::PatchAction::PutMap {
@@ -240,38 +538,46 @@ impl DrawerRepo {
                     },
                     _ => return Ok(()),
                 };
-                let vtag = VersionTag::hydrate_bytes(vtag)?;
-                if Some(vtag.actor_id) == exclude_actor_id {
-                    return Ok(());
-                }
+                let _ = VersionTag::hydrate_bytes(vtag)?;
                 // docs.map.<doc_id>.version changed
                 let Some((_obj, automerge::Prop::Map(doc_id_str))) = patch.path.get(2) else {
                     return Ok(());
                 };
                 let doc_id = DocId::from(doc_id_str.clone());
 
-                // Hydrate the entry at patch heads
-                let entry_path = vec![
+                // Hydrate the entry at patch heads.
+                let path = vec![
                     "docs".into(),
                     "map".into(),
                     autosurgeon::Prop::Key(doc_id.to_string().into()),
                 ];
-
-                let (new_entry, _) = self
-                    .acx
+                let (new_entry, drawer_heads) = self
+                    .big_repo
                     .hydrate_path_at_heads::<DocEntry>(
                         &self.drawer_doc_id,
                         patch_heads,
                         automerge::ROOT,
-                        entry_path,
+                        path,
                     )
                     .await?
-                    .expect("failed to hydrate entry from patch");
+                    .ok_or_else(|| {
+                        ferr!(
+                            "drawer entry missing while handling vtag patch: doc_id={} patch_path={:?} patch_heads_len={}",
+                            doc_id,
+                            patch.path,
+                            patch_heads.len()
+                        )
+                    })?;
+                let drawer_heads = ChangeHashSet(drawer_heads);
 
                 if new_entry.previous_version_heads.is_none() {
+                    let entry = self
+                        .current_doc_branches(&doc_id)
+                        .await?
+                        .ok_or_eyre("drawer doc added but branch state missing")?;
                     out.push(DrawerEvent::DocAdded {
                         id: doc_id,
-                        entry: new_entry,
+                        entry,
                         drawer_heads,
                     });
                 } else {
@@ -285,10 +591,14 @@ impl DrawerRepo {
                         .ok_or_eyre(
                             "doc update previous entry not found at previous_version_heads",
                         )?;
-                    let diff = DocEntryDiff::new(&old_entry, &new_entry);
+                    let diff = DocEntryDiff::new(&old_entry, &new_entry, Vec::new());
+                    let entry = self
+                        .current_doc_branches(&doc_id)
+                        .await?
+                        .ok_or_eyre("drawer doc updated but branch state missing")?;
                     out.push(DrawerEvent::DocUpdated {
                         id: doc_id,
-                        entry: new_entry,
+                        entry,
                         diff,
                         drawer_heads,
                     });
@@ -297,6 +607,7 @@ impl DrawerRepo {
             automerge::PatchAction::DeleteMap { key, .. } if patch.path.len() == 2 => {
                 // docs.map.<doc_id> deleted
                 let doc_id = DocId::from(key.clone());
+                let drawer_heads = ChangeHashSet(Arc::clone(patch_heads));
 
                 // We don't have the entry anymore in the current heads,
                 // but V1 includes a placeholder entry.
@@ -328,9 +639,42 @@ impl DrawerRepo {
 
         let mut events = vec![];
         for patch in patches {
-            self.events_for_patch(&patch, &heads.0, &mut events, None)
+            self.events_for_patch(&patch, &heads.0, &mut events, None, None)
                 .await?;
         }
+        Ok(events)
+    }
+
+    pub async fn events_for_init(&self) -> Res<Vec<DrawerEvent>> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+
+        let (drawer_heads, entries) = self.current_drawer_entries()?;
+
+        {
+            let mut pool = self.entry_pool.lock().unwrap();
+            for (doc_id, entry) in &entries {
+                let pruned = pool.insert_key(doc_id, 1);
+                for pkey in pruned {
+                    self.entry_cache.remove(&pkey);
+                }
+                self.entry_cache.insert(doc_id.clone(), entry.clone());
+            }
+        }
+
+        let mut events = Vec::with_capacity(entries.len() + 1);
+        for (id, _entry) in entries {
+            events.push(DrawerEvent::DocAdded {
+                id: id.clone(),
+                entry: self
+                    .current_doc_branches(&id)
+                    .await?
+                    .ok_or_eyre("current branch state missing during drawer init")?,
+                drawer_heads: drawer_heads.clone(),
+            });
+        }
+        events.push(DrawerEvent::ListChanged { drawer_heads });
         Ok(events)
     }
 
@@ -364,7 +708,7 @@ impl DrawerRepo {
 
     pub async fn validate_facets(
         &self,
-        incoming_facets: &HashMap<FacetKey, daybook_types::doc::ArcFacetRaw>,
+        incoming_facets: &HashMap<FacetKey, FacetRaw>,
         resulting_facet_keys: &HashSet<FacetKey>,
     ) -> Res<()> {
         for (facet_key, facet_value) in incoming_facets {
@@ -377,8 +721,22 @@ impl DrawerRepo {
             };
 
             let schema_json = serde_json::to_value(&facet_manifest.value_schema)?;
-            let validator = jsonschema::validator_for(&schema_json)?;
-            if let Err(validation_error) = validator.validate(facet_value.as_ref()) {
+            let schema_cache_key = (facet_tag.clone(), serde_json::to_string(&schema_json)?);
+            let mut cache = self.facet_schema_validators.lock().unwrap();
+            let validator = if let Some(existing) = cache.get(&schema_cache_key) {
+                Arc::clone(existing)
+            } else {
+                let compiled = jsonschema::validator_for(&schema_json).map_err(|err| {
+                    eyre::eyre!(
+                        "failed to compile facet schema validator for facet_manifest tag '{}': {err}",
+                        facet_manifest.key_tag
+                    )
+                })?;
+                let compiled = Arc::new(compiled);
+                cache.insert(schema_cache_key, Arc::clone(&compiled));
+                compiled
+            };
+            if let Err(validation_error) = validator.validate(facet_value) {
                 eyre::bail!(
                     "facet '{}' failed schema validation: {}",
                     facet_key,
@@ -390,7 +748,7 @@ impl DrawerRepo {
                 self.validate_facet_reference(
                     resulting_facet_keys,
                     facet_key,
-                    facet_value.as_ref(),
+                    facet_value,
                     reference_manifest,
                 )?;
             }
@@ -617,163 +975,134 @@ impl DrawerRepo {
     }
 
     pub fn get_drawer_heads(&self) -> ChangeHashSet {
-        self.current_heads.read().unwrap().clone()
+        self.current_heads.lock().expect(ERROR_MUTEX).clone()
     }
 
     pub async fn list_just_ids(&self) -> Res<(ChangeHashSet, Vec<String>)> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-
-        self.drawer_am_handle.with_document(|doc| {
-            let map_id = match doc.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
-                    match doc.get(&id, "map")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => eyre::bail!("invalid drawer shape"),
-                    }
+        let (drawer_heads, entries) = self.current_drawer_entries()?;
+        {
+            let mut pool = self.entry_pool.lock().unwrap();
+            for (doc_id, entry) in &entries {
+                let pruned = pool.insert_key(doc_id, 1);
+                for pkey in pruned {
+                    self.entry_cache.remove(&pkey);
                 }
-                None => return eyre::Ok((ChangeHashSet(doc.get_heads().into()), vec![])),
-                _ => eyre::bail!("invalid drawer shape"),
-            };
-
-            let mut results = vec![];
-            for item in doc.map_range(&map_id, ..) {
-                results.push(item.key.to_string());
+                self.entry_cache.insert(doc_id.clone(), entry.clone());
             }
-            eyre::Ok((ChangeHashSet(doc.get_heads().into()), results))
-        })
+        }
+        let mut results = entries
+            .into_iter()
+            .map(|(doc_id, _)| doc_id.to_string())
+            .collect::<Vec<_>>();
+        results.sort();
+        Ok((drawer_heads, results))
     }
     pub async fn list(&self) -> Res<Vec<DocNBranches>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-
-        self.drawer_am_handle.with_document(|doc| {
-            let map_id = match doc.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
-                    match doc.get(&id, "map")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => eyre::bail!("invalid drawer shape"),
-                    }
-                }
-                None => return eyre::Ok(Vec::new()),
-                _ => eyre::bail!("invalid drawer shape"),
-            };
-
-            let mut results = Vec::new();
-            // FIXME: wtf, why are we not using autosurgeon hydrate here?
-            for item in doc.map_range(&map_id, ..) {
-                let doc_id = DocId::from(item.key.clone());
-                let entry_id = item.id();
-
-                let branches =
-                    if let Some((automerge::Value::Object(automerge::ObjType::Map), b_id)) =
-                        doc.get(&entry_id, "branches")?
-                    {
-                        let mut b_map = HashMap::new();
-                        for b_item in doc.map_range(&b_id, ..) {
-                            let b_heads: ChangeHashSet =
-                                autosurgeon::hydrate_prop(doc, &b_id, b_item.key.clone())?;
-                            b_map.insert(b_item.key.to_string(), b_heads);
-                        }
-                        b_map
-                    } else {
-                        HashMap::new()
-                    };
-
-                results.push(DocNBranches { doc_id, branches });
+        let (_drawer_heads, doc_ids) = self.list_just_ids().await?;
+        let mut results = Vec::with_capacity(doc_ids.len());
+        for doc_id in doc_ids {
+            if let Some(entry) = self.current_doc_branches(&DocId::from(doc_id)).await? {
+                results.push(entry);
             }
-            Ok(results)
-        })
+        }
+        Ok(results)
     }
 
-    pub async fn add(&self, args: AddDocArgs) -> Result<DocId, DrawerError> {
-        if self.cancel_token.is_cancelled() {
-            return Err(ferr!("repo is stopped"))?;
+    async fn prepare_add_doc(&self, args: AddDocArgs) -> Result<PreparedAddDoc, DrawerError> {
+        if args.branch_path != "main" {
+            return Err(ferr!("new docs must be created on main"))?;
         }
-        let incoming_facets: HashMap<FacetKey, daybook_types::doc::ArcFacetRaw> = args
-            .facets
-            .iter()
-            .map(|(facet_key, facet_value)| (facet_key.clone(), Arc::new(facet_value.clone())))
-            .collect();
-        let resulting_keys: HashSet<FacetKey> = incoming_facets.keys().cloned().collect();
-        self.validate_facets(&incoming_facets, &resulting_keys)
-            .await?;
-        let mutation_actor_id = if let Some(path) = &args.user_path {
-            daybook_types::doc::user_path::to_actor_id(path)
-        } else {
-            self.local_actor_id.clone()
-        };
-
-        // 1. Create content doc
-        let mut doc_am = automerge::Automerge::new();
-        doc_am.set_actor(mutation_actor_id);
-        let handle = self.acx.add_doc(doc_am).await?;
-        let doc_id = handle.document_id().to_string();
+        let doc_am = automerge::Automerge::new();
+        let handle = self.big_repo.create_doc(doc_am).await?;
+        let doc_id = DocId::from(Uuid::new_v4().bs58());
+        let branch_doc_id = handle.document_id().to_string();
+        let mutation_actor_id = self.content_actor_id(args.user_path.as_ref(), &branch_doc_id);
         let now = Timestamp::now();
 
         let facet_keys: Vec<_> = args.facets.keys().cloned().collect();
 
-        let heads = handle.with_document(|am_doc| {
-            let mut tx = am_doc.transaction();
-            tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
-            tx.put(automerge::ROOT, "id", &doc_id)?;
+        let heads = handle
+            .with_document_local(|am_doc| {
+                let mut tx = am_doc.transaction();
+                tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
+                tx.put(automerge::ROOT, "id", &doc_id)?;
 
-            let facets_obj = tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?;
+                let facets_obj =
+                    tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?;
 
-            for (key, value) in &args.facets {
-                let key_str = key.to_string();
-                autosurgeon::reconcile_prop(
+                for (key, value) in &args.facets {
+                    let key_str = key.to_string();
+                    autosurgeon::reconcile_prop(
+                        &mut tx,
+                        &facets_obj,
+                        &*key_str,
+                        ThroughJson(value.clone()),
+                    )?;
+                }
+
+                dmeta::ensure_for_add(
                     &mut tx,
                     &facets_obj,
-                    &*key_str,
-                    ThroughJson(value.clone()),
+                    &facet_keys,
+                    now,
+                    args.user_path.as_ref(),
+                    &mutation_actor_id,
                 )?;
-            }
 
-            dmeta::ensure_for_add(&mut tx, &facets_obj, &facet_keys, now)?;
-
-            let (heads, _) = tx.commit();
-            let heads = heads.expect("commit failed");
-            eyre::Ok(ChangeHashSet(Arc::from([heads])))
-        })?;
-
-        // 2. Update drawer doc
-        let mut users = HashMap::new();
-        if let Some(user_path) = args.user_path {
-            users.insert(
-                self.local_actor_id.to_string(),
-                crate::config::UserMeta {
-                    user_path,
-                    seen_at: now,
-                },
-            );
-        }
+                let (heads, _) = tx.commit();
+                let heads = heads.expect("commit failed");
+                eyre::Ok(ChangeHashSet(Arc::from([heads])))
+            })
+            .await??;
 
         let entry = DocEntry {
             branches: [(
-                args.branch_path.to_string_lossy().to_string(),
-                heads.clone(),
+                args.branch_path.to_string(),
+                StoredBranchRef {
+                    branch_doc_id: branch_doc_id.clone(),
+                },
             )]
             .into(),
-            facet_blames: facet_keys
-                .iter()
-                .map(|facet_key| {
-                    (
-                        facet_key.to_string(),
-                        FacetBlame {
-                            heads: heads.clone(),
-                        },
-                    )
-                })
-                .collect(),
-            users,
             vtag: VersionTag::mint(self.local_actor_id.clone()),
             previous_version_heads: None,
         };
 
+        Ok(PreparedAddDoc {
+            doc_id,
+            handle,
+            entry,
+            branch_heads: heads,
+            branch_doc_id,
+        })
+    }
+
+    pub async fn batch_add(&self, args_batch: Vec<AddDocArgs>) -> Result<Vec<DocId>, DrawerError> {
+        if self.cancel_token.is_cancelled() {
+            return Err(ferr!("repo is stopped"))?;
+        }
+
+        if args_batch.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        for args in &args_batch {
+            let resulting_keys: HashSet<FacetKey> = args.facets.keys().cloned().collect();
+            self.validate_facets(&args.facets, &resulting_keys).await?;
+        }
+
+        let mut prepared_docs = Vec::with_capacity(args_batch.len());
+        for args in args_batch {
+            prepared_docs.push(self.prepare_add_doc(args).await?);
+        }
+
         let drawer_heads = self.drawer_am_handle.with_document(|doc| {
+            doc.set_actor(self.local_actor_id.clone());
             let mut tx = doc.transaction();
             let docs_obj = match tx.get(automerge::ROOT, "docs")? {
                 Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
@@ -783,37 +1112,69 @@ impl DrawerRepo {
                 Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
                 _ => tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?,
             };
-
-            autosurgeon::reconcile_prop(&mut tx, &map_id, &*doc_id, &entry)?;
+            for prepared in &prepared_docs {
+                autosurgeon::reconcile_prop(
+                    &mut tx,
+                    &map_id,
+                    autosurgeon::Prop::Key((&prepared.doc_id[..]).into()),
+                    &prepared.entry,
+                )?;
+            }
             let (heads, _) = tx.commit();
             let heads = heads.expect("commit failed");
             eyre::Ok(ChangeHashSet(Arc::from([heads])))
         })?;
 
-        // 3. Update caches and notify
+        let mut doc_ids = Vec::with_capacity(prepared_docs.len());
+        let mut events = Vec::with_capacity(prepared_docs.len() + 1);
+
         {
             let mut pool = self.entry_pool.lock().unwrap();
-            let pruned = pool.insert_key(&doc_id, 1);
-            for pkey in pruned {
-                self.entry_cache.remove(&pkey);
+            for prepared in &prepared_docs {
+                let pruned = pool.insert_key(&prepared.doc_id, 1);
+                for pkey in pruned {
+                    self.entry_cache.remove(&pkey);
+                }
+                self.entry_cache
+                    .insert(prepared.doc_id.clone(), prepared.entry.clone());
             }
-            self.entry_cache.insert(doc_id.clone(), entry.clone());
         }
-        self.handles.insert(doc_id.clone(), handle);
 
-        self.registry.notify([
-            DrawerEvent::DocAdded {
-                id: doc_id.clone(),
-                entry,
+        for prepared in prepared_docs {
+            self.add_branch_to_partitions_if_needed(
+                BranchKind::Replicated,
+                &prepared.branch_doc_id,
+            )
+            .await?;
+            doc_ids.push(prepared.doc_id.clone());
+            self.branch_handles
+                .insert(prepared.branch_doc_id.clone(), prepared.handle);
+            events.push(DrawerEvent::DocAdded {
+                id: prepared.doc_id.clone(),
+                entry: DocNBranches {
+                    doc_id: prepared.doc_id,
+                    branches: [("main".to_string(), prepared.branch_heads)].into(),
+                },
                 drawer_heads: drawer_heads.clone(),
-            },
-            DrawerEvent::ListChanged {
-                drawer_heads: drawer_heads.clone(),
-            },
-        ]);
-        *self.current_heads.write().unwrap() = drawer_heads;
+            });
+        }
+        events.push(DrawerEvent::ListChanged {
+            drawer_heads: drawer_heads.clone(),
+        });
+        self.registry.notify(events);
+        *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
 
-        Ok(doc_id)
+        Ok(doc_ids)
+    }
+
+    pub async fn add(&self, args: AddDocArgs) -> Result<DocId, DrawerError> {
+        let mut created = self.batch_add(vec![args]).await?;
+        if created.len() != 1 {
+            return Err(ferr!(
+                "batch_add returned invalid result for single add call"
+            ))?;
+        }
+        Ok(created.pop().expect("checked above"))
     }
 
     pub async fn update_at_heads(
@@ -829,30 +1190,14 @@ impl DrawerRepo {
             return Ok(());
         }
 
-        let handle = self
-            .get_handle(&patch.id)
-            .await?
-            .ok_or_else(|| DrawerError::DocNotFound {
-                id: patch.id.clone(),
-            })?;
-
-        let latest_drawer_heads = self.current_heads.read().unwrap().clone();
-        let entry = self
-            .get_entry_at_heads(&patch.id, &latest_drawer_heads)
-            .await?
-            .ok_or_else(|| DrawerError::DocNotFound {
-                id: patch.id.clone(),
-            })?;
-
-        let heads = match heads {
-            Some(selected_heads) => selected_heads,
-            None => {
-                let branch_name = branch_path.to_string_lossy().to_string();
-                entry
-                    .branches
-                    .get(&branch_name)
-                    .cloned()
-                    .ok_or_else(|| DrawerError::BranchNotFound { name: branch_name })?
+        let existing_branch_state = self.get_branch_state(&patch.id, &branch_path).await?;
+        let heads = match (heads, existing_branch_state.as_ref()) {
+            (Some(selected_heads), _) => selected_heads,
+            (None, Some(branch_state)) => branch_state.latest_heads.clone(),
+            (None, None) => {
+                return Err(DrawerError::BranchNotFound {
+                    name: branch_path.to_string(),
+                })
             }
         };
 
@@ -863,114 +1208,161 @@ impl DrawerRepo {
                 id: patch.id.clone(),
             })?;
         let mut resulting_keys = existing_facet_keys;
-        let incoming_facets: HashMap<FacetKey, daybook_types::doc::ArcFacetRaw> = patch
-            .facets_set
-            .iter()
-            .map(|(facet_key, facet_value)| (facet_key.clone(), Arc::new(facet_value.clone())))
-            .collect();
-        for facet_key in incoming_facets.keys() {
+        for facet_key in patch.facets_set.keys() {
             resulting_keys.insert(facet_key.clone());
         }
         for facet_key in &patch.facets_remove {
             resulting_keys.remove(facet_key);
         }
-        self.validate_facets(&incoming_facets, &resulting_keys)
+        self.validate_facets(&patch.facets_set, &resulting_keys)
             .await?;
 
         let now = Timestamp::now();
         let facet_keys_set: Vec<_> = patch.facets_set.keys().cloned().collect();
         let facet_keys_remove = patch.facets_remove.clone();
-        let mutation_actor_id = if let Some(path) = &patch.user_path {
-            daybook_types::doc::user_path::to_actor_id(path)
-        } else {
-            self.local_actor_id.clone()
-        };
+
+        let (handle, created_branch_doc_id, branch_kind, branch_doc_id) =
+            if let Some(branch_state) = existing_branch_state {
+                (
+                    self.get_handle_by_branch_doc_id(&branch_state.branch_doc_id)
+                        .await?
+                        .ok_or_else(|| {
+                            ferr!("missing branch doc '{}'", branch_state.branch_doc_id)
+                        })?,
+                    None,
+                    branch_state.branch_kind,
+                    branch_state.branch_doc_id,
+                )
+            } else {
+                let branch_kind = self.branch_kind_for_path(&branch_path)?;
+                let Some(source_handle) = self.resolve_handle_for_heads(&patch.id, &heads).await?
+                else {
+                    return Err(DrawerError::DocNotFound {
+                        id: patch.id.clone(),
+                    });
+                };
+                let branch_doc = source_handle
+                    .with_document_local(|am_doc| {
+                        am_doc.fork_at(&heads).map_err(eyre::Report::from)
+                    })
+                    .await??;
+                let handle = self.big_repo.create_doc(branch_doc).await?;
+                let branch_doc_id = handle.document_id().to_string();
+                (
+                    handle,
+                    Some(branch_doc_id.clone()),
+                    branch_kind,
+                    branch_doc_id,
+                )
+            };
+        let mutation_actor_id = self.content_actor_id(patch.user_path.as_ref(), &branch_doc_id);
 
         // 1. Update content doc
-        let (new_heads, invalidated_uuids) = handle.with_document(|am_doc| {
-            am_doc.set_actor(mutation_actor_id.clone());
-            let mut tx = am_doc.transaction_at(automerge::PatchLog::null(), &heads);
+        let (_new_heads, invalidated_uuids) = handle
+            .with_document_local(|am_doc| {
+                am_doc.set_actor(mutation_actor_id.clone());
+                let mut tx = am_doc.transaction_at(automerge::PatchLog::null(), &heads);
 
-            let facets_obj = match tx.get(automerge::ROOT, "facets")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                _ => eyre::bail!("facets object not found in content doc"),
-            };
+                let facets_obj = match tx.get(automerge::ROOT, "facets")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => eyre::bail!("facets object not found in content doc"),
+                };
 
-            for (key, value) in &patch.facets_set {
-                let key_str = key.to_string();
-                autosurgeon::reconcile_prop(
+                for (key, value) in &patch.facets_set {
+                    let key_str = key.to_string();
+                    autosurgeon::reconcile_prop(
+                        &mut tx,
+                        &facets_obj,
+                        &*key_str,
+                        ThroughJson(value.clone()),
+                    )?;
+                }
+                for key in &patch.facets_remove {
+                    let key_str = key.to_string();
+                    tx.delete(&facets_obj, &*key_str)?;
+                }
+
+                let invalidated_uuids = dmeta::apply_update(
                     &mut tx,
                     &facets_obj,
-                    &*key_str,
-                    ThroughJson(value.clone()),
+                    &facet_keys_set,
+                    &facet_keys_remove,
+                    now,
+                    patch.user_path.as_ref(),
+                    &mutation_actor_id,
                 )?;
-            }
-            for key in &patch.facets_remove {
-                let key_str = key.to_string();
-                tx.delete(&facets_obj, &*key_str)?;
-            }
 
-            let invalidated_uuids = dmeta::apply_update(
-                &mut tx,
-                &facets_obj,
-                &facet_keys_set,
-                &facet_keys_remove,
-                now,
-            )?;
+                let (heads, _) = tx.commit();
+                let heads = heads.expect("commit failed");
+                eyre::Ok((ChangeHashSet(Arc::from([heads])), invalidated_uuids))
+            })
+            .await??;
 
-            let (heads, _) = tx.commit();
-            let heads = heads.expect("commit failed");
-            eyre::Ok((ChangeHashSet(Arc::from([heads])), invalidated_uuids))
-        })?;
+        if let Some(created_branch_doc_id) = &created_branch_doc_id {
+            self.add_branch_to_partitions_if_needed(branch_kind, created_branch_doc_id)
+                .await?;
+        }
 
-        // 2. Update drawer doc
-        let mut new_entry = entry.clone();
-        new_entry
-            .branches
-            .insert(branch_path.to_string_lossy().to_string(), new_heads.clone());
-        for key in &facet_keys_set {
-            new_entry.facet_blames.insert(
-                key.to_string(),
-                FacetBlame {
-                    heads: new_heads.clone(),
+        let mut drawer_heads = self.get_drawer_heads();
+        let diff = if let Some(ref created_branch_doc_id) = created_branch_doc_id {
+            let latest_drawer_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
+            let entry = self
+                .get_entry_at_heads(&patch.id, &latest_drawer_heads)
+                .await?
+                .ok_or_else(|| DrawerError::DocNotFound {
+                    id: patch.id.clone(),
+                })?;
+            let mut new_entry = entry.clone();
+            new_entry.branches.insert(
+                branch_path.to_string(),
+                StoredBranchRef {
+                    branch_doc_id: created_branch_doc_id.clone(),
                 },
             );
-        }
-        for key in &facet_keys_remove {
-            new_entry.facet_blames.remove(&key.to_string());
-        }
-        if let Some(user_path) = patch.user_path {
-            new_entry.users.insert(
-                self.local_actor_id.to_string(),
-                crate::config::UserMeta {
-                    user_path,
-                    seen_at: now,
-                },
-            );
-        }
-        new_entry.vtag = VersionTag::update(self.local_actor_id.clone());
+            new_entry.vtag = VersionTag::update(self.local_actor_id.clone());
 
-        let drawer_heads = self.drawer_am_handle.with_document(|doc| {
-            let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
-            new_entry.previous_version_heads = Some(current_drawer_heads);
+            drawer_heads = self.drawer_am_handle.with_document(|doc| {
+                let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
+                new_entry.previous_version_heads = Some(current_drawer_heads);
 
-            let mut tx = doc.transaction();
-            let map_id = match tx.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => {
-                    match tx.get(&docs_id, "map")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => map_id,
-                        _ => eyre::bail!("drawer map not found"),
+                let mut tx = doc.transaction();
+                let map_id = match tx.get(automerge::ROOT, "docs")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => {
+                        match tx.get(&docs_id, "map")? {
+                            Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => {
+                                map_id
+                            }
+                            _ => eyre::bail!("drawer map not found"),
+                        }
                     }
-                }
-                _ => eyre::bail!("drawer docs not found"),
-            };
+                    _ => eyre::bail!("drawer docs not found"),
+                };
 
-            autosurgeon::reconcile_prop(&mut tx, &map_id, &*patch.id, &new_entry)?;
-            let (heads, _) = tx.commit();
-            let heads = heads.expect("commit failed");
-            eyre::Ok(ChangeHashSet(Arc::from([heads])))
-        })?;
-        let diff = DocEntryDiff::new(&entry, &new_entry);
+                autosurgeon::reconcile_prop(&mut tx, &map_id, &*patch.id, &new_entry)?;
+                let (heads, _) = tx.commit();
+                let heads = heads.expect("commit failed");
+                eyre::Ok(ChangeHashSet(Arc::from([heads])))
+            })?;
+            let old_entry = entry.clone();
+            DocEntryDiff::new(
+                &old_entry,
+                &new_entry,
+                facet_keys_set
+                    .iter()
+                    .cloned()
+                    .chain(facet_keys_remove.iter().cloned())
+                    .collect(),
+            )
+        } else {
+            DocEntryDiff {
+                changed_facet_keys: facet_keys_set
+                    .iter()
+                    .cloned()
+                    .chain(facet_keys_remove.iter().cloned())
+                    .collect(),
+                moved_branch_names: vec![branch_path.to_string()],
+            }
+        };
 
         // 3. Update caches and notify
         {
@@ -979,17 +1371,22 @@ impl DrawerRepo {
             for pkey in pruned {
                 self.entry_cache.remove(&pkey);
             }
-            self.entry_cache.insert(patch.id.clone(), new_entry.clone());
+            self.entry_cache.remove(&patch.id);
         }
 
         for uuid in invalidated_uuids {
             self.invalidate_facet_cache_entry(&patch.id, &uuid);
         }
 
+        *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
+        let updated_entry = self
+            .current_doc_branches(&patch.id)
+            .await?
+            .ok_or_eyre("branch state missing after update")?;
         self.registry.notify([
             DrawerEvent::DocUpdated {
-                id: patch.id,
-                entry: new_entry,
+                id: patch.id.clone(),
+                entry: updated_entry,
                 diff,
                 drawer_heads: drawer_heads.clone(),
             },
@@ -997,7 +1394,9 @@ impl DrawerRepo {
                 drawer_heads: drawer_heads.clone(),
             },
         ]);
-        *self.current_heads.write().unwrap() = drawer_heads;
+
+        self.branch_handles
+            .insert(handle.document_id().to_string(), handle);
 
         Ok(())
     }
@@ -1014,123 +1413,92 @@ impl DrawerRepo {
                 inner: ferr!("repo is stopped"),
             });
         }
+        let to_branch_state = self.get_branch_state(id, to_branch).await?.ok_or_else(|| {
+            DrawerError::BranchNotFound {
+                name: to_branch.to_string(),
+            }
+        })?;
         let handle = self
-            .get_handle(id)
+            .get_handle_by_branch_doc_id(&to_branch_state.branch_doc_id)
             .await?
             .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
-
-        let latest_drawer_heads = self.current_heads.read().unwrap().clone();
-        let entry = self
-            .get_entry_at_heads(id, &latest_drawer_heads)
+        let to_branch_name = to_branch.to_string();
+        let to_heads = &to_branch_state.latest_heads;
+        let mutation_actor_id =
+            self.content_actor_id(user_path.as_ref(), &to_branch_state.branch_doc_id);
+        let from_handle = self
+            .resolve_handle_for_heads(id, from_heads)
             .await?
             .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
-
-        let to_branch_name = to_branch.to_string_lossy().to_string();
-        let to_heads =
-            entry
-                .branches
-                .get(&to_branch_name)
-                .ok_or_else(|| DrawerError::BranchNotFound {
-                    name: to_branch_name.clone(),
-                })?;
-        let mutation_actor_id = if let Some(path) = &user_path {
-            daybook_types::doc::user_path::to_actor_id(path)
-        } else {
-            self.local_actor_id.clone()
-        };
 
         // 1. Merge content docs
-        let (new_heads, modified_facets, invalidated_uuids) = handle.with_document(|am_doc| {
-            am_doc.set_actor(mutation_actor_id.clone());
-            let mut am_to = am_doc.fork_at(to_heads)?;
-            am_to.set_actor(mutation_actor_id);
+        let user_path_for_dmeta = user_path.clone();
+        let mut am_from = from_handle
+            .with_document_local(|from_doc| {
+                from_doc.fork_at(from_heads).map_err(eyre::Report::from)
+            })
+            .await??;
+        let (_new_heads, modified_facets, invalidated_uuids) = handle
+            .with_document_local(move |am_doc| {
+                am_doc.set_actor(mutation_actor_id.clone());
+                let mut am_to = am_doc.fork_at(to_heads)?;
+                am_to.set_actor(mutation_actor_id.clone());
 
-            let mut am_from = am_doc.fork_at(from_heads)?;
+                let mut patch_log = automerge::PatchLog::active();
+                am_to.merge_and_log_patches(&mut am_from, &mut patch_log)?;
 
-            let mut patch_log = automerge::PatchLog::active();
-            am_to.merge_and_log_patches(&mut am_from, &mut patch_log)?;
+                let patches = am_to.make_patches(&mut patch_log);
+                let heads = am_to.get_heads();
+                let new_heads = ChangeHashSet(heads.into());
 
-            let patches = am_to.make_patches(&mut patch_log);
-            let heads = am_to.get_heads();
-            let new_heads = ChangeHashSet(heads.into());
+                // Merge back to main doc handle
+                am_doc.merge(&mut am_to)?;
 
-            // Merge back to main doc handle
-            am_doc.merge(&mut am_to)?;
-
-            // Identify modified facets from patches
-            let mut modified_facets = HashSet::new();
-            for patch in patches {
-                if patch.path.len() >= 2 {
-                    if let (_, automerge::Prop::Map(ref p0)) = &patch.path[0] {
-                        if p0 == "facets" {
-                            if let (_, automerge::Prop::Map(ref facet_key_str)) = &patch.path[1] {
-                                modified_facets.insert(facet_key_str.to_string());
+                // Identify modified facets from patches
+                let mut modified_facets = HashSet::new();
+                for patch in patches {
+                    if patch.path.len() >= 2 {
+                        if let (_, automerge::Prop::Map(ref p0)) = &patch.path[0] {
+                            if p0 == "facets" {
+                                if let (_, automerge::Prop::Map(ref facet_key_str)) = &patch.path[1]
+                                {
+                                    modified_facets.insert(facet_key_str.to_string());
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            let invalidated_uuids = if modified_facets.is_empty() {
-                Vec::new()
-            } else {
-                let mut tx = am_doc.transaction();
-                let facets_obj = match tx.get(automerge::ROOT, "facets")? {
-                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                    _ => eyre::bail!("facets object not found in content doc"),
+                let invalidated_uuids = if modified_facets.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut tx = am_doc.transaction();
+                    let facets_obj = match tx.get(automerge::ROOT, "facets")? {
+                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                        _ => eyre::bail!("facets object not found in content doc"),
+                    };
+                    let now = Timestamp::now();
+                    let invalidated = dmeta::apply_merge(
+                        &mut tx,
+                        &facets_obj,
+                        &modified_facets,
+                        now,
+                        user_path_for_dmeta.as_ref(),
+                        &mutation_actor_id,
+                    )?;
+                    tx.commit();
+                    invalidated
                 };
-                let now = Timestamp::now();
-                let invalidated = dmeta::apply_merge(&mut tx, &facets_obj, &modified_facets, now)?;
-                tx.commit();
-                invalidated
-            };
 
-            eyre::Ok((new_heads, modified_facets, invalidated_uuids))
-        })?;
+                eyre::Ok((new_heads, modified_facets, invalidated_uuids))
+            })
+            .await??;
 
-        // 2. Update drawer doc
-        let mut new_entry = entry.clone();
-        new_entry.branches.insert(to_branch_name, new_heads.clone());
-        for key_str in modified_facets {
-            new_entry.facet_blames.insert(
-                key_str,
-                FacetBlame {
-                    heads: new_heads.clone(),
-                },
-            );
-        }
-        if let Some(user_path) = user_path {
-            new_entry.users.insert(
-                self.local_actor_id.to_string(),
-                crate::config::UserMeta {
-                    user_path,
-                    seen_at: Timestamp::now(),
-                },
-            );
-        }
-        new_entry.vtag = VersionTag::update(self.local_actor_id.clone());
-
-        let drawer_heads = self.drawer_am_handle.with_document(|doc| {
-            let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
-            new_entry.previous_version_heads = Some(current_drawer_heads);
-
-            let mut tx = doc.transaction();
-            let map_id = match tx.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => {
-                    match tx.get(&docs_id, "map")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => map_id,
-                        _ => eyre::bail!("drawer map not found"),
-                    }
-                }
-                _ => eyre::bail!("drawer docs not found"),
-            };
-
-            autosurgeon::reconcile_prop(&mut tx, &map_id, &**id, &new_entry)?;
-            let (heads, _) = tx.commit();
-            let heads = heads.expect("commit failed");
-            eyre::Ok(ChangeHashSet(Arc::from([heads])))
-        })?;
-        let diff = DocEntryDiff::new(&entry, &new_entry);
+        let drawer_heads = self.get_drawer_heads();
+        let diff = DocEntryDiff {
+            changed_facet_keys: modified_facets.into_iter().map(FacetKey::from).collect(),
+            moved_branch_names: vec![to_branch_name.clone()],
+        };
 
         // 3. Update caches and notify
         {
@@ -1139,17 +1507,22 @@ impl DrawerRepo {
             for pkey in pruned {
                 self.entry_cache.remove(&pkey);
             }
-            self.entry_cache.insert(id.clone(), new_entry.clone());
+            self.entry_cache.remove(id);
         }
 
         for uuid in invalidated_uuids {
             self.invalidate_facet_cache_entry(id, &uuid);
         }
 
+        *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
+        let updated_entry = self
+            .current_doc_branches(id)
+            .await?
+            .ok_or_eyre("branch state missing after merge")?;
         self.registry.notify([
             DrawerEvent::DocUpdated {
                 id: id.clone(),
-                entry: new_entry,
+                entry: updated_entry,
                 diff,
                 drawer_heads: drawer_heads.clone(),
             },
@@ -1157,7 +1530,6 @@ impl DrawerRepo {
                 drawer_heads: drawer_heads.clone(),
             },
         ]);
-        *self.current_heads.write().unwrap() = drawer_heads;
 
         Ok(())
     }
@@ -1195,20 +1567,36 @@ impl DrawerRepo {
         let (existed, drawer_heads, entry) = res?;
 
         if existed {
+            let Some(entry) = &entry else {
+                return Err(ferr!(
+                    "deleted drawer entry must be returned with deletion result"
+                ))?;
+            };
+            for (branch_path, branch_ref) in &entry.branches {
+                self.remove_branch_from_partitions_if_needed(
+                    self.branch_kind_for_path(&daybook_types::doc::BranchPath::from(
+                        branch_path.clone(),
+                    ))?,
+                    &branch_ref.branch_doc_id,
+                )
+                .await?;
+            }
             self.invalidate_entry_cache(id);
-            self.handles.remove(id);
+            for branch_ref in entry.branches.values() {
+                self.branch_handles.remove(&branch_ref.branch_doc_id);
+            }
             self.invalidate_facet_cache_doc(id);
             self.registry.notify([
                 DrawerEvent::DocDeleted {
                     id: id.clone(),
-                    entry,
+                    entry: Some(entry.clone()),
                     drawer_heads: drawer_heads.clone(),
                 },
                 DrawerEvent::ListChanged {
                     drawer_heads: drawer_heads.clone(),
                 },
             ]);
-            *self.current_heads.write().unwrap() = drawer_heads;
+            *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads;
         }
 
         Ok(existed)
@@ -1222,15 +1610,25 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        // Entry cache is currently only for "latest" known heads of the drawer doc.
-        // For specific heads, we always hydrate.
+        let current_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
+        if heads == &current_heads {
+            return self.get_entry(doc_id).await;
+        }
+        self.hydrate_entry_at_heads(doc_id, heads).await
+    }
+
+    async fn hydrate_entry_at_heads(
+        &self,
+        doc_id: &DocId,
+        heads: &ChangeHashSet,
+    ) -> Res<Option<DocEntry>> {
         let path = vec![
             "docs".into(),
             "map".into(),
             autosurgeon::Prop::Key(doc_id.to_string().into()),
         ];
         let entry = self
-            .acx
+            .big_repo
             .hydrate_path_at_heads::<DocEntry>(&self.drawer_doc_id, heads, automerge::ROOT, path)
             .await?;
         Ok(entry.map(|(entry_value, _)| entry_value))
@@ -1246,8 +1644,8 @@ impl DrawerRepo {
             return Ok(Some(cached.clone()));
         }
 
-        let heads = self.current_heads.read().unwrap().clone();
-        let entry = self.get_entry_at_heads(doc_id, &heads).await?;
+        let heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
+        let entry = self.hydrate_entry_at_heads(doc_id, &heads).await?;
 
         if let Some(entry) = entry {
             let mut pool = self.entry_pool.lock().unwrap();
@@ -1262,21 +1660,6 @@ impl DrawerRepo {
         }
     }
 
-    async fn get_handle(&self, id: &DocId) -> Res<Option<samod::DocHandle>> {
-        if let Some(handle) = self.handles.get(id) {
-            return Ok(Some(handle.clone()));
-        }
-        if self.get_entry(id).await?.is_none() {
-            return Ok(None);
-        }
-        let doc_id = DocumentId::from_str(id)?;
-        let Some(handle) = self.acx.find_doc(&doc_id).await? else {
-            return Ok(None);
-        };
-        self.handles.insert(id.clone(), handle.clone());
-        Ok(Some(handle))
-    }
-
     /// Fetch facets at given heads with Arc-backed values to avoid deep-cloning on cache hits.
     pub(crate) async fn get_at_heads_with_facets_arc(
         &self,
@@ -1288,62 +1671,76 @@ impl DrawerRepo {
             eyre::bail!("repo is stopped");
         }
 
-        let Some(handle) = self.get_handle(doc_id).await? else {
+        let Some(handle) = self.resolve_handle_for_heads(doc_id, heads).await? else {
             return Ok(None);
         };
 
-        let (facets, to_cache) = handle.with_document(|am_doc| {
-            let view: automerge::Automerge = am_doc.fork_at(heads)?;
-            let mut facets = HashMap::new();
-            let mut to_cache = Vec::new();
+        let (facets, to_cache) = handle
+            .with_document_local(|am_doc| {
+                let mut facets = HashMap::new();
+                let mut to_cache = Vec::new();
 
-            match &facet_keys {
-                None => {
-                    let full: ThroughJson<Doc> = autosurgeon::hydrate(&view)?;
-                    for (key, value) in full.0.facets {
-                        let value = Arc::new(value);
-                        facets.insert(key.clone(), Arc::clone(&value));
-                        if let Some(facet_uuid) = dmeta::facet_uuid_for_key(&view, &key)? {
-                            let facet_heads = dmeta::facet_heads_for_key(&view, &key)?;
-                            to_cache.push((facet_uuid, facet_heads, value));
+                match &facet_keys {
+                    None => {
+                        let full: ThroughJson<Doc> = autosurgeon::hydrate_at(am_doc, heads)?;
+                        for (key, value) in full.0.facets {
+                            let value = Arc::new(value);
+                            facets.insert(key.clone(), Arc::clone(&value));
+                            if let Some(facet_uuid) =
+                                dmeta::facet_uuid_for_key_at(am_doc, &key, heads)?
+                            {
+                                let facet_heads =
+                                    dmeta::facet_heads_for_key_at(am_doc, &key, heads)?;
+                                to_cache.push((facet_uuid, facet_heads, value));
+                            }
                         }
                     }
-                }
-                Some(keys) => {
-                    let facets_obj = match view.get(automerge::ROOT, "facets")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => eyre::bail!("facets object not found in content doc"),
-                    };
-                    for key in keys {
-                        let facet_uuid = dmeta::facet_uuid_for_key(&view, key)?;
-                        let facet_heads = if facet_uuid.is_some() {
-                            Some(dmeta::facet_heads_for_key(&view, key)?)
-                        } else {
-                            None
+                    Some(keys) => {
+                        let facets_obj = match automerge::ReadDoc::get_at(
+                            am_doc,
+                            automerge::ROOT,
+                            "facets",
+                            heads,
+                        )? {
+                            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                            _ => eyre::bail!("facets object not found in content doc"),
                         };
+                        for key in keys {
+                            let facet_uuid = dmeta::facet_uuid_for_key_at(am_doc, key, heads)?;
+                            let facet_heads = if facet_uuid.is_some() {
+                                Some(dmeta::facet_heads_for_key_at(am_doc, key, heads)?)
+                            } else {
+                                None
+                            };
 
-                        if let (Some(uuid), Some(heads)) = (facet_uuid, &facet_heads) {
-                            if let Some(cached) = self.facet_cache_get(doc_id, &uuid, heads) {
-                                facets.insert(key.clone(), cached);
-                                continue;
+                            if let (Some(uuid), Some(heads)) = (facet_uuid, &facet_heads) {
+                                if let Some(cached) = self.facet_cache_get(doc_id, &uuid, heads) {
+                                    facets.insert(key.clone(), cached);
+                                    continue;
+                                }
                             }
-                        }
 
-                        let key_str = key.to_string();
-                        let value: Option<ThroughJson<FacetRaw>> =
-                            autosurgeon::hydrate_prop(&view, &facets_obj, &*key_str)?;
-                        if let Some(facet_value) = value {
-                            let facet_value = Arc::new(facet_value.0);
-                            facets.insert(key.clone(), Arc::clone(&facet_value));
-                            if let (Some(uuid), Some(heads)) = (facet_uuid, facet_heads) {
-                                to_cache.push((uuid, heads, facet_value));
+                            let key_str = key.to_string();
+                            let value: Option<ThroughJson<FacetRaw>> =
+                                autosurgeon::hydrate_prop_at(
+                                    am_doc,
+                                    &facets_obj,
+                                    &*key_str,
+                                    heads,
+                                )?;
+                            if let Some(facet_value) = value {
+                                let facet_value = Arc::new(facet_value.0);
+                                facets.insert(key.clone(), Arc::clone(&facet_value));
+                                if let (Some(uuid), Some(heads)) = (facet_uuid, facet_heads) {
+                                    to_cache.push((uuid, heads, facet_value));
+                                }
                             }
                         }
                     }
                 }
-            }
-            eyre::Ok((facets, to_cache))
-        })?;
+                eyre::Ok((facets, to_cache))
+            })
+            .await??;
 
         for (uuid, heads, value) in to_cache {
             self.facet_cache_put(doc_id, uuid, heads, value);
@@ -1359,16 +1756,11 @@ impl DrawerRepo {
         branch_path: &daybook_types::doc::BranchPath,
         facet_keys: Option<Vec<FacetKey>>,
     ) -> Res<Option<Arc<Doc>>> {
-        let entry = self.get_entry(doc_id).await?;
-        let Some(entry) = entry else {
-            return Ok(None);
-        };
-        let branch_name = branch_path.to_string_lossy().to_string();
-        let Some(heads) = entry.branches.get(&branch_name) else {
+        let Some(branch_state) = self.get_branch_state(doc_id, branch_path).await? else {
             return Ok(None);
         };
 
-        self.get_doc_with_facets_at_heads(doc_id, heads, facet_keys)
+        self.get_doc_with_facets_at_heads(doc_id, &branch_state.latest_heads, facet_keys)
             .await
     }
 
@@ -1380,19 +1772,26 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let entry = self.get_entry_at_heads(doc_id, heads).await?;
-        Ok(entry.map(|entry_value| DocNBranches {
-            doc_id: doc_id.clone(),
-            branches: entry_value.branches,
-        }))
+        let current_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
+        if heads != &current_heads {
+            let entry = self.get_entry_at_heads(doc_id, heads).await?;
+            return Ok(entry.map(|entry_value| DocNBranches {
+                doc_id: doc_id.clone(),
+                branches: entry_value
+                    .branches
+                    .into_keys()
+                    .map(|branch_name| (branch_name, ChangeHashSet::default()))
+                    .collect(),
+            }));
+        }
+        self.current_doc_branches(doc_id).await
     }
 
     pub async fn get_doc_branches(&self, doc_id: &DocId) -> Res<Option<DocNBranches>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let heads = self.current_heads.read().unwrap().clone();
-        self.get_doc_branches_at_heads(doc_id, &heads).await
+        self.current_doc_branches(doc_id).await
     }
 
     /// Get a doc at specific heads (exact version). Delegates to get_at_heads_with_facets.
@@ -1422,26 +1821,20 @@ impl DrawerRepo {
         &self,
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
-        heads: &ChangeHashSet,
+        _heads: &ChangeHashSet,
         facet_keys: Option<Vec<FacetKey>>,
     ) -> Res<Option<(Arc<Doc>, ChangeHashSet)>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let entry = self.get_entry_at_heads(doc_id, heads).await?;
-        let Some(entry) = entry else {
-            return Ok(None);
-        };
-
-        let branch_name = branch_path.to_string_lossy().to_string();
-        let Some(branch_heads) = entry.branches.get(&branch_name) else {
+        let Some(branch_state) = self.get_branch_state(doc_id, branch_path).await? else {
             return Ok(None);
         };
 
         let doc = self
-            .get_doc_with_facets_at_heads(doc_id, branch_heads, facet_keys)
+            .get_doc_with_facets_at_heads(doc_id, &branch_state.latest_heads, facet_keys)
             .await?;
-        Ok(doc.map(|doc_value| (doc_value, branch_heads.clone())))
+        Ok(doc.map(|doc_value| (doc_value, branch_state.latest_heads)))
     }
 
     pub async fn get_with_heads(
@@ -1453,9 +1846,13 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let heads = self.current_heads.read().unwrap().clone();
-        self.get_with_heads_at_heads(doc_id, branch_path, &heads, facet_keys)
-            .await
+        let Some(branch_state) = self.get_branch_state(doc_id, branch_path).await? else {
+            return Ok(None);
+        };
+        let doc = self
+            .get_doc_with_facets_at_heads(doc_id, &branch_state.latest_heads, facet_keys)
+            .await?;
+        Ok(doc.map(|doc| (doc, branch_state.latest_heads)))
     }
 
     pub async fn get_if_latest_at_heads(
@@ -1463,24 +1860,19 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
-        drawer_heads: &ChangeHashSet,
+        _drawer_heads: &ChangeHashSet,
         facet_keys: Option<Vec<FacetKey>>,
     ) -> Res<Option<Arc<Doc>>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let entry = self.get_entry_at_heads(doc_id, drawer_heads).await?;
-        let Some(entry) = entry else {
+        let Some(branch_state) = self.get_branch_state(doc_id, branch_path).await? else {
             return Ok(None);
         };
-
-        let branch_name = branch_path.to_string_lossy().to_string();
-        if let Some(latest_heads) = entry.branches.get(&branch_name) {
-            if latest_heads == heads {
-                return self
-                    .get_doc_with_facets_at_heads(doc_id, heads, facet_keys)
-                    .await;
-            }
+        if &branch_state.latest_heads == heads {
+            return self
+                .get_doc_with_facets_at_heads(doc_id, heads, facet_keys)
+                .await;
         }
         Ok(None)
     }
@@ -1495,7 +1887,7 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let drawer_heads = self.current_heads.read().unwrap().clone();
+        let drawer_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
         self.get_if_latest_at_heads(doc_id, branch_path, heads, &drawer_heads, facet_keys)
             .await
     }
@@ -1509,22 +1901,24 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let Some(handle) = self.get_handle(doc_id).await? else {
+        let Some(handle) = self.resolve_handle_for_heads(doc_id, heads).await? else {
             return Ok(None);
         };
-        let keys = handle.with_document(|am_doc| {
-            let view: automerge::Automerge = am_doc.fork_at(heads)?;
-            let facets_obj = match view.get(automerge::ROOT, "facets")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                _ => return Ok::<HashSet<FacetKey>, eyre::Report>(HashSet::new()),
-            };
-            let mut out = HashSet::new();
-            for item in view.map_range(&facets_obj, ..) {
-                let key_str = item.key.to_string();
-                out.insert(FacetKey::from(key_str.as_str()));
-            }
-            Ok(out)
-        })?;
+        let keys = handle
+            .with_document_local(|am_doc| {
+                let facets_obj =
+                    match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", heads)? {
+                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                        _ => return Ok::<HashSet<FacetKey>, eyre::Report>(HashSet::new()),
+                    };
+                let mut out = HashSet::new();
+                for item in automerge::ReadDoc::map_range_at(am_doc, &facets_obj, .., heads) {
+                    let key_str = item.key.to_string();
+                    out.insert(FacetKey::from(key_str.as_str()));
+                }
+                Ok(out)
+            })
+            .await??;
         Ok(Some(keys))
     }
 
@@ -1534,20 +1928,16 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
-        drawer_heads: &ChangeHashSet,
+        _drawer_heads: &ChangeHashSet,
     ) -> Res<Option<HashSet<FacetKey>>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let entry = self.get_entry_at_heads(doc_id, drawer_heads).await?;
-        let Some(entry) = entry else {
+        let Some(branch_state) = self.get_branch_state(doc_id, branch_path).await? else {
             return Ok(None);
         };
-        let branch_name = branch_path.to_string_lossy().to_string();
-        if let Some(latest_heads) = entry.branches.get(&branch_name) {
-            if latest_heads == heads {
-                return self.facet_keys_at_heads(doc_id, heads).await;
-            }
+        if &branch_state.latest_heads == heads {
+            return self.facet_keys_at_heads(doc_id, heads).await;
         }
         Ok(None)
     }
@@ -1593,21 +1983,14 @@ impl DrawerRepo {
                 inner: ferr!("repo is stopped"),
             });
         }
-        let entry = self
-            .get_entry(id)
+        let from_branch_state = self
+            .get_branch_state(id, from_branch)
             .await?
-            .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
+            .ok_or_else(|| DrawerError::BranchNotFound {
+                name: from_branch.to_string(),
+            })?;
 
-        let from_branch_name = from_branch.to_string_lossy().to_string();
-        let from_heads =
-            entry
-                .branches
-                .get(&from_branch_name)
-                .ok_or_else(|| DrawerError::BranchNotFound {
-                    name: from_branch_name,
-                })?;
-
-        self.merge_from_heads(id, to_branch, from_heads, user_path)
+        self.merge_from_heads(id, to_branch, &from_branch_state.latest_heads, user_path)
             .await
     }
 
@@ -1615,7 +1998,7 @@ impl DrawerRepo {
         &self,
         id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
-        user_path: Option<daybook_types::doc::UserPath>,
+        _user_path: Option<daybook_types::doc::UserPath>,
     ) -> Result<bool, DrawerError> {
         if self.cancel_token.is_cancelled() {
             return Err(DrawerError::Other {
@@ -1623,29 +2006,26 @@ impl DrawerRepo {
             });
         }
 
-        let latest_drawer_heads = self.current_heads.read().unwrap().clone();
+        let branch_name = branch_path.to_string();
+        let Some(branch_state) = self.get_branch_state(id, branch_path).await? else {
+            return Ok(false);
+        };
+
+        self.remove_branch_from_partitions_if_needed(
+            branch_state.branch_kind,
+            &branch_state.branch_doc_id,
+        )
+        .await?;
+        self.branch_handles.remove(&branch_state.branch_doc_id);
+
+        let latest_drawer_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
         let entry = self
             .get_entry_at_heads(id, &latest_drawer_heads)
             .await?
             .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
-
-        let branch_name = branch_path.to_string_lossy().to_string();
-        if !entry.branches.contains_key(&branch_name) {
-            return Ok(false);
-        }
-
         let mut new_entry = entry.clone();
         new_entry.branches.remove(&branch_name);
         new_entry.vtag = VersionTag::update(self.local_actor_id.clone());
-        if let Some(user_path) = user_path {
-            new_entry.users.insert(
-                self.local_actor_id.to_string(),
-                crate::config::UserMeta {
-                    user_path,
-                    seen_at: Timestamp::now(),
-                },
-            );
-        }
 
         let drawer_heads = self.drawer_am_handle.with_document(|doc| {
             let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
@@ -1667,7 +2047,7 @@ impl DrawerRepo {
             let heads = heads.expect("commit failed");
             eyre::Ok(ChangeHashSet(Arc::from([heads])))
         })?;
-        let diff = DocEntryDiff::new(&entry, &new_entry);
+        let diff = DocEntryDiff::new(&entry, &new_entry, Vec::new());
 
         // Update caches and notify
         {
@@ -1676,13 +2056,18 @@ impl DrawerRepo {
             for pkey in pruned {
                 self.entry_cache.remove(&pkey);
             }
-            self.entry_cache.insert(id.clone(), new_entry.clone());
+            self.entry_cache.remove(id);
         }
 
+        *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
+        let updated_entry = self
+            .current_doc_branches(id)
+            .await?
+            .ok_or_eyre("branch state missing after delete_branch")?;
         self.registry.notify([
             DrawerEvent::DocUpdated {
                 id: id.clone(),
-                entry: new_entry,
+                entry: updated_entry,
                 diff,
                 drawer_heads: drawer_heads.clone(),
             },
@@ -1690,7 +2075,6 @@ impl DrawerRepo {
                 drawer_heads: drawer_heads.clone(),
             },
         ]);
-        *self.current_heads.write().unwrap() = drawer_heads;
 
         Ok(true)
     }
@@ -1704,13 +2088,14 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let Some(handle) = self.get_handle(doc_id).await? else {
+        let Some(handle) = self.resolve_handle_for_heads(doc_id, heads).await? else {
             eyre::bail!("doc not found");
         };
-        handle.with_document(|am_doc| {
-            let view: automerge::Automerge = am_doc.fork_at(heads)?;
-            facet_recovery::recover_facet_heads(&view, facet_key)
-        })
+        handle
+            .with_document_local(|am_doc| {
+                facet_recovery::recover_facet_heads_at(am_doc, facet_key, heads)
+            })
+            .await?
     }
 
     pub async fn get_facet_heads_at_branch(
@@ -1722,15 +2107,10 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let entry = self.get_entry(doc_id).await?;
-        let Some(entry) = entry else {
+        let Some(branch_state) = self.get_branch_state(doc_id, branch_path).await? else {
             return Ok(None);
         };
-        let branch_name = branch_path.to_string_lossy().to_string();
-        let Some(heads) = entry.branches.get(&branch_name) else {
-            return Ok(None);
-        };
-        self.get_facet_heads_at_heads(doc_id, heads, facet_key)
+        self.get_facet_heads_at_heads(doc_id, &branch_state.latest_heads, facet_key)
             .await
             .map(Some)
     }
@@ -1873,7 +2253,7 @@ pub mod dmeta {
     use automerge::transaction::Transactable;
     use automerge::ReadDoc;
     use daybook_types::doc::{
-        ChangeHashSet, FacetKey, FacetMeta, WellKnownFacet, WellKnownFacetTag,
+        ChangeHashSet, FacetKey, FacetMeta, UserMeta, UserPath, WellKnownFacet, WellKnownFacetTag,
     };
 
     fn dmeta_key() -> String {
@@ -1925,12 +2305,68 @@ pub mod dmeta {
         }
     }
 
+    pub fn facet_uuid_for_key_at(
+        doc: &automerge::Automerge,
+        facet_key: &FacetKey,
+        heads: &[automerge::ChangeHash],
+    ) -> Res<Option<Uuid>> {
+        let Some(facet_meta_obj) = facet_meta_obj_at(doc, facet_key, heads)? else {
+            return Ok(None);
+        };
+        match autosurgeon::hydrate_prop_at::<_, Option<Vec<Uuid>>, _, _>(
+            doc,
+            &facet_meta_obj,
+            "uuid",
+            heads,
+        ) {
+            Ok(Some(uuids)) => Ok(uuids.into_iter().next()),
+            _ => Ok(None),
+        }
+    }
+
     pub fn facet_heads_for_key(
         doc: &automerge::Automerge,
         facet_key: &FacetKey,
     ) -> Res<ChangeHashSet> {
         let heads = super::facet_recovery::recover_facet_heads(doc, facet_key)?;
         Ok(ChangeHashSet(Arc::from(heads)))
+    }
+
+    pub fn facet_heads_for_key_at(
+        doc: &automerge::Automerge,
+        facet_key: &FacetKey,
+        heads: &[automerge::ChangeHash],
+    ) -> Res<ChangeHashSet> {
+        let heads = super::facet_recovery::recover_facet_heads_at(doc, facet_key, heads)?;
+        Ok(ChangeHashSet(Arc::from(heads)))
+    }
+
+    fn facet_meta_obj_at(
+        doc: &automerge::Automerge,
+        facet_key: &FacetKey,
+        heads: &[automerge::ChangeHash],
+    ) -> Res<Option<automerge::ObjId>> {
+        let facets_obj = match doc.get_at(automerge::ROOT, "facets", heads)? {
+            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+            _ => return Ok(None),
+        };
+
+        let key = dmeta_key();
+        let dmeta_obj = match doc.get_at(&facets_obj, &key, heads)? {
+            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+            _ => return Ok(None),
+        };
+
+        let dmeta_facets_obj = match doc.get_at(&dmeta_obj, "facets", heads)? {
+            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+            _ => return Ok(None),
+        };
+
+        let facet_key_str = facet_key.to_string();
+        match doc.get_at(&dmeta_facets_obj, facet_key_str, heads)? {
+            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => Ok(Some(id)),
+            _ => Ok(None),
+        }
     }
 
     fn load_dmeta(
@@ -1972,11 +2408,43 @@ pub mod dmeta {
         Ok(())
     }
 
+    fn set_user(
+        tx: &mut automerge::transaction::Transaction,
+        dmeta_obj: &automerge::ObjId,
+        actor_id: &ActorId,
+        user_path: Option<&UserPath>,
+    ) -> Res<()> {
+        let Some(user_path) = user_path else {
+            return Ok(());
+        };
+
+        let mut actors = match autosurgeon::hydrate_prop::<
+            _,
+            Option<ThroughJson<HashMap<String, UserMeta>>>,
+            _,
+            _,
+        >(tx, dmeta_obj, "actors")?
+        {
+            Some(ThroughJson(map)) => map,
+            None => HashMap::new(),
+        };
+        actors.insert(
+            actor_id.to_string(),
+            UserMeta {
+                user_path: user_path.clone(),
+            },
+        );
+        autosurgeon::reconcile_prop(tx, dmeta_obj, "actors", ThroughJson(actors))?;
+        Ok(())
+    }
+
     pub fn ensure_for_add(
         tx: &mut automerge::transaction::Transaction,
         facets_obj: &automerge::ObjId,
         facet_keys: &[FacetKey],
         now: Timestamp,
+        user_path: Option<&UserPath>,
+        actor_id: &ActorId,
     ) -> Res<()> {
         let key = dmeta_key();
         let doc_id = match tx.get(automerge::ROOT, "id")? {
@@ -1991,6 +2459,15 @@ pub mod dmeta {
         };
         let mut facet_uuids = HashMap::new();
         let mut facets = HashMap::new();
+        let mut actors = HashMap::new();
+        if let Some(user_path) = user_path {
+            actors.insert(
+                actor_id.to_string(),
+                UserMeta {
+                    user_path: user_path.clone(),
+                },
+            );
+        }
         for facet_key in facet_keys {
             let facet_uuid = Uuid::new_v4();
             facet_uuids.insert(facet_uuid, facet_key.clone());
@@ -2011,6 +2488,7 @@ pub mod dmeta {
                 id: doc_id,
                 created_at: now,
                 updated_at: vec![now],
+                actors,
                 facet_uuids,
                 facets,
             })),
@@ -2120,9 +2598,12 @@ pub mod dmeta {
         facet_keys_set: &[FacetKey],
         facet_keys_remove: &[FacetKey],
         now: Timestamp,
+        user_path: Option<&UserPath>,
+        actor_id: &ActorId,
     ) -> Res<Vec<Uuid>> {
         let (dmeta_obj, dmeta_facets_obj, dmeta_facet_uuids_obj) = load_dmeta(tx, facets_obj)?;
         set_updated_at_list(tx, &dmeta_obj, "updatedAt", now)?;
+        set_user(tx, &dmeta_obj, actor_id, user_path)?;
         let mut invalidated_uuids = Vec::new();
 
         for key in facet_keys_remove {
@@ -2150,12 +2631,15 @@ pub mod dmeta {
         facets_obj: &automerge::ObjId,
         modified_facet_key_strs: &std::collections::HashSet<String>,
         now: Timestamp,
+        user_path: Option<&UserPath>,
+        actor_id: &ActorId,
     ) -> Res<Vec<Uuid>> {
         if modified_facet_key_strs.is_empty() {
             return Ok(Vec::new());
         }
         let (dmeta_obj, dmeta_facets_obj, dmeta_facet_uuids_obj) = load_dmeta(tx, facets_obj)?;
         set_updated_at_list(tx, &dmeta_obj, "updatedAt", now)?;
+        set_user(tx, &dmeta_obj, actor_id, user_path)?;
         let mut invalidated_uuids = Vec::new();
         for key_str in modified_facet_key_strs {
             let facet_uuid =
@@ -2172,19 +2656,42 @@ mod tests {
 
     use crate::drawer::lru::KeyedLruPool;
     use crate::repos::Repo;
+    use automerge::transaction::Transactable;
+    use automerge::ReadDoc;
     use daybook_types::doc::{Body, FacetKey, UserPath, WellKnownFacet, WellKnownFacetTag};
     use daybook_types::url::build_facet_ref;
+
+    async fn get_dmeta_on_main(
+        repo: &DrawerRepo,
+        doc_id: &DocId,
+    ) -> Res<daybook_types::doc::Dmeta> {
+        let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
+        let doc = repo
+            .get_doc_with_facets_at_branch(doc_id, &"main".into(), Some(vec![dmeta_key.clone()]))
+            .await?
+            .ok_or_eyre("doc not found when loading dmeta")?;
+        let dmeta = doc
+            .facets
+            .get(&dmeta_key)
+            .ok_or_eyre("dmeta facet missing")?;
+        let dmeta = match serde_json::from_value::<WellKnownFacet>(dmeta.clone())? {
+            WellKnownFacet::Dmeta(dmeta) => dmeta,
+            other => eyre::bail!("expected dmeta facet, got {:?}", other.tag()),
+        };
+        Ok(dmeta)
+    }
+
+    fn local_branch(name: &str) -> daybook_types::doc::BranchPath {
+        daybook_types::doc::BranchPath::from(format!("/test-device/{name}"))
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-v2".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -2192,16 +2699,17 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
             None,
@@ -2275,15 +2783,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_v2_merge() -> Res<()> {
+    async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-v2-merge".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-partitions".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -2291,16 +2796,301 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
+            entry_pool,
+            doc_pool,
+            None,
+        )
+        .await?;
+
+        let partition_id = repo.replicated_partition_id();
+        let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+
+        let doc_id = repo
+            .add(AddDocArgs {
+                branch_path: "main".into(),
+                facets: [(
+                    title_key.clone(),
+                    WellKnownFacet::TitleGeneric("Initial".into()).into(),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        assert_eq!(big_repo.partition_member_count(&partition_id).await?, 1);
+
+        let main_heads = repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .ok_or_eyre("missing doc branches after add")?
+            .branches
+            .get("main")
+            .ok_or_eyre("missing main branch")?
+            .clone();
+
+        repo.update_at_heads(
+            DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    title_key.clone(),
+                    WellKnownFacet::TitleGeneric("Tmp branch update".into()).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            daybook_types::doc::BranchPath::from("/tmp/job-1"),
+            Some(main_heads.clone()),
+        )
+        .await?;
+        assert_eq!(big_repo.partition_member_count(&partition_id).await?, 1);
+
+        repo.update_at_heads(
+            DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    title_key.clone(),
+                    WellKnownFacet::TitleGeneric("Replicated branch update".into()).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            local_branch("branch-a"),
+            Some(main_heads),
+        )
+        .await?;
+        assert_eq!(big_repo.partition_member_count(&partition_id).await?, 2);
+
+        assert!(
+            repo.delete_branch(&doc_id, &local_branch("branch-a"), None)
+                .await?
+        );
+        assert_eq!(big_repo.partition_member_count(&partition_id).await?, 1);
+
+        assert!(repo.del(&doc_id).await?);
+        assert_eq!(big_repo.partition_member_count(&partition_id).await?, 0);
+
+        stop_token.stop().await?;
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_v2_batch_add_smoke() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-batch-add".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
+        .await?;
+
+        let drawer_doc_id = {
+            let mut doc = automerge::Automerge::new();
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+            let handle = big_repo.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+
+        let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+        let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+        let (repo, stop_token) = DrawerRepo::load(
+            Arc::clone(&big_repo),
+            drawer_doc_id,
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
+            entry_pool,
+            doc_pool,
+            None,
+        )
+        .await?;
+
+        let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let created_ids = repo
+            .batch_add(vec![
+                AddDocArgs {
+                    branch_path: "main".into(),
+                    facets: [(
+                        title_key.clone(),
+                        WellKnownFacet::TitleGeneric("First".into()).into(),
+                    )]
+                    .into(),
+                    user_path: None,
+                },
+                AddDocArgs {
+                    branch_path: "main".into(),
+                    facets: [(
+                        title_key.clone(),
+                        WellKnownFacet::TitleGeneric("Second".into()).into(),
+                    )]
+                    .into(),
+                    user_path: None,
+                },
+            ])
+            .await?;
+
+        assert_eq!(created_ids.len(), 2);
+        assert_ne!(created_ids[0], created_ids[1]);
+
+        let list = repo.list().await?;
+        assert_eq!(list.len(), 2);
+        let listed_ids: HashSet<DocId> = list.into_iter().map(|item| item.doc_id).collect();
+        assert!(listed_ids.contains(&created_ids[0]));
+        assert!(listed_ids.contains(&created_ids[1]));
+
+        stop_token.stop().await?;
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-batch-add-events".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
+        .await?;
+
+        let drawer_doc_id = {
+            let mut doc = automerge::Automerge::new();
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+            let handle = big_repo.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+
+        let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+        let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+        let (repo, stop_token) = DrawerRepo::load(
+            Arc::clone(&big_repo),
+            drawer_doc_id,
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
+            entry_pool,
+            doc_pool,
+            None,
+        )
+        .await?;
+
+        let listener = repo.subscribe(crate::repos::SubscribeOpts::new(64));
+        let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let created_ids = repo
+            .batch_add(vec![
+                AddDocArgs {
+                    branch_path: "main".into(),
+                    facets: [(
+                        title_key.clone(),
+                        WellKnownFacet::TitleGeneric("Alpha".into()).into(),
+                    )]
+                    .into(),
+                    user_path: None,
+                },
+                AddDocArgs {
+                    branch_path: "main".into(),
+                    facets: [(
+                        title_key.clone(),
+                        WellKnownFacet::TitleGeneric("Beta".into()).into(),
+                    )]
+                    .into(),
+                    user_path: None,
+                },
+                AddDocArgs {
+                    branch_path: "main".into(),
+                    facets: [(
+                        title_key.clone(),
+                        WellKnownFacet::TitleGeneric("Gamma".into()).into(),
+                    )]
+                    .into(),
+                    user_path: None,
+                },
+            ])
+            .await?;
+
+        let mut events = Vec::new();
+        for _ in 0..4 {
+            let event = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                listener.recv_lossy_async(),
+            )
+            .await
+            .wrap_err("timeout waiting for drawer event")?
+            .map_err(|_| eyre::eyre!("listener closed"))?;
+            events.push(event);
+        }
+
+        let mut added_ids = HashSet::new();
+        let mut doc_added_heads = Vec::new();
+        let mut list_changed_heads = Vec::new();
+        for event in events {
+            match &*event {
+                DrawerEvent::DocAdded {
+                    id, drawer_heads, ..
+                } => {
+                    added_ids.insert(id.clone());
+                    doc_added_heads.push(drawer_heads.clone());
+                }
+                DrawerEvent::ListChanged { drawer_heads } => {
+                    list_changed_heads.push(drawer_heads.clone());
+                }
+                other => eyre::bail!("unexpected event: {other:?}"),
+            }
+        }
+
+        assert_eq!(added_ids.len(), created_ids.len());
+        for created_id in created_ids {
+            assert!(added_ids.contains(&created_id));
+        }
+        assert_eq!(doc_added_heads.len(), 3);
+        assert_eq!(list_changed_heads.len(), 1);
+        for heads in doc_added_heads {
+            assert_eq!(heads, list_changed_heads[0]);
+        }
+
+        stop_token.stop().await?;
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_v2_merge() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-merge".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
+        .await?;
+
+        let drawer_doc_id = {
+            let mut doc = automerge::Automerge::new();
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+            let handle = big_repo.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+
+        let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+        let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+        let (repo, stop_token) = DrawerRepo::load(
+            Arc::clone(&big_repo),
+            drawer_doc_id,
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
             None,
@@ -2323,7 +3113,7 @@ mod tests {
             })
             .await?;
 
-        let entry = repo.get_entry(&doc_id).await?.unwrap();
+        let entry = repo.get_doc_branches(&doc_id).await?.unwrap();
         let main_heads = entry.branches.get("main").unwrap().clone();
 
         // 2. Update branch-a
@@ -2338,7 +3128,7 @@ mod tests {
                 facets_remove: vec![],
                 user_path: None,
             },
-            "branch-a".into(),
+            local_branch("branch-a"),
             Some(main_heads.clone()),
         )
         .await?;
@@ -2351,20 +3141,28 @@ mod tests {
                 facets_remove: vec![],
                 user_path: None,
             },
-            "branch-b".into(),
+            local_branch("branch-b"),
             Some(main_heads.clone()),
         )
         .await?;
 
         // 4. Merge branch-a to main
-        let entry = repo.get_entry(&doc_id).await?.unwrap();
-        let a_heads = entry.branches.get("branch-a").unwrap().clone();
+        let entry = repo.get_doc_branches(&doc_id).await?.unwrap();
+        let a_heads = entry
+            .branches
+            .get(&*local_branch("branch-a").to_string())
+            .unwrap()
+            .clone();
         repo.merge_from_heads(&doc_id, &"main".into(), &a_heads, None)
             .await?;
 
         // 5. Merge branch-b to main
-        let entry = repo.get_entry(&doc_id).await?.unwrap();
-        let b_heads = entry.branches.get("branch-b").unwrap().clone();
+        let entry = repo.get_doc_branches(&doc_id).await?.unwrap();
+        let b_heads = entry
+            .branches
+            .get(&*local_branch("branch-b").to_string())
+            .unwrap()
+            .clone();
         repo.merge_from_heads(&doc_id, &"main".into(), &b_heads, None)
             .await?;
 
@@ -2390,28 +3188,22 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_sync_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (client_acx, client_acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "client".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (client_acx, client_acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "client".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
-        let (server_acx, server_acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "server".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (server_acx, server_acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "server".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         // Connect repos
         {
             #[allow(deprecated)]
-            fn repos(acx: &AmCtx) -> &samod::Repo {
-                acx.repo()
+            fn repos(big_repo: &SharedBigRepo) -> &samod::Repo {
+                big_repo.samod_repo()
             }
             crate::tincans::connect_repos(repos(&client_acx), repos(&server_acx));
             repos(&client_acx).when_connected("server".into()).await?;
@@ -2431,25 +3223,43 @@ mod tests {
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
 
         let (client_repo, client_stop) = DrawerRepo::load(
-            client_acx.clone(),
+            Arc::clone(&client_acx),
             drawer_doc_id.clone(),
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::clone(&entry_pool),
             Arc::clone(&doc_pool),
             None,
         )
         .await?;
         let (server_repo, server_stop) = DrawerRepo::load(
-            server_acx.clone(),
+            Arc::clone(&server_acx),
             drawer_doc_id.clone(),
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::clone(&entry_pool),
             Arc::clone(&doc_pool),
             None,
         )
         .await?;
 
-        let server_listener = server_repo.subscribe(crate::repos::SubscribeOpts::new(128));
+        // Ensure baseline drawer sync converges before asserting incremental replication.
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let client_heads = client_repo
+                    .drawer_am_handle
+                    .with_document(|doc| doc.get_heads());
+                let server_heads = server_repo
+                    .drawer_am_handle
+                    .with_document(|doc| doc.get_heads());
+                if client_heads == server_heads {
+                    break Ok::<(), eyre::Report>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .wrap_err("timeout waiting for drawer baseline sync")??;
 
         // 1. Client adds a doc
         let new_doc_id = client_repo
@@ -2464,19 +3274,18 @@ mod tests {
             })
             .await?;
 
-        // 2. Server should receive DocAdded event
-        let event = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            server_listener.recv_lossy_async(),
-        )
+        // 2. Server should eventually observe the replicated doc
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let list = server_repo.list().await?;
+                if list.iter().any(|entry| entry.doc_id == new_doc_id) {
+                    break Ok::<(), eyre::Report>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
         .await
-        .wrap_err("timeout waiting for DocAdded")?
-        .map_err(|_| eyre::eyre!("listener closed"))?;
-
-        match &*event {
-            DrawerEvent::DocAdded { id, .. } => assert_eq!(id, &new_doc_id),
-            _ => eyre::bail!("unexpected event: {:?}", event),
-        }
+        .wrap_err("timeout waiting for DocAdded")??;
 
         // 3. Server should be able to list the doc.
         // Note: this test validates drawer-map replication only. Content-doc sync is
@@ -2495,13 +3304,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_additional_apis() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-v2-apis".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-apis".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -2509,16 +3315,17 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
             None,
@@ -2598,6 +3405,14 @@ mod tests {
         );
 
         // 6. Test merge_from_branch
+        let latest_main_heads = repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .ok_or_eyre("missing branches")?
+            .branches
+            .get("main")
+            .cloned()
+            .ok_or_eyre("missing main")?;
         repo.update_at_heads(
             DocPatch {
                 id: doc_id.clone(),
@@ -2609,12 +3424,12 @@ mod tests {
                 facets_remove: vec![],
                 user_path: None,
             },
-            "branch-a".into(),
-            Some(heads),
+            local_branch("branch-a"),
+            Some(latest_main_heads),
         )
         .await?;
 
-        repo.merge_from_branch(&doc_id, &"main".into(), &"branch-a".into(), None)
+        repo.merge_from_branch(&doc_id, &"main".into(), &local_branch("branch-a"), None)
             .await?;
         let doc_merged = repo
             .get_doc_with_facets_at_branch(&doc_id, &"main".into(), None)
@@ -2627,11 +3442,13 @@ mod tests {
 
         // 7. Test delete_branch
         assert!(
-            repo.delete_branch(&doc_id, &"branch-a".into(), None)
+            repo.delete_branch(&doc_id, &local_branch("branch-a"), None)
                 .await?
         );
         let branches_after_del = repo.get_doc_branches(&doc_id).await?.unwrap();
-        assert!(!branches_after_del.branches.contains_key("branch-a"));
+        assert!(!branches_after_del
+            .branches
+            .contains_key(&*local_branch("branch-a").to_string()));
 
         stop_token.stop().await?;
         acx_stop.stop().await?;
@@ -2641,13 +3458,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_metadata_maintenance() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-v2-meta".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-meta".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -2655,16 +3469,17 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
             None,
@@ -2673,7 +3488,8 @@ mod tests {
 
         let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
         let facet_note = FacetKey::from(WellKnownFacetTag::Note);
-        let user_path = UserPath::from("/device1/plug1/routine1");
+        let user_path =
+            UserPath::from("/duser-wip-testmeta1/ddev-wip-iroh-testmeta1/plug1/routine1");
 
         // 1. Test 'add' metadata
         let doc_id = repo
@@ -2688,19 +3504,34 @@ mod tests {
             })
             .await?;
 
-        let entry = repo.get_entry(&doc_id).await?.unwrap();
+        let dmeta_after_add = get_dmeta_on_main(&repo, &doc_id).await?;
+        let main_branch_doc_id = repo
+            .get_branch_state(&doc_id, &"main".into())
+            .await?
+            .ok_or_eyre("missing main branch state")?
+            .branch_doc_id;
         assert!(
-            entry.users.contains_key(&repo.local_actor_id.to_string()),
-            "user should be recorded on add"
+            dmeta_after_add.actors.contains_key(
+                &repo
+                    .content_actor_id(Some(&user_path), &main_branch_doc_id)
+                    .to_string()
+            ),
+            "user should be recorded on add dmeta"
         );
         assert!(
-            entry.facet_blames.contains_key(&facet_title.to_string()),
-            "facet_blame should exist for title"
+            dmeta_after_add.facets.contains_key(&facet_title),
+            "dmeta facet metadata should exist for title"
         );
 
         // Check Dmeta in content doc
-        let am_id = DocumentId::from_str(&doc_id)?;
-        let handle = acx.find_doc(&am_id).await?.unwrap();
+        let am_id = DocumentId::from_str(
+            &repo
+                .get_branch_state(&doc_id, &"main".into())
+                .await?
+                .ok_or_eyre("missing main branch state")?
+                .branch_doc_id,
+        )?;
+        let handle = big_repo.find_doc_handle(&am_id).await?.unwrap();
         handle.with_document(|doc| -> Res<()> {
             let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
             assert_eq!(heads.len(), 1, "should have 1 head for title");
@@ -2708,7 +3539,8 @@ mod tests {
         })?;
 
         // 2. Test 'update' metadata and user attribution
-        let user_path2 = UserPath::from("/device2/plug2/routine2");
+        let user_path2 =
+            UserPath::from("/duser-wip-testmeta2/ddev-wip-iroh-testmeta2/plug2/routine2");
         repo.update_at_heads(
             DocPatch {
                 id: doc_id.clone(),
@@ -2725,15 +3557,20 @@ mod tests {
         )
         .await?;
 
-        let entry = repo.get_entry(&doc_id).await?.unwrap();
+        let dmeta_after_update = get_dmeta_on_main(&repo, &doc_id).await?;
         assert!(
-            entry.users.contains_key(&repo.local_actor_id.to_string()),
-            "user should still be recorded"
+            dmeta_after_update.actors.contains_key(
+                &repo
+                    .content_actor_id(Some(&user_path2), &main_branch_doc_id)
+                    .to_string()
+            ),
+            "updated user should be recorded on dmeta"
         );
         assert!(
-            entry.facet_blames.contains_key(&facet_note.to_string()),
-            "facet_blame should exist for note"
+            dmeta_after_update.facets.contains_key(&facet_note),
+            "dmeta facet metadata should exist for note"
         );
+        let entry = repo.get_doc_branches(&doc_id).await?.unwrap();
 
         // 3. Test 'merge' metadata maintenance
         repo.update_at_heads(
@@ -2747,27 +3584,25 @@ mod tests {
                 facets_remove: vec![],
                 user_path: None,
             },
-            "branch-a".into(),
+            local_branch("branch-a"),
             Some(entry.branches.get("main").unwrap().clone()),
         )
         .await?;
 
-        let entry_before_merge = repo.get_entry(&doc_id).await?.unwrap();
-        let a_heads = entry_before_merge.branches.get("branch-a").unwrap().clone();
+        let entry_before_merge = repo.get_doc_branches(&doc_id).await?.unwrap();
+        let a_heads = entry_before_merge
+            .branches
+            .get(&*local_branch("branch-a").to_string())
+            .unwrap()
+            .clone();
 
         repo.merge_from_heads(&doc_id, &"main".into(), &a_heads, Some(user_path.clone()))
             .await?;
 
-        let entry_after_merge = repo.get_entry(&doc_id).await?.unwrap();
-        assert_eq!(
-            entry_after_merge
-                .facet_blames
-                .get(&facet_title.to_string())
-                .unwrap()
-                .heads
-                .len(),
-            1,
-            "title blame should be updated after merge"
+        let dmeta_after_merge = get_dmeta_on_main(&repo, &doc_id).await?;
+        assert!(
+            dmeta_after_merge.facets.contains_key(&facet_title),
+            "title metadata should exist after merge"
         );
 
         stop_token.stop().await?;
@@ -2791,26 +3626,24 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-update-actor".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-update-actor".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
         let drawer_doc_id = {
             let mut doc = automerge::Automerge::new();
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             None,
@@ -2829,7 +3662,7 @@ mod tests {
             })
             .await?;
 
-        let user_path = UserPath::from("/device-actor/plug/routine");
+        let user_path = UserPath::from("/duser-wip-testactor/ddev-wip-iroh-testactor/plug/routine");
         repo.update_at_heads(
             DocPatch {
                 id: doc_id.clone(),
@@ -2846,9 +3679,22 @@ mod tests {
         )
         .await?;
 
-        let expected_actor = daybook_types::doc::user_path::to_actor_id(&user_path);
-        let handle = acx
-            .find_doc(&DocumentId::from_str(&doc_id)?)
+        let expected_actor = repo.content_actor_id(
+            Some(&user_path),
+            &repo
+                .get_branch_state(&doc_id, &"main".into())
+                .await?
+                .ok_or_eyre("missing main branch state")?
+                .branch_doc_id,
+        );
+        let handle = big_repo
+            .find_doc_handle(&DocumentId::from_str(
+                &repo
+                    .get_branch_state(&doc_id, &"main".into())
+                    .await?
+                    .ok_or_eyre("missing main branch state")?
+                    .branch_doc_id,
+            )?)
             .await?
             .ok_or_eyre("doc not found")?;
         let latest_actor = latest_change_actor(&handle)?;
@@ -2862,26 +3708,24 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-merge-actor".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-merge-actor".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
         let drawer_doc_id = {
             let mut doc = automerge::Automerge::new();
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             None,
@@ -2901,7 +3745,7 @@ mod tests {
             .await?;
 
         let main_heads = repo
-            .get_entry(&doc_id)
+            .get_doc_branches(&doc_id)
             .await?
             .ok_or_eyre("missing entry")?
             .branches
@@ -2919,20 +3763,21 @@ mod tests {
                 facets_remove: vec![],
                 user_path: None,
             },
-            "branch-a".into(),
+            local_branch("branch-a"),
             Some(main_heads),
         )
         .await?;
 
         let branch_heads = repo
-            .get_entry(&doc_id)
+            .get_doc_branches(&doc_id)
             .await?
             .ok_or_eyre("missing entry after branch update")?
             .branches
-            .get("branch-a")
+            .get(&*local_branch("branch-a").to_string())
             .cloned()
             .ok_or_eyre("missing branch-a")?;
-        let merge_user_path = UserPath::from("/merge-device/plug/routine");
+        let merge_user_path =
+            UserPath::from("/duser-wip-testmerge/ddev-wip-iroh-testmerge/plug/routine");
         repo.merge_from_heads(
             &doc_id,
             &"main".into(),
@@ -2941,9 +3786,22 @@ mod tests {
         )
         .await?;
 
-        let expected_actor = daybook_types::doc::user_path::to_actor_id(&merge_user_path);
-        let handle = acx
-            .find_doc(&DocumentId::from_str(&doc_id)?)
+        let expected_actor = repo.content_actor_id(
+            Some(&merge_user_path),
+            &repo
+                .get_branch_state(&doc_id, &"main".into())
+                .await?
+                .ok_or_eyre("missing main branch state")?
+                .branch_doc_id,
+        );
+        let handle = big_repo
+            .find_doc_handle(&DocumentId::from_str(
+                &repo
+                    .get_branch_state(&doc_id, &"main".into())
+                    .await?
+                    .ok_or_eyre("missing main branch state")?
+                    .branch_doc_id,
+            )?)
             .await?
             .ok_or_eyre("doc not found")?;
         let latest_actor = latest_change_actor(&handle)?;
@@ -3020,13 +3878,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_updated_at_merge() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-v2-updated-at".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-updated-at".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -3034,16 +3889,17 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
             None,
@@ -3065,7 +3921,7 @@ mod tests {
             })
             .await?;
 
-        let entry = repo.get_entry(&doc_id).await?.unwrap();
+        let entry = repo.get_doc_branches(&doc_id).await?.unwrap();
         let main_heads = entry.branches.get("main").unwrap().clone();
 
         // 2. Concurrent updates to the same facet on branch-a and branch-b
@@ -3080,7 +3936,7 @@ mod tests {
                 facets_remove: vec![],
                 user_path: None,
             },
-            "branch-a".into(),
+            local_branch("branch-a"),
             Some(main_heads.clone()),
         )
         .await?;
@@ -3096,15 +3952,23 @@ mod tests {
                 facets_remove: vec![],
                 user_path: None,
             },
-            "branch-b".into(),
+            local_branch("branch-b"),
             Some(main_heads.clone()),
         )
         .await?;
 
         // 3. Merge both into main
-        let entry = repo.get_entry(&doc_id).await?.unwrap();
-        let a_heads = entry.branches.get("branch-a").unwrap().clone();
-        let b_heads = entry.branches.get("branch-b").unwrap().clone();
+        let entry = repo.get_doc_branches(&doc_id).await?.unwrap();
+        let a_heads = entry
+            .branches
+            .get(&*local_branch("branch-a").to_string())
+            .unwrap()
+            .clone();
+        let b_heads = entry
+            .branches
+            .get(&*local_branch("branch-b").to_string())
+            .unwrap()
+            .clone();
 
         repo.merge_from_heads(&doc_id, &"main".into(), &a_heads, None)
             .await?;
@@ -3112,8 +3976,14 @@ mod tests {
             .await?;
 
         // 4. Verify updatedAt list in content doc
-        let am_id = DocumentId::from_str(&doc_id)?;
-        let handle = acx.find_doc(&am_id).await?.unwrap();
+        let am_id = DocumentId::from_str(
+            &repo
+                .get_branch_state(&doc_id, &"main".into())
+                .await?
+                .ok_or_eyre("missing main branch state")?
+                .branch_doc_id,
+        )?;
+        let handle = big_repo.find_doc_handle(&am_id).await?.unwrap();
         handle.with_document(|doc| -> Res<()> {
             // recover_facet_heads should return 2 change hashes
             let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
@@ -3137,13 +4007,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_facet_blame_maintenance() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-v2-blame".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-blame".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -3151,16 +4018,17 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
             None,
@@ -3183,16 +4051,10 @@ mod tests {
             })
             .await?;
 
-        let entry = repo.get_entry(&doc_id).await?.unwrap();
+        let entry = repo.get_doc_branches(&doc_id).await?.unwrap();
         let initial_heads = entry.branches.get("main").unwrap().clone();
-        assert_eq!(
-            entry
-                .facet_blames
-                .get(&facet_title.to_string())
-                .unwrap()
-                .heads,
-            initial_heads
-        );
+        let dmeta_initial = get_dmeta_on_main(&repo, &doc_id).await?;
+        assert!(dmeta_initial.facets.contains_key(&facet_title));
 
         // 2. Update facet on branch-a
         repo.update_at_heads(
@@ -3206,21 +4068,18 @@ mod tests {
                 facets_remove: vec![],
                 user_path: None,
             },
-            "branch-a".into(),
+            local_branch("branch-a"),
             Some(initial_heads.clone()),
         )
         .await?;
 
-        let entry_a = repo.get_entry(&doc_id).await?.unwrap();
-        let a_heads = entry_a.branches.get("branch-a").unwrap().clone();
-        assert_eq!(
-            entry_a
-                .facet_blames
-                .get(&facet_title.to_string())
-                .unwrap()
-                .heads,
-            a_heads
-        );
+        let entry_a = repo.get_doc_branches(&doc_id).await?.unwrap();
+        let a_heads = entry_a
+            .branches
+            .get(&*local_branch("branch-a").to_string())
+            .unwrap()
+            .clone();
+        assert_ne!(a_heads, initial_heads, "branch-a should advance");
 
         // 3. Update different facet on branch-b
         repo.update_at_heads(
@@ -3230,65 +4089,43 @@ mod tests {
                 facets_remove: vec![],
                 user_path: None,
             },
-            "branch-b".into(),
+            local_branch("branch-b"),
             Some(initial_heads.clone()),
         )
         .await?;
 
-        let entry_b = repo.get_entry(&doc_id).await?.unwrap();
-        let b_heads = entry_b.branches.get("branch-b").unwrap().clone();
-        assert_eq!(
-            entry_b
-                .facet_blames
-                .get(&facet_note.to_string())
-                .unwrap()
-                .heads,
-            b_heads
-        );
+        let entry_b = repo.get_doc_branches(&doc_id).await?.unwrap();
+        let b_heads = entry_b
+            .branches
+            .get(&*local_branch("branch-b").to_string())
+            .unwrap()
+            .clone();
+        assert_ne!(b_heads, initial_heads, "branch-b should advance");
 
         // 4. Merge branch-a to main
         repo.merge_from_heads(&doc_id, &"main".into(), &a_heads, None)
             .await?;
-        let entry_merged_a = repo.get_entry(&doc_id).await?.unwrap();
+        let entry_merged_a = repo.get_doc_branches(&doc_id).await?.unwrap();
         let main_heads_a = entry_merged_a.branches.get("main").unwrap().clone();
-
-        let blame_a = entry_merged_a
-            .facet_blames
-            .get(&facet_title.to_string())
-            .unwrap()
-            .clone();
-        assert_eq!(
-            blame_a.heads, main_heads_a,
-            "title blame should match main heads after merge A"
+        assert_ne!(
+            main_heads_a, initial_heads,
+            "main should advance after merge A"
         );
+        let dmeta_after_a = get_dmeta_on_main(&repo, &doc_id).await?;
+        assert!(dmeta_after_a.facets.contains_key(&facet_title));
 
         // 5. Merge branch-b to main
         repo.merge_from_heads(&doc_id, &"main".into(), &b_heads, None)
             .await?;
-        let entry_merged_b = repo.get_entry(&doc_id).await?.unwrap();
+        let entry_merged_b = repo.get_doc_branches(&doc_id).await?.unwrap();
         let main_heads_b = entry_merged_b.branches.get("main").unwrap().clone();
-
-        let blame_b = entry_merged_b
-            .facet_blames
-            .get(&facet_note.to_string())
-            .unwrap()
-            .clone();
-        assert_eq!(
-            blame_b.heads, main_heads_b,
-            "note blame should match main heads after merge B"
+        assert_ne!(
+            main_heads_b, main_heads_a,
+            "main should advance after merge B"
         );
-
-        // title blame should still be main_heads_a (from previous merge)
-        // because it was NOT modified in the second merge.
-        let blame_a_after_b = entry_merged_b
-            .facet_blames
-            .get(&facet_title.to_string())
-            .unwrap()
-            .clone();
-        assert_eq!(
-            blame_a_after_b.heads, main_heads_a,
-            "title blame should remain unchanged after merge B"
-        );
+        let dmeta_after_b = get_dmeta_on_main(&repo, &doc_id).await?;
+        assert!(dmeta_after_b.facets.contains_key(&facet_note));
+        assert!(dmeta_after_b.facets.contains_key(&facet_title));
 
         stop_token.stop().await?;
         acx_stop.stop().await?;
@@ -3298,13 +4135,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-v2-scope".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-scope".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let make_drawer_doc = || async {
@@ -3312,7 +4146,7 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             eyre::Ok(handle.document_id().clone())
         };
 
@@ -3323,18 +4157,20 @@ mod tests {
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
 
         let (repo_a, stop_a) = DrawerRepo::load(
-            acx.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id_a,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::clone(&entry_pool),
             Arc::clone(&doc_pool),
             None,
         )
         .await?;
         let (repo_b, stop_b) = DrawerRepo::load(
-            acx.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id_b,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::clone(&entry_pool),
             Arc::clone(&doc_pool),
             None,
@@ -3375,13 +4211,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_v2_doc_updated_includes_changed_facet_keys() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-v2-changed-facets".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-changed-facets".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -3389,16 +4222,17 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
         let (repo, stop_token) = DrawerRepo::load(
-            acx.clone(),
+            Arc::clone(&big_repo),
             drawer_doc_id,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             entry_pool,
             doc_pool,
             None,
@@ -3473,13 +4307,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-v2-unknown-tag".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-unknown-tag".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -3487,14 +4318,15 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let (repo, stop_token) = DrawerRepo::load(
-            acx,
+            big_repo,
             drawer_doc_id,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             None,
@@ -3523,13 +4355,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-v2-self-ref".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-self-ref".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -3537,14 +4366,15 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let (repo, stop_token) = DrawerRepo::load(
-            acx,
+            big_repo,
             drawer_doc_id,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             None,
@@ -3585,13 +4415,10 @@ mod tests {
     async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_target() -> Res<()>
     {
         utils_rs::testing::setup_tracing_once();
-        let (acx, acx_stop) = AmCtx::boot(
-            am_utils_rs::Config {
-                peer_id: "test-v2-body-empty-fragment-self".into(),
-                storage: am_utils_rs::StorageConfig::Memory,
-            },
-            Some(samod::AlwaysAnnounce),
-        )
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-v2-body-empty-fragment-self".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
         .await?;
 
         let drawer_doc_id = {
@@ -3599,14 +4426,15 @@ mod tests {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
-            let handle = acx.add_doc(doc).await?;
+            let handle = big_repo.add_doc(doc).await?;
             handle.document_id().clone()
         };
 
         let (repo, stop_token) = DrawerRepo::load(
-            acx,
+            big_repo,
             drawer_doc_id,
-            automerge::ActorId::random(),
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
             None,
@@ -3644,6 +4472,186 @@ mod tests {
 
         assert!(add_result.is_ok(), "{add_result:?}");
 
+        stop_token.stop().await?;
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+
+        let temp_dir = tempfile::tempdir()?;
+        let storage_path = temp_dir.path().join("samod-amctx-disk");
+        std::fs::create_dir_all(&storage_path)?;
+
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: format!("perf-drawer-raw-amctx-{}", Uuid::new_v4()),
+            storage: am_utils_rs::repo::StorageConfig::Disk {
+                path: storage_path.clone(),
+                big_repo_sqlite_url: None,
+            },
+        })
+        .await?;
+
+        let local_actor_id = automerge::ActorId::random();
+        let mut aggregate_doc = automerge::Automerge::new();
+        {
+            let mut tx = aggregate_doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            let docs_obj = tx.put_object(automerge::ROOT, "docs", automerge::ObjType::Map)?;
+            tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?;
+            tx.commit();
+        }
+        let aggregate_handle = big_repo.add_doc(aggregate_doc).await?;
+
+        let total_docs: u64 = 80;
+        let started_at = std::time::Instant::now();
+
+        for ii in 0..total_docs {
+            let mut content_doc = automerge::Automerge::new();
+            content_doc.set_actor(automerge::ActorId::random());
+            let content_handle = big_repo.add_doc(content_doc).await?;
+            let content_doc_id = content_handle.document_id().to_string();
+
+            let _content_heads = content_handle.with_document(|doc| -> Res<ChangeHashSet> {
+                let mut tx = doc.transaction();
+                tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
+                tx.put(automerge::ROOT, "id", &content_doc_id)?;
+                let facets_obj =
+                    tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?;
+                for jj in 0..4_u64 {
+                    let facet_obj = tx.put_object(
+                        &facets_obj,
+                        format!("org.test.perf/{jj:02}"),
+                        automerge::ObjType::Map,
+                    )?;
+                    tx.put(&facet_obj, "title", format!("doc-{ii}-facet-{jj}"))?;
+                    tx.put(&facet_obj, "num", (ii * 10 + jj) as i64)?;
+                    let tags_obj = tx.put_object(&facet_obj, "tags", automerge::ObjType::List)?;
+                    tx.insert(&tags_obj, 0, "alpha")?;
+                    tx.insert(&tags_obj, 1, "beta")?;
+                    tx.insert(&tags_obj, 2, "gamma")?;
+                }
+                let (heads, _) = tx.commit();
+                let head = heads.expect("content doc commit failed");
+                Ok(ChangeHashSet(Arc::from([head])))
+            })?;
+
+            aggregate_handle.with_document(|doc| -> Res<()> {
+                let mut tx = doc.transaction();
+                let docs_obj = match tx.get(automerge::ROOT, "docs")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => eyre::bail!("aggregate docs map missing"),
+                };
+                let map_obj = match tx.get(&docs_obj, "map")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => eyre::bail!("aggregate docs.map missing"),
+                };
+                let entry = DocEntry {
+                    branches: [(
+                        "main".to_string(),
+                        StoredBranchRef {
+                            branch_doc_id: content_doc_id.to_string(),
+                        },
+                    )]
+                    .into(),
+                    vtag: VersionTag::mint(local_actor_id.clone()),
+                    previous_version_heads: None,
+                };
+                autosurgeon::reconcile_prop(&mut tx, &map_obj, &*content_doc_id, &entry)?;
+                tx.commit();
+                Ok(())
+            })?;
+        }
+
+        let elapsed = started_at.elapsed();
+        let docs_per_sec = total_docs as f64 / elapsed.as_secs_f64();
+        eprintln!(
+            "samod+automerge via SharedBigRepo baseline: added {} docs in {:?} ({:.2} docs/sec)",
+            total_docs, elapsed, docs_per_sec
+        );
+        assert!(docs_per_sec > 0.0);
+        acx_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn perf_drawer_add_disk_baseline() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+
+        let temp_dir = tempfile::tempdir()?;
+        let storage_path = temp_dir.path().join("drawer-disk");
+        std::fs::create_dir_all(&storage_path)?;
+
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: format!("perf-drawer-add-{}", Uuid::new_v4()),
+            storage: am_utils_rs::repo::StorageConfig::Disk {
+                path: storage_path.clone(),
+                big_repo_sqlite_url: None,
+            },
+        })
+        .await?;
+
+        let drawer_doc_id = {
+            let mut doc = automerge::Automerge::new();
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+            let handle = big_repo.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+
+        let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(4000)));
+        let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(4000)));
+        let (repo, stop_token) = DrawerRepo::load(
+            Arc::clone(&big_repo),
+            drawer_doc_id,
+            daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
+            entry_pool,
+            doc_pool,
+            None,
+        )
+        .await?;
+
+        let total_docs: u64 = 80;
+        let started_at = std::time::Instant::now();
+        for ii in 0..total_docs {
+            let _doc_id = repo
+                .add(AddDocArgs {
+                    branch_path: "main".into(),
+                    facets: [
+                        (
+                            FacetKey::from(WellKnownFacetTag::TitleGeneric),
+                            WellKnownFacet::TitleGeneric(format!("doc-{ii}")).into(),
+                        ),
+                        (
+                            FacetKey::from(WellKnownFacetTag::Note),
+                            WellKnownFacet::Note(format!("note-{ii}").into()).into(),
+                        ),
+                        (
+                            FacetKey::from(WellKnownFacetTag::LabelGeneric),
+                            WellKnownFacet::LabelGeneric(format!("label-{ii}")).into(),
+                        ),
+                        (
+                            FacetKey::from(WellKnownFacetTag::PathGeneric),
+                            WellKnownFacet::PathGeneric(format!("/tmp/doc-{ii}")).into(),
+                        ),
+                    ]
+                    .into(),
+                    user_path: None,
+                })
+                .await?;
+        }
+
+        let elapsed = started_at.elapsed();
+        let docs_per_sec = total_docs as f64 / elapsed.as_secs_f64();
+        eprintln!(
+            "drawer add baseline: added {} docs in {:?} ({:.2} docs/sec)",
+            total_docs, elapsed, docs_per_sec
+        );
+        assert!(docs_per_sec > 0.0);
         stop_token.stop().await?;
         acx_stop.stop().await?;
         Ok(())

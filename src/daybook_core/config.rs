@@ -16,7 +16,7 @@ pub struct ConfigStore {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reconcile, Hydrate)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct UserMeta {
-    #[autosurgeon(with = "am_utils_rs::codecs::path")]
+    #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
     pub user_path: daybook_types::doc::UserPath,
     #[autosurgeon(with = "am_utils_rs::codecs::date")]
     pub seen_at: Timestamp,
@@ -93,7 +93,7 @@ pub enum ConfigEvent {
 }
 
 pub struct ConfigRepo {
-    acx: AmCtx,
+    big_repo: SharedBigRepo,
     app_doc_id: DocumentId,
     app_am_handle: samod::DocHandle,
     store: crate::stores::AmStoreHandle<ConfigStore>,
@@ -101,11 +101,13 @@ pub struct ConfigRepo {
     plug_repo: Arc<PlugsRepo>,
     local_user_path: daybook_types::doc::UserPath,
     local_actor_id: ActorId,
+    local_peer_id: String,
     sql_pool: sqlx::SqlitePool,
     cancel_token: CancellationToken,
     global_props_doc_init_lock: tokio::sync::Mutex<()>,
     sync_config_lock: tokio::sync::Mutex<()>,
-    _change_listener_tickets: Vec<am_utils_rs::changes::ChangeListenerRegistration>,
+    _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
+    _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
 }
 
 impl crate::repos::Repo for ConfigRepo {
@@ -120,19 +122,21 @@ impl crate::repos::Repo for ConfigRepo {
 
 impl ConfigRepo {
     pub async fn load(
-        acx: AmCtx,
+        big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
         plug_repo: Arc<PlugsRepo>,
         local_user_path: daybook_types::doc::UserPath,
         sql_pool: sqlx::SqlitePool,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
-        let store_val = ConfigStore::load(&acx, &app_doc_id).await?;
+        let store_val = ConfigStore::load(&big_repo, &app_doc_id).await?;
+        let local_user_path =
+            daybook_types::doc::user_path::for_repo(&local_user_path, "config-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
 
         let store = crate::stores::AmStoreHandle::new(
             store_val,
-            acx.clone(),
+            Arc::clone(&big_repo),
             app_doc_id.clone(),
             local_actor_id.clone(),
         );
@@ -141,7 +145,7 @@ impl ConfigRepo {
             .mutate_sync(|store| {
                 store
                     .users
-                    .entry(local_user_path.to_string_lossy().into_owned())
+                    .entry(local_actor_id.to_string())
                     .or_insert_with(|| {
                         Versioned::mint(
                             local_actor_id.clone(),
@@ -155,28 +159,20 @@ impl ConfigRepo {
             })
             .await?;
 
-        let app_am_handle = acx
-            .find_doc(&app_doc_id)
+        let app_am_handle = big_repo
+            .find_doc_handle(&app_doc_id)
             .await?
             .ok_or_eyre("unable to find app doc in am")?;
 
-        let (broker, broker_stop) = acx.change_manager().add_doc(app_am_handle.clone()).await?;
+        let broker = big_repo.ensure_change_broker(app_am_handle.clone()).await?;
 
-        let (notif_tx, notif_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Vec<am_utils_rs::changes::ChangeNotification>>();
+        let cancel_token = CancellationToken::new();
         // Register change listener to automatically notify repo listeners
-        let ticket = ConfigStore::register_change_listener(&acx, &broker, vec![], {
-            move |notifs| {
-                if let Err(err) = notif_tx.send(notifs) {
-                    warn!("failed to send change notifications: {err}");
-                }
-            }
-        })
-        .await?;
+        let (ticket, notif_rx) =
+            ConfigStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
 
-        let main_cancel_token = CancellationToken::new();
         let repo = Self {
-            acx: acx.clone(),
+            big_repo: Arc::clone(&big_repo),
             app_doc_id: app_doc_id.clone(),
             app_am_handle,
             store,
@@ -184,17 +180,19 @@ impl ConfigRepo {
             plug_repo,
             local_user_path,
             local_actor_id,
+            local_peer_id: big_repo.samod_repo().peer_id().to_string(),
             sql_pool,
-            cancel_token: main_cancel_token.child_token(),
+            cancel_token: cancel_token.clone(),
             global_props_doc_init_lock: tokio::sync::Mutex::new(()),
             sync_config_lock: tokio::sync::Mutex::new(()),
             _change_listener_tickets: vec![ticket],
+            _change_broker_leases: vec![broker],
         };
         let repo = Arc::new(repo);
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
-            let cancel_token = main_cancel_token.clone();
+            let cancel_token = cancel_token.child_token();
             async move {
                 repo.notifs_loop(notif_rx, cancel_token)
                     .await
@@ -205,9 +203,8 @@ impl ConfigRepo {
         Ok((
             repo,
             crate::repos::RepoStopToken {
-                cancel_token: main_cancel_token,
+                cancel_token,
                 worker_handle: Some(worker_handle),
-                broker_stop_tokens: vec![broker_stop],
             },
         ))
     }
@@ -215,7 +212,7 @@ impl ConfigRepo {
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<am_utils_rs::changes::ChangeNotification>,
+            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -238,17 +235,27 @@ impl ConfigRepo {
             events.clear();
             let mut last_heads = None;
             for notif in notifs {
+                let am_utils_rs::repo::BigRepoChangeNotification::DocChanged {
+                    patch,
+                    heads,
+                    origin,
+                    ..
+                } = notif
+                else {
+                    continue;
+                };
                 let len = events.len();
                 self.events_for_patch(
-                    &notif.patch,
-                    &notif.heads,
+                    &patch,
+                    &heads,
                     &mut events,
-                    Some(self.local_actor_id.clone()),
+                    Some(&origin),
+                    Some(self.local_peer_id.as_str()),
                 )
                 .await?;
                 // events were added
                 if len != events.len() {
-                    last_heads = Some(ChangeHashSet(Arc::clone(&notif.heads)));
+                    last_heads = Some(ChangeHashSet(Arc::clone(&heads)));
                 }
             }
             // for event in &events {
@@ -260,7 +267,7 @@ impl ConfigRepo {
 
             if let Some(heads) = last_heads {
                 let (new_store, _) = self
-                    .acx
+                    .big_repo
                     .hydrate_path_at_heads::<ConfigStore>(
                         &self.app_doc_id,
                         &heads,
@@ -304,10 +311,16 @@ impl ConfigRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
-            self.events_for_patch(&patch, &heads, &mut events, None)
+            self.events_for_patch(&patch, &heads, &mut events, None, None)
                 .await?;
         }
         Ok(events)
+    }
+
+    pub async fn events_for_init(&self) -> Res<Vec<ConfigEvent>> {
+        Ok(vec![ConfigEvent::Changed {
+            heads: ChangeHashSet(self.get_config_heads().await?),
+        }])
     }
 
     async fn events_for_patch(
@@ -315,8 +328,16 @@ impl ConfigRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<ConfigEvent>,
-        exclude_actor_id: Option<ActorId>,
+        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer: Option<&str>,
     ) -> Res<()> {
+        if let Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) = origin {
+            if let Some(exclude_peer) = exclude_peer {
+                if peer_id.to_string() == exclude_peer {
+                    return Ok(());
+                }
+            }
+        }
         let heads = ChangeHashSet(Arc::clone(patch_heads));
 
         match &patch.action {
@@ -328,15 +349,11 @@ impl ConfigRepo {
                 let Some((_obj, automerge::Prop::Map(section_key))) = patch.path.get(1) else {
                     return Ok(());
                 };
-                let vtag = match val {
-                    automerge::Value::Scalar(scalar) => match &**scalar {
-                        automerge::ScalarValue::Bytes(bytes) => bytes,
-                        _ => return Ok(()),
-                    },
-                    _ => return Ok(()),
-                };
-                let vtag = VersionTag::hydrate_bytes(vtag)?;
-                if Some(vtag.actor_id) == exclude_actor_id {
+                if !matches!(
+                    val,
+                    automerge::Value::Scalar(scalar)
+                    if matches!(&**scalar, automerge::ScalarValue::Bytes(_))
+                ) {
                     return Ok(());
                 }
 
@@ -354,8 +371,8 @@ impl ConfigRepo {
 
     pub async fn get_config_heads(&self) -> Res<Arc<[automerge::ChangeHash]>> {
         let handle = self
-            .acx
-            .find_doc(&self.app_doc_id)
+            .big_repo
+            .find_doc_handle(&self.app_doc_id)
             .await?
             .ok_or_eyre("app doc not found")?;
         let heads = handle.with_document(|doc| doc.get_heads());

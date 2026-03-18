@@ -1,7 +1,7 @@
 use crate::interlude::*;
 use automerge::transaction::Transactable;
 
-use am_utils_rs::AmCtx;
+use am_utils_rs::SharedBigRepo;
 
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
@@ -15,7 +15,7 @@ mod ocr_image_wflow;
 mod plugin_local_index_wflow;
 
 pub struct DaybookTestContext {
-    pub _acx: AmCtx,
+    pub _acx: SharedBigRepo,
     pub drawer_repo: Arc<DrawerRepo>,
     pub dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
     pub _config_repo: Arc<crate::config::ConfigRepo>,
@@ -23,7 +23,7 @@ pub struct DaybookTestContext {
     pub plugs_stop: crate::repos::RepoStopToken,
     pub config_stop: crate::repos::RepoStopToken,
     pub dispatch_stop: crate::repos::RepoStopToken,
-    pub acx_stop: am_utils_rs::AmCtxStopToken,
+    pub acx_stop: am_utils_rs::BigRepoStopToken,
     pub rt_stop: crate::rt::RtStopToken,
     pub rt: Arc<crate::rt::Rt>,
     pub _temp_dir: tempfile::TempDir,
@@ -139,14 +139,11 @@ pub async fn test_cx_with_options(
     let device_id = format!("test_{}", uuid::Uuid::new_v4().simple());
     let peer_id = format!("test_{}", uuid::Uuid::new_v4().simple());
 
-    // Initialize AmCtx with memory storage
-    let (acx, acx_stop) = AmCtx::boot(
-        am_utils_rs::Config {
-            peer_id,
-            storage: am_utils_rs::StorageConfig::Memory,
-        },
-        Option::<samod::AlwaysAnnounce>::None,
-    )
+    // Initialize SharedBigRepo with memory storage
+    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+        peer_id,
+        storage: am_utils_rs::repo::StorageConfig::Memory,
+    })
     .await?;
 
     // Create a drawer document
@@ -155,34 +152,35 @@ pub async fn test_cx_with_options(
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = acx.add_doc(doc).await?;
+        let handle = big_repo.add_doc(doc).await?;
         handle.document_id().clone()
     };
 
     // Create an app document for all stores (config, plugs, dispatch, triage)
     let app_doc_id = {
         let doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
-        let handle = acx.add_doc(doc).await?;
+        let handle = big_repo.add_doc(doc).await?;
         handle.document_id().clone()
     };
 
     // Load config first to get local identity
     let local_user_path = daybook_types::doc::UserPath::from("/test-user");
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
-
     let temp_dir = tempfile::tempdir()?;
-    let blobs = crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs")).await?;
+    let blobs =
+        crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.to_string())
+            .await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
-        acx.clone(),
+        Arc::clone(&big_repo),
         Arc::clone(&blobs),
         app_doc_id.clone(),
-        local_actor_id.clone(),
+        local_user_path.clone(),
     )
     .await?;
     let sql_ctx = crate::app::SqlCtx::new("sqlite::memory:").await?;
     let (config_repo, config_stop) = crate::config::ConfigRepo::load(
-        acx.clone(),
+        Arc::clone(&big_repo),
         app_doc_id.clone(),
         Arc::clone(&plugs_repo),
         local_user_path.clone(),
@@ -190,16 +188,17 @@ pub async fn test_cx_with_options(
     )
     .await?;
     let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
-        acx.clone(),
+        Arc::clone(&big_repo),
         app_doc_id.clone(),
-        local_actor_id.clone(),
+        local_user_path.clone(),
     )
     .await?;
     let progress_repo = crate::progress::ProgressRepo::boot(sql_ctx.db_pool.clone()).await?;
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
-        acx.clone(),
+        Arc::clone(&big_repo),
         drawer_doc_id,
-        local_actor_id.clone(),
+        local_user_path.clone(),
+        temp_dir.path().join("local_states"),
         Arc::new(std::sync::Mutex::new(
             crate::drawer::lru::KeyedLruPool::new(1000),
         )),
@@ -229,7 +228,7 @@ pub async fn test_cx_with_options(
         },
         app_doc_id,
         wflow_db_url,
-        acx.clone(),
+        Arc::clone(&big_repo),
         Arc::clone(&drawer_repo),
         Arc::clone(&plugs_repo),
         Arc::clone(&dispatch_repo),
@@ -244,7 +243,7 @@ pub async fn test_cx_with_options(
     plugs_repo.ensure_system_plugs().await?;
 
     Ok(DaybookTestContext {
-        _acx: acx,
+        _acx: big_repo,
         drawer_repo,
         rt,
         dispatch_repo,

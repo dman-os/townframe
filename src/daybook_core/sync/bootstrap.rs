@@ -89,6 +89,7 @@ impl IrohSyncRepo {
 }
 
 /// NOTE: this uses a fresh secret key for the connection
+#[tracing::instrument(skip(iroh_doc_url))]
 pub async fn resolve_bootstrap_from_url(iroh_doc_url: &str) -> Res<SyncBootstrapState> {
     let session = TempDocsSession::boot(None).await?;
     let out = resolve_bootstrap_with_docs(&session.docs, &session.blobs, iroh_doc_url).await;
@@ -103,10 +104,14 @@ pub async fn resolve_bootstrap_from_url(iroh_doc_url: &str) -> Res<SyncBootstrap
 
     impl TempDocsSession {
         async fn boot(secret_key: Option<iroh::SecretKey>) -> Res<Self> {
-            let mut endpoint_builder = iroh::Endpoint::builder();
-            if let Some(secret_key) = secret_key {
-                endpoint_builder = endpoint_builder.secret_key(secret_key);
-            }
+            let endpoint_builder = match secret_key {
+                Some(secret_key) => iroh::Endpoint::builder().secret_key(secret_key),
+                None => iroh::Endpoint::builder(),
+            };
+            #[cfg(test)]
+            let endpoint_builder = endpoint_builder
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_address_lookup();
             let endpoint = endpoint_builder.bind().await?;
             let blobs = (*iroh_blobs::store::mem::MemStore::new()).clone();
             let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
@@ -136,7 +141,7 @@ pub async fn resolve_bootstrap_from_url(iroh_doc_url: &str) -> Res<SyncBootstrap
     }
 }
 
-#[tracing::instrument(skip(docs, blobs), ret)]
+#[tracing::instrument(skip(docs, blobs, iroh_doc_url))]
 pub(super) async fn resolve_bootstrap_with_docs(
     docs: &iroh_docs::api::DocsApi,
     blobs: &iroh_blobs::api::Store,
@@ -187,47 +192,25 @@ pub(super) async fn resolve_bootstrap_with_docs(
     }
 }
 
-pub async fn pull_required_docs_once(
-    acx: &AmCtx,
-    app_doc_id: &DocumentId,
-    drawer_doc_id: &DocumentId,
-    timeout: std::time::Duration,
-) -> Res<()> {
-    let app_doc_id = app_doc_id.clone();
-    let drawer_doc_id = drawer_doc_id.clone();
-    tokio::time::timeout(timeout, async move {
-        loop {
-            let app = acx.find_doc(&app_doc_id).await?;
-            let drawer = acx.find_doc(&drawer_doc_id).await?;
-            if app.is_some() && drawer.is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        }
-        Ok::<(), eyre::Report>(())
-    })
-    .await
-    .map_err(|_| eyre::eyre!("timed out waiting for remote docs during clone"))??;
-
-    Ok(())
-}
-
+#[tracing::instrument(skip(big_repo, iroh_secret_key, bootstrap, timeout))]
 pub async fn connect_and_pull_required_docs_once(
-    acx: &AmCtx,
+    big_repo: &SharedBigRepo,
     iroh_secret_key: iroh::SecretKey,
     bootstrap: &SyncBootstrapState,
     timeout: std::time::Duration,
 ) -> Res<()> {
-    let endpoint = iroh::Endpoint::builder()
-        .secret_key(iroh_secret_key)
-        .bind()
-        .await?;
-    let conn = acx
+    let endpoint_builder = iroh::Endpoint::builder().secret_key(iroh_secret_key);
+    #[cfg(test)]
+    let endpoint_builder = endpoint_builder
+        .relay_mode(iroh::RelayMode::Disabled)
+        .clear_address_lookup();
+    let endpoint = endpoint_builder.bind().await?;
+    let conn = big_repo
         .spawn_connection_iroh(&endpoint, bootstrap.endpoint_addr.clone(), None)
         .await?;
 
     let pull_res = pull_required_docs_once(
-        acx,
+        big_repo,
         &bootstrap.app_doc_id,
         &bootstrap.drawer_doc_id,
         timeout,
@@ -238,6 +221,31 @@ pub async fn connect_and_pull_required_docs_once(
     pull_res?;
     stop_res?;
     endpoint.close().await;
+    Ok(())
+}
+
+async fn pull_required_docs_once(
+    big_repo: &SharedBigRepo,
+    app_doc_id: &DocumentId,
+    drawer_doc_id: &DocumentId,
+    timeout: std::time::Duration,
+) -> Res<()> {
+    let app_doc_id = app_doc_id.clone();
+    let drawer_doc_id = drawer_doc_id.clone();
+    tokio::time::timeout(timeout, async move {
+        loop {
+            let app = big_repo.find_doc_handle(&app_doc_id).await?;
+            let drawer = big_repo.find_doc_handle(&drawer_doc_id).await?;
+            if app.is_some() && drawer.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+        Ok::<(), eyre::Report>(())
+    })
+    .await
+    .map_err(|_| eyre::eyre!("timed out waiting for remote docs during clone"))??;
+
     Ok(())
 }
 

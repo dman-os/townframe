@@ -33,10 +33,10 @@ impl PlugsRepoFfi {
     ) -> Result<Arc<Self>, FfiError> {
         let (repo, stop_token) = fcx
             .do_on_rt(PlugsRepo::load(
-                fcx.rcx.acx.clone(),
+                Arc::clone(&fcx.rcx.big_repo),
                 Arc::clone(&blobs_repo.repo),
                 fcx.rcx.doc_app.document_id().clone(),
-                fcx.rcx.local_actor_id.clone(),
+                daybook_types::doc::UserPath::from(fcx.rcx.local_user_path.clone()),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;

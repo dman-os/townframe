@@ -23,7 +23,7 @@ fn setup_tracing() -> Res<()> {
     let filter: Option<String> = None;
 
     #[allow(clippy::unnecessary_literal_unwrap)]
-    let filter = filter.unwrap_or_else(|| "info,ort::logging=warn".into());
+    let filter = filter.unwrap_or_else(|| "info,cranelift_codegen=info,wasmtime_internal_cranelift=info,wasmtime=info,rustls=info,h2=info,hyper_util=info,ort::logging=warn,samod_core=warn,netlink_packet_route::link::buffer_tool=error".into());
 
     // #[cfg(test)]
     // console_subscriber::init();

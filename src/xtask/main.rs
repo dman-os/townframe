@@ -10,8 +10,21 @@ mod interlude {
 mod gen;
 
 use clap::builder::styling::AnsiColor;
+use irpc::{channel::oneshot, rpc_requests, Client, WithChannels};
+use irpc_iroh::IrohProtocol;
+use serde::{Deserialize, Serialize};
 
 use crate::interlude::*;
+
+const IRPC_PROBE_ALPN: &[u8] = b"townframe/xtask/irpc-probe/0";
+
+#[rpc_requests(message = ProbeMessage)]
+#[derive(Debug, Serialize, Deserialize)]
+enum ProbeProtocol {
+    #[rpc(tx=oneshot::Sender<u64>)]
+    #[wrap(PingReq, derive(Clone))]
+    Ping(u64),
+}
 
 fn main() -> Res<()> {
     dotenv_flow::dotenv_flow().ok();
@@ -30,6 +43,15 @@ async fn main_main() -> Res<()> {
     match args.command {
         Commands::Gen {} => {
             gen::cli()?;
+        }
+        Commands::IrpcDisconnectProbe {} => {
+            irpc_disconnect_probe().await?;
+        }
+        Commands::IrpcInflightDisconnectProbe {} => {
+            irpc_inflight_disconnect_probe().await?;
+        }
+        Commands::IrpcClientCancelProbe {} => {
+            irpc_client_cancel_probe().await?;
         }
         Commands::EmbedSimilarityDemo {
             image,
@@ -527,6 +549,179 @@ async fn fastembed_builtin_clip_cross_modal_embeddings(
     .wrap_err("fastembed built-in CLIP cross-modal embed task failed to join")?
 }
 
+async fn irpc_disconnect_probe() -> Res<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                ProbeMessage::Ping(msg) => {
+                    let WithChannels { inner, tx, .. } = msg;
+                    tx.send(inner.0.saturating_add(1))
+                        .await
+                        .expect("probe responder channel closed unexpectedly");
+                }
+            }
+        }
+    });
+
+    let server_local = Client::<ProbeProtocol>::local(tx);
+    let server_endpoint = iroh::Endpoint::bind().await?;
+    let protocol = IrohProtocol::with_sender(
+        server_local
+            .as_local()
+            .expect("local irpc sender missing for probe"),
+    );
+    let router = iroh::protocol::Router::builder(server_endpoint)
+        .accept(IRPC_PROBE_ALPN, protocol)
+        .spawn();
+    let server_addr = router.endpoint().addr();
+
+    let client_endpoint = iroh::Endpoint::bind().await?;
+    let client = irpc_iroh::client::<ProbeProtocol>(client_endpoint, server_addr, IRPC_PROBE_ALPN);
+
+    let first = client
+        .rpc(PingReq(41))
+        .await
+        .wrap_err("initial rpc failed")?;
+    if first != 42 {
+        eyre::bail!("probe invariant failed: expected 42, got {first}");
+    }
+
+    router.shutdown().await.wrap_err("router shutdown failed")?;
+
+    match client.rpc(PingReq(7)).await {
+        Ok(val) => eyre::bail!("expected rpc failure after shutdown, got value={val}"),
+        Err(err) => {
+            println!("irpc disconnect probe: observed expected error after shutdown: {err}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn irpc_inflight_disconnect_probe() -> Res<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                ProbeMessage::Ping(msg) => {
+                    let WithChannels { inner, tx, .. } = msg;
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    // If peer disconnected, this will fail and that's fine for the probe.
+                    let _ = tx.send(inner.0.saturating_add(1)).await;
+                }
+            }
+        }
+    });
+
+    let server_local = Client::<ProbeProtocol>::local(tx);
+    let server_endpoint = iroh::Endpoint::bind().await?;
+    let protocol = IrohProtocol::with_sender(
+        server_local
+            .as_local()
+            .expect("local irpc sender missing for probe"),
+    );
+    let router = iroh::protocol::Router::builder(server_endpoint)
+        .accept(IRPC_PROBE_ALPN, protocol)
+        .spawn();
+    let server_addr = router.endpoint().addr();
+
+    let client_endpoint = iroh::Endpoint::bind().await?;
+    let client = irpc_iroh::client::<ProbeProtocol>(client_endpoint, server_addr, IRPC_PROBE_ALPN);
+
+    let call = tokio::spawn({
+        let client = client.clone();
+        async move {
+            let started = std::time::Instant::now();
+            let out = client.rpc(PingReq(123)).await;
+            (started.elapsed(), out)
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    router.shutdown().await.wrap_err("router shutdown failed")?;
+
+    let (elapsed, out) = call.await.wrap_err("probe task join failed")?;
+    match out {
+        Ok(value) => {
+            eyre::bail!("expected in-flight rpc failure after shutdown, got value={value}")
+        }
+        Err(err) => {
+            println!(
+                "irpc in-flight disconnect probe: rpc failed after {:?}: {}",
+                elapsed, err
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn irpc_client_cancel_probe() -> Res<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let (report_tx, mut report_rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                ProbeMessage::Ping(msg) => {
+                    let WithChannels { inner, tx, .. } = msg;
+                    let report_tx = report_tx.clone();
+                    tokio::spawn(async move {
+                        let started = std::time::Instant::now();
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        let send_result = tx.send(inner.0.saturating_add(1)).await;
+                        report_tx
+                            .send((started.elapsed(), send_result.is_ok()))
+                            .await
+                            .expect("probe report channel closed unexpectedly");
+                    });
+                }
+            }
+        }
+    });
+
+    let server_local = Client::<ProbeProtocol>::local(tx);
+    let server_endpoint = iroh::Endpoint::bind().await?;
+    let protocol = IrohProtocol::with_sender(
+        server_local
+            .as_local()
+            .expect("local irpc sender missing for probe"),
+    );
+    let router = iroh::protocol::Router::builder(server_endpoint)
+        .accept(IRPC_PROBE_ALPN, protocol)
+        .spawn();
+    let server_addr = router.endpoint().addr();
+
+    let client_endpoint = iroh::Endpoint::bind().await?;
+    let client = irpc_iroh::client::<ProbeProtocol>(client_endpoint, server_addr, IRPC_PROBE_ALPN);
+
+    let call = tokio::spawn({
+        let client = client.clone();
+        async move { client.rpc(PingReq(123)).await }
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    call.abort();
+    let join_err = call.await.expect_err("probe task should have been aborted");
+    if !join_err.is_cancelled() {
+        eyre::bail!("expected cancelled join error after abort, got: {join_err}");
+    }
+
+    let (elapsed, send_ok) = report_rx
+        .recv()
+        .await
+        .ok_or_eyre("probe report missing after client cancellation")?;
+    println!(
+        "irpc client cancel probe: responder send_ok={send_ok} after {:?}",
+        elapsed
+    );
+    if send_ok {
+        eyre::bail!("expected responder send failure after client cancellation");
+    }
+
+    router.shutdown().await.wrap_err("router shutdown failed")?;
+    Ok(())
+}
+
 fn direct_cosine_similarity(image_vector: &[f32], text_vector: &[f32]) -> Res<f32> {
     if image_vector.is_empty() || text_vector.is_empty() {
         eyre::bail!("cannot compare empty embeddings");
@@ -603,4 +798,7 @@ enum Commands {
     },
     Play {},
     Gen {},
+    IrpcDisconnectProbe {},
+    IrpcInflightDisconnectProbe {},
+    IrpcClientCancelProbe {},
 }
