@@ -7,18 +7,18 @@ Currently intended for contributors.
 
 In daybook, all of our documents go in a single repo.
 We can clone our repo on other devices to get access to our docs.
-Changes can be made on any replicas of the same repo, whether it is to add a new document or to modify an existing one.
-Daybook ensures then that these changes are synced to other replicas whenever a working connection between devices.
+Changes can be made on any replicas of the same repo, weather it is to add a new document or to modify an existing one.
+Daybook ensures then that these changes are synced to other replicas whenever a working connection between devices is established.
 
 ## Docs
 
-Documents are a the main units of information in a repo and have a unique ids.
+Documents are the main units of information in a repo and have a unique ids.
 
 ### Facets
 
 Documents are mainly made up of facets which are JSON objects describing the different pieces of the document.
 Facets are stored in a map with unordered keys that have a format of `facet.tag/key-id`.
-The facet tag indicates expected schema of the value of under that key.
+The facet tag indicates expected schema of the value under that key.
 The key-id allows multiple facets of the same kind in the doc and is an untyped string.
 Using a convention for the id, like the plain default "main", allows for convergence when creating facets on different devices.
 For uniqueness, uuids can be used.
@@ -41,14 +41,14 @@ Some examples of facets:
 ### Automerge
 
 Documents are stored using the Automerge data structure, a JSON based CRDT implementation.
-CRDTs are a family of data structures allowing concurrent edits acoss devices that can then be resolved to a final, merged state in a repeatable and unsupervised manner.
+CRDTs are a family of data structures allowing concurrent edits across devices that can then be resolved to a final, merged state in a repeatable and unsupervised manner.
 The design of Automerge requires the full history of the document is kept which can be a feature or a burden depending on the usecase. 
 
 #### Heads
 
 In automerge, instead of line diffs as seen in git, we have operations describing changes to JSON objects.
 These operations are bunched up together into transactions or changes as they're called.
-A change can be taught of as a single git commit with a hash used to refer to it, the change hash.
+A change can be thought of as a single git commit with a hash used to refer to it, the change hash.
 But unlike git, automerge avoids ambiguity merge conflicts at the JSON layer.
 All changes concurrently resolve to the same outcome for all replicas.
 This allows us to avoid the need of creating merge commits to refer to a state of the document at a point in time.
@@ -91,7 +91,7 @@ const facetRef = new URL(
 ```
 
 URLs can be used for intra or inter-doc facet references.
-As a special convention, `self` can be used instead of the document id to indicates that the reference is to the same doc containing the facet making holding the URL.
+As a special convention, `self` can be used instead of the document id to indicates that the reference is to the same doc containing the facet that holds the URL.
 
 We use change hash sets to refer to commit of the facet we're referring to.
 These can be put in the URL query params or be put in another field.

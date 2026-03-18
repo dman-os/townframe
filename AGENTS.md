@@ -100,17 +100,17 @@
 
 ## Cheating
 
-Avoid cheating through hacks that violate common sensebilites just to get a task done.
+Avoid cheating through hacks that violate common sensibilities just to get a task done.
 
-- Code that tires to get the test green by writing shallow or buggy fixes.
+- Code that tires to get tests green by writing shallow or buggy fixes.
 - Code that reads the whole database in a memory HashSet to avoid writing the right SQL.
 
 THIS IS A NO CHEAT REPO!
 
 ## Test code
 
-Human auditors of this repo don't really read test code or mantain it.
-So when working on tests, take a gardening hand to it and assume they've been less strictly audited in the past.
+Test code is often less consistently audited than production code.
+So when working on tests, take a gardening hand to it and proactively improve them.
 See a useless or too shallow a test?
 Flag it for removal.
 Are tests repeating too much setup code?

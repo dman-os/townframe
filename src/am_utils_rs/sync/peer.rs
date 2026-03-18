@@ -146,7 +146,7 @@ pub async fn spawn_peer_sync_worker(
                 peer: worker.remote_peer.clone(),
                 partition_count: frontiers.len(),
             })
-            .expect(ERROR_CHANNEL);
+            .ok();
 
         let subscribe_started_at = Instant::now();
 
@@ -186,7 +186,7 @@ pub async fn spawn_peer_sync_worker(
             .send(PeerSyncWorkerEvent::LiveReady {
                 peer: worker.remote_peer.clone(),
             })
-            .expect(ERROR_CHANNEL);
+            .ok();
 
         loop {
             if replay_phase_finished && !replay_phase_transition_emitted {
@@ -236,7 +236,7 @@ pub async fn spawn_peer_sync_worker(
                         peer: args.remote_peer,
                         reason: err.to_string(),
                     })
-                    .expect(ERROR_CHANNEL);
+                    .ok();
             }
             debug!(result = ?run_res.as_ref().map(|_| ()), "peer sync worker future exiting");
             run_res.unwrap();
@@ -328,8 +328,6 @@ impl PeerSyncWorker {
             .iter()
             .map(|item| (item.partition_id.clone(), item.latest_cursor))
             .collect();
-
-        info!(?partitions, "XXX");
 
         let mut frontiers: HashMap<PartitionId, u64> = default();
         for part in &self.target_partitions {
@@ -801,13 +799,13 @@ impl PeerSyncWorker {
     fn emit_phase_started(&self, phase: &'static str) {
         self.progress_tx
             .send(PeerSyncProgressEvent::PhaseStarted { phase })
-            .expect(ERROR_CHANNEL);
+            .ok();
     }
 
     fn emit_phase_finished(&self, phase: &'static str, elapsed: Duration) {
         self.progress_tx
             .send(PeerSyncProgressEvent::PhaseFinished { phase, elapsed })
-            .expect(ERROR_CHANNEL);
+            .ok();
     }
 
     fn emit_doc_sync_status(&self, synced_docs: u64, remaining_docs: u64) {
@@ -816,7 +814,7 @@ impl PeerSyncWorker {
                 synced_docs,
                 remaining_docs,
             })
-            .expect(ERROR_CHANNEL);
+            .ok();
     }
 
     fn assert_cursor_monotonic(&self, current: Option<u64>, next: u64) -> Res<()> {

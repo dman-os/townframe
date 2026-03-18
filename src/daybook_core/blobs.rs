@@ -356,10 +356,11 @@ impl BlobsRepo {
 
     fn lock_for_hash(&self, hash: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut guard = self.hash_locks.lock().expect(ERROR_MUTEX);
-        guard
-            .entry(hash.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+        Arc::clone(
+            guard
+                .entry(hash.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
     }
 
     fn is_exists_error(err: &std::io::Error) -> bool {

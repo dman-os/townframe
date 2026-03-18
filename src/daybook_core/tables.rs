@@ -655,7 +655,7 @@ impl TablesRepo {
     ) -> Res<()> {
         if let Some(origin) = origin {
             match origin {
-                am_utils_rs::repo::BigRepoChangeOrigin::Local { .. } => return Ok(()),
+                am_utils_rs::repo::BigRepoChangeOrigin::Local => return Ok(()),
                 am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. } => {
                     if let Some(exclude_peer) = exclude_peer {
                         if peer_id.to_string() == exclude_peer {

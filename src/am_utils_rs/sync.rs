@@ -768,7 +768,10 @@ mod tests {
             Duration::from_secs(5),
             || async {
                 let count = dst.partition_member_count(&p_ok).await?;
-                Ok(count == 1)
+                let ok_cursor = dst_store
+                    .get_partition_cursor(peer_key.clone(), p_ok.clone())
+                    .await?;
+                Ok(count == 1 && ok_cursor.doc_cursor.is_some())
             },
             "timed out waiting for healthy partition membership sync",
         )

@@ -128,10 +128,6 @@ impl DocBlobsIndexRepo {
         .execute(db_pool)
         .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_doc_blob_refs_doc_id ON doc_blob_refs(doc_id)")
-            .execute(db_pool)
-            .await?;
-
         Ok(())
     }
 
@@ -179,7 +175,7 @@ impl DocBlobsIndexRepo {
             .drawer_repo
             .get_at_heads_with_facets_arc(doc_id, heads, Some(selected_blob_keys))
             .await?
-            .unwrap_or_default();
+            .ok_or_eyre("doc didn't match expectation")?;
 
         let mut hashes = HashSet::<String>::new();
         for (_facet_key, facet_raw) in facets {
@@ -446,7 +442,6 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
                     .get_facet_keys_if_latest(id, &branch_path, heads, drawer_heads)
                     .await?
                 else {
-                    self.index_repo.enqueue_delete(id.clone())?;
                     return Ok(outcome);
                 };
                 self.index_repo.enqueue_upsert(id.clone(), heads.clone())?;

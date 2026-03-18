@@ -1776,6 +1776,9 @@ impl Worker {
         hash: String,
         endpoint_id: Option<EndpointId>,
     ) -> Res<()> {
+        if !self.known_blob_set.contains_key(&hash) {
+            return Ok(());
+        }
         let sync_hash = hash.clone();
         if let Some(active) = self.active_blobs.remove(&hash) {
             active.stop_token.stop().await?;
@@ -1804,6 +1807,9 @@ impl Worker {
         previous_backoff: Duration,
         _previous_attempt_at: std::time::Instant,
     ) -> Res<()> {
+        if !self.known_blob_set.contains_key(&hash) {
+            return Ok(());
+        }
         let Some(active) = self.active_blobs.remove(&hash) else {
             return Ok(());
         };
