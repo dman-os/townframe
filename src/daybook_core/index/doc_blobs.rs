@@ -15,7 +15,14 @@ const DOC_BLOBS_LOCAL_STATE_ID: &str = "@daybook/wip/doc-blobs-index";
 pub struct DocBlobMembership {
     pub doc_id: DocId,
     pub blob_hash: String,
+    pub length_octets: u64,
     pub origin_heads: ChangeHashSet,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocBlobRef {
+    pub blob_hash: String,
+    pub length_octets: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +121,7 @@ impl DocBlobsIndexRepo {
             CREATE TABLE IF NOT EXISTS doc_blob_refs (
                 doc_id TEXT NOT NULL,
                 blob_hash TEXT NOT NULL,
+                length_octets INTEGER NOT NULL DEFAULT 0,
                 origin_heads TEXT NOT NULL,
                 PRIMARY KEY(doc_id, blob_hash)
             )
@@ -121,6 +129,19 @@ impl DocBlobsIndexRepo {
         )
         .execute(db_pool)
         .await?;
+
+        let has_length_octets_col: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM pragma_table_info('doc_blob_refs') WHERE name = 'length_octets'",
+        )
+        .fetch_optional(db_pool)
+        .await?;
+        if has_length_octets_col.is_none() {
+            sqlx::query(
+                "ALTER TABLE doc_blob_refs ADD COLUMN length_octets INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(db_pool)
+            .await?;
+        }
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_doc_blob_refs_blob_hash ON doc_blob_refs(blob_hash)",
@@ -178,7 +199,7 @@ impl DocBlobsIndexRepo {
             .map(|(facets, _)| facets)
             .ok_or_eyre("doc didn't match expectation")?;
 
-        let mut hashes = HashSet::<String>::new();
+        let mut blobs = HashMap::<String, u64>::new();
         for (_facet_key, facet_raw) in facets {
             let facet =
                 match WellKnownFacet::from_json((*facet_raw).clone(), WellKnownFacetTag::Blob) {
@@ -199,27 +220,33 @@ impl DocBlobsIndexRepo {
             if let Some(urls) = blob.urls {
                 for url in urls {
                     if let Some(hash) = parse_db_blob_hash(&url) {
-                        hashes.insert(hash);
+                        if let Some(existing_len) = blobs.insert(hash.clone(), blob.length_octets) {
+                            eyre::ensure!(
+                                existing_len == blob.length_octets,
+                                "inconsistent blob length indexed for hash {hash}: {existing_len} != {}",
+                                blob.length_octets
+                            );
+                        }
                     }
                 }
             }
         }
 
-        self.reindex_doc_hashes(doc_id, heads, &hashes).await
+        self.reindex_doc_hashes(doc_id, heads, &blobs).await
     }
 
     async fn reindex_doc_hashes(
         &self,
         doc_id: &DocId,
         heads: &ChangeHashSet,
-        hashes: &HashSet<String>,
+        blobs: &HashMap<String, u64>,
     ) -> Res<ReindexDocOutcome> {
         sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1")
             .bind(doc_id)
             .execute(&self.db_pool)
             .await?;
 
-        if hashes.is_empty() {
+        if blobs.is_empty() {
             return Ok(ReindexDocOutcome::Evicted);
         }
 
@@ -227,15 +254,20 @@ impl DocBlobsIndexRepo {
             serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
                 .expect(ERROR_JSON);
 
-        let mut query_builder =
-            QueryBuilder::new("INSERT INTO doc_blob_refs (doc_id, blob_hash, origin_heads) ");
-        query_builder.push_values(hashes.iter(), |mut row, hash| {
+        let mut query_builder = QueryBuilder::new(
+            "INSERT INTO doc_blob_refs (doc_id, blob_hash, length_octets, origin_heads) ",
+        );
+        query_builder.push_values(blobs.iter(), |mut row, (hash, length_octets)| {
             row.push_bind(doc_id)
                 .push_bind(hash)
+                .push_bind(
+                    i64::try_from(*length_octets)
+                        .expect("blob length octets exceeds sqlite INTEGER range"),
+                )
                 .push_bind(&serialized_heads);
         });
         query_builder.push(
-            " ON CONFLICT(doc_id, blob_hash) DO UPDATE SET origin_heads = excluded.origin_heads",
+            " ON CONFLICT(doc_id, blob_hash) DO UPDATE SET origin_heads = excluded.origin_heads, length_octets = excluded.length_octets",
         );
         query_builder.build().execute(&self.db_pool).await?;
         Ok(ReindexDocOutcome::Present)
@@ -264,10 +296,34 @@ impl DocBlobsIndexRepo {
         Ok(hashes)
     }
 
-    pub async fn list_docs_for_hash(&self, hash: &str) -> Res<Vec<DocBlobMembership>> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
+    pub async fn list_blob_refs_for_doc(&self, doc_id: &DocId) -> Res<Vec<DocBlobRef>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
             r#"
-            SELECT doc_id, origin_heads
+            SELECT blob_hash, length_octets
+            FROM doc_blob_refs
+            WHERE doc_id = ?1
+            ORDER BY blob_hash ASC
+            "#,
+        )
+        .bind(doc_id)
+        .fetch_all(&self.db_pool)
+        .await?;
+        rows.into_iter()
+            .map(|(blob_hash, length_octets)| {
+                let length_octets = u64::try_from(length_octets)
+                    .map_err(|_| ferr!("invalid negative blob length for hash {blob_hash}"))?;
+                Ok(DocBlobRef {
+                    blob_hash,
+                    length_octets,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn list_docs_for_hash(&self, hash: &str) -> Res<Vec<DocBlobMembership>> {
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            r#"
+            SELECT doc_id, origin_heads, length_octets
             FROM doc_blob_refs
             WHERE blob_hash = ?1
             ORDER BY doc_id ASC
@@ -278,11 +334,14 @@ impl DocBlobsIndexRepo {
         .await?;
 
         rows.into_iter()
-            .map(|(doc_id, origin_heads)| {
+            .map(|(doc_id, origin_heads, length_octets)| {
                 let head_strings: Vec<String> = serde_json::from_str(&origin_heads)?;
+                let length_octets = u64::try_from(length_octets)
+                    .map_err(|_| ferr!("invalid negative blob length for hash {hash}"))?;
                 Ok(DocBlobMembership {
                     doc_id,
                     blob_hash: hash.to_string(),
+                    length_octets,
                     origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
                 })
             })
@@ -302,17 +361,23 @@ impl DocBlobsIndexRepo {
         Ok(hashes)
     }
 
-    pub async fn list_all_memberships(&self) -> Res<Vec<(DocId, String)>> {
-        let rows: Vec<(DocId, String)> = sqlx::query_as(
+    pub async fn list_all_memberships(&self) -> Res<Vec<(DocId, String, u64)>> {
+        let rows: Vec<(DocId, String, i64)> = sqlx::query_as(
             r#"
-            SELECT doc_id, blob_hash
+            SELECT doc_id, blob_hash, length_octets
             FROM doc_blob_refs
             ORDER BY doc_id ASC, blob_hash ASC
             "#,
         )
         .fetch_all(&self.db_pool)
         .await?;
-        Ok(rows)
+        rows.into_iter()
+            .map(|(doc_id, blob_hash, length_octets)| {
+                let length_octets = u64::try_from(length_octets)
+                    .map_err(|_| ferr!("invalid negative blob length for hash {blob_hash}"))?;
+                Ok((doc_id, blob_hash, length_octets))
+            })
+            .collect()
     }
 
     pub fn triage_listener(
@@ -505,9 +570,16 @@ mod tests {
         let hashes = repo.list_hashes_for_doc(&doc_id).await?;
         assert!(hashes.contains(&hash_a));
         assert!(hashes.contains(&hash_b));
+        let blob_refs = repo.list_blob_refs_for_doc(&doc_id).await?;
+        assert_eq!(blob_refs.len(), 2);
+        assert!(blob_refs
+            .iter()
+            .all(|blob_ref| blob_ref.length_octets == 42));
 
         let memberships = repo.list_docs_for_hash(&hash_a).await?;
-        assert!(memberships.iter().any(|value| value.doc_id == doc_id));
+        assert!(memberships
+            .iter()
+            .any(|value| value.doc_id == doc_id && value.length_octets == 42));
 
         test_context.stop().await?;
         Ok(())

@@ -17,6 +17,8 @@ use crate::interlude::*;
 
 pub mod codecs;
 #[cfg(feature = "repo")]
+pub mod partition;
+#[cfg(feature = "repo")]
 pub mod repo;
 #[cfg(feature = "repo")]
 pub mod sync;

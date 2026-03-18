@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use crate::partition::PartitionStore;
 
 use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
@@ -11,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 mod changes;
 pub mod iroh;
 mod partition;
+pub mod rpc;
 
 pub use changes::{
     path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
@@ -65,7 +67,7 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     state_pool: sqlx::SqlitePool,
     #[educe(Debug(ignore))]
-    partition_events_tx: broadcast::Sender<crate::sync::protocol::PartitionEvent>,
+    partition_store: Arc<PartitionStore>,
     #[educe(Debug(ignore))]
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
@@ -98,15 +100,23 @@ impl BigRepo {
             .await
             .wrap_err("failed connecting big repo sqlite")?;
         let (partition_events_tx, _) = broadcast::channel(config.subscription_capacity.max(1));
+        let partition_forwarder_cancel = CancellationToken::new();
+        let partition_forwarders = Arc::new(utils_rs::AbortableJoinSet::new());
+        let partition_store = Arc::new(PartitionStore::new(
+            state_pool.clone(),
+            partition_events_tx.clone(),
+            partition_forwarder_cancel.clone(),
+            Arc::clone(&partition_forwarders),
+        ));
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
 
         let out = Arc::new(Self {
             repo,
             state_pool,
-            partition_events_tx,
+            partition_store,
             change_manager,
-            partition_forwarder_cancel: CancellationToken::new(),
-            partition_forwarders: Arc::new(utils_rs::AbortableJoinSet::new()),
+            partition_forwarder_cancel,
+            partition_forwarders,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
             persistent_change_brokers: std::sync::Mutex::new(default()),
         });
@@ -220,11 +230,15 @@ impl BigRepo {
         &self.state_pool
     }
 
+    pub fn partition_store(&self) -> Arc<PartitionStore> {
+        Arc::clone(&self.partition_store)
+    }
+
     // NOTE: this method has no users
     pub fn subscribe_partition_events(
         &self,
     ) -> broadcast::Receiver<crate::sync::protocol::PartitionEvent> {
-        self.partition_events_tx.subscribe()
+        self.partition_store.subscribe_partition_events()
     }
 
     pub async fn ensure_change_broker(

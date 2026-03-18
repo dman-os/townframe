@@ -139,16 +139,6 @@ pub struct GetPartitionDocEventsResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GetDocsFullRequest {
-    pub doc_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GetDocsFullResponse {
-    pub docs: Vec<FullDoc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SubPartitionsRequest {
     pub partitions: Vec<PartitionStreamCursorRequest>,
 }
@@ -210,12 +200,6 @@ pub struct GetPartitionDocEventsRpcReq {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GetDocsFullRpcReq {
-    pub peer: PeerKey,
-    pub req: GetDocsFullRequest,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SubPartitionsRpcReq {
     pub peer: PeerKey,
     pub req: SubPartitionsRequest,
@@ -230,8 +214,6 @@ pub enum PartitionSyncRpc {
     GetPartitionMemberEvents(GetPartitionMemberEventsRpcReq),
     #[rpc(tx = channel::oneshot::Sender<Result<GetPartitionDocEventsResponse, PartitionSyncError>>)]
     GetPartitionDocEvents(GetPartitionDocEventsRpcReq),
-    #[rpc(tx = channel::oneshot::Sender<Result<GetDocsFullResponse, PartitionSyncError>>)]
-    GetDocsFull(GetDocsFullRpcReq),
     #[rpc(tx = channel::mpsc::Sender<SubscriptionItem>)]
     SubPartitions(SubPartitionsRpcReq),
 }

@@ -33,7 +33,9 @@ mod tests {
     use automerge::transaction::Transactable;
     use samod::DocumentId;
     use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashMap as StdHashMap};
     use std::str::FromStr;
+    use std::sync::LazyLock;
     use tokio::sync::mpsc;
 
     async fn boot_big_repo(peer_seed: &str) -> Res<Arc<BigRepo>> {
@@ -42,11 +44,238 @@ mod tests {
             .with_storage(samod::storage::InMemoryStorage::new())
             .load()
             .await;
-        BigRepo::boot_with_repo(repo, BigRepoConfig::new("sqlite::memory:".to_string())).await
+        let dir = std::env::temp_dir().join("am_utils_sync_tests");
+        std::fs::create_dir_all(&dir)?;
+        let sqlite_path = dir.join(format!("{}-{}.sqlite", peer_seed, uuid::Uuid::new_v4()));
+        let sqlite_url = format!(
+            "sqlite://{}",
+            sqlite_path
+                .to_str()
+                .ok_or_else(|| eyre::eyre!("invalid sqlite path"))?
+        );
+        BigRepo::boot_with_repo(repo, BigRepoConfig::new(sqlite_url)).await
+    }
+
+    fn sync_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: LazyLock<tokio::sync::Mutex<()>> =
+            LazyLock::new(|| tokio::sync::Mutex::new(()));
+        &LOCK
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestAckMode {
+        Auto,
+        ManualDoc,
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestDocSyncRequest {
+        doc_id: String,
+        cursor: u64,
+    }
+
+    enum AckSlotState {
+        Pending,
+        Ready,
+    }
+
+    struct TestSamodHarness {
+        doc_sync_rx: mpsc::Receiver<TestDocSyncRequest>,
+        join_handle: tokio::task::JoinHandle<()>,
+    }
+
+    impl TestSamodHarness {
+        async fn stop(self) {
+            self.join_handle.abort();
+            let _ = self.join_handle.await;
+        }
+    }
+
+    fn spawn_test_samod_harness(
+        src: Arc<BigRepo>,
+        dst: Arc<BigRepo>,
+        mut samod_rx: mpsc::Receiver<SamodSyncRequest>,
+        samod_ack_tx: mpsc::Sender<SamodSyncAck>,
+        ack_mode: TestAckMode,
+    ) -> TestSamodHarness {
+        let (doc_sync_tx, doc_sync_rx) = mpsc::channel::<TestDocSyncRequest>(512);
+        let join_handle = tokio::spawn(async move {
+            let mut ack_slots: StdHashMap<PartitionId, BTreeMap<u64, AckSlotState>> = default();
+            while let Some(req) = samod_rx.recv().await {
+                match req {
+                    SamodSyncRequest::PartitionMemberEvent { event, .. } => {
+                        match &event.deets {
+                            PartitionMemberEventDeets::MemberUpsert { doc_id } => {
+                                dst.add_doc_to_partition(&event.partition_id, doc_id)
+                                    .await
+                                    .unwrap();
+                            }
+                            PartitionMemberEventDeets::MemberRemoved { doc_id } => {
+                                dst.remove_doc_from_partition(&event.partition_id, doc_id)
+                                    .await
+                                    .unwrap();
+                            }
+                        }
+                        samod_ack_tx
+                            .send(SamodSyncAck::MemberCursorAdvanced {
+                                partition_id: event.partition_id,
+                                cursor: event.cursor,
+                            })
+                            .await
+                            .ok();
+                    }
+                    SamodSyncRequest::PartitionDocEvent { event, .. } => {
+                        let resolved;
+                        match &event.deets {
+                            PartitionDocEventDeets::DocChanged { doc_id, .. } => {
+                                let parsed = match DocumentId::from_str(doc_id) {
+                                    Ok(parsed) => parsed,
+                                    Err(_) => {
+                                        let slots = ack_slots
+                                            .entry(event.partition_id.clone())
+                                            .or_default();
+                                        slots.entry(event.cursor).or_insert(AckSlotState::Pending);
+                                        continue;
+                                    }
+                                };
+                                let local_has = dst.local_contains_document(&parsed).await.unwrap();
+                                if local_has {
+                                    doc_sync_tx
+                                        .send(TestDocSyncRequest {
+                                            doc_id: doc_id.clone(),
+                                            cursor: event.cursor,
+                                        })
+                                        .await
+                                        .ok();
+                                    resolved = matches!(ack_mode, TestAckMode::Auto);
+                                } else {
+                                    let exported =
+                                        src.samod_repo().local_export(parsed.clone()).await;
+                                    resolved = match exported {
+                                        Ok(exported) => {
+                                            dst.import_doc_fast(parsed, exported).await.unwrap();
+                                            true
+                                        }
+                                        Err(_) => false,
+                                    };
+                                }
+                            }
+                            PartitionDocEventDeets::DocDeleted { doc_id, .. } => {
+                                let _ = dst
+                                    .remove_doc_from_partition(&event.partition_id, doc_id)
+                                    .await;
+                                resolved = true;
+                            }
+                        }
+                        let slots = ack_slots.entry(event.partition_id.clone()).or_default();
+                        match slots.entry(event.cursor) {
+                            std::collections::btree_map::Entry::Vacant(v) => {
+                                v.insert(if resolved {
+                                    AckSlotState::Ready
+                                } else {
+                                    AckSlotState::Pending
+                                });
+                            }
+                            std::collections::btree_map::Entry::Occupied(mut o) => {
+                                if resolved {
+                                    o.insert(AckSlotState::Ready);
+                                }
+                            }
+                        }
+                        loop {
+                            let Some((&cursor, state)) = slots.first_key_value() else {
+                                break;
+                            };
+                            if !matches!(state, AckSlotState::Ready) {
+                                break;
+                            }
+                            slots.pop_first();
+                            samod_ack_tx
+                                .send(SamodSyncAck::CursorAdvanced {
+                                    partition_id: event.partition_id.clone(),
+                                    cursor,
+                                })
+                                .await
+                                .ok();
+                        }
+                    }
+                    SamodSyncRequest::RequestDocSync {
+                        partition_id,
+                        doc_id,
+                        cursor,
+                        ..
+                    } => {
+                        doc_sync_tx
+                            .send(TestDocSyncRequest {
+                                doc_id: doc_id.clone(),
+                                cursor,
+                            })
+                            .await
+                            .ok();
+                        if matches!(ack_mode, TestAckMode::Auto) {
+                            samod_ack_tx
+                                .send(SamodSyncAck::CursorAdvanced {
+                                    partition_id,
+                                    cursor,
+                                })
+                                .await
+                                .ok();
+                        }
+                    }
+                    SamodSyncRequest::ImportDoc {
+                        partition_id,
+                        doc_id,
+                        cursor,
+                        ..
+                    } => {
+                        let resolved = if let Ok(parsed) = DocumentId::from_str(&doc_id) {
+                            match src.samod_repo().local_export(parsed.clone()).await {
+                                Ok(exported) => {
+                                    dst.import_doc_fast(parsed, exported).await.unwrap();
+                                    true
+                                }
+                                Err(_) => false,
+                            }
+                        } else {
+                            false
+                        };
+                        if resolved {
+                            samod_ack_tx
+                                .send(SamodSyncAck::CursorAdvanced {
+                                    partition_id,
+                                    cursor,
+                                })
+                                .await
+                                .ok();
+                        }
+                    }
+                    SamodSyncRequest::DocDeleted {
+                        partition_id,
+                        doc_id,
+                        cursor,
+                        ..
+                    } => {
+                        let _ = dst.remove_doc_from_partition(&partition_id, &doc_id).await;
+                        samod_ack_tx
+                            .send(SamodSyncAck::CursorAdvanced {
+                                partition_id,
+                                cursor,
+                            })
+                            .await
+                            .ok();
+                    }
+                }
+            }
+        });
+        TestSamodHarness {
+            doc_sync_rx,
+            join_handle,
+        }
     }
 
     #[tokio::test]
     async fn sync_smoke_bootstrap_and_resume() -> Res<()> {
+        let _guard = sync_test_lock().lock().await;
         let part_id: PartitionId = "sync-part-1".into();
         let src = boot_big_repo("src-peer").await?;
         let dst = boot_big_repo("dst-peer").await?;
@@ -71,6 +300,12 @@ mod tests {
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
         let (node, node_stop) = spawn_sync_node(
+            src.partition_store(),
+            src_store.clone(),
+            Arc::new(AllowAllPartitionAccessPolicy),
+        )
+        .await?;
+        let (_repo_rpc, repo_rpc_stop) = crate::repo::rpc::spawn_repo_rpc(
             Arc::clone(&src),
             src_store.clone(),
             Arc::new(AllowAllPartitionAccessPolicy),
@@ -80,19 +315,25 @@ mod tests {
         src_store.register_peer(peer_key.clone()).await?;
         node.register_local_peer(peer_key.clone()).await?;
 
-        let (samod_tx, mut samod_rx) = mpsc::channel(128);
-        let (_samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
+        let (samod_tx, samod_rx) = mpsc::channel(128);
+        let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
         let (_worker, worker_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
             local_peer: peer_key.clone(),
             remote_peer: peer_key.clone(),
             rpc_client: node.rpc_client(),
-            local_repo: Arc::clone(&dst),
             sync_store: dst_store.clone(),
             samod_sync_tx: samod_tx.clone(),
             samod_ack_rx,
             target_partitions: vec![part_id.clone()],
         })
         .await?;
+        let mut harness = spawn_test_samod_harness(
+            Arc::clone(&src),
+            Arc::clone(&dst),
+            samod_rx,
+            samod_ack_tx,
+            TestAckMode::ManualDoc,
+        );
 
         wait_until(
             Duration::from_secs(5),
@@ -135,18 +376,17 @@ mod tests {
         .await?;
 
         let mutated: HashSet<String> = source_doc_ids.iter().take(5).cloned().collect();
-        wait_for_samod_request(
-            &mut samod_rx,
+        wait_for_doc_sync_request(
+            &mut harness.doc_sync_rx,
             Duration::from_secs(5),
-            |req| match req {
-                SamodSyncRequest::RequestDocSync { doc_id, .. } => mutated.contains(doc_id),
-                _ => false,
-            },
+            |req| mutated.contains(&req.doc_id),
             "timed out waiting for samod RequestDocSync for mutated docs",
         )
         .await?;
 
         worker_stop.stop().await?;
+        harness.stop().await;
+        repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
         src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
@@ -155,6 +395,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_bootstrap_existing_local_doc_uses_samod_request() -> Res<()> {
+        let _guard = sync_test_lock().lock().await;
         let part_id: PartitionId = "sync-part-existing".into();
         let src = boot_big_repo("src-existing").await?;
         let dst = boot_big_repo("dst-existing").await?;
@@ -188,6 +429,12 @@ mod tests {
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
         let (node, node_stop) = spawn_sync_node(
+            src.partition_store(),
+            src_store.clone(),
+            Arc::new(AllowAllPartitionAccessPolicy),
+        )
+        .await?;
+        let (_repo_rpc, repo_rpc_stop) = crate::repo::rpc::spawn_repo_rpc(
             Arc::clone(&src),
             src_store.clone(),
             Arc::new(AllowAllPartitionAccessPolicy),
@@ -197,19 +444,25 @@ mod tests {
         src_store.register_peer(peer_key.clone()).await?;
         node.register_local_peer(peer_key.clone()).await?;
 
-        let (samod_tx, mut samod_rx) = mpsc::channel(128);
-        let (_samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
+        let (samod_tx, samod_rx) = mpsc::channel(128);
+        let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
         let (_worker, worker_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
             local_peer: peer_key.clone(),
             remote_peer: peer_key,
             rpc_client: node.rpc_client(),
-            local_repo: Arc::clone(&dst),
             sync_store: dst_store.clone(),
             samod_sync_tx: samod_tx,
             samod_ack_rx,
             target_partitions: vec![part_id.clone()],
         })
         .await?;
+        let mut harness = spawn_test_samod_harness(
+            Arc::clone(&src),
+            Arc::clone(&dst),
+            samod_rx,
+            samod_ack_tx,
+            TestAckMode::Auto,
+        );
 
         wait_until(
             Duration::from_secs(5),
@@ -221,20 +474,17 @@ mod tests {
         )
         .await?;
 
-        wait_for_samod_request(
-            &mut samod_rx,
+        wait_for_doc_sync_request(
+            &mut harness.doc_sync_rx,
             Duration::from_secs(5),
-            |req| match req {
-                SamodSyncRequest::RequestDocSync {
-                    doc_id: req_doc_id, ..
-                } => req_doc_id == &doc_id,
-                _ => false,
-            },
+            |req| req.doc_id == doc_id,
             "timed out waiting for samod RequestDocSync for existing local doc",
         )
         .await?;
 
         worker_stop.stop().await?;
+        harness.stop().await;
+        repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
         src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
@@ -243,6 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_doc_cursor_advances_only_after_samod_ack() -> Res<()> {
+        let _guard = sync_test_lock().lock().await;
         let part_id: PartitionId = "sync-part-ack-gated".into();
         let src = boot_big_repo("src-ack-gated").await?;
         let dst = boot_big_repo("dst-ack-gated").await?;
@@ -271,6 +522,12 @@ mod tests {
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
         let (node, node_stop) = spawn_sync_node(
+            src.partition_store(),
+            src_store.clone(),
+            Arc::new(AllowAllPartitionAccessPolicy),
+        )
+        .await?;
+        let (_repo_rpc, repo_rpc_stop) = crate::repo::rpc::spawn_repo_rpc(
             Arc::clone(&src),
             src_store.clone(),
             Arc::new(AllowAllPartitionAccessPolicy),
@@ -280,37 +537,35 @@ mod tests {
         src_store.register_peer(peer_key.clone()).await?;
         node.register_local_peer(peer_key.clone()).await?;
 
-        let (samod_tx, mut samod_rx) = mpsc::channel(128);
+        let (samod_tx, samod_rx) = mpsc::channel(128);
         let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
         let (_worker, worker_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
             local_peer: peer_key.clone(),
             remote_peer: peer_key.clone(),
             rpc_client: node.rpc_client(),
-            local_repo: Arc::clone(&dst),
             sync_store: dst_store.clone(),
             samod_sync_tx: samod_tx,
             samod_ack_rx,
             target_partitions: vec![part_id.clone()],
         })
         .await?;
+        let mut harness = spawn_test_samod_harness(
+            Arc::clone(&src),
+            Arc::clone(&dst),
+            samod_rx,
+            samod_ack_tx.clone(),
+            TestAckMode::ManualDoc,
+        );
 
-        let req = wait_for_samod_request(
-            &mut samod_rx,
+        let req = wait_for_doc_sync_request(
+            &mut harness.doc_sync_rx,
             Duration::from_secs(5),
-            |req| match req {
-                SamodSyncRequest::RequestDocSync {
-                    doc_id: req_doc_id, ..
-                } => req_doc_id == &doc_id,
-                _ => false,
-            },
+            |req| req.doc_id == doc_id,
             "timed out waiting for samod RequestDocSync for ack-gated cursor test",
         )
         .await?;
 
-        let req_cursor = match req {
-            SamodSyncRequest::RequestDocSync { cursor, .. } => cursor,
-            _ => unreachable!(),
-        };
+        let req_cursor = req.cursor;
 
         let cursor_before_ack = dst_store
             .get_partition_cursor(peer_key.clone(), part_id.clone())
@@ -342,6 +597,8 @@ mod tests {
         .await?;
 
         worker_stop.stop().await?;
+        harness.stop().await;
+        repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
         src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
@@ -350,6 +607,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_ignores_stale_samod_ack_behind_persisted_doc_cursor() -> Res<()> {
+        let _guard = sync_test_lock().lock().await;
         let part_id: PartitionId = "sync-part-stale-ack".into();
         let src = boot_big_repo("src-stale-ack").await?;
         let dst = boot_big_repo("dst-stale-ack").await?;
@@ -378,6 +636,12 @@ mod tests {
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
         let (node, node_stop) = spawn_sync_node(
+            src.partition_store(),
+            src_store.clone(),
+            Arc::new(AllowAllPartitionAccessPolicy),
+        )
+        .await?;
+        let (_repo_rpc, repo_rpc_stop) = crate::repo::rpc::spawn_repo_rpc(
             Arc::clone(&src),
             src_store.clone(),
             Arc::new(AllowAllPartitionAccessPolicy),
@@ -387,36 +651,46 @@ mod tests {
         src_store.register_peer(peer_key.clone()).await?;
         node.register_local_peer(peer_key.clone()).await?;
 
-        let (samod_tx, mut samod_rx) = mpsc::channel(128);
+        let (samod_tx, samod_rx) = mpsc::channel(128);
         let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
         let (_worker, worker_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
             local_peer: peer_key.clone(),
             remote_peer: peer_key.clone(),
             rpc_client: node.rpc_client(),
-            local_repo: Arc::clone(&dst),
             sync_store: dst_store.clone(),
             samod_sync_tx: samod_tx,
             samod_ack_rx,
             target_partitions: vec![part_id.clone()],
         })
         .await?;
+        let mut harness = spawn_test_samod_harness(
+            Arc::clone(&src),
+            Arc::clone(&dst),
+            samod_rx,
+            samod_ack_tx.clone(),
+            TestAckMode::ManualDoc,
+        );
 
-        let req = wait_for_samod_request(
-            &mut samod_rx,
+        let req = wait_for_doc_sync_request(
+            &mut harness.doc_sync_rx,
             Duration::from_secs(5),
-            |req| match req {
-                SamodSyncRequest::RequestDocSync {
-                    doc_id: req_doc_id, ..
-                } => req_doc_id == &doc_id,
-                _ => false,
-            },
+            |req| req.doc_id == doc_id,
             "timed out waiting for samod RequestDocSync for stale-ack test",
         )
         .await?;
-        let req_cursor = match req {
-            SamodSyncRequest::RequestDocSync { cursor, .. } => cursor,
-            _ => unreachable!(),
-        };
+        let req_cursor = req.cursor;
+
+        wait_until(
+            Duration::from_secs(5),
+            || async {
+                let cursor = dst_store
+                    .get_partition_cursor(peer_key.clone(), part_id.clone())
+                    .await?;
+                Ok(cursor.member_cursor.is_some())
+            },
+            "timed out waiting for member cursor before stale ack check",
+        )
+        .await?;
 
         dst_store
             .set_partition_cursor(
@@ -447,6 +721,8 @@ mod tests {
         );
 
         worker_stop.stop().await?;
+        harness.stop().await;
+        repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
         src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
@@ -455,6 +731,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_resets_stale_remote_peer_cursor_before_replay() -> Res<()> {
+        let _guard = sync_test_lock().lock().await;
         let part_id: PartitionId = "sync-part-reset-stale".into();
         let src = boot_big_repo("src-reset-stale").await?;
         let dst = boot_big_repo("dst-reset-stale").await?;
@@ -482,6 +759,12 @@ mod tests {
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
         let (node, node_stop) = spawn_sync_node(
+            src.partition_store(),
+            src_store.clone(),
+            Arc::new(AllowAllPartitionAccessPolicy),
+        )
+        .await?;
+        let (_repo_rpc, repo_rpc_stop) = crate::repo::rpc::spawn_repo_rpc(
             Arc::clone(&src),
             src_store.clone(),
             Arc::new(AllowAllPartitionAccessPolicy),
@@ -495,19 +778,25 @@ mod tests {
             .set_partition_cursor(peer_key.clone(), part_id.clone(), Some(208), Some(208))
             .await?;
 
-        let (samod_tx, mut samod_rx) = mpsc::channel(128);
-        let (_samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
+        let (samod_tx, samod_rx) = mpsc::channel(128);
+        let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
         let (_worker, worker_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
             local_peer: peer_key.clone(),
             remote_peer: peer_key.clone(),
             rpc_client: node.rpc_client(),
-            local_repo: Arc::clone(&dst),
             sync_store: dst_store.clone(),
             samod_sync_tx: samod_tx,
             samod_ack_rx,
             target_partitions: vec![part_id.clone()],
         })
         .await?;
+        let mut harness = spawn_test_samod_harness(
+            Arc::clone(&src),
+            Arc::clone(&dst),
+            samod_rx,
+            samod_ack_tx,
+            TestAckMode::ManualDoc,
+        );
 
         wait_until(
             Duration::from_secs(5),
@@ -519,27 +808,31 @@ mod tests {
         )
         .await?;
 
-        let req = wait_for_samod_request(
-            &mut samod_rx,
+        let req = wait_for_doc_sync_request(
+            &mut harness.doc_sync_rx,
             Duration::from_secs(5),
-            |req| match req {
-                SamodSyncRequest::RequestDocSync {
-                    doc_id: req_doc_id, ..
-                } => req_doc_id == &doc_id,
-                _ => false,
-            },
+            |req| req.doc_id == doc_id,
             "timed out waiting for doc replay after stale cursor reset",
         )
         .await?;
 
-        let req_cursor = match req {
-            SamodSyncRequest::RequestDocSync { cursor, .. } => cursor,
-            _ => unreachable!(),
-        };
+        let req_cursor = req.cursor;
         assert!(
             req_cursor < 208,
             "stale stored cursor was not invalidated before replay: req_cursor={req_cursor}"
         );
+
+        wait_until(
+            Duration::from_secs(5),
+            || async {
+                let cursor = dst_store
+                    .get_partition_cursor(peer_key.clone(), part_id.clone())
+                    .await?;
+                Ok(cursor.member_cursor.is_some_and(|value| value < 208))
+            },
+            "timed out waiting for member cursor replay after stale reset",
+        )
+        .await?;
 
         let cursor = dst_store
             .get_partition_cursor(peer_key.clone(), part_id.clone())
@@ -554,6 +847,8 @@ mod tests {
         );
 
         worker_stop.stop().await?;
+        harness.stop().await;
+        repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
         src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
@@ -562,6 +857,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_bootstrap_does_not_advance_doc_cursor_when_docs_unresolved() -> Res<()> {
+        let _guard = sync_test_lock().lock().await;
         let part_id: PartitionId = "sync-part-unresolved".into();
         let src = boot_big_repo("src-unresolved").await?;
         let dst = boot_big_repo("dst-unresolved").await?;
@@ -583,6 +879,12 @@ mod tests {
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
         let (node, node_stop) = spawn_sync_node(
+            src.partition_store(),
+            src_store.clone(),
+            Arc::new(AllowAllPartitionAccessPolicy),
+        )
+        .await?;
+        let (_repo_rpc, repo_rpc_stop) = crate::repo::rpc::spawn_repo_rpc(
             Arc::clone(&src),
             src_store.clone(),
             Arc::new(AllowAllPartitionAccessPolicy),
@@ -592,19 +894,25 @@ mod tests {
         src_store.register_peer(peer_key.clone()).await?;
         node.register_local_peer(peer_key.clone()).await?;
 
-        let (samod_tx, _samod_rx) = mpsc::channel(128);
-        let (_samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
+        let (samod_tx, samod_rx) = mpsc::channel(128);
+        let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
         let (_worker, worker_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
             local_peer: peer_key.clone(),
             remote_peer: peer_key.clone(),
             rpc_client: node.rpc_client(),
-            local_repo: Arc::clone(&dst),
             sync_store: dst_store.clone(),
             samod_sync_tx: samod_tx,
             samod_ack_rx,
             target_partitions: vec![part_id.clone()],
         })
         .await?;
+        let harness = spawn_test_samod_harness(
+            Arc::clone(&src),
+            Arc::clone(&dst),
+            samod_rx,
+            samod_ack_tx,
+            TestAckMode::Auto,
+        );
 
         tokio::time::sleep(Duration::from_millis(700)).await;
         let cursor = dst_store
@@ -616,6 +924,8 @@ mod tests {
         );
 
         worker_stop.stop().await?;
+        harness.stop().await;
+        repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
         src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
@@ -624,6 +934,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_does_not_skip_failed_doc_cursor_when_later_doc_import_succeeds() -> Res<()> {
+        let _guard = sync_test_lock().lock().await;
         let part_id: PartitionId = "sync-part-blocked-cursor".into();
         let src = boot_big_repo("src-blocked-cursor").await?;
         let dst = boot_big_repo("dst-blocked-cursor").await?;
@@ -660,6 +971,12 @@ mod tests {
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
         let (node, node_stop) = spawn_sync_node(
+            src.partition_store(),
+            src_store.clone(),
+            Arc::new(AllowAllPartitionAccessPolicy),
+        )
+        .await?;
+        let (_repo_rpc, repo_rpc_stop) = crate::repo::rpc::spawn_repo_rpc(
             Arc::clone(&src),
             src_store.clone(),
             Arc::new(AllowAllPartitionAccessPolicy),
@@ -669,19 +986,25 @@ mod tests {
         src_store.register_peer(peer_key.clone()).await?;
         node.register_local_peer(peer_key.clone()).await?;
 
-        let (samod_tx, _samod_rx) = mpsc::channel(128);
-        let (_samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
+        let (samod_tx, samod_rx) = mpsc::channel(128);
+        let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
         let (_worker, worker_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
             local_peer: peer_key.clone(),
             remote_peer: peer_key.clone(),
             rpc_client: node.rpc_client(),
-            local_repo: Arc::clone(&dst),
             sync_store: dst_store.clone(),
             samod_sync_tx: samod_tx,
             samod_ack_rx,
             target_partitions: vec![part_id.clone()],
         })
         .await?;
+        let harness = spawn_test_samod_harness(
+            Arc::clone(&src),
+            Arc::clone(&dst),
+            samod_rx,
+            samod_ack_tx,
+            TestAckMode::Auto,
+        );
 
         wait_until(
             Duration::from_secs(5),
@@ -699,6 +1022,8 @@ mod tests {
         );
 
         worker_stop.stop().await?;
+        harness.stop().await;
+        repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
         src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
@@ -707,6 +1032,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_unresolved_partition_does_not_block_other_partition_cursor() -> Res<()> {
+        let _guard = sync_test_lock().lock().await;
         let p_bad: PartitionId = "sync-part-bad".into();
         let p_ok: PartitionId = "sync-part-ok".into();
         let src = boot_big_repo("src-partition-isolation").await?;
@@ -741,6 +1067,12 @@ mod tests {
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
         let (node, node_stop) = spawn_sync_node(
+            src.partition_store(),
+            src_store.clone(),
+            Arc::new(AllowAllPartitionAccessPolicy),
+        )
+        .await?;
+        let (_repo_rpc, repo_rpc_stop) = crate::repo::rpc::spawn_repo_rpc(
             Arc::clone(&src),
             src_store.clone(),
             Arc::new(AllowAllPartitionAccessPolicy),
@@ -750,19 +1082,25 @@ mod tests {
         src_store.register_peer(peer_key.clone()).await?;
         node.register_local_peer(peer_key.clone()).await?;
 
-        let (samod_tx, _samod_rx) = mpsc::channel(128);
-        let (_samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
+        let (samod_tx, samod_rx) = mpsc::channel(128);
+        let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
         let (_worker, worker_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
             local_peer: peer_key.clone(),
             remote_peer: peer_key.clone(),
             rpc_client: node.rpc_client(),
-            local_repo: Arc::clone(&dst),
             sync_store: dst_store.clone(),
             samod_sync_tx: samod_tx,
             samod_ack_rx,
             target_partitions: vec![p_bad.clone(), p_ok.clone()],
         })
         .await?;
+        let harness = spawn_test_samod_harness(
+            Arc::clone(&src),
+            Arc::clone(&dst),
+            samod_rx,
+            samod_ack_tx,
+            TestAckMode::Auto,
+        );
 
         wait_until(
             Duration::from_secs(5),
@@ -793,6 +1131,8 @@ mod tests {
         );
 
         worker_stop.stop().await?;
+        harness.stop().await;
+        repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
         src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
@@ -801,6 +1141,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_role_reversal_after_serve_only_does_not_skip_new_docs() -> Res<()> {
+        let _guard = sync_test_lock().lock().await;
         let part_id: PartitionId = "sync-part-role-reversal".into();
         let repo_a = boot_big_repo("role-a").await?;
         let repo_b = boot_big_repo("role-b").await?;
@@ -824,12 +1165,24 @@ mod tests {
         let (store_a, store_a_stop) = spawn_sync_store(repo_a.state_pool().clone()).await?;
         let (store_b, store_b_stop) = spawn_sync_store(repo_b.state_pool().clone()).await?;
         let (node_a, node_a_stop) = spawn_sync_node(
-            Arc::clone(&repo_a),
+            repo_a.partition_store(),
             store_a.clone(),
             Arc::new(AllowAllPartitionAccessPolicy),
         )
         .await?;
         let (node_b, node_b_stop) = spawn_sync_node(
+            repo_b.partition_store(),
+            store_b.clone(),
+            Arc::new(AllowAllPartitionAccessPolicy),
+        )
+        .await?;
+        let (_repo_rpc_a, repo_rpc_a_stop) = crate::repo::rpc::spawn_repo_rpc(
+            Arc::clone(&repo_a),
+            store_a.clone(),
+            Arc::new(AllowAllPartitionAccessPolicy),
+        )
+        .await?;
+        let (_repo_rpc_b, repo_rpc_b_stop) = crate::repo::rpc::spawn_repo_rpc(
             Arc::clone(&repo_b),
             store_b.clone(),
             Arc::new(AllowAllPartitionAccessPolicy),
@@ -842,19 +1195,25 @@ mod tests {
         store_a.register_peer(peer_b.clone()).await?;
         node_a.register_local_peer(peer_b.clone()).await?;
 
-        let (samod_tx_b, _samod_rx_b) = mpsc::channel(128);
-        let (_samod_ack_tx_b, samod_ack_rx_b) = mpsc::channel(128);
+        let (samod_tx_b, samod_rx_b) = mpsc::channel(128);
+        let (samod_ack_tx_b, samod_ack_rx_b) = mpsc::channel(128);
         let (_worker_b, worker_b_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
             local_peer: peer_b.clone(),
             remote_peer: peer_a.clone(),
             rpc_client: node_a.rpc_client(),
-            local_repo: Arc::clone(&repo_b),
             sync_store: store_b.clone(),
             samod_sync_tx: samod_tx_b,
             samod_ack_rx: samod_ack_rx_b,
             target_partitions: vec![part_id.clone()],
         })
         .await?;
+        let harness_b = spawn_test_samod_harness(
+            Arc::clone(&repo_a),
+            Arc::clone(&repo_b),
+            samod_rx_b,
+            samod_ack_tx_b,
+            TestAckMode::Auto,
+        );
         wait_until(
             Duration::from_secs(5),
             || async {
@@ -865,6 +1224,7 @@ mod tests {
         )
         .await?;
         worker_b_stop.stop().await?;
+        harness_b.stop().await;
 
         // Add new docs only on B after phase 1.
         let mut b_new_doc_ids = Vec::new();
@@ -886,19 +1246,25 @@ mod tests {
         // Phase 2: roles reversed, A pulls from B.
         store_b.register_peer(peer_a.clone()).await?;
         node_b.register_local_peer(peer_a.clone()).await?;
-        let (samod_tx_a, _samod_rx_a) = mpsc::channel(128);
-        let (_samod_ack_tx_a, samod_ack_rx_a) = mpsc::channel(128);
+        let (samod_tx_a, samod_rx_a) = mpsc::channel(128);
+        let (samod_ack_tx_a, samod_ack_rx_a) = mpsc::channel(128);
         let (_worker_a, worker_a_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
             local_peer: peer_a.clone(),
             remote_peer: peer_b.clone(),
             rpc_client: node_b.rpc_client(),
-            local_repo: Arc::clone(&repo_a),
             sync_store: store_a.clone(),
             samod_sync_tx: samod_tx_a,
             samod_ack_rx: samod_ack_rx_a,
             target_partitions: vec![part_id.clone()],
         })
         .await?;
+        let harness_a = spawn_test_samod_harness(
+            Arc::clone(&repo_b),
+            Arc::clone(&repo_a),
+            samod_rx_a,
+            samod_ack_tx_a,
+            TestAckMode::Auto,
+        );
 
         wait_until(
             Duration::from_secs(5),
@@ -923,6 +1289,9 @@ mod tests {
         }
 
         worker_a_stop.stop().await?;
+        harness_a.stop().await;
+        repo_rpc_a_stop.stop().await?;
+        repo_rpc_b_stop.stop().await?;
         node_a_stop.stop().await?;
         node_b_stop.stop().await?;
         store_a_stop.stop().await?;
@@ -951,14 +1320,14 @@ mod tests {
         }
     }
 
-    async fn wait_for_samod_request<F>(
-        rx: &mut mpsc::Receiver<SamodSyncRequest>,
+    async fn wait_for_doc_sync_request<F>(
+        rx: &mut mpsc::Receiver<TestDocSyncRequest>,
         timeout_dur: Duration,
         mut pred: F,
         timeout_msg: &str,
-    ) -> Res<SamodSyncRequest>
+    ) -> Res<TestDocSyncRequest>
     where
-        F: FnMut(&SamodSyncRequest) -> bool,
+        F: FnMut(&TestDocSyncRequest) -> bool,
     {
         let deadline = tokio::time::Instant::now() + timeout_dur;
         loop {

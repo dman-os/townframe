@@ -16,6 +16,7 @@ pub use bootstrap::*;
 
 pub const IROH_DOC_URL_SCHEME: &str = "db+iroh-doc";
 pub const PARTITION_SYNC_ALPN: &[u8] = b"townframe/partition-sync/0";
+pub const REPO_SYNC_ALPN: &[u8] = b"townframe/repo-sync/0";
 
 enum ActivePeerState {
     Connecting,
@@ -97,6 +98,7 @@ pub struct IrohSyncRepoStopToken {
     worker_handle: JoinHandle<()>,
     router: iroh::protocol::Router,
     partition_sync_stop_token: am_utils_rs::sync::node::SyncNodeStopToken,
+    repo_rpc_stop_token: am_utils_rs::repo::rpc::RepoRpcStopToken,
     partition_sync_store_stop_token: am_utils_rs::sync::store::SyncStoreStopToken,
     full_stop_token: full::StopToken,
 }
@@ -111,6 +113,7 @@ impl IrohSyncRepoStopToken {
             .await
             .map_err(|_| eyre::eyre!("timeout for waiting router shutdown"))??;
         self.partition_sync_stop_token.stop().await?;
+        self.repo_rpc_stop_token.stop().await?;
 
         self.partition_sync_store_stop_token.stop().await?;
         utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(2)).await?;
@@ -161,12 +164,18 @@ impl IrohSyncRepo {
             am_utils_rs::sync::store::spawn_sync_store(rcx.big_repo.state_pool().clone()).await?;
         let (partition_sync_node, partition_sync_stop_token) =
             am_utils_rs::sync::node::spawn_sync_node(
-                Arc::clone(&rcx.big_repo),
+                rcx.big_repo.partition_store(),
                 partition_sync_store.clone(),
                 Arc::new(am_utils_rs::sync::AllowAllPartitionAccessPolicy),
             )
             .await?;
         let partition_sync_node = Arc::new(partition_sync_node);
+        let (repo_rpc, repo_rpc_stop_token) = am_utils_rs::repo::rpc::spawn_repo_rpc(
+            Arc::clone(&rcx.big_repo),
+            partition_sync_store.clone(),
+            Arc::new(am_utils_rs::sync::AllowAllPartitionAccessPolicy),
+        )
+        .await?;
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(
@@ -182,6 +191,12 @@ impl IrohSyncRepo {
                 PARTITION_SYNC_ALPN,
                 irpc_iroh::IrohProtocol::<am_utils_rs::sync::protocol::PartitionSyncRpc>::with_sender(
                     partition_sync_node.local_sender(),
+                ),
+            )
+            .accept(
+                REPO_SYNC_ALPN,
+                irpc_iroh::IrohProtocol::<am_utils_rs::repo::rpc::RepoSyncRpc>::with_sender(
+                    repo_rpc.local_sender(),
                 ),
             )
             .accept(
@@ -243,6 +258,7 @@ impl IrohSyncRepo {
                 worker_handle,
                 router,
                 partition_sync_stop_token,
+                repo_rpc_stop_token,
                 partition_sync_store_stop_token,
                 full_stop_token,
             },
