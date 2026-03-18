@@ -410,6 +410,7 @@ impl TablesRepo {
             _change_broker_leases: vec![broker],
         };
         let repo = Arc::new(repo);
+        repo.ensure_non_empty_graph().await?;
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
@@ -428,6 +429,156 @@ impl TablesRepo {
                 worker_handle: Some(worker_handle),
             },
         ))
+    }
+
+    async fn ensure_non_empty_graph(&self) -> Res<()> {
+        let (changed, hash) = self
+            .store
+            .mutate_sync(|store| {
+                let mut changed = false;
+
+                let window_id = if let Some((&id, _)) = store.windows.iter().next() {
+                    id
+                } else {
+                    changed = true;
+                    let id = Uuid::new_v4();
+                    store.windows.insert(
+                        id,
+                        Versioned::mint(
+                            self.local_actor_id.clone(),
+                            Window {
+                                id,
+                                title: "Main Window".to_string(),
+                                tabs: Vec::new(),
+                                selected_table: None,
+                                layout: WindowLayout::default(),
+                                last_capture_mode: CaptureMode::default(),
+                                documents_screen_list_size_expanded: WindowLayoutRegionSize::Weight(
+                                    sidebar_layout::DOCUMENTS_LIST_EXPANDED_WEIGHT,
+                                ),
+                            },
+                        ),
+                    );
+                    id
+                };
+
+                let panel_id = if let Some((&id, _)) = store.panels.iter().next() {
+                    id
+                } else {
+                    changed = true;
+                    let id = Uuid::new_v4();
+                    store.panels.insert(
+                        id,
+                        Versioned::mint(
+                            self.local_actor_id.clone(),
+                            Panel {
+                                id,
+                                title: "Panel 1".to_string(),
+                            },
+                        ),
+                    );
+                    id
+                };
+
+                let tab_id = if let Some((&id, _)) = store.tabs.iter().next() {
+                    let mut inserted_panel = false;
+                    if let Some(tab) = store.tabs.get_mut(&id) {
+                        if tab.panels.is_empty() {
+                            tab.panels.push(panel_id);
+                            changed = true;
+                            inserted_panel = true;
+                        }
+                        if tab.selected_panel.is_none()
+                            || !tab.panels.contains(&tab.selected_panel.unwrap_or(panel_id))
+                        {
+                            tab.selected_panel = Some(tab.panels[0]);
+                            changed = true;
+                        }
+                    }
+                    if inserted_panel {
+                        store.panel_to_tab.insert(panel_id, id);
+                    }
+                    id
+                } else {
+                    changed = true;
+                    let id = Uuid::new_v4();
+                    store.tabs.insert(
+                        id,
+                        Versioned::mint(
+                            self.local_actor_id.clone(),
+                            Tab {
+                                id,
+                                title: "Tab 1".to_string(),
+                                panels: vec![panel_id],
+                                selected_panel: Some(panel_id),
+                            },
+                        ),
+                    );
+                    id
+                };
+
+                let table_id = if let Some((&id, _)) = store.tables.iter().next() {
+                    if let Some(table) = store.tables.get_mut(&id) {
+                        if table.tabs.is_empty() {
+                            table.tabs.push(tab_id);
+                            changed = true;
+                        }
+                        if table.selected_tab.is_none()
+                            || !table.tabs.contains(&table.selected_tab.unwrap_or(tab_id))
+                        {
+                            table.selected_tab = Some(table.tabs[0]);
+                            changed = true;
+                        }
+                    }
+                    id
+                } else {
+                    changed = true;
+                    let id = Uuid::new_v4();
+                    store.tables.insert(
+                        id,
+                        Versioned::mint(
+                            self.local_actor_id.clone(),
+                            Table {
+                                id,
+                                title: "Table 1".to_string(),
+                                tabs: vec![tab_id],
+                                window: TableWindow::Specific { id: window_id },
+                                selected_tab: Some(tab_id),
+                            },
+                        ),
+                    );
+                    id
+                };
+
+                if let Some(window) = store.windows.get_mut(&window_id) {
+                    if !window.tabs.contains(&tab_id) {
+                        window.tabs.push(tab_id);
+                        changed = true;
+                    }
+                    if window.selected_table.is_none()
+                        || !store
+                            .tables
+                            .contains_key(&window.selected_table.unwrap_or(table_id))
+                    {
+                        window.selected_table = Some(table_id);
+                        changed = true;
+                    }
+                }
+
+                store.rebuild_indices();
+                changed
+            })
+            .await?;
+
+        if changed {
+            if let Some(hash) = hash {
+                self.registry.notify([TablesEvent::ListChanged {
+                    heads: ChangeHashSet(Arc::from([hash])),
+                }]);
+            }
+        }
+
+        Ok(())
     }
 
     async fn notifs_loop(
@@ -1434,6 +1585,63 @@ impl TablesRepo {
         }
         self.registry.notify([TablesEvent::ListChanged { heads }]);
 
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_ensures_non_empty_tables_graph() -> Res<()> {
+        let (big_repo, big_repo_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-tables-ensure-non-empty".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
+        .await?;
+
+        let app_doc_id = {
+            let doc_bytes = crate::app::version_updates::version_latest()?;
+            let doc = automerge::Automerge::load(&doc_bytes)?;
+            let handle = big_repo.add_doc(doc).await?;
+            handle.document_id().clone()
+        };
+
+        let (repo, stop_token) = TablesRepo::load(
+            Arc::clone(&big_repo),
+            app_doc_id,
+            daybook_types::doc::UserPath::from("/duser-test/ddev-test"),
+        )
+        .await?;
+
+        let windows = repo.list_windows().await?;
+        let tables = repo.list_tables().await?;
+        let selected = repo.get_selected_table().await?;
+
+        assert!(
+            !windows.is_empty(),
+            "load must ensure at least one window exists"
+        );
+        assert!(
+            !tables.is_empty(),
+            "load must ensure at least one table exists"
+        );
+        assert!(
+            selected.is_some(),
+            "load must ensure a selected table is available"
+        );
+
+        let selected_id = selected.expect("selected table should exist").id;
+        assert!(
+            windows
+                .iter()
+                .any(|window| window.selected_table == Some(selected_id)),
+            "at least one window should point to selected table"
+        );
+
+        stop_token.stop().await?;
+        big_repo_stop.stop().await?;
         Ok(())
     }
 }

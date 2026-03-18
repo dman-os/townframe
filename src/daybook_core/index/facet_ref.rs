@@ -231,6 +231,7 @@ impl DocFacetRefIndexRepo {
                 .drawer_repo
                 .get_at_heads_with_facets_arc(&doc.doc_id, &heads, Some(selected_keys))
                 .await?
+                .map(|(facets, _)| facets)
                 .unwrap_or_default();
             self.reindex_doc_from_facets(&doc.doc_id, &heads, &facets)
                 .await?;
@@ -264,6 +265,7 @@ impl DocFacetRefIndexRepo {
             .drawer_repo
             .get_at_heads_with_facets_arc(doc_id, heads, Some(selected_keys))
             .await?
+            .map(|(facets, _)| facets)
             .unwrap_or_default();
         self.reindex_doc_from_facets(doc_id, heads, &facets).await
     }

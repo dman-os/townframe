@@ -1,5 +1,5 @@
 use crate::interlude::*;
-use daybook_types::doc::{ChangeHashSet, DocId, FacetKey};
+use daybook_types::doc::{ChangeHashSet, Doc, DocId, FacetKey};
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -56,6 +56,15 @@ pub struct DocEntry {
 pub struct DocNBranches {
     pub doc_id: DocId,
     pub branches: HashMap<String, ChangeHashSet>,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DocBundle {
+    pub doc: Doc,
+    pub entry: DocEntry,
+    pub branch_heads: ChangeHashSet,
+    pub facet_heads_by_key: HashMap<FacetKey, ChangeHashSet>,
 }
 
 impl DocNBranches {

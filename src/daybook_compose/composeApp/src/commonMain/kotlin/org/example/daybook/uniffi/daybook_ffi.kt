@@ -44,6 +44,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import org.example.daybook.uniffi.core.ConfigEvent
 import org.example.daybook.uniffi.core.CreateProgressTaskArgs
 import org.example.daybook.uniffi.core.DispatchEvent
+import org.example.daybook.uniffi.core.DocBundle
 import org.example.daybook.uniffi.core.DocEntry
 import org.example.daybook.uniffi.core.DocNBranches
 import org.example.daybook.uniffi.core.DrawerEvent
@@ -51,6 +52,7 @@ import org.example.daybook.uniffi.core.FacetDisplayHint
 import org.example.daybook.uniffi.core.FfiConverterTypeConfigEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeCreateProgressTaskArgs
 import org.example.daybook.uniffi.core.FfiConverterTypeDispatchEvent
+import org.example.daybook.uniffi.core.FfiConverterTypeDocBundle
 import org.example.daybook.uniffi.core.FfiConverterTypeDocEntry
 import org.example.daybook.uniffi.core.FfiConverterTypeDocNBranches
 import org.example.daybook.uniffi.core.FfiConverterTypeDrawerEvent
@@ -96,6 +98,7 @@ import org.example.daybook.uniffi.types.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferConfigEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferCreateProgressTaskArgs
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDispatchEvent
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocBundle
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocEntry
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocNBranches
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDrawerEvent
@@ -940,6 +943,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get(
     ): Short
+    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_bundle(
+    ): Short
     external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_entry(
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_list(
@@ -1204,6 +1209,8 @@ external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_del(`ptr`: Long,`id`: Ru
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get(`ptr`: Long,`id`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get_bundle(`ptr`: Long,`id`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get_entry(`ptr`: Long,`id`: RustBuffer.ByValue,
 ): Long
@@ -1541,6 +1548,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get() != 37722.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_bundle() != 25690.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_entry() != 8189.toShort()) {
@@ -5097,6 +5107,8 @@ public interface DrawerRepoFfiInterface {
     
     suspend fun `get`(`id`: kotlin.String, `branchPath`: kotlin.String): Doc?
     
+    suspend fun `getBundle`(`id`: kotlin.String, `branchPath`: kotlin.String): DocBundle?
+    
     suspend fun `getEntry`(`id`: kotlin.String): DocEntry?
     
     suspend fun `list`(): List<DocNBranches>
@@ -5298,6 +5310,27 @@ open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeDoc.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getBundle`(`id`: kotlin.String, `branchPath`: kotlin.String) : DocBundle? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_get_bundle(
+                uniffiHandle,
+                FfiConverterString.lower(`id`),FfiConverterString.lower(`branchPath`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeDocBundle.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -8809,6 +8842,38 @@ public object FfiConverterTypeCameraPreviewFrameEncoding: FfiConverterRustBuffer
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeDocBundle: FfiConverterRustBuffer<DocBundle?> {
+    override fun read(buf: ByteBuffer): DocBundle? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeDocBundle.read(buf)
+    }
+
+    override fun allocationSize(value: DocBundle?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeDocBundle.allocationSize(value)
+        }
+    }
+
+    override fun write(value: DocBundle?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeDocBundle.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeDocEntry: FfiConverterRustBuffer<DocEntry?> {
     override fun read(buf: ByteBuffer): DocEntry? {
         if (buf.get().toInt() == 0) {
@@ -9524,16 +9589,6 @@ public typealias FfiConverterTypeJson = FfiConverterString
 
 
 
-/**
- * Typealias from the type name used in the UDL file to the builtin type.  This
- * is needed because the UDL type name is used in function/method signatures.
- * It's also what we have an external type that references a custom type.
- */
-public typealias PathBuf = kotlin.String
-public typealias FfiConverterTypePathBuf = FfiConverterString
-
-
-
 
 
 /**
@@ -9583,6 +9638,16 @@ public object FfiConverterTypeTimestamp: FfiConverter<Timestamp, Long> {
  */
 public typealias Url = kotlin.String
 public typealias FfiConverterTypeUrl = FfiConverterString
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias Utf8PathBuf = kotlin.String
+public typealias FfiConverterTypeUtf8PathBuf = FfiConverterString
 
 
 

@@ -1035,11 +1035,11 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 
 
 data class AddDocArgs (
-    var `branchPath`: PathBuf
+    var `branchPath`: Utf8PathBuf
     , 
     var `facets`: Map<FacetKey, Json>
     , 
-    var `userPath`: PathBuf?
+    var `userPath`: Utf8PathBuf?
     
 ){
     
@@ -1056,22 +1056,22 @@ data class AddDocArgs (
 public object FfiConverterTypeAddDocArgs: FfiConverterRustBuffer<AddDocArgs> {
     override fun read(buf: ByteBuffer): AddDocArgs {
         return AddDocArgs(
-            FfiConverterTypePathBuf.read(buf),
+            FfiConverterTypeUtf8PathBuf.read(buf),
             FfiConverterMapTypeFacetKeyTypeJson.read(buf),
-            FfiConverterOptionalTypePathBuf.read(buf),
+            FfiConverterOptionalTypeUtf8PathBuf.read(buf),
         )
     }
 
     override fun allocationSize(value: AddDocArgs) = (
-            FfiConverterTypePathBuf.allocationSize(value.`branchPath`) +
+            FfiConverterTypeUtf8PathBuf.allocationSize(value.`branchPath`) +
             FfiConverterMapTypeFacetKeyTypeJson.allocationSize(value.`facets`) +
-            FfiConverterOptionalTypePathBuf.allocationSize(value.`userPath`)
+            FfiConverterOptionalTypeUtf8PathBuf.allocationSize(value.`userPath`)
     )
 
     override fun write(value: AddDocArgs, buf: ByteBuffer) {
-            FfiConverterTypePathBuf.write(value.`branchPath`, buf)
+            FfiConverterTypeUtf8PathBuf.write(value.`branchPath`, buf)
             FfiConverterMapTypeFacetKeyTypeJson.write(value.`facets`, buf)
-            FfiConverterOptionalTypePathBuf.write(value.`userPath`, buf)
+            FfiConverterOptionalTypeUtf8PathBuf.write(value.`userPath`, buf)
     }
 }
 
@@ -1175,6 +1175,8 @@ data class Dmeta (
     , 
     var `updatedAt`: List<Timestamp>
     , 
+    var `actors`: Map<kotlin.String, UserMeta>
+    , 
     var `facetUuids`: Map<Uuid, FacetKey>
     , 
     var `facets`: Map<FacetKey, FacetMeta>
@@ -1197,6 +1199,7 @@ public object FfiConverterTypeDmeta: FfiConverterRustBuffer<Dmeta> {
             FfiConverterString.read(buf),
             FfiConverterTypeTimestamp.read(buf),
             FfiConverterSequenceTypeTimestamp.read(buf),
+            FfiConverterMapStringTypeUserMeta.read(buf),
             FfiConverterMapTypeUuidTypeFacetKey.read(buf),
             FfiConverterMapTypeFacetKeyTypeFacetMeta.read(buf),
         )
@@ -1206,6 +1209,7 @@ public object FfiConverterTypeDmeta: FfiConverterRustBuffer<Dmeta> {
             FfiConverterString.allocationSize(value.`id`) +
             FfiConverterTypeTimestamp.allocationSize(value.`createdAt`) +
             FfiConverterSequenceTypeTimestamp.allocationSize(value.`updatedAt`) +
+            FfiConverterMapStringTypeUserMeta.allocationSize(value.`actors`) +
             FfiConverterMapTypeUuidTypeFacetKey.allocationSize(value.`facetUuids`) +
             FfiConverterMapTypeFacetKeyTypeFacetMeta.allocationSize(value.`facets`)
     )
@@ -1214,6 +1218,7 @@ public object FfiConverterTypeDmeta: FfiConverterRustBuffer<Dmeta> {
             FfiConverterString.write(value.`id`, buf)
             FfiConverterTypeTimestamp.write(value.`createdAt`, buf)
             FfiConverterSequenceTypeTimestamp.write(value.`updatedAt`, buf)
+            FfiConverterMapStringTypeUserMeta.write(value.`actors`, buf)
             FfiConverterMapTypeUuidTypeFacetKey.write(value.`facetUuids`, buf)
             FfiConverterMapTypeFacetKeyTypeFacetMeta.write(value.`facets`, buf)
     }
@@ -1313,7 +1318,7 @@ data class DocPatch (
     /**
      * Optional user path for recording in drawer
      */
-    var `userPath`: PathBuf?
+    var `userPath`: Utf8PathBuf?
     
 ){
     
@@ -1333,7 +1338,7 @@ public object FfiConverterTypeDocPatch: FfiConverterRustBuffer<DocPatch> {
             FfiConverterString.read(buf),
             FfiConverterMapTypeFacetKeyTypeJson.read(buf),
             FfiConverterSequenceTypeFacetKey.read(buf),
-            FfiConverterOptionalTypePathBuf.read(buf),
+            FfiConverterOptionalTypeUtf8PathBuf.read(buf),
         )
     }
 
@@ -1341,14 +1346,14 @@ public object FfiConverterTypeDocPatch: FfiConverterRustBuffer<DocPatch> {
             FfiConverterString.allocationSize(value.`id`) +
             FfiConverterMapTypeFacetKeyTypeJson.allocationSize(value.`facetsSet`) +
             FfiConverterSequenceTypeFacetKey.allocationSize(value.`facetsRemove`) +
-            FfiConverterOptionalTypePathBuf.allocationSize(value.`userPath`)
+            FfiConverterOptionalTypeUtf8PathBuf.allocationSize(value.`userPath`)
     )
 
     override fun write(value: DocPatch, buf: ByteBuffer) {
             FfiConverterString.write(value.`id`, buf)
             FfiConverterMapTypeFacetKeyTypeJson.write(value.`facetsSet`, buf)
             FfiConverterSequenceTypeFacetKey.write(value.`facetsRemove`, buf)
-            FfiConverterOptionalTypePathBuf.write(value.`userPath`, buf)
+            FfiConverterOptionalTypeUtf8PathBuf.write(value.`userPath`, buf)
     }
 }
 
@@ -1847,6 +1852,39 @@ public object FfiConverterTypePseudoLabelCandidatesFacet: FfiConverterRustBuffer
 
 
 
+data class UserMeta (
+    var `userPath`: Utf8PathBuf
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUserMeta: FfiConverterRustBuffer<UserMeta> {
+    override fun read(buf: ByteBuffer): UserMeta {
+        return UserMeta(
+            FfiConverterTypeUtf8PathBuf.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UserMeta) = (
+            FfiConverterTypeUtf8PathBuf.allocationSize(value.`userPath`)
+    )
+
+    override fun write(value: UserMeta, buf: ByteBuffer) {
+            FfiConverterTypeUtf8PathBuf.write(value.`userPath`, buf)
+    }
+}
+
+
+
 
 enum class EmbeddingCompression {
     
@@ -2056,7 +2094,7 @@ sealed class WellKnownFacet {
     }
     
     data class PathGeneric(
-        val v1: org.example.daybook.uniffi.types.PathBuf) : WellKnownFacet()
+        val v1: kotlin.String) : WellKnownFacet()
         
     {
         
@@ -2162,7 +2200,7 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
                 FfiConverterString.read(buf),
                 )
             7 -> WellKnownFacet.PathGeneric(
-                FfiConverterTypePathBuf.read(buf),
+                FfiConverterString.read(buf),
                 )
             8 -> WellKnownFacet.Pending(
                 FfiConverterTypePending.read(buf),
@@ -2236,7 +2274,7 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterTypePathBuf.allocationSize(value.v1)
+                + FfiConverterString.allocationSize(value.v1)
             )
         }
         is WellKnownFacet.Pending -> {
@@ -2324,7 +2362,7 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
             }
             is WellKnownFacet.PathGeneric -> {
                 buf.putInt(7)
-                FfiConverterTypePathBuf.write(value.v1, buf)
+                FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.Pending -> {
@@ -2612,28 +2650,28 @@ public object FfiConverterOptionalSequenceTypeOcrTextRegion: FfiConverterRustBuf
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypePathBuf: FfiConverterRustBuffer<PathBuf?> {
-    override fun read(buf: ByteBuffer): PathBuf? {
+public object FfiConverterOptionalTypeUtf8PathBuf: FfiConverterRustBuffer<Utf8PathBuf?> {
+    override fun read(buf: ByteBuffer): Utf8PathBuf? {
         if (buf.get().toInt() == 0) {
             return null
         }
-        return FfiConverterTypePathBuf.read(buf)
+        return FfiConverterTypeUtf8PathBuf.read(buf)
     }
 
-    override fun allocationSize(value: PathBuf?): ULong {
+    override fun allocationSize(value: Utf8PathBuf?): ULong {
         if (value == null) {
             return 1UL
         } else {
-            return 1UL + FfiConverterTypePathBuf.allocationSize(value)
+            return 1UL + FfiConverterTypeUtf8PathBuf.allocationSize(value)
         }
     }
 
-    override fun write(value: PathBuf?, buf: ByteBuffer) {
+    override fun write(value: Utf8PathBuf?, buf: ByteBuffer) {
         if (value == null) {
             buf.put(0)
         } else {
             buf.put(1)
-            FfiConverterTypePathBuf.write(value, buf)
+            FfiConverterTypeUtf8PathBuf.write(value, buf)
         }
     }
 }
@@ -2868,6 +2906,45 @@ public object FfiConverterSequenceTypeUuid: FfiConverterRustBuffer<List<Uuid>> {
 /**
  * @suppress
  */
+public object FfiConverterMapStringTypeUserMeta: FfiConverterRustBuffer<Map<kotlin.String, UserMeta>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, UserMeta> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, UserMeta>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterTypeUserMeta.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, UserMeta>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterTypeUserMeta.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, UserMeta>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterTypeUserMeta.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterMapTypeFacetKeyTypeFacetMeta: FfiConverterRustBuffer<Map<FacetKey, FacetMeta>> {
     override fun read(buf: ByteBuffer): Map<FacetKey, FacetMeta> {
         val len = buf.getInt()
@@ -3001,16 +3078,6 @@ public typealias FfiConverterTypeJson = FfiConverterString
 
 
 
-/**
- * Typealias from the type name used in the UDL file to the builtin type.  This
- * is needed because the UDL type name is used in function/method signatures.
- * It's also what we have an external type that references a custom type.
- */
-public typealias PathBuf = kotlin.String
-public typealias FfiConverterTypePathBuf = FfiConverterString
-
-
-
 
 
 /**
@@ -3060,6 +3127,16 @@ public object FfiConverterTypeTimestamp: FfiConverter<Timestamp, Long> {
  */
 public typealias Url = kotlin.String
 public typealias FfiConverterTypeUrl = FfiConverterString
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias Utf8PathBuf = kotlin.String
+public typealias FfiConverterTypeUtf8PathBuf = FfiConverterString
 
 
 
