@@ -63,21 +63,6 @@ jobs:
         uses: mxschmitt/action-tmate@v3
         with:
           detached: true
-
-      - name: remove unused files
-        # based on https://dev.to/mathio/squeezing-disk-space-from-github-actions-runners-an-engineers-guide-3pjg
-        run: |
-          sudo rm -rf /usr/lib/jvm
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/julia*
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /opt/microsoft /opt/google
-          sudo rm -rf /opt/az
-          sudo rm -rf /usr/local/share/powershell
-          # sudo rm -rf /opt/hostedtoolcache
       - uses: actions/checkout@v4
       - id: meta
         name: resolve release metadata

@@ -1003,7 +1003,7 @@ mod tests {
         let rtx = RepoCtx::init(
             &repo_a_path,
             RepoOpenOptions {
-                ws_connector_url: None,
+                ..default()
             },
             "test-device".into(),
         )
@@ -1095,7 +1095,7 @@ mod tests {
         let rtx = RepoCtx::init(
             &repo_a_path,
             RepoOpenOptions {
-                ws_connector_url: None,
+                ..default()
             },
             "test-device".into(),
         )
@@ -1157,7 +1157,7 @@ mod tests {
         let rtx = RepoCtx::init(
             &repo_path,
             RepoOpenOptions {
-                ws_connector_url: None,
+                ..default()
             },
             "test-device".into(),
         )
@@ -1309,7 +1309,7 @@ mod tests {
         let rtx = RepoCtx::init(
             &repo_a_path,
             RepoOpenOptions {
-                ws_connector_url: None,
+                ..default()
             },
             "test-device".into(),
         )
@@ -1461,7 +1461,7 @@ mod tests {
         let rtx = RepoCtx::init(
             repo_a_path,
             RepoOpenOptions {
-                ws_connector_url: None,
+                ..default()
             },
             "test-device".into(),
         )
@@ -1504,52 +1504,14 @@ mod tests {
         source_url: &str,
         destination: &std::path::Path,
     ) -> Res<()> {
-        if destination.exists() {
-            let mut read_dir = tokio::fs::read_dir(destination).await?;
-            if read_dir.next_entry().await?.is_some() {
-                eyre::bail!(
-                    "bootstrap clone destination must be empty: {}",
-                    destination.display()
-                );
-            }
-        } else {
-            tokio::fs::create_dir_all(destination).await?;
-        }
-
-        let bootstrap = crate::sync::resolve_bootstrap_from_url(source_url).await?;
-        let sqlite_path = destination.join("sqlite.db");
-        let sql = crate::app::SqlCtx::new(&format!("sqlite://{}", sqlite_path.display())).await?;
-        crate::app::globals::set_repo_id(&sql.db_pool, &bootstrap.repo_id).await?;
-        let identity =
-            crate::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &bootstrap.repo_id)
-                .await?;
-        let _repo_user_id = crate::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
-
-        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
-            storage: am_utils_rs::repo::StorageConfig::Disk {
-                path: destination.join("samod"),
-                big_repo_sqlite_url: None,
-            },
-            peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
-        })
-        .await?;
-        crate::sync::connect_and_pull_required_docs_once(
-            &big_repo,
-            identity.iroh_secret_key.clone(),
-            &bootstrap,
-            Duration::from_secs(30),
-        )
-        .await?;
-        crate::app::globals::set_init_state(
-            &sql.db_pool,
-            &crate::app::globals::InitState::Created {
-                doc_id_app: bootstrap.app_doc_id,
-                doc_id_drawer: bootstrap.drawer_doc_id,
+        crate::sync::clone_repo_init_from_url(
+            source_url,
+            destination,
+            crate::sync::CloneRepoInitOptions {
+                timeout: Duration::from_secs(30),
             },
         )
         .await?;
-        crate::repo::mark_repo_initialized(destination).await?;
-        big_repo_stop.stop().await?;
         Ok(())
     }
 
@@ -1558,7 +1520,7 @@ mod tests {
             RepoCtx::open(
                 repo_root,
                 RepoOpenOptions {
-                    ws_connector_url: None,
+                    ..default()
                 },
                 "test-device".into(),
             )

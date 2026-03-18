@@ -12,8 +12,10 @@ import org.example.daybook.uniffi.CameraPreviewFfi
 actual fun DaybookCameraPreview(
     cameraPreviewFfi: CameraPreviewFfi,
     modifier: Modifier,
+    selectedDeviceId: Int?,
+    onAvailableDevicesChanged: ((List<org.example.daybook.uniffi.CameraDeviceInfo>, Int?) -> Unit)?,
     onImageSaved: ((ByteArray) -> Unit)?,
-    onCaptureRequested: (() -> Unit)?
+    onFrameAvailable: ((org.example.daybook.capture.data.CameraFrameSample) -> Unit)?
 ) {
     // Camera not available on WebAssembly
     Box(

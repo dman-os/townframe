@@ -356,6 +356,8 @@ pub mod globals {
     #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
     pub struct KnownRepoEntry {
         pub id: String,
+        #[serde(default)]
+        pub name: String,
         pub path: String,
         pub created_at_unix_secs: i64,
         pub last_opened_at_unix_secs: i64,

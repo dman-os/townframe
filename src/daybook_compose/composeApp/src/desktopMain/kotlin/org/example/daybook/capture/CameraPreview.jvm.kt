@@ -3,12 +3,7 @@ package org.example.daybook.capture
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,7 +19,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.unit.dp
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import javax.imageio.ImageIO
@@ -33,6 +27,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.example.daybook.capture.data.CameraFrameSample
 import org.example.daybook.uniffi.CameraDeviceInfo
 import org.example.daybook.uniffi.CameraPreviewFfi
 import org.example.daybook.uniffi.CameraPreviewFrame
@@ -94,19 +89,27 @@ private fun CameraPreviewFrame.toJpegBytes(): ByteArray {
     }
 }
 
+private fun CameraPreviewFrame.toFrameSample(): CameraFrameSample {
+    return CameraFrameSample(
+        widthPx = widthPx.toInt(),
+        heightPx = heightPx.toInt(),
+        jpegBytes = toJpegBytes()
+    )
+}
+
 @Composable
 actual fun DaybookCameraPreview(
     cameraPreviewFfi: CameraPreviewFfi,
     modifier: Modifier,
+    selectedDeviceId: Int?,
+    onAvailableDevicesChanged: ((List<CameraDeviceInfo>, Int?) -> Unit)?,
     onImageSaved: ((ByteArray) -> Unit)?,
-    onCaptureRequested: (() -> Unit)?
+    onFrameAvailable: ((CameraFrameSample) -> Unit)?
 ) {
     val captureContext = LocalCameraCaptureContext.current
     val coroutineScope = rememberCoroutineScope()
 
     var devices by remember { mutableStateOf<List<CameraDeviceInfo>>(emptyList()) }
-    var selectedDeviceId by remember { mutableStateOf<Int?>(null) }
-    var expandedMenu by remember { mutableStateOf(false) }
     var latestFrame by remember { mutableStateOf<CameraPreviewFrame?>(null) }
     var latestImageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
@@ -124,7 +127,7 @@ actual fun DaybookCameraPreview(
         try {
             val listedDevices = cameraPreviewFfi.listDevices()
             devices = listedDevices
-            selectedDeviceId = listedDevices.firstOrNull()?.deviceId?.toInt()
+            onAvailableDevicesChanged?.invoke(listedDevices, listedDevices.firstOrNull()?.deviceId?.toInt())
             errorText = if (listedDevices.isEmpty()) "No camera devices found." else null
         } catch (ffiError: FfiException) {
             errorText = ffiError.message()
@@ -141,13 +144,17 @@ actual fun DaybookCameraPreview(
         }
     }
 
-    LaunchedEffect(cameraPreviewFfi, selectedDeviceId) {
+    LaunchedEffect(cameraPreviewFfi, selectedDeviceId, onFrameAvailable) {
         if (selectedDeviceId == null) return@LaunchedEffect
         while (isActive) {
             val nextFrame = cameraPreviewFfi.`takeLatestFrame`()
             if (nextFrame != null) {
                 latestFrame = nextFrame
                 latestImageBitmap = withContext(Dispatchers.IO) { nextFrame.toImageBitmap() }
+                if (onFrameAvailable != null) {
+                    val sample = withContext(Dispatchers.IO) { nextFrame.toFrameSample() }
+                    onFrameAvailable.invoke(sample)
+                }
             }
             delay(12)
         }
@@ -192,83 +199,30 @@ actual fun DaybookCameraPreview(
                 Text(text = errorText ?: "Loading camera devices...")
             }
         } else {
-            Column(modifier = Modifier.fillMaxSize()) {
-                Box(
-                    modifier = Modifier.padding(8.dp),
-                    contentAlignment = Alignment.TopEnd
-                ) {
-                    DeviceSelectionMenu(
-                        devices = devices,
-                        selectedDeviceId = selectedDeviceId,
-                        expanded = expandedMenu,
-                        onExpandedChange = { expandedMenu = it },
-                        onDeviceSelected = { selectedDeviceId = it }
+            Box(
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surface)
+            ) {
+                if (latestImageBitmap != null) {
+                    Image(
+                        bitmap = latestImageBitmap!!,
+                        contentDescription = "Camera preview",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.FillBounds,
+                        alignment = Alignment.Center
                     )
                 }
 
-                Box(
-                    modifier =
-                        Modifier
-                            .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.surface)
-                ) {
-                    if (latestImageBitmap != null) {
-                        Image(
-                            bitmap = latestImageBitmap!!,
-                            contentDescription = "Camera preview",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Fit,
-                            alignment = Alignment.Center
-                        )
-                    }
-
-                    if (errorText != null) {
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(text = errorText ?: "Camera error")
-                        }
+                if (errorText != null) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = errorText ?: "Camera error")
                     }
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DeviceSelectionMenu(
-    devices: List<CameraDeviceInfo>,
-    selectedDeviceId: Int?,
-    expanded: Boolean,
-    onExpandedChange: (Boolean) -> Unit,
-    onDeviceSelected: (Int) -> Unit
-) {
-    val selectedLabel =
-        devices
-            .firstOrNull { it.deviceId.toInt() == selectedDeviceId }
-            ?.label ?: "Select camera"
-
-    Box {
-        Button(onClick = { onExpandedChange(!expanded) }) {
-            Text(
-                text = selectedLabel,
-                style = MaterialTheme.typography.bodyMedium
-            )
-        }
-
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { onExpandedChange(false) }
-        ) {
-            devices.forEach { device ->
-                DropdownMenuItem(
-                    text = { Text(device.label) },
-                    onClick = {
-                        onDeviceSelected(device.deviceId.toInt())
-                        onExpandedChange(false)
-                    }
-                )
             }
         }
     }

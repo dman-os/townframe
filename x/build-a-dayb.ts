@@ -34,34 +34,58 @@ const ortRootDir = $.relativeDir("../target/ort");
 const sourceArchivePath = ortRootDir.join(`onnxruntime-${ortSourceTag}.tar.gz`);
 const sourceDir = ortRootDir.join("onnxruntime-src");
 const sourceCompleteFile = ortRootDir.join(`.source-${ortSourceTag}.complete`);
-const buildCompleteFile = ortRootDir.join(
-  `.build-${triple}-${ortBuildConfig.toLowerCase()}.complete`,
+const distDir = ortRootDir.join("dist", triple, ortBuildConfig);
+const distCompleteFile = ortRootDir.join(
+  `.dist-${ortSourceTag}-${triple}-${ortBuildConfig.toLowerCase()}.complete`,
 );
 const libDirFile = ortRootDir.join(`ort-lib-location-${triple}.txt`);
 
 await ortRootDir.ensureDir();
 
-if (!(await sourceCompleteFile.exists())) {
-  await $.request(
-    `https://github.com/microsoft/onnxruntime/archive/refs/tags/${ortSourceTag}.tar.gz`,
-  )
-    .showProgress()
-    .pipeToPath(sourceArchivePath);
-  await sourceDir.ensureRemove();
-  await sourceDir.ensureDir();
-  await $`bsdtar --extract --file ${sourceArchivePath} --directory ${sourceDir} --strip-components=1`;
-  await sourceCompleteFile.writeText("ok\n");
-}
+if (!(await distCompleteFile.exists())) {
+  const needsSourceExtract = !(await sourceDir.exists());
+  if (!(await sourceCompleteFile.exists()) || needsSourceExtract) {
+    if (!(await sourceArchivePath.exists())) {
+      await $.request(
+        `https://github.com/microsoft/onnxruntime/archive/refs/tags/${ortSourceTag}.tar.gz`,
+      )
+        .showProgress()
+        .pipeToPath(sourceArchivePath);
+    }
+    await sourceDir.ensureRemove();
+    await sourceDir.ensureDir();
+    await $`bsdtar --extract --file ${sourceArchivePath} --directory ${sourceDir} --strip-components=1`;
+    await sourceCompleteFile.writeText("ok\n");
+  }
 
-if (!(await buildCompleteFile.exists())) {
-  await $`bash ./build.sh --update --build --config ${ortBuildConfig} --parallel --compile_no_warning_as_error --skip_submodule_sync --android --android_abi=${abi} --android_api=${androidApiLevel} --android_ndk_path=${androidNdkRoot}`
+  await $`bash ./build.sh --update --build --config ${ortBuildConfig} --parallel --compile_no_warning_as_error --skip_submodule_sync --build_shared_lib --android --android_abi=${abi} --android_api=${androidApiLevel} --android_ndk_path=${androidNdkRoot}`
     .cwd(
       sourceDir,
     );
+  const builtLibDir = sourceDir.join("build", "Android", ortBuildConfig);
+  const sharedLibPathsRaw = await $`find ${builtLibDir} -type f -name '*.so*'`
+    .text();
+  const sharedLibPaths = sharedLibPathsRaw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (sharedLibPaths.length === 0) {
+    throw new Error(
+      `ORT build did not produce shared libraries under ${builtLibDir}`,
+    );
+  }
+  await distDir.ensureRemove();
+  await distDir.ensureDir();
+  for (const sourceLibPath of sharedLibPaths) {
+    await $`cp -f ${sourceLibPath} ${distDir}`;
+  }
   await libDirFile.writeText(
-    `${sourceDir.join("build", "Android", ortBuildConfig)}\n`,
+    `${distDir}\n`,
   );
-  await buildCompleteFile.writeText("ok\n");
+  await distCompleteFile.writeText("ok\n");
+
+  // The ORT source + build tree is huge; we only need the copied runtime libs.
+  await sourceDir.ensureRemove();
 }
 
 await $`./gradlew install${gradleVariant} -PdaybookProfile=${composeProfile}`
@@ -69,4 +93,5 @@ await $`./gradlew install${gradleVariant} -PdaybookProfile=${composeProfile}`
   .env({
     ORT_LIB_LOCATION: (await libDirFile.readText()).trim(),
     ORT_LIB_PROFILE: $.env.ORT_LIB_PROFILE ?? ortBuildConfig,
+    ORT_PREFER_DYNAMIC_LINK: $.env.ORT_PREFER_DYNAMIC_LINK ?? "1",
   });

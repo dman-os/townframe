@@ -14,12 +14,33 @@ pub struct SyncBootstrapState {
     pub endpoint_addr: iroh::EndpointAddr,
     pub endpoint_id: EndpointId,
     pub repo_id: String,
+    pub repo_name: String,
     pub app_doc_id: DocumentId,
     pub drawer_doc_id: DocumentId,
     pub device_name: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CloneRepoInitOptions {
+    pub timeout: std::time::Duration,
+}
+
+impl Default for CloneRepoInitOptions {
+    fn default() -> Self {
+        Self {
+            timeout: std::time::Duration::from_secs(30),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CloneRepoInitResult {
+    pub repo_path: std::path::PathBuf,
+    pub bootstrap: SyncBootstrapState,
+}
+
 const BOOTSTRAP_KEY_REPO_ID: &[u8] = b"repo_id";
+const BOOTSTRAP_KEY_REPO_NAME: &[u8] = b"repo_name";
 const BOOTSTRAP_KEY_APP_DOC_ID: &[u8] = b"app_doc_id";
 const BOOTSTRAP_KEY_DRAWER_DOC_ID: &[u8] = b"drawer_doc_id";
 const BOOTSTRAP_KEY_DEVICE_NAME: &[u8] = b"device_name";
@@ -45,6 +66,21 @@ impl IrohSyncRepo {
             )
             .await
             .map_err(|err| ferr!("error writing repo_id bootstrap key: {err:?}"))?;
+            let repo_name = self
+                .rcx
+                .layout
+                .repo_root
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| self.rcx.repo_id.clone());
+            doc.set_bytes(
+                author,
+                BOOTSTRAP_KEY_REPO_NAME.to_vec(),
+                repo_name.as_bytes().to_vec(),
+            )
+            .await
+            .map_err(|err| ferr!("error writing repo_name bootstrap key: {err:?}"))?;
             doc.set_bytes(
                 author,
                 BOOTSTRAP_KEY_APP_DOC_ID.to_vec(),
@@ -164,6 +200,7 @@ pub(super) async fn resolve_bootstrap_with_docs(
     let timeout_at = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         let repo_id = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_REPO_ID).await?;
+        let repo_name = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_REPO_NAME).await?;
         let app_doc_id = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_APP_DOC_ID).await?;
         let drawer_doc_id = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_DRAWER_DOC_ID).await?;
         let device_name = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_DEVICE_NAME).await?;
@@ -180,6 +217,7 @@ pub(super) async fn resolve_bootstrap_with_docs(
                 endpoint_addr,
                 endpoint_id,
                 repo_id,
+                repo_name: repo_name.unwrap_or_default(),
                 app_doc_id,
                 drawer_doc_id,
                 device_name,
@@ -222,6 +260,65 @@ pub async fn connect_and_pull_required_docs_once(
     stop_res?;
     endpoint.close().await;
     Ok(())
+}
+
+#[tracing::instrument(skip(source_url, destination, options))]
+pub async fn clone_repo_init_from_url(
+    source_url: &str,
+    destination: &std::path::Path,
+    options: CloneRepoInitOptions,
+) -> Res<CloneRepoInitResult> {
+    let destination = std::path::absolute(destination)?;
+    if destination.exists() {
+        let mut read_dir = tokio::fs::read_dir(&destination).await?;
+        if read_dir.next_entry().await?.is_some() {
+            eyre::bail!(
+                "clone destination must be empty or non-existent: {}",
+                destination.display()
+            );
+        }
+    } else {
+        tokio::fs::create_dir_all(&destination).await?;
+    }
+
+    let bootstrap = resolve_bootstrap_from_url(source_url).await?;
+    let sqlite_path = destination.join("sqlite.db");
+    let sql = crate::app::SqlCtx::new(&format!("sqlite://{}", sqlite_path.display())).await?;
+    crate::app::globals::set_repo_id(&sql.db_pool, &bootstrap.repo_id).await?;
+    let identity =
+        crate::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &bootstrap.repo_id)
+            .await?;
+    let _repo_user_id = crate::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
+
+    let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
+        storage: am_utils_rs::repo::StorageConfig::Disk {
+            path: destination.join("samod"),
+            big_repo_sqlite_url: None,
+        },
+        peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
+    })
+    .await?;
+    connect_and_pull_required_docs_once(
+        &big_repo,
+        identity.iroh_secret_key.clone(),
+        &bootstrap,
+        options.timeout,
+    )
+    .await?;
+    crate::app::globals::set_init_state(
+        &sql.db_pool,
+        &crate::app::globals::InitState::Created {
+            doc_id_app: bootstrap.app_doc_id.clone(),
+            doc_id_drawer: bootstrap.drawer_doc_id.clone(),
+        },
+    )
+    .await?;
+    crate::repo::mark_repo_initialized(&destination).await?;
+    big_repo_stop.stop().await?;
+    Ok(CloneRepoInitResult {
+        repo_path: destination,
+        bootstrap,
+    })
 }
 
 async fn pull_required_docs_once(

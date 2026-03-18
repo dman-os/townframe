@@ -153,7 +153,9 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
     tokio::fs::create_dir_all(&paths[0]).await?;
     let rtx = RepoCtx::init(
         &paths[0],
-        RepoOpenOptions::default(),
+        RepoOpenOptions {
+            ..default()
+        },
         "stress-test-device".into(),
     )
     .await?;
@@ -171,7 +173,9 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
 
             let ctx = RepoCtx::open(
                 dst,
-                RepoOpenOptions::default(),
+                RepoOpenOptions {
+                    ..default()
+                },
                 "stress-test-device".into(),
             )
             .await?;

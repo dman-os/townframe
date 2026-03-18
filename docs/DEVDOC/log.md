@@ -1,5 +1,12 @@
 # duck-log
 
+## 2026-03-18 | sync hell 2
+
+Finally merged the sync work.
+It's a vibe coded buggy mess but it sort of works.
+I was hoping it'd take a single week but that's an idiot for you.
+I can't afford to get bogged down in mostly backend concerns at this early stage.
+
 ## 2026-03-06 | sync hell
 
 I've been trying to implement sync over iroh for the past two weeks.

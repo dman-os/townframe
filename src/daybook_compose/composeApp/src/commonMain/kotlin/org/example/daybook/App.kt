@@ -17,6 +17,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,18 +29,27 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LargeTopAppBar
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -71,9 +81,14 @@ import io.github.vinceglb.filekit.dialogs.compose.rememberDirectoryPickerLaunche
 import io.github.vinceglb.filekit.path
 import org.example.daybook.capture.CameraCaptureContext
 import org.example.daybook.capture.ProvideCameraCaptureContext
+import org.example.daybook.capture.data.CameraOverlay
+import org.example.daybook.capture.data.CameraPreviewQrBridge
+import org.example.daybook.capture.data.CameraQrOverlayBridge
 import org.example.daybook.capture.screens.CaptureScreen
+import org.example.daybook.capture.ui.DaybookCameraViewport
 import org.example.daybook.drawer.DrawerScreen
 import org.example.daybook.progress.ProgressList
+import org.example.daybook.progress.ProgressAmountBlock
 import org.example.daybook.settings.SettingsScreen
 import org.example.daybook.tables.CompactLayout
 import org.example.daybook.tables.ExpandedLayout
@@ -81,6 +96,7 @@ import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
 import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.CameraPreviewFfi
+import org.example.daybook.uniffi.CameraQrAnalyzerFfi
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.DispatchRepoFfi
 import org.example.daybook.uniffi.FfiCtx
@@ -88,11 +104,16 @@ import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.AppFfiCtx
 import org.example.daybook.uniffi.ProgressRepoFfi
 import org.example.daybook.uniffi.RtFfi
+import org.example.daybook.uniffi.SyncRepoFfi
+import org.example.daybook.uniffi.CloneBootstrapInfo
 import org.example.daybook.uniffi.TablesEventListener
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.KnownRepoEntry
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.uniffi.core.Panel
+import org.example.daybook.uniffi.core.ProgressTask
+import org.example.daybook.uniffi.core.ProgressTaskState
+import org.example.daybook.uniffi.core.ProgressUpdateDeets
 import org.example.daybook.uniffi.core.Tab
 import org.example.daybook.uniffi.core.Table
 import org.example.daybook.uniffi.core.TablesEvent
@@ -134,6 +155,7 @@ data class AppContainer(
     val plugsRepo: org.example.daybook.uniffi.PlugsRepoFfi,
     val configRepo: ConfigRepoFfi,
     val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
+    val syncRepo: SyncRepoFfi,
     val cameraPreviewFfi: CameraPreviewFfi
 )
 
@@ -163,6 +185,32 @@ private sealed interface AppInitState {
     data class Ready(val container: AppContainer) : AppInitState
 
     data class Error(val throwable: Throwable) : AppInitState
+}
+
+private sealed interface CloneUiState {
+    data class UrlInput(
+        val urlInput: String = "",
+        val isResolving: Boolean = false,
+        val errorMessage: String? = null
+    ) : CloneUiState
+
+    data class Scanner(
+        val currentUrlInput: String,
+        val errorMessage: String? = null
+    ) : CloneUiState
+
+    data class PickingLocation(
+        val sourceUrl: String,
+        val info: CloneBootstrapInfo,
+        val destinationPath: String,
+        val isCloning: Boolean = false,
+        val errorMessage: String? = null,
+        val destinationWarning: String? = null
+    ) : CloneUiState
+
+    data class Syncing(
+        val sourceUrl: String
+    ) : CloneUiState
 }
 
 sealed interface TablesState {
@@ -495,9 +543,22 @@ fun App(
     var initAttempt by remember { mutableStateOf(0) }
     var initState by remember { mutableStateOf<AppInitState>(AppInitState.Loading) }
     var pendingOpenRepoPath by remember { mutableStateOf<String?>(null) }
+    var cloneUiState by remember { mutableStateOf<CloneUiState?>(null) }
+    var cloneSourceUrlPendingOpen by remember { mutableStateOf<String?>(null) }
+    var cloneInitRequest by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var selectedWelcomeRepo by remember { mutableStateOf<KnownRepoEntry?>(null) }
+    var pendingForgetRepoId by remember { mutableStateOf<String?>(null) }
+    val cloneCameraPreviewFfi = remember { CameraPreviewFfi.load() }
+
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose {
+            cloneCameraPreviewFfi.close()
+        }
+    }
 
     LaunchedEffect(initAttempt) {
         initState = AppInitState.Loading
+        selectedWelcomeRepo = null
         try {
             val globalsCtx = AppFfiCtx.init()
             val repoConfig = globalsCtx.getRepoConfig()
@@ -538,6 +599,14 @@ fun App(
             val configRepo = ConfigRepoFfi.load(fcx = fcx, plugRepo = plugsRepo)
             val dispatchRepo = DispatchRepoFfi.load(fcx = fcx)
             val progressRepo = ProgressRepoFfi.load(fcx = fcx)
+            val syncRepo =
+                SyncRepoFfi.load(
+                    fcx = fcx,
+                    configRepo = configRepo,
+                    blobsRepo = blobsRepo,
+                    drawerRepo = drawerRepo,
+                    progressRepo = progressRepo
+                )
             val rtFfi =
                 RtFfi.load(
                     fcx = fcx,
@@ -566,6 +635,7 @@ fun App(
                         plugsRepo = plugsRepo,
                         configRepo = configRepo,
                         blobsRepo = blobsRepo,
+                        syncRepo = syncRepo,
                         cameraPreviewFfi = cameraPreviewFfi
                     )
                 )
@@ -576,6 +646,22 @@ fun App(
         }
     }
 
+    LaunchedEffect(pendingForgetRepoId) {
+        val repoId = pendingForgetRepoId ?: return@LaunchedEffect
+        try {
+            val gcx = AppFfiCtx.init()
+            gcx.forgetKnownRepo(repoId)
+            val repoConfig = gcx.getRepoConfig()
+            gcx.close()
+            selectedWelcomeRepo = null
+            initState = AppInitState.Welcome(repos = repoConfig.knownRepos)
+        } catch (throwable: Throwable) {
+            initState = AppInitState.Error(throwable)
+        } finally {
+            pendingForgetRepoId = null
+        }
+    }
+
     DaybookTheme(themeConfig = config.theme) {
         when (val state = initState) {
             is AppInitState.Loading -> {
@@ -583,12 +669,27 @@ fun App(
             }
 
             is AppInitState.Welcome -> {
-                WelcomeScreen(
-                    repos = state.repos,
-                    onOpenRepo = { selectedRepoPath ->
-                        pendingOpenRepoPath = selectedRepoPath
-                    }
-                )
+                val repoDetail = selectedWelcomeRepo
+                if (repoDetail == null) {
+                    WelcomeScreen(
+                        repos = state.repos,
+                        onOpenRepo = { selectedRepoPath ->
+                            pendingOpenRepoPath = selectedRepoPath
+                        },
+                        onInspectRepo = { repo ->
+                            selectedWelcomeRepo = repo
+                        },
+                        onStartClone = { cloneUiState = CloneUiState.UrlInput() }
+                    )
+                } else {
+                    WelcomeRepoDetailScreen(
+                        repo = repoDetail,
+                        onBack = { selectedWelcomeRepo = null },
+                        onOpen = { pendingOpenRepoPath = repoDetail.path },
+                        onForget = { pendingForgetRepoId = repoDetail.id },
+                        forgetting = pendingForgetRepoId == repoDetail.id
+                    )
+                }
             }
 
             is AppInitState.OpeningRepo -> {
@@ -616,6 +717,7 @@ fun App(
                         appContainer.rtFfi.close()
                         appContainer.plugsRepo.close()
                         appContainer.configRepo.close()
+                        appContainer.syncRepo.close()
                         appContainer.cameraPreviewFfi.close()
                         appContainer.ffiCtx.close()
                     }
@@ -624,22 +726,203 @@ fun App(
                 CompositionLocalProvider(
                     LocalContainer provides appContainer
                 ) {
-                    // Provide camera capture context for coordination between camera and bottom bar
-                    val cameraCaptureContext = remember { CameraCaptureContext() }
-                    val chromeStateManager = remember { ChromeStateManager() }
-                    ProvideCameraCaptureContext(cameraCaptureContext) {
-                        CompositionLocalProvider(
-                            LocalChromeStateManager provides chromeStateManager
-                        ) {
-                            AdaptiveAppLayout(
-                                modifier = surfaceModifier,
-                                navController = navController,
-                                extraAction = extraAction
-                            )
+                    if (cloneUiState is CloneUiState.Syncing) {
+                        CloneSyncScreen(
+                            onSyncInBackground = { cloneUiState = null },
+                            onRetry = {
+                                val sourceUrl = (cloneUiState as CloneUiState.Syncing).sourceUrl
+                                cloneSourceUrlPendingOpen = sourceUrl
+                            }
+                        )
+                    } else {
+                        // Provide camera capture context for coordination between camera and bottom bar
+                        val cameraCaptureContext = remember { CameraCaptureContext() }
+                        val chromeStateManager = remember { ChromeStateManager() }
+                        ProvideCameraCaptureContext(cameraCaptureContext) {
+                            CompositionLocalProvider(
+                                LocalChromeStateManager provides chromeStateManager
+                            ) {
+                                AdaptiveAppLayout(
+                                    modifier = surfaceModifier,
+                                    navController = navController,
+                                    extraAction = extraAction
+                                )
+                            }
                         }
                     }
                 }
             }
+        }
+
+        when (val state = cloneUiState) {
+            null -> {}
+            is CloneUiState.UrlInput -> {
+                CloneUrlScreen(
+                    state = state,
+                    onBack = { cloneUiState = null },
+                    onUrlChange = { next ->
+                        cloneUiState = state.copy(urlInput = next, errorMessage = null)
+                    },
+                    onOpenScanner = {
+                        cloneUiState =
+                            CloneUiState.Scanner(
+                                currentUrlInput = state.urlInput
+                            )
+                    },
+                    onContinue = { sourceUrl ->
+                        cloneUiState = state.copy(isResolving = true, errorMessage = null)
+                        cloneSourceUrlPendingOpen = sourceUrl
+                    }
+                )
+                if (state.isResolving) {
+                    val sourceUrl = cloneSourceUrlPendingOpen
+                    if (sourceUrl != null) {
+                        LaunchedEffect(sourceUrl) {
+                            try {
+                                val gcx = AppFfiCtx.init()
+                                val info = gcx.resolveCloneUrl(sourceUrl)
+                                val defaultParent =
+                                    runCatching { gcx.defaultCloneParentDir() }
+                                        .getOrDefault("")
+                                gcx.close()
+                                val initialRepoName =
+                                    if (info.repoName.isNotBlank()) info.repoName else "daybook-repo"
+                                cloneUiState =
+                                    CloneUiState.PickingLocation(
+                                        sourceUrl = sourceUrl,
+                                        info = info,
+                                        destinationPath =
+                                            if (defaultParent.isBlank()) {
+                                                initialRepoName
+                                            } else {
+                                                "$defaultParent/$initialRepoName"
+                                            }
+                                    )
+                            } catch (error: Throwable) {
+                                cloneUiState =
+                                    state.copy(
+                                        isResolving = false,
+                                        errorMessage = "Resolve failed: ${describeThrowable(error)}"
+                                    )
+                            } finally {
+                                cloneSourceUrlPendingOpen = null
+                            }
+                        }
+                    }
+                }
+            }
+            is CloneUiState.Scanner -> {
+                CloneQrScannerScreen(
+                    cameraPreviewFfi = cloneCameraPreviewFfi,
+                    onBack = {
+                        cloneUiState = CloneUiState.UrlInput(urlInput = state.currentUrlInput)
+                    },
+                    onDetectedUrl = { detectedUrl ->
+                        cloneUiState =
+                            CloneUiState.UrlInput(
+                                urlInput = detectedUrl,
+                                errorMessage = null
+                            )
+                    }
+                )
+            }
+            is CloneUiState.PickingLocation -> {
+                CloneLocationScreen(
+                    state = state,
+                    onBack = {
+                        cloneUiState =
+                            CloneUiState.UrlInput(
+                                urlInput = state.sourceUrl
+                            )
+                    },
+                    onDestinationChange = { next ->
+                        cloneUiState =
+                            state.copy(
+                                destinationPath = next,
+                                errorMessage = null,
+                                destinationWarning = null
+                            )
+                    },
+                    onContinue = { destinationPath ->
+                        cloneUiState =
+                            state.copy(
+                                destinationPath = destinationPath,
+                                isCloning = true,
+                                errorMessage = null
+                            )
+                        val sourceUrl = state.sourceUrl
+                        cloneInitRequest = sourceUrl to destinationPath
+                    }
+                )
+                LaunchedEffect(state.destinationPath) {
+                    val destination = state.destinationPath.trim()
+                    if (destination.isBlank()) {
+                        cloneUiState = state.copy(destinationWarning = null)
+                        return@LaunchedEffect
+                    }
+                    try {
+                        val gcx = AppFfiCtx.init()
+                        val check = gcx.checkCloneDestination(destination)
+                        gcx.close()
+                        val warning =
+                            when {
+                                !check.exists -> null
+                                !check.isDir -> "Destination exists and is not a directory."
+                                !check.isEmpty -> "Destination directory is not empty."
+                                else -> null
+                            }
+                        cloneUiState = state.copy(destinationWarning = warning)
+                    } catch (_: Throwable) {
+                        cloneUiState = state.copy(destinationWarning = null)
+                    }
+                }
+                if (state.isCloning) {
+                    val request = cloneInitRequest
+                    if (request != null) {
+                        LaunchedEffect(request.first, request.second) {
+                            try {
+                                val gcx = AppFfiCtx.init()
+                                val preflight = gcx.checkCloneDestination(request.second)
+                                if (preflight.exists && preflight.isDir && !preflight.isEmpty) {
+                                    gcx.close()
+                                    cloneUiState =
+                                        state.copy(
+                                            isCloning = false,
+                                            errorMessage = "Destination directory is not empty. Choose an empty directory.",
+                                            destinationWarning = "Destination directory is not empty."
+                                        )
+                                    return@LaunchedEffect
+                                }
+                                val out = gcx.cloneRepoInitFromUrl(request.first, request.second)
+                                gcx.close()
+                                cloneSourceUrlPendingOpen = request.first
+                                pendingOpenRepoPath = out.repoPath
+                            } catch (error: Throwable) {
+                                cloneUiState =
+                                    state.copy(
+                                        isCloning = false,
+                                        errorMessage = "Clone initialization failed: ${describeThrowable(error)}"
+                                    )
+                            } finally {
+                                cloneInitRequest = null
+                            }
+                        }
+                    }
+                }
+            }
+            is CloneUiState.Syncing -> {}
+        }
+    }
+
+    LaunchedEffect(initState, cloneSourceUrlPendingOpen) {
+        val ready = initState as? AppInitState.Ready ?: return@LaunchedEffect
+        val sourceUrl = cloneSourceUrlPendingOpen ?: return@LaunchedEffect
+        cloneUiState = CloneUiState.Syncing(sourceUrl = sourceUrl)
+        cloneSourceUrlPendingOpen = null
+        try {
+            ready.container.syncRepo.connectUrl(sourceUrl)
+        } catch (_: Throwable) {
+            // Retry is available on the sync screen.
         }
     }
 }
@@ -1006,10 +1289,57 @@ private fun LoadingScreen(message: String = "Preparing Daybook…") {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WelcomeFlowScaffold(
+    title: String,
+    subtitle: String? = null,
+    onBack: (() -> Unit)? = null,
+    content: @Composable () -> Unit
+) {
+    Scaffold(
+        topBar = {
+            LargeTopAppBar(
+                title = {
+                    Column {
+                        Text(title)
+                        if (!subtitle.isNullOrBlank()) {
+                            Text(
+                                subtitle,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                            )
+                        }
+                    }
+                },
+                navigationIcon = {
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                        }
+                    }
+                }
+            )
+        }
+    ) { innerPadding ->
+        Box(
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(innerPadding)
+        ) {
+            content()
+        }
+    }
+}
+
 @Composable
 private fun WelcomeScreen(
     repos: List<KnownRepoEntry>,
-    onOpenRepo: (String) -> Unit
+    onOpenRepo: (String) -> Unit,
+    onInspectRepo: (KnownRepoEntry) -> Unit,
+    onStartClone: () -> Unit
 ) {
     val openRepoLauncher = rememberDirectoryPickerLauncher { directory ->
         val selectedPath = directory?.path ?: return@rememberDirectoryPickerLauncher
@@ -1021,60 +1351,133 @@ private fun WelcomeScreen(
         onOpenRepo(selectedPath)
     }
 
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.surface
+    val isDesktop = getPlatform().getScreenWidthDp().value >= 1000f
+    WelcomeFlowScaffold(
+        title = "Welcome to Daybook",
+        subtitle = "Select a repository to continue"
     ) {
-        Column(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Text(
-                text = "Welcome to Daybook",
-                style = MaterialTheme.typography.headlineMedium
-            )
-            Text(
-                text = "Select a repository to continue",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
-            )
-
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = { createRepoLauncher.launch() }) {
+        if (isDesktop) {
+            Row(
+                modifier = Modifier.fillMaxSize().padding(24.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                ElevatedCard(modifier = Modifier.width(360.dp).fillMaxHeight()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Button(onClick = { createRepoLauncher.launch() }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.CreateNewFolder, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Create New Repo")
+                        }
+                        Button(onClick = { openRepoLauncher.launch() }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Open Directory")
+                        }
+                        Button(onClick = onStartClone, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.Description, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Clone Repo")
+                        }
+                    }
+                }
+                ElevatedCard(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        if (repos.isEmpty()) {
+                            Text(
+                                text = "No known repositories yet.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                        } else {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(repos, key = { repo -> repo.id }) { repo ->
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth().clickable { onInspectRepo(repo) },
+                                        shape = MaterialTheme.shapes.medium,
+                                        tonalElevation = 2.dp
+                                    ) {
+                                        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                                            Text(
+                                                text = if (repo.name.isNotBlank()) repo.name else repo.path,
+                                                style = MaterialTheme.typography.bodyLarge
+                                            )
+                                            Text(
+                                                text = repo.path,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                            )
+                                            Text(
+                                                text = "Last opened: ${repo.lastOpenedAtUnixSecs}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Button(onClick = { createRepoLauncher.launch() }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.CreateNewFolder, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Create New Repo")
                 }
-                Button(onClick = { openRepoLauncher.launch() }) {
+                Button(onClick = { openRepoLauncher.launch() }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.FolderOpen, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Open Directory")
                 }
-            }
+                Button(onClick = onStartClone, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Description, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Clone Repo")
+                }
 
-            HorizontalDivider()
+                HorizontalDivider()
 
-            if (repos.isEmpty()) {
-                Text(
-                    text = "No known repositories yet.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
-            } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(repos, key = { repo -> repo.id }) { repo ->
-                        Surface(
-                            modifier = Modifier.fillMaxWidth().clickable { onOpenRepo(repo.path) },
-                            shape = MaterialTheme.shapes.medium,
-                            tonalElevation = 2.dp
-                        ) {
-                            Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
-                                Text(text = repo.path, style = MaterialTheme.typography.bodyLarge)
-                                Text(
-                                    text = "Last opened: ${repo.lastOpenedAtUnixSecs}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                                )
+                if (repos.isEmpty()) {
+                    Text(
+                        text = "No known repositories yet.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(repos, key = { repo -> repo.id }) { repo ->
+                            Surface(
+                                modifier = Modifier.fillMaxWidth().clickable { onInspectRepo(repo) },
+                                shape = MaterialTheme.shapes.medium,
+                                tonalElevation = 2.dp
+                            ) {
+                                Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                                    Text(
+                                        text = if (repo.name.isNotBlank()) repo.name else repo.path,
+                                        style = MaterialTheme.typography.bodyLarge
+                                    )
+                                    Text(
+                                        text = repo.path,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                    )
+                                    Text(
+                                        text = "Last opened: ${repo.lastOpenedAtUnixSecs}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1082,6 +1485,446 @@ private fun WelcomeScreen(
             }
         }
     }
+}
+
+@Composable
+private fun WelcomeRepoDetailScreen(
+    repo: KnownRepoEntry,
+    onBack: () -> Unit,
+    onOpen: () -> Unit,
+    onForget: () -> Unit,
+    forgetting: Boolean
+) {
+    val widthFraction = if (getPlatform().getScreenWidthDp().value >= 1000f) 0.6f else 1f
+    WelcomeFlowScaffold(
+        title = "Repository Details",
+        subtitle = "Review before opening",
+        onBack = onBack
+    ) {
+        Box(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+            Column(
+                modifier = Modifier.fillMaxWidth(widthFraction).align(Alignment.TopCenter),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = if (repo.name.isBlank()) repo.path else repo.name,
+                            style = MaterialTheme.typography.headlineSmall
+                        )
+                        Text(
+                            text = repo.path,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                        )
+                        Text(
+                            text = "Created: ${repo.createdAtUnixSecs}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            text = "Last opened: ${repo.lastOpenedAtUnixSecs}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Button(
+                        onClick = onOpen,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !forgetting
+                    ) {
+                        Text("Open Repo")
+                    }
+                    OutlinedButton(
+                        onClick = onForget,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !forgetting
+                    ) {
+                        Text(if (forgetting) "Forgetting..." else "Forget Repo")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CloneUrlScreen(
+    state: CloneUiState.UrlInput,
+    onBack: () -> Unit,
+    onUrlChange: (String) -> Unit,
+    onOpenScanner: () -> Unit,
+    onContinue: (String) -> Unit
+) {
+    val widthFraction = if (getPlatform().getScreenWidthDp().value >= 1000f) 0.6f else 1f
+    WelcomeFlowScaffold(
+        title = "Clone Repo",
+        subtitle = "Enter a URL or scan a code",
+        onBack = onBack
+    ) {
+        Box(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+            Column(
+                modifier = Modifier.fillMaxWidth(widthFraction).align(Alignment.TopCenter),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                ElevatedCard {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = state.urlInput,
+                            onValueChange = onUrlChange,
+                            label = { Text("Clone URL") },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !state.isResolving
+                        )
+                        HorizontalDivider()
+                        Button(
+                            onClick = onOpenScanner,
+                            enabled = !state.isResolving,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.QrCodeScanner, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Scan QR Code")
+                        }
+                        if (state.isResolving) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.width(18.dp).height(18.dp))
+                                Text("Resolving clone URL…", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                        if (!state.errorMessage.isNullOrBlank()) {
+                            Text(
+                                state.errorMessage,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Button(
+                        onClick = { onContinue(state.urlInput.trim()) },
+                        enabled = state.urlInput.trim().isNotBlank() && !state.isResolving
+                    ) {
+                        Text("Continue")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CloneQrScannerScreen(
+    cameraPreviewFfi: CameraPreviewFfi,
+    onBack: () -> Unit,
+    onDetectedUrl: (String) -> Unit
+) {
+    val useNativePreviewQr = remember(cameraPreviewFfi) { cameraPreviewFfi.supportsNativeQrAnalysis() }
+    val analyzer = remember { CameraQrAnalyzerFfi.load() }
+    var userVisibleError by remember { mutableStateOf<String?>(null) }
+    var hasCompleted by remember { mutableStateOf(false) }
+    val frameBridge =
+        remember(analyzer) {
+            CameraQrOverlayBridge(
+                analyzer = analyzer,
+                onDetectedText = { rawText ->
+                    if (hasCompleted) return@CameraQrOverlayBridge
+                    val candidate = rawText.trim()
+                    val looksLikeUrl = candidate.contains("://")
+                    if (!looksLikeUrl) {
+                        userVisibleError = "Detected QR is not a URL."
+                        return@CameraQrOverlayBridge
+                    }
+                    hasCompleted = true
+                    onDetectedUrl(candidate)
+                }
+            )
+        }
+    val previewBridge =
+        remember(cameraPreviewFfi) {
+            CameraPreviewQrBridge(
+                cameraPreviewFfi = cameraPreviewFfi,
+                onDetectedText = { rawText ->
+                    if (hasCompleted) return@CameraPreviewQrBridge
+                    val candidate = rawText.trim()
+                    val looksLikeUrl = candidate.contains("://")
+                    if (!looksLikeUrl) {
+                        userVisibleError = "Detected QR is not a URL."
+                        return@CameraPreviewQrBridge
+                    }
+                    hasCompleted = true
+                    onDetectedUrl(candidate)
+                }
+            )
+        }
+    val overlayState by (if (useNativePreviewQr) previewBridge.state else frameBridge.state).collectAsState()
+
+    androidx.compose.runtime.DisposableEffect(analyzer, frameBridge, previewBridge, useNativePreviewQr) {
+        if (useNativePreviewQr) {
+            previewBridge.start()
+        } else {
+            frameBridge.start()
+        }
+        onDispose {
+            previewBridge.stop()
+            frameBridge.stop()
+            analyzer.close()
+        }
+    }
+
+    WelcomeFlowScaffold(
+        title = "Scan Clone URL",
+        subtitle = "Point camera at a QR code",
+        onBack = onBack
+    ) {
+        Box(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                ElevatedCard(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                    DaybookCameraViewport(
+                        cameraPreviewFfi = cameraPreviewFfi,
+                        modifier = Modifier.fillMaxSize(),
+                        overlays =
+                            if (overlayState.overlays.isEmpty()) {
+                                listOf(CameraOverlay.Grid)
+                            } else {
+                                overlayState.overlays
+                            },
+                        onFrameAvailable = if (useNativePreviewQr) null else frameBridge::submitFrame
+                    )
+                }
+                val errorText = userVisibleError ?: overlayState.latestError
+                if (!errorText.isNullOrBlank()) {
+                    Text(
+                        text = errorText,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                } else {
+                    Text(
+                        text = "Scanning… detected URLs auto-fill the clone form.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CloneLocationScreen(
+    state: CloneUiState.PickingLocation,
+    onBack: () -> Unit,
+    onDestinationChange: (String) -> Unit,
+    onContinue: (String) -> Unit
+) {
+    val picker = rememberDirectoryPickerLauncher { directory ->
+        val selectedPath = directory?.path ?: return@rememberDirectoryPickerLauncher
+        val repoName = state.info.repoName.ifBlank { destinationPathBasename(state.destinationPath) }
+        onDestinationChange("$selectedPath/$repoName")
+    }
+
+    val widthFraction = if (getPlatform().getScreenWidthDp().value >= 1000f) 0.6f else 1f
+    WelcomeFlowScaffold(
+        title = "Clone Destination",
+        subtitle = "Resolve complete",
+        onBack = onBack
+    ) {
+        Box(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+            Column(
+                modifier = Modifier.fillMaxWidth(widthFraction).align(Alignment.TopCenter),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                ElevatedCard {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text("Repo: ${state.info.repoName}")
+                        Text("Repo ID: ${state.info.repoId}")
+                        Text("Endpoint: ${state.info.endpointId}")
+                        OutlinedTextField(
+                            value = state.destinationPath,
+                            onValueChange = onDestinationChange,
+                            label = { Text("Clone Destination") },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !state.isCloning
+                        )
+                        Button(
+                            onClick = { picker.launch() },
+                            enabled = !state.isCloning
+                        ) {
+                            Text("Browse")
+                        }
+                        if (state.isCloning) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.width(18.dp).height(18.dp))
+                                Text("Initializing clone…", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                        if (!state.errorMessage.isNullOrBlank()) {
+                            Text(
+                                state.errorMessage,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        if (!state.destinationWarning.isNullOrBlank()) {
+                            Text(
+                                state.destinationWarning,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Button(
+                        onClick = { onContinue(state.destinationPath.trim()) },
+                        enabled =
+                            state.destinationPath.isNotBlank() &&
+                                !state.isCloning &&
+                                state.destinationWarning.isNullOrBlank()
+                    ) {
+                        Text("Continue")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CloneSyncScreen(
+    onSyncInBackground: () -> Unit,
+    onRetry: () -> Unit
+) {
+    val container = LocalContainer.current
+    var statusMessage by remember { mutableStateOf("Sync in progress…") }
+    var syncTasks by remember { mutableStateOf(emptyList<ProgressTask>()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            try {
+                syncTasks = container.progressRepo.listByTagPrefix("/sync/full")
+                val active = syncTasks.count { it.state == ProgressTaskState.ACTIVE }
+                statusMessage =
+                    if (syncTasks.isEmpty()) {
+                        "Connected. Waiting for sync tasks…"
+                    } else {
+                        "Sync tasks running: $active active / ${syncTasks.size} total"
+                    }
+            } catch (_: Throwable) {
+                statusMessage = "Unable to read sync progress right now."
+            }
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+
+    val widthFraction = if (getPlatform().getScreenWidthDp().value >= 1000f) 0.7f else 1f
+    WelcomeFlowScaffold(
+        title = "Sync",
+        subtitle = "Clone ongoing"
+    ) {
+        Box(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+            Column(
+                modifier = Modifier.fillMaxWidth(widthFraction).align(Alignment.TopCenter),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(statusMessage, style = MaterialTheme.typography.bodyMedium)
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(syncTasks, key = { it.id }) { task ->
+                        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = task.title ?: task.id,
+                                    style = MaterialTheme.typography.titleSmall
+                                )
+                                Text(
+                                    text = task.latestUpdate?.let { "Update #${it.sequence}" } ?: "No updates yet",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                )
+                                when (val deets = task.latestUpdate?.update?.deets) {
+                                    is ProgressUpdateDeets.Amount ->
+                                        ProgressAmountBlock(deets, modifier = Modifier.fillMaxWidth())
+                                    is ProgressUpdateDeets.Status ->
+                                        Text(deets.message, style = MaterialTheme.typography.bodySmall)
+                                    is ProgressUpdateDeets.Completed ->
+                                        Text(
+                                            deets.message ?: deets.state.name.lowercase(),
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    null -> {}
+                                }
+                            }
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Button(onClick = onSyncInBackground) {
+                        Text("Sync in background")
+                    }
+                    TextButton(onClick = onRetry) {
+                        Text("Retry connection")
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun destinationPathBasename(path: String): String {
+    val trimmed = path.trim().trimEnd('/', '\\')
+    if (trimmed.isBlank()) return "daybook-repo"
+    val unix = trimmed.substringAfterLast('/')
+    return unix.substringAfterLast('\\').ifBlank { "daybook-repo" }
+}
+
+private fun describeThrowable(error: Throwable): String {
+    val parts = mutableListOf<String>()
+    var current: Throwable? = error
+    var depth = 0
+    while (current != null && depth < 4) {
+        val className = current::class.simpleName ?: current::class.qualifiedName ?: "Throwable"
+        val message = current.message?.takeIf { it.isNotBlank() }
+        val piece =
+            when {
+                message != null -> "$className: $message"
+                else -> current.toString()
+            }
+        if (piece.isNotBlank()) {
+            parts += piece
+        }
+        current = current.cause
+        depth += 1
+    }
+    return parts.distinct().joinToString(" | ").ifBlank { error.toString() }
 }
 
 @Composable

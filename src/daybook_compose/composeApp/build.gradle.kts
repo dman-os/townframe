@@ -4,6 +4,7 @@ import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
 import org.gradle.api.tasks.Copy
+import org.gradle.api.tasks.Delete
 import org.gradle.api.tasks.Exec
 import org.gradle.process.CommandLineArgumentProvider
 import java.io.File
@@ -362,40 +363,25 @@ fun registerRustAndroidCopyTask(
     buildTaskName: String,
     sourceLibPath: String,
 ) =
-    tasks.register<Copy>(taskName) {
+    run {
+        val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
+        val destSoFile = File(destDir, "libdaybook_ffi.so")
+        val destLibcxxFile = File(destDir, "libc++_shared.so")
+        val cleanupTaskName = "${taskName}CleanTargets"
+        tasks.register<Delete>(cleanupTaskName) {
+            delete(destSoFile, destLibcxxFile)
+        }
+
+        tasks.register<Copy>(taskName) {
         group = "build"
         description = "Copy Rust daybook_ffi and libc++_shared.so to Android jniLibs"
 
-        dependsOn(buildTaskName)
+        dependsOn(buildTaskName, cleanupTaskName)
 
         val sourceSoFile = File(repoRoot, sourceLibPath)
         val androidNdkRoot = System.getenv("ANDROID_NDK_ROOT")
         val libcxxSourceFile =
             if (!androidNdkRoot.isNullOrBlank()) ndkLibCppSharedForAbi(targetAbi, androidNdkRoot) else null
-        val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
-        val destSoFile = File(destDir, "libdaybook_ffi.so")
-        val destLibcxxFile = File(destDir, "libc++_shared.so")
-        
-        doFirst {
-            if (!sourceSoFile.exists()) {
-                throw GradleException("Missing Rust library: ${sourceSoFile.absolutePath}")
-            }
-            if (androidNdkRoot.isNullOrBlank()) {
-                throw GradleException("ANDROID_NDK_ROOT is not set; cannot locate libc++_shared.so")
-            }
-            if (libcxxSourceFile == null || !libcxxSourceFile.exists()) {
-                throw GradleException("Missing libc++_shared.so for ABI $targetAbi")
-            }
-        }
-
-        onlyIf {
-            val needsRustCopy = !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
-            val needsLibcxxCopy =
-                libcxxSourceFile?.let { source ->
-                    !destLibcxxFile.exists() || source.lastModified() > destLibcxxFile.lastModified()
-                } ?: false
-            needsRustCopy || needsLibcxxCopy
-        }
 
         from(sourceSoFile)
         if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
@@ -412,6 +398,7 @@ fun registerRustAndroidCopyTask(
             outputs.file(destLibcxxFile)
         }
     }
+}
 
 // Debug variant: build Rust in debug mode
 tasks.register<Exec>("buildRustAndroidDebug") {

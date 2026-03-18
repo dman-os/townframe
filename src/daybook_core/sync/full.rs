@@ -532,9 +532,25 @@ impl Worker {
         match event {
             PeerSyncProgressEvent::PhaseStarted { phase } => {
                 debug!(endpoint_id = ?endpoint_id, phase, "peer sync phase started");
+                self.emit_peer_progress_status(
+                    endpoint_id,
+                    ProgressUpdateDeets::Status {
+                        severity: ProgressSeverity::Info,
+                        message: format!("phase started: {phase}"),
+                    },
+                )
+                .await?;
             }
             PeerSyncProgressEvent::PhaseFinished { phase, elapsed } => {
                 debug!(endpoint_id = ?endpoint_id, phase, elapsed_ms = elapsed.as_millis(), "peer sync phase finished");
+                self.emit_peer_progress_status(
+                    endpoint_id,
+                    ProgressUpdateDeets::Status {
+                        severity: ProgressSeverity::Info,
+                        message: format!("phase finished: {phase} ({:?})", elapsed),
+                    },
+                )
+                .await?;
             }
             PeerSyncProgressEvent::DocSyncStatus {
                 synced_docs,
@@ -546,6 +562,19 @@ impl Worker {
                     remaining_docs,
                     "peer sync worker doc status"
                 );
+                self.emit_peer_progress_status(
+                    endpoint_id,
+                    ProgressUpdateDeets::Amount {
+                        severity: ProgressSeverity::Info,
+                        done: synced_docs,
+                        total: Some(synced_docs.saturating_add(remaining_docs)),
+                        unit: ProgressUnit::Generic {
+                            label: "docs".to_string(),
+                        },
+                        message: Some("doc sync status".to_string()),
+                    },
+                )
+                .await?;
                 if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
                     if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
                         peer_state.bootstrap_synced_docs = synced_docs;
@@ -569,6 +598,14 @@ impl Worker {
                 partition_count,
             } => {
                 debug!(endpoint_id = ?endpoint_id, peer, partition_count, "peer sync worker bootstrapped");
+                self.emit_peer_progress_status(
+                    endpoint_id,
+                    ProgressUpdateDeets::Status {
+                        severity: ProgressSeverity::Info,
+                        message: format!("bootstrapped with {partition_count} partitions"),
+                    },
+                )
+                .await?;
                 if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
                     if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
                         peer_state.bootstrap_ready = true;
@@ -579,6 +616,14 @@ impl Worker {
             }
             PeerSyncWorkerEvent::LiveReady { peer } => {
                 debug!(endpoint_id = ?endpoint_id, peer, "peer sync worker entered live mode");
+                self.emit_peer_progress_status(
+                    endpoint_id,
+                    ProgressUpdateDeets::Completed {
+                        state: ProgressFinalState::Succeeded,
+                        message: Some("peer entered live mode".to_string()),
+                    },
+                )
+                .await?;
                 if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
                     if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
                         peer_state.live_ready = true;
@@ -588,6 +633,14 @@ impl Worker {
             }
             PeerSyncWorkerEvent::AbnormalExit { peer, reason } => {
                 warn!(endpoint_id = ?endpoint_id, peer, reason, "peer sync worker exited abnormally");
+                self.emit_peer_progress_status(
+                    endpoint_id,
+                    ProgressUpdateDeets::Completed {
+                        state: ProgressFinalState::Failed,
+                        message: Some(format!("peer worker abnormal exit: {reason}")),
+                    },
+                )
+                .await?;
                 self.emit_stale_peer(endpoint_id).await?;
                 self.scheduler.peer_sessions_to_refresh.insert(endpoint_id);
             }
@@ -1697,6 +1750,7 @@ impl Worker {
             .expect("active doc sync state should exist")
             .latest_heads = local_heads.clone();
         let mut events_to_emit = Vec::new();
+        let mut progress_completions = Vec::new();
         let mut peers_to_refresh = Vec::new();
         let mut partitions_to_advance = Vec::new();
         for (conn_id, diff) in diff {
@@ -1727,6 +1781,7 @@ impl Worker {
                     endpoint_id: peer_state.endpoint_id,
                     doc_id: doc_id.clone(),
                 });
+                progress_completions.push((peer_state.endpoint_id, doc_id.clone()));
                 let Some(samod_doc) = self.samod_doc_set.get_mut(&doc_id) else {
                     continue;
                 };
@@ -1790,6 +1845,16 @@ impl Worker {
         for event in events_to_emit {
             self.emit_full_sync_event(event).await?;
         }
+        for (endpoint_id, doc_id) in progress_completions {
+            self.emit_peer_progress_status(
+                endpoint_id,
+                ProgressUpdateDeets::Status {
+                    severity: ProgressSeverity::Info,
+                    message: format!("doc sync completed: {doc_id}"),
+                },
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -1827,6 +1892,7 @@ impl Worker {
             return Ok(());
         };
 
+        let endpoint_ids = sync_state.requested_peers.keys().copied().collect::<Vec<_>>();
         let mut peers_to_refresh = Vec::new();
         for endpoint_id in sync_state.requested_peers.keys() {
             if let Some(conn_id) = self.conn_by_peer.get(endpoint_id).copied() {
@@ -1838,6 +1904,18 @@ impl Worker {
         }
         for endpoint_id in peers_to_refresh {
             self.refresh_peer_fully_synced_state(endpoint_id).await?;
+        }
+        for endpoint_id in endpoint_ids {
+            self.emit_peer_progress_status(
+                endpoint_id,
+                ProgressUpdateDeets::Completed {
+                    state: ProgressFinalState::Failed,
+                    message: Some(format!(
+                        "doc sync requested for missing local doc: {doc_id}"
+                    )),
+                },
+            )
+            .await?;
         }
         warn!(%doc_id, "doc sync requested for missing local doc; marking request terminal");
         Ok(())
@@ -2227,54 +2305,39 @@ impl Worker {
 
     async fn emit_blob_worker_status(
         &self,
-        partition: PartitionKey,
-        hash: &str,
-        message: String,
-        final_state: Option<ProgressFinalState>,
+        _partition: PartitionKey,
+        _hash: &str,
+        _message: String,
+        _final_state: Option<ProgressFinalState>,
+    ) -> Res<()> {
+        Ok(())
+    }
+
+    fn peer_sync_task_id(endpoint_id: EndpointId) -> String {
+        format!("sync/full/peer/{endpoint_id}")
+    }
+
+    async fn emit_peer_progress_status(
+        &self,
+        endpoint_id: EndpointId,
+        deets: ProgressUpdateDeets,
     ) -> Res<()> {
         if !self.has_progress_repo() {
             return Ok(());
         }
-        let task_id = format!(
-            "sync/full/{}/blob/{}/worker",
-            partition.as_tag_value(),
-            hash
-        );
+        let task_id = Self::peer_sync_task_id(endpoint_id);
         self.emit_progress_task(
             task_id.clone(),
             vec![
                 "/type/sync".to_string(),
                 "/sync/full".to_string(),
-                format!("/partition/{}", partition.as_tag_value()),
-                "/kind/blob_worker".to_string(),
-                format!("/blob/{hash}"),
+                "/kind/peer_sync".to_string(),
+                format!("/peer/{endpoint_id}"),
             ],
         )
         .await?;
-        match final_state {
-            Some(state) => {
-                self.emit_progress_update(
-                    &task_id,
-                    ProgressUpdateDeets::Completed {
-                        state,
-                        message: Some(message),
-                    },
-                    None,
-                )
-                .await?;
-            }
-            None => {
-                self.emit_progress_update(
-                    &task_id,
-                    ProgressUpdateDeets::Status {
-                        severity: ProgressSeverity::Info,
-                        message,
-                    },
-                    None,
-                )
-                .await?;
-            }
-        }
+        self.emit_progress_update(&task_id, deets, Some(format!("peer sync {endpoint_id}")))
+            .await?;
         Ok(())
     }
 
@@ -2426,35 +2489,14 @@ impl Worker {
         partition: PartitionKey,
         hash: &str,
     ) -> Res<()> {
-        if self.has_progress_repo() {
-            let task_id = format!(
-                "sync/full/{}/{}/blob/{}",
-                partition.as_tag_value(),
-                endpoint_id,
-                hash
-            );
-            self.emit_progress_task(
-                task_id.clone(),
-                vec![
-                    "/type/sync".to_string(),
-                    "/sync/full".to_string(),
-                    format!("/partition/{}", partition.as_tag_value()),
-                    format!("/peer/{endpoint_id}"),
-                    "/kind/blob".to_string(),
-                    format!("/blob/{hash}"),
-                ],
-            )
-            .await?;
-            self.emit_progress_update(
-                &task_id,
-                ProgressUpdateDeets::Status {
-                    severity: ProgressSeverity::Info,
-                    message: "download started".to_string(),
-                },
-                Some(format!("sync blob {hash}")),
-            )
-            .await?;
-        }
+        self.emit_peer_progress_status(
+            endpoint_id,
+            ProgressUpdateDeets::Status {
+                severity: ProgressSeverity::Info,
+                message: format!("blob download started: {hash}"),
+            },
+        )
+        .await?;
         self.emit_full_sync_event(FullSyncEvent::BlobDownloadStarted {
             endpoint_id,
             partition,
@@ -2466,32 +2508,11 @@ impl Worker {
 
     async fn emit_blob_progress_amount(
         &self,
-        endpoint_id: EndpointId,
-        partition: PartitionKey,
-        hash: &str,
-        done: u64,
+        _endpoint_id: EndpointId,
+        _partition: PartitionKey,
+        _hash: &str,
+        _done: u64,
     ) -> Res<()> {
-        if !self.has_progress_repo() {
-            return Ok(());
-        }
-        let task_id = format!(
-            "sync/full/{}/{}/blob/{}",
-            partition.as_tag_value(),
-            endpoint_id,
-            hash
-        );
-        self.emit_progress_update(
-            &task_id,
-            ProgressUpdateDeets::Amount {
-                severity: ProgressSeverity::Info,
-                done,
-                total: None,
-                unit: ProgressUnit::Bytes,
-                message: None,
-            },
-            None,
-        )
-        .await?;
         Ok(())
     }
 
@@ -2502,27 +2523,21 @@ impl Worker {
         hash: &str,
         success: bool,
     ) -> Res<()> {
-        if self.has_progress_repo() {
-            let task_id = format!(
-                "sync/full/{}/{}/blob/{}",
-                partition.as_tag_value(),
-                endpoint_id,
-                hash
-            );
-            self.emit_progress_update(
-                &task_id,
-                ProgressUpdateDeets::Completed {
-                    state: if success {
-                        ProgressFinalState::Succeeded
-                    } else {
-                        ProgressFinalState::Failed
-                    },
-                    message: None,
+        self.emit_peer_progress_status(
+            endpoint_id,
+            ProgressUpdateDeets::Status {
+                severity: if success {
+                    ProgressSeverity::Info
+                } else {
+                    ProgressSeverity::Error
                 },
-                None,
-            )
-            .await?;
-        }
+                message: format!(
+                    "blob download {}: {hash}",
+                    if success { "finished" } else { "failed" }
+                ),
+            },
+        )
+        .await?;
         self.emit_full_sync_event(FullSyncEvent::BlobDownloadFinished {
             endpoint_id,
             partition,

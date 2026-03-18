@@ -44,7 +44,8 @@ Specifically, daybook design is informed by tech I find shiny, gaps I see in the
     - Excellent design 
     - Questionable performance on Android
   - Obsidian 
-    - Design is excellent and the performance acceptable on mobile
+    - Excellent sensiblities
+    - Questionable performance on Android
     - The plugins seem insecure
     - Collaboration is secondary?
 - Politics
@@ -58,15 +59,15 @@ There are zero features implemented.
 - [Patchwork](https://www.inkandswitch.com/patchwork)
   - The lab's entire corpus really.
 - [Obsidian](https://obsidian.md/)
-  - The right senseblities.
-    - File first.
-    - Easy portability with minimal lock-in.
+  - Local-first.
+  - File first.
+  - Easy portability with minimal lock-in.
 - [Notion](https://www.notion.so/)
   - Great usablitiy that's accessible.
   - World class collaboration.
 - [Org mode](https://orgmode.org/)
   - Excellent power user design.
-    - Unix senseblities.
+    - Unix sensiblities.
 - [Anytype](https://anytype.io/)
   - Encrypted offline-first with sync/collaboration
 - TODO: mention more

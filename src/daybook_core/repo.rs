@@ -26,7 +26,6 @@ pub struct RepoLayout {
 
 #[derive(Debug, Clone, Default)]
 pub struct RepoOpenOptions {
-    pub ws_connector_url: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -165,7 +164,7 @@ impl RepoCtx {
     async fn open_inner(
         layout: RepoLayout,
         lock_guard: RepoLockGuard,
-        options: RepoOpenOptions,
+        _options: RepoOpenOptions,
         local_device_name: String,
         initialize_repo: bool,
     ) -> Res<Self> {
@@ -240,13 +239,6 @@ impl RepoCtx {
             partition_forwarders,
         )
         .await?;
-        if let Some(ws_connector_url) = options.ws_connector_url {
-            std::mem::drop(
-                big_repo
-                    .spawn_ws_connector(ws_connector_url.parse()?)
-                    .await?,
-            );
-        }
 
         let doc_app_cell = tokio::sync::OnceCell::new();
         let doc_drawer_cell = tokio::sync::OnceCell::new();
@@ -506,6 +498,11 @@ pub async fn upsert_known_repo(
         .wrap_err_with(|| format!("error absolutizing repo path {}", repo_root.display()))?;
     let repo_path = repo_root.display().to_string();
     let now_unix_secs = jiff::Timestamp::now().as_second();
+    let inferred_name = repo_root
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| repo_path.clone());
     let mut repo_config = globals::get_repo_config(sql).await?;
     if let Some(existing_repo) = repo_config
         .known_repos
@@ -513,6 +510,9 @@ pub async fn upsert_known_repo(
         .find(|repo| repo.path == repo_path)
     {
         existing_repo.last_opened_at_unix_secs = now_unix_secs;
+        if existing_repo.name.is_empty() {
+            existing_repo.name = inferred_name;
+        }
         let repo = existing_repo.clone();
         repo_config.last_used_repo_id = Some(repo.id.clone());
         globals::set_repo_config(sql, &repo_config).await?;
@@ -521,6 +521,7 @@ pub async fn upsert_known_repo(
 
     let repo = KnownRepoEntry {
         id: repo_path.clone(),
+        name: inferred_name,
         path: repo_path,
         created_at_unix_secs: now_unix_secs,
         last_opened_at_unix_secs: now_unix_secs,

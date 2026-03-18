@@ -22,9 +22,8 @@ pub type SharedCtx = Arc<Ctx>;
 pub async fn open_repo_ctx(
     config: &Config,
     ensure_initialized: bool,
-    ws_connector_url: Option<String>,
 ) -> Res<SharedCtx> {
-    let options = daybook_core::repo::RepoOpenOptions { ws_connector_url };
+    let options = daybook_core::repo::RepoOpenOptions { ..default() };
     let local_device_name = format!("daybook-cli-{}", std::env::consts::ARCH);
     let rcx = if ensure_initialized
         && !daybook_core::repo::is_repo_initialized(&config.cli_config.repo_path).await?

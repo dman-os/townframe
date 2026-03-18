@@ -1,6 +1,24 @@
 package org.example.daybook.capture.data
 
-import kotlin.time.Instant
+sealed interface CameraOverlay {
+    data object Grid : CameraOverlay
 
-fun what() {
+    data class QrBounds(
+        val left: Float,
+        val top: Float,
+        val right: Float,
+        val bottom: Float
+    ) : CameraOverlay
 }
+
+data class CameraFrameSample(
+    val widthPx: Int,
+    val heightPx: Int,
+    val jpegBytes: ByteArray
+)
+
+data class CameraOverlayState(
+    val overlays: List<CameraOverlay> = emptyList(),
+    val lastDetectedText: String? = null,
+    val latestError: String? = null
+)
