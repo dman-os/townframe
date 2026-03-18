@@ -985,11 +985,17 @@ impl PlugsRepo {
         origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
         exclude_peer: Option<&str>,
     ) -> Res<()> {
-        if let Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) = origin {
-            if let Some(exclude_peer) = exclude_peer {
-                if peer_id.to_string() == exclude_peer {
-                    return Ok(());
+        if let Some(origin) = origin {
+            match origin {
+                am_utils_rs::repo::BigRepoChangeOrigin::Local { .. } => return Ok(()),
+                am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. } => {
+                    if let Some(exclude_peer) = exclude_peer {
+                        if peer_id.to_string() == exclude_peer {
+                            return Ok(());
+                        }
+                    }
                 }
+                am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap => {}
             }
         }
         let heads = ChangeHashSet(Arc::clone(patch_heads));
@@ -1723,6 +1729,7 @@ fn validate_facet_reference_manifests(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repos::{Repo, SubscribeOpts, TryRecvError};
 
     async fn setup_repo() -> Res<(SharedBigRepo, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
         let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
@@ -1777,6 +1784,30 @@ mod tests {
 
         let saved = repo.get("@test/plug1").await.unwrap();
         assert_eq!(saved.name, "plug1");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_plug_add_emits_single_local_event() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let listener = repo.subscribe(SubscribeOpts::new(16));
+
+        repo.add(mock_plug("plug-single-event")).await?;
+
+        let first: Arc<PlugsEvent> = listener
+            .recv_async()
+            .await
+            .map_err(|err| ferr!("listener recv failed: {err:?}"))?;
+        assert!(
+            matches!(&*first, PlugsEvent::PlugAdded { id, .. } if id == "@test/plug-single-event"),
+            "expected PlugAdded event, got: {first:?}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            matches!(listener.try_recv(), Err(TryRecvError::Empty)),
+            "expected no duplicate local listener event"
+        );
         Ok(())
     }
 

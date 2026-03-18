@@ -100,10 +100,10 @@
 
 ## Cheating
 
-Cheat code is bad code.
-Cheat code is code that tires to get the test green by writing shallow or buggy fixes.
-Cheat code reads the whole database in a memory HashSet to avoid writing the right SQL.
-Cheat code ignores errors with warnings logs and moves on.
+Avoid cheating through hacks that violate common sensebilites just to get a task done.
+
+- Code that tires to get the test green by writing shallow or buggy fixes.
+- Code that reads the whole database in a memory HashSet to avoid writing the right SQL.
 
 THIS IS A NO CHEAT REPO!
 

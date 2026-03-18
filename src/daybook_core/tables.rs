@@ -653,11 +653,17 @@ impl TablesRepo {
         origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
         exclude_peer: Option<&str>,
     ) -> Res<()> {
-        if let Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) = origin {
-            if let Some(exclude_peer) = exclude_peer {
-                if peer_id.to_string() == exclude_peer {
-                    return Ok(());
+        if let Some(origin) = origin {
+            match origin {
+                am_utils_rs::repo::BigRepoChangeOrigin::Local { .. } => return Ok(()),
+                am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. } => {
+                    if let Some(exclude_peer) = exclude_peer {
+                        if peer_id.to_string() == exclude_peer {
+                            return Ok(());
+                        }
+                    }
                 }
+                am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap => {}
             }
         }
         let heads = ChangeHashSet(Arc::clone(patch_heads));

@@ -183,7 +183,19 @@ impl DocBlobsIndexRepo {
 
         let mut hashes = HashSet::<String>::new();
         for (_facet_key, facet_raw) in facets {
-            let facet = WellKnownFacet::from_json((*facet_raw).clone(), WellKnownFacetTag::Blob)?;
+            let facet = match WellKnownFacet::from_json((*facet_raw).clone(), WellKnownFacetTag::Blob)
+            {
+                Ok(facet) => facet,
+                Err(err) => {
+                    warn!(
+                        %doc_id,
+                        ?err,
+                        "failed to parse blob facet while indexing; evicting stale blob refs"
+                    );
+                    self.delete_doc(doc_id).await?;
+                    return Ok(ReindexDocOutcome::Evicted);
+                }
+            };
             let WellKnownFacet::Blob(blob) = facet else {
                 continue;
             };
@@ -291,6 +303,19 @@ impl DocBlobsIndexRepo {
         .fetch_all(&self.db_pool)
         .await?;
         Ok(hashes)
+    }
+
+    pub async fn list_all_memberships(&self) -> Res<Vec<(DocId, String)>> {
+        let rows: Vec<(DocId, String)> = sqlx::query_as(
+            r#"
+            SELECT doc_id, blob_hash
+            FROM doc_blob_refs
+            ORDER BY doc_id ASC, blob_hash ASC
+            "#,
+        )
+        .fetch_all(&self.db_pool)
+        .await?;
+        Ok(rows)
     }
 
     pub fn triage_listener(
@@ -516,4 +541,5 @@ mod tests {
         test_context.stop().await?;
         Ok(())
     }
+
 }

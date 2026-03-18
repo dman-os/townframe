@@ -269,11 +269,17 @@ impl DispatchRepo {
         origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
         exclude_peer: Option<&str>,
     ) -> Res<()> {
-        if let Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) = origin {
-            if let Some(exclude_peer) = exclude_peer {
-                if peer_id.to_string() == exclude_peer {
-                    return Ok(());
+        if let Some(origin) = origin {
+            match origin {
+                am_utils_rs::repo::BigRepoChangeOrigin::Local { .. } => return Ok(()),
+                am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. } => {
+                    if let Some(exclude_peer) = exclude_peer {
+                        if peer_id.to_string() == exclude_peer {
+                            return Ok(());
+                        }
+                    }
                 }
+                am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap => {}
             }
         }
         if !am_utils_rs::repo::big_repo_path_prefix_matches(
@@ -498,5 +504,72 @@ impl DispatchRepo {
             })
             .await?;
         Ok(marked_now)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::version_updates;
+    use crate::repos::{Repo, SubscribeOpts, TryRecvError};
+
+    async fn setup_repo() -> Res<(Arc<DispatchRepo>, tempfile::TempDir)> {
+        let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
+        let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-dispatch".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
+        .await?;
+        let doc = automerge::Automerge::load(&version_updates::version_latest()?)?;
+        let handle = big_repo.add_doc(doc).await?;
+        let doc_id = handle.document_id().clone();
+        let (repo, _stop) = DispatchRepo::load(big_repo, doc_id, local_user_path).await?;
+        Ok((repo, tempfile::tempdir()?))
+    }
+
+    fn mock_dispatch(job_id: &str) -> Arc<ActiveDispatch> {
+        Arc::new(ActiveDispatch {
+            deets: ActiveDispatchDeets::Wflow {
+                wflow_partition_id: "part-1".to_string(),
+                entry_id: 1,
+                plug_id: "@test/plug".to_string(),
+                bundle_name: "bundle".to_string(),
+                wflow_key: "key".to_string(),
+                wflow_job_id: job_id.to_string(),
+            },
+            args: ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+                doc_id: "doc1".to_string(),
+                branch_path: "main".into(),
+                staging_branch_path: "@daybook/wip/staging".into(),
+                heads: ChangeHashSet(default()),
+                facet_key: "facet".to_string(),
+                facet_acl: vec![],
+                config_prop_acl: vec![],
+                local_state_acl: vec![],
+            }),
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_emits_single_local_dispatch_added_event() -> Res<()> {
+        let (repo, _temp) = setup_repo().await?;
+        let listener = repo.subscribe(SubscribeOpts::new(16));
+
+        repo.add("disp-1".to_string(), mock_dispatch("job-1")).await?;
+
+        let first: Arc<DispatchEvent> = listener
+            .recv_async()
+            .await
+            .map_err(|err| ferr!("listener recv failed: {err:?}"))?;
+        assert!(
+            matches!(&*first, DispatchEvent::DispatchAdded { id, .. } if id == "disp-1"),
+            "expected DispatchAdded event, got: {first:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            matches!(listener.try_recv(), Err(TryRecvError::Empty)),
+            "expected no duplicate local dispatch event"
+        );
+        Ok(())
     }
 }

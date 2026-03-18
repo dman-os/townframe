@@ -388,10 +388,10 @@ pub mod user_path {
     }
 
     pub fn for_repo(base_user_path: &UserPath, repo_scope: &str) -> Res<UserPath> {
-        if repo_scope.is_empty() {
-            eyre::bail!("repo scope must not be empty");
-        }
-        parse(&format!("{}/{}", base_user_path.as_str(), repo_scope))
+        validate_segment("repo_scope", repo_scope)?;
+        let mut path = base_user_path.clone();
+        path.push(repo_scope);
+        parse(path.as_str())
     }
 
     pub fn for_plug_routine(
@@ -400,7 +400,29 @@ pub mod user_path {
         plug_id: &str,
         routine_id: &str,
     ) -> Res<UserPath> {
-        parse(&format!("/{user_id}/{device_id}/{plug_id}/{routine_id}"))
+        validate_segment("user_id", user_id)?;
+        validate_segment("device_id", device_id)?;
+        validate_segment("plug_id", plug_id)?;
+        validate_segment("routine_id", routine_id)?;
+        let mut path = Utf8PathBuf::from("/");
+        path.push(user_id);
+        path.push(device_id);
+        path.push(plug_id);
+        path.push(routine_id);
+        parse(path.as_str())
+    }
+
+    fn validate_segment(label: &str, value: &str) -> Res<()> {
+        if value.is_empty() {
+            eyre::bail!("{label} must not be empty");
+        }
+        if value.contains('/') {
+            eyre::bail!("{label} must not contain '/'");
+        }
+        if matches!(value, "." | "..") {
+            eyre::bail!("{label} must not be '.' or '..'");
+        }
+        Ok(())
     }
 
     pub fn plug(path: &UserPath) -> Option<&str> {
@@ -428,6 +450,33 @@ pub mod user_path {
             eyre::bail!("UserPath must not end with /");
         }
         Ok(path)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn for_repo_rejects_invalid_segment() {
+            let base = Utf8PathBuf::from("/");
+            assert!(for_repo(&base, "").is_err());
+            assert!(for_repo(&base, "a/b").is_err());
+            assert!(for_repo(&base, "..").is_err());
+        }
+
+        #[test]
+        fn for_plug_routine_rejects_invalid_segments() {
+            assert!(for_plug_routine("", "dev", "plug", "routine").is_err());
+            assert!(for_plug_routine("user", "dev/seg", "plug", "routine").is_err());
+            assert!(for_plug_routine("user", "dev", ".", "routine").is_err());
+        }
+
+        #[test]
+        fn for_repo_handles_root_base_with_push() {
+            let base = Utf8PathBuf::from("/");
+            let path = for_repo(&base, "config-repo").expect("expected valid repo path");
+            assert_eq!(path.as_str(), "/config-repo");
+        }
     }
 }
 

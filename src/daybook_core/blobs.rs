@@ -3,6 +3,7 @@ use crate::interlude::*;
 use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
 use iroh_blobs::store::fs::FsStore;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tokio::io::AsyncWriteExt;
 
 #[derive(Clone)]
@@ -10,6 +11,7 @@ pub struct BlobsRepo {
     root: PathBuf,
     src_local_user_path: String,
     iroh_store: iroh_blobs::api::Store,
+    hash_locks: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,6 +59,7 @@ impl BlobsRepo {
             root,
             src_local_user_path,
             iroh_store: fs_store.into(),
+            hash_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }))
     }
 
@@ -119,6 +122,8 @@ impl BlobsRepo {
                     .await?;
             let object_paths = self.object_paths(&hash)?;
             tokio::fs::create_dir_all(&object_paths.dir).await?;
+            let hash_lock = self.lock_for_hash(&hash);
+            let _hash_guard = hash_lock.lock().await;
 
             let source_path_string = source_path
                 .to_str()
@@ -349,6 +354,19 @@ impl BlobsRepo {
         Ok(())
     }
 
+    fn lock_for_hash(&self, hash: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut guard = self.hash_locks.lock().expect(ERROR_MUTEX);
+        guard
+            .entry(hash.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    fn is_exists_error(err: &std::io::Error) -> bool {
+        err.kind() == std::io::ErrorKind::AlreadyExists
+            || matches!(err.raw_os_error(), Some(17 | 183))
+    }
+
     async fn atomic_copy_file(&self, source: &Path, dest: &Path) -> Res<()> {
         let dir = dest
             .parent()
@@ -373,7 +391,13 @@ impl BlobsRepo {
         file.sync_all().await?;
         drop(file);
 
-        tokio::fs::rename(&temp, dest).await?;
+        match tokio::fs::rename(&temp, dest).await {
+            Ok(_) => {}
+            Err(err) if Self::is_exists_error(&err) => {
+                let _ = tokio::fs::remove_file(&temp).await;
+            }
+            Err(err) => return Err(err.into()),
+        }
         self.sync_dir(dir).await?;
         Ok(())
     }
@@ -685,6 +709,44 @@ mod tests {
         tokio::fs::remove_file(&source_a_abs).await?;
         let got = repo.get_path(&hash_a).await?;
         assert_eq!(got, source_b_abs);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_path_reference_merges_source_paths_under_concurrency() -> Res<()> {
+        let (repo, temp) = setup().await;
+        let source_a = temp.path().join("source-a-concurrent.bin");
+        let source_b = temp.path().join("source-b-concurrent.bin");
+        tokio::fs::write(&source_a, b"same-bytes").await?;
+        tokio::fs::write(&source_b, b"same-bytes").await?;
+        let source_a_abs = source_a.canonicalize()?;
+        let source_b_abs = source_b.canonicalize()?;
+
+        let repo_a = Arc::clone(&repo);
+        let repo_b = Arc::clone(&repo);
+        let (hash_a, hash_b) = tokio::try_join!(
+            repo_a.put_path_reference(&source_a_abs),
+            repo_b.put_path_reference(&source_b_abs)
+        )?;
+        assert_eq!(hash_a, hash_b);
+
+        let object_paths = repo.object_paths(&hash_a)?;
+        let meta = repo
+            .read_meta(&object_paths.meta)
+            .await?
+            .ok_or_eyre("expected metadata for concurrent references")?;
+        assert!(
+            meta.source_paths
+                .iter()
+                .any(|value| value == &source_a_abs.to_string_lossy()),
+            "expected first source path to be preserved"
+        );
+        assert!(
+            meta.source_paths
+                .iter()
+                .any(|value| value == &source_b_abs.to_string_lossy()),
+            "expected second source path to be preserved"
+        );
         Ok(())
     }
 

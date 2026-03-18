@@ -300,7 +300,12 @@ pub async fn start_full_sync_worker(
     let doc_blobs_rx = worker
         .doc_blobs_index_repo
         .subscribe(crate::repos::SubscribeOpts { capacity: 1024 });
-    for hash in worker.doc_blobs_index_repo.list_all_hashes().await? {
+    for (doc_id, hash) in worker.doc_blobs_index_repo.list_all_memberships().await? {
+        worker
+            .doc_to_known_hashes
+            .entry(doc_id)
+            .or_default()
+            .insert(hash.clone());
         worker
             .known_blob_set
             .entry(hash.clone())
@@ -890,24 +895,21 @@ impl Worker {
                 }
                 continue;
             };
-            let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) else {
+            let Some(_peer_state) = self.known_peer_set.get(&conn_id) else {
                 if desired_parts.is_empty() {
                     sessions_to_remove.push(endpoint_id);
                 }
                 continue;
             };
             if desired_parts.is_empty() {
-                peer_state.partitions.clear();
                 sessions_to_remove.push(endpoint_id);
                 continue;
             }
             let Some(session) = self.peer_partition_sessions.get(&endpoint_id) else {
-                peer_state.partitions = desired_parts;
                 self.peer_sessions_to_refresh.insert(endpoint_id);
                 continue;
             };
             if session.partitions != desired_parts {
-                peer_state.partitions = desired_parts;
                 self.peer_sessions_to_refresh.insert(endpoint_id);
             }
         }
@@ -1044,11 +1046,11 @@ impl Worker {
             let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
                 continue;
             };
-            let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) else {
+            let Some(peer_state) = self.known_peer_set.get(&conn_id) else {
                 continue;
             };
             let peer_key = peer_state.peer_key.clone();
-            let parts = peer_state.partitions.clone();
+            let parts = self.desired_big_repo_partitions_for_peer(endpoint_id);
             self.refresh_peer_partition_session(endpoint_id, peer_key, parts)
                 .await?;
         }
@@ -1601,6 +1603,17 @@ impl Worker {
         })
     }
 
+    async fn remove_doc_blobs_partition_if_hash_unreferenced(&mut self, hash: &str) -> Res<()> {
+        if !self.doc_blobs_index_repo.list_docs_for_hash(hash).await?.is_empty() {
+            return Ok(());
+        }
+        if let Some(parts) = self.known_blob_set.get_mut(hash) {
+            parts.remove(&PartitionKey::DocBlobsFullSync);
+        }
+        self.remove_blob_tracking_if_unused(hash);
+        Ok(())
+    }
+
     async fn handle_doc_blobs_event(&mut self, evt: &DocBlobsIndexEvent) -> Res<()> {
         match evt {
             DocBlobsIndexEvent::Updated { doc_id } => {
@@ -1614,10 +1627,8 @@ impl Worker {
                     .insert(doc_id.clone(), next_hashes.clone())
                     .unwrap_or_default();
                 for stale in prev_hashes.difference(&next_hashes) {
-                    if let Some(parts) = self.known_blob_set.get_mut(stale) {
-                        parts.remove(&PartitionKey::DocBlobsFullSync);
-                    }
-                    self.remove_blob_tracking_if_unused(stale);
+                    self.remove_doc_blobs_partition_if_hash_unreferenced(stale)
+                        .await?;
                 }
                 for hash in next_hashes {
                     self.known_blob_set
@@ -1632,10 +1643,18 @@ impl Worker {
             DocBlobsIndexEvent::Deleted { doc_id } => {
                 if let Some(hashes) = self.doc_to_known_hashes.remove(doc_id) {
                     for hash in hashes {
-                        if let Some(parts) = self.known_blob_set.get_mut(&hash) {
-                            parts.remove(&PartitionKey::DocBlobsFullSync);
-                        }
-                        self.remove_blob_tracking_if_unused(&hash);
+                        self.remove_doc_blobs_partition_if_hash_unreferenced(&hash)
+                            .await?;
+                    }
+                } else {
+                    let known_hashes: Vec<String> = self
+                        .known_blob_set
+                        .keys()
+                        .cloned()
+                        .collect();
+                    for hash in known_hashes {
+                        self.remove_doc_blobs_partition_if_hash_unreferenced(&hash)
+                            .await?;
                     }
                 }
             }

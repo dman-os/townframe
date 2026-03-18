@@ -296,9 +296,19 @@ enum DocEventDecision {
     },
 }
 
+fn take_requested_doc(docs: Vec<FullDoc>, requested_doc_id: &str) -> Option<FullDoc> {
+    docs.into_iter().find(|doc| doc.doc_id == requested_doc_id)
+}
+
 #[derive(Debug, Default)]
 struct PartitionDocCursorState {
-    slots: BTreeMap<u64, HashSet<String>>,
+    slots: BTreeMap<u64, CursorSlotState>,
+}
+
+#[derive(Debug, Clone)]
+enum CursorSlotState {
+    Pending(HashSet<String>),
+    Blocked,
 }
 
 impl PeerSyncWorker {
@@ -679,6 +689,7 @@ impl PeerSyncWorker {
                         "peer worker imported missing remote doc"
                     );
                     out.synced_docs = out.synced_docs.saturating_add(1);
+                    self.mark_doc_cursor_resolved_immediate(&event.partition_id, event.cursor);
                     self.maybe_advance_doc_cursor(&event.partition_id).await?;
                     Ok(())
                 }
@@ -719,6 +730,7 @@ impl PeerSyncWorker {
                     })
                     .await
                     .map_err(|err| eyre::eyre!("samod sync channel closed: {err}"))?;
+                self.mark_doc_cursor_resolved_immediate(&event.partition_id, event.cursor);
                 self.maybe_advance_doc_cursor(&event.partition_id).await?;
                 Ok(())
             }
@@ -736,7 +748,7 @@ impl PeerSyncWorker {
             })
             .await
             .wrap_err("get_docs_full rpc failed")??;
-        let Some(doc) = response.docs.into_iter().next() else {
+        let Some(doc) = take_requested_doc(response.docs, doc_id) else {
             eyre::bail!("remote did not return doc '{doc_id}'");
         };
         let parsed = doc
@@ -856,12 +868,23 @@ impl PeerSyncWorker {
                     );
                     return Ok(());
                 };
-                if !slot.remove(&doc_id) {
-                    debug!(
-                        partition_id,
-                        doc_id, cursor, "ignoring ack for unknown pending doc"
-                    );
-                    return Ok(());
+                match slot {
+                    CursorSlotState::Pending(pending_doc_ids) => {
+                        if !pending_doc_ids.remove(&doc_id) {
+                            debug!(
+                                partition_id,
+                                doc_id, cursor, "ignoring ack for unknown pending doc"
+                            );
+                            return Ok(());
+                        }
+                    }
+                    CursorSlotState::Blocked => {
+                        debug!(
+                            partition_id,
+                            doc_id, cursor, "ignoring ack for blocked cursor slot"
+                        );
+                        return Ok(());
+                    }
                 }
                 self.maybe_advance_doc_cursor(&partition_id).await?;
                 Ok(())
@@ -874,7 +897,7 @@ impl PeerSyncWorker {
             .doc_cursor_state
             .entry(partition_id.clone())
             .or_default();
-        state.slots.entry(cursor).or_default();
+        state.slots.entry(cursor).or_insert(CursorSlotState::Blocked);
     }
 
     async fn discard_stale_doc_slots(&mut self, partition_id: &PartitionId) -> Res<()> {
@@ -911,11 +934,21 @@ impl PeerSyncWorker {
             .doc_cursor_state
             .get_mut(partition_id)
             .expect("partition cursor state should exist");
+        state.slots.insert(
+            cursor,
+            CursorSlotState::Pending([doc_id.to_string()].into_iter().collect()),
+        );
+    }
+
+    fn mark_doc_cursor_resolved_immediate(&mut self, partition_id: &PartitionId, cursor: u64) {
+        self.note_doc_cursor_seen(partition_id, cursor);
+        let state = self
+            .doc_cursor_state
+            .get_mut(partition_id)
+            .expect("partition cursor state should exist");
         state
             .slots
-            .get_mut(&cursor)
-            .expect("cursor slot should exist")
-            .insert(doc_id.to_string());
+            .insert(cursor, CursorSlotState::Pending(HashSet::new()));
     }
 
     async fn maybe_advance_doc_cursor(&mut self, partition_id: &PartitionId) -> Res<()> {
@@ -927,7 +960,12 @@ impl PeerSyncWorker {
         while state
             .slots
             .first_key_value()
-            .is_some_and(|(_, pending_doc_ids)| pending_doc_ids.is_empty())
+            .is_some_and(|(_, slot_state)| {
+                matches!(
+                    slot_state,
+                    CursorSlotState::Pending(pending_doc_ids) if pending_doc_ids.is_empty()
+                )
+            })
         {
             let (cursor, _) = state
                 .slots
@@ -953,5 +991,28 @@ impl PeerSyncWorker {
             .await?;
         debug!(partition_id, next_cursor, "peer worker advanced doc cursor");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn take_requested_doc_picks_exact_match_not_first_item() {
+        let docs = vec![
+            FullDoc {
+                doc_id: "other-doc".to_string(),
+                automerge_save: vec![1],
+            },
+            FullDoc {
+                doc_id: "wanted-doc".to_string(),
+                automerge_save: vec![2],
+            },
+        ];
+        let selected = take_requested_doc(docs, "wanted-doc")
+            .expect("expected exact doc match to be selected");
+        assert_eq!(selected.doc_id, "wanted-doc");
+        assert_eq!(selected.automerge_save, vec![2]);
     }
 }

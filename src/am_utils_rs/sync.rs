@@ -623,6 +623,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_does_not_skip_failed_doc_cursor_when_later_doc_import_succeeds() -> Res<()> {
+        let part_id: PartitionId = "sync-part-blocked-cursor".into();
+        let src = boot_big_repo("src-blocked-cursor").await?;
+        let dst = boot_big_repo("dst-blocked-cursor").await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO partition_doc_state(partition_id, doc_id, deleted, latest_txid)
+            VALUES(?, ?, 0, 1)
+            ON CONFLICT(partition_id, doc_id) DO UPDATE SET
+                deleted = excluded.deleted,
+                latest_txid = excluded.latest_txid
+            "#,
+        )
+        .bind(&part_id)
+        .bind("definitely-not-a-samod-doc-id")
+        .execute(src.state_pool())
+        .await?;
+
+        let handle = src.create_doc(automerge::Automerge::new()).await?;
+        handle
+            .with_document_local(|doc| {
+                let mut tx = doc.transaction();
+                tx.put(automerge::ROOT, "seed", 9_i64)
+                    .expect("failed writing seed");
+                tx.commit();
+            })
+            .await?;
+        let valid_doc_id = handle.document_id().to_string();
+        src.add_doc_to_partition(&part_id, &valid_doc_id).await?;
+
+        let valid_doc_id_parsed = DocumentId::from_str(&valid_doc_id)
+            .map_err(|err| ferr!("invalid source doc id {valid_doc_id}: {err}"))?;
+
+        let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
+        let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
+        let (node, node_stop) = spawn_sync_node(
+            Arc::clone(&src),
+            src_store.clone(),
+            Arc::new(AllowAllPartitionAccessPolicy),
+        )
+        .await?;
+        let peer_key: PeerKey = "peer-blocked-cursor".into();
+        src_store.register_peer(peer_key.clone()).await?;
+        node.register_local_peer(peer_key.clone()).await?;
+
+        let (samod_tx, _samod_rx) = mpsc::channel(128);
+        let (_samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
+        let (_worker, worker_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
+            local_peer: peer_key.clone(),
+            remote_peer: peer_key.clone(),
+            rpc_client: node.rpc_client(),
+            local_repo: Arc::clone(&dst),
+            sync_store: dst_store.clone(),
+            samod_sync_tx: samod_tx,
+            samod_ack_rx,
+            target_partitions: vec![part_id.clone()],
+        })
+        .await?;
+
+        wait_until(
+            Duration::from_secs(5),
+            || async { dst.local_contains_document(&valid_doc_id_parsed).await },
+            "timed out waiting for later valid document import",
+        )
+        .await?;
+
+        let cursor = dst_store
+            .get_partition_cursor(peer_key.clone(), part_id.clone())
+            .await?;
+        assert!(
+            cursor.doc_cursor.is_none(),
+            "doc cursor must remain blocked when an earlier cursor failed: {cursor:?}"
+        );
+
+        worker_stop.stop().await?;
+        node_stop.stop().await?;
+        src_store_stop.stop().await?;
+        dst_store_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sync_unresolved_partition_does_not_block_other_partition_cursor() -> Res<()> {
         let p_bad: PartitionId = "sync-part-bad".into();
         let p_ok: PartitionId = "sync-part-ok".into();

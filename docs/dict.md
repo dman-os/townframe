@@ -30,7 +30,7 @@ Some examples of facets:
   "org.example.daybook.path/main": "/hello.txt",
   // all docs in the document drawer dmeta facet
   "org.example.daybook.dmeta/main": {
-    id: "<the id that the drawer knows it by>"
+    id: "<the id that the drawer knows it by>",
     createdAt: "timestamp",
     updatedAt: "timestamp",
     // more metadata
@@ -83,7 +83,12 @@ Multiple facets can be updated at once and if so, will be put into a single tran
 
 ### URLs
 
-    db+facet://self/org.example.daybook.title/main?at=hash1|hash2
+```js
+const facetRef = new URL(
+  // NOTE: empty authority
+  "db+facet:///self/org.example.daybook.title/main?at=hash1|hash2",
+)
+```
 
 URLs can be used for intra or inter-doc facet references.
 As a special convention, `self` can be used instead of the document id to indicates that the reference is to the same doc containing the facet making holding the URL.
@@ -106,15 +111,15 @@ We use the blob facet to manage references to this.
   "org.example.daybook.blob/main": {
     mime: "image/png",
     lengthOctets: 1024,
-    digest: "<hash>"
+    digest: "<hash>",
     inlineBase64: "small blobs are stored inline as base64 strings but not all blobs",
     urls: [
       "db+blob://<digest>"
-    ]
+    ],
   },
   "org.example.daybook.imagemetadata/main": {
-    facetRef: "db+facet://self/org.example.daybook.blob/main"
-    refHeads: []
+    facetRef: "db+facet://self/org.example.daybook.blob/main",
+    refHeads: [],
   }
 }
 ```
