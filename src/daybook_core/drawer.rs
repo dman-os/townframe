@@ -9,7 +9,7 @@ use crate::plugs::PlugsRepo;
 pub mod lru;
 pub mod types;
 
-pub use types::{DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
+pub use types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
 
 use lru::SharedKeyedLruPool;
 use types::{DrawerError, StoredBranchRef, UpdateDocArgsV2, UpdateDocBatchErrV2};
@@ -1666,7 +1666,12 @@ impl DrawerRepo {
         doc_id: &DocId,
         heads: &ChangeHashSet,
         facet_keys: Option<Vec<FacetKey>>,
-    ) -> Res<Option<HashMap<FacetKey, daybook_types::doc::ArcFacetRaw>>> {
+    ) -> Res<
+        Option<(
+            HashMap<FacetKey, daybook_types::doc::ArcFacetRaw>,
+            HashMap<FacetKey, ChangeHashSet>,
+        )>,
+    > {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
@@ -1675,9 +1680,10 @@ impl DrawerRepo {
             return Ok(None);
         };
 
-        let (facets, to_cache) = handle
+        let (facets, facet_heads_by_key, to_cache) = handle
             .with_document_local(|am_doc| {
                 let mut facets = HashMap::new();
+                let mut facet_heads_by_key = HashMap::new();
                 let mut to_cache = Vec::new();
 
                 match &facet_keys {
@@ -1691,6 +1697,7 @@ impl DrawerRepo {
                             {
                                 let facet_heads =
                                     dmeta::facet_heads_for_key_at(am_doc, &key, heads)?;
+                                facet_heads_by_key.insert(key, facet_heads.clone());
                                 to_cache.push((facet_uuid, facet_heads, value));
                             }
                         }
@@ -1712,6 +1719,9 @@ impl DrawerRepo {
                             } else {
                                 None
                             };
+                            if let Some(meta_heads) = &facet_heads {
+                                facet_heads_by_key.insert(key.clone(), meta_heads.clone());
+                            }
 
                             if let (Some(uuid), Some(heads)) = (facet_uuid, &facet_heads) {
                                 if let Some(cached) = self.facet_cache_get(doc_id, &uuid, heads) {
@@ -1738,7 +1748,7 @@ impl DrawerRepo {
                         }
                     }
                 }
-                eyre::Ok((facets, to_cache))
+                eyre::Ok((facets, facet_heads_by_key, to_cache))
             })
             .await??;
 
@@ -1746,7 +1756,7 @@ impl DrawerRepo {
             self.facet_cache_put(doc_id, uuid, heads, value);
         }
 
-        Ok(Some(facets))
+        Ok(Some((facets, facet_heads_by_key)))
     }
 
     /// Get a doc at specific branch.
@@ -1803,7 +1813,8 @@ impl DrawerRepo {
     ) -> Res<Option<Arc<Doc>>> {
         let facets = self
             .get_at_heads_with_facets_arc(id, heads, facet_keys)
-            .await?;
+            .await?
+            .map(|(facets, _)| facets);
         let Some(facets) = facets else {
             return Ok(None);
         };
@@ -1815,6 +1826,51 @@ impl DrawerRepo {
             id: id.clone(),
             facets,
         })))
+    }
+
+    pub async fn get_doc_bundle_at_branch(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+        facet_keys: Option<Vec<FacetKey>>,
+    ) -> Res<Option<DocBundle>> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let Some(entry) = self.get_entry(doc_id).await? else {
+            return Ok(None);
+        };
+        let Some(branch_ref) = entry.branches.get(&branch_path.to_string()) else {
+            return Ok(None);
+        };
+        let Some(handle) = self
+            .get_handle_by_branch_doc_id(&branch_ref.branch_doc_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let branch_heads = handle
+            .with_document_local(|doc| ChangeHashSet(doc.get_heads().into()))
+            .await?;
+        let Some((facets, facet_heads_by_key)) = self
+            .get_at_heads_with_facets_arc(doc_id, &branch_heads, facet_keys)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let doc = Doc {
+            id: doc_id.clone(),
+            facets: facets
+                .into_iter()
+                .map(|(key, value)| (key, value.as_ref().clone()))
+                .collect(),
+        };
+        Ok(Some(DocBundle {
+            doc,
+            entry,
+            branch_heads,
+            facet_heads_by_key,
+        }))
     }
 
     pub async fn get_with_heads_at_heads(
@@ -3957,6 +4013,31 @@ mod tests {
         )
         .await?;
 
+        let expected_a_raw = repo
+            .get_doc_with_facets_at_branch(
+                &doc_id,
+                &local_branch("branch-a"),
+                Some(vec![facet_title.clone()]),
+            )
+            .await?
+            .ok_or_eyre("missing branch-a doc")?
+            .facets
+            .get(&facet_title)
+            .cloned()
+            .ok_or_eyre("missing title facet on branch-a")?;
+        let expected_b_raw = repo
+            .get_doc_with_facets_at_branch(
+                &doc_id,
+                &local_branch("branch-b"),
+                Some(vec![facet_title.clone()]),
+            )
+            .await?
+            .ok_or_eyre("missing branch-b doc")?
+            .facets
+            .get(&facet_title)
+            .cloned()
+            .ok_or_eyre("missing title facet on branch-b")?;
+
         // 3. Merge both into main
         let entry = repo.get_doc_branches(&doc_id).await?.unwrap();
         let a_heads = entry
@@ -3975,7 +4056,8 @@ mod tests {
         repo.merge_from_heads(&doc_id, &"main".into(), &b_heads, None)
             .await?;
 
-        // 4. Verify updatedAt list in content doc
+        // 4. Verify updatedAt list in content doc and that recovered heads
+        // can resolve the corresponding facet payload versions.
         let am_id = DocumentId::from_str(
             &repo
                 .get_branch_state(&doc_id, &"main".into())
@@ -3984,8 +4066,7 @@ mod tests {
                 .branch_doc_id,
         )?;
         let handle = big_repo.find_doc_handle(&am_id).await?.unwrap();
-        handle.with_document(|doc| -> Res<()> {
-            // recover_facet_heads should return 2 change hashes
+        let recovered_heads = handle.with_document(|doc| -> Res<Vec<automerge::ChangeHash>> {
             let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
 
             // On a concurrent update where both sides clear and insert,
@@ -3996,8 +4077,34 @@ mod tests {
                 "updatedAt should have 2 elements after concurrent merge"
             );
 
-            Ok(())
+            Ok(heads)
         })?;
+
+        let mut recovered_values = std::collections::HashSet::new();
+        for head in &recovered_heads {
+            let single_head = daybook_types::doc::ChangeHashSet([*head].into());
+            let at_doc = repo
+                .get_doc_with_facets_at_heads(
+                    &doc_id,
+                    &single_head,
+                    Some(vec![facet_title.clone()]),
+                )
+                .await?
+                .ok_or_eyre("doc missing at recovered facet head")?;
+            let raw = at_doc
+                .facets
+                .get(&facet_title)
+                .ok_or_eyre("title facet missing at recovered head")?;
+            recovered_values.insert(serde_json::to_string(raw)?);
+        }
+        let expected_values = std::collections::HashSet::from([
+            serde_json::to_string(&expected_a_raw)?,
+            serde_json::to_string(&expected_b_raw)?,
+        ]);
+        assert_eq!(
+            recovered_values, expected_values,
+            "recovered facet heads should resolve concurrent facet versions",
+        );
 
         stop_token.stop().await?;
         acx_stop.stop().await?;

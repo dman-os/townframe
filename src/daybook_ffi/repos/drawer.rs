@@ -4,7 +4,7 @@ use crate::ffi::{FfiError, SharedFfiCtx};
 use crate::repos::plugs::PlugsRepoFfi;
 
 use daybook_core::drawer::types::UpdateDocArgsV2 as UpdateDocArgs;
-use daybook_core::drawer::{DocEntry, DocNBranches, DrawerEvent, DrawerRepo};
+use daybook_core::drawer::{DocBundle, DocEntry, DocNBranches, DrawerEvent, DrawerRepo};
 use daybook_types::doc::{AddDocArgs, ChangeHashSet, Doc, DocId, DocPatch};
 
 #[derive(uniffi::Object)]
@@ -84,6 +84,24 @@ impl DrawerRepoFfi {
                     .get_doc_with_facets_at_branch(&id, &branch_path, None)
                     .await
                     .map(|opt| opt.map(|arc| (*arc).clone()))
+            })
+            .await?)
+    }
+
+    #[tracing::instrument(err, skip(self), ret)]
+    async fn get_bundle(
+        self: Arc<Self>,
+        id: DocId,
+        branch_path: String,
+    ) -> Result<Option<DocBundle>, FfiError> {
+        let this = Arc::clone(&self);
+        let branch_path = daybook_types::doc::BranchPath::from(branch_path);
+        Ok(self
+            .fcx
+            .do_on_rt(async move {
+                this.repo
+                    .get_doc_bundle_at_branch(&id, &branch_path, None)
+                    .await
             })
             .await?)
     }

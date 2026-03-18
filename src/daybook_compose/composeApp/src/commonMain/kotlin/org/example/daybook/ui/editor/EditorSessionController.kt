@@ -22,7 +22,7 @@ import org.example.daybook.ui.putWellKnownFacet
 import org.example.daybook.ui.stripFacetRefFragment
 import org.example.daybook.ui.withFacetRefCommitHeads
 import org.example.daybook.uniffi.DrawerRepoFfi
-import org.example.daybook.uniffi.core.DocEntry
+import org.example.daybook.uniffi.core.DocBundle
 import org.example.daybook.uniffi.core.UpdateDocArgsV2
 import org.example.daybook.uniffi.types.AddDocArgs
 import org.example.daybook.uniffi.types.Doc
@@ -106,10 +106,10 @@ class EditorSessionController(
     private var saveDebounceJob: Job? = null
     private var nextScrollRequestSeq: Long = 1
 
-    fun bindDoc(doc: Doc?, entry: DocEntry? = null) {
+    fun bindDoc(doc: Doc?, bundle: DocBundle? = null) {
         persistedDocSnapshot = doc
-        facetHeadsByKeyString = entry?.facetBlames?.mapValues { (_, blame) -> blame.heads } ?: emptyMap()
-        mainBranchHeads = entry?.branches?.get("main").orEmpty()
+        facetHeadsByKeyString = bundle?.facetHeadsByKey?.mapKeys { (facetKey, _) -> facetKeyRefPathString(facetKey) } ?: emptyMap()
+        mainBranchHeads = bundle?.branchHeads.orEmpty()
         val nextState = buildBoundState(doc)
         _state.value = nextState
     }
@@ -238,7 +238,8 @@ class EditorSessionController(
                         )
                     )
                 onDocCreated?.invoke(addedId)
-                bindDoc(drawerRepo.get(addedId, "main"), drawerRepo.getEntry(addedId))
+                val bundle = drawerRepo.getBundle(addedId, "main")
+                bindDoc(bundle?.doc, bundle)
                 return
             }
 
@@ -247,7 +248,8 @@ class EditorSessionController(
             if (!patch.facetsSet.isEmpty() || !patch.facetsRemove.isEmpty()) {
                 drawerRepo.updateBatch(listOf(UpdateDocArgsV2("main", null, patch)))
             }
-            bindDoc(drawerRepo.get(currentDocId, "main"), drawerRepo.getEntry(currentDocId))
+            val bundle = drawerRepo.getBundle(currentDocId, "main")
+            bindDoc(bundle?.doc, bundle)
         } catch (error: Throwable) {
             _state.update { it.copy(isSaving = false, saveError = error.message ?: "Failed to save") }
         }

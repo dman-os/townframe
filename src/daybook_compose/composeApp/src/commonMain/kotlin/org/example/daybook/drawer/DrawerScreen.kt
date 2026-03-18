@@ -129,9 +129,9 @@ fun DrawerScreen(contentType: DaybookContentType, modifier: Modifier = Modifier)
 
     val selectedDocId by drawerVm.selectedDocId.collectAsState()
     val selectedDoc by drawerVm.selectedDoc.collectAsState()
-    val selectedDocEntry by drawerVm.selectedDocEntry.collectAsState()
-    LaunchedEffect(selectedDoc?.id, selectedDocEntry) {
-        vm.editorController.bindDoc(selectedDoc, selectedDocEntry)
+    val selectedDocBundle by drawerVm.selectedDocBundle.collectAsState()
+    LaunchedEffect(selectedDoc?.id, selectedDocBundle) {
+        vm.editorController.bindDoc(selectedDoc, selectedDocBundle)
     }
 
     if (contentType == DaybookContentType.LIST_AND_DETAIL) {

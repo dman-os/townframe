@@ -175,6 +175,7 @@ impl DocBlobsIndexRepo {
             .drawer_repo
             .get_at_heads_with_facets_arc(doc_id, heads, Some(selected_blob_keys))
             .await?
+            .map(|(facets, _)| facets)
             .ok_or_eyre("doc didn't match expectation")?;
 
         let mut hashes = HashSet::<String>::new();
