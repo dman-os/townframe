@@ -183,19 +183,19 @@ impl DocBlobsIndexRepo {
 
         let mut hashes = HashSet::<String>::new();
         for (_facet_key, facet_raw) in facets {
-            let facet = match WellKnownFacet::from_json((*facet_raw).clone(), WellKnownFacetTag::Blob)
-            {
-                Ok(facet) => facet,
-                Err(err) => {
-                    warn!(
-                        %doc_id,
-                        ?err,
-                        "failed to parse blob facet while indexing; evicting stale blob refs"
-                    );
-                    self.delete_doc(doc_id).await?;
-                    return Ok(ReindexDocOutcome::Evicted);
-                }
-            };
+            let facet =
+                match WellKnownFacet::from_json((*facet_raw).clone(), WellKnownFacetTag::Blob) {
+                    Ok(facet) => facet,
+                    Err(err) => {
+                        warn!(
+                            %doc_id,
+                            ?err,
+                            "failed to parse blob facet while indexing; evicting stale blob refs"
+                        );
+                        self.delete_doc(doc_id).await?;
+                        return Ok(ReindexDocOutcome::Evicted);
+                    }
+                };
             let WellKnownFacet::Blob(blob) = facet else {
                 continue;
             };
@@ -541,5 +541,4 @@ mod tests {
         test_context.stop().await?;
         Ok(())
     }
-
 }

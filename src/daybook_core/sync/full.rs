@@ -1604,7 +1604,12 @@ impl Worker {
     }
 
     async fn remove_doc_blobs_partition_if_hash_unreferenced(&mut self, hash: &str) -> Res<()> {
-        if !self.doc_blobs_index_repo.list_docs_for_hash(hash).await?.is_empty() {
+        if !self
+            .doc_blobs_index_repo
+            .list_docs_for_hash(hash)
+            .await?
+            .is_empty()
+        {
             return Ok(());
         }
         if let Some(parts) = self.known_blob_set.get_mut(hash) {
@@ -1647,11 +1652,7 @@ impl Worker {
                             .await?;
                     }
                 } else {
-                    let known_hashes: Vec<String> = self
-                        .known_blob_set
-                        .keys()
-                        .cloned()
-                        .collect();
+                    let known_hashes: Vec<String> = self.known_blob_set.keys().cloned().collect();
                     for hash in known_hashes {
                         self.remove_doc_blobs_partition_if_hash_unreferenced(&hash)
                             .await?;

@@ -897,7 +897,10 @@ impl PeerSyncWorker {
             .doc_cursor_state
             .entry(partition_id.clone())
             .or_default();
-        state.slots.entry(cursor).or_insert(CursorSlotState::Blocked);
+        state
+            .slots
+            .entry(cursor)
+            .or_insert(CursorSlotState::Blocked);
     }
 
     async fn discard_stale_doc_slots(&mut self, partition_id: &PartitionId) -> Res<()> {

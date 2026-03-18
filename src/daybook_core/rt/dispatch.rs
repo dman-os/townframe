@@ -555,7 +555,8 @@ mod tests {
         let (repo, _temp) = setup_repo().await?;
         let listener = repo.subscribe(SubscribeOpts::new(16));
 
-        repo.add("disp-1".to_string(), mock_dispatch("job-1")).await?;
+        repo.add("disp-1".to_string(), mock_dispatch("job-1"))
+            .await?;
 
         let first: Arc<DispatchEvent> = listener
             .recv_async()
