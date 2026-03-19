@@ -100,13 +100,12 @@ pub struct IrohSyncRepoStopToken {
     partition_sync_stop_token: am_utils_rs::sync::node::SyncNodeStopToken,
     repo_rpc_stop_token: am_utils_rs::repo::rpc::RepoRpcStopToken,
     partition_sync_store_stop_token: am_utils_rs::sync::store::SyncStoreStopToken,
-    full_stop_token: full::StopToken,
 }
 
 impl IrohSyncRepoStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
-        self.full_stop_token.stop().await?;
+        utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(2)).await?;
         // NOTE: we only add timeouts for stop tokens that don't have internal
         // timeouts
         tokio::time::timeout(Duration::from_secs(10), self.router.shutdown())
@@ -116,7 +115,6 @@ impl IrohSyncRepoStopToken {
         self.repo_rpc_stop_token.stop().await?;
 
         self.partition_sync_store_stop_token.stop().await?;
-        utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(2)).await?;
         Ok(())
     }
 }
@@ -243,10 +241,14 @@ impl IrohSyncRepo {
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
+            let full_stop_token = full_stop_token;
             async move {
-                repo.machine_loop(full_sync_rx, incoming_conn_rx, conn_end_rx)
-                    .await
-                    .unwrap();
+                let loop_res = repo
+                    .machine_loop(full_sync_rx, incoming_conn_rx, conn_end_rx)
+                    .await;
+                let full_stop_res = full_stop_token.stop().await;
+                loop_res.unwrap();
+                full_stop_res.unwrap();
             }
             .instrument(tracing::info_span!("IrohSyncRepo listen task"))
         });
@@ -260,7 +262,6 @@ impl IrohSyncRepo {
                 partition_sync_stop_token,
                 repo_rpc_stop_token,
                 partition_sync_store_stop_token,
-                full_stop_token,
             },
         ))
     }
@@ -1379,8 +1380,22 @@ mod tests {
                 match std::fs::copy(&src_path, &dst_path) {
                     Ok(_) => {}
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                        // Source files such as sqlite WAL/SHM can disappear between read_dir and copy.
-                        continue;
+                        // SQLite WAL/SHM sidecars can disappear between read_dir and copy.
+                        // Missing any other file is unexpected and should fail loudly.
+                        let file_name = src_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or_default();
+                        if file_name.ends_with("-wal") || file_name.ends_with("-shm") {
+                            continue;
+                        }
+                        return Err(err).wrap_err_with(|| {
+                            format!(
+                                "unexpected missing file during copy {} -> {}",
+                                src_path.display(),
+                                dst_path.display()
+                            )
+                        });
                     }
                     Err(err) => {
                         return Err(err).wrap_err_with(|| {
@@ -1401,6 +1416,35 @@ mod tests {
         repo_a_path: &std::path::Path,
         repo_b_path: &std::path::Path,
     ) -> Res<()> {
+        async fn force_delete_journal_mode(sqlite_path: &std::path::Path) -> Res<()> {
+            use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+            use std::str::FromStr;
+
+            let db_url = format!("sqlite://{}", sqlite_path.display());
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(
+                    SqliteConnectOptions::from_str(&db_url)?
+                        .create_if_missing(false)
+                        .busy_timeout(Duration::from_secs(5)),
+                )
+                .await?;
+            let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                .execute(&pool)
+                .await;
+            let mode: String = sqlx::query_scalar("PRAGMA journal_mode=DELETE")
+                .fetch_one(&pool)
+                .await?;
+            if mode.to_lowercase() != "delete" {
+                eyre::bail!(
+                    "failed forcing sqlite journal mode to DELETE for {} (got: {mode})",
+                    sqlite_path.display()
+                );
+            }
+            pool.close().await;
+            Ok(())
+        }
+
         tokio::fs::create_dir_all(repo_a_path).await?;
         let rtx = RepoCtx::init(
             repo_a_path,
@@ -1411,8 +1455,11 @@ mod tests {
         )
         .await?;
         let source_repo_id = rtx.repo_id.clone();
+        let source_repo_user_id = crate::repo::get_or_init_repo_user_id(&rtx.sql.db_pool).await?;
         rtx.shutdown().await?;
         drop(rtx);
+        force_delete_journal_mode(&repo_a_path.join("sqlite.db")).await?;
+        force_delete_journal_mode(&repo_a_path.join("big_repo.sqlite")).await?;
 
         copy_dir_all(repo_a_path, repo_b_path)?;
         let repo_b_sql = crate::app::SqlCtx::new(&format!(
@@ -1421,6 +1468,7 @@ mod tests {
         ))
         .await?;
         crate::app::globals::set_repo_id(&repo_b_sql.db_pool, &source_repo_id).await?;
+        crate::repo::set_repo_user_id(&repo_b_sql.db_pool, &source_repo_user_id).await?;
         let repo_b_repo_id = crate::app::globals::get_repo_id(&repo_b_sql.db_pool)
             .await?
             .ok_or_eyre("repo_b repo_id missing after copy")?;

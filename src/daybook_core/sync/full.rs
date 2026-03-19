@@ -2241,10 +2241,9 @@ impl Worker {
 
     async fn emit_full_sync_event(&self, event: FullSyncEvent) -> Res<()> {
         debug!(event = ?event, "emitting full sync event");
-        self.events_tx
-            .send(event)
-            .inspect_err(|_| warn!("full sync event receiver dropped"))
-            .ok();
+        if self.events_tx.send(event).is_err() && !self.cancel_token.is_cancelled() {
+            trace!("full sync event receiver dropped");
+        }
         Ok(())
     }
 

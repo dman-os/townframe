@@ -637,10 +637,10 @@ impl BigRepoStopToken {
         self.partition_forwarders
             .stop(Duration::from_secs(5))
             .await?;
+        self.repo.stop().await;
         if let Some(stop_token) = self.change_manager_stop.take() {
             stop_token.stop().await?;
         }
-        self.repo.stop().await;
         Ok(())
     }
 }
