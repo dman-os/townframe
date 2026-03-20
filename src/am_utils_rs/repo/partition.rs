@@ -12,22 +12,6 @@ impl BigRepo {
         self.partition_store.ensure_schema().await
     }
 
-    pub async fn add_doc_to_partition(&self, partition_id: &PartitionId, doc_id: &str) -> Res<()> {
-        self.partition_store
-            .add_doc_to_partition(partition_id, doc_id)
-            .await
-    }
-
-    pub async fn remove_doc_from_partition(
-        &self,
-        partition_id: &PartitionId,
-        doc_id: &str,
-    ) -> Res<()> {
-        self.partition_store
-            .remove_doc_from_partition(partition_id, doc_id)
-            .await
-    }
-
     pub(super) async fn record_doc_heads_change(
         &self,
         doc_id: &samod::DocumentId,
@@ -39,16 +23,16 @@ impl BigRepo {
     }
 
     pub async fn partition_member_count(&self, part_id: &PartitionId) -> Res<i64> {
-        self.partition_store.partition_member_count(part_id).await
+        self.partition_store.member_count(part_id).await
     }
 
-    pub async fn is_doc_present_in_partition_state(
+    pub async fn is_member_present_in_partition_item_state(
         &self,
         partition_id: &PartitionId,
-        doc_id: &str,
+        member_id: &str,
     ) -> Res<bool> {
         self.partition_store
-            .is_doc_present_in_partition_state(partition_id, doc_id)
+            .is_member_present_in_item_state(partition_id, member_id)
             .await
     }
 
@@ -233,7 +217,8 @@ mod tests {
         let partition_id = "p-main".into();
 
         big_repo
-            .add_doc_to_partition(&partition_id, &doc_id)
+            .partition_store()
+            .add_member(&partition_id, &doc_id)
             .await?;
         handle
             .with_document(|doc| {
@@ -276,7 +261,8 @@ mod tests {
         let target_doc_id = handle.document_id().to_string();
         let partition_id = "p-remove".into();
         big_repo
-            .add_doc_to_partition(&partition_id, &target_doc_id)
+            .partition_store()
+            .add_member(&partition_id, &target_doc_id)
             .await?;
         handle
             .with_document(|doc| {
@@ -287,7 +273,8 @@ mod tests {
             })
             .await?;
         big_repo
-            .remove_doc_from_partition(&partition_id, &target_doc_id)
+            .partition_store()
+            .remove_member(&partition_id, &target_doc_id)
             .await?;
 
         let snapshot = big_repo
@@ -321,21 +308,23 @@ mod tests {
         let unknown_doc_id = "doc-no-version-state".to_string();
 
         big_repo
-            .add_doc_to_partition(&partition_id, &unknown_doc_id)
+            .partition_store()
+            .add_member(&partition_id, &unknown_doc_id)
             .await?;
         assert!(
             big_repo
-                .is_doc_present_in_partition_state(&partition_id, &unknown_doc_id)
+                .is_member_present_in_partition_item_state(&partition_id, &unknown_doc_id)
                 .await?,
             "doc should be present in partition_doc_state after add"
         );
 
         big_repo
-            .remove_doc_from_partition(&partition_id, &unknown_doc_id)
+            .partition_store()
+            .remove_member(&partition_id, &unknown_doc_id)
             .await?;
         assert!(
             !big_repo
-                .is_doc_present_in_partition_state(&partition_id, &unknown_doc_id)
+                .is_member_present_in_partition_item_state(&partition_id, &unknown_doc_id)
                 .await?,
             "doc should be tombstoned in partition_doc_state even when doc_version_state is absent"
         );
@@ -353,7 +342,8 @@ mod tests {
             let handle = big_repo.create_doc(automerge::Automerge::new()).await?;
             let doc_id = handle.document_id().to_string();
             big_repo
-                .add_doc_to_partition(&partition_id, &doc_id)
+                .partition_store()
+                .add_member(&partition_id, &doc_id)
                 .await?;
             expected.insert(doc_id);
         }
@@ -411,7 +401,8 @@ mod tests {
                 .await?;
             let doc_id = handle.document_id().to_string();
             big_repo
-                .add_doc_to_partition(&partition_id, &doc_id)
+                .partition_store()
+                .add_member(&partition_id, &doc_id)
                 .await?;
             expected.insert(doc_id);
         }
@@ -460,11 +451,11 @@ mod tests {
 
         let d1 = big_repo.create_doc(automerge::Automerge::new()).await?;
         let d1_id = d1.document_id().to_string();
-        big_repo.add_doc_to_partition(&p1, &d1_id).await?;
+        big_repo.partition_store().add_member(&p1, &d1_id).await?;
 
         let d2 = big_repo.create_doc(automerge::Automerge::new()).await?;
         let d2_id = d2.document_id().to_string();
-        big_repo.add_doc_to_partition(&p2, &d2_id).await?;
+        big_repo.partition_store().add_member(&p2, &d2_id).await?;
 
         assert!(
             big_repo

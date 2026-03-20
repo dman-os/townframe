@@ -923,7 +923,8 @@ mod tests {
             .await
             .map_err(|err| ferr!("failed exporting source doc: {err}"))?;
 
-        dst.add_doc_to_partition(&part_id, &doc_id.to_string())
+        dst.partition_store()
+            .add_member(&part_id, &doc_id.to_string())
             .await?;
 
         let outcome = dst.import_doc_fast(doc_id.clone(), exported).await?;
@@ -933,7 +934,7 @@ mod tests {
         );
 
         assert!(
-            dst.is_doc_present_in_partition_state(&part_id, &doc_id.to_string())
+            dst.is_member_present_in_partition_item_state(&part_id, &doc_id.to_string())
                 .await?,
             "fast import must keep the doc present in partition state for existing memberships"
         );

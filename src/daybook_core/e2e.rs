@@ -167,9 +167,14 @@ pub async fn test_cx_with_options(
     let local_user_path = daybook_types::doc::UserPath::from("/test-user");
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
     let temp_dir = tempfile::tempdir()?;
-    let blobs =
-        crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.to_string())
-            .await?;
+    let blobs = crate::blobs::BlobsRepo::new(
+        temp_dir.path().join("blobs"),
+        local_user_path.to_string(),
+        Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
+            big_repo.partition_store(),
+        )),
+    )
+    .await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&big_repo),

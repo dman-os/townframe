@@ -127,12 +127,12 @@ impl PartitionStore {
         Ok(())
     }
 
-    pub async fn add_doc_to_partition(&self, partition_id: &PartitionId, doc_id: &str) -> Res<()> {
+    pub async fn add_member(&self, partition_id: &PartitionId, member_id: &str) -> Res<()> {
         let existing_present: Option<i64> = sqlx::query_scalar(
             "SELECT present FROM partition_membership_state WHERE partition_id = ? AND doc_id = ?",
         )
         .bind(partition_id)
-        .bind(doc_id)
+        .bind(member_id)
         .fetch_optional(&self.state_pool)
         .await?;
         if existing_present == Some(1) {
@@ -153,7 +153,7 @@ impl PartitionStore {
             "#,
         )
         .bind(partition_id)
-        .bind(doc_id)
+        .bind(member_id)
         .bind(membership_txid as i64)
         .bind(membership_txid as i64)
         .execute(&mut *tx)
@@ -162,7 +162,7 @@ impl PartitionStore {
         let doc_ver_row = sqlx::query_as::<_, (String, i64)>(
             "SELECT latest_heads_json, change_count_hint FROM doc_version_state WHERE doc_id = ?",
         )
-        .bind(doc_id)
+        .bind(member_id)
         .fetch_optional(&mut *tx)
         .await?;
         let doc_txid = alloc_txid(tx.as_mut()).await?;
@@ -177,7 +177,7 @@ impl PartitionStore {
             "#,
         )
         .bind(partition_id)
-        .bind(doc_id)
+        .bind(member_id)
         .bind(doc_txid as i64)
         .execute(&mut *tx)
         .await?;
@@ -197,7 +197,7 @@ impl PartitionStore {
                 cursor: membership_txid,
                 partition_id: partition_id.clone(),
                 deets: PartitionEventDeets::MemberUpsert {
-                    doc_id: doc_id.to_owned(),
+                    doc_id: member_id.to_owned(),
                 },
             })
             .ok();
@@ -206,7 +206,7 @@ impl PartitionStore {
                 cursor: doc_txid,
                 partition_id: partition_id.clone(),
                 deets: PartitionEventDeets::DocChanged {
-                    doc_id: doc_id.to_owned(),
+                    doc_id: member_id.to_owned(),
                     heads,
                     change_count_hint,
                 },
@@ -215,16 +215,12 @@ impl PartitionStore {
         Ok(())
     }
 
-    pub async fn remove_doc_from_partition(
-        &self,
-        partition_id: &PartitionId,
-        doc_id: &str,
-    ) -> Res<()> {
+    pub async fn remove_member(&self, partition_id: &PartitionId, member_id: &str) -> Res<()> {
         let existing_present: Option<i64> = sqlx::query_scalar(
             "SELECT present FROM partition_membership_state WHERE partition_id = ? AND doc_id = ?",
         )
         .bind(partition_id)
-        .bind(doc_id)
+        .bind(member_id)
         .fetch_optional(&self.state_pool)
         .await?;
         if existing_present != Some(1) {
@@ -244,7 +240,7 @@ impl PartitionStore {
             "#,
         )
         .bind(partition_id)
-        .bind(doc_id)
+        .bind(member_id)
         .bind(membership_txid as i64)
         .bind(membership_txid as i64)
         .execute(&mut *tx)
@@ -252,7 +248,7 @@ impl PartitionStore {
         let change_count_hint = sqlx::query_scalar::<_, i64>(
             "SELECT change_count_hint FROM doc_version_state WHERE doc_id = ?",
         )
-        .bind(doc_id)
+        .bind(member_id)
         .fetch_optional(&mut *tx)
         .await?;
         let doc_txid = alloc_txid(tx.as_mut()).await?;
@@ -261,7 +257,7 @@ impl PartitionStore {
         )
         .bind(doc_txid as i64)
         .bind(partition_id)
-        .bind(doc_id)
+        .bind(member_id)
         .execute(&mut *tx)
         .await?;
         let doc_deleted_event = (
@@ -275,7 +271,7 @@ impl PartitionStore {
                 cursor: membership_txid,
                 partition_id: partition_id.clone(),
                 deets: PartitionEventDeets::MemberRemoved {
-                    doc_id: doc_id.to_owned(),
+                    doc_id: member_id.to_owned(),
                 },
             })
             .ok();
@@ -285,7 +281,7 @@ impl PartitionStore {
                 cursor: doc_txid,
                 partition_id: partition_id.clone(),
                 deets: PartitionEventDeets::DocDeleted {
-                    doc_id: doc_id.to_owned(),
+                    doc_id: member_id.to_owned(),
                     change_count_hint,
                 },
             })
@@ -384,7 +380,7 @@ impl PartitionStore {
         Ok(())
     }
 
-    pub async fn partition_member_count(&self, part_id: &PartitionId) -> Res<i64> {
+    pub async fn member_count(&self, part_id: &PartitionId) -> Res<i64> {
         let count = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(1) FROM partition_membership_state WHERE partition_id = ? AND present = 1",
         )
@@ -394,16 +390,16 @@ impl PartitionStore {
         Ok(count)
     }
 
-    pub async fn is_doc_present_in_partition_state(
+    pub async fn is_member_present_in_item_state(
         &self,
         partition_id: &PartitionId,
-        doc_id: &str,
+        member_id: &str,
     ) -> Res<bool> {
         let exists: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM partition_doc_state WHERE partition_id = ? AND doc_id = ? AND deleted = 0)",
         )
         .bind(partition_id)
-        .bind(doc_id)
+        .bind(member_id)
         .fetch_one(&self.state_pool)
         .await?;
         Ok(exists == 1)

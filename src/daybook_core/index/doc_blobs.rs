@@ -1,4 +1,5 @@
 use crate::blobs::BLOB_SCHEME;
+use crate::blobs::{BlobScope, BlobsRepo};
 use crate::drawer::DrawerRepo;
 use crate::interlude::*;
 use crate::repos::Repo;
@@ -35,6 +36,7 @@ pub struct DocBlobsIndexRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub cancel_token: CancellationToken,
     drawer_repo: Arc<DrawerRepo>,
+    blobs_repo: Arc<BlobsRepo>,
     work_tx: tokio::sync::mpsc::UnboundedSender<DocBlobsIndexWorkItem>,
     db_pool: SqlitePool,
 }
@@ -69,6 +71,7 @@ impl DocBlobsIndexStopToken {
 impl DocBlobsIndexRepo {
     pub async fn boot(
         drawer_repo: Arc<DrawerRepo>,
+        blobs_repo: Arc<BlobsRepo>,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     ) -> Res<(Arc<Self>, DocBlobsIndexStopToken)> {
         let (_sqlite_file_path, db_pool) = sqlite_local_state_repo
@@ -83,6 +86,7 @@ impl DocBlobsIndexRepo {
             registry,
             cancel_token: cancel_token.child_token(),
             drawer_repo: Arc::clone(&drawer_repo),
+            blobs_repo,
             work_tx,
             db_pool,
         });
@@ -241,12 +245,19 @@ impl DocBlobsIndexRepo {
         heads: &ChangeHashSet,
         blobs: &HashMap<String, u64>,
     ) -> Res<ReindexDocOutcome> {
+        let prev_hashes: HashSet<String> = self
+            .list_hashes_for_doc(doc_id)
+            .await?
+            .into_iter()
+            .collect();
         sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1")
             .bind(doc_id)
             .execute(&self.db_pool)
             .await?;
 
         if blobs.is_empty() {
+            self.publish_hash_diff(&prev_hashes, &HashSet::new())
+                .await?;
             return Ok(ReindexDocOutcome::Evicted);
         }
 
@@ -270,14 +281,43 @@ impl DocBlobsIndexRepo {
             " ON CONFLICT(doc_id, blob_hash) DO UPDATE SET origin_heads = excluded.origin_heads, length_octets = excluded.length_octets",
         );
         query_builder.build().execute(&self.db_pool).await?;
+        let next_hashes: HashSet<String> = blobs.keys().cloned().collect();
+        self.publish_hash_diff(&prev_hashes, &next_hashes).await?;
         Ok(ReindexDocOutcome::Present)
     }
 
     pub async fn delete_doc(&self, doc_id: &DocId) -> Res<()> {
+        let prev_hashes: HashSet<String> = self
+            .list_hashes_for_doc(doc_id)
+            .await?
+            .into_iter()
+            .collect();
         sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1")
             .bind(doc_id)
             .execute(&self.db_pool)
             .await?;
+        self.publish_hash_diff(&prev_hashes, &HashSet::new())
+            .await?;
+        Ok(())
+    }
+
+    async fn publish_hash_diff(
+        &self,
+        prev_hashes: &HashSet<String>,
+        next_hashes: &HashSet<String>,
+    ) -> Res<()> {
+        for hash in next_hashes.difference(prev_hashes) {
+            self.blobs_repo
+                .add_hash_to_scope(BlobScope::Docs, hash)
+                .await?;
+        }
+        for hash in prev_hashes.difference(next_hashes) {
+            if self.list_docs_for_hash(hash).await?.is_empty() {
+                self.blobs_repo
+                    .remove_hash_from_scope(BlobScope::Docs, hash)
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -537,6 +577,26 @@ mod tests {
         eyre::bail!("timeout waiting for doc blob hash")
     }
 
+    async fn wait_for_partition_member_count(
+        big_repo: &SharedBigRepo,
+        partition_id: &str,
+        expected: i64,
+    ) -> Res<()> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            let count = big_repo
+                .partition_member_count(&partition_id.to_string())
+                .await?;
+            if count == expected {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        eyre::bail!(
+            "timeout waiting for partition member count partition_id={partition_id} expected={expected}"
+        )
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_doc_blobs_index_tracks_blob_hashes() -> Res<()> {
         let test_context = test_cx(utils_rs::function_full!()).await?;
@@ -607,6 +667,104 @@ mod tests {
         );
 
         test_context.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn doc_blobs_index_publishes_docs_scope_partition_membership() -> Res<()> {
+        let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
+        let (big_repo, big_repo_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-doc-blobs-scope".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
+        .await?;
+        let mut drawer_doc = automerge::Automerge::new();
+        {
+            use automerge::transaction::Transactable;
+            let mut tx = drawer_doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+        }
+        let drawer_doc_id = big_repo.add_doc(drawer_doc).await?.document_id().clone();
+        let temp_dir = tempfile::tempdir()?;
+        let blobs_repo = crate::blobs::BlobsRepo::new(
+            temp_dir.path().join("blobs"),
+            "/test-user".to_string(),
+            Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
+                big_repo.partition_store(),
+            )),
+        )
+        .await?;
+        let (drawer_repo, drawer_stop) = crate::drawer::DrawerRepo::load(
+            Arc::clone(&big_repo),
+            drawer_doc_id,
+            local_user_path.clone(),
+            temp_dir.path().join("drawer-local-state"),
+            Arc::new(std::sync::Mutex::new(
+                crate::drawer::lru::KeyedLruPool::new(1000),
+            )),
+            Arc::new(std::sync::Mutex::new(
+                crate::drawer::lru::KeyedLruPool::new(1000),
+            )),
+            None,
+        )
+        .await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            crate::local_state::SqliteLocalStateRepo::boot(temp_dir.path().join("local-state"))
+                .await?;
+        let (repo, repo_stop) = DocBlobsIndexRepo::boot(
+            Arc::clone(&drawer_repo),
+            Arc::clone(&blobs_repo),
+            Arc::clone(&sqlite_local_state_repo),
+        )
+        .await?;
+
+        let partition_id = crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string();
+        let hash = utils_rs::hash::encode_base58_multibase(b"docs-scope-hash");
+        let doc_id = drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPath::from("main"),
+                facets: [(
+                    FacetKey::from(WellKnownFacetTag::Blob),
+                    FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
+                        mime: "application/octet-stream".to_string(),
+                        length_octets: 13,
+                        digest: "ignored-digest".to_string(),
+                        inline: None,
+                        urls: Some(vec![format!("{BLOB_SCHEME}:///{hash}")]),
+                    })),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+        let heads = drawer_repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .and_then(|branches| branches.branches.get("main").cloned())
+            .ok_or_eyre("expected main branch heads for test doc")?;
+        repo.enqueue_upsert(doc_id.clone(), heads)?;
+
+        wait_for_partition_member_count(&big_repo, &partition_id, 1).await?;
+        assert!(
+            big_repo
+                .is_member_present_in_partition_item_state(&partition_id, &hash)
+                .await?
+        );
+
+        drawer_repo.del(&doc_id).await?;
+        repo.enqueue_delete(doc_id.clone())?;
+        wait_for_partition_member_count(&big_repo, &partition_id, 0).await?;
+        assert!(
+            !big_repo
+                .is_member_present_in_partition_item_state(&partition_id, &hash)
+                .await?
+        );
+
+        repo_stop.stop().await?;
+        sqlite_local_state_stop.stop().await?;
+        drawer_stop.stop().await?;
+        big_repo_stop.stop().await?;
         Ok(())
     }
 }

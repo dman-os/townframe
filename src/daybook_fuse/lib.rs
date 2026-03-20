@@ -512,8 +512,14 @@ mod tests {
             .await?;
 
             let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
-            let blobs_repo =
-                BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.to_string()).await?;
+            let blobs_repo = BlobsRepo::new(
+                temp_dir.path().join("blobs"),
+                local_user_path.to_string(),
+                Arc::new(daybook_core::blobs::PartitionStoreMembershipWriter::new(
+                    big_repo.partition_store(),
+                )),
+            )
+            .await?;
             let (plugs_repo, plugs_stop) = PlugsRepo::load(
                 Arc::clone(&big_repo),
                 blobs_repo,

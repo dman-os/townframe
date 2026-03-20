@@ -213,6 +213,7 @@ impl Rt {
             .await?;
         let (doc_blobs_index_repo, doc_blobs_index_stop) = crate::index::DocBlobsIndexRepo::boot(
             Arc::clone(&drawer),
+            Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;

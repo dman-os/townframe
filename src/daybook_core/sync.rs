@@ -127,11 +127,26 @@ impl IrohSyncRepo {
         let drawer_doc_id = rcx.doc_drawer.document_id().to_string();
         let app_doc_id = rcx.doc_app.document_id().to_string();
         rcx.big_repo
-            .add_doc_to_partition(&partition_id, &drawer_doc_id)
+            .partition_store()
+            .add_member(&partition_id, &drawer_doc_id)
             .await?;
         rcx.big_repo
-            .add_doc_to_partition(&partition_id, &app_doc_id)
+            .partition_store()
+            .add_member(&partition_id, &app_doc_id)
             .await?;
+        for blob_partition_id in [
+            crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
+            crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
+        ] {
+            rcx.big_repo
+                .partition_store()
+                .add_member(&blob_partition_id, &app_doc_id)
+                .await?;
+            rcx.big_repo
+                .partition_store()
+                .remove_member(&blob_partition_id, &app_doc_id)
+                .await?;
+        }
         Ok(())
     }
 
@@ -213,7 +228,6 @@ impl IrohSyncRepo {
         let (mut full_sync_handle, full_stop_token) = full::start_full_sync_worker(
             Arc::clone(&rcx),
             Arc::clone(&blobs_repo),
-            Arc::clone(&doc_blobs_index_repo),
             progress_repo.clone(),
             Arc::clone(&partition_sync_node),
             partition_sync_store.clone(),
@@ -278,6 +292,8 @@ impl IrohSyncRepo {
             crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
                 self.rcx.doc_drawer.document_id(),
             ),
+            crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
+            crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
         ]
         .into()
     }
@@ -1552,8 +1568,14 @@ mod tests {
             )
             .await?,
         );
-        let blobs_repo =
-            BlobsRepo::new(rtx.layout.blobs_root.clone(), rtx.local_user_path.clone()).await?;
+        let blobs_repo = BlobsRepo::new(
+            rtx.layout.blobs_root.clone(),
+            rtx.local_user_path.clone(),
+            Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
+                rtx.big_repo.partition_store(),
+            )),
+        )
+        .await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
             Arc::clone(&rtx.big_repo),
             Arc::clone(&blobs_repo),
@@ -1587,6 +1609,7 @@ mod tests {
             SqliteLocalStateRepo::boot(rtx.layout.repo_root.join("local_state")).await?;
         let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
             Arc::clone(&drawer_repo),
+            Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
@@ -1951,6 +1974,7 @@ mod tests {
         let blobs_repo = BlobsRepo::new(
             temp_root.path().join("blobs"),
             "/u/stress-test/dev-local".to_string(),
+            Arc::new(crate::blobs::NoopPartitionMembershipWriter),
         )
         .await?;
         let payload = b"delayed-blob-arrival".to_vec();

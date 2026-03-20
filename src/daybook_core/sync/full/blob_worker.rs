@@ -15,6 +15,7 @@ impl BlobSyncWorkerStopToken {
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_blob_sync_worker(
+    partition: PartitionKey,
     hash: String,
     peers: Vec<EndpointId>,
     cancel_token: CancellationToken,
@@ -26,6 +27,7 @@ pub fn spawn_blob_sync_worker(
 ) -> Res<BlobSyncWorkerStopToken> {
     let stop_cancel_token = cancel_token.clone();
     let worker = BlobSyncWorker {
+        partition,
         hash,
         peers,
         cancel_token,
@@ -38,7 +40,7 @@ pub fn spawn_blob_sync_worker(
     let fut = async move {
         worker
             .send_progress(SyncProgressMsg::BlobWorkerStarted {
-                partition: PartitionKey::DocBlobsFullSync,
+                partition: worker.partition.clone(),
                 hash: worker.hash.clone(),
             })
             .await;
@@ -49,7 +51,7 @@ pub fn spawn_blob_sync_worker(
                 tracing::warn!(?err, hash = %worker.hash, "invalid daybook blob hash");
                 worker
                     .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                        partition: PartitionKey::DocBlobsFullSync,
+                        partition: worker.partition.clone(),
                         hash: worker.hash.clone(),
                         success: false,
                         reason: "invalid hash".to_string(),
@@ -65,7 +67,7 @@ pub fn spawn_blob_sync_worker(
                 tracing::warn!(?err, hash = %worker.hash, "error checking iroh blob store");
                 worker
                     .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                        partition: PartitionKey::DocBlobsFullSync,
+                        partition: worker.partition.clone(),
                         hash: worker.hash.clone(),
                         success: false,
                         reason: "iroh store lookup failed".to_string(),
@@ -82,7 +84,7 @@ pub fn spawn_blob_sync_worker(
                 tracing::warn!(?err, hash = %worker.hash, "error checking local blob presence");
                 worker
                     .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                        partition: PartitionKey::DocBlobsFullSync,
+                        partition: worker.partition.clone(),
                         hash: worker.hash.clone(),
                         success: false,
                         reason: "local blob lookup failed".to_string(),
@@ -97,7 +99,7 @@ pub fn spawn_blob_sync_worker(
             worker.mark_synced(None);
             worker
                 .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                    partition: PartitionKey::DocBlobsFullSync,
+                    partition: worker.partition.clone(),
                     hash: worker.hash.clone(),
                     success: true,
                     reason: "already present in blobs repo".to_string(),
@@ -109,7 +111,7 @@ pub fn spawn_blob_sync_worker(
         if has_in_store {
             worker
                 .send_progress(SyncProgressMsg::BlobMaterializeStarted {
-                    partition: PartitionKey::DocBlobsFullSync,
+                    partition: worker.partition.clone(),
                     hash: worker.hash.clone(),
                 })
                 .await;
@@ -118,7 +120,7 @@ pub fn spawn_blob_sync_worker(
                     worker.mark_synced(None);
                     worker
                         .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                            partition: PartitionKey::DocBlobsFullSync,
+                            partition: worker.partition.clone(),
                             hash: worker.hash.clone(),
                             success: true,
                             reason: "materialized from local iroh store".to_string(),
@@ -129,7 +131,7 @@ pub fn spawn_blob_sync_worker(
                     tracing::warn!(?err, hash = %worker.hash, "put_from_store failed from local iroh store");
                     worker
                         .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                            partition: PartitionKey::DocBlobsFullSync,
+                            partition: worker.partition.clone(),
                             hash: worker.hash.clone(),
                             success: false,
                             reason: "put_from_store failed".to_string(),
@@ -144,7 +146,7 @@ pub fn spawn_blob_sync_worker(
         if worker.peers.is_empty() {
             worker
                 .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                    partition: PartitionKey::DocBlobsFullSync,
+                    partition: worker.partition.clone(),
                     hash: worker.hash.clone(),
                     success: false,
                     reason: "no peers available".to_string(),
@@ -160,7 +162,7 @@ pub fn spawn_blob_sync_worker(
         let Ok(mut stream) = stream_res else {
             worker
                 .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                    partition: PartitionKey::DocBlobsFullSync,
+                    partition: worker.partition.clone(),
                     hash: worker.hash.clone(),
                     success: false,
                     reason: "failed to open download stream".to_string(),
@@ -185,7 +187,7 @@ pub fn spawn_blob_sync_worker(
                     worker
                         .send_progress(SyncProgressMsg::BlobDownloadStarted {
                             endpoint_id: id,
-                            partition: PartitionKey::DocBlobsFullSync,
+                            partition: worker.partition.clone(),
                             hash: worker.hash.clone(),
                         })
                         .await;
@@ -196,7 +198,7 @@ pub fn spawn_blob_sync_worker(
                         worker
                             .send_progress(SyncProgressMsg::BlobDownloadProgress {
                                 endpoint_id,
-                                partition: PartitionKey::DocBlobsFullSync,
+                                partition: worker.partition.clone(),
                                 hash: worker.hash.clone(),
                                 done,
                             })
@@ -217,7 +219,7 @@ pub fn spawn_blob_sync_worker(
         if saw_download_error {
             worker
                 .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                    partition: PartitionKey::DocBlobsFullSync,
+                    partition: worker.partition.clone(),
                     hash: worker.hash.clone(),
                     success: false,
                     reason: "download reported error".to_string(),
@@ -239,7 +241,7 @@ pub fn spawn_blob_sync_worker(
                 tracing::warn!(?err, hash = %worker.hash, "error checking iroh blob store after download");
                 worker
                     .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                        partition: PartitionKey::DocBlobsFullSync,
+                        partition: worker.partition.clone(),
                         hash: worker.hash.clone(),
                         success: false,
                         reason: "iroh store lookup failed after download".to_string(),
@@ -253,7 +255,7 @@ pub fn spawn_blob_sync_worker(
         if !has_in_store_after_download {
             worker
                 .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                    partition: PartitionKey::DocBlobsFullSync,
+                    partition: worker.partition.clone(),
                     hash: worker.hash.clone(),
                     success: false,
                     reason: "download completed but blob missing from store".to_string(),
@@ -265,7 +267,7 @@ pub fn spawn_blob_sync_worker(
 
         worker
             .send_progress(SyncProgressMsg::BlobMaterializeStarted {
-                partition: PartitionKey::DocBlobsFullSync,
+                partition: worker.partition.clone(),
                 hash: worker.hash.clone(),
             })
             .await;
@@ -277,7 +279,7 @@ pub fn spawn_blob_sync_worker(
                     worker
                         .send_progress(SyncProgressMsg::BlobDownloadFinished {
                             endpoint_id,
-                            partition: PartitionKey::DocBlobsFullSync,
+                            partition: worker.partition.clone(),
                             hash: worker.hash.clone(),
                             success: true,
                         })
@@ -285,7 +287,7 @@ pub fn spawn_blob_sync_worker(
                 }
                 worker
                     .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                        partition: PartitionKey::DocBlobsFullSync,
+                        partition: worker.partition.clone(),
                         hash: worker.hash.clone(),
                         success: true,
                         reason: "download and materialize succeeded".to_string(),
@@ -299,7 +301,7 @@ pub fn spawn_blob_sync_worker(
                     worker
                         .send_progress(SyncProgressMsg::BlobDownloadFinished {
                             endpoint_id,
-                            partition: PartitionKey::DocBlobsFullSync,
+                            partition: worker.partition.clone(),
                             hash: worker.hash.clone(),
                             success: false,
                         })
@@ -307,7 +309,7 @@ pub fn spawn_blob_sync_worker(
                 }
                 worker
                     .send_progress(SyncProgressMsg::BlobWorkerFinished {
-                        partition: PartitionKey::DocBlobsFullSync,
+                        partition: worker.partition.clone(),
                         hash: worker.hash.clone(),
                         success: false,
                         reason: if saw_download_signal {
@@ -329,6 +331,7 @@ pub fn spawn_blob_sync_worker(
 }
 
 struct BlobSyncWorker {
+    partition: PartitionKey,
     hash: String,
     peers: Vec<EndpointId>,
     cancel_token: CancellationToken,

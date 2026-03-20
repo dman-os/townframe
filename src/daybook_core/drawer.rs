@@ -292,7 +292,8 @@ impl DrawerRepo {
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
             self.big_repo
-                .add_doc_to_partition(&self.replicated_partition_id(), branch_doc_id)
+                .partition_store()
+                .add_member(&self.replicated_partition_id(), branch_doc_id)
                 .await?;
         }
         Ok(())
@@ -305,7 +306,8 @@ impl DrawerRepo {
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
             self.big_repo
-                .remove_doc_from_partition(&self.replicated_partition_id(), branch_doc_id)
+                .partition_store()
+                .remove_member(&self.replicated_partition_id(), branch_doc_id)
                 .await?;
         }
         Ok(())

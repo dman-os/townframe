@@ -106,12 +106,14 @@ mod tests {
                     SamodSyncRequest::PartitionMemberEvent { event, .. } => {
                         match &event.deets {
                             PartitionMemberEventDeets::MemberUpsert { doc_id } => {
-                                dst.add_doc_to_partition(&event.partition_id, doc_id)
+                                dst.partition_store()
+                                    .add_member(&event.partition_id, doc_id)
                                     .await
                                     .unwrap();
                             }
                             PartitionMemberEventDeets::MemberRemoved { doc_id } => {
-                                dst.remove_doc_from_partition(&event.partition_id, doc_id)
+                                dst.partition_store()
+                                    .remove_member(&event.partition_id, doc_id)
                                     .await
                                     .unwrap();
                             }
@@ -162,7 +164,8 @@ mod tests {
                             }
                             PartitionDocEventDeets::DocDeleted { doc_id, .. } => {
                                 let _ = dst
-                                    .remove_doc_from_partition(&event.partition_id, doc_id)
+                                    .partition_store()
+                                    .remove_member(&event.partition_id, doc_id)
                                     .await;
                                 resolved = true;
                             }
@@ -255,7 +258,10 @@ mod tests {
                         cursor,
                         ..
                     } => {
-                        let _ = dst.remove_doc_from_partition(&partition_id, &doc_id).await;
+                        let _ = dst
+                            .partition_store()
+                            .remove_member(&partition_id, &doc_id)
+                            .await;
                         samod_ack_tx
                             .send(SamodSyncAck::CursorAdvanced {
                                 partition_id,
@@ -294,7 +300,7 @@ mod tests {
             source_doc_ids.push(handle.document_id().to_string());
         }
         for doc_id in source_doc_ids.iter().take(10) {
-            src.add_doc_to_partition(&part_id, doc_id).await?;
+            src.partition_store().add_member(&part_id, doc_id).await?;
         }
 
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
@@ -362,7 +368,7 @@ mod tests {
                 .await?;
         }
         for doc_id in source_doc_ids.iter().skip(10).take(5) {
-            src.add_doc_to_partition(&part_id, doc_id).await?;
+            src.partition_store().add_member(&part_id, doc_id).await?;
         }
 
         wait_until(
@@ -410,7 +416,7 @@ mod tests {
             })
             .await?;
         let doc_id = handle.document_id().to_string();
-        src.add_doc_to_partition(&part_id, &doc_id).await?;
+        src.partition_store().add_member(&part_id, &doc_id).await?;
 
         let parsed = DocumentId::from_str(&doc_id)
             .map_err(|err| ferr!("invalid source doc id {doc_id}: {err}"))?;
@@ -508,7 +514,7 @@ mod tests {
             })
             .await?;
         let doc_id = handle.document_id().to_string();
-        src.add_doc_to_partition(&part_id, &doc_id).await?;
+        src.partition_store().add_member(&part_id, &doc_id).await?;
 
         let parsed = DocumentId::from_str(&doc_id)
             .map_err(|err| ferr!("invalid source doc id {doc_id}: {err}"))?;
@@ -622,7 +628,7 @@ mod tests {
             })
             .await?;
         let doc_id = handle.document_id().to_string();
-        src.add_doc_to_partition(&part_id, &doc_id).await?;
+        src.partition_store().add_member(&part_id, &doc_id).await?;
 
         let parsed = DocumentId::from_str(&doc_id)
             .map_err(|err| ferr!("invalid source doc id {doc_id}: {err}"))?;
@@ -746,7 +752,7 @@ mod tests {
             })
             .await?;
         let doc_id = handle.document_id().to_string();
-        src.add_doc_to_partition(&part_id, &doc_id).await?;
+        src.partition_store().add_member(&part_id, &doc_id).await?;
         let parsed = DocumentId::from_str(&doc_id)
             .map_err(|err| ferr!("invalid source doc id {doc_id}: {err}"))?;
         let exported = src
@@ -963,7 +969,9 @@ mod tests {
             })
             .await?;
         let valid_doc_id = handle.document_id().to_string();
-        src.add_doc_to_partition(&part_id, &valid_doc_id).await?;
+        src.partition_store()
+            .add_member(&part_id, &valid_doc_id)
+            .await?;
 
         let valid_doc_id_parsed = DocumentId::from_str(&valid_doc_id)
             .map_err(|err| ferr!("invalid source doc id {valid_doc_id}: {err}"))?;
@@ -1061,7 +1069,8 @@ mod tests {
                 tx.commit();
             })
             .await?;
-        src.add_doc_to_partition(&p_ok, &ok_handle.document_id().to_string())
+        src.partition_store()
+            .add_member(&p_ok, &ok_handle.document_id().to_string())
             .await?;
 
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
@@ -1158,7 +1167,10 @@ mod tests {
                 })
                 .await?;
             let doc_id = handle.document_id().to_string();
-            repo_a.add_doc_to_partition(&part_id, &doc_id).await?;
+            repo_a
+                .partition_store()
+                .add_member(&part_id, &doc_id)
+                .await?;
             a_doc_ids.push(doc_id);
         }
 
@@ -1239,7 +1251,10 @@ mod tests {
                 })
                 .await?;
             let doc_id = handle.document_id().to_string();
-            repo_b.add_doc_to_partition(&part_id, &doc_id).await?;
+            repo_b
+                .partition_store()
+                .add_member(&part_id, &doc_id)
+                .await?;
             b_new_doc_ids.push(doc_id);
         }
 
