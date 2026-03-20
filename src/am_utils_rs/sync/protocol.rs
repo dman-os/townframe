@@ -58,26 +58,33 @@ pub struct PartitionEvent {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PartitionEventDeets {
     MemberUpsert {
-        doc_id: String,
+        item_id: String,
+        payload: serde_json::Value,
     },
     MemberRemoved {
-        doc_id: String,
+        item_id: String,
+        payload: serde_json::Value,
     },
-    DocChanged {
-        doc_id: String,
-        heads: Vec<String>,
-        change_count_hint: u64,
+    ItemChanged {
+        item_id: String,
+        payload: serde_json::Value,
     },
-    DocDeleted {
-        doc_id: String,
-        change_count_hint: u64,
+    ItemDeleted {
+        item_id: String,
+        payload: serde_json::Value,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PartitionMemberEventDeets {
-    MemberUpsert { doc_id: String },
-    MemberRemoved { doc_id: String },
+    MemberUpsert {
+        item_id: String,
+        payload: serde_json::Value,
+    },
+    MemberRemoved {
+        item_id: String,
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -89,14 +96,13 @@ pub struct PartitionDocEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PartitionDocEventDeets {
-    DocChanged {
-        doc_id: String,
-        heads: Vec<String>,
-        change_count_hint: u64,
+    ItemChanged {
+        item_id: String,
+        payload: serde_json::Value,
     },
-    DocDeleted {
-        doc_id: String,
-        change_count_hint: u64,
+    ItemDeleted {
+        item_id: String,
+        payload: serde_json::Value,
     },
 }
 

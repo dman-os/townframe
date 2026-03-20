@@ -88,13 +88,6 @@ impl RtStopToken {
             );
         }
 
-        if let Err(err) = self.doc_blobs_index_stop.stop().await {
-            warn!(
-                ?err,
-                "error stopping doc_blobs_index_repo during shutdown - continuing"
-            );
-        }
-
         if let Err(err) = self.doc_facet_set_index_stop.stop().await {
             warn!(
                 ?err,
@@ -153,6 +146,12 @@ impl RtStopToken {
             warn!(
                 ?err,
                 "error stopping wash_host during shutdown - continuing"
+            );
+        }
+        if let Err(err) = self.doc_blobs_index_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping doc_blobs_index_repo during shutdown - continuing"
             );
         }
 

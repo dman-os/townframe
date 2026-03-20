@@ -293,7 +293,11 @@ impl DrawerRepo {
         if branch_kind == BranchKind::Replicated {
             self.big_repo
                 .partition_store()
-                .add_member(&self.replicated_partition_id(), branch_doc_id)
+                .add_member(
+                    &self.replicated_partition_id(),
+                    branch_doc_id,
+                    &serde_json::json!({}),
+                )
                 .await?;
         }
         Ok(())
@@ -307,7 +311,11 @@ impl DrawerRepo {
         if branch_kind == BranchKind::Replicated {
             self.big_repo
                 .partition_store()
-                .remove_member(&self.replicated_partition_id(), branch_doc_id)
+                .remove_member(
+                    &self.replicated_partition_id(),
+                    branch_doc_id,
+                    &serde_json::json!({}),
+                )
                 .await?;
         }
         Ok(())

@@ -111,8 +111,8 @@ impl IrohSyncRepoStopToken {
         tokio::time::timeout(Duration::from_secs(10), self.router.shutdown())
             .await
             .map_err(|_| eyre::eyre!("timeout for waiting router shutdown"))??;
-        self.partition_sync_stop_token.stop().await?;
         self.repo_rpc_stop_token.stop().await?;
+        self.partition_sync_stop_token.stop().await?;
 
         self.partition_sync_store_stop_token.stop().await?;
         Ok(())
@@ -128,11 +128,11 @@ impl IrohSyncRepo {
         let app_doc_id = rcx.doc_app.document_id().to_string();
         rcx.big_repo
             .partition_store()
-            .add_member(&partition_id, &drawer_doc_id)
+            .add_member(&partition_id, &drawer_doc_id, &serde_json::json!({}))
             .await?;
         rcx.big_repo
             .partition_store()
-            .add_member(&partition_id, &app_doc_id)
+            .add_member(&partition_id, &app_doc_id, &serde_json::json!({}))
             .await?;
         for blob_partition_id in [
             crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
@@ -140,11 +140,7 @@ impl IrohSyncRepo {
         ] {
             rcx.big_repo
                 .partition_store()
-                .add_member(&blob_partition_id, &app_doc_id)
-                .await?;
-            rcx.big_repo
-                .partition_store()
-                .remove_member(&blob_partition_id, &app_doc_id)
+                .ensure_partition(&blob_partition_id)
                 .await?;
         }
         Ok(())

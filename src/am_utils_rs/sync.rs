@@ -62,6 +62,10 @@ mod tests {
         &LOCK
     }
 
+    fn empty_payload() -> serde_json::Value {
+        serde_json::json!({})
+    }
+
     #[derive(Clone, Copy)]
     enum TestAckMode {
         Auto,
@@ -101,36 +105,39 @@ mod tests {
         let (doc_sync_tx, doc_sync_rx) = mpsc::channel::<TestDocSyncRequest>(512);
         let join_handle = tokio::spawn(async move {
             let mut ack_slots: StdHashMap<PartitionId, BTreeMap<u64, AckSlotState>> = default();
-            while let Some(req) = samod_rx.recv().await {
+            'harness: while let Some(req) = samod_rx.recv().await {
                 match req {
                     SamodSyncRequest::PartitionMemberEvent { event, .. } => {
                         match &event.deets {
-                            PartitionMemberEventDeets::MemberUpsert { doc_id } => {
+                            PartitionMemberEventDeets::MemberUpsert { item_id, payload } => {
                                 dst.partition_store()
-                                    .add_member(&event.partition_id, doc_id)
+                                    .add_member(&event.partition_id, item_id, payload)
                                     .await
                                     .unwrap();
                             }
-                            PartitionMemberEventDeets::MemberRemoved { doc_id } => {
+                            PartitionMemberEventDeets::MemberRemoved { item_id, payload } => {
                                 dst.partition_store()
-                                    .remove_member(&event.partition_id, doc_id)
+                                    .remove_member(&event.partition_id, item_id, payload)
                                     .await
                                     .unwrap();
                             }
                         }
-                        samod_ack_tx
+                        if samod_ack_tx
                             .send(SamodSyncAck::MemberCursorAdvanced {
                                 partition_id: event.partition_id,
                                 cursor: event.cursor,
                             })
                             .await
-                            .ok();
+                            .is_err()
+                        {
+                            break 'harness;
+                        }
                     }
                     SamodSyncRequest::PartitionDocEvent { event, .. } => {
                         let resolved;
                         match &event.deets {
-                            PartitionDocEventDeets::DocChanged { doc_id, .. } => {
-                                let parsed = match DocumentId::from_str(doc_id) {
+                            PartitionDocEventDeets::ItemChanged { item_id, .. } => {
+                                let parsed = match DocumentId::from_str(item_id) {
                                     Ok(parsed) => parsed,
                                     Err(_) => {
                                         let slots = ack_slots
@@ -142,13 +149,16 @@ mod tests {
                                 };
                                 let local_has = dst.local_contains_document(&parsed).await.unwrap();
                                 if local_has {
-                                    doc_sync_tx
+                                    if doc_sync_tx
                                         .send(TestDocSyncRequest {
-                                            doc_id: doc_id.clone(),
+                                            doc_id: item_id.clone(),
                                             cursor: event.cursor,
                                         })
                                         .await
-                                        .ok();
+                                        .is_err()
+                                    {
+                                        break 'harness;
+                                    }
                                     resolved = matches!(ack_mode, TestAckMode::Auto);
                                 } else {
                                     let exported =
@@ -162,10 +172,10 @@ mod tests {
                                     };
                                 }
                             }
-                            PartitionDocEventDeets::DocDeleted { doc_id, .. } => {
+                            PartitionDocEventDeets::ItemDeleted { item_id, .. } => {
                                 let _ = dst
                                     .partition_store()
-                                    .remove_member(&event.partition_id, doc_id)
+                                    .remove_member(&event.partition_id, item_id, &empty_payload())
                                     .await;
                                 resolved = true;
                             }
@@ -193,13 +203,16 @@ mod tests {
                                 break;
                             }
                             slots.pop_first();
-                            samod_ack_tx
+                            if samod_ack_tx
                                 .send(SamodSyncAck::CursorAdvanced {
                                     partition_id: event.partition_id.clone(),
                                     cursor,
                                 })
                                 .await
-                                .ok();
+                                .is_err()
+                            {
+                                break 'harness;
+                            }
                         }
                     }
                     SamodSyncRequest::RequestDocSync {
@@ -208,21 +221,26 @@ mod tests {
                         cursor,
                         ..
                     } => {
-                        doc_sync_tx
+                        if doc_sync_tx
                             .send(TestDocSyncRequest {
                                 doc_id: doc_id.clone(),
                                 cursor,
                             })
                             .await
-                            .ok();
-                        if matches!(ack_mode, TestAckMode::Auto) {
-                            samod_ack_tx
+                            .is_err()
+                        {
+                            break 'harness;
+                        }
+                        if matches!(ack_mode, TestAckMode::Auto)
+                            && samod_ack_tx
                                 .send(SamodSyncAck::CursorAdvanced {
                                     partition_id,
                                     cursor,
                                 })
                                 .await
-                                .ok();
+                                .is_err()
+                        {
+                            break 'harness;
                         }
                     }
                     SamodSyncRequest::ImportDoc {
@@ -242,14 +260,16 @@ mod tests {
                         } else {
                             false
                         };
-                        if resolved {
-                            samod_ack_tx
+                        if resolved
+                            && samod_ack_tx
                                 .send(SamodSyncAck::CursorAdvanced {
                                     partition_id,
                                     cursor,
                                 })
                                 .await
-                                .ok();
+                                .is_err()
+                        {
+                            break 'harness;
                         }
                     }
                     SamodSyncRequest::DocDeleted {
@@ -260,15 +280,18 @@ mod tests {
                     } => {
                         let _ = dst
                             .partition_store()
-                            .remove_member(&partition_id, &doc_id)
+                            .remove_member(&partition_id, &doc_id, &empty_payload())
                             .await;
-                        samod_ack_tx
+                        if samod_ack_tx
                             .send(SamodSyncAck::CursorAdvanced {
                                 partition_id,
                                 cursor,
                             })
                             .await
-                            .ok();
+                            .is_err()
+                        {
+                            break 'harness;
+                        }
                     }
                 }
             }
@@ -300,7 +323,9 @@ mod tests {
             source_doc_ids.push(handle.document_id().to_string());
         }
         for doc_id in source_doc_ids.iter().take(10) {
-            src.partition_store().add_member(&part_id, doc_id).await?;
+            src.partition_store()
+                .add_member(&part_id, doc_id, &empty_payload())
+                .await?;
         }
 
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
@@ -368,7 +393,9 @@ mod tests {
                 .await?;
         }
         for doc_id in source_doc_ids.iter().skip(10).take(5) {
-            src.partition_store().add_member(&part_id, doc_id).await?;
+            src.partition_store()
+                .add_member(&part_id, doc_id, &empty_payload())
+                .await?;
         }
 
         wait_until(
@@ -390,12 +417,12 @@ mod tests {
         )
         .await?;
 
-        worker_stop.stop().await?;
         harness.stop().await;
+        worker_stop.stop().await?;
         repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
-        src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
+        src_store_stop.stop().await?;
         Ok(())
     }
 
@@ -416,7 +443,9 @@ mod tests {
             })
             .await?;
         let doc_id = handle.document_id().to_string();
-        src.partition_store().add_member(&part_id, &doc_id).await?;
+        src.partition_store()
+            .add_member(&part_id, &doc_id, &empty_payload())
+            .await?;
 
         let parsed = DocumentId::from_str(&doc_id)
             .map_err(|err| ferr!("invalid source doc id {doc_id}: {err}"))?;
@@ -488,12 +517,12 @@ mod tests {
         )
         .await?;
 
-        worker_stop.stop().await?;
         harness.stop().await;
+        worker_stop.stop().await?;
         repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
-        src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
+        src_store_stop.stop().await?;
         Ok(())
     }
 
@@ -514,7 +543,9 @@ mod tests {
             })
             .await?;
         let doc_id = handle.document_id().to_string();
-        src.partition_store().add_member(&part_id, &doc_id).await?;
+        src.partition_store()
+            .add_member(&part_id, &doc_id, &empty_payload())
+            .await?;
 
         let parsed = DocumentId::from_str(&doc_id)
             .map_err(|err| ferr!("invalid source doc id {doc_id}: {err}"))?;
@@ -602,12 +633,12 @@ mod tests {
         )
         .await?;
 
-        worker_stop.stop().await?;
         harness.stop().await;
+        worker_stop.stop().await?;
         repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
-        src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
+        src_store_stop.stop().await?;
         Ok(())
     }
 
@@ -628,7 +659,9 @@ mod tests {
             })
             .await?;
         let doc_id = handle.document_id().to_string();
-        src.partition_store().add_member(&part_id, &doc_id).await?;
+        src.partition_store()
+            .add_member(&part_id, &doc_id, &empty_payload())
+            .await?;
 
         let parsed = DocumentId::from_str(&doc_id)
             .map_err(|err| ferr!("invalid source doc id {doc_id}: {err}"))?;
@@ -726,12 +759,12 @@ mod tests {
             "stale ack must not regress persisted doc cursor"
         );
 
-        worker_stop.stop().await?;
         harness.stop().await;
+        worker_stop.stop().await?;
         repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
-        src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
+        src_store_stop.stop().await?;
         Ok(())
     }
 
@@ -752,7 +785,9 @@ mod tests {
             })
             .await?;
         let doc_id = handle.document_id().to_string();
-        src.partition_store().add_member(&part_id, &doc_id).await?;
+        src.partition_store()
+            .add_member(&part_id, &doc_id, &empty_payload())
+            .await?;
         let parsed = DocumentId::from_str(&doc_id)
             .map_err(|err| ferr!("invalid source doc id {doc_id}: {err}"))?;
         let exported = src
@@ -852,12 +887,12 @@ mod tests {
             "doc cursor should remain ack-gated for existing local docs after stale reset replay: {cursor:?}"
         );
 
-        worker_stop.stop().await?;
         harness.stop().await;
+        worker_stop.stop().await?;
         repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
-        src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
+        src_store_stop.stop().await?;
         Ok(())
     }
 
@@ -870,10 +905,11 @@ mod tests {
 
         sqlx::query(
             r#"
-            INSERT INTO partition_doc_state(partition_id, doc_id, deleted, latest_txid)
-            VALUES(?, ?, 0, 1)
-            ON CONFLICT(partition_id, doc_id) DO UPDATE SET
+            INSERT INTO partition_item_state(partition_id, item_id, deleted, item_payload_json, latest_txid)
+            VALUES(?, ?, 0, '{}', 1)
+            ON CONFLICT(partition_id, item_id) DO UPDATE SET
                 deleted = excluded.deleted,
+                item_payload_json = excluded.item_payload_json,
                 latest_txid = excluded.latest_txid
             "#,
         )
@@ -929,12 +965,12 @@ mod tests {
             "doc cursor must not advance when bootstrap page has unresolved docs: {cursor:?}"
         );
 
-        worker_stop.stop().await?;
         harness.stop().await;
+        worker_stop.stop().await?;
         repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
-        src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
+        src_store_stop.stop().await?;
         Ok(())
     }
 
@@ -947,10 +983,11 @@ mod tests {
 
         sqlx::query(
             r#"
-            INSERT INTO partition_doc_state(partition_id, doc_id, deleted, latest_txid)
-            VALUES(?, ?, 0, 1)
-            ON CONFLICT(partition_id, doc_id) DO UPDATE SET
+            INSERT INTO partition_item_state(partition_id, item_id, deleted, item_payload_json, latest_txid)
+            VALUES(?, ?, 0, '{}', 1)
+            ON CONFLICT(partition_id, item_id) DO UPDATE SET
                 deleted = excluded.deleted,
+                item_payload_json = excluded.item_payload_json,
                 latest_txid = excluded.latest_txid
             "#,
         )
@@ -970,7 +1007,7 @@ mod tests {
             .await?;
         let valid_doc_id = handle.document_id().to_string();
         src.partition_store()
-            .add_member(&part_id, &valid_doc_id)
+            .add_member(&part_id, &valid_doc_id, &empty_payload())
             .await?;
 
         let valid_doc_id_parsed = DocumentId::from_str(&valid_doc_id)
@@ -1029,12 +1066,12 @@ mod tests {
             "doc cursor must remain blocked when an earlier cursor failed: {cursor:?}"
         );
 
-        worker_stop.stop().await?;
         harness.stop().await;
+        worker_stop.stop().await?;
         repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
-        src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
+        src_store_stop.stop().await?;
         Ok(())
     }
 
@@ -1048,10 +1085,11 @@ mod tests {
 
         sqlx::query(
             r#"
-            INSERT INTO partition_doc_state(partition_id, doc_id, deleted, latest_txid)
-            VALUES(?, ?, 0, 1)
-            ON CONFLICT(partition_id, doc_id) DO UPDATE SET
+            INSERT INTO partition_item_state(partition_id, item_id, deleted, item_payload_json, latest_txid)
+            VALUES(?, ?, 0, '{}', 1)
+            ON CONFLICT(partition_id, item_id) DO UPDATE SET
                 deleted = excluded.deleted,
+                item_payload_json = excluded.item_payload_json,
                 latest_txid = excluded.latest_txid
             "#,
         )
@@ -1070,7 +1108,11 @@ mod tests {
             })
             .await?;
         src.partition_store()
-            .add_member(&p_ok, &ok_handle.document_id().to_string())
+            .add_member(
+                &p_ok,
+                &ok_handle.document_id().to_string(),
+                &empty_payload(),
+            )
             .await?;
 
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
@@ -1139,12 +1181,12 @@ mod tests {
             "expected healthy partition doc cursor to advance: {ok_cursor:?}"
         );
 
-        worker_stop.stop().await?;
         harness.stop().await;
+        worker_stop.stop().await?;
         repo_rpc_stop.stop().await?;
         node_stop.stop().await?;
-        src_store_stop.stop().await?;
         dst_store_stop.stop().await?;
+        src_store_stop.stop().await?;
         Ok(())
     }
 
@@ -1169,7 +1211,7 @@ mod tests {
             let doc_id = handle.document_id().to_string();
             repo_a
                 .partition_store()
-                .add_member(&part_id, &doc_id)
+                .add_member(&part_id, &doc_id, &empty_payload())
                 .await?;
             a_doc_ids.push(doc_id);
         }
@@ -1253,7 +1295,7 @@ mod tests {
             let doc_id = handle.document_id().to_string();
             repo_b
                 .partition_store()
-                .add_member(&part_id, &doc_id)
+                .add_member(&part_id, &doc_id, &empty_payload())
                 .await?;
             b_new_doc_ids.push(doc_id);
         }

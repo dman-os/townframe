@@ -202,7 +202,8 @@ pub async fn spawn_peer_sync_worker(
                 biased;
                 recv = worker.samod_ack_rx.recv() => {
                     let Some(ack) = recv else {
-                        eyre::bail!("samod ack channel closed");
+                        debug!("samod ack channel closed; stopping peer sync worker");
+                        break;
                     };
                     worker.handle_samod_ack(ack).await?;
                 }
@@ -224,6 +225,7 @@ pub async fn spawn_peer_sync_worker(
                 }
             }
         }
+        Ok(())
     };
     let join_handle = tokio::spawn({
         let cancel_token = cancel_token.clone();
@@ -352,9 +354,9 @@ impl PeerSyncWorker {
                     *member_replay_complete = true;
                 } else if stream == SubscriptionStreamKind::Doc {
                     *doc_replay_complete = true;
-                    if !*replay_phase_finished {
-                        *replay_phase_finished = true;
-                    }
+                }
+                if *member_replay_complete && *doc_replay_complete && !*replay_phase_finished {
+                    *replay_phase_finished = true;
                 }
                 if *member_replay_complete && *doc_replay_complete && !*bootstrap_emitted {
                     self.events_tx

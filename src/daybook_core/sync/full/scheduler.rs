@@ -11,7 +11,7 @@ pub(super) struct Scheduler {
     pub active_docs: HashMap<DocumentId, ActiveDocSyncState>,
     pub active_imports: HashMap<DocumentId, ActiveImportSyncState>,
     pub active_blobs: HashMap<String, ActiveBlobSyncState>,
-    pub synced_blobs: HashMap<String, SyncedBlobSyncState>,
+    pub blob_requirements: HashMap<String, HashSet<PartitionKey>>,
     pub cursor_ack_state: HashMap<EndpointId, HashMap<PartitionId, PartitionCursorAckState>>,
 }
 
@@ -319,10 +319,7 @@ impl Scheduler {
             .iter()
             .filter_map(|(task, pending)| match task {
                 SyncTask::Blob(hash) => {
-                    if pending.due_at <= now
-                        && !self.active_blobs.contains_key(hash)
-                        && !self.synced_blobs.contains_key(hash)
-                    {
+                    if pending.due_at <= now && !self.active_blobs.contains_key(hash) {
                         Some(hash.clone())
                     } else {
                         None

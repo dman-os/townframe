@@ -8,17 +8,17 @@ use crate::repo::BigRepo;
 use crate::sync::protocol::*;
 
 impl BigRepo {
-    pub(super) async fn ensure_schema(&self) -> Res<()> {
-        self.partition_store.ensure_schema().await
-    }
-
     pub(super) async fn record_doc_heads_change(
         &self,
         doc_id: &samod::DocumentId,
         heads: Vec<automerge::ChangeHash>,
     ) -> Res<()> {
+        let item_payload = serde_json::json!({
+            "heads": crate::serialize_commit_heads(&heads),
+            "change_count_hint": 1_u64,
+        });
         self.partition_store
-            .record_doc_heads_change(doc_id, heads)
+            .record_member_item_change(&doc_id.to_string(), &item_payload)
             .await
     }
 
@@ -142,7 +142,7 @@ impl BigRepo {
             return Ok(false);
         }
         let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT EXISTS(SELECT 1 FROM partition_membership_state WHERE doc_id = ",
+            "SELECT EXISTS(SELECT 1 FROM partition_membership_state WHERE item_id = ",
         );
         query.push_bind(doc_id);
         query.push(" AND present = 1 AND partition_id IN (");
@@ -174,7 +174,7 @@ impl BigRepo {
             query.push_bind(doc_id);
         }
         query.push(") SELECT requested.doc_id FROM requested WHERE NOT EXISTS (");
-        query.push("SELECT 1 FROM partition_membership_state m WHERE m.doc_id = requested.doc_id");
+        query.push("SELECT 1 FROM partition_membership_state m WHERE m.item_id = requested.doc_id");
         query.push(" AND m.present = 1 AND m.partition_id IN (");
         let mut partitions = query.separated(", ");
         for partition_id in allowed_partitions {
@@ -208,6 +208,10 @@ mod tests {
         BigRepo::boot_with_repo(repo, BigRepoConfig::new("sqlite::memory:".to_string())).await
     }
 
+    fn empty_payload() -> serde_json::Value {
+        serde_json::json!({})
+    }
+
     #[tokio::test]
     async fn bigrepo_emits_partition_doc_events_on_doc_write() -> Res<()> {
         let big_repo = boot_big_repo().await?;
@@ -218,7 +222,7 @@ mod tests {
 
         big_repo
             .partition_store()
-            .add_member(&partition_id, &doc_id)
+            .add_member(&partition_id, &doc_id, &empty_payload())
             .await?;
         handle
             .with_document(|doc| {
@@ -245,7 +249,7 @@ mod tests {
         assert!(events
             .events
             .iter()
-            .any(|evt| matches!(evt.deets, PartitionDocEventDeets::DocChanged { .. })));
+            .any(|evt| matches!(evt.deets, PartitionDocEventDeets::ItemChanged { .. })));
         assert!(events
             .cursors
             .iter()
@@ -262,7 +266,7 @@ mod tests {
         let partition_id = "p-remove".into();
         big_repo
             .partition_store()
-            .add_member(&partition_id, &target_doc_id)
+            .add_member(&partition_id, &target_doc_id, &empty_payload())
             .await?;
         handle
             .with_document(|doc| {
@@ -274,7 +278,7 @@ mod tests {
             .await?;
         big_repo
             .partition_store()
-            .remove_member(&partition_id, &target_doc_id)
+            .remove_member(&partition_id, &target_doc_id, &empty_payload())
             .await?;
 
         let snapshot = big_repo
@@ -293,7 +297,7 @@ mod tests {
             !snapshot.events.iter().any(|event| {
                 matches!(
                     event.deets,
-                    PartitionMemberEventDeets::MemberUpsert { ref doc_id } if doc_id == &target_doc_id
+                    PartitionMemberEventDeets::MemberUpsert { ref item_id, .. } if item_id == &target_doc_id
                 )
             }),
             "removed doc should not remain in snapshot membership"
@@ -309,7 +313,7 @@ mod tests {
 
         big_repo
             .partition_store()
-            .add_member(&partition_id, &unknown_doc_id)
+            .add_member(&partition_id, &unknown_doc_id, &empty_payload())
             .await?;
         assert!(
             big_repo
@@ -320,7 +324,7 @@ mod tests {
 
         big_repo
             .partition_store()
-            .remove_member(&partition_id, &unknown_doc_id)
+            .remove_member(&partition_id, &unknown_doc_id, &empty_payload())
             .await?;
         assert!(
             !big_repo
@@ -343,7 +347,7 @@ mod tests {
             let doc_id = handle.document_id().to_string();
             big_repo
                 .partition_store()
-                .add_member(&partition_id, &doc_id)
+                .add_member(&partition_id, &doc_id, &empty_payload())
                 .await?;
             expected.insert(doc_id);
         }
@@ -364,8 +368,8 @@ mod tests {
                 )
                 .await?;
             for evt in &page.events {
-                if let PartitionMemberEventDeets::MemberUpsert { doc_id } = &evt.deets {
-                    seen.insert(doc_id.clone());
+                if let PartitionMemberEventDeets::MemberUpsert { item_id, .. } = &evt.deets {
+                    seen.insert(item_id.clone());
                 }
             }
             let cursor = page
@@ -402,7 +406,7 @@ mod tests {
             let doc_id = handle.document_id().to_string();
             big_repo
                 .partition_store()
-                .add_member(&partition_id, &doc_id)
+                .add_member(&partition_id, &doc_id, &empty_payload())
                 .await?;
             expected.insert(doc_id);
         }
@@ -423,8 +427,8 @@ mod tests {
                 )
                 .await?;
             for evt in &page.events {
-                if let PartitionDocEventDeets::DocChanged { doc_id, .. } = &evt.deets {
-                    seen.insert(doc_id.clone());
+                if let PartitionDocEventDeets::ItemChanged { item_id, .. } = &evt.deets {
+                    seen.insert(item_id.clone());
                 }
             }
             let cursor = page
@@ -451,11 +455,17 @@ mod tests {
 
         let d1 = big_repo.create_doc(automerge::Automerge::new()).await?;
         let d1_id = d1.document_id().to_string();
-        big_repo.partition_store().add_member(&p1, &d1_id).await?;
+        big_repo
+            .partition_store()
+            .add_member(&p1, &d1_id, &empty_payload())
+            .await?;
 
         let d2 = big_repo.create_doc(automerge::Automerge::new()).await?;
         let d2_id = d2.document_id().to_string();
-        big_repo.partition_store().add_member(&p2, &d2_id).await?;
+        big_repo
+            .partition_store()
+            .add_member(&p2, &d2_id, &empty_payload())
+            .await?;
 
         assert!(
             big_repo

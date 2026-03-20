@@ -913,7 +913,7 @@ impl PlugsRepo {
                             warn!(plug_id = id, "ignoring stale plug patch: entry missing at heads");
                             continue;
                         };
-                        let prev_hashes = self
+                        let prev_hashes = match self
                             .store
                             .query_sync(|store| {
                                 store
@@ -923,10 +923,30 @@ impl PlugsRepo {
                             })
                             .await
                             .map(|manifest| Self::blob_hashes_for_manifest(manifest.as_ref()))
-                            .transpose()?
-                            .unwrap_or_default();
+                            .transpose()
+                        {
+                            Ok(value) => value.unwrap_or_default(),
+                            Err(err) => {
+                                warn!(
+                                    plug_id = id,
+                                    ?err,
+                                    "failed reading previous plug blob hashes; skipping event"
+                                );
+                                continue;
+                            }
+                        };
                         let next_hashes =
-                            Self::blob_hashes_for_manifest(new_versioned.val.as_ref())?;
+                            match Self::blob_hashes_for_manifest(new_versioned.val.as_ref()) {
+                                Ok(value) => value,
+                                Err(err) => {
+                                    warn!(
+                                        plug_id = id,
+                                        ?err,
+                                        "failed reading next plug blob hashes; skipping event"
+                                    );
+                                    continue;
+                                }
+                            };
 
                         self.store
                             .mutate_sync(|store| {
@@ -934,8 +954,17 @@ impl PlugsRepo {
                                 store.rebuild_indices();
                             })
                             .await?;
-                        self.publish_plug_scope_diff(&prev_hashes, &next_hashes)
-                            .await?;
+                        if let Err(err) = self
+                            .publish_plug_scope_diff(&prev_hashes, &next_hashes)
+                            .await
+                        {
+                            warn!(
+                                plug_id = id,
+                                ?err,
+                                "failed publishing plug scope hash diff; skipping event"
+                            );
+                            continue;
+                        }
                     }
                     PlugsEvent::PlugDeleted { id, .. } => {
                         let (removed_manifest, _hash) = self
@@ -950,9 +979,26 @@ impl PlugsRepo {
                             })
                             .await?;
                         if let Some(removed) = removed_manifest {
-                            let removed_hashes = Self::blob_hashes_for_manifest(removed.as_ref())?;
-                            self.publish_plug_scope_diff(&removed_hashes, &HashSet::new())
-                                .await?;
+                            let removed_hashes = match Self::blob_hashes_for_manifest(
+                                removed.as_ref(),
+                            ) {
+                                Ok(value) => value,
+                                Err(err) => {
+                                    warn!(
+                                        plug_id = id,
+                                        ?err,
+                                        "failed reading removed plug blob hashes; skipping event"
+                                    );
+                                    continue;
+                                }
+                            };
+                            if let Err(err) = self
+                                .publish_plug_scope_diff(&removed_hashes, &HashSet::new())
+                                .await
+                            {
+                                warn!(plug_id = id, ?err, "failed publishing removed plug scope hash diff; skipping event");
+                                continue;
+                            }
                         }
                     }
                 }

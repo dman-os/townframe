@@ -84,24 +84,13 @@ pub struct BigRepo {
 pub type SharedBigRepo = Arc<BigRepo>;
 
 impl BigRepo {
-    pub async fn boot_with_repo(repo: samod::Repo, config: BigRepoConfig) -> Res<Arc<Self>> {
-        let connect_options = SqliteConnectOptions::from_str(&config.sqlite_url)
-            .wrap_err_with(|| format!("invalid sqlite url: {}", config.sqlite_url))?
-            .create_if_missing(true);
-        let state_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(connect_options)
-            .await
-            .wrap_err("failed connecting big repo sqlite")?;
-        let (partition_events_tx, _) = broadcast::channel(config.subscription_capacity.max(1));
-        let partition_forwarder_cancel = CancellationToken::new();
-        let partition_forwarders = Arc::new(utils_rs::AbortableJoinSet::new());
-        let partition_store = Arc::new(PartitionStore::new(
-            state_pool.clone(),
-            partition_events_tx.clone(),
-            partition_forwarder_cancel.clone(),
-            Arc::clone(&partition_forwarders),
-        ));
+    async fn boot_with_components(
+        repo: samod::Repo,
+        state_pool: sqlx::SqlitePool,
+        partition_store: Arc<PartitionStore>,
+        partition_forwarder_cancel: CancellationToken,
+        partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
+    ) -> Res<Arc<Self>> {
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
 
         let out = Arc::new(Self {
@@ -114,7 +103,6 @@ impl BigRepo {
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
             persistent_change_brokers: std::sync::Mutex::new(default()),
         });
-        out.ensure_schema().await?;
         let (_head_reg, mut head_rx) = out
             .subscribe_head_listener(BigRepoHeadFilter { doc_id: None })
             .await?;
@@ -155,6 +143,51 @@ impl BigRepo {
                 .expect("failed spawning remote heads forwarding worker");
         }
         Ok(out)
+    }
+
+    pub async fn boot_with_repo(repo: samod::Repo, config: BigRepoConfig) -> Res<Arc<Self>> {
+        let connect_options = SqliteConnectOptions::from_str(&config.sqlite_url)
+            .wrap_err_with(|| format!("invalid sqlite url: {}", config.sqlite_url))?
+            .create_if_missing(true);
+        let state_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(connect_options)
+            .await
+            .wrap_err("failed connecting big repo sqlite")?;
+        let (partition_events_tx, _) = broadcast::channel(config.subscription_capacity.max(1));
+        let partition_forwarder_cancel = CancellationToken::new();
+        let partition_forwarders = Arc::new(utils_rs::AbortableJoinSet::new());
+        let partition_store = Arc::new(PartitionStore::new(
+            state_pool.clone(),
+            partition_events_tx,
+            partition_forwarder_cancel.clone(),
+            Arc::clone(&partition_forwarders),
+        ));
+        partition_store.ensure_schema().await?;
+        Self::boot_with_components(
+            repo,
+            state_pool,
+            partition_store,
+            partition_forwarder_cancel,
+            partition_forwarders,
+        )
+        .await
+    }
+
+    pub async fn boot_with_repo_and_partition_store(
+        repo: samod::Repo,
+        partition_store: Arc<PartitionStore>,
+        partition_forwarder_cancel: CancellationToken,
+        partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
+    ) -> Res<Arc<Self>> {
+        Self::boot_with_components(
+            repo,
+            partition_store.state_pool().clone(),
+            partition_store,
+            partition_forwarder_cancel,
+            partition_forwarders,
+        )
+        .await
     }
 
     pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
@@ -216,6 +249,59 @@ impl BigRepo {
         ))
     }
 
+    pub async fn boot_with_partition_store(
+        config: Config,
+        partition_store: Arc<PartitionStore>,
+        partition_forwarder_cancel: CancellationToken,
+        partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
+    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
+        let Config { peer_id, storage } = config;
+        let peer_id = samod::PeerId::from_string(peer_id);
+        let repo = samod::Repo::build_tokio().with_peer_id(peer_id);
+        let repo = match storage {
+            StorageConfig::Disk { path, .. } => {
+                std::fs::create_dir_all(&path).wrap_err_with(|| {
+                    format!("Failed to create storage directory: {}", path.display())
+                })?;
+                let storage_path = path
+                    .to_str()
+                    .ok_or_else(|| eyre::eyre!("storage path contains invalid UTF-8"))?;
+                repo.with_storage(samod::storage::TokioFilesystemStorage::new(storage_path))
+                    .with_announce_policy(samod::AlwaysAnnounce)
+                    .load()
+                    .await
+            }
+            StorageConfig::Memory => {
+                repo.with_storage(samod::storage::InMemoryStorage::new())
+                    .with_announce_policy(samod::AlwaysAnnounce)
+                    .load()
+                    .await
+            }
+        };
+        let out = Self::boot_with_repo_and_partition_store(
+            repo.clone(),
+            partition_store,
+            partition_forwarder_cancel.clone(),
+            Arc::clone(&partition_forwarders),
+        )
+        .await?;
+        let change_manager_stop = out
+            .change_manager_stop
+            .lock()
+            .expect(ERROR_MUTEX)
+            .take()
+            .expect("BigRepo change manager stop token missing");
+        Ok((
+            Arc::clone(&out),
+            BigRepoStopToken {
+                repo,
+                change_manager_stop: Some(change_manager_stop),
+                partition_forwarder_cancel,
+                partition_forwarders,
+            },
+        ))
+    }
+
     pub fn samod_repo(&self) -> &samod::Repo {
         &self.repo
     }
@@ -269,14 +355,19 @@ impl BigRepo {
     async fn ensure_persistent_change_brokers_for_known_docs(
         self: &Arc<Self>,
     ) -> Res<Vec<Arc<changes::DocChangeBrokerLease>>> {
-        let doc_ids: Vec<String> =
-            sqlx::query_scalar("SELECT DISTINCT doc_id FROM doc_version_state")
-                .fetch_all(&self.state_pool)
-                .await?;
+        let doc_ids: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT DISTINCT item_id AS doc_id FROM partition_membership_state
+            UNION
+            SELECT DISTINCT item_id AS doc_id FROM partition_item_state
+            "#,
+        )
+        .fetch_all(&self.state_pool)
+        .await?;
         let mut leases = Vec::new();
         for raw_doc_id in doc_ids {
             let doc_id = DocumentId::from_str(&raw_doc_id)
-                .map_err(|err| ferr!("invalid stored doc id in doc_version_state: {err}"))?;
+                .map_err(|err| ferr!("invalid stored doc id in partition state: {err}"))?;
             if let Some(handle) = self.find_doc_handle(&doc_id).await? {
                 let lease = self.ensure_persistent_change_broker(handle).await?;
                 leases.push(lease);
@@ -890,7 +981,7 @@ mod tests {
             .map_err(|err| ferr!("failed exporting source doc: {err}"))?;
 
         dst.partition_store()
-            .add_member(&part_id, &doc_id.to_string())
+            .add_member(&part_id, &doc_id.to_string(), &serde_json::json!({}))
             .await?;
 
         let _handle = dst.import_doc(doc_id.clone(), exported).await?;
@@ -918,11 +1009,14 @@ mod tests {
                 event.partition_id == part_id
                     && matches!(
                         &event.deets,
-                        crate::sync::protocol::PartitionDocEventDeets::DocChanged {
-                            doc_id: event_doc_id,
-                            heads,
-                            ..
-                        } if event_doc_id == &doc_id.to_string() && !heads.is_empty()
+                        crate::sync::protocol::PartitionDocEventDeets::ItemChanged {
+                            item_id: event_doc_id,
+                            payload,
+                        } if event_doc_id == &doc_id.to_string()
+                            && payload
+                                .get("heads")
+                                .and_then(|value| value.as_array())
+                                .is_some_and(|heads| !heads.is_empty())
                     )
             }),
             "import must produce current partition doc events with imported heads"

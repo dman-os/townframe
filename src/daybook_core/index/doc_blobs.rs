@@ -245,19 +245,35 @@ impl DocBlobsIndexRepo {
         heads: &ChangeHashSet,
         blobs: &HashMap<String, u64>,
     ) -> Res<ReindexDocOutcome> {
+        let mut tx = self.db_pool.begin().await?;
         let prev_hashes: HashSet<String> = self
-            .list_hashes_for_doc(doc_id)
+            .list_hashes_for_doc_tx(tx.as_mut(), doc_id)
             .await?
             .into_iter()
             .collect();
+        let next_hashes: HashSet<String> = blobs.keys().cloned().collect();
+
+        let mut hashes_to_remove = HashSet::new();
+        for hash in prev_hashes.difference(&next_hashes) {
+            if self
+                .hash_is_unused_excluding_doc_tx(tx.as_mut(), hash, doc_id)
+                .await?
+            {
+                hashes_to_remove.insert(hash.clone());
+            }
+        }
+        let hashes_to_add: HashSet<String> =
+            next_hashes.difference(&prev_hashes).cloned().collect();
+        self.publish_hash_delta_with_retry(&hashes_to_add, &hashes_to_remove)
+            .await?;
+
         sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1")
             .bind(doc_id)
-            .execute(&self.db_pool)
+            .execute(&mut *tx)
             .await?;
 
         if blobs.is_empty() {
-            self.publish_hash_diff(&prev_hashes, &HashSet::new())
-                .await?;
+            tx.commit().await?;
             return Ok(ReindexDocOutcome::Evicted);
         }
 
@@ -280,42 +296,71 @@ impl DocBlobsIndexRepo {
         query_builder.push(
             " ON CONFLICT(doc_id, blob_hash) DO UPDATE SET origin_heads = excluded.origin_heads, length_octets = excluded.length_octets",
         );
-        query_builder.build().execute(&self.db_pool).await?;
-        let next_hashes: HashSet<String> = blobs.keys().cloned().collect();
-        self.publish_hash_diff(&prev_hashes, &next_hashes).await?;
+        query_builder.build().execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(ReindexDocOutcome::Present)
     }
 
     pub async fn delete_doc(&self, doc_id: &DocId) -> Res<()> {
+        let mut tx = self.db_pool.begin().await?;
         let prev_hashes: HashSet<String> = self
-            .list_hashes_for_doc(doc_id)
+            .list_hashes_for_doc_tx(tx.as_mut(), doc_id)
             .await?
             .into_iter()
             .collect();
+        let mut hashes_to_remove = HashSet::new();
+        for hash in &prev_hashes {
+            if self
+                .hash_is_unused_excluding_doc_tx(tx.as_mut(), hash, doc_id)
+                .await?
+            {
+                hashes_to_remove.insert(hash.clone());
+            }
+        }
+        self.publish_hash_delta_with_retry(&HashSet::new(), &hashes_to_remove)
+            .await?;
         sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1")
             .bind(doc_id)
-            .execute(&self.db_pool)
+            .execute(&mut *tx)
             .await?;
-        self.publish_hash_diff(&prev_hashes, &HashSet::new())
-            .await?;
+        tx.commit().await?;
         Ok(())
     }
 
-    async fn publish_hash_diff(
+    async fn publish_hash_delta_with_retry(
         &self,
-        prev_hashes: &HashSet<String>,
-        next_hashes: &HashSet<String>,
+        hashes_to_add: &HashSet<String>,
+        hashes_to_remove: &HashSet<String>,
     ) -> Res<()> {
-        for hash in next_hashes.difference(prev_hashes) {
-            self.blobs_repo
-                .add_hash_to_scope(BlobScope::Docs, hash)
-                .await?;
+        const MAX_ATTEMPTS: usize = 3;
+        for hash in hashes_to_add {
+            for attempt in 1..=MAX_ATTEMPTS {
+                let result = self
+                    .blobs_repo
+                    .add_hash_to_scope(BlobScope::Docs, hash)
+                    .await;
+                match result {
+                    Ok(()) => break,
+                    Err(err) if attempt == MAX_ATTEMPTS => return Err(err),
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_millis((attempt * 100) as u64)).await
+                    }
+                }
+            }
         }
-        for hash in prev_hashes.difference(next_hashes) {
-            if self.list_docs_for_hash(hash).await?.is_empty() {
-                self.blobs_repo
+        for hash in hashes_to_remove {
+            for attempt in 1..=MAX_ATTEMPTS {
+                let result = self
+                    .blobs_repo
                     .remove_hash_from_scope(BlobScope::Docs, hash)
-                    .await?;
+                    .await;
+                match result {
+                    Ok(()) => break,
+                    Err(err) if attempt == MAX_ATTEMPTS => return Err(err),
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_millis((attempt * 100) as u64)).await
+                    }
+                }
             }
         }
         Ok(())
@@ -334,6 +379,48 @@ impl DocBlobsIndexRepo {
         .fetch_all(&self.db_pool)
         .await?;
         Ok(hashes)
+    }
+
+    async fn list_hashes_for_doc_tx(
+        &self,
+        tx: &mut sqlx::SqliteConnection,
+        doc_id: &DocId,
+    ) -> Res<Vec<String>> {
+        let hashes: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT blob_hash
+            FROM doc_blob_refs
+            WHERE doc_id = ?1
+            ORDER BY blob_hash ASC
+            "#,
+        )
+        .bind(doc_id)
+        .fetch_all(tx)
+        .await?;
+        Ok(hashes)
+    }
+
+    async fn hash_is_unused_excluding_doc_tx(
+        &self,
+        tx: &mut sqlx::SqliteConnection,
+        hash: &str,
+        doc_id: &DocId,
+    ) -> Res<bool> {
+        let exists_other: i64 = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM doc_blob_refs
+                WHERE blob_hash = ?1
+                  AND doc_id != ?2
+            )
+            "#,
+        )
+        .bind(hash)
+        .bind(doc_id)
+        .fetch_one(tx)
+        .await?;
+        Ok(exists_other == 0)
     }
 
     pub async fn list_blob_refs_for_doc(&self, doc_id: &DocId) -> Res<Vec<DocBlobRef>> {
