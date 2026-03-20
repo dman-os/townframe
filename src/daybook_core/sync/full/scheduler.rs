@@ -9,6 +9,7 @@ pub(super) struct Scheduler {
     pub partitions_to_refresh: HashSet<PartitionKey>,
     pub peer_sessions_to_refresh: HashSet<EndpointId>,
     pub active_docs: HashMap<DocumentId, ActiveDocSyncState>,
+    pub active_imports: HashMap<DocumentId, ActiveImportSyncState>,
     pub active_blobs: HashMap<String, ActiveBlobSyncState>,
     pub synced_blobs: HashMap<String, SyncedBlobSyncState>,
     pub cursor_ack_state: HashMap<EndpointId, HashMap<PartitionId, PartitionCursorAckState>>,
@@ -17,6 +18,7 @@ pub(super) struct Scheduler {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(super) enum SyncTask {
     Doc(DocumentId),
+    Import(DocumentId),
     Blob(String),
 }
 
@@ -46,6 +48,12 @@ impl Scheduler {
             .any(|task| matches!(task, SyncTask::Doc(_)))
     }
 
+    pub fn has_queued_imports(&self) -> bool {
+        self.queued_tasks
+            .iter()
+            .any(|task| matches!(task, SyncTask::Import(_)))
+    }
+
     pub fn has_queued_blobs(&self) -> bool {
         self.queued_tasks
             .iter()
@@ -69,6 +77,12 @@ impl Scheduler {
             .cloned()
     }
 
+    pub fn pending_import_state(&self, doc_id: &DocumentId) -> Option<PendingTaskState> {
+        self.pending_tasks
+            .get(&SyncTask::Import(doc_id.clone()))
+            .cloned()
+    }
+
     pub fn enqueue_doc(&mut self, doc_id: DocumentId) {
         self.queued_tasks.insert(SyncTask::Doc(doc_id));
     }
@@ -77,9 +91,18 @@ impl Scheduler {
         self.queued_tasks.insert(SyncTask::Blob(hash));
     }
 
+    pub fn enqueue_import(&mut self, doc_id: DocumentId) {
+        self.queued_tasks.insert(SyncTask::Import(doc_id));
+    }
+
     pub fn clear_doc_task(&mut self, doc_id: &DocumentId) {
         self.pending_tasks.remove(&SyncTask::Doc(doc_id.clone()));
         self.queued_tasks.remove(&SyncTask::Doc(doc_id.clone()));
+    }
+
+    pub fn clear_import_task(&mut self, doc_id: &DocumentId) {
+        self.pending_tasks.remove(&SyncTask::Import(doc_id.clone()));
+        self.queued_tasks.remove(&SyncTask::Import(doc_id.clone()));
     }
 
     pub fn clear_blob_task(&mut self, hash: &str) {
@@ -113,6 +136,19 @@ impl Scheduler {
         self.enqueue_blob(hash.to_string());
     }
 
+    pub fn set_import_pending_now(&mut self, doc_id: &DocumentId) {
+        let now = std::time::Instant::now();
+        self.pending_tasks
+            .entry(SyncTask::Import(doc_id.clone()))
+            .or_insert(PendingTaskState {
+                attempt_no: 0,
+                last_backoff: Duration::from_millis(0),
+                last_attempt_at: now,
+                due_at: now,
+            });
+        self.enqueue_import(doc_id.clone());
+    }
+
     pub fn set_doc_backoff(&mut self, doc_id: &DocumentId, pending: PendingTaskState) {
         self.pending_tasks
             .insert(SyncTask::Doc(doc_id.clone()), pending);
@@ -123,12 +159,21 @@ impl Scheduler {
             .insert(SyncTask::Blob(hash.to_string()), pending);
     }
 
+    pub fn set_import_backoff(&mut self, doc_id: &DocumentId, pending: PendingTaskState) {
+        self.pending_tasks
+            .insert(SyncTask::Import(doc_id.clone()), pending);
+    }
+
     pub fn clear_doc_pending(&mut self, doc_id: &DocumentId) {
         self.pending_tasks.remove(&SyncTask::Doc(doc_id.clone()));
     }
 
     pub fn clear_blob_pending(&mut self, hash: &str) {
         self.pending_tasks.remove(&SyncTask::Blob(hash.to_string()));
+    }
+
+    pub fn clear_import_pending(&mut self, doc_id: &DocumentId) {
+        self.pending_tasks.remove(&SyncTask::Import(doc_id.clone()));
     }
 
     pub fn drain_queued_docs(&mut self, budget: usize) -> Vec<DocumentId> {
@@ -140,7 +185,7 @@ impl Scheduler {
             .iter()
             .filter_map(|task| match task {
                 SyncTask::Doc(doc_id) => Some(doc_id.clone()),
-                SyncTask::Blob(_) => None,
+                SyncTask::Import(_) | SyncTask::Blob(_) => None,
             })
             .take(budget)
             .collect();
@@ -159,7 +204,7 @@ impl Scheduler {
             .iter()
             .filter_map(|task| match task {
                 SyncTask::Blob(hash) => Some(hash.clone()),
-                SyncTask::Doc(_) => None,
+                SyncTask::Doc(_) | SyncTask::Import(_) => None,
             })
             .take(budget)
             .collect();
@@ -169,8 +214,27 @@ impl Scheduler {
         blobs
     }
 
+    pub fn drain_queued_imports(&mut self, budget: usize) -> Vec<DocumentId> {
+        if budget == 0 {
+            return Vec::new();
+        }
+        let docs: Vec<DocumentId> = self
+            .queued_tasks
+            .iter()
+            .filter_map(|task| match task {
+                SyncTask::Import(doc_id) => Some(doc_id.clone()),
+                SyncTask::Doc(_) | SyncTask::Blob(_) => None,
+            })
+            .take(budget)
+            .collect();
+        for doc_id in &docs {
+            self.queued_tasks.remove(&SyncTask::Import(doc_id.clone()));
+        }
+        docs
+    }
+
     pub fn active_worker_count(&self) -> usize {
-        self.active_docs.len() + self.active_blobs.len()
+        self.active_docs.len() + self.active_imports.len() + self.active_blobs.len()
     }
 
     pub fn available_total_boot_budget(&self, max_active_sync_workers: usize) -> usize {
@@ -182,9 +246,21 @@ impl Scheduler {
         if remaining_total == 0 {
             return 0;
         }
-        let doc_cap = max_active_sync_workers.saturating_sub(MIN_BLOB_WORKER_FLOOR);
+        let doc_cap =
+            max_active_sync_workers.saturating_sub(MIN_BLOB_WORKER_FLOOR + MIN_IMPORT_WORKER_FLOOR);
         let remaining_doc_cap = doc_cap.saturating_sub(self.active_docs.len());
         remaining_total.min(remaining_doc_cap)
+    }
+
+    pub fn available_import_boot_budget(&self, max_active_sync_workers: usize) -> usize {
+        let remaining_total = self.available_total_boot_budget(max_active_sync_workers);
+        if remaining_total == 0 {
+            return 0;
+        }
+        let import_cap =
+            max_active_sync_workers.saturating_sub(MIN_DOC_WORKER_FLOOR + MIN_BLOB_WORKER_FLOOR);
+        let remaining_import_cap = import_cap.saturating_sub(self.active_imports.len());
+        remaining_total.min(remaining_import_cap)
     }
 
     pub fn available_blob_boot_budget(&self, max_active_sync_workers: usize) -> usize {
@@ -192,7 +268,8 @@ impl Scheduler {
         if remaining_total == 0 {
             return 0;
         }
-        let blob_cap = max_active_sync_workers.saturating_sub(MIN_DOC_WORKER_FLOOR);
+        let blob_cap =
+            max_active_sync_workers.saturating_sub(MIN_DOC_WORKER_FLOOR + MIN_IMPORT_WORKER_FLOOR);
         let remaining_blob_cap = blob_cap.saturating_sub(self.active_blobs.len());
         remaining_total.min(remaining_blob_cap)
     }
@@ -200,6 +277,7 @@ impl Scheduler {
     pub fn backoff_janitor_enqueue_due(&mut self, max_active_sync_workers: usize) {
         let now = std::time::Instant::now();
         let doc_budget = self.available_doc_boot_budget(max_active_sync_workers);
+        let import_budget = self.available_import_boot_budget(max_active_sync_workers);
         let blob_budget = self.available_blob_boot_budget(max_active_sync_workers);
 
         let due_docs: Vec<_> = self
@@ -219,6 +297,23 @@ impl Scheduler {
             self.enqueue_doc(doc_id);
         }
 
+        let due_imports: Vec<_> = self
+            .pending_tasks
+            .iter()
+            .filter_map(|(task, pending)| match task {
+                SyncTask::Import(doc_id)
+                    if pending.due_at <= now && !self.active_imports.contains_key(doc_id) =>
+                {
+                    Some(doc_id.clone())
+                }
+                _ => None,
+            })
+            .take(import_budget)
+            .collect();
+        for doc_id in due_imports {
+            self.enqueue_import(doc_id);
+        }
+
         let due_blobs: Vec<_> = self
             .pending_tasks
             .iter()
@@ -233,7 +328,7 @@ impl Scheduler {
                         None
                     }
                 }
-                SyncTask::Doc(_) => None,
+                SyncTask::Doc(_) | SyncTask::Import(_) => None,
             })
             .take(blob_budget)
             .collect();
@@ -416,6 +511,21 @@ mod tests {
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0], doc_id);
         assert!(scheduler.is_doc_pending(&batch[0]));
+    }
+
+    #[test]
+    fn import_task_dedup_single_pending_entry() {
+        let mut scheduler = Scheduler::default();
+        let doc_id = doc("22222222-2222-2222-2222-222222222222");
+
+        scheduler.set_import_pending_now(&doc_id);
+        scheduler.set_import_pending_now(&doc_id);
+        scheduler.enqueue_import(doc_id.clone());
+
+        let batch = scheduler.drain_queued_imports(32);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0], doc_id);
+        assert!(scheduler.pending_import_state(&batch[0]).is_some());
     }
 
     #[test]

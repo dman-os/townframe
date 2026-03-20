@@ -155,7 +155,7 @@ mod tests {
                                         src.samod_repo().local_export(parsed.clone()).await;
                                     resolved = match exported {
                                         Ok(exported) => {
-                                            dst.import_doc_fast(parsed, exported).await.unwrap();
+                                            dst.import_doc(parsed, exported).await.unwrap();
                                             true
                                         }
                                         Err(_) => false,
@@ -234,7 +234,7 @@ mod tests {
                         let resolved = if let Ok(parsed) = DocumentId::from_str(&doc_id) {
                             match src.samod_repo().local_export(parsed.clone()).await {
                                 Ok(exported) => {
-                                    dst.import_doc_fast(parsed, exported).await.unwrap();
+                                    dst.import_doc(parsed, exported).await.unwrap();
                                     true
                                 }
                                 Err(_) => false,
@@ -425,7 +425,7 @@ mod tests {
             .local_export(parsed.clone())
             .await
             .map_err(|err| ferr!("failed exporting source doc: {err}"))?;
-        let _ = dst.import_doc_fast(parsed.clone(), exported).await?;
+        let _ = dst.import_doc(parsed.clone(), exported).await?;
         assert_eq!(
             dst.partition_member_count(&part_id).await?,
             0,
@@ -523,7 +523,7 @@ mod tests {
             .local_export(parsed.clone())
             .await
             .map_err(|err| ferr!("failed exporting source doc: {err}"))?;
-        let _ = dst.import_doc_fast(parsed.clone(), exported).await?;
+        let _ = dst.import_doc(parsed.clone(), exported).await?;
 
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
@@ -637,7 +637,7 @@ mod tests {
             .local_export(parsed.clone())
             .await
             .map_err(|err| ferr!("failed exporting source doc: {err}"))?;
-        let _ = dst.import_doc_fast(parsed.clone(), exported).await?;
+        let _ = dst.import_doc(parsed.clone(), exported).await?;
 
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
@@ -760,7 +760,7 @@ mod tests {
             .local_export(parsed.clone())
             .await
             .map_err(|err| ferr!("failed exporting source doc: {err}"))?;
-        let _ = dst.import_doc_fast(parsed, exported).await?;
+        let _ = dst.import_doc(parsed, exported).await?;
 
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;

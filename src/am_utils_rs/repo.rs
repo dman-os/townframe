@@ -83,12 +83,6 @@ pub struct BigRepo {
 
 pub type SharedBigRepo = Arc<BigRepo>;
 
-#[derive(Debug)]
-pub enum ImportDocFastOutcome {
-    Imported(samod::DocHandle),
-    AlreadyExists,
-}
-
 impl BigRepo {
     pub async fn boot_with_repo(repo: samod::Repo, config: BigRepoConfig) -> Res<Arc<Self>> {
         let connect_options = SqliteConnectOptions::from_str(&config.sqlite_url)
@@ -402,34 +396,6 @@ impl BigRepo {
         )
         .await?;
         Ok(out)
-    }
-
-    pub(crate) async fn import_doc_fast(
-        self: &Arc<Self>,
-        document_id: DocumentId,
-        initial_content: automerge::Automerge,
-    ) -> Res<ImportDocFastOutcome> {
-        match self.repo.import(document_id, initial_content).await {
-            Ok(handle) => {
-                let _lease = self.ensure_persistent_change_broker(handle.clone()).await?;
-                let heads = handle
-                    .with_document(|doc| Arc::<[automerge::ChangeHash]>::from(doc.get_heads()));
-                self.change_manager
-                    .notify_doc_imported(handle.document_id().clone(), Arc::clone(&heads))?;
-                self.change_manager
-                    .notify_local_doc_imported(handle.document_id().clone(), heads)?;
-                self.record_doc_heads_change(
-                    handle.document_id(),
-                    handle.with_document(|doc| doc.get_heads()),
-                )
-                .await?;
-                Ok(ImportDocFastOutcome::Imported(handle))
-            }
-            Err(samod::ImportError::AlreadyExists { .. }) => {
-                Ok(ImportDocFastOutcome::AlreadyExists)
-            }
-            Err(err) => Err(ferr!("failed importing doc (fast path): {err}")),
-        }
     }
 
     pub async fn find_doc(self: &Arc<Self>, document_id: &DocumentId) -> Res<Option<BigDocHandle>> {
@@ -901,7 +867,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_doc_fast_updates_partition_doc_state() -> Res<()> {
+    async fn import_doc_updates_partition_doc_state() -> Res<()> {
         let part_id = "fast-import-part".to_string();
         let src = boot_big_repo("fast-import-src").await?;
         let dst = boot_big_repo("fast-import-dst").await?;
@@ -927,16 +893,12 @@ mod tests {
             .add_member(&part_id, &doc_id.to_string())
             .await?;
 
-        let outcome = dst.import_doc_fast(doc_id.clone(), exported).await?;
-        assert!(
-            matches!(outcome, ImportDocFastOutcome::Imported(_)),
-            "expected fast import to materialize new doc"
-        );
+        let _handle = dst.import_doc(doc_id.clone(), exported).await?;
 
         assert!(
             dst.is_member_present_in_partition_item_state(&part_id, &doc_id.to_string())
                 .await?,
-            "fast import must keep the doc present in partition state for existing memberships"
+            "import must keep the doc present in partition state for existing memberships"
         );
 
         let events = dst
@@ -963,7 +925,7 @@ mod tests {
                         } if event_doc_id == &doc_id.to_string() && !heads.is_empty()
                     )
             }),
-            "fast import must produce current partition doc events with imported heads"
+            "import must produce current partition doc events with imported heads"
         );
         Ok(())
     }
