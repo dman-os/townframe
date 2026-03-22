@@ -10,6 +10,7 @@ use daybook_core::index::{DocBlobsIndexRepo, DocBlobsIndexStopToken};
 use daybook_core::local_state::SqliteLocalStateRepo;
 use daybook_core::repos::RepoStopToken;
 use daybook_core::sync::{IrohSyncRepo, IrohSyncRepoStopToken};
+use qrcode::QrCode;
 
 #[derive(uniffi::Object)]
 pub struct SyncRepoFfi {
@@ -34,10 +35,7 @@ fn bootstrap_to_ffi(bootstrap: daybook_core::sync::SyncBootstrapState) -> CloneB
 #[uniffi::export]
 impl SyncRepoFfi {
     #[uniffi::constructor]
-    #[tracing::instrument(
-        err,
-        skip(fcx, config_repo, blobs_repo, drawer_repo, progress_repo)
-    )]
+    #[tracing::instrument(err, skip(fcx, config_repo, blobs_repo, drawer_repo, progress_repo))]
     async fn load(
         fcx: SharedFfiCtx,
         config_repo: Arc<ConfigRepoFfi>,
@@ -94,6 +92,29 @@ impl SyncRepoFfi {
         let this = Arc::clone(&self);
         self.fcx
             .do_on_rt(async move { this.repo.get_ticket_url().await.map_err(FfiError::from) })
+            .await
+    }
+
+    async fn get_ticket_qr_png(self: Arc<Self>, size_px: u32) -> Result<Vec<u8>, FfiError> {
+        let this = Arc::clone(&self);
+        self.fcx
+            .do_on_rt(async move {
+                let ticket_url = this.repo.get_ticket_url().await?;
+                let qr_code = QrCode::new(ticket_url.as_bytes())
+                    .map_err(|err| eyre::eyre!("failed to encode QR ticket: {err}"))?;
+                let image = qr_code
+                    .render::<image::Luma<u8>>()
+                    .min_dimensions(size_px, size_px)
+                    .build();
+                let mut png_bytes = Vec::new();
+                {
+                    let mut cursor = std::io::Cursor::new(&mut png_bytes);
+                    image::DynamicImage::ImageLuma8(image)
+                        .write_to(&mut cursor, image::ImageFormat::Png)
+                        .map_err(|err| eyre::eyre!("failed to render QR PNG bytes: {err}"))?;
+                }
+                Ok::<Vec<u8>, FfiError>(png_bytes)
+            })
             .await
     }
 

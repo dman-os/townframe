@@ -138,7 +138,18 @@ impl DocChangeBroker {
                 heads: Arc::clone(&new_heads),
                 origin: changes.origin.clone(),
             }])
-            .expect(ERROR_CHANNEL);
+            .or_else(|err| {
+                if self.cancel_token.is_cancelled() {
+                    debug!(
+                        ?err,
+                        ?doc_id,
+                        "head_tx closed during broker shutdown; dropping late head notification"
+                    );
+                    Ok(())
+                } else {
+                    Err(eyre::eyre!("channel error: closed?: {err:?}"))
+                }
+            })?;
         if !(self.has_candidate_listener)(self.handle.document_id(), &changes.origin) {
             return Ok(());
         }
@@ -161,7 +172,18 @@ impl DocChangeBroker {
         });
 
         if !all_changes.is_empty() {
-            self.change_tx.send(all_changes).expect(ERROR_CHANNEL);
+            self.change_tx.send(all_changes).or_else(|err| {
+                if self.cancel_token.is_cancelled() {
+                    debug!(
+                        ?err,
+                        ?doc_id,
+                        "change_tx closed during broker shutdown; dropping late change notification"
+                    );
+                    Ok(())
+                } else {
+                    Err(eyre::eyre!("channel error: closed?: {err:?}"))
+                }
+            })?;
         }
 
         Ok(())

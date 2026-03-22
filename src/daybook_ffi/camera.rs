@@ -40,6 +40,8 @@ pub enum CameraOverlay {
     Grid,
     QrBounds {
         bounds: CameraNormalizedRect,
+        frame_width_px: u32,
+        frame_height_px: u32,
     },
 }
 
@@ -80,20 +82,10 @@ fn normalize_rect(
 
     let width = width_px as f32;
     let height = height_px as f32;
-    let mut left = (min_x / width).clamp(0.0, 1.0);
-    let mut top = (min_y / height).clamp(0.0, 1.0);
-    let mut right = (max_x / width).clamp(0.0, 1.0);
-    let mut bottom = (max_y / height).clamp(0.0, 1.0);
-
-    // rqrr bounds are typically around the decoded grid. Expand slightly so
-    // the overlay covers the whole visible QR marker more consistently.
-    let padding_scale = 0.10_f32;
-    let pad_x = (right - left) * padding_scale;
-    let pad_y = (bottom - top) * padding_scale;
-    left = (left - pad_x).clamp(0.0, 1.0);
-    top = (top - pad_y).clamp(0.0, 1.0);
-    right = (right + pad_x).clamp(0.0, 1.0);
-    bottom = (bottom + pad_y).clamp(0.0, 1.0);
+    let left = (min_x / width).clamp(0.0, 1.0);
+    let top = (min_y / height).clamp(0.0, 1.0);
+    let right = (max_x / width).clamp(0.0, 1.0);
+    let bottom = (max_y / height).clamp(0.0, 1.0);
 
     Some(CameraNormalizedRect {
         left,
@@ -146,7 +138,11 @@ fn publish_qr_for_frame(
     overlays.push(CameraOverlay::Grid);
     for grid in &grids {
         if let Some(bounds) = normalize_rect(width_px, height_px, &grid.bounds) {
-            overlays.push(CameraOverlay::QrBounds { bounds });
+            overlays.push(CameraOverlay::QrBounds {
+                bounds,
+                frame_width_px: width_px,
+                frame_height_px: height_px,
+            });
         }
     }
     listener.on_camera_qr_overlays_updated(overlays);
@@ -228,7 +224,8 @@ pub struct CameraPreviewFfi {
 struct DesktopCameraState {
     stream: Option<nokhwa::CallbackCamera>,
     latest_frame: std::sync::Arc<std::sync::Mutex<Option<CameraPreviewFrame>>>,
-    qr_listener: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn CameraQrEventListener>>>>,
+    qr_listener:
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn CameraQrEventListener>>>>,
     qr_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     qr_last_decode_at: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
@@ -514,7 +511,9 @@ impl CameraPreviewFfi {
                             .expect("qr decode timestamp mutex should not be poisoned");
                         let now = std::time::Instant::now();
                         let ready = match *last_decode_guard {
-                            Some(last) => now.duration_since(last) >= std::time::Duration::from_millis(200),
+                            Some(last) => {
+                                now.duration_since(last) >= std::time::Duration::from_millis(200)
+                            }
                             None => true,
                         };
                         if ready {

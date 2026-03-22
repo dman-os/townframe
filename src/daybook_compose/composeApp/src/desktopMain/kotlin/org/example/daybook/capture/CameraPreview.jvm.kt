@@ -210,7 +210,7 @@ actual fun DaybookCameraPreview(
                         bitmap = latestImageBitmap!!,
                         contentDescription = "Camera preview",
                         modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.FillBounds,
+                        contentScale = ContentScale.Crop,
                         alignment = Alignment.Center
                     )
                 }

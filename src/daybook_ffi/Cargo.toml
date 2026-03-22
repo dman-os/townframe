@@ -53,6 +53,7 @@ futures = { workspace = true }
 regex = "1"
 rqrr = "0.10.1"
 image = { version = "0.25", default-features = true, features = ["jpeg", "png"] }
+qrcode = { workspace = true, features = ["image"] }
 
 # ffi
 uniffi = { workspace = true, features = ["cli"] }

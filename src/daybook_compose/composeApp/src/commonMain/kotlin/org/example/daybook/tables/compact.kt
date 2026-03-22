@@ -178,7 +178,8 @@ fun CompactLayout(
     modifier: Modifier = Modifier,
     navController: NavHostController,
     extraAction: (() -> Unit)? = null,
-    contentType: DaybookContentType
+    contentType: DaybookContentType,
+    onShowCloneShare: () -> Unit = {}
 ) {
     var showFeaturesMenu by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -230,7 +231,7 @@ fun CompactLayout(
 
     // Use separate feature lists: navBar features for center rollout, menu features for menu sheet
     val navBarFeatures = rememberNavBarFeatures(navController)
-    val baseMenuFeatures = rememberMenuFeatures(navController)
+    val baseMenuFeatures = rememberMenuFeatures(navController, onShowCloneShare = onShowCloneShare)
 
     // Get chrome state to check for prominent buttons
     val chromeStateManager = LocalChromeStateManager.current

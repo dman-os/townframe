@@ -151,14 +151,7 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
         .map(|idx| root.join(format!("repo-{idx}")))
         .collect::<Vec<_>>();
     tokio::fs::create_dir_all(&paths[0]).await?;
-    let rtx = RepoCtx::init(
-        &paths[0],
-        RepoOpenOptions {
-            ..default()
-        },
-        "stress-test-device".into(),
-    )
-    .await?;
+    let rtx = RepoCtx::init(&paths[0], RepoOpenOptions {}, "stress-test-device".into()).await?;
     let source_repo_id = rtx.repo_id.clone();
     let source_app_doc_id = rtx.doc_app.document_id().clone();
     let source_drawer_doc_id = rtx.doc_drawer.document_id().clone();
@@ -171,14 +164,7 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
         for dst in paths.iter().skip(1) {
             bootstrap_clone_repo_from_url_for_tests(&ticket, dst).await?;
 
-            let ctx = RepoCtx::open(
-                dst,
-                RepoOpenOptions {
-                    ..default()
-                },
-                "stress-test-device".into(),
-            )
-            .await?;
+            let ctx = RepoCtx::open(dst, RepoOpenOptions {}, "stress-test-device".into()).await?;
             if ctx.repo_id != source_repo_id {
                 eyre::bail!(
                     "stress init repo_id mismatch after clone (source={}, cloned={})",

@@ -34,7 +34,9 @@ fun main() = application {
                     hasOverlay = true,
                     hasMicrophone = true,
                     hasNotifications = true,
-                    requestAllPermissions = {}
+                    hasStorageRead = true,
+                    hasStorageWrite = true,
+                    requestPermissions = {}
                 ),
             LocalPlatform provides createReactiveJVMPlatform(windowState)
         ) {

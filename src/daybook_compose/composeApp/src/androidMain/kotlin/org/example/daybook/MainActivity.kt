@@ -1,7 +1,9 @@
 package org.example.daybook
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -9,6 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
@@ -22,6 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -34,10 +38,6 @@ import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.mohamedrejeb.calf.permissions.ExperimentalPermissionsApi
-import com.mohamedrejeb.calf.permissions.Permission
-import com.mohamedrejeb.calf.permissions.isGranted
-import com.mohamedrejeb.calf.permissions.rememberMultiplePermissionsState
 import org.example.daybook.theme.ThemeConfig
 
 class MainActivity : ComponentActivity() {
@@ -61,23 +61,44 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun AndroidApp() {
     val context = LocalContext.current
 
     var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var permissionRefreshTick by remember { mutableIntStateOf(0) }
+
+    val permissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            permissionRefreshTick += 1
+        }
 
     val permCtx =
         run {
-            val notificationPermissionState =
-                rememberMultiplePermissionsState(
-                    listOf(
-                        Permission.Notification,
-                        Permission.Camera,
-                        Permission.RecordAudio
-                    )
-                )
+            fun hasRuntimePermission(name: String): Boolean =
+                ContextCompat.checkSelfPermission(context, name) == PackageManager.PERMISSION_GRANTED
+
+            fun hasNotificationsPermission(): Boolean =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    hasRuntimePermission(Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                    true
+                }
+
+            fun hasStorageReadPermission(): Boolean =
+                if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
+                    hasRuntimePermission(Manifest.permission.READ_EXTERNAL_STORAGE)
+                } else {
+                    true
+                }
+
+            fun hasStorageWritePermission(): Boolean =
+                if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+                    hasRuntimePermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                } else {
+                    true
+                }
+
             val lifecycleOwner = LocalLifecycleOwner.current
             // Observe lifecycle events to refresh permission status when app resumes
             DisposableEffect(lifecycleOwner) {
@@ -85,6 +106,7 @@ fun AndroidApp() {
                     LifecycleEventObserver { _, event ->
                         if (event == Lifecycle.Event.ON_RESUME) {
                             hasOverlayPermission = Settings.canDrawOverlays(context)
+                            permissionRefreshTick += 1
                         }
                     }
                 lifecycleOwner.lifecycle.addObserver(observer)
@@ -93,18 +115,47 @@ fun AndroidApp() {
                     lifecycleOwner.lifecycle.removeObserver(observer)
                 }
             }
+            permissionRefreshTick
             PermissionsContext(
                 hasOverlay = hasOverlayPermission,
-                hasNotifications =
-                    notificationPermissionState.permissions[0].status.isGranted,
-                hasCamera =
-                    notificationPermissionState.permissions[1].status.isGranted,
-                hasMicrophone =
-                    notificationPermissionState.permissions[2].status.isGranted,
-                requestAllPermissions = {
-                    notificationPermissionState.launchMultiplePermissionRequest()
-                    if (!hasOverlayPermission) {
-                        // Request permission
+                hasNotifications = hasNotificationsPermission(),
+                hasCamera = hasRuntimePermission(Manifest.permission.CAMERA),
+                hasMicrophone = hasRuntimePermission(Manifest.permission.RECORD_AUDIO),
+                hasStorageRead = hasStorageReadPermission(),
+                hasStorageWrite = hasStorageWritePermission(),
+                requestPermissions = { request ->
+                    val requestedPermissions = buildList {
+                        if (request.camera && !hasRuntimePermission(Manifest.permission.CAMERA)) {
+                            add(Manifest.permission.CAMERA)
+                        }
+                        if (request.microphone && !hasRuntimePermission(Manifest.permission.RECORD_AUDIO)) {
+                            add(Manifest.permission.RECORD_AUDIO)
+                        }
+                        if (request.notifications &&
+                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                            !hasRuntimePermission(Manifest.permission.POST_NOTIFICATIONS)
+                        ) {
+                            add(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                        if (request.storageRead &&
+                            Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2 &&
+                            !hasRuntimePermission(Manifest.permission.READ_EXTERNAL_STORAGE)
+                        ) {
+                            add(Manifest.permission.READ_EXTERNAL_STORAGE)
+                        }
+                        if (request.storageWrite &&
+                            Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+                            !hasRuntimePermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        ) {
+                            add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        }
+                    }
+
+                    if (requestedPermissions.isNotEmpty()) {
+                        permissionLauncher.launch(requestedPermissions.toTypedArray())
+                    }
+
+                    if (request.overlay && !hasOverlayPermission) {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                             val intent =
                                 Intent(
@@ -113,14 +164,7 @@ fun AndroidApp() {
                                 )
                             context.startActivity(intent)
                         } else {
-                            // Pre-M, permission is granted if declared, though this case is rare now
-                            // and Settings.canDrawOverlays should already be true if manifest perm is there.
-                            // However, for safety, you might re-check or assume it's okay if declared.
-                            hasOverlayPermission =
-                                Settings.canDrawOverlays(context) // Re-check for safety
-                            if (!hasOverlayPermission) {
-                                throw Exception("impossible")
-                            }
+                            hasOverlayPermission = Settings.canDrawOverlays(context)
                         }
                     }
                 }

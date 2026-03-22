@@ -64,7 +64,7 @@ impl DrawerRepoFfi {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self), ret)]
+    #[tracing::instrument(skip(self))]
     async fn list(self: Arc<Self>) -> Vec<DocNBranches> {
         let this = Arc::clone(&self);
         self.fcx
@@ -73,7 +73,7 @@ impl DrawerRepoFfi {
             .expect("error listing docs")
     }
 
-    #[tracing::instrument(err, skip(self), ret)]
+    #[tracing::instrument(err, skip(self))]
     async fn get(self: Arc<Self>, id: DocId, branch_path: String) -> Result<Option<Doc>, FfiError> {
         let this = Arc::clone(&self);
         let branch_path = daybook_types::doc::BranchPath::from(branch_path);
@@ -88,7 +88,7 @@ impl DrawerRepoFfi {
             .await?)
     }
 
-    #[tracing::instrument(err, skip(self), ret)]
+    #[tracing::instrument(err, skip(self))]
     async fn get_bundle(
         self: Arc<Self>,
         id: DocId,
@@ -106,7 +106,7 @@ impl DrawerRepoFfi {
             .await?)
     }
 
-    #[tracing::instrument(err, skip(self), ret)]
+    #[tracing::instrument(err, skip(self))]
     async fn get_entry(self: Arc<Self>, id: DocId) -> Result<Option<DocEntry>, FfiError> {
         let this = Arc::clone(&self);
         Ok(self
@@ -115,7 +115,7 @@ impl DrawerRepoFfi {
             .await?)
     }
 
-    #[tracing::instrument(err, skip(self), ret)]
+    #[tracing::instrument(err, skip(self))]
     async fn add(self: Arc<Self>, args: AddDocArgs) -> Result<DocId, FfiError> {
         let this = Arc::clone(&self);
         Ok(self
@@ -124,7 +124,7 @@ impl DrawerRepoFfi {
             .await?)
     }
 
-    #[tracing::instrument(err, skip(self), ret)]
+    #[tracing::instrument(err, skip(self))]
     async fn batch_add(self: Arc<Self>, args: Vec<AddDocArgs>) -> Result<Vec<DocId>, FfiError> {
         let this = Arc::clone(&self);
         Ok(self

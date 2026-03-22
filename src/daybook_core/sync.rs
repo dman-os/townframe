@@ -19,6 +19,7 @@ pub const IROH_CLONE_URL_SCHEME: &str = "db+iroh-clone";
 pub const PARTITION_SYNC_ALPN: &[u8] = b"townframe/partition-sync/0";
 pub const REPO_SYNC_ALPN: &[u8] = b"townframe/repo-sync/0";
 pub const CLONE_PROVISION_ALPN: &[u8] = b"townframe/clone-provision/0";
+pub const CORE_DOCS_PARTITION_ID: &str = "core.docs";
 
 enum ActivePeerState {
     Connecting,
@@ -122,18 +123,30 @@ impl IrohSyncRepoStopToken {
 
 impl IrohSyncRepo {
     async fn ensure_local_drawer_partition_seeded(rcx: &RepoCtx) -> Res<()> {
-        let partition_id = crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
+        let drawer_partition_id = crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
             rcx.doc_drawer.document_id(),
         );
         let drawer_doc_id = rcx.doc_drawer.document_id().to_string();
         let app_doc_id = rcx.doc_app.document_id().to_string();
         rcx.big_repo
             .partition_store()
-            .add_member(&partition_id, &drawer_doc_id, &serde_json::json!({}))
+            .ensure_partition(&drawer_partition_id)
             .await?;
         rcx.big_repo
             .partition_store()
-            .add_member(&partition_id, &app_doc_id, &serde_json::json!({}))
+            .add_member(
+                &CORE_DOCS_PARTITION_ID.to_string(),
+                &drawer_doc_id,
+                &serde_json::json!({}),
+            )
+            .await?;
+        rcx.big_repo
+            .partition_store()
+            .add_member(
+                &CORE_DOCS_PARTITION_ID.to_string(),
+                &app_doc_id,
+                &serde_json::json!({}),
+            )
             .await?;
         for blob_partition_id in [
             crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
@@ -309,6 +322,7 @@ impl IrohSyncRepo {
 
     fn peer_partition_ids(&self, _peer_key: &str) -> HashSet<PartitionId> {
         [
+            CORE_DOCS_PARTITION_ID.to_string(),
             crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
                 self.rcx.doc_drawer.document_id(),
             ),
@@ -495,7 +509,9 @@ impl IrohSyncRepo {
             app_doc_id: bootstrap.app_doc_id.to_string(),
             drawer_doc_id: bootstrap.drawer_doc_id.to_string(),
             device_name: Some(device_name),
-            issued_iroh_secret_key_hex: Some(data_encoding::HEXLOWER.encode(&issued_secret.to_bytes())),
+            issued_iroh_secret_key_hex: Some(
+                data_encoding::HEXLOWER.encode(&issued_secret.to_bytes()),
+            ),
             issued_iroh_public_key: Some(issued_public.to_string()),
             issued_peer_key: Some(issued_peer_key),
         })
@@ -1157,14 +1173,7 @@ mod tests {
         let repo_b_path = temp_root.path().join("repo-b");
 
         tokio::fs::create_dir_all(&repo_a_path).await?;
-        let rtx = RepoCtx::init(
-            &repo_a_path,
-            RepoOpenOptions {
-                ..default()
-            },
-            "test-device".into(),
-        )
-        .await?;
+        let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
         rtx.shutdown().await?;
         drop(rtx);
 
@@ -1241,7 +1250,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cloned_repo_registers_drawer_replicated_partition_on_open() -> Res<()> {
+    async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         std::env::set_var("DAYB_DISABLE_KEYRING", "1");
         let temp_root = tempfile::tempdir()?;
@@ -1249,14 +1258,7 @@ mod tests {
         let repo_b_path = temp_root.path().join("repo-b");
 
         tokio::fs::create_dir_all(&repo_a_path).await?;
-        let rtx = RepoCtx::init(
-            &repo_a_path,
-            RepoOpenOptions {
-                ..default()
-            },
-            "test-device".into(),
-        )
-        .await?;
+        let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
         rtx.shutdown().await?;
         drop(rtx);
 
@@ -1283,20 +1285,17 @@ mod tests {
             .big_repo
             .list_partitions_for_peer(&"peer-partition-visibility".into())
             .await?;
-        let drawer_partition_id = crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
-            &node_b.ctx.doc_drawer.document_id().clone(),
-        );
-        let drawer_partition = partitions
+        let core_partition = partitions
             .iter()
-            .find(|summary| summary.partition_id == drawer_partition_id);
+            .find(|summary| summary.partition_id == CORE_DOCS_PARTITION_ID);
         assert!(
-            drawer_partition.is_some(),
-            "cloned repo should register drawer replicated partition on open: {partitions:?}"
+            core_partition.is_some(),
+            "cloned repo should register core docs partition on open: {partitions:?}"
         );
-        let drawer_partition = drawer_partition.expect("checked above");
+        let core_partition = core_partition.expect("checked above");
         assert!(
-            drawer_partition.member_count >= 2,
-            "drawer replicated partition should include drawer/app docs after sync boot: {drawer_partition:?}"
+            core_partition.member_count >= 2,
+            "core docs partition should include drawer/app docs after sync boot: {core_partition:?}"
         );
 
         node_b.stop().await?;
@@ -1311,14 +1310,7 @@ mod tests {
         let repo_path = temp_root.path().join("repo-a");
         tokio::fs::create_dir_all(&repo_path).await?;
 
-        let rtx = RepoCtx::init(
-            &repo_path,
-            RepoOpenOptions {
-                ..default()
-            },
-            "test-device".into(),
-        )
-        .await?;
+        let rtx = RepoCtx::init(&repo_path, RepoOpenOptions {}, "test-device".into()).await?;
         rtx.shutdown().await?;
         drop(rtx);
 
@@ -1463,14 +1455,7 @@ mod tests {
         let repo_b_path = temp_root.path().join("repo-b");
 
         tokio::fs::create_dir_all(&repo_a_path).await?;
-        let rtx = RepoCtx::init(
-            &repo_a_path,
-            RepoOpenOptions {
-                ..default()
-            },
-            "test-device".into(),
-        )
-        .await?;
+        let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
         rtx.shutdown().await?;
         drop(rtx);
 
@@ -1615,14 +1600,7 @@ mod tests {
         }
 
         tokio::fs::create_dir_all(repo_a_path).await?;
-        let rtx = RepoCtx::init(
-            repo_a_path,
-            RepoOpenOptions {
-                ..default()
-            },
-            "test-device".into(),
-        )
-        .await?;
+        let rtx = RepoCtx::init(repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
         let source_repo_id = rtx.repo_id.clone();
         let source_repo_user_id = crate::repo::get_or_init_repo_user_id(&rtx.sql.db_pool).await?;
         rtx.shutdown().await?;
@@ -1673,16 +1651,8 @@ mod tests {
     }
 
     async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
-        let rtx = Arc::new(
-            RepoCtx::open(
-                repo_root,
-                RepoOpenOptions {
-                    ..default()
-                },
-                "test-device".into(),
-            )
-            .await?,
-        );
+        let rtx =
+            Arc::new(RepoCtx::open(repo_root, RepoOpenOptions {}, "test-device".into()).await?);
         let blobs_repo = BlobsRepo::new(
             rtx.layout.blobs_root.clone(),
             rtx.local_user_path.clone(),

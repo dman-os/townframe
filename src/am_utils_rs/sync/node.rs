@@ -21,7 +21,6 @@ impl SyncNodeHandle {
     pub fn local_sender(&self) -> tokio::sync::mpsc::Sender<PartitionSyncRpcMessage> {
         self.rpc_tx.clone()
     }
-
 }
 
 pub struct SyncNodeStopToken {
@@ -81,10 +80,7 @@ pub async fn spawn_sync_node(
     };
     let join_handle = tokio::spawn(async { fut.await.unwrap() });
     Ok((
-        SyncNodeHandle {
-            rpc_tx,
-            rpc_client,
-        },
+        SyncNodeHandle { rpc_tx, rpc_client },
         SyncNodeStopToken {
             cancel_token,
             subscription_tasks,

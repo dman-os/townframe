@@ -532,7 +532,6 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     }
                 }
             }
-
         }
         StaticCommands::Devices { command } => {
             let config_repo = lazy::config_repo().await?;
@@ -617,12 +616,10 @@ async fn clone_repo_from_url(source_url: &str, destination: &std::path::Path) ->
         res.repo_path.display()
     );
     println!(
-        "bootstrap docs synced (repo_id={}, repo_name={})",
+        "required clone partitions synced (repo_id={}, repo_name={})",
         res.bootstrap.repo_id, res.bootstrap.repo_name
     );
-    println!(
-        "full sync can continue in future sync sessions (run: daybook sync <ticket>)"
-    );
+    println!("full sync can continue in future sync sessions (run: daybook sync <ticket>)");
     Ok(())
 }
 
@@ -647,20 +644,18 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     }
 
     let ctx = (Box::pin(lazy::repo_ctx())
-        as std::pin::Pin<
-            Box<dyn std::future::Future<Output = Res<SharedCtx>> + Send + 'static>,
-        >)
-    .await?;
+        as std::pin::Pin<Box<dyn std::future::Future<Output = Res<SharedCtx>> + Send + 'static>>)
+        .await?;
     let drawer = (Box::pin(lazy::drawer_repo())
         as std::pin::Pin<
             Box<dyn std::future::Future<Output = Res<Arc<DrawerRepo>>> + Send + 'static>,
         >)
-    .await?;
+        .await?;
     let plugs_repo = (Box::pin(lazy::plugs_repo())
         as std::pin::Pin<
             Box<dyn std::future::Future<Output = Res<Arc<PlugsRepo>>> + Send + 'static>,
         >)
-    .await?;
+        .await?;
 
     let plugs = plugs_repo.list_plugs().await;
 
@@ -751,7 +746,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
                                 + 'static,
                         >,
                     >)
-                .await?;
+                    .await?;
                 let ecx = ExecCtx {
                     rt: Arc::clone(&rt),
                     _cx: Arc::clone(&ctx),
@@ -1068,16 +1063,8 @@ mod tests {
     }
 
     async fn open_cli_sync_node(repo_root: &std::path::Path) -> Res<CliSyncNode> {
-        let ctx = Arc::new(
-            RepoCtx::open(
-                repo_root,
-                RepoOpenOptions {
-                    ..default()
-                },
-                "cli-test-device".into(),
-            )
-            .await?,
-        );
+        let ctx =
+            Arc::new(RepoCtx::open(repo_root, RepoOpenOptions {}, "cli-test-device".into()).await?);
         let blobs_repo = BlobsRepo::new(
             ctx.layout.blobs_root.clone(),
             ctx.local_user_path.clone(),
@@ -1159,14 +1146,8 @@ mod tests {
         let repo_b_path = temp_root.join("repo-b");
 
         tokio::fs::create_dir_all(&repo_a_path).await?;
-        let init = RepoCtx::init(
-            &repo_a_path,
-            RepoOpenOptions {
-                ..default()
-            },
-            "cli-test-device".into(),
-        )
-        .await?;
+        let init =
+            RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "cli-test-device".into()).await?;
         init.shutdown().await?;
         drop(init);
 
@@ -1470,13 +1451,12 @@ mod lazy {
                 let drawer = drawer_repo().await?;
                 let blobs = blobs_repo().await?;
                 let sqlite_local_state = sqlite_local_state_repo().await?;
-                let (repo, stop) =
-                    DocBlobsIndexRepo::boot(
-                        Arc::clone(&drawer),
-                        Arc::clone(&blobs),
-                        Arc::clone(&sqlite_local_state),
-                    )
-                    .await?;
+                let (repo, stop) = DocBlobsIndexRepo::boot(
+                    Arc::clone(&drawer),
+                    Arc::clone(&blobs),
+                    Arc::clone(&sqlite_local_state),
+                )
+                .await?;
                 register_shutdown(move || async move { stop.stop().await });
                 Ok(repo)
             })

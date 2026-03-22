@@ -1862,7 +1862,11 @@ impl Worker {
             return Ok(());
         };
 
-        let endpoint_ids = sync_state.requested_peers.keys().copied().collect::<Vec<_>>();
+        let endpoint_ids = sync_state
+            .requested_peers
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
         let mut peers_to_refresh = Vec::new();
         for endpoint_id in sync_state.requested_peers.keys() {
             if let Some(conn_id) = self.conn_by_peer.get(endpoint_id).copied() {
@@ -2399,12 +2403,28 @@ impl Worker {
             }
         }
         if let Some(doc_count) = emit_full {
+            self.emit_peer_progress_status(
+                endpoint_id,
+                ProgressUpdateDeets::Status {
+                    severity: ProgressSeverity::Info,
+                    message: format!("peer fully synced ({doc_count} docs converged)"),
+                },
+            )
+            .await?;
             self.emit_full_sync_event(FullSyncEvent::PeerFullSynced {
                 endpoint_id,
                 doc_count,
             })
             .await?;
         } else if emit_stale {
+            self.emit_peer_progress_status(
+                endpoint_id,
+                ProgressUpdateDeets::Status {
+                    severity: ProgressSeverity::Warn,
+                    message: "peer no longer fully synced".to_string(),
+                },
+            )
+            .await?;
             self.emit_full_sync_event(FullSyncEvent::StalePeer { endpoint_id })
                 .await?;
         }

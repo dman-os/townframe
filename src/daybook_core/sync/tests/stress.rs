@@ -169,12 +169,8 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
         for dst in paths.iter().skip(1) {
             bootstrap_clone_repo_from_url_for_tests(&ticket, dst).await?;
 
-            let ctx = RepoCtx::open(
-                dst,
-                RepoOpenOptions::default(),
-                "stress-test-device".into(),
-            )
-            .await?;
+            let ctx =
+                RepoCtx::open(dst, RepoOpenOptions::default(), "stress-test-device".into()).await?;
             if ctx.repo_id != source_repo_id {
                 eyre::bail!(
                     "stress init repo_id mismatch after clone (source={}, cloned={})",

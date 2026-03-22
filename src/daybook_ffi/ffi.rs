@@ -67,6 +67,45 @@ fn bootstrap_to_ffi(bootstrap: daybook_core::sync::SyncBootstrapState) -> CloneB
     }
 }
 
+fn app_private_clone_parent_dir(acx: &AppCtx) -> std::path::PathBuf {
+    acx.config.app_data_dir.join("repos")
+}
+
+fn resolve_clone_destination_for_app(acx: &AppCtx, destination: &str) -> Res<std::path::PathBuf> {
+    let parent = app_private_clone_parent_dir(acx);
+    std::fs::create_dir_all(&parent).wrap_err_with(|| {
+        format!(
+            "failed creating clone parent directory {}",
+            parent.display()
+        )
+    })?;
+    let parent_abs = std::path::absolute(&parent).wrap_err_with(|| {
+        format!(
+            "failed resolving clone parent directory {}",
+            parent.display()
+        )
+    })?;
+    let raw = std::path::PathBuf::from(destination);
+    let destination_candidate = if raw.is_absolute() {
+        raw
+    } else {
+        parent_abs.join(raw)
+    };
+    let destination_abs = std::path::absolute(&destination_candidate).wrap_err_with(|| {
+        format!(
+            "failed resolving clone destination {}",
+            destination_candidate.display()
+        )
+    })?;
+    if !destination_abs.starts_with(&parent_abs) {
+        eyre::bail!(
+            "clone destination must be under app-private storage: {}",
+            parent_abs.display()
+        );
+    }
+    Ok(destination_abs)
+}
+
 impl FfiCtx {
     pub async fn do_on_rt<O, F>(&self, future: F) -> O
     where
@@ -93,18 +132,14 @@ impl FfiCtx {
             let rcx = if daybook_core::repo::is_repo_initialized(&repo_root_for_init).await? {
                 acx.open_repo(
                     &repo_root_for_init,
-                    daybook_core::repo::RepoOpenOptions {
-                        ..default()
-                    },
+                    daybook_core::repo::RepoOpenOptions {},
                     format!("daybook-ffi-{}", std::env::consts::ARCH),
                 )
                 .await?
             } else {
                 acx.init_repo(
                     &repo_root_for_init,
-                    daybook_core::repo::RepoOpenOptions {
-                        ..default()
-                    },
+                    daybook_core::repo::RepoOpenOptions {},
                     format!("daybook-ffi-{}", std::env::consts::ARCH),
                 )
                 .await?
@@ -194,12 +229,14 @@ impl AppFfiCtx {
     async fn forget_known_repo(self: Arc<Self>, repo_id: String) -> Result<(), FfiError> {
         let this = Arc::clone(&self);
         self.do_on_rt(async move {
-            let mut repo_config = daybook_core::app::globals::get_repo_config(&this.inner.sql.db_pool).await?;
+            let mut repo_config =
+                daybook_core::app::globals::get_repo_config(&this.inner.sql.db_pool).await?;
             repo_config.known_repos.retain(|repo| repo.id != repo_id);
             if repo_config.last_used_repo_id.as_deref() == Some(repo_id.as_str()) {
                 repo_config.last_used_repo_id = None;
             }
-            daybook_core::app::globals::set_repo_config(&this.inner.sql.db_pool, &repo_config).await?;
+            daybook_core::app::globals::set_repo_config(&this.inner.sql.db_pool, &repo_config)
+                .await?;
             Ok::<(), eyre::Report>(())
         })
         .await
@@ -213,7 +250,7 @@ impl AppFfiCtx {
             if !repo_root.exists() {
                 return Ok::<bool, eyre::Report>(false);
             }
-            daybook_core::repo::is_repo_initialized(&repo_root).await
+            daybook_core::repo::is_repo_bootstrapped(&repo_root).await
         })
         .await
         .map_err(Into::into)
@@ -221,13 +258,16 @@ impl AppFfiCtx {
 
     #[tracing::instrument(err, skip(self))]
     async fn default_clone_parent_dir(self: Arc<Self>) -> Result<String, FfiError> {
+        let this = Arc::clone(&self);
         self.do_on_rt(async move {
-            let user_dirs = directories::UserDirs::new().ok_or_eyre("user directories unavailable")?;
-            let base = user_dirs
-                .document_dir()
-                .map(|path| path.to_path_buf())
-                .unwrap_or_else(|| user_dirs.home_dir().to_path_buf());
-            Ok::<String, eyre::Report>(base.join("Daybook").display().to_string())
+            let parent = app_private_clone_parent_dir(&this.inner);
+            std::fs::create_dir_all(&parent).wrap_err_with(|| {
+                format!(
+                    "failed creating clone parent directory {}",
+                    parent.display()
+                )
+            })?;
+            Ok::<String, eyre::Report>(parent.display().to_string())
         })
         .await
         .map_err(Into::into)
@@ -264,7 +304,7 @@ impl AppFfiCtx {
     ) -> Result<CloneInitResult, FfiError> {
         let this = Arc::clone(&self);
         self.do_on_rt(async move {
-            let destination = std::path::PathBuf::from(destination);
+            let destination = resolve_clone_destination_for_app(&this.inner, &destination)?;
             let out = daybook_core::sync::clone_repo_init_from_url(
                 &source_url,
                 &destination,
@@ -286,8 +326,9 @@ impl AppFfiCtx {
         self: Arc<Self>,
         destination: String,
     ) -> Result<CloneDestinationCheck, FfiError> {
+        let this = Arc::clone(&self);
         self.do_on_rt(async move {
-            let path = std::path::PathBuf::from(destination);
+            let path = resolve_clone_destination_for_app(&this.inner, &destination)?;
             let exists = path.exists();
             if !exists {
                 return Ok::<CloneDestinationCheck, eyre::Report>(CloneDestinationCheck {

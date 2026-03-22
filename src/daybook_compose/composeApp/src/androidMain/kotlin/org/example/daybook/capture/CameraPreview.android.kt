@@ -38,6 +38,7 @@ import java.util.concurrent.Executors
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import org.example.daybook.LocalPermCtx
+import org.example.daybook.PermissionRequest
 import org.example.daybook.capture.data.CameraFrameSample
 import org.example.daybook.uniffi.CameraPreviewFfi
 
@@ -85,7 +86,7 @@ actual fun DaybookCameraPreview(
 
     if (permCtx != null && !permCtx.hasCamera) {
         LaunchedEffect(Unit) {
-            permCtx.requestAllPermissions()
+            permCtx.requestPermissions(PermissionRequest(camera = true))
         }
         Box(
             modifier = modifier.fillMaxSize(),

@@ -1053,6 +1053,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_url(
     ): Short
+    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_qr_png(
+    ): Short
     external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_url(
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_stop(
@@ -1404,6 +1406,8 @@ external fun uniffi_daybook_ffi_fn_constructor_syncrepoffi_load(`fcx`: Long,`con
 external fun uniffi_daybook_ffi_fn_method_syncrepoffi_connect_known_devices_once(`ptr`: Long,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_syncrepoffi_connect_url(`ptr`: Long,`sourceUrl`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_qr_png(`ptr`: Long,`sizePx`: Int,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_url(`ptr`: Long,
 ): Long
@@ -1795,6 +1799,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_url() != 27752.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_qr_png() != 4719.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_url() != 44496.toShort()) {
@@ -8834,6 +8841,8 @@ public interface SyncRepoFfiInterface {
     
     suspend fun `connectUrl`(`sourceUrl`: kotlin.String): CloneBootstrapInfo
     
+    suspend fun `getTicketQrPng`(`sizePx`: kotlin.UInt): kotlin.ByteArray
+    
     suspend fun `getTicketUrl`(): kotlin.String
     
     suspend fun `stop`()
@@ -8975,6 +8984,27 @@ open class SyncRepoFfi: Disposable, AutoCloseable, SyncRepoFfiInterface
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeCloneBootstrapInfo.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getTicketQrPng`(`sizePx`: kotlin.UInt) : kotlin.ByteArray {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_qr_png(
+                uniffiHandle,
+                FfiConverterUInt.lower(`sizePx`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterByteArray.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -10378,7 +10408,9 @@ sealed class CameraOverlay {
     
     
     data class QrBounds(
-        val `bounds`: org.example.daybook.uniffi.CameraNormalizedRect) : CameraOverlay()
+        val `bounds`: org.example.daybook.uniffi.CameraNormalizedRect, 
+        val `frameWidthPx`: kotlin.UInt, 
+        val `frameHeightPx`: kotlin.UInt) : CameraOverlay()
         
     {
         
@@ -10405,6 +10437,8 @@ public object FfiConverterTypeCameraOverlay : FfiConverterRustBuffer<CameraOverl
             1 -> CameraOverlay.Grid
             2 -> CameraOverlay.QrBounds(
                 FfiConverterTypeCameraNormalizedRect.read(buf),
+                FfiConverterUInt.read(buf),
+                FfiConverterUInt.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -10422,6 +10456,8 @@ public object FfiConverterTypeCameraOverlay : FfiConverterRustBuffer<CameraOverl
             (
                 4UL
                 + FfiConverterTypeCameraNormalizedRect.allocationSize(value.`bounds`)
+                + FfiConverterUInt.allocationSize(value.`frameWidthPx`)
+                + FfiConverterUInt.allocationSize(value.`frameHeightPx`)
             )
         }
     }
@@ -10435,6 +10471,8 @@ public object FfiConverterTypeCameraOverlay : FfiConverterRustBuffer<CameraOverl
             is CameraOverlay.QrBounds -> {
                 buf.putInt(2)
                 FfiConverterTypeCameraNormalizedRect.write(value.`bounds`, buf)
+                FfiConverterUInt.write(value.`frameWidthPx`, buf)
+                FfiConverterUInt.write(value.`frameHeightPx`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -11391,66 +11429,3 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

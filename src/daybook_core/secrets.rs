@@ -93,7 +93,10 @@ impl SecretRepo {
             let service_name = format!("daybook.repo.{repo_id}");
             if let Ok(entry) = keyring::Entry::new(&service_name, Self::KEYRING_USERNAME) {
                 if let Err(err) = entry.set_password(&encoded) {
-                    warn!(?err, "failed setting keyring secret from provisioned clone identity");
+                    warn!(
+                        ?err,
+                        "failed setting keyring secret from provisioned clone identity"
+                    );
                 }
             }
         }

@@ -20,6 +20,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import kotlin.math.max
 import org.example.daybook.capture.DaybookCameraPreview
 import org.example.daybook.capture.data.CameraFrameSample
 import org.example.daybook.capture.data.CameraOverlay
@@ -123,10 +124,21 @@ private fun CameraOverlayLayer(
                 }
 
                 is CameraOverlay.QrBounds -> {
-                    val left = overlay.left.coerceIn(0f, 1f) * size.width
-                    val top = overlay.top.coerceIn(0f, 1f) * size.height
-                    val right = overlay.right.coerceIn(0f, 1f) * size.width
-                    val bottom = overlay.bottom.coerceIn(0f, 1f) * size.height
+                    val sourceWidth = overlay.sourceWidthPx.toFloat()
+                    val sourceHeight = overlay.sourceHeightPx.toFloat()
+                    if (sourceWidth <= 0f || sourceHeight <= 0f) return@forEach
+
+                    // Preview surfaces are presented as a crop-fit of source frames.
+                    val scale = max(size.width / sourceWidth, size.height / sourceHeight)
+                    val drawnWidth = sourceWidth * scale
+                    val drawnHeight = sourceHeight * scale
+                    val offsetX = (size.width - drawnWidth) * 0.5f
+                    val offsetY = (size.height - drawnHeight) * 0.5f
+
+                    val left = offsetX + overlay.left.coerceIn(0f, 1f) * drawnWidth
+                    val top = offsetY + overlay.top.coerceIn(0f, 1f) * drawnHeight
+                    val right = offsetX + overlay.right.coerceIn(0f, 1f) * drawnWidth
+                    val bottom = offsetY + overlay.bottom.coerceIn(0f, 1f) * drawnHeight
                     if (right > left && bottom > top) {
                         drawRect(
                             color = Color(0xFF4DD0E1),

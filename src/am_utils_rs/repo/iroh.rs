@@ -340,35 +340,46 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
             })
             .expect(ERROR_CHANNEL);
 
-        tokio::select! {
-            _ = cancel_token.cancelled() => {
-                close_iroh_conn(Some(&connection), 220, b"we are shutting down");
-                debug!("cancel token lit");
-            }
-            evt = events.next() => {
-                let Some(evt) = evt else {
-                    close_iroh_conn(Some(&connection), 500, b"samod connection stream ended abruptly");
-                    return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
-                        "connection stream ended before disconnect with {endpoint_id}"
-                    ))));
-                };
-                match evt {
-                    AcceptorEvent::ClientDisconnected {
-                        reason,
-                        ..
-                    } => {
-                        close_iroh_conn(Some(&connection), 200, b"you disconnected");
-                        info!(?reason, "incoming connection finished");
-                        self.end_signal_tx.send(crate::repo::ConnFinishSignal {
-                            conn_id,
-                            peer_id,
-                            reason: format!("{reason}"),
-                        })
-                        .inspect_err(|_| warn!(ERROR_CALLER))
-                        .ok();
-                    },
-                    AcceptorEvent::ClientConnected {..} => {
-                        unreachable!()
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    close_iroh_conn(Some(&connection), 220, b"we are shutting down");
+                    debug!("cancel token lit");
+                    break;
+                }
+                evt = events.next() => {
+                    let Some(evt) = evt else {
+                        close_iroh_conn(Some(&connection), 500, b"samod connection stream ended abruptly");
+                        return Err(iroh::protocol::AcceptError::from_boxed(Box::from(format!(
+                            "connection stream ended before disconnect with {endpoint_id}"
+                        ))));
+                    };
+                    match evt {
+                        AcceptorEvent::ClientDisconnected {
+                            reason,
+                            ..
+                        } => {
+                            close_iroh_conn(Some(&connection), 200, b"you disconnected");
+                            info!(?reason, "incoming connection finished");
+                            self.end_signal_tx.send(crate::repo::ConnFinishSignal {
+                                conn_id,
+                                peer_id: Arc::<str>::clone(&peer_id),
+                                reason: format!("{reason}"),
+                            })
+                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .ok();
+                            break;
+                        },
+                        AcceptorEvent::ClientConnected {
+                            connection_id,
+                            peer_info,
+                        } => {
+                            warn!(
+                                ?connection_id,
+                                ?peer_info,
+                                "received duplicate incoming ClientConnected event; waiting for disconnect"
+                            );
+                        }
                     }
                 }
             }

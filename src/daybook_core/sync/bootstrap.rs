@@ -1,12 +1,17 @@
 use crate::interlude::*;
 
-use super::{IrohSyncRepo, CLONE_PROVISION_ALPN, IROH_CLONE_URL_SCHEME};
+use super::{
+    IrohSyncRepo, CLONE_PROVISION_ALPN, CORE_DOCS_PARTITION_ID, IROH_CLONE_URL_SCHEME,
+    PARTITION_SYNC_ALPN,
+};
 
 use std::str::FromStr;
 
-use irpc::{channel, rpc_requests};
+use futures::StreamExt;
 use iroh::EndpointId;
+use iroh_blobs::api::downloader::DownloadProgressItem;
 use iroh_tickets::endpoint::EndpointTicket;
+use irpc::{channel, rpc_requests};
 #[cfg(test)]
 use tokio::sync::RwLock;
 
@@ -180,9 +185,11 @@ pub async fn resolve_bootstrap_from_url(source_url: &str) -> Res<SyncBootstrapSt
     .to_bootstrap_state()
 }
 
-#[tracing::instrument(skip(big_repo, iroh_secret_key, bootstrap, timeout))]
-pub async fn connect_and_pull_required_docs_once(
+#[tracing::instrument(skip(big_repo, blobs_repo, iroh_secret_key, bootstrap, timeout))]
+pub async fn connect_and_pull_required_partitions_once(
     big_repo: &SharedBigRepo,
+    blobs_repo: &Arc<crate::blobs::BlobsRepo>,
+    local_peer_key: &str,
     iroh_secret_key: iroh::SecretKey,
     bootstrap: &SyncBootstrapState,
     timeout: std::time::Duration,
@@ -197,10 +204,12 @@ pub async fn connect_and_pull_required_docs_once(
         .spawn_connection_iroh(&endpoint, bootstrap.endpoint_addr.clone(), None)
         .await?;
 
-    let pull_res = pull_required_docs_once(
+    let pull_res = pull_required_partitions_once(
         big_repo,
-        &bootstrap.app_doc_id,
-        &bootstrap.drawer_doc_id,
+        blobs_repo,
+        local_peer_key,
+        &endpoint,
+        bootstrap,
         timeout,
     )
     .await;
@@ -227,134 +236,367 @@ pub async fn clone_repo_init_from_url(
                 destination.display()
             );
         }
-    } else {
-        tokio::fs::create_dir_all(&destination).await?;
     }
+    let parent = destination
+        .parent()
+        .ok_or_eyre("clone destination missing parent directory")?;
+    tokio::fs::create_dir_all(parent).await?;
+    let staging = next_clone_staging_dir(parent)?;
+    tokio::fs::create_dir_all(&staging).await?;
 
-    let provision = request_clone_provision_via_rpc(
-        source_url,
-        CloneProvisionRequest {
-            requested_device_name: Some(format!(
-                "clone-{}",
-                std::env::consts::ARCH
-            )),
-            provision: true,
-            requester_endpoint_id: None,
-            requester_peer_key: None,
-        },
-    )
-    .await?;
-    let bootstrap = provision.to_bootstrap_state()?;
-    let sqlite_path = destination.join("sqlite.db");
-    let sql = crate::app::SqlCtx::new(&format!("sqlite://{}", sqlite_path.display())).await?;
-    crate::app::globals::set_repo_id(&sql.db_pool, &bootstrap.repo_id).await?;
-    let issued_secret_hex = provision
-        .issued_iroh_secret_key_hex
-        .ok_or_eyre("clone provision response missing issued_iroh_secret_key_hex")?;
-    let issued_public_key = provision
-        .issued_iroh_public_key
-        .ok_or_eyre("clone provision response missing issued_iroh_public_key")?;
-    let identity = crate::secrets::SecretRepo::set_identity_from_secret_hex(
-        &sql.db_pool,
-        &bootstrap.repo_id,
-        &issued_secret_hex,
-    )
-    .await?;
-    if identity.iroh_public_key.to_string() != issued_public_key {
-        eyre::bail!("provisioned public key mismatch while cloning");
-    }
-    let _repo_user_id = crate::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS sync_allowed_peers(
-            peer_key TEXT PRIMARY KEY,
-            endpoint_id TEXT NULL
+    let cloned = async {
+        let provision = request_clone_provision_via_rpc(
+            source_url,
+            CloneProvisionRequest {
+                requested_device_name: Some(format!("clone-{}", std::env::consts::ARCH)),
+                provision: true,
+                requester_endpoint_id: None,
+                requester_peer_key: None,
+            },
         )
-        "#,
-    )
-    .execute(&sql.db_pool)
-    .await?;
-    let source_peer_key = format!("/{}/{}", bootstrap.repo_id, bootstrap.endpoint_id);
-    sqlx::query(
-        "INSERT INTO sync_allowed_peers(peer_key, endpoint_id) VALUES(?, ?) ON CONFLICT(peer_key) DO UPDATE SET endpoint_id = excluded.endpoint_id",
-    )
-    .bind(source_peer_key)
-    .bind(bootstrap.endpoint_id.to_string())
-    .execute(&sql.db_pool)
-    .await?;
-    let mut sync_config = crate::app::globals::get_sync_config(&sql.db_pool).await?;
-    if !sync_config
-        .known_devices
-        .iter()
-        .any(|entry| entry.endpoint_id == bootstrap.endpoint_id)
-    {
-        sync_config
+        .await?;
+        let bootstrap = provision.to_bootstrap_state()?;
+        let sqlite_path = staging.join("sqlite.db");
+        let sql = crate::app::SqlCtx::new(&format!("sqlite://{}", sqlite_path.display())).await?;
+        crate::app::globals::set_repo_id(&sql.db_pool, &bootstrap.repo_id).await?;
+        let issued_secret_hex = provision
+            .issued_iroh_secret_key_hex
+            .ok_or_eyre("clone provision response missing issued_iroh_secret_key_hex")?;
+        let issued_public_key = provision
+            .issued_iroh_public_key
+            .ok_or_eyre("clone provision response missing issued_iroh_public_key")?;
+        let identity = crate::secrets::SecretRepo::set_identity_from_secret_hex(
+            &sql.db_pool,
+            &bootstrap.repo_id,
+            &issued_secret_hex,
+        )
+        .await?;
+        if identity.iroh_public_key.to_string() != issued_public_key {
+            eyre::bail!("provisioned public key mismatch while cloning");
+        }
+        let _repo_user_id = crate::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sync_allowed_peers(
+                peer_key TEXT PRIMARY KEY,
+                endpoint_id TEXT NULL
+            )
+            "#,
+        )
+        .execute(&sql.db_pool)
+        .await?;
+        let source_peer_key = format!("/{}/{}", bootstrap.repo_id, bootstrap.endpoint_id);
+        sqlx::query(
+            "INSERT INTO sync_allowed_peers(peer_key, endpoint_id) VALUES(?, ?) ON CONFLICT(peer_key) DO UPDATE SET endpoint_id = excluded.endpoint_id",
+        )
+        .bind(source_peer_key)
+        .bind(bootstrap.endpoint_id.to_string())
+        .execute(&sql.db_pool)
+        .await?;
+        let mut sync_config = crate::app::globals::get_sync_config(&sql.db_pool).await?;
+        if !sync_config
             .known_devices
-            .push(crate::app::globals::SyncDeviceEntry {
-                endpoint_id: bootstrap.endpoint_id,
-                name: bootstrap
-                    .device_name
-                    .clone()
-                    .unwrap_or_else(|| bootstrap.endpoint_id.to_string()),
-                added_at: jiff::Timestamp::now(),
-                last_connected_at: None,
-            });
-        crate::app::globals::set_sync_config(&sql.db_pool, &sync_config).await?;
-    }
+            .iter()
+            .any(|entry| entry.endpoint_id == bootstrap.endpoint_id)
+        {
+            sync_config
+                .known_devices
+                .push(crate::app::globals::SyncDeviceEntry {
+                    endpoint_id: bootstrap.endpoint_id,
+                    name: bootstrap
+                        .device_name
+                        .clone()
+                        .unwrap_or_else(|| bootstrap.endpoint_id.to_string()),
+                    added_at: jiff::Timestamp::now(),
+                    last_connected_at: None,
+                });
+            crate::app::globals::set_sync_config(&sql.db_pool, &sync_config).await?;
+        }
 
-    let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
-        storage: am_utils_rs::repo::StorageConfig::Disk {
-            path: destination.join("samod"),
-            big_repo_sqlite_url: None,
-        },
-        peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
-    })
-    .await?;
-    connect_and_pull_required_docs_once(
-        &big_repo,
-        identity.iroh_secret_key.clone(),
-        &bootstrap,
-        options.timeout,
-    )
-    .await?;
-    crate::app::globals::set_init_state(
-        &sql.db_pool,
-        &crate::app::globals::InitState::Created {
-            doc_id_app: bootstrap.app_doc_id.clone(),
-            doc_id_drawer: bootstrap.drawer_doc_id.clone(),
-        },
-    )
-    .await?;
-    crate::repo::mark_repo_initialized(&destination).await?;
-    big_repo_stop.stop().await?;
+        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
+            storage: am_utils_rs::repo::StorageConfig::Disk {
+                path: staging.join("samod"),
+                big_repo_sqlite_url: None,
+            },
+            peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
+        })
+        .await?;
+        let local_peer_key = format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key);
+        let blobs_repo = crate::blobs::BlobsRepo::new(
+            staging.join("blobs"),
+            "clone-bootstrap".to_string(),
+            Arc::new(crate::blobs::NoopPartitionMembershipWriter),
+        )
+        .await?;
+        connect_and_pull_required_partitions_once(
+            &big_repo,
+            &blobs_repo,
+            &local_peer_key,
+            identity.iroh_secret_key.clone(),
+            &bootstrap,
+            options.timeout,
+        )
+        .await?;
+        crate::app::globals::set_init_state(
+            &sql.db_pool,
+            &crate::app::globals::InitState::Created {
+                doc_id_app: bootstrap.app_doc_id.clone(),
+                doc_id_drawer: bootstrap.drawer_doc_id.clone(),
+            },
+        )
+        .await?;
+        crate::repo::mark_repo_initialized(&staging).await?;
+        big_repo_stop.stop().await?;
+        Ok::<SyncBootstrapState, eyre::Report>(bootstrap)
+    }
+    .await;
+
+    let bootstrap = match cloned {
+        Ok(bootstrap) => bootstrap,
+        Err(err) => {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return Err(err);
+        }
+    };
+
+    if destination.exists() {
+        let mut read_dir = tokio::fs::read_dir(&destination).await?;
+        if read_dir.next_entry().await?.is_some() {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            eyre::bail!(
+                "clone destination became non-empty during clone: {}",
+                destination.display()
+            );
+        }
+        tokio::fs::remove_dir(&destination).await?;
+    }
+    tokio::fs::rename(&staging, &destination).await?;
+
     Ok(CloneRepoInitResult {
         repo_path: destination,
         bootstrap,
     })
 }
 
+fn next_clone_staging_dir(parent: &std::path::Path) -> Res<std::path::PathBuf> {
+    for _ in 0..16usize {
+        let candidate = parent.join(format!(".daybook-clone-staging-{}", Uuid::new_v4()));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    eyre::bail!(
+        "failed allocating clone staging directory under {}",
+        parent.display()
+    );
+}
+
 async fn pull_required_docs_once(
     big_repo: &SharedBigRepo,
     app_doc_id: &DocumentId,
     drawer_doc_id: &DocumentId,
+) -> Res<()> {
+    let app = big_repo.find_doc_handle(app_doc_id).await?;
+    let drawer = big_repo.find_doc_handle(drawer_doc_id).await?;
+    if app.is_none() || drawer.is_none() {
+        eyre::bail!(
+            "required core docs missing locally (app_present={}, drawer_present={})",
+            app.is_some(),
+            drawer.is_some()
+        );
+    }
+    Ok(())
+}
+
+async fn pull_required_partitions_once(
+    big_repo: &SharedBigRepo,
+    blobs_repo: &Arc<crate::blobs::BlobsRepo>,
+    local_peer_key: &str,
+    endpoint: &iroh::Endpoint,
+    bootstrap: &SyncBootstrapState,
     timeout: std::time::Duration,
 ) -> Res<()> {
-    let app_doc_id = app_doc_id.clone();
-    let drawer_doc_id = drawer_doc_id.clone();
     tokio::time::timeout(timeout, async move {
+        let partition_rpc = irpc_iroh::client::<am_utils_rs::sync::protocol::PartitionSyncRpc>(
+            endpoint.clone(),
+            bootstrap.endpoint_addr.clone(),
+            PARTITION_SYNC_ALPN,
+        );
+        let partition_list = partition_rpc
+            .rpc(am_utils_rs::sync::protocol::ListPartitionsRpcReq {
+                peer: local_peer_key.to_string(),
+            })
+            .await
+            .wrap_err("list required partitions rpc failed")?
+            .map_err(|err| eyre::eyre!("list required partitions rpc failed: {err:?}"))?;
+        let available_partitions: HashSet<String> = partition_list
+            .partitions
+            .into_iter()
+            .map(|summary| summary.partition_id)
+            .collect();
+        for required in [
+            CORE_DOCS_PARTITION_ID.to_string(),
+            crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
+        ] {
+            if !available_partitions.contains(&required) {
+                eyre::bail!("required partition missing on clone source: {required}");
+            }
+        }
+
+        let core_docs = list_current_partition_members(
+            &partition_rpc,
+            local_peer_key,
+            CORE_DOCS_PARTITION_ID,
+        )
+        .await?;
+        let app_doc_id = bootstrap.app_doc_id.to_string();
+        let drawer_doc_id = bootstrap.drawer_doc_id.to_string();
+        if !core_docs.contains(&app_doc_id) || !core_docs.contains(&drawer_doc_id) {
+            eyre::bail!(
+                "required core docs missing from partition {CORE_DOCS_PARTITION_ID} (app_present={}, drawer_present={})",
+                core_docs.contains(&app_doc_id),
+                core_docs.contains(&drawer_doc_id)
+            );
+        }
+
         loop {
-            let app = big_repo.find_doc_handle(&app_doc_id).await?;
-            let drawer = big_repo.find_doc_handle(&drawer_doc_id).await?;
-            if app.is_some() && drawer.is_some() {
+            pull_required_docs_once(big_repo, &bootstrap.app_doc_id, &bootstrap.drawer_doc_id)
+                .await
+                .inspect_err(|err| {
+                    debug!(?err, "waiting for required docs to materialize locally");
+                })
+                .ok();
+            let app = big_repo.find_doc_handle(&bootstrap.app_doc_id).await?.is_some();
+            let drawer = big_repo.find_doc_handle(&bootstrap.drawer_doc_id).await?.is_some();
+            if app && drawer {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
+
+        let plug_blob_hashes = list_current_partition_members(
+            &partition_rpc,
+            local_peer_key,
+            crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID,
+        )
+        .await?;
+        for hash in plug_blob_hashes {
+            ensure_blob_hash_present(blobs_repo, endpoint, bootstrap.endpoint_id, &hash).await?;
+        }
+
         Ok::<(), eyre::Report>(())
     })
     .await
-    .map_err(|_| eyre::eyre!("timed out waiting for remote docs during clone"))??;
+    .map_err(|_| eyre::eyre!("timed out waiting for required partitions during clone"))??;
 
+    Ok(())
+}
+
+async fn list_current_partition_members(
+    partition_rpc: &irpc::Client<am_utils_rs::sync::protocol::PartitionSyncRpc>,
+    local_peer_key: &str,
+    partition_id: &str,
+) -> Res<HashSet<String>> {
+    let mut current_members = HashSet::new();
+    let mut since = None;
+    loop {
+        let page = partition_rpc
+            .rpc(
+                am_utils_rs::sync::protocol::GetPartitionMemberEventsRpcReq {
+                    peer: local_peer_key.to_string(),
+                    req: am_utils_rs::sync::protocol::GetPartitionMemberEventsRequest {
+                        partitions: vec![am_utils_rs::sync::protocol::PartitionCursorRequest {
+                            partition_id: partition_id.to_string(),
+                            since,
+                        }],
+                        limit: am_utils_rs::sync::protocol::DEFAULT_EVENT_PAGE_LIMIT,
+                    },
+                },
+            )
+            .await
+            .wrap_err_with(|| {
+                format!("partition member replay rpc failed for partition {partition_id}")
+            })?
+            .map_err(|err| {
+                eyre::eyre!(
+                    "partition member replay rpc failed for partition {partition_id}: {err:?}"
+                )
+            })?;
+        for event in page.events {
+            match event.deets {
+                am_utils_rs::sync::protocol::PartitionMemberEventDeets::MemberUpsert {
+                    item_id,
+                    ..
+                } => {
+                    current_members.insert(item_id);
+                }
+                am_utils_rs::sync::protocol::PartitionMemberEventDeets::MemberRemoved {
+                    item_id,
+                    ..
+                } => {
+                    current_members.remove(&item_id);
+                }
+            }
+        }
+        let cursor = page
+            .cursors
+            .into_iter()
+            .find(|cursor| cursor.partition_id == partition_id)
+            .ok_or_eyre("partition cursor page missing during clone bootstrap")?;
+        if !cursor.has_more {
+            break;
+        }
+        since = Some(
+            cursor
+                .next_cursor
+                .ok_or_eyre("partition replay cursor missing next_cursor")?,
+        );
+    }
+    Ok(current_members)
+}
+
+async fn ensure_blob_hash_present(
+    blobs_repo: &Arc<crate::blobs::BlobsRepo>,
+    endpoint: &iroh::Endpoint,
+    endpoint_id: EndpointId,
+    hash: &str,
+) -> Res<()> {
+    if blobs_repo.has_hash(hash).await? {
+        return Ok(());
+    }
+    let iroh_hash = crate::blobs::daybook_hash_to_iroh_hash(hash)?;
+    if blobs_repo.iroh_store().blobs().has(iroh_hash).await? {
+        blobs_repo.put_from_store(hash).await?;
+        return Ok(());
+    }
+    let downloader = blobs_repo.iroh_store().downloader(endpoint);
+    let progress = downloader.download(iroh_hash, vec![endpoint_id]);
+    let mut stream = progress
+        .stream()
+        .await
+        .map_err(|err| eyre::eyre!("failed opening blob download stream for {hash}: {err:?}"))?;
+    let mut saw_error = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            DownloadProgressItem::DownloadError | DownloadProgressItem::Error(_) => {
+                saw_error = true;
+            }
+            DownloadProgressItem::TryProvider { .. }
+            | DownloadProgressItem::Progress(_)
+            | DownloadProgressItem::PartComplete { .. }
+            | DownloadProgressItem::ProviderFailed { .. } => {}
+        }
+    }
+    if saw_error {
+        eyre::bail!("blob download reported error for hash {hash}");
+    }
+    if !blobs_repo.iroh_store().blobs().has(iroh_hash).await? {
+        eyre::bail!("blob not found in iroh store after download for hash {hash}");
+    }
+    blobs_repo.put_from_store(hash).await?;
+    if !blobs_repo.has_hash(hash).await? {
+        eyre::bail!("blob materialization failed for hash {hash}");
+    }
     Ok(())
 }
 
@@ -368,15 +610,19 @@ fn parse_clone_endpoint_addr(input: &str) -> Res<iroh::EndpointAddr> {
 }
 
 #[cfg(test)]
-static TEST_CLONE_RPC_REGISTRY: LazyLock<RwLock<HashMap<EndpointId, tokio::sync::mpsc::Sender<CloneProvisionRpcMessage>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+static TEST_CLONE_RPC_REGISTRY: LazyLock<
+    RwLock<HashMap<EndpointId, tokio::sync::mpsc::Sender<CloneProvisionRpcMessage>>>,
+> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[cfg(test)]
 pub async fn register_test_clone_rpc_sender(
     endpoint_id: EndpointId,
     sender: tokio::sync::mpsc::Sender<CloneProvisionRpcMessage>,
 ) {
-    TEST_CLONE_RPC_REGISTRY.write().await.insert(endpoint_id, sender);
+    TEST_CLONE_RPC_REGISTRY
+        .write()
+        .await
+        .insert(endpoint_id, sender);
 }
 
 #[cfg(test)]

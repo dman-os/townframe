@@ -168,8 +168,12 @@ pub async fn init_from_globals(
     sql: &SqlitePool,
     doc_app_cell: &tokio::sync::OnceCell<samod::DocHandle>,
     doc_drawer_cell: &tokio::sync::OnceCell<samod::DocHandle>,
+    strict_existing_repo: bool,
 ) -> Res<()> {
     let init_state = globals::get_init_state(sql).await?;
+    if strict_existing_repo && !matches!(init_state, globals::InitState::Created { .. }) {
+        eyre::bail!("repo init_state missing for existing repository");
+    }
     let (handle_app, handle_drawer) = if let globals::InitState::Created {
         doc_id_app,
         doc_id_drawer,
@@ -179,11 +183,22 @@ pub async fn init_from_globals(
             big_repo.find_doc_handle(&doc_id_app),
             big_repo.find_doc_handle(&doc_id_drawer)
         )?;
-        if handle_app.is_none() {
-            warn!("doc not found locally for stored doc_id_app; creating new local document");
+        if strict_existing_repo && (handle_app.is_none() || handle_drawer.is_none()) {
+            eyre::bail!(
+                "required core docs missing in existing repository (app_present={}, drawer_present={})",
+                handle_app.is_some(),
+                handle_drawer.is_some()
+            );
         }
-        if handle_drawer.is_none() {
-            warn!("doc not found locally for stored doc_id_drawer; creating new local document");
+        if !strict_existing_repo {
+            if handle_app.is_none() {
+                warn!("doc not found locally for stored doc_id_app; creating new local document");
+            }
+            if handle_drawer.is_none() {
+                warn!(
+                    "doc not found locally for stored doc_id_drawer; creating new local document"
+                );
+            }
         }
         (handle_app, handle_drawer)
     } else {

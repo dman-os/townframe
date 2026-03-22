@@ -4,6 +4,36 @@
 
 import { $ } from "./utils.ts";
 
+async function removeTreeIfExists(path: { toString(): string }) {
+  const targetPath = path.toString();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await Deno.remove(targetPath, { recursive: true });
+      return;
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      const isRetryable = message.includes("Directory not empty") ||
+        message.includes("resource busy");
+      if (!isRetryable || attempt === 4) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+    }
+  }
+}
+
+async function cleanupOrtBuildArtifacts(sourceDir: {
+  join(path: string): { toString(): string };
+}) {
+  // Keep extracted ORT sources for reuse, but drop heavy generated Android build output.
+  await removeTreeIfExists({
+    toString: () => `${sourceDir.join("build").toString()}/Android`,
+  });
+}
+
 const abiToTriple = {
   "arm64-v8a": "aarch64-linux-android",
   "armeabi-v7a": "armv7-linux-androideabi",
@@ -22,6 +52,8 @@ if (!(composeProfile === "debug" || composeProfile === "release")) {
   );
 }
 const gradleVariant = composeProfile === "release" ? "Release" : "Debug";
+const gradleTask = $.env.DAYBOOK_ANDROID_GRADLE_TASK ??
+  `install${gradleVariant}`;
 const ortBuildConfig = $.env.ORT_BUILD_CONFIG ??
   (composeProfile === "release" ? "Release" : "Debug");
 
@@ -52,7 +84,7 @@ if (!(await distCompleteFile.exists())) {
         .showProgress()
         .pipeToPath(sourceArchivePath);
     }
-    await sourceDir.ensureRemove();
+    await removeTreeIfExists(sourceDir);
     await sourceDir.ensureDir();
     await $`bsdtar --extract --file ${sourceArchivePath} --directory ${sourceDir} --strip-components=1`;
     await sourceCompleteFile.writeText("ok\n");
@@ -74,21 +106,20 @@ if (!(await distCompleteFile.exists())) {
       `ORT build did not produce shared libraries under ${builtLibDir}`,
     );
   }
-  await distDir.ensureRemove();
+  await removeTreeIfExists(distDir);
   await distDir.ensureDir();
   for (const sourceLibPath of sharedLibPaths) {
-    await $`cp -f ${sourceLibPath} ${distDir}`;
+    await $`cp ${sourceLibPath} ${distDir}`;
   }
-  await libDirFile.writeText(
-    `${distDir}\n`,
-  );
+  await libDirFile.writeText(`${distDir}\n`);
   await distCompleteFile.writeText("ok\n");
-
-  // The ORT source + build tree is huge; we only need the copied runtime libs.
-  await sourceDir.ensureRemove();
 }
 
-await $`./gradlew install${gradleVariant} -PdaybookProfile=${composeProfile}`
+if (await sourceDir.exists()) {
+  await cleanupOrtBuildArtifacts(sourceDir);
+}
+
+await $`./gradlew ${gradleTask} -PdaybookProfile=${composeProfile}`
   .cwd($.relativeDir("../src/daybook_compose/"))
   .env({
     ORT_LIB_LOCATION: (await libDirFile.readText()).trim(),

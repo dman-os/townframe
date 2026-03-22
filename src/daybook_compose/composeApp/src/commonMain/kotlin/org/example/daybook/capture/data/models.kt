@@ -7,7 +7,9 @@ sealed interface CameraOverlay {
         val left: Float,
         val top: Float,
         val right: Float,
-        val bottom: Float
+        val bottom: Float,
+        val sourceWidthPx: Int,
+        val sourceHeightPx: Int
     ) : CameraOverlay
 }
 

@@ -33,7 +33,9 @@ class CameraQrOverlayBridge(
                                             left = overlay.bounds.left,
                                             top = overlay.bounds.top,
                                             right = overlay.bounds.right,
-                                            bottom = overlay.bounds.bottom
+                                            bottom = overlay.bounds.bottom,
+                                            sourceWidthPx = overlay.frameWidthPx.toInt(),
+                                            sourceHeightPx = overlay.frameHeightPx.toInt()
                                         )
                                 }
                             }
@@ -108,7 +110,9 @@ class CameraPreviewQrBridge(
                                             left = overlay.bounds.left,
                                             top = overlay.bounds.top,
                                             right = overlay.bounds.right,
-                                            bottom = overlay.bounds.bottom
+                                            bottom = overlay.bounds.bottom,
+                                            sourceWidthPx = overlay.frameWidthPx.toInt(),
+                                            sourceHeightPx = overlay.frameHeightPx.toInt()
                                         )
                                 }
                             }
