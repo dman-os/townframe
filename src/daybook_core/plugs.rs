@@ -894,7 +894,9 @@ impl PlugsRepo {
                 .await?;
             }
 
-            for event in &events {
+            let mut delivered_events = Vec::with_capacity(events.len());
+            for event in events.drain(..) {
+                let is_added = matches!(event, PlugsEvent::PlugAdded { .. });
                 match event {
                     PlugsEvent::PlugAdded { id, heads } | PlugsEvent::PlugChanged { id, heads } => {
                         let Some((new_versioned, _)) = self
@@ -918,7 +920,7 @@ impl PlugsRepo {
                             .query_sync(|store| {
                                 store
                                     .manifests
-                                    .get(id)
+                                    .get(&id)
                                     .map(|versioned| Arc::clone(&versioned.val))
                             })
                             .await
@@ -947,15 +949,12 @@ impl PlugsRepo {
                                     continue;
                                 }
                             };
-
-                        self.store
-                            .mutate_sync(|store| {
-                                store.manifests.insert(id.clone(), new_versioned);
-                                store.rebuild_indices();
-                            })
-                            .await?;
                         if let Err(err) = self
-                            .publish_plug_scope_diff(&prev_hashes, &next_hashes)
+                            .publish_plug_scope_diff_for_manifest_change(
+                                &id,
+                                &prev_hashes,
+                                &next_hashes,
+                            )
                             .await
                         {
                             warn!(
@@ -965,45 +964,62 @@ impl PlugsRepo {
                             );
                             continue;
                         }
-                    }
-                    PlugsEvent::PlugDeleted { id, .. } => {
-                        let (removed_manifest, _hash) = self
-                            .store
+
+                        self.store
                             .mutate_sync(|store| {
-                                let removed = store
-                                    .manifests
-                                    .remove(id)
-                                    .map(|value| Arc::clone(&value.val));
+                                store.manifests.insert(id.clone(), new_versioned);
                                 store.rebuild_indices();
-                                removed
                             })
                             .await?;
+                        delivered_events.push(if is_added {
+                            PlugsEvent::PlugAdded { id, heads }
+                        } else {
+                            PlugsEvent::PlugChanged { id, heads }
+                        });
+                    }
+                    PlugsEvent::PlugDeleted { id, heads } => {
+                        let removed_manifest = self
+                            .store
+                            .query_sync(|store| {
+                                store.manifests.get(&id).map(|value| Arc::clone(&value.val))
+                            })
+                            .await;
                         if let Some(removed) = removed_manifest {
-                            let removed_hashes = match Self::blob_hashes_for_manifest(
-                                removed.as_ref(),
-                            ) {
-                                Ok(value) => value,
-                                Err(err) => {
-                                    warn!(
+                            let removed_hashes =
+                                match Self::blob_hashes_for_manifest(removed.as_ref()) {
+                                    Ok(value) => value,
+                                    Err(err) => {
+                                        warn!(
                                         plug_id = id,
                                         ?err,
                                         "failed reading removed plug blob hashes; skipping event"
                                     );
-                                    continue;
-                                }
-                            };
+                                        continue;
+                                    }
+                                };
                             if let Err(err) = self
-                                .publish_plug_scope_diff(&removed_hashes, &HashSet::new())
+                                .publish_plug_scope_diff_for_manifest_change(
+                                    &id,
+                                    &removed_hashes,
+                                    &HashSet::new(),
+                                )
                                 .await
                             {
                                 warn!(plug_id = id, ?err, "failed publishing removed plug scope hash diff; skipping event");
                                 continue;
                             }
+                            self.store
+                                .mutate_sync(|store| {
+                                    store.manifests.remove(&id);
+                                    store.rebuild_indices();
+                                })
+                                .await?;
+                            delivered_events.push(PlugsEvent::PlugDeleted { id, heads });
                         }
                     }
                 }
             }
-            self.registry.notify(events.drain(..));
+            self.registry.notify(delivered_events.drain(..));
         }
         Ok(())
     }
@@ -1272,6 +1288,8 @@ impl PlugsRepo {
             .transpose()?
             .unwrap_or_default();
         let next_hashes = Self::blob_hashes_for_manifest(&manifest)?;
+        self.publish_plug_scope_diff_for_manifest_change(&plug_id, &prev_hashes, &next_hashes)
+            .await?;
 
         let ((plug_id, is_update), hash) = self
             .store
@@ -1310,8 +1328,6 @@ impl PlugsRepo {
         } else {
             PlugsEvent::PlugAdded { id: plug_id, heads }
         }]);
-        self.publish_plug_scope_diff(&prev_hashes, &next_hashes)
-            .await?;
 
         Ok(())
     }
@@ -1336,8 +1352,9 @@ impl PlugsRepo {
         Ok(hashes)
     }
 
-    async fn publish_plug_scope_diff(
+    async fn publish_plug_scope_diff_for_manifest_change(
         &self,
+        plug_id: &str,
         prev_hashes: &HashSet<String>,
         next_hashes: &HashSet<String>,
     ) -> Res<()> {
@@ -1347,7 +1364,10 @@ impl PlugsRepo {
                 .await?;
         }
         for hash in prev_hashes.difference(next_hashes) {
-            if !self.is_blob_hash_referenced_by_any_plug(hash).await {
+            if !self
+                .is_blob_hash_referenced_by_any_plug_excluding(hash, plug_id)
+                .await
+            {
                 self.blobs
                     .remove_hash_from_scope(crate::blobs::BlobScope::Plugs, hash)
                     .await?;
@@ -1356,18 +1376,26 @@ impl PlugsRepo {
         Ok(())
     }
 
-    async fn is_blob_hash_referenced_by_any_plug(&self, hash: &str) -> bool {
+    async fn is_blob_hash_referenced_by_any_plug_excluding(
+        &self,
+        hash: &str,
+        excluded_plug_id: &str,
+    ) -> bool {
         self.store
             .query_sync(|store| {
-                store.manifests.values().any(|manifest| {
-                    manifest.val.wflow_bundles.values().any(|bundle| {
-                        bundle.component_urls.iter().any(|url| {
-                            url.scheme() == crate::blobs::BLOB_SCHEME
-                                && url.host_str().is_none()
-                                && url.path().trim_start_matches('/') == hash
+                store
+                    .manifests
+                    .iter()
+                    .filter(|(plug_id, _)| plug_id.as_str() != excluded_plug_id)
+                    .any(|(_, manifest)| {
+                        manifest.val.wflow_bundles.values().any(|bundle| {
+                            bundle.component_urls.iter().any(|url| {
+                                url.scheme() == crate::blobs::BLOB_SCHEME
+                                    && url.host_str().is_none()
+                                    && url.path().trim_start_matches('/') == hash
+                            })
                         })
                     })
-                })
             })
             .await
     }

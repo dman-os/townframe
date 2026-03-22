@@ -158,7 +158,7 @@ pub async fn spawn_peer_sync_worker(
         let mut replay_phase_transition_emitted = false;
         worker.emit_phase_started("subscribe_replay");
 
-        let reqs = {
+        let mut rpc_rx = {
             let mut reqs = Vec::with_capacity(parts.len());
             for part in &parts {
                 let cursor = worker
@@ -171,19 +171,18 @@ pub async fn spawn_peer_sync_worker(
                     since_doc: cursor.doc_cursor,
                 });
             }
-            reqs
+            worker
+                .rpc_client
+                .server_streaming(
+                    SubPartitionsRpcReq {
+                        peer: worker.local_peer.clone(),
+                        req: SubPartitionsRequest { partitions: reqs },
+                    },
+                    DEFAULT_SUBSCRIPTION_CAPACITY,
+                )
+                .await
+                .wrap_err("subscription rpc failed")?
         };
-        let mut rpc_rx = worker
-            .rpc_client
-            .server_streaming(
-                SubPartitionsRpcReq {
-                    peer: worker.local_peer.clone(),
-                    req: SubPartitionsRequest { partitions: reqs },
-                },
-                DEFAULT_SUBSCRIPTION_CAPACITY,
-            )
-            .await
-            .wrap_err("subscription rpc failed")?;
 
         worker
             .events_tx
@@ -208,10 +207,9 @@ pub async fn spawn_peer_sync_worker(
                     worker.handle_samod_ack(ack).await?;
                 }
                 recv = rpc_rx.recv() => {
-                    let item = recv.map_err(|err| ferr!("subscription recv failed: {err}"))?;
-                    let Some(item) = item else {
-                        eyre::bail!("subscription ended");
-                    };
+                    let item = recv
+                        .wrap_err("subscription recv failed")?
+                        .ok_or_else(|| ferr!("subscription stream closed"))?;
                     worker
                         .handle_subscription_item(
                             item,
@@ -232,7 +230,7 @@ pub async fn spawn_peer_sync_worker(
         // let cancel_token = cancel_token.clone();
         let span = tracing::info_span!("PeerSyncWorker", remote_peer = %args.remote_peer);
         async move {
-            let run_res = match cancel_token.run_until_cancelled(fut).await {
+            let run_res: Res<()> = match cancel_token.run_until_cancelled(fut).await {
                 Some(out) => out,
                 None => Ok(()),
             };
@@ -249,7 +247,9 @@ pub async fn spawn_peer_sync_worker(
                     .ok();
             }
             debug!(result = ?run_res.as_ref().map(|_| ()), "peer sync worker future exiting");
-            run_res.unwrap();
+            if let Err(err) = run_res {
+                warn!(?err, "peer sync worker exiting with abnormal error");
+            }
         }
         .instrument(span)
     });

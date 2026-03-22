@@ -102,13 +102,6 @@ impl RtStopToken {
             );
         }
 
-        if let Err(err) = self.sqlite_local_state_stop.stop().await {
-            warn!(
-                ?err,
-                "error stopping sqlite_local_state_repo during shutdown - continuing"
-            );
-        }
-
         // FIXME: this is wrong, dispatches are allowed
         // to resume on reboot
         //
@@ -152,6 +145,12 @@ impl RtStopToken {
             warn!(
                 ?err,
                 "error stopping doc_blobs_index_repo during shutdown - continuing"
+            );
+        }
+        if let Err(err) = self.sqlite_local_state_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping sqlite_local_state_repo during shutdown - continuing"
             );
         }
 

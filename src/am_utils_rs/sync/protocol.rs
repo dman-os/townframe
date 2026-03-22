@@ -77,14 +77,8 @@ pub enum PartitionEventDeets {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PartitionMemberEventDeets {
-    MemberUpsert {
-        item_id: String,
-        payload: serde_json::Value,
-    },
-    MemberRemoved {
-        item_id: String,
-        payload: serde_json::Value,
-    },
+    MemberUpsert { item_id: String, payload: String },
+    MemberRemoved { item_id: String, payload: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -96,14 +90,8 @@ pub struct PartitionDocEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PartitionDocEventDeets {
-    ItemChanged {
-        item_id: String,
-        payload: serde_json::Value,
-    },
-    ItemDeleted {
-        item_id: String,
-        payload: serde_json::Value,
-    },
+    ItemChanged { item_id: String, payload: String },
+    ItemDeleted { item_id: String, payload: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

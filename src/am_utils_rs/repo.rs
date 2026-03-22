@@ -366,8 +366,13 @@ impl BigRepo {
         .await?;
         let mut leases = Vec::new();
         for raw_doc_id in doc_ids {
-            let doc_id = DocumentId::from_str(&raw_doc_id)
-                .map_err(|err| ferr!("invalid stored doc id in partition state: {err}"))?;
+            let Ok(doc_id) = DocumentId::from_str(&raw_doc_id) else {
+                debug!(
+                    raw_doc_id,
+                    "skipping non-document partition item while bootstrapping persistent change brokers"
+                );
+                continue;
+            };
             if let Some(handle) = self.find_doc_handle(&doc_id).await? {
                 let lease = self.ensure_persistent_change_broker(handle).await?;
                 leases.push(lease);
@@ -1013,10 +1018,15 @@ mod tests {
                             item_id: event_doc_id,
                             payload,
                         } if event_doc_id == &doc_id.to_string()
-                            && payload
-                                .get("heads")
-                                .and_then(|value| value.as_array())
-                                .is_some_and(|heads| !heads.is_empty())
+                            && serde_json::from_str::<serde_json::Value>(payload)
+                                .ok()
+                                .and_then(|value| {
+                                    value
+                                        .get("heads")
+                                        .and_then(|heads| heads.as_array())
+                                        .map(|heads| !heads.is_empty())
+                                })
+                                .unwrap_or(false)
                     )
             }),
             "import must produce current partition doc events with imported heads"

@@ -50,7 +50,7 @@ impl PartitionStore {
 
     pub async fn ensure_schema(&self) -> Res<()> {
         sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS big_repo_meta(
+            r#"CREATE TABLE IF NOT EXISTS meta_kvstore(
                 key TEXT PRIMARY KEY
                 ,value TEXT NOT NULL
             )"#,
@@ -59,7 +59,7 @@ impl PartitionStore {
         .await?;
         sqlx::query(
             r#"
-            INSERT INTO big_repo_meta(key, value)
+            INSERT INTO meta_kvstore(key, value)
             VALUES(?, ?)
             ON CONFLICT(key) DO NOTHING
             "#,
@@ -179,7 +179,7 @@ impl PartitionStore {
             return Ok(());
         }
         let item_payload_json = sqlx::query_scalar::<_, String>(
-            "SELECT item_payload_json FROM partition_item_state WHERE partition_id = ? AND item_id = ? AND deleted = 0",
+            "SELECT item_payload_json FROM partition_item_state WHERE partition_id = ? AND item_id = ?",
         )
         .bind(partition_id)
         .bind(item_id)
@@ -329,27 +329,8 @@ impl PartitionStore {
         item_id: &str,
         item_payload: &serde_json::Value,
     ) -> Res<()> {
-        let item_payload_json = serde_json::to_string(item_payload)?;
         let mut tx = self.state_pool.begin().await?;
-        let txid = alloc_txid(tx.as_mut()).await?;
-        sqlx::query(
-            r#"
-            INSERT INTO partition_item_state(
-                partition_id, item_id, deleted, item_payload_json, latest_txid
-            ) VALUES(?, ?, 0, ?, ?)
-            ON CONFLICT(partition_id, item_id) DO UPDATE SET
-                deleted = 0,
-                item_payload_json = excluded.item_payload_json,
-                latest_txid = excluded.latest_txid
-            "#,
-        )
-        .bind(partition_id)
-        .bind(item_id)
-        .bind(&item_payload_json)
-        .bind(txid as i64)
-        .execute(&mut *tx)
-        .await?;
-
+        let txid = record_item_change_tx(tx.as_mut(), partition_id, item_id, item_payload).await?;
         tx.commit().await?;
         self.partition_events_tx
             .send(PartitionEvent {
@@ -370,26 +351,8 @@ impl PartitionStore {
         item_id: &str,
         item_payload: &serde_json::Value,
     ) -> Res<()> {
-        let item_payload_json = serde_json::to_string(item_payload)?;
         let mut tx = self.state_pool.begin().await?;
-        let txid = alloc_txid(tx.as_mut()).await?;
-        sqlx::query(
-            r#"
-            INSERT INTO partition_item_state(
-                partition_id, item_id, deleted, item_payload_json, latest_txid
-            ) VALUES(?, ?, 1, ?, ?)
-            ON CONFLICT(partition_id, item_id) DO UPDATE SET
-                deleted = 1,
-                item_payload_json = excluded.item_payload_json,
-                latest_txid = excluded.latest_txid
-            "#,
-        )
-        .bind(partition_id)
-        .bind(item_id)
-        .bind(&item_payload_json)
-        .bind(txid as i64)
-        .execute(&mut *tx)
-        .await?;
+        let txid = record_item_deleted_tx(tx.as_mut(), partition_id, item_id, item_payload).await?;
         tx.commit().await?;
         self.partition_events_tx
             .send(PartitionEvent {
@@ -409,16 +372,30 @@ impl PartitionStore {
         item_id: &str,
         item_payload: &serde_json::Value,
     ) -> Res<()> {
+        let mut tx = self.state_pool.begin().await?;
         let partition_rows = sqlx::query(
             "SELECT partition_id FROM partition_membership_state WHERE item_id = ? AND present = 1",
         )
         .bind(item_id)
-        .fetch_all(&self.state_pool)
+        .fetch_all(&mut *tx)
         .await?;
+        let mut events = Vec::with_capacity(partition_rows.len());
         for row in partition_rows {
             let partition_id: String = row.try_get("partition_id")?;
-            self.record_item_change(&partition_id, item_id, item_payload)
-                .await?;
+            let txid =
+                record_item_change_tx(tx.as_mut(), &partition_id, item_id, item_payload).await?;
+            events.push(PartitionEvent {
+                cursor: txid,
+                partition_id,
+                deets: PartitionEventDeets::ItemChanged {
+                    item_id: item_id.to_owned(),
+                    payload: item_payload.clone(),
+                },
+            });
+        }
+        tx.commit().await?;
+        for event in events {
+            self.partition_events_tx.send(event).ok();
         }
         Ok(())
     }
@@ -428,15 +405,29 @@ impl PartitionStore {
         item_id: &str,
         item_payload: &serde_json::Value,
     ) -> Res<()> {
+        let mut tx = self.state_pool.begin().await?;
         let partition_rows =
             sqlx::query("SELECT partition_id FROM partition_membership_state WHERE item_id = ?")
                 .bind(item_id)
-                .fetch_all(&self.state_pool)
+                .fetch_all(&mut *tx)
                 .await?;
+        let mut events = Vec::with_capacity(partition_rows.len());
         for row in partition_rows {
             let partition_id: String = row.try_get("partition_id")?;
-            self.record_item_deleted(&partition_id, item_id, item_payload)
-                .await?;
+            let txid =
+                record_item_deleted_tx(tx.as_mut(), &partition_id, item_id, item_payload).await?;
+            events.push(PartitionEvent {
+                cursor: txid,
+                partition_id,
+                deets: PartitionEventDeets::ItemDeleted {
+                    item_id: item_id.to_owned(),
+                    payload: item_payload.clone(),
+                },
+            });
+        }
+        tx.commit().await?;
+        for event in events {
+            self.partition_events_tx.send(event).ok();
         }
         Ok(())
     }
@@ -594,7 +585,6 @@ impl PartitionStore {
             .map(|item| item.partition_id.clone())
             .collect();
         let (tx, rx) = tokio::sync::mpsc::channel(capacity.max(1));
-        let mut rx_opt = Some(rx);
         let mut member_high_watermark: HashMap<PartitionId, u64> = reqs
             .partitions
             .iter()
@@ -605,56 +595,6 @@ impl PartitionStore {
                 )
             })
             .collect();
-        'member_replay: loop {
-            let replay_members = self
-                .get_partition_member_events_for_peer(
-                    peer,
-                    &GetPartitionMemberEventsRequest {
-                        partitions: member_parts.clone(),
-                        limit: DEFAULT_EVENT_PAGE_LIMIT,
-                    },
-                )
-                .await?;
-            for event in replay_members.events {
-                let entry = member_high_watermark
-                    .entry(event.partition_id.clone())
-                    .or_default();
-                *entry = (*entry).max(event.cursor);
-                if tx.send(SubscriptionItem::MemberEvent(event)).await.is_err() {
-                    break 'member_replay;
-                }
-            }
-            let mut any_more = false;
-            for cursor_page in replay_members.cursors {
-                let Some(part) = member_parts
-                    .iter_mut()
-                    .find(|part| part.partition_id == cursor_page.partition_id)
-                else {
-                    continue;
-                };
-                part.since = cursor_page.next_cursor.or(part.since);
-                any_more |= cursor_page.has_more;
-            }
-            if !any_more {
-                break;
-            }
-        }
-        if tx.is_closed() {
-            return Ok(rx_opt
-                .take()
-                .expect("partition subscription response channel should exist"));
-        }
-        if tx
-            .send(SubscriptionItem::ReplayComplete {
-                stream: SubscriptionStreamKind::Member,
-            })
-            .await
-            .is_err()
-        {
-            return Ok(rx_opt
-                .take()
-                .expect("partition subscription response channel should exist"));
-        }
         let mut doc_high_watermark: HashMap<PartitionId, u64> = reqs
             .partitions
             .iter()
@@ -665,61 +605,100 @@ impl PartitionStore {
                 )
             })
             .collect();
-        'doc_replay: loop {
-            let replay_docs = self
-                .get_partition_doc_events_for_peer(
-                    peer,
-                    &GetPartitionDocEventsRequest {
-                        partitions: doc_parts.clone(),
-                        limit: DEFAULT_EVENT_PAGE_LIMIT,
-                    },
-                )
-                .await?;
-            for event in replay_docs.events {
-                let entry = doc_high_watermark
-                    .entry(event.partition_id.clone())
-                    .or_default();
-                *entry = (*entry).max(event.cursor);
-                if tx.send(SubscriptionItem::DocEvent(event)).await.is_err() {
-                    break 'doc_replay;
-                }
-            }
-            let mut any_more = false;
-            for cursor_page in replay_docs.cursors {
-                let Some(part) = doc_parts
-                    .iter_mut()
-                    .find(|part| part.partition_id == cursor_page.partition_id)
-                else {
-                    continue;
-                };
-                part.since = cursor_page.next_cursor.or(part.since);
-                any_more |= cursor_page.has_more;
-            }
-            if !any_more {
-                break;
-            }
-        }
-        if tx.is_closed() {
-            return Ok(rx_opt
-                .take()
-                .expect("partition subscription response channel should exist"));
-        }
-        if tx
-            .send(SubscriptionItem::ReplayComplete {
-                stream: SubscriptionStreamKind::Doc,
-            })
-            .await
-            .is_err()
-        {
-            return Ok(rx_opt
-                .take()
-                .expect("partition subscription response channel should exist"));
-        }
-
+        let store = self.clone();
+        let peer = peer.clone();
         let cancel_token = self.partition_forwarder_cancel.clone();
         let fut = {
             let span = tracing::info_span!("partition live forwarder");
             async move {
+                loop {
+                    let replay_members = store
+                        .get_partition_member_events_for_peer(
+                            &peer,
+                            &GetPartitionMemberEventsRequest {
+                                partitions: member_parts.clone(),
+                                limit: DEFAULT_EVENT_PAGE_LIMIT,
+                            },
+                        )
+                        .await?;
+                    for event in replay_members.events {
+                        let entry = member_high_watermark
+                            .entry(event.partition_id.clone())
+                            .or_default();
+                        *entry = (*entry).max(event.cursor);
+                        if tx.send(SubscriptionItem::MemberEvent(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    let mut any_more = false;
+                    for cursor_page in replay_members.cursors {
+                        let Some(part) = member_parts
+                            .iter_mut()
+                            .find(|part| part.partition_id == cursor_page.partition_id)
+                        else {
+                            continue;
+                        };
+                        part.since = cursor_page.next_cursor.or(part.since);
+                        any_more |= cursor_page.has_more;
+                    }
+                    if !any_more {
+                        break;
+                    }
+                }
+                if tx
+                    .send(SubscriptionItem::ReplayComplete {
+                        stream: SubscriptionStreamKind::Member,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+
+                loop {
+                    let replay_docs = store
+                        .get_partition_doc_events_for_peer(
+                            &peer,
+                            &GetPartitionDocEventsRequest {
+                                partitions: doc_parts.clone(),
+                                limit: DEFAULT_EVENT_PAGE_LIMIT,
+                            },
+                        )
+                        .await?;
+                    for event in replay_docs.events {
+                        let entry = doc_high_watermark
+                            .entry(event.partition_id.clone())
+                            .or_default();
+                        *entry = (*entry).max(event.cursor);
+                        if tx.send(SubscriptionItem::DocEvent(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    let mut any_more = false;
+                    for cursor_page in replay_docs.cursors {
+                        let Some(part) = doc_parts
+                            .iter_mut()
+                            .find(|part| part.partition_id == cursor_page.partition_id)
+                        else {
+                            continue;
+                        };
+                        part.since = cursor_page.next_cursor.or(part.since);
+                        any_more |= cursor_page.has_more;
+                    }
+                    if !any_more {
+                        break;
+                    }
+                }
+                if tx
+                    .send(SubscriptionItem::ReplayComplete {
+                        stream: SubscriptionStreamKind::Doc,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+
                 loop {
                     let recv = cancel_token.run_until_cancelled(live_rx.recv()).await;
                     let event = match recv {
@@ -743,6 +722,8 @@ impl PartitionStore {
                             if txid <= high_watermark {
                                 continue;
                             }
+                            let payload = serde_json::to_string(&payload)
+                                .expect("member upsert payload should serialize to json");
                             if tx
                                 .send(SubscriptionItem::MemberEvent(PartitionMemberEvent {
                                     cursor: event.cursor,
@@ -765,6 +746,8 @@ impl PartitionStore {
                             if txid <= high_watermark {
                                 continue;
                             }
+                            let payload = serde_json::to_string(&payload)
+                                .expect("member removed payload should serialize to json");
                             if tx
                                 .send(SubscriptionItem::MemberEvent(PartitionMemberEvent {
                                     cursor: event.cursor,
@@ -787,6 +770,8 @@ impl PartitionStore {
                             if txid <= high_watermark {
                                 continue;
                             }
+                            let payload = serde_json::to_string(&payload)
+                                .expect("item changed payload should serialize to json");
                             if tx
                                 .send(SubscriptionItem::DocEvent(PartitionDocEvent {
                                     cursor: event.cursor,
@@ -806,6 +791,8 @@ impl PartitionStore {
                             if txid <= high_watermark {
                                 continue;
                             }
+                            let payload = serde_json::to_string(&payload)
+                                .expect("item deleted payload should serialize to json");
                             if tx
                                 .send(SubscriptionItem::DocEvent(PartitionDocEvent {
                                     cursor: event.cursor,
@@ -827,15 +814,13 @@ impl PartitionStore {
         };
         self.partition_forwarders
             .spawn(async move { fut.await.unwrap() })?;
-        Ok(rx_opt
-            .take()
-            .expect("partition subscription response channel should exist"))
+        Ok(rx)
     }
 }
 
 async fn alloc_txid(conn: &mut sqlx::SqliteConnection) -> Res<u64> {
     let next_value: i64 = sqlx::query_scalar(
-        "UPDATE big_repo_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = ? RETURNING CAST(value AS INTEGER)",
+        "UPDATE meta_kvstore SET value = CAST(value AS INTEGER) + 1 WHERE key = ? RETURNING CAST(value AS INTEGER)",
     )
     .bind(META_NEXT_TXID_KEY)
     .fetch_one(&mut *conn)
@@ -846,6 +831,62 @@ async fn alloc_txid(conn: &mut sqlx::SqliteConnection) -> Res<u64> {
     }
     let out = out as u64;
     Ok(out)
+}
+
+async fn record_item_change_tx(
+    conn: &mut sqlx::SqliteConnection,
+    partition_id: &PartitionId,
+    item_id: &str,
+    item_payload: &serde_json::Value,
+) -> Res<u64> {
+    let item_payload_json = serde_json::to_string(item_payload)?;
+    let txid = alloc_txid(conn).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO partition_item_state(
+            partition_id, item_id, deleted, item_payload_json, latest_txid
+        ) VALUES(?, ?, 0, ?, ?)
+        ON CONFLICT(partition_id, item_id) DO UPDATE SET
+            deleted = 0,
+            item_payload_json = excluded.item_payload_json,
+            latest_txid = excluded.latest_txid
+        "#,
+    )
+    .bind(partition_id)
+    .bind(item_id)
+    .bind(item_payload_json)
+    .bind(txid as i64)
+    .execute(&mut *conn)
+    .await?;
+    Ok(txid)
+}
+
+async fn record_item_deleted_tx(
+    conn: &mut sqlx::SqliteConnection,
+    partition_id: &PartitionId,
+    item_id: &str,
+    item_payload: &serde_json::Value,
+) -> Res<u64> {
+    let item_payload_json = serde_json::to_string(item_payload)?;
+    let txid = alloc_txid(conn).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO partition_item_state(
+            partition_id, item_id, deleted, item_payload_json, latest_txid
+        ) VALUES(?, ?, 1, ?, ?)
+        ON CONFLICT(partition_id, item_id) DO UPDATE SET
+            deleted = 1,
+            item_payload_json = excluded.item_payload_json,
+            latest_txid = excluded.latest_txid
+        "#,
+    )
+    .bind(partition_id)
+    .bind(item_id)
+    .bind(item_payload_json)
+    .bind(txid as i64)
+    .execute(&mut *conn)
+    .await?;
+    Ok(txid)
 }
 
 async fn ensure_partition_exists(pool: &sqlx::SqlitePool, partition_id: &PartitionId) -> Res<()> {
@@ -928,11 +969,16 @@ async fn load_member_partition_page(
             let txid: i64 = row.try_get("txid")?;
             let item_id: String = row.try_get("item_id")?;
             let payload_json: String = row.try_get("member_payload_json")?;
-            let payload = serde_json::from_str::<serde_json::Value>(&payload_json)?;
             let kind: i64 = row.try_get("kind")?;
             let deets = match kind {
-                1 => PartitionMemberEventDeets::MemberUpsert { item_id, payload },
-                0 => PartitionMemberEventDeets::MemberRemoved { item_id, payload },
+                1 => PartitionMemberEventDeets::MemberUpsert {
+                    item_id,
+                    payload: payload_json,
+                },
+                0 => PartitionMemberEventDeets::MemberRemoved {
+                    item_id,
+                    payload: payload_json,
+                },
                 other => eyre::bail!("invalid membership kind '{other}'"),
             };
             Ok(PartitionMemberEvent {
@@ -998,11 +1044,16 @@ async fn load_doc_partition_page(
             let event_txid: i64 = row.try_get("event_txid")?;
             let item_id: String = row.try_get("item_id")?;
             let payload_json: String = row.try_get("payload_json")?;
-            let payload = serde_json::from_str::<serde_json::Value>(&payload_json)?;
             let deleted: i64 = row.try_get("deleted")?;
             let deets = match deleted {
-                0 => PartitionDocEventDeets::ItemChanged { item_id, payload },
-                1 => PartitionDocEventDeets::ItemDeleted { item_id, payload },
+                0 => PartitionDocEventDeets::ItemChanged {
+                    item_id,
+                    payload: payload_json,
+                },
+                1 => PartitionDocEventDeets::ItemDeleted {
+                    item_id,
+                    payload: payload_json,
+                },
                 other => eyre::bail!("invalid deleted flag '{other}'"),
             };
             Ok(PartitionDocEvent {
@@ -1029,4 +1080,106 @@ fn cmp_doc_events(left: &PartitionDocEvent, right: &PartitionDocEvent) -> std::c
     left.cursor
         .cmp(&right.cursor)
         .then_with(|| left.partition_id.cmp(&right.partition_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use tokio::time::{timeout, Duration};
+
+    async fn make_store() -> PartitionStore {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite pool should initialize");
+        let (events_tx, _events_rx) = broadcast::channel(1024);
+        let forwarders = Arc::new(utils_rs::AbortableJoinSet::new());
+        let store = PartitionStore::new(
+            pool,
+            events_tx,
+            CancellationToken::new(),
+            Arc::clone(&forwarders),
+        );
+        store
+            .ensure_schema()
+            .await
+            .expect("schema should initialize");
+        store
+    }
+
+    #[tokio::test]
+    async fn add_member_restores_tombstoned_item_payload() {
+        let store = make_store().await;
+        let partition_id: PartitionId = "p-docs".into();
+        let item_id = "item-1";
+        let member_payload = serde_json::json!({});
+        let expected_payload = serde_json::json!({ "k": "v" });
+
+        store
+            .add_member(&partition_id, item_id, &member_payload)
+            .await
+            .expect("membership add should succeed");
+        store
+            .record_item_change(&partition_id, item_id, &expected_payload)
+            .await
+            .expect("item change should succeed");
+        store
+            .remove_member(&partition_id, item_id, &member_payload)
+            .await
+            .expect("membership remove should succeed");
+        store
+            .add_member(&partition_id, item_id, &member_payload)
+            .await
+            .expect("membership re-add should succeed");
+
+        let payload_json: String = sqlx::query_scalar(
+            "SELECT item_payload_json FROM partition_item_state WHERE partition_id = ? AND item_id = ?",
+        )
+        .bind(&partition_id)
+        .bind(item_id)
+        .fetch_one(store.state_pool())
+        .await
+        .expect("item payload row should exist");
+        let payload = serde_json::from_str::<serde_json::Value>(&payload_json)
+            .expect("payload JSON should parse");
+        assert_eq!(payload, expected_payload);
+    }
+
+    #[tokio::test]
+    async fn subscribe_partition_events_returns_even_when_replay_exceeds_capacity() {
+        let store = make_store().await;
+        let partition_id: PartitionId = "p-replay".into();
+        for idx in 0..8 {
+            store
+                .add_member(
+                    &partition_id,
+                    &format!("item-{idx}"),
+                    &serde_json::json!({}),
+                )
+                .await
+                .expect("membership add should succeed");
+        }
+
+        let req = SubPartitionsRequest {
+            partitions: vec![crate::sync::protocol::PartitionStreamCursorRequest {
+                partition_id: partition_id.clone(),
+                since_member: None,
+                since_doc: None,
+            }],
+        };
+        let mut rx = timeout(
+            Duration::from_millis(250),
+            store.subscribe_partition_events_for_peer(&"peer-x".into(), &req, 1),
+        )
+        .await
+        .expect("subscription call should not block on replay")
+        .expect("subscription should initialize");
+
+        let first_item = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("replay should produce at least one item");
+        assert!(first_item.is_some());
+    }
 }

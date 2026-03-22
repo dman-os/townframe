@@ -246,8 +246,22 @@ impl Scheduler {
         if remaining_total == 0 {
             return 0;
         }
+        let import_demand = self.active_imports.len()
+            + self
+                .queued_tasks
+                .iter()
+                .filter(|task| matches!(task, SyncTask::Import(_)))
+                .count();
+        let blob_demand = self.active_blobs.len()
+            + self
+                .queued_tasks
+                .iter()
+                .filter(|task| matches!(task, SyncTask::Blob(_)))
+                .count();
+        let reserved_for_import = MIN_IMPORT_WORKER_FLOOR.min(import_demand);
+        let reserved_for_blob = MIN_BLOB_WORKER_FLOOR.min(blob_demand);
         let doc_cap =
-            max_active_sync_workers.saturating_sub(MIN_BLOB_WORKER_FLOOR + MIN_IMPORT_WORKER_FLOOR);
+            max_active_sync_workers.saturating_sub(reserved_for_import + reserved_for_blob);
         let remaining_doc_cap = doc_cap.saturating_sub(self.active_docs.len());
         remaining_total.min(remaining_doc_cap)
     }
@@ -257,8 +271,22 @@ impl Scheduler {
         if remaining_total == 0 {
             return 0;
         }
+        let doc_demand = self.active_docs.len()
+            + self
+                .queued_tasks
+                .iter()
+                .filter(|task| matches!(task, SyncTask::Doc(_)))
+                .count();
+        let blob_demand = self.active_blobs.len()
+            + self
+                .queued_tasks
+                .iter()
+                .filter(|task| matches!(task, SyncTask::Blob(_)))
+                .count();
+        let reserved_for_doc = MIN_DOC_WORKER_FLOOR.min(doc_demand);
+        let reserved_for_blob = MIN_BLOB_WORKER_FLOOR.min(blob_demand);
         let import_cap =
-            max_active_sync_workers.saturating_sub(MIN_DOC_WORKER_FLOOR + MIN_BLOB_WORKER_FLOOR);
+            max_active_sync_workers.saturating_sub(reserved_for_doc + reserved_for_blob);
         let remaining_import_cap = import_cap.saturating_sub(self.active_imports.len());
         remaining_total.min(remaining_import_cap)
     }
@@ -268,8 +296,22 @@ impl Scheduler {
         if remaining_total == 0 {
             return 0;
         }
+        let doc_demand = self.active_docs.len()
+            + self
+                .queued_tasks
+                .iter()
+                .filter(|task| matches!(task, SyncTask::Doc(_)))
+                .count();
+        let import_demand = self.active_imports.len()
+            + self
+                .queued_tasks
+                .iter()
+                .filter(|task| matches!(task, SyncTask::Import(_)))
+                .count();
+        let reserved_for_doc = MIN_DOC_WORKER_FLOOR.min(doc_demand);
+        let reserved_for_import = MIN_IMPORT_WORKER_FLOOR.min(import_demand);
         let blob_cap =
-            max_active_sync_workers.saturating_sub(MIN_DOC_WORKER_FLOOR + MIN_IMPORT_WORKER_FLOOR);
+            max_active_sync_workers.saturating_sub(reserved_for_doc + reserved_for_import);
         let remaining_blob_cap = blob_cap.saturating_sub(self.active_blobs.len());
         remaining_total.min(remaining_blob_cap)
     }
@@ -358,8 +400,15 @@ impl Scheduler {
                 ));
             }
             std::collections::btree_map::Entry::Occupied(mut occupied) => {
-                if let CursorAckSlotState::Pending(pending_docs) = occupied.get_mut() {
-                    pending_docs.insert(doc_id.to_string());
+                match occupied.get_mut() {
+                    CursorAckSlotState::Pending(pending_docs) => {
+                        pending_docs.insert(doc_id.to_string());
+                    }
+                    CursorAckSlotState::Ready => {
+                        occupied.insert(CursorAckSlotState::Pending(
+                            [doc_id.to_string()].into_iter().collect(),
+                        ));
+                    }
                 }
             }
         }
@@ -415,38 +464,75 @@ impl Scheduler {
     }
 
     pub fn next_ready_cursor_to_ack(
-        &mut self,
+        &self,
         endpoint_id: EndpointId,
         partition_id: &PartitionId,
         persisted_cursor: Option<u64>,
     ) -> Option<u64> {
-        let part_state = self
+        let part_state = self.cursor_ack_state.get(&endpoint_id)?.get(partition_id)?;
+        let floor = persisted_cursor
+            .unwrap_or(0)
+            .max(part_state.last_emitted_cursor.unwrap_or(0));
+        let mut latest_ready = None;
+        let mut expected = floor.saturating_add(1);
+        for (cursor, slot) in part_state.slots.range(expected..) {
+            if *cursor != expected {
+                break;
+            }
+            if !matches!(slot, CursorAckSlotState::Ready) {
+                break;
+            }
+            latest_ready = Some(*cursor);
+            expected = expected.saturating_add(1);
+        }
+        latest_ready
+    }
+
+    pub fn commit_ack_cursor(
+        &mut self,
+        endpoint_id: EndpointId,
+        partition_id: &PartitionId,
+        persisted_cursor: Option<u64>,
+        cursor: u64,
+    ) -> Res<()> {
+        let Some(part_state) = self
             .cursor_ack_state
-            .get_mut(&endpoint_id)?
-            .get_mut(partition_id)?;
+            .get_mut(&endpoint_id)
+            .and_then(|parts| parts.get_mut(partition_id))
+        else {
+            return Ok(());
+        };
         let floor = persisted_cursor
             .unwrap_or(0)
             .max(part_state.last_emitted_cursor.unwrap_or(0));
         while part_state
             .slots
             .first_key_value()
-            .is_some_and(|(cursor, _)| *cursor <= floor)
+            .is_some_and(|(slot_cursor, _)| *slot_cursor <= floor)
         {
             part_state.slots.pop_first();
         }
-        let mut latest_ready = None;
+        let mut expected = floor.saturating_add(1);
+        while expected <= cursor {
+            let Some(slot) = part_state.slots.get(&expected) else {
+                eyre::bail!("cannot commit cursor {cursor}; missing slot for cursor {expected}");
+            };
+            if !matches!(slot, CursorAckSlotState::Ready) {
+                eyre::bail!(
+                    "cannot commit cursor {cursor}; slot for cursor {expected} is not ready"
+                );
+            }
+            expected = expected.saturating_add(1);
+        }
         while part_state
             .slots
             .first_key_value()
-            .is_some_and(|(_, slot)| matches!(slot, CursorAckSlotState::Ready))
+            .is_some_and(|(slot_cursor, _)| *slot_cursor <= cursor)
         {
-            let (cursor, _) = part_state.slots.pop_first()?;
-            latest_ready = Some(cursor);
+            part_state.slots.pop_first();
         }
-        if let Some(latest_ready) = latest_ready {
-            part_state.last_emitted_cursor = Some(latest_ready);
-        }
-        latest_ready
+        part_state.last_emitted_cursor = Some(cursor);
+        Ok(())
     }
 }
 
@@ -484,6 +570,13 @@ mod tests {
             Some(10)
         );
         assert_eq!(
+            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(9)),
+            Some(10)
+        );
+        scheduler
+            .commit_ack_cursor(endpoint, &part, Some(9), 10)
+            .expect("commit should succeed");
+        assert_eq!(
             scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(10)),
             None
         );
@@ -492,6 +585,32 @@ mod tests {
         assert_eq!(
             scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(10)),
             Some(12)
+        );
+        scheduler
+            .commit_ack_cursor(endpoint, &part, Some(10), 12)
+            .expect("commit should succeed");
+    }
+
+    #[test]
+    fn late_doc_request_downgrades_ready_slot_to_pending() {
+        let endpoint = endpoint(8);
+        let part: PartitionId = "p-late".into();
+        let mut scheduler = Scheduler::default();
+
+        scheduler.note_cursor_ready_immediate(endpoint, &part, 20);
+        assert_eq!(
+            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(19)),
+            Some(20)
+        );
+        scheduler.note_doc_sync_requested(endpoint, &part, 20, "doc-z");
+        assert_eq!(
+            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(19)),
+            None
+        );
+        scheduler.note_doc_synced(endpoint, &part, 20, "doc-z");
+        assert_eq!(
+            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(19)),
+            Some(20)
         );
     }
 
@@ -539,6 +658,9 @@ mod tests {
             scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(4)),
             Some(5)
         );
+        scheduler
+            .commit_ack_cursor(endpoint, &part, Some(4), 5)
+            .expect("commit should succeed");
         assert_eq!(
             scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(5)),
             None

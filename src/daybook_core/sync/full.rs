@@ -1153,9 +1153,11 @@ impl Worker {
                 item_id,
                 payload,
             } => {
+                let payload = serde_json::from_str::<serde_json::Value>(payload)
+                    .map_err(|err| ferr!("invalid member upsert payload json: {err}"))?;
                 self.big_repo
                     .partition_store()
-                    .add_member(&event.partition_id, item_id, payload)
+                    .add_member(&event.partition_id, item_id, &payload)
                     .await?;
                 if let Some(scope) = BlobScope::from_partition_id(&event.partition_id) {
                     self.add_hash_to_blob_scope(scope, item_id.clone()).await?;
@@ -1165,9 +1167,11 @@ impl Worker {
                 item_id,
                 payload,
             } => {
+                let payload = serde_json::from_str::<serde_json::Value>(payload)
+                    .map_err(|err| ferr!("invalid member removed payload json: {err}"))?;
                 self.big_repo
                     .partition_store()
-                    .remove_member(&event.partition_id, item_id, payload)
+                    .remove_member(&event.partition_id, item_id, &payload)
                     .await?;
                 if let Some(scope) = BlobScope::from_partition_id(&event.partition_id) {
                     self.remove_hash_from_blob_scope(scope, item_id).await?;
@@ -1435,6 +1439,8 @@ impl Worker {
                 self.scheduler.peer_sessions_to_refresh.insert(endpoint_id);
                 break;
             }
+            self.scheduler
+                .commit_ack_cursor(endpoint_id, partition_id, persisted, next_cursor)?;
         }
         Ok(())
     }

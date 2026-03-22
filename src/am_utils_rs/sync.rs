@@ -110,14 +110,18 @@ mod tests {
                     SamodSyncRequest::PartitionMemberEvent { event, .. } => {
                         match &event.deets {
                             PartitionMemberEventDeets::MemberUpsert { item_id, payload } => {
+                                let payload = serde_json::from_str::<serde_json::Value>(payload)
+                                    .expect("member upsert payload should be valid json");
                                 dst.partition_store()
-                                    .add_member(&event.partition_id, item_id, payload)
+                                    .add_member(&event.partition_id, item_id, &payload)
                                     .await
                                     .unwrap();
                             }
                             PartitionMemberEventDeets::MemberRemoved { item_id, payload } => {
+                                let payload = serde_json::from_str::<serde_json::Value>(payload)
+                                    .expect("member removed payload should be valid json");
                                 dst.partition_store()
-                                    .remove_member(&event.partition_id, item_id, payload)
+                                    .remove_member(&event.partition_id, item_id, &payload)
                                     .await
                                     .unwrap();
                             }
@@ -1277,8 +1281,8 @@ mod tests {
             "timed out waiting for phase-1 B<-A membership sync",
         )
         .await?;
-        worker_b_stop.stop().await?;
         harness_b.stop().await;
+        worker_b_stop.stop().await?;
 
         // Add new docs only on B after phase 1.
         let mut b_new_doc_ids = Vec::new();
@@ -1345,14 +1349,14 @@ mod tests {
             .await?;
         }
 
-        worker_a_stop.stop().await?;
         harness_a.stop().await;
-        repo_rpc_a_stop.stop().await?;
+        worker_a_stop.stop().await?;
         repo_rpc_b_stop.stop().await?;
-        node_a_stop.stop().await?;
+        repo_rpc_a_stop.stop().await?;
         node_b_stop.stop().await?;
-        store_a_stop.stop().await?;
+        node_a_stop.stop().await?;
         store_b_stop.stop().await?;
+        store_a_stop.stop().await?;
         Ok(())
     }
 
