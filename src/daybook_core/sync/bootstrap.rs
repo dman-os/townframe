@@ -1,13 +1,14 @@
 use crate::interlude::*;
 
-use super::{IrohSyncRepo, IROH_DOC_URL_SCHEME};
+use super::{IrohSyncRepo, CLONE_PROVISION_ALPN, IROH_CLONE_URL_SCHEME};
 
 use std::str::FromStr;
 
-use iroh_docs::api::protocol::{AddrInfoOptions, ShareMode};
-use iroh_docs::store::Query;
-
+use irpc::{channel, rpc_requests};
 use iroh::EndpointId;
+use iroh_tickets::endpoint::EndpointTicket;
+#[cfg(test)]
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncBootstrapState {
@@ -39,195 +40,144 @@ pub struct CloneRepoInitResult {
     pub bootstrap: SyncBootstrapState,
 }
 
-const BOOTSTRAP_KEY_REPO_ID: &[u8] = b"repo_id";
-const BOOTSTRAP_KEY_REPO_NAME: &[u8] = b"repo_name";
-const BOOTSTRAP_KEY_APP_DOC_ID: &[u8] = b"app_doc_id";
-const BOOTSTRAP_KEY_DRAWER_DOC_ID: &[u8] = b"drawer_doc_id";
-const BOOTSTRAP_KEY_DEVICE_NAME: &[u8] = b"device_name";
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CloneProvisionRequest {
+    pub requested_device_name: Option<String>,
+    pub provision: bool,
+    pub requester_endpoint_id: Option<String>,
+    pub requester_peer_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CloneProvisionResponse {
+    pub endpoint_addr: iroh::EndpointAddr,
+    pub repo_id: String,
+    pub repo_name: String,
+    pub app_doc_id: String,
+    pub drawer_doc_id: String,
+    pub device_name: Option<String>,
+    pub issued_iroh_secret_key_hex: Option<String>,
+    pub issued_iroh_public_key: Option<String>,
+    pub issued_peer_key: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RequestCloneProvisionRpcReq {
+    pub req: CloneProvisionRequest,
+}
+
+#[rpc_requests(message = CloneProvisionRpcMessage)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub enum CloneProvisionRpc {
+    #[rpc(tx = channel::oneshot::Sender<Result<CloneProvisionResponse, String>>)]
+    RequestCloneProvision(RequestCloneProvisionRpcReq),
+}
 
 impl IrohSyncRepo {
     pub async fn get_ticket_url(&self) -> Res<String> {
         self.ensure_repo_live()?;
-        let doc = self
-            .iroh_docs
-            .create()
-            .await
-            .map_err(|err| ferr!("error creating bootstrap doc: {err:?}"))?;
-        {
-            let author = self
-                .iroh_docs
-                .author_default()
-                .await
-                .map_err(|err| ferr!("error getting default docs author: {err:?}"))?;
-            doc.set_bytes(
-                author,
-                BOOTSTRAP_KEY_REPO_ID.to_vec(),
-                self.rcx.repo_id.as_bytes().to_vec(),
-            )
-            .await
-            .map_err(|err| ferr!("error writing repo_id bootstrap key: {err:?}"))?;
-            let repo_name = self
-                .rcx
-                .layout
-                .repo_root
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| self.rcx.repo_id.clone());
-            doc.set_bytes(
-                author,
-                BOOTSTRAP_KEY_REPO_NAME.to_vec(),
-                repo_name.as_bytes().to_vec(),
-            )
-            .await
-            .map_err(|err| ferr!("error writing repo_name bootstrap key: {err:?}"))?;
-            doc.set_bytes(
-                author,
-                BOOTSTRAP_KEY_APP_DOC_ID.to_vec(),
-                self.rcx
-                    .doc_app
-                    .document_id()
-                    .to_string()
-                    .as_bytes()
-                    .to_vec(),
-            )
-            .await
-            .map_err(|err| ferr!("error writing app_doc_id bootstrap key: {err:?}"))?;
-            doc.set_bytes(
-                author,
-                BOOTSTRAP_KEY_DRAWER_DOC_ID.to_vec(),
-                self.rcx
-                    .doc_drawer
-                    .document_id()
-                    .to_string()
-                    .as_bytes()
-                    .to_vec(),
-            )
-            .await
-            .map_err(|err| ferr!("error writing drawer_doc_id bootstrap key: {err:?}"))?;
-            doc.set_bytes(
-                author,
-                BOOTSTRAP_KEY_DEVICE_NAME.to_vec(),
-                self.rcx.local_device_name.as_bytes().to_vec(),
-            )
-            .await
-            .map_err(|err| ferr!("error writing device_name bootstrap key: {err:?}"))?;
-        }
-        let ticket = doc
-            .share(ShareMode::Write, AddrInfoOptions::RelayAndAddresses)
-            .await
-            .map_err(|err| ferr!("error sharing bootstrap doc: {err:?}"))?;
-        doc.start_sync(vec![])
-            .await
-            .map_err(|err| ferr!("error starting bootstrap doc sync: {err:?}"))?;
-        Ok(format!("{IROH_DOC_URL_SCHEME}:{ticket}"))
+        let endpoint_addr = self.current_endpoint_addr_for_clone().await;
+        let endpoint_ticket = EndpointTicket::from(endpoint_addr).to_string();
+        Ok(format!("{IROH_CLONE_URL_SCHEME}:{endpoint_ticket}"))
     }
 }
 
-/// NOTE: this uses a fresh secret key for the connection
-#[tracing::instrument(skip(iroh_doc_url))]
-pub async fn resolve_bootstrap_from_url(iroh_doc_url: &str) -> Res<SyncBootstrapState> {
-    let session = TempDocsSession::boot(None).await?;
-    let out = resolve_bootstrap_with_docs(&session.docs, &session.blobs, iroh_doc_url).await;
-    session.shutdown().await?;
-    return out;
-
-    struct TempDocsSession {
-        router: iroh::protocol::Router,
-        docs: iroh_docs::api::DocsApi,
-        blobs: iroh_blobs::api::Store,
+impl IrohSyncRepo {
+    async fn current_endpoint_addr_for_clone(&self) -> iroh::EndpointAddr {
+        let mut endpoint_addr = self.router.endpoint().addr();
+        if endpoint_addr.addrs.is_empty() {
+            let started = std::time::Instant::now();
+            while endpoint_addr.addrs.is_empty() && started.elapsed() < Duration::from_secs(2) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                endpoint_addr = self.router.endpoint().addr();
+            }
+        }
+        endpoint_addr
     }
 
-    impl TempDocsSession {
-        async fn boot(secret_key: Option<iroh::SecretKey>) -> Res<Self> {
-            let endpoint_builder = match secret_key {
-                Some(secret_key) => iroh::Endpoint::builder().secret_key(secret_key),
-                None => iroh::Endpoint::builder(),
-            };
-            #[cfg(test)]
-            let endpoint_builder = endpoint_builder
-                .relay_mode(iroh::RelayMode::Disabled)
-                .clear_address_lookup();
-            let endpoint = endpoint_builder.bind().await?;
-            let blobs = (*iroh_blobs::store::mem::MemStore::new()).clone();
-            let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-            let docs = iroh_docs::protocol::Docs::memory()
-                .spawn(endpoint.clone(), blobs.clone(), gossip.clone())
-                .await
-                .map_err(|err| ferr!("error booting temporary docs protocol: {err:?}"))?;
-            let router = iroh::protocol::Router::builder(endpoint)
-                .accept(
-                    iroh_blobs::ALPN,
-                    iroh_blobs::BlobsProtocol::new(&blobs, None),
-                )
-                .accept(iroh_docs::ALPN, docs.clone())
-                .accept(iroh_gossip::ALPN, gossip)
-                .spawn();
-            Ok(Self {
-                router,
-                docs: docs.api().clone(),
-                blobs,
-            })
-        }
-
-        async fn shutdown(self) -> Res<()> {
-            self.router.shutdown().await?;
-            Ok(())
+    pub async fn current_bootstrap_state(&self) -> SyncBootstrapState {
+        let repo_name = self
+            .rcx
+            .layout
+            .repo_root
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.rcx.repo_id.clone());
+        let endpoint_addr = self.current_endpoint_addr_for_clone().await;
+        let endpoint_id = endpoint_addr.id;
+        SyncBootstrapState {
+            endpoint_addr,
+            endpoint_id,
+            repo_id: self.rcx.repo_id.clone(),
+            repo_name,
+            app_doc_id: self.rcx.doc_app.document_id().clone(),
+            drawer_doc_id: self.rcx.doc_drawer.document_id().clone(),
+            device_name: Some(self.rcx.local_device_name.clone()),
         }
     }
 }
 
-#[tracing::instrument(skip(docs, blobs, iroh_doc_url))]
-pub(super) async fn resolve_bootstrap_with_docs(
-    docs: &iroh_docs::api::DocsApi,
-    blobs: &iroh_blobs::api::Store,
-    iroh_doc_url: &str,
-) -> Res<SyncBootstrapState> {
-    let ticket = parse_iroh_doc_ticket_url(iroh_doc_url)?;
-    let endpoint_addr = ticket
-        .nodes
-        .first()
-        .cloned()
-        .ok_or_eyre("iroh docs ticket is missing endpoint addresses")?;
-    let doc = docs
-        .import(ticket.clone())
-        .await
-        .map_err(|err| ferr!("error importing bootstrap doc ticket: {err:?}"))?;
-    doc.start_sync(ticket.nodes.clone())
-        .await
-        .map_err(|err| ferr!("error starting bootstrap doc sync: {err:?}"))?;
-
-    let timeout_at = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
-    loop {
-        let repo_id = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_REPO_ID).await?;
-        let repo_name = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_REPO_NAME).await?;
-        let app_doc_id = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_APP_DOC_ID).await?;
-        let drawer_doc_id = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_DRAWER_DOC_ID).await?;
-        let device_name = read_bootstrap_key(&doc, blobs, BOOTSTRAP_KEY_DEVICE_NAME).await?;
-        if let (Some(repo_id), Some(app_doc_id), Some(drawer_doc_id)) =
-            (repo_id, app_doc_id, drawer_doc_id)
-        {
-            let app_doc_id =
-                DocumentId::from_str(&app_doc_id).wrap_err("invalid app_doc_id in bootstrap")?;
-            let drawer_doc_id = DocumentId::from_str(&drawer_doc_id)
-                .wrap_err("invalid drawer_doc_id in bootstrap")?;
-            let endpoint_id = endpoint_addr.id;
-            doc.leave().await.to_eyre()?;
-            return Ok(SyncBootstrapState {
-                endpoint_addr,
-                endpoint_id,
-                repo_id,
-                repo_name: repo_name.unwrap_or_default(),
-                app_doc_id,
-                drawer_doc_id,
-                device_name,
-            });
-        }
-        if tokio::time::Instant::now() >= timeout_at {
-            eyre::bail!("timed out waiting for bootstrap state from iroh docs");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+impl CloneProvisionResponse {
+    pub fn to_bootstrap_state(&self) -> Res<SyncBootstrapState> {
+        let endpoint_id = self.endpoint_addr.id;
+        Ok(SyncBootstrapState {
+            endpoint_addr: self.endpoint_addr.clone(),
+            endpoint_id,
+            repo_id: self.repo_id.clone(),
+            repo_name: self.repo_name.clone(),
+            app_doc_id: DocumentId::from_str(&self.app_doc_id)
+                .wrap_err("invalid app_doc_id in clone response")?,
+            drawer_doc_id: DocumentId::from_str(&self.drawer_doc_id)
+                .wrap_err("invalid drawer_doc_id in clone response")?,
+            device_name: self.device_name.clone(),
+        })
     }
+}
+
+pub async fn request_clone_provision_via_rpc(
+    source_url: &str,
+    request: CloneProvisionRequest,
+) -> Res<CloneProvisionResponse> {
+    let endpoint_addr = parse_clone_endpoint_addr(source_url)?;
+    #[cfg(test)]
+    if let Some(local_sender) = lookup_test_clone_rpc_sender(endpoint_addr.id).await {
+        let client = irpc::Client::<CloneProvisionRpc>::local(local_sender);
+        let response = client
+            .rpc(RequestCloneProvisionRpcReq { req: request })
+            .await
+            .wrap_err("clone provision rpc transport failed (in-memory)")?
+            .map_err(|err| eyre::eyre!("clone provision rpc failed: {err}"))?;
+        return Ok(response);
+    }
+    let endpoint = iroh::Endpoint::builder().bind().await?;
+    let client = irpc_iroh::client::<CloneProvisionRpc>(
+        endpoint.clone(),
+        endpoint_addr,
+        CLONE_PROVISION_ALPN,
+    );
+    let response = client
+        .rpc(RequestCloneProvisionRpcReq { req: request })
+        .await
+        .wrap_err("clone provision rpc transport failed")?
+        .map_err(|err| eyre::eyre!("clone provision rpc failed: {err}"))?;
+    endpoint.close().await;
+    Ok(response)
+}
+
+#[tracing::instrument(skip(source_url))]
+pub async fn resolve_bootstrap_from_url(source_url: &str) -> Res<SyncBootstrapState> {
+    request_clone_provision_via_rpc(
+        source_url,
+        CloneProvisionRequest {
+            requested_device_name: None,
+            provision: false,
+            requester_endpoint_id: None,
+            requester_peer_key: None,
+        },
+    )
+    .await?
+    .to_bootstrap_state()
 }
 
 #[tracing::instrument(skip(big_repo, iroh_secret_key, bootstrap, timeout))]
@@ -281,14 +231,76 @@ pub async fn clone_repo_init_from_url(
         tokio::fs::create_dir_all(&destination).await?;
     }
 
-    let bootstrap = resolve_bootstrap_from_url(source_url).await?;
+    let provision = request_clone_provision_via_rpc(
+        source_url,
+        CloneProvisionRequest {
+            requested_device_name: Some(format!(
+                "clone-{}",
+                std::env::consts::ARCH
+            )),
+            provision: true,
+            requester_endpoint_id: None,
+            requester_peer_key: None,
+        },
+    )
+    .await?;
+    let bootstrap = provision.to_bootstrap_state()?;
     let sqlite_path = destination.join("sqlite.db");
     let sql = crate::app::SqlCtx::new(&format!("sqlite://{}", sqlite_path.display())).await?;
     crate::app::globals::set_repo_id(&sql.db_pool, &bootstrap.repo_id).await?;
-    let identity =
-        crate::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &bootstrap.repo_id)
-            .await?;
+    let issued_secret_hex = provision
+        .issued_iroh_secret_key_hex
+        .ok_or_eyre("clone provision response missing issued_iroh_secret_key_hex")?;
+    let issued_public_key = provision
+        .issued_iroh_public_key
+        .ok_or_eyre("clone provision response missing issued_iroh_public_key")?;
+    let identity = crate::secrets::SecretRepo::set_identity_from_secret_hex(
+        &sql.db_pool,
+        &bootstrap.repo_id,
+        &issued_secret_hex,
+    )
+    .await?;
+    if identity.iroh_public_key.to_string() != issued_public_key {
+        eyre::bail!("provisioned public key mismatch while cloning");
+    }
     let _repo_user_id = crate::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS sync_allowed_peers(
+            peer_key TEXT PRIMARY KEY,
+            endpoint_id TEXT NULL
+        )
+        "#,
+    )
+    .execute(&sql.db_pool)
+    .await?;
+    let source_peer_key = format!("/{}/{}", bootstrap.repo_id, bootstrap.endpoint_id);
+    sqlx::query(
+        "INSERT INTO sync_allowed_peers(peer_key, endpoint_id) VALUES(?, ?) ON CONFLICT(peer_key) DO UPDATE SET endpoint_id = excluded.endpoint_id",
+    )
+    .bind(source_peer_key)
+    .bind(bootstrap.endpoint_id.to_string())
+    .execute(&sql.db_pool)
+    .await?;
+    let mut sync_config = crate::app::globals::get_sync_config(&sql.db_pool).await?;
+    if !sync_config
+        .known_devices
+        .iter()
+        .any(|entry| entry.endpoint_id == bootstrap.endpoint_id)
+    {
+        sync_config
+            .known_devices
+            .push(crate::app::globals::SyncDeviceEntry {
+                endpoint_id: bootstrap.endpoint_id,
+                name: bootstrap
+                    .device_name
+                    .clone()
+                    .unwrap_or_else(|| bootstrap.endpoint_id.to_string()),
+                added_at: jiff::Timestamp::now(),
+                last_connected_at: None,
+            });
+        crate::app::globals::set_sync_config(&sql.db_pool, &sync_config).await?;
+    }
 
     let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
         storage: am_utils_rs::repo::StorageConfig::Disk {
@@ -346,33 +358,39 @@ async fn pull_required_docs_once(
     Ok(())
 }
 
-async fn read_bootstrap_key(
-    doc: &iroh_docs::api::Doc,
-    blobs: &iroh_blobs::api::Store,
-    key: &[u8],
-) -> Res<Option<String>> {
-    let Some(entry) = doc
-        .get_one(Query::key_exact(key))
-        .await
-        .to_eyre()
-        .wrap_err("error reading bootstrap key")?
-    else {
-        return Ok(None);
-    };
-    let bytes = match blobs.get_bytes(entry.content_hash()).await {
-        Ok(bytes) => bytes,
-        Err(_) => return Ok(None),
-    };
-    Ok(Some(
-        std::str::from_utf8(&bytes)
-            .wrap_err("bootstrap key has invalid utf8 value")?
-            .to_string(),
-    ))
+fn parse_clone_endpoint_addr(input: &str) -> Res<iroh::EndpointAddr> {
+    let payload = input
+        .strip_prefix(&format!("{IROH_CLONE_URL_SCHEME}:"))
+        .ok_or_eyre("invalid clone url scheme, expected db+iroh-clone:<endpoint-ticket>")?;
+    let endpoint_ticket = EndpointTicket::from_str(payload)
+        .wrap_err("invalid endpoint ticket payload in clone url")?;
+    Ok(endpoint_ticket.into())
 }
 
-fn parse_iroh_doc_ticket_url(input: &str) -> Res<iroh_docs::DocTicket> {
-    let payload = input
-        .strip_prefix(&format!("{IROH_DOC_URL_SCHEME}:"))
-        .ok_or_eyre("invalid sync url scheme, expected db+iroh-doc:<ticket>")?;
-    iroh_docs::DocTicket::from_str(payload).wrap_err("invalid iroh docs ticket")
+#[cfg(test)]
+static TEST_CLONE_RPC_REGISTRY: LazyLock<RwLock<HashMap<EndpointId, tokio::sync::mpsc::Sender<CloneProvisionRpcMessage>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+#[cfg(test)]
+pub async fn register_test_clone_rpc_sender(
+    endpoint_id: EndpointId,
+    sender: tokio::sync::mpsc::Sender<CloneProvisionRpcMessage>,
+) {
+    TEST_CLONE_RPC_REGISTRY.write().await.insert(endpoint_id, sender);
+}
+
+#[cfg(test)]
+pub async fn unregister_test_clone_rpc_sender(endpoint_id: EndpointId) {
+    TEST_CLONE_RPC_REGISTRY.write().await.remove(&endpoint_id);
+}
+
+#[cfg(test)]
+async fn lookup_test_clone_rpc_sender(
+    endpoint_id: EndpointId,
+) -> Option<tokio::sync::mpsc::Sender<CloneProvisionRpcMessage>> {
+    TEST_CLONE_RPC_REGISTRY
+        .read()
+        .await
+        .get(&endpoint_id)
+        .cloned()
 }

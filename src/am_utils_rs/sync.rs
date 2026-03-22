@@ -347,8 +347,7 @@ mod tests {
         )
         .await?;
         let peer_key: PeerKey = "peer-b".into();
-        src_store.register_peer(peer_key.clone()).await?;
-        node.register_local_peer(peer_key.clone()).await?;
+        src_store.allow_peer(peer_key.clone(), None).await?;
 
         let (samod_tx, samod_rx) = mpsc::channel(128);
         let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
@@ -480,8 +479,7 @@ mod tests {
         )
         .await?;
         let peer_key: PeerKey = "peer-existing".into();
-        src_store.register_peer(peer_key.clone()).await?;
-        node.register_local_peer(peer_key.clone()).await?;
+        src_store.allow_peer(peer_key.clone(), None).await?;
 
         let (samod_tx, samod_rx) = mpsc::channel(128);
         let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
@@ -575,8 +573,7 @@ mod tests {
         )
         .await?;
         let peer_key: PeerKey = "peer-ack-gated".into();
-        src_store.register_peer(peer_key.clone()).await?;
-        node.register_local_peer(peer_key.clone()).await?;
+        src_store.allow_peer(peer_key.clone(), None).await?;
 
         let (samod_tx, samod_rx) = mpsc::channel(128);
         let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
@@ -691,8 +688,7 @@ mod tests {
         )
         .await?;
         let peer_key: PeerKey = "peer-stale-ack".into();
-        src_store.register_peer(peer_key.clone()).await?;
-        node.register_local_peer(peer_key.clone()).await?;
+        src_store.allow_peer(peer_key.clone(), None).await?;
 
         let (samod_tx, samod_rx) = mpsc::channel(128);
         let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
@@ -816,8 +812,7 @@ mod tests {
         )
         .await?;
         let peer_key: PeerKey = "peer-reset-stale".into();
-        src_store.register_peer(peer_key.clone()).await?;
-        node.register_local_peer(peer_key.clone()).await?;
+        src_store.allow_peer(peer_key.clone(), None).await?;
 
         dst_store
             .set_partition_cursor(peer_key.clone(), part_id.clone(), Some(208), Some(208))
@@ -937,8 +932,7 @@ mod tests {
         )
         .await?;
         let peer_key: PeerKey = "peer-unresolved".into();
-        src_store.register_peer(peer_key.clone()).await?;
-        node.register_local_peer(peer_key.clone()).await?;
+        src_store.allow_peer(peer_key.clone(), None).await?;
 
         let (samod_tx, samod_rx) = mpsc::channel(128);
         let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
@@ -1032,8 +1026,7 @@ mod tests {
         )
         .await?;
         let peer_key: PeerKey = "peer-blocked-cursor".into();
-        src_store.register_peer(peer_key.clone()).await?;
-        node.register_local_peer(peer_key.clone()).await?;
+        src_store.allow_peer(peer_key.clone(), None).await?;
 
         let (samod_tx, samod_rx) = mpsc::channel(128);
         let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
@@ -1134,8 +1127,7 @@ mod tests {
         )
         .await?;
         let peer_key: PeerKey = "peer-partition-isolation".into();
-        src_store.register_peer(peer_key.clone()).await?;
-        node.register_local_peer(peer_key.clone()).await?;
+        src_store.allow_peer(peer_key.clone(), None).await?;
 
         let (samod_tx, samod_rx) = mpsc::channel(128);
         let (samod_ack_tx, samod_ack_rx) = mpsc::channel(128);
@@ -1250,8 +1242,7 @@ mod tests {
         // Phase 1: B pulls from A. A only serves.
         let peer_a: PeerKey = "peer-a".into();
         let peer_b: PeerKey = "peer-b".into();
-        store_a.register_peer(peer_b.clone()).await?;
-        node_a.register_local_peer(peer_b.clone()).await?;
+        store_a.allow_peer(peer_b.clone(), None).await?;
 
         let (samod_tx_b, samod_rx_b) = mpsc::channel(128);
         let (samod_ack_tx_b, samod_ack_rx_b) = mpsc::channel(128);
@@ -1305,8 +1296,7 @@ mod tests {
         }
 
         // Phase 2: roles reversed, A pulls from B.
-        store_b.register_peer(peer_a.clone()).await?;
-        node_b.register_local_peer(peer_a.clone()).await?;
+        store_b.allow_peer(peer_a.clone(), None).await?;
         let (samod_tx_a, samod_rx_a) = mpsc::channel(128);
         let (samod_ack_tx_a, samod_ack_rx_a) = mpsc::channel(128);
         let (_worker_a, worker_a_stop) = spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {

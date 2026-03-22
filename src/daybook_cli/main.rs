@@ -561,8 +561,17 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     iroh_ticket_url,
                     name,
                 } => {
-                    let bootstrap =
-                        daybook_core::sync::resolve_bootstrap_from_url(&iroh_ticket_url).await?;
+                    let bootstrap = daybook_core::sync::request_clone_provision_via_rpc(
+                        &iroh_ticket_url,
+                        daybook_core::sync::CloneProvisionRequest {
+                            requested_device_name: None,
+                            provision: false,
+                            requester_endpoint_id: None,
+                            requester_peer_key: None,
+                        },
+                    )
+                    .await?
+                    .to_bootstrap_state()?;
                     let local_repo_id = ctx.repo_id.clone();
                     if bootstrap.repo_id != local_repo_id {
                         eyre::bail!(
@@ -789,7 +798,7 @@ enum StaticCommands {
     Init {},
     /// Clone a repo to a destination path
     Clone {
-        /// Source bootstrap URL: db+iroh-doc:<ticket>
+        /// Source clone URL: db+iroh-clone:<endpoint-ticket>
         source: String,
         /// Destination directory path (must be empty or non-existent)
         destination: String,
@@ -843,7 +852,7 @@ enum DevicesCommands {
     Ls,
     /// Add a device from a bootstrap URL
     Add {
-        /// Bootstrap URL: db+iroh-doc:<ticket>
+        /// Clone URL: db+iroh-clone:<endpoint-ticket>
         iroh_ticket_url: String,
         /// Override display name
         #[arg(long)]

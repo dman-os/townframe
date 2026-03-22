@@ -239,7 +239,17 @@ impl AppFfiCtx {
         source_url: String,
     ) -> Result<CloneBootstrapInfo, FfiError> {
         self.do_on_rt(async move {
-            let bootstrap = daybook_core::sync::resolve_bootstrap_from_url(&source_url).await?;
+            let bootstrap = daybook_core::sync::request_clone_provision_via_rpc(
+                &source_url,
+                daybook_core::sync::CloneProvisionRequest {
+                    requested_device_name: None,
+                    provision: false,
+                    requester_endpoint_id: None,
+                    requester_peer_key: None,
+                },
+            )
+            .await?
+            .to_bootstrap_state()?;
             Ok::<CloneBootstrapInfo, eyre::Report>(bootstrap_to_ffi(bootstrap))
         })
         .await

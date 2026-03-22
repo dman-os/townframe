@@ -2,6 +2,7 @@ use crate::interlude::*;
 
 use am_utils_rs::sync::protocol::PartitionId;
 use iroh::EndpointId;
+use std::str::FromStr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -14,9 +15,10 @@ mod bootstrap;
 mod full;
 pub use bootstrap::*;
 
-pub const IROH_DOC_URL_SCHEME: &str = "db+iroh-doc";
+pub const IROH_CLONE_URL_SCHEME: &str = "db+iroh-clone";
 pub const PARTITION_SYNC_ALPN: &[u8] = b"townframe/partition-sync/0";
 pub const REPO_SYNC_ALPN: &[u8] = b"townframe/repo-sync/0";
+pub const CLONE_PROVISION_ALPN: &[u8] = b"townframe/clone-provision/0";
 
 enum ActivePeerState {
     Connecting,
@@ -34,12 +36,10 @@ pub struct IrohSyncRepo {
     doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
 
-    iroh_docs: iroh_docs::api::DocsApi,
-    iroh_blobs: iroh_blobs::api::Store,
-
     conn_end_signal_tx: tokio::sync::mpsc::UnboundedSender<am_utils_rs::repo::ConnFinishSignal>,
     active_samod_peers: tokio::sync::RwLock<HashMap<EndpointId, ActivePeerState>>,
     full_sync_handle: full::WorkerHandle,
+    sync_store: am_utils_rs::sync::store::SyncStoreHandle,
     // bootstrap_docs: tokio::sync::Mutex<Vec<iroh_docs::api::Doc>>,
     // active_endpoint_ids: tokio::sync::RwLock<HashMap<String, ()>>,
 }
@@ -105,7 +105,8 @@ pub struct IrohSyncRepoStopToken {
 impl IrohSyncRepoStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
-        utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(2)).await?;
+        // Worker shutdown drains active repo connections; each connection stop can wait up to 5s.
+        utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(10)).await?;
         // NOTE: we only add timeouts for stop tokens that don't have internal
         // timeouts
         tokio::time::timeout(Duration::from_secs(10), self.router.shutdown())
@@ -169,6 +170,7 @@ impl IrohSyncRepo {
 
         let (incoming_conn_tx, incoming_conn_rx) = tokio::sync::mpsc::unbounded_channel();
         let (conn_end_tx, conn_end_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clone_rpc_tx, clone_rpc_rx) = tokio::sync::mpsc::channel(128);
         let (partition_sync_store, partition_sync_store_stop_token) =
             am_utils_rs::sync::store::spawn_sync_store(rcx.big_repo.state_pool().clone()).await?;
         let (partition_sync_node, partition_sync_stop_token) =
@@ -194,6 +196,7 @@ impl IrohSyncRepo {
                     big_repo: Arc::clone(&rcx.big_repo),
                     conn_tx: incoming_conn_tx,
                     end_signal_tx: conn_end_tx.clone(),
+                    sync_store: partition_sync_store.clone(),
                 },
             )
             .accept(
@@ -206,6 +209,12 @@ impl IrohSyncRepo {
                 REPO_SYNC_ALPN,
                 irpc_iroh::IrohProtocol::<am_utils_rs::repo::rpc::RepoSyncRpc>::with_sender(
                     repo_rpc.local_sender(),
+                ),
+            )
+            .accept(
+                CLONE_PROVISION_ALPN,
+                irpc_iroh::IrohProtocol::<bootstrap::CloneProvisionRpc>::with_sender(
+                    clone_rpc_tx.clone(),
                 ),
             )
             .accept(
@@ -225,7 +234,6 @@ impl IrohSyncRepo {
             Arc::clone(&rcx),
             Arc::clone(&blobs_repo),
             progress_repo.clone(),
-            Arc::clone(&partition_sync_node),
             partition_sync_store.clone(),
             endpoint.clone(),
         )
@@ -238,17 +246,29 @@ impl IrohSyncRepo {
             config_repo,
             doc_blobs_index_repo,
             progress_repo,
-            iroh_docs: docs.api().clone(),
-            iroh_blobs: blobs,
             cancel_token: cancel_token.clone(),
             registry: crate::repos::ListenersRegistry::new(),
             active_samod_peers: default(),
             conn_end_signal_tx: conn_end_tx,
             full_sync_handle,
+            sync_store: partition_sync_store.clone(),
             // bootstrap_docs: tokio::sync::Mutex::new(Vec::new()),
             // active_endpoint_ids: tokio::sync::RwLock::new(HashMap::new()),
         });
+        #[cfg(test)]
+        bootstrap::register_test_clone_rpc_sender(router.endpoint().id(), clone_rpc_tx.clone())
+            .await;
 
+        let clone_rpc_handle = tokio::spawn({
+            let repo = Arc::clone(&repo);
+            async move {
+                repo.clone_rpc_loop(clone_rpc_rx).await.unwrap();
+            }
+            .instrument(tracing::info_span!("IrohSyncRepo clone rpc task"))
+        });
+
+        #[cfg(test)]
+        let router_for_shutdown = router.clone();
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
             let full_stop_token = full_stop_token;
@@ -257,6 +277,10 @@ impl IrohSyncRepo {
                     .machine_loop(full_sync_rx, incoming_conn_rx, conn_end_rx)
                     .await;
                 let full_stop_res = full_stop_token.stop().await;
+                #[cfg(test)]
+                bootstrap::unregister_test_clone_rpc_sender(router_for_shutdown.endpoint().id())
+                    .await;
+                clone_rpc_handle.abort();
                 loop_res.unwrap();
                 full_stop_res.unwrap();
             }
@@ -294,14 +318,36 @@ impl IrohSyncRepo {
         .into()
     }
 
+    fn spawn_connect_known_devices_once(self: &Arc<Self>, trigger: &'static str) {
+        let repo = Arc::clone(self);
+        tokio::spawn(async move {
+            if repo.cancel_token.is_cancelled() {
+                return;
+            }
+            if let Err(err) = repo.connect_known_devices_once().await {
+                if !repo.cancel_token.is_cancelled() {
+                    warn!(?err, trigger, "known-device reconnect failed");
+                }
+            }
+        });
+    }
+
     async fn machine_loop(
-        &self,
+        self: &Arc<Self>,
         mut full_sync_rx: tokio::sync::broadcast::Receiver<full::FullSyncEvent>,
         mut incoming_conn_rx: tokio::sync::mpsc::UnboundedReceiver<
             am_utils_rs::repo::RepoConnection,
         >,
         mut conn_end_rx: tokio::sync::mpsc::UnboundedReceiver<am_utils_rs::repo::ConnFinishSignal>,
     ) -> Res<()> {
+        use crate::repos::Repo;
+
+        let config_listener = self
+            .config_repo
+            .subscribe(crate::repos::SubscribeOpts { capacity: 64 });
+        let mut reconnect_tick = tokio::time::interval(Duration::from_secs(15));
+        reconnect_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        self.spawn_connect_known_devices_once("initial");
         loop {
             tokio::select! {
                 biased;
@@ -332,6 +378,24 @@ impl IrohSyncRepo {
                 val = conn_end_rx.recv() => {
                     let signal = val.expect("impossible actually");
                     self.handle_conn_end(signal).await?;
+                }
+                _ = reconnect_tick.tick() => {
+                    self.spawn_connect_known_devices_once("periodic");
+                }
+                val = config_listener.recv_async() => {
+                    match val {
+                        Ok(event) => {
+                            if matches!(&*event, crate::config::ConfigEvent::SyncDevicesChanged) {
+                                self.spawn_connect_known_devices_once("config-change");
+                            }
+                        }
+                        Err(crate::repos::RecvError::Closed) => {
+                            warn!("config listener closed");
+                        }
+                        Err(crate::repos::RecvError::Dropped { dropped_count }) => {
+                            warn!(dropped_count, "config listener dropped events");
+                        }
+                    }
                 }
             }
         }
@@ -367,6 +431,76 @@ impl IrohSyncRepo {
         eyre::Ok(())
     }
 
+    async fn clone_rpc_loop(
+        &self,
+        mut rx: tokio::sync::mpsc::Receiver<bootstrap::CloneProvisionRpcMessage>,
+    ) -> Res<()> {
+        use irpc::WithChannels;
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                bootstrap::CloneProvisionRpcMessage::RequestCloneProvision(req) => {
+                    let WithChannels { inner, tx, .. } = req;
+                    let out = self.handle_clone_provision_request(inner.req).await;
+                    tx.send(out.map_err(|err| format!("{err:#}")))
+                        .await
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_clone_provision_request(
+        &self,
+        req: bootstrap::CloneProvisionRequest,
+    ) -> Res<bootstrap::CloneProvisionResponse> {
+        if let (Some(requester_peer_key), Some(requester_endpoint_id)) = (
+            req.requester_peer_key.as_ref(),
+            req.requester_endpoint_id.as_ref(),
+        ) {
+            let endpoint_id = iroh::PublicKey::from_str(requester_endpoint_id)
+                .wrap_err("invalid requester_endpoint_id in clone provision request")?;
+            self.sync_store
+                .allow_peer(requester_peer_key.clone(), Some(endpoint_id))
+                .await?;
+        }
+        let bootstrap = self.current_bootstrap_state().await;
+        if !req.provision {
+            return Ok(bootstrap::CloneProvisionResponse {
+                endpoint_addr: bootstrap.endpoint_addr.clone(),
+                repo_id: bootstrap.repo_id,
+                repo_name: bootstrap.repo_name,
+                app_doc_id: bootstrap.app_doc_id.to_string(),
+                drawer_doc_id: bootstrap.drawer_doc_id.to_string(),
+                device_name: bootstrap.device_name,
+                issued_iroh_secret_key_hex: None,
+                issued_iroh_public_key: None,
+                issued_peer_key: None,
+            });
+        }
+        let issued_secret = iroh::SecretKey::generate(&mut rand::rng());
+        let issued_public = issued_secret.public();
+        let issued_peer_key = format!("/{}/{}", self.rcx.repo_id, issued_public);
+        self.sync_store
+            .allow_peer(issued_peer_key.clone(), Some(issued_public))
+            .await?;
+        let device_name = req
+            .requested_device_name
+            .unwrap_or_else(|| format!("clone-{}", issued_public));
+        Ok(bootstrap::CloneProvisionResponse {
+            endpoint_addr: bootstrap.endpoint_addr,
+            repo_id: bootstrap.repo_id,
+            repo_name: bootstrap.repo_name,
+            app_doc_id: bootstrap.app_doc_id.to_string(),
+            drawer_doc_id: bootstrap.drawer_doc_id.to_string(),
+            device_name: Some(device_name),
+            issued_iroh_secret_key_hex: Some(data_encoding::HEXLOWER.encode(&issued_secret.to_bytes())),
+            issued_iroh_public_key: Some(issued_public.to_string()),
+            issued_peer_key: Some(issued_peer_key),
+        })
+    }
+
     async fn handle_incoming_am_conn(&self, conn: am_utils_rs::repo::RepoConnection) -> Res<()> {
         let endpoint_id = conn
             .endpoint_id
@@ -389,6 +523,9 @@ impl IrohSyncRepo {
             conn_id: conn.id,
         }];
         let partition_ids = self.peer_partition_ids(&peer_key);
+        self.sync_store
+            .allow_peer(peer_key.clone(), Some(endpoint_id))
+            .await?;
 
         if let Err(err) = self
             .full_sync_handle
@@ -412,7 +549,10 @@ impl IrohSyncRepo {
         Ok(())
     }
 
-    async fn handle_conn_end(&self, signal: am_utils_rs::repo::ConnFinishSignal) -> Res<()> {
+    async fn handle_conn_end(
+        self: &Arc<Self>,
+        signal: am_utils_rs::repo::ConnFinishSignal,
+    ) -> Res<()> {
         let Some(endpoint_id) = self.active_samod_peers.read().await.iter().find_map(
             |(endpoint_id, state)| match state {
                 ActivePeerState::Connected(conn) if conn.id == signal.conn_id => Some(*endpoint_id),
@@ -439,6 +579,10 @@ impl IrohSyncRepo {
         assert!(matches!(old, Some(ActivePeerState::Connected(_))), "fishy");
 
         self.registry.notify(events);
+        if self.cancel_token.is_cancelled() {
+            return Ok(());
+        }
+        self.spawn_connect_known_devices_once("connection-close");
         Ok(())
     }
 
@@ -469,6 +613,9 @@ impl IrohSyncRepo {
     ) -> Res<()> {
         let conn_id = conn.id;
         let partition_ids = self.peer_partition_ids(&peer_key);
+        self.sync_store
+            .allow_peer(peer_key.clone(), Some(endpoint_id))
+            .await?;
         if let Err(err) = self
             .full_sync_handle
             .set_connection(endpoint_id, conn_id, peer_key, partition_ids)
@@ -585,12 +732,20 @@ impl IrohSyncRepo {
         Ok(())
     }
 
-    pub async fn connect_url(&self, iroh_doc_url: &str) -> Res<bootstrap::SyncBootstrapState> {
+    pub async fn connect_url(&self, source_url: &str) -> Res<bootstrap::SyncBootstrapState> {
         self.ensure_repo_live()?;
 
-        let bootstrap =
-            bootstrap::resolve_bootstrap_with_docs(&self.iroh_docs, &self.iroh_blobs, iroh_doc_url)
-                .await?;
+        let bootstrap = bootstrap::request_clone_provision_via_rpc(
+            source_url,
+            bootstrap::CloneProvisionRequest {
+                requested_device_name: None,
+                provision: false,
+                requester_endpoint_id: Some(self.router.endpoint().id().to_string()),
+                requester_peer_key: Some(self.rcx.big_repo.samod_repo().peer_id().to_string()),
+            },
+        )
+        .await?
+        .to_bootstrap_state()?;
 
         if bootstrap.repo_id != self.rcx.repo_id {
             eyre::bail!(
@@ -606,15 +761,17 @@ impl IrohSyncRepo {
 
     pub async fn connect_known_devices_once(&self) -> Res<()> {
         self.ensure_repo_live()?;
-
-        let devices = self.config_repo.list_known_sync_devices().await?;
-        let local_endpoint_id = self.router.endpoint().id();
-        for device in devices {
-            if device.endpoint_id == local_endpoint_id {
-                continue;
+        #[cfg(not(test))]
+        {
+            let devices = self.config_repo.list_known_sync_devices().await?;
+            let local_endpoint_id = self.router.endpoint().id();
+            for device in devices {
+                if device.endpoint_id == local_endpoint_id {
+                    continue;
+                }
+                self.connect_endpoint_addr(iroh::EndpointAddr::new(device.endpoint_id))
+                    .await?;
             }
-            self.connect_endpoint_addr(iroh::EndpointAddr::new(device.endpoint_id))
-                .await?;
         }
         Ok(())
     }

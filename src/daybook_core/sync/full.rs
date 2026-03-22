@@ -3,7 +3,6 @@
 use crate::interlude::*;
 
 use am_utils_rs::sync::{
-    node::SyncNodeHandle,
     peer::{
         PeerSyncProgressEvent, PeerSyncWorkerEvent, PeerSyncWorkerStopToken, SamodSyncAck,
         SamodSyncRequest, SpawnPeerSyncWorkerArgs,
@@ -251,7 +250,6 @@ pub async fn start_full_sync_worker(
     rcx: Arc<RepoCtx>,
     blobs_repo: Arc<BlobsRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
-    partition_sync_node: Arc<SyncNodeHandle>,
     sync_store: SyncStoreHandle,
     iroh_endpoint: iroh::Endpoint,
 ) -> Res<(WorkerHandle, StopToken)> {
@@ -284,7 +282,6 @@ pub async fn start_full_sync_worker(
 
         blobs_repo,
         progress_repo,
-        partition_sync_node,
         sync_store,
         iroh_endpoint,
 
@@ -371,19 +368,6 @@ pub async fn start_full_sync_worker(
                         .await?;
                 }
             }
-            let registered_peers = worker
-                .known_peer_set
-                .values()
-                .map(|state| state.peer_key.clone())
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            for peer_key in registered_peers {
-                worker
-                    .partition_sync_node
-                    .unregister_local_peer(peer_key)
-                    .await?;
-            }
             eyre::Ok(())
         }
     };
@@ -411,7 +395,6 @@ struct Worker {
     cancel_token: CancellationToken,
     blobs_repo: Arc<BlobsRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
-    partition_sync_node: Arc<SyncNodeHandle>,
     sync_store: SyncStoreHandle,
     iroh_endpoint: iroh::Endpoint,
 
@@ -690,17 +673,7 @@ impl Worker {
                 if let Some(old_state) = old_state.as_ref() {
                     if old_state.peer_key != peer_key {
                         self.endpoint_by_peer_key.remove(&old_state.peer_key);
-                        self.partition_sync_node
-                            .unregister_local_peer(old_state.peer_key.clone())
-                            .await?;
-                        self.partition_sync_node
-                            .register_local_peer(peer_key.clone())
-                            .await?;
                     }
-                } else {
-                    self.partition_sync_node
-                        .register_local_peer(peer_key.clone())
-                        .await?;
                 }
                 let new_parts: Vec<_> = if let Some(old) = old_state {
                     for part_key in old.partitions.difference(&partitions) {
@@ -737,9 +710,6 @@ impl Worker {
                 if let Some(conn_id) = self.conn_by_peer.remove(&endpoint_id) {
                     if let Some(state) = self.known_peer_set.remove(&conn_id) {
                         self.endpoint_by_peer_key.remove(&state.peer_key);
-                        self.partition_sync_node
-                            .unregister_local_peer(state.peer_key)
-                            .await?;
                         self.remove_peer_from_samod_doc_set(endpoint_id).await?;
                         self.remove_peer_from_import_doc_set(endpoint_id).await?;
                         self.remove_peer_partition_session(endpoint_id).await?;

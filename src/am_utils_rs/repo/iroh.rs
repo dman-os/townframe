@@ -12,6 +12,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use tokio_util::sync::CancellationToken;
 
 use crate::repo::{BigRepo, SharedBigRepo};
+use crate::sync::store::SyncStoreHandle;
 
 mod codec;
 
@@ -243,6 +244,7 @@ pub struct IrohRepoProtocol {
     pub cancel_token: CancellationToken,
     pub conn_tx: tokio::sync::mpsc::UnboundedSender<crate::repo::RepoConnection>,
     pub end_signal_tx: tokio::sync::mpsc::UnboundedSender<crate::repo::ConnFinishSignal>,
+    pub sync_store: SyncStoreHandle,
 }
 
 impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
@@ -252,6 +254,20 @@ impl iroh::protocol::ProtocolHandler for IrohRepoProtocol {
         connection: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
         let endpoint_id = connection.remote_id();
+        let allowed = self
+            .sync_store
+            .is_endpoint_allowed(endpoint_id)
+            .await
+            .map_err(|err| {
+                iroh::protocol::AcceptError::from_boxed(Box::from(format!(
+                    "failed checking endpoint auth for {endpoint_id}: {err:#}"
+                )))
+            })?;
+        if !allowed {
+            let reason = format!("peer endpoint {endpoint_id} is not authorized");
+            connection.close(403u32.into(), reason.as_bytes());
+            return Err(iroh::protocol::AcceptError::from_boxed(Box::from(reason)));
+        }
         tracing::record_all!(
             tracing::Span::current(),
             endpoint_id = ?endpoint_id,

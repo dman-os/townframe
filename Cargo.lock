@@ -2236,6 +2236,7 @@ dependencies = [
  "iroh-docs",
  "iroh-gossip",
  "iroh-tickets 0.3.0",
+ "irpc",
  "irpc-iroh",
  "jsonschema",
  "keyring",

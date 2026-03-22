@@ -135,7 +135,7 @@ async fn ensure_known_peer(
     peer: &crate::sync::protocol::PeerKey,
 ) -> Result<(), PartitionSyncError> {
     let known = sync_store
-        .is_peer_registered(peer.clone())
+        .is_peer_allowed(peer.clone())
         .await
         .map_err(map_repo_err)?;
     if known {

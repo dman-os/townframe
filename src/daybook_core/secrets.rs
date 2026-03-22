@@ -69,6 +69,41 @@ impl SecretRepo {
             iroh_public_key: public,
         })
     }
+
+    pub async fn set_identity_from_secret_hex(
+        sql: &SqlitePool,
+        repo_id: &str,
+        secret_hex: &str,
+    ) -> Res<RepoIdentity> {
+        let secret = decode_secret_hex(secret_hex)?;
+        let encoded = data_encoding::HEXLOWER.encode(&secret.to_bytes());
+        let _ = ensure_fallback_secret(sql, repo_id, &encoded).await?;
+        let fallback_key = fallback_secret_key(repo_id);
+        sqlx::query(
+            "INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(&fallback_key)
+        .bind(&encoded)
+        .execute(sql)
+        .await?;
+        if std::env::var("DAYB_DISABLE_KEYRING")
+            .map(|value| value != "1")
+            .unwrap_or(true)
+        {
+            let service_name = format!("daybook.repo.{repo_id}");
+            if let Ok(entry) = keyring::Entry::new(&service_name, Self::KEYRING_USERNAME) {
+                if let Err(err) = entry.set_password(&encoded) {
+                    warn!(?err, "failed setting keyring secret from provisioned clone identity");
+                }
+            }
+        }
+        let public = secret.public();
+        Ok(RepoIdentity {
+            repo_id: repo_id.to_string(),
+            iroh_secret_key: secret,
+            iroh_public_key: public,
+        })
+    }
 }
 
 fn fallback_secret_key(repo_id: &str) -> String {
