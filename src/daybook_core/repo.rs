@@ -3,8 +3,13 @@ use crate::interlude::*;
 
 use crate::app::*;
 
+use am_utils_rs::partition::PartitionStore;
 use fs4::fs_std::FileExt;
+use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::SqlitePool;
+use std::str::FromStr;
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 const REPO_MARKER_FILE: &str = "db.repo.txt";
 const REPO_USER_ID_KEY: &str = "repo.user_id";
@@ -95,6 +100,7 @@ pub struct RepoCtx {
     pub lock_guard: RepoLockGuard,
 
     pub sql: SqlCtx,
+    pub partition_store: Arc<PartitionStore>,
 
     pub big_repo: SharedBigRepo,
     big_repo_stop: std::sync::Mutex<Option<am_utils_rs::BigRepoStopToken>>,
@@ -196,10 +202,7 @@ impl RepoCtx {
         let am_config = am_utils_rs::repo::Config {
             storage: am_utils_rs::repo::StorageConfig::Disk {
                 path: layout.samod_root.clone(),
-                big_repo_sqlite_url: Some(format!(
-                    "sqlite://{}",
-                    layout.repo_root.join("big_repo.sqlite").display()
-                )),
+                big_repo_sqlite_url: None,
             },
             peer_id,
         };
@@ -207,7 +210,36 @@ impl RepoCtx {
             &daybook_types::doc::UserPath::from(local_user_path.clone()),
         );
 
-        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_config).await?;
+        let big_repo_sqlite_url = format!(
+            "sqlite://{}",
+            layout.repo_root.join("big_repo.sqlite").display()
+        );
+        let connect_options = SqliteConnectOptions::from_str(&big_repo_sqlite_url)
+            .wrap_err_with(|| format!("invalid sqlite url: {big_repo_sqlite_url}"))?
+            .create_if_missing(true);
+        let partition_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(connect_options)
+            .await
+            .wrap_err("failed connecting big repo sqlite")?;
+        let (partition_events_tx, _) =
+            broadcast::channel(am_utils_rs::sync::protocol::DEFAULT_SUBSCRIPTION_CAPACITY);
+        let partition_forwarder_cancel = CancellationToken::new();
+        let partition_forwarders = Arc::new(utils_rs::AbortableJoinSet::new());
+        let partition_store = Arc::new(PartitionStore::new(
+            partition_pool,
+            partition_events_tx,
+            partition_forwarder_cancel.clone(),
+            Arc::clone(&partition_forwarders),
+        ));
+        partition_store.ensure_schema().await?;
+        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot_with_partition_store(
+            am_config,
+            Arc::clone(&partition_store),
+            partition_forwarder_cancel,
+            partition_forwarders,
+        )
+        .await?;
         if let Some(ws_connector_url) = options.ws_connector_url {
             std::mem::drop(
                 big_repo
@@ -245,6 +277,7 @@ impl RepoCtx {
             layout,
             lock_guard,
             sql,
+            partition_store,
             big_repo,
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
             doc_app,
@@ -273,7 +306,14 @@ impl RepoCtx {
         use crate::rt::dispatch::DispatchRepo;
         use crate::tables::TablesRepo;
 
-        let blobs_repo = BlobsRepo::new(blobs_root.clone(), local_user_path.to_string()).await?;
+        let blobs_repo = BlobsRepo::new(
+            blobs_root.clone(),
+            local_user_path.to_string(),
+            Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
+                big_repo.partition_store(),
+            )),
+        )
+        .await?;
         let mut plugs_repo: Option<Arc<PlugsRepo>> = None;
         let mut plugs_stop: Option<crate::repos::RepoStopToken> = None;
         let mut config_stop: Option<crate::repos::RepoStopToken> = None;

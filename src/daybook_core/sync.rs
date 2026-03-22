@@ -16,6 +16,7 @@ pub use bootstrap::*;
 
 pub const IROH_DOC_URL_SCHEME: &str = "db+iroh-doc";
 pub const PARTITION_SYNC_ALPN: &[u8] = b"townframe/partition-sync/0";
+pub const REPO_SYNC_ALPN: &[u8] = b"townframe/repo-sync/0";
 
 enum ActivePeerState {
     Connecting,
@@ -97,23 +98,23 @@ pub struct IrohSyncRepoStopToken {
     worker_handle: JoinHandle<()>,
     router: iroh::protocol::Router,
     partition_sync_stop_token: am_utils_rs::sync::node::SyncNodeStopToken,
+    repo_rpc_stop_token: am_utils_rs::repo::rpc::RepoRpcStopToken,
     partition_sync_store_stop_token: am_utils_rs::sync::store::SyncStoreStopToken,
-    full_stop_token: full::StopToken,
 }
 
 impl IrohSyncRepoStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
-        self.full_stop_token.stop().await?;
+        utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(2)).await?;
         // NOTE: we only add timeouts for stop tokens that don't have internal
         // timeouts
         tokio::time::timeout(Duration::from_secs(10), self.router.shutdown())
             .await
             .map_err(|_| eyre::eyre!("timeout for waiting router shutdown"))??;
+        self.repo_rpc_stop_token.stop().await?;
         self.partition_sync_stop_token.stop().await?;
 
         self.partition_sync_store_stop_token.stop().await?;
-        utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(2)).await?;
         Ok(())
     }
 }
@@ -126,11 +127,22 @@ impl IrohSyncRepo {
         let drawer_doc_id = rcx.doc_drawer.document_id().to_string();
         let app_doc_id = rcx.doc_app.document_id().to_string();
         rcx.big_repo
-            .add_doc_to_partition(&partition_id, &drawer_doc_id)
+            .partition_store()
+            .add_member(&partition_id, &drawer_doc_id, &serde_json::json!({}))
             .await?;
         rcx.big_repo
-            .add_doc_to_partition(&partition_id, &app_doc_id)
+            .partition_store()
+            .add_member(&partition_id, &app_doc_id, &serde_json::json!({}))
             .await?;
+        for blob_partition_id in [
+            crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
+            crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
+        ] {
+            rcx.big_repo
+                .partition_store()
+                .ensure_partition(&blob_partition_id)
+                .await?;
+        }
         Ok(())
     }
 
@@ -161,12 +173,18 @@ impl IrohSyncRepo {
             am_utils_rs::sync::store::spawn_sync_store(rcx.big_repo.state_pool().clone()).await?;
         let (partition_sync_node, partition_sync_stop_token) =
             am_utils_rs::sync::node::spawn_sync_node(
-                Arc::clone(&rcx.big_repo),
+                rcx.big_repo.partition_store(),
                 partition_sync_store.clone(),
                 Arc::new(am_utils_rs::sync::AllowAllPartitionAccessPolicy),
             )
             .await?;
         let partition_sync_node = Arc::new(partition_sync_node);
+        let (repo_rpc, repo_rpc_stop_token) = am_utils_rs::repo::rpc::spawn_repo_rpc(
+            Arc::clone(&rcx.big_repo),
+            partition_sync_store.clone(),
+            Arc::new(am_utils_rs::sync::AllowAllPartitionAccessPolicy),
+        )
+        .await?;
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(
@@ -185,6 +203,12 @@ impl IrohSyncRepo {
                 ),
             )
             .accept(
+                REPO_SYNC_ALPN,
+                irpc_iroh::IrohProtocol::<am_utils_rs::repo::rpc::RepoSyncRpc>::with_sender(
+                    repo_rpc.local_sender(),
+                ),
+            )
+            .accept(
                 iroh_blobs::ALPN,
                 iroh_blobs::BlobsProtocol::new(&blobs, None),
             )
@@ -200,7 +224,6 @@ impl IrohSyncRepo {
         let (mut full_sync_handle, full_stop_token) = full::start_full_sync_worker(
             Arc::clone(&rcx),
             Arc::clone(&blobs_repo),
-            Arc::clone(&doc_blobs_index_repo),
             progress_repo.clone(),
             Arc::clone(&partition_sync_node),
             partition_sync_store.clone(),
@@ -228,10 +251,14 @@ impl IrohSyncRepo {
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
+            let full_stop_token = full_stop_token;
             async move {
-                repo.machine_loop(full_sync_rx, incoming_conn_rx, conn_end_rx)
-                    .await
-                    .unwrap();
+                let loop_res = repo
+                    .machine_loop(full_sync_rx, incoming_conn_rx, conn_end_rx)
+                    .await;
+                let full_stop_res = full_stop_token.stop().await;
+                loop_res.unwrap();
+                full_stop_res.unwrap();
             }
             .instrument(tracing::info_span!("IrohSyncRepo listen task"))
         });
@@ -243,8 +270,8 @@ impl IrohSyncRepo {
                 worker_handle,
                 router,
                 partition_sync_stop_token,
+                repo_rpc_stop_token,
                 partition_sync_store_stop_token,
-                full_stop_token,
             },
         ))
     }
@@ -261,6 +288,8 @@ impl IrohSyncRepo {
             crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
                 self.rcx.doc_drawer.document_id(),
             ),
+            crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
+            crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
         ]
         .into()
     }
@@ -1363,8 +1392,22 @@ mod tests {
                 match std::fs::copy(&src_path, &dst_path) {
                     Ok(_) => {}
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                        // Source files such as sqlite WAL/SHM can disappear between read_dir and copy.
-                        continue;
+                        // SQLite WAL/SHM sidecars can disappear between read_dir and copy.
+                        // Missing any other file is unexpected and should fail loudly.
+                        let file_name = src_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or_default();
+                        if file_name.ends_with("-wal") || file_name.ends_with("-shm") {
+                            continue;
+                        }
+                        return Err(err).wrap_err_with(|| {
+                            format!(
+                                "unexpected missing file during copy {} -> {}",
+                                src_path.display(),
+                                dst_path.display()
+                            )
+                        });
                     }
                     Err(err) => {
                         return Err(err).wrap_err_with(|| {
@@ -1385,6 +1428,35 @@ mod tests {
         repo_a_path: &std::path::Path,
         repo_b_path: &std::path::Path,
     ) -> Res<()> {
+        async fn force_delete_journal_mode(sqlite_path: &std::path::Path) -> Res<()> {
+            use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+            use std::str::FromStr;
+
+            let db_url = format!("sqlite://{}", sqlite_path.display());
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(
+                    SqliteConnectOptions::from_str(&db_url)?
+                        .create_if_missing(false)
+                        .busy_timeout(Duration::from_secs(5)),
+                )
+                .await?;
+            let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                .execute(&pool)
+                .await;
+            let mode: String = sqlx::query_scalar("PRAGMA journal_mode=DELETE")
+                .fetch_one(&pool)
+                .await?;
+            if mode.to_lowercase() != "delete" {
+                eyre::bail!(
+                    "failed forcing sqlite journal mode to DELETE for {} (got: {mode})",
+                    sqlite_path.display()
+                );
+            }
+            pool.close().await;
+            Ok(())
+        }
+
         tokio::fs::create_dir_all(repo_a_path).await?;
         let rtx = RepoCtx::init(
             repo_a_path,
@@ -1395,8 +1467,11 @@ mod tests {
         )
         .await?;
         let source_repo_id = rtx.repo_id.clone();
+        let source_repo_user_id = crate::repo::get_or_init_repo_user_id(&rtx.sql.db_pool).await?;
         rtx.shutdown().await?;
         drop(rtx);
+        force_delete_journal_mode(&repo_a_path.join("sqlite.db")).await?;
+        force_delete_journal_mode(&repo_a_path.join("big_repo.sqlite")).await?;
 
         copy_dir_all(repo_a_path, repo_b_path)?;
         let repo_b_sql = crate::app::SqlCtx::new(&format!(
@@ -1405,6 +1480,7 @@ mod tests {
         ))
         .await?;
         crate::app::globals::set_repo_id(&repo_b_sql.db_pool, &source_repo_id).await?;
+        crate::repo::set_repo_user_id(&repo_b_sql.db_pool, &source_repo_user_id).await?;
         let repo_b_repo_id = crate::app::globals::get_repo_id(&repo_b_sql.db_pool)
             .await?
             .ok_or_eyre("repo_b repo_id missing after copy")?;
@@ -1488,8 +1564,14 @@ mod tests {
             )
             .await?,
         );
-        let blobs_repo =
-            BlobsRepo::new(rtx.layout.blobs_root.clone(), rtx.local_user_path.clone()).await?;
+        let blobs_repo = BlobsRepo::new(
+            rtx.layout.blobs_root.clone(),
+            rtx.local_user_path.clone(),
+            Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
+                rtx.big_repo.partition_store(),
+            )),
+        )
+        .await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
             Arc::clone(&rtx.big_repo),
             Arc::clone(&blobs_repo),
@@ -1523,6 +1605,7 @@ mod tests {
             SqliteLocalStateRepo::boot(rtx.layout.repo_root.join("local_state")).await?;
         let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
             Arc::clone(&drawer_repo),
+            Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
@@ -1887,6 +1970,7 @@ mod tests {
         let blobs_repo = BlobsRepo::new(
             temp_root.path().join("blobs"),
             "/u/stress-test/dev-local".to_string(),
+            Arc::new(crate::blobs::NoopPartitionMembershipWriter),
         )
         .await?;
         let payload = b"delayed-blob-arrival".to_vec();

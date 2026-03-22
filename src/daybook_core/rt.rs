@@ -88,13 +88,6 @@ impl RtStopToken {
             );
         }
 
-        if let Err(err) = self.doc_blobs_index_stop.stop().await {
-            warn!(
-                ?err,
-                "error stopping doc_blobs_index_repo during shutdown - continuing"
-            );
-        }
-
         if let Err(err) = self.doc_facet_set_index_stop.stop().await {
             warn!(
                 ?err,
@@ -106,13 +99,6 @@ impl RtStopToken {
             warn!(
                 ?err,
                 "error stopping doc_facet_ref_index_repo during shutdown - continuing"
-            );
-        }
-
-        if let Err(err) = self.sqlite_local_state_stop.stop().await {
-            warn!(
-                ?err,
-                "error stopping sqlite_local_state_repo during shutdown - continuing"
             );
         }
 
@@ -153,6 +139,18 @@ impl RtStopToken {
             warn!(
                 ?err,
                 "error stopping wash_host during shutdown - continuing"
+            );
+        }
+        if let Err(err) = self.doc_blobs_index_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping doc_blobs_index_repo during shutdown - continuing"
+            );
+        }
+        if let Err(err) = self.sqlite_local_state_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping sqlite_local_state_repo during shutdown - continuing"
             );
         }
 
@@ -213,6 +211,7 @@ impl Rt {
             .await?;
         let (doc_blobs_index_repo, doc_blobs_index_stop) = crate::index::DocBlobsIndexRepo::boot(
             Arc::clone(&drawer),
+            Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;

@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::repo::SharedBigRepo;
+use crate::partition::PartitionStore;
 use crate::sync::protocol::*;
 use crate::sync::store::SyncStoreHandle;
 use crate::sync::PartitionAccessPolicy;
@@ -78,7 +78,7 @@ impl SyncNodeStopToken {
 }
 
 pub async fn spawn_sync_node(
-    big_repo: SharedBigRepo,
+    partition_store: Arc<PartitionStore>,
     sync_store: SyncStoreHandle,
     access_policy: Arc<dyn PartitionAccessPolicy>,
 ) -> Res<(SyncNodeHandle, SyncNodeStopToken)> {
@@ -92,7 +92,7 @@ pub async fn spawn_sync_node(
         let cancel_token = cancel_token.clone();
         let subscription_tasks = Arc::clone(&subscription_tasks);
         let mut worker = SyncNodeWorker {
-            big_repo,
+            partition_store,
             sync_store,
             access_policy,
             cancel_token: cancel_token.clone(),
@@ -145,7 +145,7 @@ pub async fn spawn_sync_node(
 }
 
 struct SyncNodeWorker {
-    big_repo: SharedBigRepo,
+    partition_store: Arc<PartitionStore>,
     sync_store: SyncStoreHandle,
     access_policy: Arc<dyn PartitionAccessPolicy>,
     cancel_token: CancellationToken,
@@ -161,15 +161,15 @@ impl SyncNodeWorker {
                 let out = (async {
                     self.ensure_known_peer(&peer).await?;
                     let mut partitions = self
-                        .big_repo
+                        .partition_store
                         .list_partitions_for_peer(&peer)
                         .await
                         .map_err(map_repo_err)?;
-                    partitions.retain(|part| {
+                    partitions.partitions.retain(|part| {
                         self.access_policy
                             .can_access_partition(&peer, &part.partition_id)
                     });
-                    Ok::<_, PartitionSyncError>(ListPartitionsResponse { partitions })
+                    Ok::<_, PartitionSyncError>(partitions)
                 })
                 .await;
                 tx.send(out).await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
@@ -181,7 +181,7 @@ impl SyncNodeWorker {
                     self.ensure_known_peer(&peer).await?;
                     self.ensure_partition_access(&peer, &req.partitions)?;
                     let out = self
-                        .big_repo
+                        .partition_store
                         .get_partition_member_events_for_peer(&peer, &req)
                         .await
                         .map_err(map_repo_err)?;
@@ -200,7 +200,7 @@ impl SyncNodeWorker {
                     self.ensure_known_peer(&peer).await?;
                     self.ensure_partition_access(&peer, &req.partitions)?;
                     let out = self
-                        .big_repo
+                        .partition_store
                         .get_partition_doc_events_for_peer(&peer, &req)
                         .await
                         .map_err(map_repo_err)?;
@@ -208,34 +208,6 @@ impl SyncNodeWorker {
                         events: out.events,
                         cursors: out.cursors,
                     })
-                })
-                .await;
-                tx.send(out).await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
-            }
-            PartitionSyncRpcMessage::GetDocsFull(req) => {
-                let WithChannels { inner, tx, .. } = req;
-                let GetDocsFullRpcReq { peer, req } = inner;
-                let out = (async {
-                    self.ensure_known_peer(&peer).await?;
-                    let mut allowed_partitions = self
-                        .big_repo
-                        .list_partitions_for_peer(&peer)
-                        .await
-                        .map_err(map_repo_err)?;
-                    allowed_partitions.retain(|part| {
-                        self.access_policy
-                            .can_access_partition(&peer, &part.partition_id)
-                    });
-                    let allowed_partition_ids = allowed_partitions
-                        .into_iter()
-                        .map(|part| part.partition_id)
-                        .collect::<Vec<_>>();
-                    let docs = self
-                        .big_repo
-                        .get_docs_full_in_partitions(&req.doc_ids, &allowed_partition_ids)
-                        .await
-                        .map_err(map_repo_err)?;
-                    Ok::<_, PartitionSyncError>(GetDocsFullResponse { docs })
                 })
                 .await;
                 tx.send(out).await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
@@ -255,7 +227,7 @@ impl SyncNodeWorker {
                             });
                         }
                     }
-                    self.big_repo
+                    self.partition_store
                         .subscribe_partition_events_for_peer(
                             &peer,
                             &req,

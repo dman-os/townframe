@@ -73,6 +73,9 @@
 
 - [ ] Cleanup and show it to people
  
+- [ ] Deletes
+  - [ ] Blobs
+  - [ ] Docs
 - [ ] Get rid of all RwLocks and all async mutexes
 - [ ] Use Arc<str> for progress.tags
 - [ ] Consider using lmdb or redb for the kvstore on wflow_tokio

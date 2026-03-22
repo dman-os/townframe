@@ -1,10 +1,87 @@
 use crate::interlude::*;
 
+use am_utils_rs::partition::PartitionStore;
 use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
 use iroh_blobs::store::fs::FsStore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::io::AsyncWriteExt;
+
+#[async_trait]
+pub trait PartitionMembershipWriter: Send + Sync {
+    async fn add_member(
+        &self,
+        partition_id: &str,
+        member_id: &str,
+        payload: &serde_json::Value,
+    ) -> Res<()>;
+    async fn remove_member(
+        &self,
+        partition_id: &str,
+        member_id: &str,
+        payload: &serde_json::Value,
+    ) -> Res<()>;
+}
+
+#[derive(Clone)]
+pub struct PartitionStoreMembershipWriter {
+    partition_store: Arc<PartitionStore>,
+}
+
+impl PartitionStoreMembershipWriter {
+    pub fn new(partition_store: Arc<PartitionStore>) -> Self {
+        Self { partition_store }
+    }
+}
+
+#[async_trait]
+impl PartitionMembershipWriter for PartitionStoreMembershipWriter {
+    async fn add_member(
+        &self,
+        partition_id: &str,
+        member_id: &str,
+        payload: &serde_json::Value,
+    ) -> Res<()> {
+        self.partition_store
+            .add_member(&partition_id.to_string(), member_id, payload)
+            .await
+    }
+
+    async fn remove_member(
+        &self,
+        partition_id: &str,
+        member_id: &str,
+        payload: &serde_json::Value,
+    ) -> Res<()> {
+        self.partition_store
+            .remove_member(&partition_id.to_string(), member_id, payload)
+            .await
+    }
+}
+
+#[derive(Clone)]
+pub struct NoopPartitionMembershipWriter;
+
+#[async_trait]
+impl PartitionMembershipWriter for NoopPartitionMembershipWriter {
+    async fn add_member(
+        &self,
+        _partition_id: &str,
+        _member_id: &str,
+        _payload: &serde_json::Value,
+    ) -> Res<()> {
+        Ok(())
+    }
+
+    async fn remove_member(
+        &self,
+        _partition_id: &str,
+        _member_id: &str,
+        _payload: &serde_json::Value,
+    ) -> Res<()> {
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 pub struct BlobsRepo {
@@ -12,6 +89,7 @@ pub struct BlobsRepo {
     src_local_user_path: String,
     iroh_store: iroh_blobs::api::Store,
     hash_locks: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    partition_writer: Arc<dyn PartitionMembershipWriter>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,11 +119,44 @@ struct ObjectPaths {
 }
 
 pub const BLOB_SCHEME: &str = "db+blob";
+pub const BLOB_SCOPE_DOCS_PARTITION_ID: &str = "blob_scope/docs";
+pub const BLOB_SCOPE_PLUGS_PARTITION_ID: &str = "blob_scope/plugs";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BlobScope {
+    Docs,
+    Plugs,
+}
+
+impl BlobScope {
+    pub fn partition_id(self) -> &'static str {
+        match self {
+            Self::Docs => BLOB_SCOPE_DOCS_PARTITION_ID,
+            Self::Plugs => BLOB_SCOPE_PLUGS_PARTITION_ID,
+        }
+    }
+
+    pub fn from_partition_id(partition_id: &str) -> Option<Self> {
+        match partition_id {
+            BLOB_SCOPE_DOCS_PARTITION_ID => Some(Self::Docs),
+            BLOB_SCOPE_PLUGS_PARTITION_ID => Some(Self::Plugs),
+            _ => None,
+        }
+    }
+
+    fn as_payload_scope(self) -> &'static str {
+        match self {
+            Self::Docs => "docs",
+            Self::Plugs => "plugs",
+        }
+    }
+}
 
 impl BlobsRepo {
     pub async fn new(
         root: PathBuf,
         src_local_user_path: String,
+        partition_writer: Arc<dyn PartitionMembershipWriter>,
     ) -> Result<Arc<Self>, eyre::Report> {
         let objects_root = root.join("objects");
         tokio::fs::create_dir_all(&objects_root).await?;
@@ -60,6 +171,40 @@ impl BlobsRepo {
             src_local_user_path,
             iroh_store: fs_store.into(),
             hash_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            partition_writer,
+        }))
+    }
+
+    pub async fn add_hash_to_scope(&self, scope: BlobScope, hash: &str) -> Res<()> {
+        let payload = self.partition_member_payload(scope, hash).await?;
+        self.partition_writer
+            .add_member(scope.partition_id(), hash, &payload)
+            .await
+    }
+
+    pub async fn remove_hash_from_scope(&self, scope: BlobScope, hash: &str) -> Res<()> {
+        let payload = self.partition_member_payload(scope, hash).await?;
+        self.partition_writer
+            .remove_member(scope.partition_id(), hash, &payload)
+            .await
+    }
+
+    async fn partition_member_payload(
+        &self,
+        scope: BlobScope,
+        hash: &str,
+    ) -> Res<serde_json::Value> {
+        let object_paths = self.object_paths(hash)?;
+        let size_bytes = if let Some(meta) = self.read_meta(&object_paths.meta).await? {
+            meta.size_bytes
+        } else if tokio::fs::try_exists(&object_paths.blob).await? {
+            tokio::fs::metadata(&object_paths.blob).await?.len()
+        } else {
+            0
+        };
+        Ok(serde_json::json!({
+            "scope": scope.as_payload_scope(),
+            "size_bytes": size_bytes,
         }))
     }
 
@@ -477,6 +622,7 @@ mod tests {
         let repo = BlobsRepo::new(
             temp_dir.path().to_path_buf(),
             "/local/test-user".to_string(),
+            Arc::new(NoopPartitionMembershipWriter),
         )
         .await
         .unwrap();
@@ -485,6 +631,24 @@ mod tests {
 
     fn bytes_hash_to_iroh_hash(bytes: &[u8]) -> iroh_blobs::Hash {
         iroh_blobs::Hash::new(bytes)
+    }
+
+    #[test]
+    fn blob_scope_partition_mapping_is_stable() {
+        assert_eq!(BlobScope::Docs.partition_id(), BLOB_SCOPE_DOCS_PARTITION_ID);
+        assert_eq!(
+            BlobScope::Plugs.partition_id(),
+            BLOB_SCOPE_PLUGS_PARTITION_ID
+        );
+        assert_eq!(
+            BlobScope::from_partition_id(BLOB_SCOPE_DOCS_PARTITION_ID),
+            Some(BlobScope::Docs)
+        );
+        assert_eq!(
+            BlobScope::from_partition_id(BLOB_SCOPE_PLUGS_PARTITION_ID),
+            Some(BlobScope::Plugs)
+        );
+        assert_eq!(BlobScope::from_partition_id("blob_scope/unknown"), None);
     }
 
     #[tokio::test]

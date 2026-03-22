@@ -126,8 +126,14 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     // configured repo is Initialized since `init`
     // initializes the repo
     let ctx = context::open_repo_ctx(&conf, false, None).await?;
-    let blobs_repo =
-        BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
+    let blobs_repo = BlobsRepo::new(
+        ctx.layout.blobs_root.clone(),
+        ctx.local_user_path.clone(),
+        Arc::new(daybook_core::blobs::PartitionStoreMembershipWriter::new(
+            ctx.big_repo.partition_store(),
+        )),
+    )
+    .await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&ctx.big_repo),
         Arc::clone(&blobs_repo),
@@ -447,6 +453,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
             let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
                 Arc::clone(&drawer_repo),
+                Arc::clone(&blobs_repo),
                 Arc::clone(&sqlite_local_state_repo),
             )
             .await?;
@@ -724,8 +731,14 @@ async fn clone_repo_from_url(source_url: &str, destination: &std::path::Path) ->
             )
             .await?,
         );
-        let blobs_repo =
-            BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
+        let blobs_repo = BlobsRepo::new(
+            ctx.layout.blobs_root.clone(),
+            ctx.local_user_path.clone(),
+            Arc::new(daybook_core::blobs::PartitionStoreMembershipWriter::new(
+                ctx.big_repo.partition_store(),
+            )),
+        )
+        .await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
             Arc::clone(&ctx.big_repo),
             Arc::clone(&blobs_repo),
@@ -759,6 +772,7 @@ async fn clone_repo_from_url(source_url: &str, destination: &std::path::Path) ->
             SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
         let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
             Arc::clone(&drawer_repo),
+            Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
@@ -812,8 +826,14 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     }
 
     let ctx = context::open_repo_ctx(&conf, false, None).await?;
-    let blobs_repo =
-        BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
+    let blobs_repo = BlobsRepo::new(
+        ctx.layout.blobs_root.clone(),
+        ctx.local_user_path.clone(),
+        Arc::new(daybook_core::blobs::PartitionStoreMembershipWriter::new(
+            ctx.big_repo.partition_store(),
+        )),
+    )
+    .await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&ctx.big_repo),
         Arc::clone(&blobs_repo),
@@ -1288,8 +1308,14 @@ mod tests {
             )
             .await?,
         );
-        let blobs_repo =
-            BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
+        let blobs_repo = BlobsRepo::new(
+            ctx.layout.blobs_root.clone(),
+            ctx.local_user_path.clone(),
+            Arc::new(daybook_core::blobs::PartitionStoreMembershipWriter::new(
+                ctx.big_repo.partition_store(),
+            )),
+        )
+        .await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
             Arc::clone(&ctx.big_repo),
             Arc::clone(&blobs_repo),
@@ -1323,6 +1349,7 @@ mod tests {
             SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
         let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
             Arc::clone(&drawer_repo),
+            Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
