@@ -53,7 +53,7 @@ if (!(composeProfile === "debug" || composeProfile === "release")) {
 }
 const gradleVariant = composeProfile === "release" ? "Release" : "Debug";
 const gradleTask = $.env.DAYBOOK_ANDROID_GRADLE_TASK ??
-  `install${gradleVariant}`;
+  `assemble${gradleVariant}`;
 const ortBuildConfig = $.env.ORT_BUILD_CONFIG ??
   (composeProfile === "release" ? "Release" : "Debug");
 
@@ -70,7 +70,9 @@ const distDir = ortRootDir.join("dist", triple, ortBuildConfig);
 const distCompleteFile = ortRootDir.join(
   `.dist-${ortSourceTag}-${triple}-${ortBuildConfig.toLowerCase()}.complete`,
 );
-const libDirFile = ortRootDir.join(`ort-lib-location-${triple}.txt`);
+const libDirFile = ortRootDir.join(
+  `ort-lib-location-${ortSourceTag}-${triple}-${ortBuildConfig.toLowerCase()}.txt`,
+);
 
 await ortRootDir.ensureDir();
 

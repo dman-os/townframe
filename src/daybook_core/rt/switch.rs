@@ -159,12 +159,10 @@ pub async fn spawn_switch_worker(
                 let event = Arc::new(event);
                 worker
                     .track_event_heads(&SwitchEvent::Plugs(Arc::clone(&event)))
-                    .await
-                    .unwrap_or_log();
+                    .await?;
                 worker
                     .dispatch_to_listeners(&SwitchEvent::Plugs(event))
-                    .await
-                    .unwrap_or_log();
+                    .await?;
             }
 
             let events = worker.rt.drawer.events_for_init().await?;
@@ -172,12 +170,10 @@ pub async fn spawn_switch_worker(
                 let event = Arc::new(event);
                 worker
                     .track_event_heads(&SwitchEvent::Drawer(Arc::clone(&event)))
-                    .await
-                    .unwrap_or_log();
+                    .await?;
                 worker
                     .dispatch_to_listeners(&SwitchEvent::Drawer(event))
-                    .await
-                    .unwrap_or_log();
+                    .await?;
             }
 
             let events = worker.rt.dispatch_repo.events_for_init().await?;
@@ -185,12 +181,10 @@ pub async fn spawn_switch_worker(
                 let event = Arc::new(event);
                 worker
                     .track_event_heads(&SwitchEvent::Dispatch(Arc::clone(&event)))
-                    .await
-                    .unwrap_or_log();
+                    .await?;
                 worker
                     .dispatch_to_listeners(&SwitchEvent::Dispatch(event))
-                    .await
-                    .unwrap_or_log();
+                    .await?;
             }
 
             let events = worker.rt.config_repo.events_for_init().await?;
@@ -198,12 +192,10 @@ pub async fn spawn_switch_worker(
                 let event = Arc::new(event);
                 worker
                     .track_event_heads(&SwitchEvent::Config(Arc::clone(&event)))
-                    .await
-                    .unwrap_or_log();
+                    .await?;
                 worker
                     .dispatch_to_listeners(&SwitchEvent::Config(event))
-                    .await
-                    .unwrap_or_log();
+                    .await?;
             }
 
             loop {

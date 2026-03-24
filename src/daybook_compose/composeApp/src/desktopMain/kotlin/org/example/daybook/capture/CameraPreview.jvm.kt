@@ -147,14 +147,18 @@ actual fun DaybookCameraPreview(
     LaunchedEffect(cameraPreviewFfi, selectedDeviceId, onFrameAvailable) {
         if (selectedDeviceId == null) return@LaunchedEffect
         while (isActive) {
-            val nextFrame = cameraPreviewFfi.`takeLatestFrame`()
-            if (nextFrame != null) {
-                latestFrame = nextFrame
-                latestImageBitmap = withContext(Dispatchers.IO) { nextFrame.toImageBitmap() }
-                if (onFrameAvailable != null) {
-                    val sample = withContext(Dispatchers.IO) { nextFrame.toFrameSample() }
-                    onFrameAvailable.invoke(sample)
+            try {
+                val nextFrame = cameraPreviewFfi.`takeLatestFrame`()
+                if (nextFrame != null) {
+                    latestFrame = nextFrame
+                    latestImageBitmap = withContext(Dispatchers.IO) { nextFrame.toImageBitmap() }
+                    if (onFrameAvailable != null) {
+                        val sample = withContext(Dispatchers.IO) { nextFrame.toFrameSample() }
+                        onFrameAvailable.invoke(sample)
+                    }
                 }
+            } catch (error: Throwable) {
+                println("camera preview frame processing failed: ${error.message ?: error}")
             }
             delay(12)
         }

@@ -507,10 +507,14 @@ pub async fn is_repo_bootstrapped(repo_root: &std::path::Path) -> Res<bool> {
     let sql_config = SqlConfig {
         database_url: format!("sqlite://{}", layout.sqlite_path.display()),
     };
-    let sql = match SqlCtx::new(&sql_config.database_url).await {
-        Ok(sql) => sql,
-        Err(_) => return Ok(false),
-    };
+    let sql = SqlCtx::new(&sql_config.database_url)
+        .await
+        .wrap_err_with(|| {
+            format!(
+                "failed opening repo sqlite while checking bootstrap state: {}",
+                layout.sqlite_path.display()
+            )
+        })?;
     let init_state = crate::app::globals::get_init_state(&sql.db_pool).await?;
     Ok(matches!(
         init_state,

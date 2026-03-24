@@ -162,7 +162,7 @@ impl DrawerRepoFfi {
                 this.repo
                     .update_batch(patches)
                     .await
-                    .inspect_err(|err| error!(?err, "XXX"))
+                    .inspect_err(|err| error!(?err, "drawer update_batch failed"))
                     .wrap_err("error applying patches")
             })
             .await?)

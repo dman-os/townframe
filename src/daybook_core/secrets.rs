@@ -16,15 +16,16 @@ impl SecretRepo {
 
     pub async fn load_or_init_identity(sql: &SqlitePool, repo_id: &str) -> Res<RepoIdentity> {
         let repo_id = repo_id.to_string();
+        let fallback_secret = load_or_init_fallback_secret(sql, &repo_id).await?;
+        let fallback_secret_hex = data_encoding::HEXLOWER.encode(&fallback_secret.to_bytes());
         if std::env::var("DAYB_DISABLE_KEYRING")
             .map(|value| value == "1")
             .unwrap_or(false)
         {
-            let secret = load_or_init_fallback_secret(sql, &repo_id).await?;
-            let public = secret.public();
+            let public = fallback_secret.public();
             return Ok(RepoIdentity {
                 repo_id,
-                iroh_secret_key: secret,
+                iroh_secret_key: fallback_secret.clone(),
                 iroh_public_key: public,
             });
         }
@@ -32,25 +33,29 @@ impl SecretRepo {
         let secret = match keyring::Entry::new(&service_name, Self::KEYRING_USERNAME) {
             Ok(entry) => match entry.get_password() {
                 Ok(secret_hex) => {
-                    let secret = decode_secret_hex(&secret_hex)?;
-                    let encoded = data_encoding::HEXLOWER.encode(&secret.to_bytes());
-                    let _ = ensure_fallback_secret(sql, &repo_id, &encoded).await?;
-                    secret
+                    let keyring_secret = decode_secret_hex(&secret_hex)?;
+                    if keyring_secret.to_bytes() != fallback_secret.to_bytes() {
+                        warn!("keyring and fallback iroh secrets diverged; using fallback secret");
+                        if let Err(err) = entry.set_password(&fallback_secret_hex) {
+                            warn!(?err, "failed repairing keyring secret from fallback value");
+                        }
+                        fallback_secret.clone()
+                    } else {
+                        keyring_secret
+                    }
                 }
                 Err(keyring::Error::NoEntry) => {
-                    let secret = load_or_init_fallback_secret(sql, &repo_id).await?;
-                    let encoded = data_encoding::HEXLOWER.encode(&secret.to_bytes());
-                    if let Err(err) = entry.set_password(&encoded) {
+                    if let Err(err) = entry.set_password(&fallback_secret_hex) {
                         warn!(?err, "failed backfilling keyring from fallback secret");
                     }
-                    secret
+                    fallback_secret.clone()
                 }
                 Err(err) => {
                     warn!(
                         ?err,
                         "error reading iroh secret key from keyring, using fallback"
                     );
-                    load_or_init_fallback_secret(sql, &repo_id).await?
+                    fallback_secret.clone()
                 }
             },
             Err(err) => {
@@ -58,7 +63,7 @@ impl SecretRepo {
                     ?err,
                     "error creating keyring entry, using fallback secret store"
                 );
-                load_or_init_fallback_secret(sql, &repo_id).await?
+                fallback_secret.clone()
             }
         };
 

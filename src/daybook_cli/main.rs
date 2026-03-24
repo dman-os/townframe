@@ -32,12 +32,16 @@ fn main() -> Res<ExitCode> {
     // can be executed without having to
     // build up the dynamic sections of
     // the CLI into clap reprs
-    let static_res = match try_static_cli()? {
-        StaticCliResult::Exit(code) => {
+    let static_res = match try_static_cli() {
+        Ok(StaticCliResult::Exit(code)) => {
             lazy::rt().block_on(lazy::shutdown())?;
             return Ok(code);
         }
-        val => val,
+        Ok(val) => val,
+        Err(err) => {
+            lazy::rt().block_on(lazy::shutdown())?;
+            return Err(err);
+        }
     };
 
     let res = lazy::rt().block_on(dynamic_cli(static_res));
@@ -1246,8 +1250,16 @@ mod lazy {
 
     pub async fn shutdown() -> Res<()> {
         let callbacks = std::mem::take(&mut *shutdown_callbacks().lock().expect(ERROR_MUTEX));
+        let mut first_err: Option<eyre::Report> = None;
         for callback in callbacks.into_iter().rev() {
-            callback().await?;
+            if let Err(err) = callback().await {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+            }
+        }
+        if let Some(err) = first_err {
+            return Err(err);
         }
         Ok(())
     }

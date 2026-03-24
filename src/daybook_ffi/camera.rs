@@ -192,11 +192,10 @@ impl CameraQrAnalyzerFfi {
                 .listener
                 .lock()
                 .expect("camera qr listener mutex should not be poisoned");
-            std::sync::Arc::clone(
-                guard
-                    .as_ref()
-                    .expect("CameraQrAnalyzerFfi listener must be set before submitting frames"),
-            )
+            guard
+                .as_ref()
+                .map(std::sync::Arc::clone)
+                .ok_or_else(|| FfiError::from(eyre::eyre!("camera qr listener not initialized")))?
         };
 
         publish_qr_for_frame(
@@ -500,6 +499,7 @@ impl CameraPreviewFfi {
                         .lock()
                         .expect("latest frame mutex should not be poisoned");
                     *latest_frame_guard = Some(frame.clone());
+                    _listener.on_camera_preview_frame(frame.clone());
 
                     if !qr_enabled.load(std::sync::atomic::Ordering::Acquire) {
                         return;

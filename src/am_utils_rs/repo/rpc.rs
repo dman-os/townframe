@@ -142,7 +142,7 @@ async fn ensure_known_peer(
         return Ok(());
     }
     Err(PartitionSyncError::Internal {
-        message: format!("peer {peer:?} is not registered in repo rpc"),
+        message: format!("peer {peer:?} is not allowed in repo rpc"),
     })
 }
 

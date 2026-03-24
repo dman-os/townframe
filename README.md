@@ -44,7 +44,7 @@ Specifically, daybook design is informed by tech I find shiny, gaps I see in the
     - Excellent design 
     - Questionable performance on Android
   - Obsidian 
-    - Excellent sensiblities
+    - Excellent sensibilities
     - Questionable performance on Android
     - The plugins seem insecure
     - Collaboration is secondary?
@@ -67,7 +67,7 @@ There are zero features implemented.
   - World class collaboration.
 - [Org mode](https://orgmode.org/)
   - Excellent power user design.
-    - Unix sensiblities.
+    - Unix sensibilities.
 - [Anytype](https://anytype.io/)
   - Encrypted offline-first with sync/collaboration
 - TODO: mention more

@@ -275,7 +275,9 @@ impl IrohSyncRepo {
         let clone_rpc_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
             async move {
-                repo.clone_rpc_loop(clone_rpc_rx).await.unwrap();
+                if let Err(error) = repo.clone_rpc_loop(clone_rpc_rx).await {
+                    error!(?error, "IrohSyncRepo clone rpc task exited with error");
+                }
             }
             .instrument(tracing::info_span!("IrohSyncRepo clone rpc task"))
         });

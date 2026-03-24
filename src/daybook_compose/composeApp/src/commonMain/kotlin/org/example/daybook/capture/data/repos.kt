@@ -9,6 +9,43 @@ import org.example.daybook.uniffi.CameraPreviewFfi
 import org.example.daybook.uniffi.CameraQrAnalyzerFfi
 import org.example.daybook.uniffi.CameraQrEventListener
 
+private fun createQrListener(
+    state: MutableStateFlow<CameraOverlayState>,
+    onDetectedText: ((String) -> Unit)?
+): CameraQrEventListener =
+    object : CameraQrEventListener {
+        override fun onCameraQrOverlaysUpdated(overlays: List<FfiCameraOverlay>) {
+            state.update { prior ->
+                prior.copy(
+                    overlays =
+                        overlays.mapNotNull { overlay ->
+                            when (overlay) {
+                                is FfiCameraOverlay.Grid -> CameraOverlay.Grid
+                                is FfiCameraOverlay.QrBounds ->
+                                    CameraOverlay.QrBounds(
+                                        left = overlay.bounds.left,
+                                        top = overlay.bounds.top,
+                                        right = overlay.bounds.right,
+                                        bottom = overlay.bounds.bottom,
+                                        sourceWidthPx = overlay.frameWidthPx.toInt(),
+                                        sourceHeightPx = overlay.frameHeightPx.toInt()
+                                    )
+                            }
+                        }
+                )
+            }
+        }
+
+        override fun onCameraQrDetected(decodedText: String) {
+            state.update { prior -> prior.copy(lastDetectedText = decodedText) }
+            onDetectedText?.invoke(decodedText)
+        }
+
+        override fun onCameraQrError(message: String) {
+            state.update { prior -> prior.copy(latestError = message) }
+        }
+    }
+
 class CameraQrOverlayBridge(
     private val analyzer: CameraQrAnalyzerFfi,
     private val onDetectedText: ((String) -> Unit)? = null
@@ -19,39 +56,7 @@ class CameraQrOverlayBridge(
     private var lastSubmitAt: kotlin.time.TimeMark? = null
     private var started = false
 
-    private val listener =
-        object : CameraQrEventListener {
-            override fun onCameraQrOverlaysUpdated(overlays: List<FfiCameraOverlay>) {
-                _state.update { prior ->
-                    prior.copy(
-                        overlays =
-                            overlays.mapNotNull { overlay ->
-                                when (overlay) {
-                                    is FfiCameraOverlay.Grid -> CameraOverlay.Grid
-                                    is FfiCameraOverlay.QrBounds ->
-                                        CameraOverlay.QrBounds(
-                                            left = overlay.bounds.left,
-                                            top = overlay.bounds.top,
-                                            right = overlay.bounds.right,
-                                            bottom = overlay.bounds.bottom,
-                                            sourceWidthPx = overlay.frameWidthPx.toInt(),
-                                            sourceHeightPx = overlay.frameHeightPx.toInt()
-                                        )
-                                }
-                            }
-                    )
-                }
-            }
-
-            override fun onCameraQrDetected(decodedText: String) {
-                _state.update { prior -> prior.copy(lastDetectedText = decodedText) }
-                onDetectedText?.invoke(decodedText)
-            }
-
-            override fun onCameraQrError(message: String) {
-                _state.update { prior -> prior.copy(latestError = message) }
-            }
-        }
+    private val listener = createQrListener(_state, onDetectedText)
 
     fun start() {
         if (started) return
@@ -96,39 +101,7 @@ class CameraPreviewQrBridge(
 
     private var started = false
 
-    private val listener =
-        object : CameraQrEventListener {
-            override fun onCameraQrOverlaysUpdated(overlays: List<FfiCameraOverlay>) {
-                _state.update { prior ->
-                    prior.copy(
-                        overlays =
-                            overlays.mapNotNull { overlay ->
-                                when (overlay) {
-                                    is FfiCameraOverlay.Grid -> CameraOverlay.Grid
-                                    is FfiCameraOverlay.QrBounds ->
-                                        CameraOverlay.QrBounds(
-                                            left = overlay.bounds.left,
-                                            top = overlay.bounds.top,
-                                            right = overlay.bounds.right,
-                                            bottom = overlay.bounds.bottom,
-                                            sourceWidthPx = overlay.frameWidthPx.toInt(),
-                                            sourceHeightPx = overlay.frameHeightPx.toInt()
-                                        )
-                                }
-                            }
-                    )
-                }
-            }
-
-            override fun onCameraQrDetected(decodedText: String) {
-                _state.update { prior -> prior.copy(lastDetectedText = decodedText) }
-                onDetectedText?.invoke(decodedText)
-            }
-
-            override fun onCameraQrError(message: String) {
-                _state.update { prior -> prior.copy(latestError = message) }
-            }
-        }
+    private val listener = createQrListener(_state, onDetectedText)
 
     fun start() {
         if (started) return

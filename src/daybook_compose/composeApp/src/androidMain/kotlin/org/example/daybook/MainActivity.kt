@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -49,6 +50,7 @@ class MainActivity : ComponentActivity() {
                 // startOverlayService()
             } else {
                 // Permission still not granted, handle accordingly
+                Toast.makeText(this, "Overlay permission denied", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -189,7 +191,7 @@ fun AndroidApp() {
                 }
 
                 isDarkMode -> {
-                    ThemeConfig.Light
+                    ThemeConfig.Dark
                 }
 
                 else -> {

@@ -1,6 +1,7 @@
 package org.example.daybook
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -73,10 +74,21 @@ fun BigDialogHost(
     modifier: Modifier = Modifier,
 ) {
     val content = state.content
-    if (content == BigDialogContent.None) return
+    var displayedContent by remember { mutableStateOf<BigDialogContent>(BigDialogContent.None) }
+    LaunchedEffect(content) {
+        if (content != BigDialogContent.None) {
+            displayedContent = content
+        }
+    }
+    LaunchedEffect(narrowScreen, content) {
+        if (narrowScreen && content == BigDialogContent.None) {
+            displayedContent = BigDialogContent.None
+        }
+    }
+    if (displayedContent == BigDialogContent.None) return
 
     val body: @Composable () -> Unit = {
-        when (content) {
+        when (displayedContent) {
             BigDialogContent.CloneShare -> {
                 CloneShareDialogContent(onClose = { state.dismiss() })
             }
@@ -86,6 +98,9 @@ fun BigDialogHost(
     }
 
     if (narrowScreen) {
+        if (content == BigDialogContent.None) {
+            return
+        }
         ModalBottomSheet(
             onDismissRequest = { state.dismiss() },
             modifier = modifier,
@@ -93,6 +108,18 @@ fun BigDialogHost(
             body()
         }
     } else {
+        val visibilityState = remember { MutableTransitionState(false) }
+        LaunchedEffect(content) {
+            visibilityState.targetState = content != BigDialogContent.None
+        }
+        LaunchedEffect(visibilityState.isIdle, visibilityState.currentState, content) {
+            if (content == BigDialogContent.None &&
+                visibilityState.isIdle &&
+                !visibilityState.currentState
+            ) {
+                displayedContent = BigDialogContent.None
+            }
+        }
         Box(
             modifier = modifier.fillMaxSize()
         ) {
@@ -104,7 +131,7 @@ fun BigDialogHost(
                         .clickable(onClick = { state.dismiss() })
             )
             AnimatedVisibility(
-                visible = true,
+                visibleState = visibilityState,
                 enter = slideInHorizontally { it } + fadeIn(),
                 exit = slideOutHorizontally { it } + fadeOut(),
                 modifier = Modifier.align(Alignment.CenterEnd)

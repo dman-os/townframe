@@ -91,9 +91,10 @@ impl IrohSyncRepo {
     async fn current_endpoint_addr_for_clone(&self) -> iroh::EndpointAddr {
         let mut endpoint_addr = self.router.endpoint().addr();
         if endpoint_addr.addrs.is_empty() {
-            let started = std::time::Instant::now();
-            while endpoint_addr.addrs.is_empty() && started.elapsed() < Duration::from_secs(2) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut ticks = tokio::time::interval(Duration::from_millis(200));
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while endpoint_addr.addrs.is_empty() && std::time::Instant::now() < deadline {
+                ticks.tick().await;
                 endpoint_addr = self.router.endpoint().addr();
             }
         }
@@ -459,17 +460,35 @@ async fn pull_required_partitions_once(
             );
         }
 
+        let mut attempts = 0usize;
         loop {
-            pull_required_docs_once(big_repo, &bootstrap.app_doc_id, &bootstrap.drawer_doc_id)
+            attempts += 1;
+            let last_pull_error = match pull_required_docs_once(
+                big_repo,
+                &bootstrap.app_doc_id,
+                &bootstrap.drawer_doc_id,
+            )
                 .await
-                .inspect_err(|err| {
+            {
+                Ok(()) => None,
+                Err(err) => {
                     debug!(?err, "waiting for required docs to materialize locally");
-                })
-                .ok();
+                    Some(err.to_string())
+                }
+            };
             let app = big_repo.find_doc_handle(&bootstrap.app_doc_id).await?.is_some();
             let drawer = big_repo.find_doc_handle(&bootstrap.drawer_doc_id).await?.is_some();
             if app && drawer {
                 break;
+            }
+            if attempts.is_multiple_of(10) {
+                debug!(
+                    attempts,
+                    app_doc_id = %bootstrap.app_doc_id,
+                    drawer_doc_id = %bootstrap.drawer_doc_id,
+                    ?last_pull_error,
+                    "still waiting for required docs after clone bootstrap pull attempt"
+                );
             }
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
@@ -578,13 +597,14 @@ async fn ensure_blob_hash_present(
     let mut saw_error = false;
     while let Some(item) = stream.next().await {
         match item {
-            DownloadProgressItem::DownloadError | DownloadProgressItem::Error(_) => {
+            DownloadProgressItem::DownloadError
+            | DownloadProgressItem::Error(_)
+            | DownloadProgressItem::ProviderFailed { .. } => {
                 saw_error = true;
             }
             DownloadProgressItem::TryProvider { .. }
             | DownloadProgressItem::Progress(_)
-            | DownloadProgressItem::PartComplete { .. }
-            | DownloadProgressItem::ProviderFailed { .. } => {}
+            | DownloadProgressItem::PartComplete { .. } => {}
         }
     }
     if saw_error {

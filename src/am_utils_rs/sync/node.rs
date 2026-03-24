@@ -244,7 +244,7 @@ impl SyncNodeWorker {
             return Ok(());
         }
         Err(PartitionSyncError::Internal {
-            message: format!("peer {peer:?} is not registered in sync node"),
+            message: format!("peer {peer:?} is not allowed in sync node"),
         })
     }
 }

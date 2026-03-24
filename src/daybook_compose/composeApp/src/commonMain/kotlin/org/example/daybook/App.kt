@@ -80,6 +80,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import io.github.vinceglb.filekit.dialogs.compose.rememberDirectoryPickerLauncher
 import io.github.vinceglb.filekit.path
 import org.example.daybook.capture.CameraCaptureContext
@@ -614,42 +615,58 @@ fun App(
 
     LaunchedEffect(pendingOpenRepoPath) {
         val repoPath = pendingOpenRepoPath ?: return@LaunchedEffect
+        var gcx: AppFfiCtx? = null
+        var fcx: FfiCtx? = null
+        var tablesRepo: TablesRepoFfi? = null
+        var blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi? = null
+        var plugsRepo: org.example.daybook.uniffi.PlugsRepoFfi? = null
+        var drawerRepo: DrawerRepoFfi? = null
+        var configRepo: ConfigRepoFfi? = null
+        var dispatchRepo: DispatchRepoFfi? = null
+        var progressRepo: ProgressRepoFfi? = null
+        var syncRepo: SyncRepoFfi? = null
+        var rtFfi: RtFfi? = null
+        var cameraPreviewFfi: CameraPreviewFfi? = null
         try {
             initState = AppInitState.OpeningRepo(repoPath = repoPath)
-            val gcx = AppFfiCtx.init()
-            val fcx = FfiCtx.init(repoPath, gcx)
+            gcx = AppFfiCtx.init()
+            fcx = FfiCtx.init(repoPath, gcx)
             gcx.close()
-            val tablesRepo = TablesRepoFfi.load(fcx = fcx)
-            val blobsRepo =
+            gcx = null
+            val fcxReady = fcx ?: error("ffi context initialization failed")
+            tablesRepo = TablesRepoFfi.load(fcx = fcxReady)
+            blobsRepo =
                 org.example.daybook.uniffi.BlobsRepoFfi
-                    .load(fcx = fcx)
-            val plugsRepo =
+                    .load(fcx = fcxReady)
+            plugsRepo =
                 org.example.daybook.uniffi.PlugsRepoFfi
-                    .load(fcx = fcx, blobsRepo = blobsRepo)
-            val drawerRepo = DrawerRepoFfi.load(fcx = fcx, plugsRepo = plugsRepo)
-            val configRepo = ConfigRepoFfi.load(fcx = fcx, plugRepo = plugsRepo)
-            val dispatchRepo = DispatchRepoFfi.load(fcx = fcx)
-            val progressRepo = ProgressRepoFfi.load(fcx = fcx)
-            val syncRepo =
+                    .load(fcx = fcxReady, blobsRepo = blobsRepo ?: error("blobs repo failed to load"))
+            drawerRepo =
+                DrawerRepoFfi.load(fcx = fcxReady, plugsRepo = plugsRepo ?: error("plugs repo failed to load"))
+            configRepo =
+                ConfigRepoFfi.load(fcx = fcxReady, plugRepo = plugsRepo ?: error("plugs repo failed to load"))
+            dispatchRepo = DispatchRepoFfi.load(fcx = fcxReady)
+            progressRepo = ProgressRepoFfi.load(fcx = fcxReady)
+            syncRepo =
                 SyncRepoFfi.load(
-                    fcx = fcx,
-                    configRepo = configRepo,
-                    blobsRepo = blobsRepo,
-                    drawerRepo = drawerRepo,
-                    progressRepo = progressRepo
+                    fcx = fcxReady,
+                    configRepo = configRepo ?: error("config repo failed to load"),
+                    blobsRepo = blobsRepo ?: error("blobs repo failed to load"),
+                    drawerRepo = drawerRepo ?: error("drawer repo failed to load"),
+                    progressRepo = progressRepo ?: error("progress repo failed to load")
                 )
-            val rtFfi =
+            rtFfi =
                 RtFfi.load(
-                    fcx = fcx,
-                    drawerRepo = drawerRepo,
-                    plugsRepo = plugsRepo,
-                    dispatchRepo = dispatchRepo,
-                    progressRepo = progressRepo,
-                    blobsRepo = blobsRepo,
-                    configRepo = configRepo,
+                    fcx = fcxReady,
+                    drawerRepo = drawerRepo ?: error("drawer repo failed to load"),
+                    plugsRepo = plugsRepo ?: error("plugs repo failed to load"),
+                    dispatchRepo = dispatchRepo ?: error("dispatch repo failed to load"),
+                    progressRepo = progressRepo ?: error("progress repo failed to load"),
+                    blobsRepo = blobsRepo ?: error("blobs repo failed to load"),
+                    configRepo = configRepo ?: error("config repo failed to load"),
                     deviceId = "compose-client"
                 )
-            val cameraPreviewFfi = CameraPreviewFfi.load()
+            cameraPreviewFfi = CameraPreviewFfi.load()
 
             val tablesViewModel = TablesViewModel(tablesRepo)
             tablesViewModel.initializeFirstTime()
@@ -657,20 +674,51 @@ fun App(
             initState =
                 AppInitState.Ready(
                     AppContainer(
-                        ffiCtx = fcx,
-                        drawerRepo = drawerRepo,
-                        tablesRepo = tablesRepo,
-                        dispatchRepo = dispatchRepo,
-                        progressRepo = progressRepo,
-                        rtFfi = rtFfi,
-                        plugsRepo = plugsRepo,
-                        configRepo = configRepo,
-                        blobsRepo = blobsRepo,
-                        syncRepo = syncRepo,
-                        cameraPreviewFfi = cameraPreviewFfi
+                        ffiCtx = fcxReady,
+                        drawerRepo = drawerRepo ?: error("drawer repo failed to load"),
+                        tablesRepo = tablesRepo ?: error("tables repo failed to load"),
+                        dispatchRepo = dispatchRepo ?: error("dispatch repo failed to load"),
+                        progressRepo = progressRepo ?: error("progress repo failed to load"),
+                        rtFfi = rtFfi ?: error("rt ffi failed to load"),
+                        plugsRepo = plugsRepo ?: error("plugs repo failed to load"),
+                        configRepo = configRepo ?: error("config repo failed to load"),
+                        blobsRepo = blobsRepo ?: error("blobs repo failed to load"),
+                        syncRepo = syncRepo ?: error("sync repo failed to load"),
+                        cameraPreviewFfi = cameraPreviewFfi ?: error("camera preview ffi failed to load")
                     )
                 )
+            tablesRepo = null
+            blobsRepo = null
+            plugsRepo = null
+            drawerRepo = null
+            configRepo = null
+            dispatchRepo = null
+            progressRepo = null
+            syncRepo = null
+            rtFfi = null
+            cameraPreviewFfi = null
+            fcx = null
         } catch (throwable: Throwable) {
+            cameraPreviewFfi?.close()
+            try {
+                val syncRepoRef = syncRepo
+                if (syncRepoRef != null) {
+                    runBlocking { syncRepoRef.stop() }
+                }
+            } catch (cleanupError: Throwable) {
+                throwable.addSuppressed(cleanupError)
+            }
+            syncRepo?.close()
+            progressRepo?.close()
+            dispatchRepo?.close()
+            rtFfi?.close()
+            drawerRepo?.close()
+            tablesRepo?.close()
+            plugsRepo?.close()
+            configRepo?.close()
+            blobsRepo?.close()
+            fcx?.close()
+            gcx?.close()
             initState = AppInitState.Error(throwable)
         } finally {
             pendingOpenRepoPath = null
@@ -753,6 +801,7 @@ fun App(
                 // Ensure FFI resources are closed when the composition leaves
                 androidx.compose.runtime.DisposableEffect(appContainer) {
                     onDispose {
+                        runBlocking { appContainer.syncRepo.stop() }
                         appContainer.drawerRepo.close()
                         appContainer.tablesRepo.close()
                         appContainer.dispatchRepo.close()
@@ -2339,7 +2388,8 @@ private fun CloneSyncScreen(
                         }
                         .map { task -> task.id.removePrefix("sync/full/peer/") }
                         .toSet()
-            } catch (_: Throwable) {
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
                 statusMessage = "Unable to read sync progress right now."
             }
             kotlinx.coroutines.delay(1000)

@@ -50,18 +50,38 @@ private fun imageProxyToJpeg(image: ImageProxy): ByteArray {
         return bytes
     }
 
-    val yPlane = image.planes[0].buffer
-    val uPlane = image.planes[1].buffer
-    val vPlane = image.planes[2].buffer
+    val width = image.width
+    val height = image.height
+    val yPlane = image.planes[0]
+    val uPlane = image.planes[1]
+    val vPlane = image.planes[2]
 
-    val ySize = yPlane.remaining()
-    val uSize = uPlane.remaining()
-    val vSize = vPlane.remaining()
+    val yBuffer = yPlane.buffer
+    val uBuffer = uPlane.buffer
+    val vBuffer = vPlane.buffer
 
-    val nv21 = ByteArray(ySize + uSize + vSize)
-    yPlane.get(nv21, 0, ySize)
-    vPlane.get(nv21, ySize, vSize)
-    uPlane.get(nv21, ySize + vSize, uSize)
+    val nv21 = ByteArray(width * height * 3 / 2)
+    var outputOffset = 0
+
+    for (row in 0 until height) {
+        val rowStart = row * yPlane.rowStride
+        for (col in 0 until width) {
+            nv21[outputOffset++] = yBuffer[rowStart + col * yPlane.pixelStride]
+        }
+    }
+
+    val chromaHeight = height / 2
+    val chromaWidth = width / 2
+    for (row in 0 until chromaHeight) {
+        val uRowStart = row * uPlane.rowStride
+        val vRowStart = row * vPlane.rowStride
+        for (col in 0 until chromaWidth) {
+            val u = uBuffer[uRowStart + col * uPlane.pixelStride]
+            val v = vBuffer[vRowStart + col * vPlane.pixelStride]
+            nv21[outputOffset++] = v
+            nv21[outputOffset++] = u
+        }
+    }
 
     val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
     val output = ByteArrayOutputStream()
