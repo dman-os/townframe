@@ -787,8 +787,16 @@ impl IrohSyncRepo {
                 if device.endpoint_id == local_endpoint_id {
                     continue;
                 }
-                self.connect_endpoint_addr(iroh::EndpointAddr::new(device.endpoint_id))
-                    .await?;
+                if let Err(err) = self
+                    .connect_endpoint_addr(iroh::EndpointAddr::new(device.endpoint_id))
+                    .await
+                {
+                    warn!(
+                        ?err,
+                        endpoint_id = %device.endpoint_id,
+                        "failed reconnect attempt for known sync device"
+                    );
+                }
             }
         }
         Ok(())

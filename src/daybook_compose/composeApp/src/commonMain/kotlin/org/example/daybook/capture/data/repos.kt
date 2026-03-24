@@ -68,9 +68,12 @@ class CameraQrOverlayBridge(
         if (!started) return
         analyzer.clearListener()
         started = false
+        lastSubmitAt = null
+        _state.value = CameraOverlayState()
     }
 
     fun submitFrame(sample: CameraFrameSample) {
+        if (!started) return
         val now = TimeSource.Monotonic.markNow()
         val previous = lastSubmitAt
         if (previous != null && previous.elapsedNow().inWholeMilliseconds < 200L) return
@@ -115,5 +118,6 @@ class CameraPreviewQrBridge(
         cameraPreviewFfi.setQrAnalysisEnabled(false)
         cameraPreviewFfi.clearQrListener()
         started = false
+        _state.value = CameraOverlayState()
     }
 }

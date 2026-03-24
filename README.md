@@ -67,7 +67,7 @@ There are zero features implemented.
   - World class collaboration.
 - [Org mode](https://orgmode.org/)
   - Excellent power user design.
-    - Unix sensibilities.
+  - Unix sensibilities.
 - [Anytype](https://anytype.io/)
   - Encrypted offline-first with sync/collaboration
 - TODO: mention more

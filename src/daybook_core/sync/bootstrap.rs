@@ -162,12 +162,13 @@ pub async fn request_clone_provision_via_rpc(
         endpoint_addr,
         CLONE_PROVISION_ALPN,
     );
-    let response = client
+    let response_res = client
         .rpc(RequestCloneProvisionRpcReq { req: request })
-        .await
+        .await;
+    endpoint.close().await;
+    let response = response_res
         .wrap_err("clone provision rpc transport failed")?
         .map_err(|err| eyre::eyre!("clone provision rpc failed: {err}"))?;
-    endpoint.close().await;
     Ok(response)
 }
 
@@ -329,25 +330,38 @@ pub async fn clone_repo_init_from_url(
             Arc::new(crate::blobs::NoopPartitionMembershipWriter),
         )
         .await?;
-        connect_and_pull_required_partitions_once(
-            &big_repo,
-            &blobs_repo,
-            &local_peer_key,
-            identity.iroh_secret_key.clone(),
-            &bootstrap,
-            options.timeout,
-        )
-        .await?;
-        crate::app::globals::set_init_state(
-            &sql.db_pool,
-            &crate::app::globals::InitState::Created {
-                doc_id_app: bootstrap.app_doc_id.clone(),
-                doc_id_drawer: bootstrap.drawer_doc_id.clone(),
-            },
-        )
-        .await?;
-        crate::repo::mark_repo_initialized(&staging).await?;
-        big_repo_stop.stop().await?;
+        let init_res: Res<()> = async {
+            connect_and_pull_required_partitions_once(
+                &big_repo,
+                &blobs_repo,
+                &local_peer_key,
+                identity.iroh_secret_key.clone(),
+                &bootstrap,
+                options.timeout,
+            )
+            .await?;
+            crate::app::globals::set_init_state(
+                &sql.db_pool,
+                &crate::app::globals::InitState::Created {
+                    doc_id_app: bootstrap.app_doc_id.clone(),
+                    doc_id_drawer: bootstrap.drawer_doc_id.clone(),
+                },
+            )
+            .await?;
+            crate::repo::mark_repo_initialized(&staging).await?;
+            Ok(())
+        }
+        .await;
+        let stop_res = big_repo_stop.stop().await;
+        if let Err(err) = init_res {
+            if let Err(stop_err) = stop_res {
+                return Err(err.wrap_err(format!(
+                    "additionally failed stopping clone bootstrap big repo: {stop_err}"
+                )));
+            }
+            return Err(err);
+        }
+        stop_res?;
         Ok::<SyncBootstrapState, eyre::Report>(bootstrap)
     }
     .await;
@@ -595,12 +609,20 @@ async fn ensure_blob_hash_present(
         .await
         .map_err(|err| eyre::eyre!("failed opening blob download stream for {hash}: {err:?}"))?;
     let mut saw_error = false;
+    let mut last_error: Option<String> = None;
     while let Some(item) = stream.next().await {
         match item {
-            DownloadProgressItem::DownloadError
-            | DownloadProgressItem::Error(_)
-            | DownloadProgressItem::ProviderFailed { .. } => {
+            DownloadProgressItem::DownloadError => {
                 saw_error = true;
+                last_error = Some("download error".to_string());
+            }
+            DownloadProgressItem::Error(err) => {
+                saw_error = true;
+                last_error = Some(format!("{err:?}"));
+            }
+            item @ DownloadProgressItem::ProviderFailed { .. } => {
+                saw_error = true;
+                last_error = Some(format!("{item:?}"));
             }
             DownloadProgressItem::TryProvider { .. }
             | DownloadProgressItem::Progress(_)
@@ -608,6 +630,9 @@ async fn ensure_blob_hash_present(
         }
     }
     if saw_error {
+        if let Some(details) = last_error {
+            eyre::bail!("blob download reported error for hash {hash}: {details}");
+        }
         eyre::bail!("blob download reported error for hash {hash}");
     }
     if !blobs_repo.iroh_store().blobs().has(iroh_hash).await? {

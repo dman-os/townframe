@@ -64,9 +64,9 @@ if (!androidNdkRoot) throw new Error("ANDROID_NDK_ROOT must be set");
 
 const ortRootDir = $.relativeDir("../target/ort");
 const sourceArchivePath = ortRootDir.join(`onnxruntime-${ortSourceTag}.tar.gz`);
-const sourceDir = ortRootDir.join("onnxruntime-src");
+const sourceDir = ortRootDir.join(`onnxruntime-src-${ortSourceTag}`);
 const sourceCompleteFile = ortRootDir.join(`.source-${ortSourceTag}.complete`);
-const distDir = ortRootDir.join("dist", triple, ortBuildConfig);
+const distDir = ortRootDir.join("dist", ortSourceTag, triple, ortBuildConfig);
 const distCompleteFile = ortRootDir.join(
   `.dist-${ortSourceTag}-${triple}-${ortBuildConfig.toLowerCase()}.complete`,
 );

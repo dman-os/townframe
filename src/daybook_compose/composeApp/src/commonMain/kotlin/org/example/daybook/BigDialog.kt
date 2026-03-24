@@ -47,6 +47,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 
 sealed interface BigDialogContent {
@@ -175,6 +176,7 @@ private fun CloneShareDialogContent(
             ticketUrl = url
             qrPngBytes = qr
         } catch (error: Throwable) {
+            if (error is CancellationException) throw error
             val details = error.message ?: error.toString()
             errorMessage = "Failed to prepare clone ticket: $details"
         }

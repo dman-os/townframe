@@ -1328,6 +1328,10 @@ mod lazy {
                     )),
                 )
                 .await?;
+                register_shutdown({
+                    let blobs = Arc::clone(&blobs);
+                    move || async move { blobs.shutdown().await }
+                });
                 Ok(blobs)
             })
             .await

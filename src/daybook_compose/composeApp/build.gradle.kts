@@ -392,9 +392,7 @@ fun registerRustAndroidCopyTask(
             }
             destDir.mkdirs()
             destSoFile.delete()
-            if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
-                destLibcxxFile.delete()
-            }
+            destLibcxxFile.delete()
         }
 
         from(sourceSoFile)

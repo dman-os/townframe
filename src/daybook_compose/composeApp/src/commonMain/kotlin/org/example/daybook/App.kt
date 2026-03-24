@@ -703,7 +703,7 @@ fun App(
             try {
                 val syncRepoRef = syncRepo
                 if (syncRepoRef != null) {
-                    runBlocking { syncRepoRef.stop() }
+                    syncRepoRef.stop()
                 }
             } catch (cleanupError: Throwable) {
                 throwable.addSuppressed(cleanupError)
@@ -1678,7 +1678,7 @@ private fun WelcomeFlowNavHost(
                             CloneUiState.PickingLocation(
                                 sourceUrl = sourceUrl,
                                 info = info,
-                                destinationPath = "$defaultParent/$initialRepoName"
+                                destinationPath = joinPath(defaultParent, initialRepoName)
                             )
                         )
                         navigateSingleTop(WelcomeRoute.CloneLocation)
@@ -2527,7 +2527,9 @@ private suspend fun resolveNonClashingDestination(
         }
     }
 
-    return DestinationResolution(path = base)
+    error(
+        "Unable to allocate non-clashing destination under '$parent' for base '$leaf' after trying suffixes 2..9999"
+    )
 }
 
 private fun parentPathOf(path: String): String {

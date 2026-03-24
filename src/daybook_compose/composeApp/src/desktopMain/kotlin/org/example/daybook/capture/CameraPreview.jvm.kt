@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
+import java.util.logging.Logger
 import javax.imageio.ImageIO
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -35,6 +36,8 @@ import org.example.daybook.uniffi.CameraPreviewFrameEncoding
 import org.example.daybook.uniffi.CameraPreviewFrameListener
 import org.example.daybook.uniffi.FfiException
 import org.jetbrains.skia.Image as SkiaImage
+
+private val previewLogger: Logger = Logger.getLogger("DaybookCameraPreviewJvm")
 
 private fun CameraPreviewFrame.toImageBitmap(): ImageBitmap {
     return when (encoding) {
@@ -146,10 +149,12 @@ actual fun DaybookCameraPreview(
 
     LaunchedEffect(cameraPreviewFfi, selectedDeviceId, onFrameAvailable) {
         if (selectedDeviceId == null) return@LaunchedEffect
+        var consecutiveFailures = 0
         while (isActive) {
             try {
                 val nextFrame = cameraPreviewFfi.`takeLatestFrame`()
                 if (nextFrame != null) {
+                    consecutiveFailures = 0
                     latestFrame = nextFrame
                     latestImageBitmap = withContext(Dispatchers.IO) { nextFrame.toImageBitmap() }
                     if (onFrameAvailable != null) {
@@ -158,7 +163,11 @@ actual fun DaybookCameraPreview(
                     }
                 }
             } catch (error: Throwable) {
-                println("camera preview frame processing failed: ${error.message ?: error}")
+                consecutiveFailures += 1
+                previewLogger.warning("camera preview frame processing failed: ${error.message ?: error}")
+                if (consecutiveFailures >= 5) {
+                    errorText = "Camera preview failed repeatedly. Please restart camera stream."
+                }
             }
             delay(12)
         }

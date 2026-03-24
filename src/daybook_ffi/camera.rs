@@ -499,6 +499,7 @@ impl CameraPreviewFfi {
                         .lock()
                         .expect("latest frame mutex should not be poisoned");
                     *latest_frame_guard = Some(frame.clone());
+                    drop(latest_frame_guard);
                     _listener.on_camera_preview_frame(frame.clone());
 
                     if !qr_enabled.load(std::sync::atomic::Ordering::Acquire) {

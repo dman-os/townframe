@@ -18,10 +18,7 @@ impl SecretRepo {
         let repo_id = repo_id.to_string();
         let fallback_secret = load_or_init_fallback_secret(sql, &repo_id).await?;
         let fallback_secret_hex = data_encoding::HEXLOWER.encode(&fallback_secret.to_bytes());
-        if std::env::var("DAYB_DISABLE_KEYRING")
-            .map(|value| value == "1")
-            .unwrap_or(false)
-        {
+        if is_keyring_disabled() {
             let public = fallback_secret.public();
             return Ok(RepoIdentity {
                 repo_id,
@@ -82,7 +79,6 @@ impl SecretRepo {
     ) -> Res<RepoIdentity> {
         let secret = decode_secret_hex(secret_hex)?;
         let encoded = data_encoding::HEXLOWER.encode(&secret.to_bytes());
-        let _ = ensure_fallback_secret(sql, repo_id, &encoded).await?;
         let fallback_key = fallback_secret_key(repo_id);
         sqlx::query(
             "INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -91,10 +87,7 @@ impl SecretRepo {
         .bind(&encoded)
         .execute(sql)
         .await?;
-        if std::env::var("DAYB_DISABLE_KEYRING")
-            .map(|value| value != "1")
-            .unwrap_or(true)
-        {
+        if !is_keyring_disabled() {
             let service_name = format!("daybook.repo.{repo_id}");
             if let Ok(entry) = keyring::Entry::new(&service_name, Self::KEYRING_USERNAME) {
                 if let Err(err) = entry.set_password(&encoded) {
@@ -112,6 +105,12 @@ impl SecretRepo {
             iroh_public_key: public,
         })
     }
+}
+
+fn is_keyring_disabled() -> bool {
+    std::env::var("DAYB_DISABLE_KEYRING")
+        .map(|value| value == "1")
+        .unwrap_or(false)
 }
 
 fn fallback_secret_key(repo_id: &str) -> String {
