@@ -365,7 +365,7 @@ impl IrohSyncRepo {
     ) -> Res<()> {
         use crate::repos::Repo;
 
-        let config_listener = self
+        let mut config_listener = self
             .config_repo
             .subscribe(crate::repos::SubscribeOpts { capacity: 64 });
         let mut reconnect_tick = tokio::time::interval(Duration::from_secs(15));
@@ -413,7 +413,10 @@ impl IrohSyncRepo {
                             }
                         }
                         Err(crate::repos::RecvError::Closed) => {
-                            warn!("config listener closed");
+                            warn!("config listener closed; re-subscribing");
+                            config_listener = self
+                                .config_repo
+                                .subscribe(crate::repos::SubscribeOpts { capacity: 64 });
                         }
                         Err(crate::repos::RecvError::Dropped { dropped_count }) => {
                             warn!(dropped_count, "config listener dropped events");

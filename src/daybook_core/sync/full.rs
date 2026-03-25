@@ -1184,7 +1184,6 @@ impl Worker {
         let session = self.peer_partition_sessions.remove(&endpoint_id);
         if let Some(mut session) = session {
             session.forward_cancel_token.cancel();
-            session.stop.stop().await?;
             for join_handle in session.forward_handles.drain(..) {
                 utils_rs::wait_on_handle_with_timeout(
                     join_handle,
@@ -1192,6 +1191,7 @@ impl Worker {
                 )
                 .await?;
             }
+            session.stop.stop().await?;
         }
         self.scheduler.clear_peer_cursor_acks(endpoint_id);
         Ok(())

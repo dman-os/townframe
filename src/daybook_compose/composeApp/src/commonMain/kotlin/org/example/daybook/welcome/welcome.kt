@@ -379,10 +379,20 @@ fun WelcomeFlowNavHost(
                         val defaultParent = withAppFfiCtx { gcx ->
                             gcx.defaultCloneParentDir().trim()
                         }
-                        onCreateRepoUiStateChange(editState.copy(parentPath = defaultParent))
+                        val current = createRepoUiState as? CreateRepoUiState.Editing ?: return@LaunchedEffect
+                        if (current.parentPath.isBlank()) {
+                            onCreateRepoUiStateChange(
+                                current.copy(
+                                    parentPath = defaultParent,
+                                    errorMessage = null
+                                )
+                            )
+                        }
                     } catch (error: Throwable) {
+                        if (error is CancellationException) throw error
+                        val current = createRepoUiState as? CreateRepoUiState.Editing ?: return@LaunchedEffect
                         onCreateRepoUiStateChange(
-                            editState.copy(
+                            current.copy(
                                 errorMessage = "Failed loading default parent: ${describeThrowable(error)}"
                             )
                         )
@@ -391,14 +401,15 @@ fun WelcomeFlowNavHost(
             }
 
             LaunchedEffect(editState.parentPath, editState.repoName) {
-                val destination = joinPath(editState.parentPath, editState.repoName)
-                if (destination.isBlank() || editState.repoName.isBlank()) {
-                    onCreateRepoUiStateChange(editState.copy(destinationWarning = null))
+                val current = createRepoUiState as? CreateRepoUiState.Editing ?: return@LaunchedEffect
+                val destination = joinPath(current.parentPath, current.repoName)
+                if (destination.isBlank() || current.repoName.isBlank()) {
+                    onCreateRepoUiStateChange(current.copy(destinationWarning = null))
                     return@LaunchedEffect
                 }
-                if (editState.repoName.contains("/") || editState.repoName.contains("\\")) {
+                if (current.repoName.contains("/") || current.repoName.contains("\\")) {
                     onCreateRepoUiStateChange(
-                        editState.copy(destinationWarning = "Repository name cannot contain path separators.")
+                        current.copy(destinationWarning = "Repository name cannot contain path separators.")
                     )
                     return@LaunchedEffect
                 }
@@ -413,10 +424,13 @@ fun WelcomeFlowNavHost(
                             !check.isEmpty -> "Destination directory is not empty."
                             else -> null
                         }
-                    onCreateRepoUiStateChange(editState.copy(destinationWarning = warning))
+                    val latest = createRepoUiState as? CreateRepoUiState.Editing ?: return@LaunchedEffect
+                    onCreateRepoUiStateChange(latest.copy(destinationWarning = warning))
                 } catch (error: Throwable) {
+                    if (error is CancellationException) throw error
+                    val latest = createRepoUiState as? CreateRepoUiState.Editing ?: return@LaunchedEffect
                     onCreateRepoUiStateChange(
-                        editState.copy(
+                        latest.copy(
                             destinationWarning = "Destination check failed: ${describeThrowable(error)}"
                         )
                     )
@@ -438,8 +452,9 @@ fun WelcomeFlowNavHost(
                             gcx.checkCloneDestination(resolvedDestination.path)
                         }
                         if (preflight.exists && preflight.isDir && !preflight.isEmpty) {
+                            val current = createRepoUiState as? CreateRepoUiState.Editing ?: return@LaunchedEffect
                             onCreateRepoUiStateChange(
-                                editState.copy(
+                                current.copy(
                                     isCreating = false,
                                     errorMessage = "Destination directory is not empty. Choose an empty directory.",
                                     destinationWarning = "Destination directory is not empty."
@@ -448,8 +463,9 @@ fun WelcomeFlowNavHost(
                             return@LaunchedEffect
                         }
                         if (resolvedDestination.note != null) {
+                            val current = createRepoUiState as? CreateRepoUiState.Editing ?: return@LaunchedEffect
                             onCreateRepoUiStateChange(
-                                editState.copy(
+                                current.copy(
                                     parentPath = parentPathOf(resolvedDestination.path),
                                     repoName = leafNameOf(resolvedDestination.path),
                                     destinationWarning = null,
@@ -461,8 +477,10 @@ fun WelcomeFlowNavHost(
                         onPendingOpenRepoPath(resolvedDestination.path)
                         onCreateRepoUiStateChange(null)
                     } catch (error: Throwable) {
+                        if (error is CancellationException) throw error
+                        val current = createRepoUiState as? CreateRepoUiState.Editing ?: return@LaunchedEffect
                         onCreateRepoUiStateChange(
-                            editState.copy(
+                            current.copy(
                                 isCreating = false,
                                 errorMessage = "Create initialization failed: ${describeThrowable(error)}"
                             )
@@ -533,6 +551,7 @@ fun WelcomeFlowNavHost(
                         )
                         navigateSingleTop(WelcomeRoute.CloneLocation)
                     } catch (error: Throwable) {
+                        if (error is CancellationException) throw error
                         onCloneUiStateChange(
                             urlState.copy(
                                 isResolving = false,
@@ -607,6 +626,7 @@ fun WelcomeFlowNavHost(
                             }
                         onCloneUiStateChange(locationState.copy(destinationWarning = warning))
                     } catch (error: Throwable) {
+                        if (error is CancellationException) throw error
                         onCloneUiStateChange(
                             locationState.copy(
                                 destinationWarning = "Destination check failed: ${describeThrowable(error)}"
@@ -655,6 +675,7 @@ fun WelcomeFlowNavHost(
                             onCloneSourceUrlPendingOpenChange(request.first)
                             onPendingOpenRepoPath(out.repoPath)
                         } catch (error: Throwable) {
+                            if (error is CancellationException) throw error
                             onCloneUiStateChange(
                                 locationState.copy(
                                     isCloning = false,

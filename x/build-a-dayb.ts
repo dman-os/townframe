@@ -3,6 +3,7 @@
 // FIXME: provide a devshell for building onnxcore (python and so on)
 
 import { $ } from "./utils.ts";
+import { walk } from "jsr:@std/fs@1.0.23/walk";
 
 async function removeTreeIfExists(targetPath: string) {
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -74,7 +75,7 @@ const libDirFile = ortRootDir.join(
 
 await ortRootDir.ensureDir();
 
-if (!(await distCompleteFile.exists())) {
+if (!((await distCompleteFile.exists()) && (await libDirFile.exists()))) {
   const needsSourceExtract = !(await sourceDir.exists());
   if (!(await sourceCompleteFile.exists()) || needsSourceExtract) {
     if (!(await sourceArchivePath.exists())) {
@@ -95,12 +96,17 @@ if (!(await distCompleteFile.exists())) {
       sourceDir,
     );
   const builtLibDir = sourceDir.join("build", "Android", ortBuildConfig);
-  const sharedLibPathsRaw = await $`find ${builtLibDir} -type f -name '*.so*'`
-    .text();
-  const sharedLibPaths = sharedLibPathsRaw
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+  const sharedLibPaths: string[] = [];
+  for await (
+    const entry of walk(builtLibDir.toString(), {
+      includeDirs: false,
+      followSymlinks: false,
+    })
+  ) {
+    if (!entry.isFile) continue;
+    if (!entry.name.includes(".so")) continue;
+    sharedLibPaths.push(entry.path);
+  }
   if (sharedLibPaths.length === 0) {
     throw new Error(
       `ORT build did not produce shared libraries under ${builtLibDir}`,

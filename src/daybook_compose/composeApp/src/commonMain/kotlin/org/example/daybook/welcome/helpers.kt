@@ -76,23 +76,85 @@ internal suspend fun resolveNonClashingDestination(
 }
 
 internal fun parentPathOf(path: String): String {
-    val normalized = path.trim().trimEnd('/', '\\')
-    val slash = normalized.lastIndexOf('/')
-    return if (slash <= 0) "" else normalized.substring(0, slash)
+    val parsed = parsePath(path)
+    if (parsed.parts.isEmpty()) return parsed.root
+    return composePath(
+        root = parsed.root,
+        parts = parsed.parts.dropLast(1),
+        separator = parsed.separator
+    )
 }
 
 internal fun leafNameOf(path: String): String {
-    val normalized = path.trim().trimEnd('/', '\\')
-    val slash = normalized.lastIndexOf('/')
-    return if (slash < 0) normalized else normalized.substring(slash + 1)
+    val parsed = parsePath(path)
+    return parsed.parts.lastOrNull() ?: ""
 }
 
 internal fun joinPath(parent: String, leaf: String): String {
-    val parentTrimmed = parent.trim().trimEnd('/', '\\')
+    val parentParsed = parsePath(parent)
     val leafTrimmed = leaf.trim().trimStart('/', '\\')
+    val leafParts = leafTrimmed.replace('\\', '/').split('/').filter { it.isNotBlank() }
     return when {
-        parentTrimmed.isBlank() -> leafTrimmed
-        leafTrimmed.isBlank() -> parentTrimmed
-        else -> "$parentTrimmed/$leafTrimmed"
+        parentParsed.root.isBlank() && parentParsed.parts.isEmpty() -> leafTrimmed
+        leafParts.isEmpty() -> composePath(parentParsed.root, parentParsed.parts, parentParsed.separator)
+        else ->
+            composePath(
+                root = parentParsed.root,
+                parts = parentParsed.parts + leafParts,
+                separator = parentParsed.separator
+            )
+    }
+}
+
+private data class ParsedPath(
+    val root: String,
+    val parts: List<String>,
+    val separator: Char
+)
+
+private fun parsePath(path: String): ParsedPath {
+    val trimmed = path.trim()
+    if (trimmed.isBlank()) return ParsedPath(root = "", parts = emptyList(), separator = '/')
+
+    val separator = if (trimmed.contains('\\') && !trimmed.contains('/')) '\\' else '/'
+    val normalized = trimmed.trimEnd('/', '\\').replace('\\', '/')
+    if (normalized.isBlank()) {
+        return ParsedPath(root = if (trimmed.startsWith("/")) "/" else "", parts = emptyList(), separator = separator)
+    }
+
+    val drivePrefix =
+        if (normalized.length >= 2 && normalized[1] == ':') {
+            normalized.substring(0, 2)
+        } else {
+            ""
+        }
+    val hasAbsoluteSlashAfterDrive = drivePrefix.isNotBlank() && normalized.getOrNull(2) == '/'
+    val root =
+        when {
+            normalized.startsWith("/") -> "/"
+            drivePrefix.isNotBlank() && hasAbsoluteSlashAfterDrive ->
+                if (separator == '\\') "$drivePrefix\\" else "$drivePrefix/"
+            drivePrefix.isNotBlank() -> drivePrefix
+            else -> ""
+        }
+    val body =
+        when {
+            root == "/" -> normalized.removePrefix("/")
+            drivePrefix.isNotBlank() && hasAbsoluteSlashAfterDrive -> normalized.drop(3)
+            drivePrefix.isNotBlank() -> normalized.drop(2).trimStart('/')
+            else -> normalized
+        }
+    val parts = body.split('/').filter { it.isNotBlank() }
+    return ParsedPath(root = root, parts = parts, separator = separator)
+}
+
+private fun composePath(root: String, parts: List<String>, separator: Char): String {
+    val joined = parts.joinToString(separator.toString())
+    if (root.isBlank()) return joined
+    if (parts.isEmpty()) return root
+    return when {
+        root == "/" || root.endsWith("/") || root.endsWith("\\") -> root + joined
+        root.length == 2 && root[1] == ':' -> "$root$separator$joined"
+        else -> "$root$separator$joined"
     }
 }

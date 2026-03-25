@@ -93,6 +93,10 @@ private fun CameraPreviewFrame.toJpegBytes(): ByteArray {
     }
 }
 
+private fun jpegToImageBitmap(jpegBytes: ByteArray): ImageBitmap {
+    return SkiaImage.makeFromEncoded(jpegBytes).toComposeImageBitmap()
+}
+
 private fun CameraPreviewFrame.toFrameSample(): CameraFrameSample {
     return CameraFrameSample(
         widthPx = widthPx.toInt(),
@@ -171,10 +175,24 @@ actual fun DaybookCameraPreview(
                     consecutiveFailures = 0
                     errorText = null
                     latestFrame = nextFrame
-                    latestImageBitmap = withContext(Dispatchers.IO) { nextFrame.toImageBitmap() }
-                    if (onFrameAvailable != null) {
-                        val sample = withContext(Dispatchers.IO) { nextFrame.toFrameSample() }
-                        onFrameAvailable.invoke(sample)
+                    if (nextFrame.encoding == CameraPreviewFrameEncoding.RGB24) {
+                        val jpegBytes = withContext(Dispatchers.IO) { nextFrame.toJpegBytes() }
+                        latestImageBitmap = withContext(Dispatchers.IO) { jpegToImageBitmap(jpegBytes) }
+                        if (onFrameAvailable != null) {
+                            val sample =
+                                CameraFrameSample(
+                                    widthPx = nextFrame.widthPx.toInt(),
+                                    heightPx = nextFrame.heightPx.toInt(),
+                                    jpegBytes = jpegBytes
+                                )
+                            onFrameAvailable.invoke(sample)
+                        }
+                    } else {
+                        latestImageBitmap = withContext(Dispatchers.IO) { nextFrame.toImageBitmap() }
+                        if (onFrameAvailable != null) {
+                            val sample = withContext(Dispatchers.IO) { nextFrame.toFrameSample() }
+                            onFrameAvailable.invoke(sample)
+                        }
                     }
                 }
             } catch (error: Throwable) {
@@ -244,11 +262,12 @@ actual fun DaybookCameraPreview(
                 }
 
                 if (errorText != null) {
+                    val message = errorText
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(text = errorText ?: "Camera error")
+                        Text(text = message!!)
                     }
                 }
             }

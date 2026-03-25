@@ -564,13 +564,16 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     iroh_ticket_url,
                     name,
                 } => {
+                    let requester_endpoint_id = Some(ctx.iroh_public_key.clone());
+                    let requester_peer_key =
+                        Some(format!("/{}/{}", ctx.repo_id, ctx.iroh_public_key));
                     let bootstrap = daybook_core::sync::request_clone_provision_via_rpc(
                         &iroh_ticket_url,
                         daybook_core::sync::CloneProvisionRequest {
                             requested_device_name: None,
                             provision: false,
-                            requester_endpoint_id: None,
-                            requester_peer_key: None,
+                            requester_endpoint_id,
+                            requester_peer_key,
                         },
                     )
                     .await?

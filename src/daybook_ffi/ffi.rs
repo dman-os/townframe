@@ -78,6 +78,21 @@ fn app_private_clone_parent_dir(acx: &AppCtx) -> std::path::PathBuf {
 }
 
 fn resolve_clone_destination_for_app(acx: &AppCtx, destination: &str) -> Res<std::path::PathBuf> {
+    fn canonicalize_existing_ancestor(path: &std::path::Path) -> Res<std::path::PathBuf> {
+        let mut cursor = path.to_path_buf();
+        loop {
+            if cursor.exists() {
+                return std::fs::canonicalize(&cursor).wrap_err_with(|| {
+                    format!("failed resolving clone destination {}", cursor.display())
+                });
+            }
+            let parent = cursor
+                .parent()
+                .ok_or_eyre("clone destination missing canonicalizable ancestor")?;
+            cursor = parent.to_path_buf();
+        }
+    }
+
     let parent = app_private_clone_parent_dir(acx);
     std::fs::create_dir_all(&parent).wrap_err_with(|| {
         format!(
@@ -85,7 +100,7 @@ fn resolve_clone_destination_for_app(acx: &AppCtx, destination: &str) -> Res<std
             parent.display()
         )
     })?;
-    let parent_abs = std::path::absolute(&parent).wrap_err_with(|| {
+    let parent_canon = std::fs::canonicalize(&parent).wrap_err_with(|| {
         format!(
             "failed resolving clone parent directory {}",
             parent.display()
@@ -95,7 +110,7 @@ fn resolve_clone_destination_for_app(acx: &AppCtx, destination: &str) -> Res<std
     let destination_candidate = if raw.is_absolute() {
         raw
     } else {
-        parent_abs.join(raw)
+        parent_canon.join(raw)
     };
     let destination_abs = std::path::absolute(&destination_candidate).wrap_err_with(|| {
         format!(
@@ -103,10 +118,11 @@ fn resolve_clone_destination_for_app(acx: &AppCtx, destination: &str) -> Res<std
             destination_candidate.display()
         )
     })?;
-    if !destination_abs.starts_with(&parent_abs) {
+    let destination_canon = canonicalize_existing_ancestor(&destination_abs)?;
+    if !destination_canon.starts_with(&parent_canon) {
         eyre::bail!(
             "clone destination must be under app-private storage: {}",
-            parent_abs.display()
+            parent_canon.display()
         );
     }
     Ok(destination_abs)

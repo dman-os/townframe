@@ -82,6 +82,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import io.github.vinceglb.filekit.dialogs.compose.rememberDirectoryPickerLauncher
 import io.github.vinceglb.filekit.path
 import org.example.daybook.capture.CameraCaptureContext
@@ -582,6 +583,8 @@ fun App(
                 initState = AppInitState.Welcome(repos = knownRepos)
             }
         } catch (throwable: Throwable) {
+            if (throwable is CancellationException) throw throwable
+            cloneSourceUrlPendingOpen = null
             initState = AppInitState.Error(throwable)
         }
     }
@@ -666,6 +669,7 @@ fun App(
             cameraPreviewFfi = null
             fcx = null
         } catch (throwable: Throwable) {
+            if (throwable is CancellationException) throw throwable
             cameraPreviewFfi?.close()
             try {
                 val syncRepoRef = syncRepo
@@ -685,6 +689,7 @@ fun App(
             configRepo?.close()
             blobsRepo?.close()
             fcx?.close()
+            cloneSourceUrlPendingOpen = null
             initState = AppInitState.Error(throwable)
         } finally {
             pendingOpenRepoPath = null
@@ -764,7 +769,7 @@ fun App(
                 // Ensure FFI resources are closed when the composition leaves
                 androidx.compose.runtime.DisposableEffect(appContainer) {
                     onDispose {
-                        CoroutineScope(Dispatchers.IO).launch {
+                        runBlocking(Dispatchers.IO) {
                             runCatching { appContainer.syncRepo.stop() }
                                 .onFailure { error -> println("sync repo stop failed: $error") }
                             runCatching { appContainer.progressRepo.stop() }

@@ -346,8 +346,14 @@ pub async fn clone_repo_init_from_url(
             Ok(())
         }
         .await;
+        let blobs_stop_res = blobs_repo.shutdown().await;
         let stop_res = big_repo_stop.stop().await;
         if let Err(err) = init_res {
+            if let Err(blobs_err) = blobs_stop_res {
+                return Err(err.wrap_err(format!(
+                    "additionally failed stopping clone bootstrap blobs repo: {blobs_err}"
+                )));
+            }
             if let Err(stop_err) = stop_res {
                 return Err(err.wrap_err(format!(
                     "additionally failed stopping clone bootstrap big repo: {stop_err}"
@@ -355,6 +361,7 @@ pub async fn clone_repo_init_from_url(
             }
             return Err(err);
         }
+        blobs_stop_res?;
         stop_res?;
         Ok::<SyncBootstrapState, eyre::Report>(bootstrap)
     }

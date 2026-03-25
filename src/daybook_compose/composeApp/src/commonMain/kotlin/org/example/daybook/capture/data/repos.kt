@@ -6,7 +6,6 @@ package org.example.daybook.capture.data
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.TimeSource
 import org.example.daybook.uniffi.CameraOverlay as FfiCameraOverlay
 import org.example.daybook.uniffi.CameraPreviewFfi
@@ -62,30 +61,37 @@ class CameraQrOverlayBridge(
     val state: StateFlow<CameraOverlayState> = _state
 
     private var lastSubmitAt: kotlin.time.TimeMark? = null
+    @Volatile
     private var started = false
-    private val sessionEpoch = AtomicLong(0)
+    @Volatile
+    private var sessionEpoch = 0L
+    private var listener: CameraQrEventListener? = null
 
-    private val listener =
-        createQrListener(
-            state = _state,
-            isSessionActive = {
-                val activeEpoch = sessionEpoch.get()
-                started && activeEpoch != 0L
-            },
-            onDetectedText = onDetectedText
-        )
+    private fun nextSessionToken(): Long =
+        synchronized(this) {
+            sessionEpoch += 1
+            sessionEpoch
+        }
 
     fun start() {
         if (started) return
-        sessionEpoch.incrementAndGet()
-        analyzer.setListener(listener)
+        val sessionToken = nextSessionToken()
         started = true
+        val sessionListener =
+            createQrListener(
+                state = _state,
+                isSessionActive = { started && sessionEpoch == sessionToken },
+                onDetectedText = onDetectedText
+            )
+        listener = sessionListener
+        analyzer.setListener(sessionListener)
     }
 
     fun stop() {
         if (!started) return
-        sessionEpoch.incrementAndGet()
+        nextSessionToken()
         started = false
+        listener = null
         analyzer.clearListener()
         lastSubmitAt = null
         _state.value = CameraOverlayState()
@@ -121,31 +127,38 @@ class CameraPreviewQrBridge(
     private val _state = MutableStateFlow(CameraOverlayState())
     val state: StateFlow<CameraOverlayState> = _state
 
+    @Volatile
     private var started = false
-    private val sessionEpoch = AtomicLong(0)
+    @Volatile
+    private var sessionEpoch = 0L
+    private var listener: CameraQrEventListener? = null
 
-    private val listener =
-        createQrListener(
-            state = _state,
-            isSessionActive = {
-                val activeEpoch = sessionEpoch.get()
-                started && activeEpoch != 0L
-            },
-            onDetectedText = onDetectedText
-        )
+    private fun nextSessionToken(): Long =
+        synchronized(this) {
+            sessionEpoch += 1
+            sessionEpoch
+        }
 
     fun start() {
         if (started) return
-        sessionEpoch.incrementAndGet()
-        cameraPreviewFfi.setQrListener(listener)
-        cameraPreviewFfi.setQrAnalysisEnabled(true)
+        val sessionToken = nextSessionToken()
         started = true
+        val sessionListener =
+            createQrListener(
+                state = _state,
+                isSessionActive = { started && sessionEpoch == sessionToken },
+                onDetectedText = onDetectedText
+            )
+        listener = sessionListener
+        cameraPreviewFfi.setQrListener(sessionListener)
+        cameraPreviewFfi.setQrAnalysisEnabled(true)
     }
 
     fun stop() {
         if (!started) return
-        sessionEpoch.incrementAndGet()
+        nextSessionToken()
         started = false
+        listener = null
         cameraPreviewFfi.setQrAnalysisEnabled(false)
         cameraPreviewFfi.clearQrListener()
         _state.value = CameraOverlayState()

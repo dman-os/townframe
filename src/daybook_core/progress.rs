@@ -240,8 +240,8 @@ impl ProgressRepo {
 
         let (sender, mut rx) = mpsc::unbounded_channel();
         let main_cancel_token = CancellationToken::new();
-        let repo_cancel_token = main_cancel_token.child_token();
-        let worker_cancel_token = main_cancel_token.clone();
+        let repo_cancel_token = main_cancel_token.clone();
+        let worker_cancel_token = main_cancel_token.child_token();
         let worker_handle = tokio::spawn(async move {
             worker
                 .run(&mut rx, worker_cancel_token)
@@ -431,6 +431,10 @@ impl ProgressWorker {
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
+                    rx.close();
+                    while let Some(msg) = rx.recv().await {
+                        self.handle_msg(msg).await;
+                    }
                     break;
                 }
                 _ = ticker.tick() => {

@@ -95,7 +95,19 @@ pub fn spawn_doc_listener(
         }
         .instrument(span)
     };
-    let join_handle = tokio::spawn(async move { fut.await.unwrap() });
+    let spawn_cancel_token = cancel_token.clone();
+    let join_handle = tokio::spawn(async move {
+        if let Err(err) = fut.await {
+            if spawn_cancel_token.is_cancelled() {
+                debug!(
+                    ?err,
+                    "doc change broker finished with error during shutdown"
+                );
+            } else {
+                error!(?err, "doc change broker send loop failed");
+            }
+        }
+    });
 
     Ok((
         DocChangeBrokerHandle {

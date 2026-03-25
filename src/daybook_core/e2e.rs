@@ -115,10 +115,10 @@ impl DaybookTestContext {
     pub async fn stop(self) -> Res<()> {
         self.rt_stop.stop().await?;
         self.drawer_stop.stop().await?;
-        self.plugs_stop.stop().await?;
-        self.config_stop.stop().await?;
-        self.dispatch_stop.stop().await?;
         self.progress_stop.stop().await?;
+        self.dispatch_stop.stop().await?;
+        self.config_stop.stop().await?;
+        self.plugs_stop.stop().await?;
         self.acx_stop.stop().await?;
         Ok(())
     }
