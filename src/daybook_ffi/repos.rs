@@ -4,4 +4,5 @@ pub mod dispatch;
 pub mod drawer;
 pub mod plugs;
 pub mod progress;
+pub mod sync;
 pub mod tables;

@@ -2,10 +2,12 @@ use crate::interlude::*;
 
 use crate::sync::protocol::{CursorIndex, PartitionId, PeerKey};
 
+use iroh::EndpointId;
 use sqlx::Row;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug)]
 pub struct SyncStoreHandle {
     tx: mpsc::UnboundedSender<StoreMsg>,
 }
@@ -39,16 +41,21 @@ pub struct PartitionSyncCursorState {
 }
 
 enum StoreMsg {
-    RegisterPeer {
+    AllowPeer {
+        peer: PeerKey,
+        endpoint_id: Option<EndpointId>,
+        resp: oneshot::Sender<Res<()>>,
+    },
+    RevokePeer {
         peer: PeerKey,
         resp: oneshot::Sender<Res<()>>,
     },
-    UnregisterPeer {
+    IsPeerAllowed {
         peer: PeerKey,
-        resp: oneshot::Sender<Res<()>>,
+        resp: oneshot::Sender<Res<bool>>,
     },
-    IsPeerRegistered {
-        peer: PeerKey,
+    IsEndpointAllowed {
+        endpoint_id: EndpointId,
         resp: oneshot::Sender<Res<bool>>,
     },
     GetPartitionCursor {
@@ -66,10 +73,22 @@ enum StoreMsg {
 }
 
 impl SyncStoreHandle {
-    pub async fn register_peer(&self, peer: PeerKey) -> Res<()> {
+    pub async fn allow_peer(&self, peer: PeerKey, endpoint_id: Option<EndpointId>) -> Res<()> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
-            .send(StoreMsg::RegisterPeer {
+            .send(StoreMsg::AllowPeer {
+                peer,
+                endpoint_id,
+                resp: resp_tx,
+            })
+            .wrap_err("sync store closed")?;
+        resp_rx.await.wrap_err(ERROR_CHANNEL)?
+    }
+
+    pub async fn revoke_peer(&self, peer: PeerKey) -> Res<()> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.tx
+            .send(StoreMsg::RevokePeer {
                 peer,
                 resp: resp_tx,
             })
@@ -77,10 +96,10 @@ impl SyncStoreHandle {
         resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
-    pub async fn unregister_peer(&self, peer: PeerKey) -> Res<()> {
+    pub async fn is_peer_allowed(&self, peer: PeerKey) -> Res<bool> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
-            .send(StoreMsg::UnregisterPeer {
+            .send(StoreMsg::IsPeerAllowed {
                 peer,
                 resp: resp_tx,
             })
@@ -88,11 +107,11 @@ impl SyncStoreHandle {
         resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
-    pub async fn is_peer_registered(&self, peer: PeerKey) -> Res<bool> {
+    pub async fn is_endpoint_allowed(&self, endpoint_id: EndpointId) -> Res<bool> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
-            .send(StoreMsg::IsPeerRegistered {
-                peer,
+            .send(StoreMsg::IsEndpointAllowed {
+                endpoint_id,
                 resp: resp_tx,
             })
             .wrap_err("sync store closed")?;
@@ -173,8 +192,9 @@ pub async fn spawn_sync_store(
 async fn ensure_schema(pool: &sqlx::SqlitePool) -> Res<()> {
     sqlx::query(
         r#"
-        CREATE TABLE IF NOT EXISTS sync_known_peers(
-            peer_key TEXT PRIMARY KEY
+        CREATE TABLE IF NOT EXISTS sync_allowed_peers(
+            peer_key TEXT PRIMARY KEY,
+            endpoint_id TEXT NULL
         )
         "#,
     )
@@ -198,12 +218,17 @@ async fn ensure_schema(pool: &sqlx::SqlitePool) -> Res<()> {
 
 async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
     match msg {
-        StoreMsg::RegisterPeer { peer, resp } => {
+        StoreMsg::AllowPeer {
+            peer,
+            endpoint_id,
+            resp,
+        } => {
             let out = async {
                 sqlx::query(
-                    "INSERT INTO sync_known_peers(peer_key) VALUES(?) ON CONFLICT(peer_key) DO NOTHING",
+                    "INSERT INTO sync_allowed_peers(peer_key, endpoint_id) VALUES(?, ?) ON CONFLICT(peer_key) DO UPDATE SET endpoint_id = excluded.endpoint_id",
                 )
                 .bind(peer)
+                .bind(endpoint_id.map(|id| id.to_string()))
                 .execute(pool)
                 .await?;
                 Ok(())
@@ -211,25 +236,36 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
             .await;
             resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
         }
-        StoreMsg::UnregisterPeer { peer, resp } => {
+        StoreMsg::RevokePeer { peer, resp } => {
             let out = async {
-                sqlx::query("DELETE FROM sync_known_peers WHERE peer_key = ?")
+                sqlx::query("DELETE FROM sync_allowed_peers WHERE peer_key = ?")
                     .bind(&peer)
                     .execute(pool)
                     .await?;
-                // Keep cursor rows to support resume after disconnect/reconnect.
-                // Peer registration still gates RPC access via ensure_known_peer.
                 Ok(())
             }
             .await;
             resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
         }
-        StoreMsg::IsPeerRegistered { peer, resp } => {
+        StoreMsg::IsPeerAllowed { peer, resp } => {
             let out = async {
                 let exists: i64 = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM sync_known_peers WHERE peer_key = ?)",
+                    "SELECT EXISTS(SELECT 1 FROM sync_allowed_peers WHERE peer_key = ?)",
                 )
                 .bind(peer)
+                .fetch_one(pool)
+                .await?;
+                Ok(exists == 1)
+            }
+            .await;
+            resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+        }
+        StoreMsg::IsEndpointAllowed { endpoint_id, resp } => {
+            let out = async {
+                let exists: i64 = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM sync_allowed_peers WHERE endpoint_id = ?)",
+                )
+                .bind(endpoint_id.to_string())
                 .fetch_one(pool)
                 .await?;
                 Ok(exists == 1)
@@ -312,12 +348,12 @@ mod tests {
         let peer: PeerKey = "peer-a".into();
         let partition: PartitionId = "part-a".into();
 
-        store.register_peer(peer.clone()).await?;
+        store.allow_peer(peer.clone(), None).await?;
         store
             .set_partition_cursor(peer.clone(), partition.clone(), Some(10), Some(20))
             .await?;
-        store.unregister_peer(peer.clone()).await?;
-        store.register_peer(peer.clone()).await?;
+        store.revoke_peer(peer.clone()).await?;
+        store.allow_peer(peer.clone(), None).await?;
 
         let cursor = store.get_partition_cursor(peer, partition).await?;
         assert_eq!(cursor.member_cursor, Some(10));

@@ -2,6 +2,7 @@ use crate::interlude::*;
 
 use am_utils_rs::sync::protocol::PartitionId;
 use iroh::EndpointId;
+use std::str::FromStr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -14,9 +15,11 @@ mod bootstrap;
 mod full;
 pub use bootstrap::*;
 
-pub const IROH_DOC_URL_SCHEME: &str = "db+iroh-doc";
+pub const IROH_CLONE_URL_SCHEME: &str = "db+iroh-clone";
 pub const PARTITION_SYNC_ALPN: &[u8] = b"townframe/partition-sync/0";
 pub const REPO_SYNC_ALPN: &[u8] = b"townframe/repo-sync/0";
+pub const CLONE_PROVISION_ALPN: &[u8] = b"townframe/clone-provision/0";
+pub const CORE_DOCS_PARTITION_ID: &str = "core.docs";
 
 enum ActivePeerState {
     Connecting,
@@ -31,15 +34,15 @@ pub struct IrohSyncRepo {
     router: iroh::protocol::Router,
 
     config_repo: Arc<crate::config::ConfigRepo>,
-    doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
+    _doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
-
-    iroh_docs: iroh_docs::api::DocsApi,
-    iroh_blobs: iroh_blobs::api::Store,
 
     conn_end_signal_tx: tokio::sync::mpsc::UnboundedSender<am_utils_rs::repo::ConnFinishSignal>,
     active_samod_peers: tokio::sync::RwLock<HashMap<EndpointId, ActivePeerState>>,
     full_sync_handle: full::WorkerHandle,
+    sync_store: am_utils_rs::sync::store::SyncStoreHandle,
+    reconnect_task_cancel: CancellationToken,
+    reconnect_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
     // bootstrap_docs: tokio::sync::Mutex<Vec<iroh_docs::api::Doc>>,
     // active_endpoint_ids: tokio::sync::RwLock<HashMap<String, ()>>,
 }
@@ -96,6 +99,8 @@ pub enum IrohSyncEvent {
 pub struct IrohSyncRepoStopToken {
     cancel_token: CancellationToken,
     worker_handle: JoinHandle<()>,
+    reconnect_task_cancel: CancellationToken,
+    reconnect_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
     router: iroh::protocol::Router,
     partition_sync_stop_token: am_utils_rs::sync::node::SyncNodeStopToken,
     repo_rpc_stop_token: am_utils_rs::repo::rpc::RepoRpcStopToken,
@@ -105,12 +110,29 @@ pub struct IrohSyncRepoStopToken {
 impl IrohSyncRepoStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
-        utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(2)).await?;
+        self.reconnect_task_cancel.cancel();
+        let reconnect_handle = self.reconnect_task.lock().await.take();
+        if let Some(handle) = reconnect_handle {
+            utils_rs::wait_on_handle_with_timeout(
+                handle,
+                utils_rs::scale_timeout(Duration::from_secs(60)),
+            )
+            .await?;
+        }
+        // Worker shutdown drains active repo connections; each connection stop can wait up to 5s.
+        utils_rs::wait_on_handle_with_timeout(
+            self.worker_handle,
+            utils_rs::scale_timeout(Duration::from_secs(60)),
+        )
+        .await?;
         // NOTE: we only add timeouts for stop tokens that don't have internal
         // timeouts
-        tokio::time::timeout(Duration::from_secs(10), self.router.shutdown())
-            .await
-            .map_err(|_| eyre::eyre!("timeout for waiting router shutdown"))??;
+        tokio::time::timeout(
+            utils_rs::scale_timeout(Duration::from_secs(60)),
+            self.router.shutdown(),
+        )
+        .await
+        .map_err(|_| eyre::eyre!("timeout for waiting router shutdown"))??;
         self.repo_rpc_stop_token.stop().await?;
         self.partition_sync_stop_token.stop().await?;
 
@@ -121,18 +143,30 @@ impl IrohSyncRepoStopToken {
 
 impl IrohSyncRepo {
     async fn ensure_local_drawer_partition_seeded(rcx: &RepoCtx) -> Res<()> {
-        let partition_id = crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
+        let drawer_partition_id = crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
             rcx.doc_drawer.document_id(),
         );
         let drawer_doc_id = rcx.doc_drawer.document_id().to_string();
         let app_doc_id = rcx.doc_app.document_id().to_string();
         rcx.big_repo
             .partition_store()
-            .add_member(&partition_id, &drawer_doc_id, &serde_json::json!({}))
+            .ensure_partition(&drawer_partition_id)
             .await?;
         rcx.big_repo
             .partition_store()
-            .add_member(&partition_id, &app_doc_id, &serde_json::json!({}))
+            .add_member(
+                &CORE_DOCS_PARTITION_ID.to_string(),
+                &drawer_doc_id,
+                &serde_json::json!({}),
+            )
+            .await?;
+        rcx.big_repo
+            .partition_store()
+            .add_member(
+                &CORE_DOCS_PARTITION_ID.to_string(),
+                &app_doc_id,
+                &serde_json::json!({}),
+            )
             .await?;
         for blob_partition_id in [
             crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
@@ -169,6 +203,9 @@ impl IrohSyncRepo {
 
         let (incoming_conn_tx, incoming_conn_rx) = tokio::sync::mpsc::unbounded_channel();
         let (conn_end_tx, conn_end_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clone_rpc_tx, clone_rpc_rx) = tokio::sync::mpsc::channel(128);
+        let reconnect_task_cancel = CancellationToken::new();
+        let reconnect_task = Arc::new(tokio::sync::Mutex::new(None));
         let (partition_sync_store, partition_sync_store_stop_token) =
             am_utils_rs::sync::store::spawn_sync_store(rcx.big_repo.state_pool().clone()).await?;
         let (partition_sync_node, partition_sync_stop_token) =
@@ -194,6 +231,7 @@ impl IrohSyncRepo {
                     big_repo: Arc::clone(&rcx.big_repo),
                     conn_tx: incoming_conn_tx,
                     end_signal_tx: conn_end_tx.clone(),
+                    sync_store: partition_sync_store.clone(),
                 },
             )
             .accept(
@@ -206,6 +244,12 @@ impl IrohSyncRepo {
                 REPO_SYNC_ALPN,
                 irpc_iroh::IrohProtocol::<am_utils_rs::repo::rpc::RepoSyncRpc>::with_sender(
                     repo_rpc.local_sender(),
+                ),
+            )
+            .accept(
+                CLONE_PROVISION_ALPN,
+                irpc_iroh::IrohProtocol::<bootstrap::CloneProvisionRpc>::with_sender(
+                    clone_rpc_tx.clone(),
                 ),
             )
             .accept(
@@ -225,7 +269,6 @@ impl IrohSyncRepo {
             Arc::clone(&rcx),
             Arc::clone(&blobs_repo),
             progress_repo.clone(),
-            Arc::clone(&partition_sync_node),
             partition_sync_store.clone(),
             endpoint.clone(),
         )
@@ -236,19 +279,35 @@ impl IrohSyncRepo {
             rcx,
             router: router.clone(),
             config_repo,
-            doc_blobs_index_repo,
+            _doc_blobs_index_repo: doc_blobs_index_repo,
             progress_repo,
-            iroh_docs: docs.api().clone(),
-            iroh_blobs: blobs,
             cancel_token: cancel_token.clone(),
             registry: crate::repos::ListenersRegistry::new(),
             active_samod_peers: default(),
             conn_end_signal_tx: conn_end_tx,
             full_sync_handle,
+            sync_store: partition_sync_store.clone(),
+            reconnect_task_cancel: reconnect_task_cancel.clone(),
+            reconnect_task: Arc::clone(&reconnect_task),
             // bootstrap_docs: tokio::sync::Mutex::new(Vec::new()),
             // active_endpoint_ids: tokio::sync::RwLock::new(HashMap::new()),
         });
+        #[cfg(test)]
+        bootstrap::register_test_clone_rpc_sender(router.endpoint().id(), clone_rpc_tx.clone())
+            .await;
 
+        let clone_rpc_handle = tokio::spawn({
+            let repo = Arc::clone(&repo);
+            async move {
+                if let Err(error) = repo.clone_rpc_loop(clone_rpc_rx).await {
+                    error!(?error, "IrohSyncRepo clone rpc task exited with error");
+                }
+            }
+            .instrument(tracing::info_span!("IrohSyncRepo clone rpc task"))
+        });
+
+        #[cfg(test)]
+        let router_for_shutdown = router.clone();
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
             let full_stop_token = full_stop_token;
@@ -257,6 +316,10 @@ impl IrohSyncRepo {
                     .machine_loop(full_sync_rx, incoming_conn_rx, conn_end_rx)
                     .await;
                 let full_stop_res = full_stop_token.stop().await;
+                #[cfg(test)]
+                bootstrap::unregister_test_clone_rpc_sender(router_for_shutdown.endpoint().id())
+                    .await;
+                clone_rpc_handle.abort();
                 loop_res.unwrap();
                 full_stop_res.unwrap();
             }
@@ -268,6 +331,8 @@ impl IrohSyncRepo {
             IrohSyncRepoStopToken {
                 cancel_token,
                 worker_handle,
+                reconnect_task_cancel,
+                reconnect_task,
                 router,
                 partition_sync_stop_token,
                 repo_rpc_stop_token,
@@ -285,6 +350,7 @@ impl IrohSyncRepo {
 
     fn peer_partition_ids(&self, _peer_key: &str) -> HashSet<PartitionId> {
         [
+            CORE_DOCS_PARTITION_ID.to_string(),
             crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
                 self.rcx.doc_drawer.document_id(),
             ),
@@ -294,14 +360,49 @@ impl IrohSyncRepo {
         .into()
     }
 
+    async fn spawn_connect_known_devices_once(self: &Arc<Self>, trigger: &'static str) {
+        let mut reconnect_task = self.reconnect_task.lock().await;
+        if let Some(existing) = reconnect_task.as_ref() {
+            if !existing.is_finished() {
+                return;
+            }
+        }
+        if let Some(done) = reconnect_task.take() {
+            let _ = done.await;
+        }
+        let repo = Arc::clone(self);
+        let task_cancel = self.reconnect_task_cancel.child_token();
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                _ = task_cancel.cancelled() => {}
+                out = repo.connect_known_devices_once() => {
+                    if let Err(err) = out {
+                        if !repo.cancel_token.is_cancelled() && !task_cancel.is_cancelled() {
+                            warn!(?err, trigger, "known-device reconnect failed");
+                        }
+                    }
+                }
+            }
+        });
+        *reconnect_task = Some(handle);
+    }
+
     async fn machine_loop(
-        &self,
+        self: &Arc<Self>,
         mut full_sync_rx: tokio::sync::broadcast::Receiver<full::FullSyncEvent>,
         mut incoming_conn_rx: tokio::sync::mpsc::UnboundedReceiver<
             am_utils_rs::repo::RepoConnection,
         >,
         mut conn_end_rx: tokio::sync::mpsc::UnboundedReceiver<am_utils_rs::repo::ConnFinishSignal>,
     ) -> Res<()> {
+        use crate::repos::Repo;
+
+        let mut config_listener = self
+            .config_repo
+            .subscribe(crate::repos::SubscribeOpts { capacity: 64 });
+        let mut reconnect_tick = tokio::time::interval(Duration::from_secs(15));
+        reconnect_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        self.spawn_connect_known_devices_once("initial").await;
         loop {
             tokio::select! {
                 biased;
@@ -332,6 +433,27 @@ impl IrohSyncRepo {
                 val = conn_end_rx.recv() => {
                     let signal = val.expect("impossible actually");
                     self.handle_conn_end(signal).await?;
+                }
+                _ = reconnect_tick.tick() => {
+                    self.spawn_connect_known_devices_once("periodic").await;
+                }
+                val = config_listener.recv_async() => {
+                    match val {
+                        Ok(event) => {
+                            if matches!(&*event, crate::config::ConfigEvent::SyncDevicesChanged) {
+                                self.spawn_connect_known_devices_once("config-change").await;
+                            }
+                        }
+                        Err(crate::repos::RecvError::Closed) => {
+                            warn!("config listener closed; re-subscribing");
+                            config_listener = self
+                                .config_repo
+                                .subscribe(crate::repos::SubscribeOpts { capacity: 64 });
+                        }
+                        Err(crate::repos::RecvError::Dropped { dropped_count }) => {
+                            warn!(dropped_count, "config listener dropped events");
+                        }
+                    }
                 }
             }
         }
@@ -367,6 +489,78 @@ impl IrohSyncRepo {
         eyre::Ok(())
     }
 
+    async fn clone_rpc_loop(
+        &self,
+        mut rx: tokio::sync::mpsc::Receiver<bootstrap::CloneProvisionRpcMessage>,
+    ) -> Res<()> {
+        use irpc::WithChannels;
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                bootstrap::CloneProvisionRpcMessage::RequestCloneProvision(req) => {
+                    let WithChannels { inner, tx, .. } = req;
+                    let out = self.handle_clone_provision_request(inner.req).await;
+                    tx.send(out.map_err(|err| format!("{err:#}")))
+                        .await
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_clone_provision_request(
+        &self,
+        req: bootstrap::CloneProvisionRequest,
+    ) -> Res<bootstrap::CloneProvisionResponse> {
+        if let (Some(requester_peer_key), Some(requester_endpoint_id)) = (
+            req.requester_peer_key.as_ref(),
+            req.requester_endpoint_id.as_ref(),
+        ) {
+            let endpoint_id = iroh::PublicKey::from_str(requester_endpoint_id)
+                .wrap_err("invalid requester_endpoint_id in clone provision request")?;
+            self.sync_store
+                .allow_peer(requester_peer_key.clone(), Some(endpoint_id))
+                .await?;
+        }
+        let bootstrap = self.current_bootstrap_state().await;
+        if !req.provision {
+            return Ok(bootstrap::CloneProvisionResponse {
+                endpoint_addr: bootstrap.endpoint_addr.clone(),
+                repo_id: bootstrap.repo_id,
+                repo_name: bootstrap.repo_name,
+                app_doc_id: bootstrap.app_doc_id.to_string(),
+                drawer_doc_id: bootstrap.drawer_doc_id.to_string(),
+                device_name: bootstrap.device_name,
+                issued_iroh_secret_key_hex: None,
+                issued_iroh_public_key: None,
+                issued_peer_key: None,
+            });
+        }
+        let issued_secret = iroh::SecretKey::generate(&mut rand::rng());
+        let issued_public = issued_secret.public();
+        let issued_peer_key = format!("/{}/{}", self.rcx.repo_id, issued_public);
+        self.sync_store
+            .allow_peer(issued_peer_key.clone(), Some(issued_public))
+            .await?;
+        let device_name = req
+            .requested_device_name
+            .unwrap_or_else(|| format!("clone-{}", issued_public));
+        Ok(bootstrap::CloneProvisionResponse {
+            endpoint_addr: bootstrap.endpoint_addr,
+            repo_id: bootstrap.repo_id,
+            repo_name: bootstrap.repo_name,
+            app_doc_id: bootstrap.app_doc_id.to_string(),
+            drawer_doc_id: bootstrap.drawer_doc_id.to_string(),
+            device_name: Some(device_name),
+            issued_iroh_secret_key_hex: Some(
+                data_encoding::HEXLOWER.encode(&issued_secret.to_bytes()),
+            ),
+            issued_iroh_public_key: Some(issued_public.to_string()),
+            issued_peer_key: Some(issued_peer_key),
+        })
+    }
+
     async fn handle_incoming_am_conn(&self, conn: am_utils_rs::repo::RepoConnection) -> Res<()> {
         let endpoint_id = conn
             .endpoint_id
@@ -389,6 +583,9 @@ impl IrohSyncRepo {
             conn_id: conn.id,
         }];
         let partition_ids = self.peer_partition_ids(&peer_key);
+        self.sync_store
+            .allow_peer(peer_key.clone(), Some(endpoint_id))
+            .await?;
 
         if let Err(err) = self
             .full_sync_handle
@@ -412,7 +609,10 @@ impl IrohSyncRepo {
         Ok(())
     }
 
-    async fn handle_conn_end(&self, signal: am_utils_rs::repo::ConnFinishSignal) -> Res<()> {
+    async fn handle_conn_end(
+        self: &Arc<Self>,
+        signal: am_utils_rs::repo::ConnFinishSignal,
+    ) -> Res<()> {
         let Some(endpoint_id) = self.active_samod_peers.read().await.iter().find_map(
             |(endpoint_id, state)| match state {
                 ActivePeerState::Connected(conn) if conn.id == signal.conn_id => Some(*endpoint_id),
@@ -439,6 +639,11 @@ impl IrohSyncRepo {
         assert!(matches!(old, Some(ActivePeerState::Connected(_))), "fishy");
 
         self.registry.notify(events);
+        if self.cancel_token.is_cancelled() {
+            return Ok(());
+        }
+        self.spawn_connect_known_devices_once("connection-close")
+            .await;
         Ok(())
     }
 
@@ -469,6 +674,9 @@ impl IrohSyncRepo {
     ) -> Res<()> {
         let conn_id = conn.id;
         let partition_ids = self.peer_partition_ids(&peer_key);
+        self.sync_store
+            .allow_peer(peer_key.clone(), Some(endpoint_id))
+            .await?;
         if let Err(err) = self
             .full_sync_handle
             .set_connection(endpoint_id, conn_id, peer_key, partition_ids)
@@ -585,12 +793,20 @@ impl IrohSyncRepo {
         Ok(())
     }
 
-    pub async fn connect_url(&self, iroh_doc_url: &str) -> Res<bootstrap::SyncBootstrapState> {
+    pub async fn connect_url(&self, source_url: &str) -> Res<bootstrap::SyncBootstrapState> {
         self.ensure_repo_live()?;
 
-        let bootstrap =
-            bootstrap::resolve_bootstrap_with_docs(&self.iroh_docs, &self.iroh_blobs, iroh_doc_url)
-                .await?;
+        let bootstrap = bootstrap::request_clone_provision_via_rpc(
+            source_url,
+            bootstrap::CloneProvisionRequest {
+                requested_device_name: None,
+                provision: false,
+                requester_endpoint_id: Some(self.router.endpoint().id().to_string()),
+                requester_peer_key: Some(self.rcx.big_repo.samod_repo().peer_id().to_string()),
+            },
+        )
+        .await?
+        .to_bootstrap_state()?;
 
         if bootstrap.repo_id != self.rcx.repo_id {
             eyre::bail!(
@@ -606,15 +822,25 @@ impl IrohSyncRepo {
 
     pub async fn connect_known_devices_once(&self) -> Res<()> {
         self.ensure_repo_live()?;
-
-        let devices = self.config_repo.list_known_sync_devices().await?;
-        let local_endpoint_id = self.router.endpoint().id();
-        for device in devices {
-            if device.endpoint_id == local_endpoint_id {
-                continue;
+        #[cfg(not(test))]
+        {
+            let devices = self.config_repo.list_known_sync_devices().await?;
+            let local_endpoint_id = self.router.endpoint().id();
+            for device in devices {
+                if device.endpoint_id == local_endpoint_id {
+                    continue;
+                }
+                if let Err(err) = self
+                    .connect_endpoint_addr(iroh::EndpointAddr::new(device.endpoint_id))
+                    .await
+                {
+                    warn!(
+                        ?err,
+                        endpoint_id = %device.endpoint_id,
+                        "failed reconnect attempt for known sync device"
+                    );
+                }
             }
-            self.connect_endpoint_addr(iroh::EndpointAddr::new(device.endpoint_id))
-                .await?;
         }
         Ok(())
     }
@@ -624,8 +850,6 @@ impl IrohSyncRepo {
         endpoint_ids: &[EndpointId],
         timeout: Duration,
     ) -> Res<()> {
-        use crate::repos::Repo;
-
         self.ensure_repo_live()?;
         let Some(progress_repo) = self.progress_repo.clone() else {
             eyre::bail!("wait_for_full_sync requires a progress-enabled IrohSyncRepo");
@@ -638,140 +862,50 @@ impl IrohSyncRepo {
             .full_sync_handle
             .get_peer_sync_snapshot(endpoint_ids)
             .await?;
-        let mut remaining = target_peers
-            .iter()
-            .filter(|endpoint_id| {
-                !initial_snapshot
-                    .get(*endpoint_id)
-                    .is_some_and(|snapshot| snapshot.emitted_full_synced)
-            })
-            .copied()
-            .collect::<HashSet<_>>();
         debug!(
             target_peers = ?target_peers,
             initial_snapshot = ?initial_snapshot,
-            remaining = ?remaining,
             "wait_for_full_sync initial state"
         );
-        let listener = self
-            .registry
-            .subscribe::<IrohSyncEvent>(crate::repos::SubscribeOpts { capacity: 1024 });
-        let doc_blobs_listener = self
-            .doc_blobs_index_repo
-            .subscribe(crate::repos::SubscribeOpts { capacity: 1024 });
         let timeout_outcome = tokio::time::timeout(timeout, async {
-            let mut tick = tokio::time::interval(Duration::from_millis(100));
-            let listener = listener;
-            let doc_blobs_listener = doc_blobs_listener;
-            let mut quiet_since: Option<std::time::Instant> = None;
-            let mut heartbeat_at = std::time::Instant::now();
-            loop {
-                let now = std::time::Instant::now();
-                if remaining.is_empty() {
-                    match quiet_since {
-                        None => quiet_since = Some(now),
-                        Some(since) if now.duration_since(since) >= Duration::from_millis(3000) => {
-                            break;
-                        }
-                        Some(_) => {}
-                    }
-                } else {
-                    quiet_since = None;
-                }
-                tokio::select! {
-                    val = listener.recv_async() => {
-                        let event = val.map_err(|err| match err {
-                            crate::repos::RecvError::Closed => eyre::eyre!("sync listener closed"),
-                            crate::repos::RecvError::Dropped { dropped_count } => {
-                                eyre::eyre!("sync listener dropped events: dropped_count={dropped_count}")
-                            }
-                        })?;
-                        match event.as_ref() {
-                            IrohSyncEvent::PeerFullySynced { endpoint_id, .. } => {
-                                remaining.remove(endpoint_id);
-                                quiet_since = None;
-                            }
-                            IrohSyncEvent::StalePeer { endpoint_id } => {
-                                if target_peers.contains(endpoint_id) {
-                                    remaining.insert(*endpoint_id);
-                                    quiet_since = None;
-                                }
-                            }
-                            IrohSyncEvent::BlobDownloadStarted { .. } => {
-                                quiet_since = None;
-                            }
-                            IrohSyncEvent::BlobDownloadFinished { .. } => {
-                                quiet_since = None;
-                            }
-                            _ => {}
-                        }
-                    }
-                    val = doc_blobs_listener.recv_async() => {
-                        match val {
-                            Ok(_) => {
-                                quiet_since = None;
-                            }
-                            Err(crate::repos::RecvError::Closed) => {
-                                eyre::bail!("doc blobs index listener closed");
-                            }
-                            Err(crate::repos::RecvError::Dropped { dropped_count }) => {
-                                eyre::bail!("doc blobs index listener dropped events: dropped_count={dropped_count}");
-                            }
-                        }
-                    }
-                    _ = tick.tick() => {
-                        if !remaining.is_empty()
-                            && now.duration_since(heartbeat_at) >= Duration::from_secs(2)
-                        {
-                            heartbeat_at = now;
-                            let latest_snapshot = self
-                                .full_sync_handle
-                                .get_peer_sync_snapshot(endpoint_ids)
-                                .await?;
-                            for endpoint_id in &target_peers {
-                                let emitted_full_synced = latest_snapshot
-                                    .get(endpoint_id)
-                                    .is_some_and(|snapshot| snapshot.emitted_full_synced);
-                                if emitted_full_synced {
-                                    remaining.remove(endpoint_id);
-                                }
-                            }
-                            let tasks = progress_repo
-                                .list_by_tag_prefix("sync/full/")
-                                .await
-                                .map(|tasks| {
-                                    let active = tasks
-                                        .iter()
-                                        .filter(|task| task.state == crate::progress::ProgressTaskState::Active)
-                                        .count();
-                                    let ids = tasks.iter().map(|task| task.id.clone()).take(12).collect::<Vec<_>>();
-                                    (tasks.len(), active, ids)
-                                });
-                            match tasks {
-                                Ok((task_count, active_count, ids)) => {
-                                    debug!(
-                                        remaining = ?remaining,
-                                        latest_snapshot = ?latest_snapshot,
-                                        task_count,
-                                        active_count,
-                                        task_ids = ?ids,
-                                        "wait_for_full_sync heartbeat"
-                                    );
-                                }
-                                Err(err) => {
-                                    warn!(?err, remaining = ?remaining, "wait_for_full_sync heartbeat failed listing progress tasks");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            self.full_sync_handle
+                .wait_for_peers_fully_synced(endpoint_ids)
+                .await?;
             eyre::Ok(())
         })
         .await;
         match timeout_outcome {
             Ok(out) => out?,
             Err(_) => {
+                let latest_snapshot = self
+                    .full_sync_handle
+                    .get_peer_sync_snapshot(endpoint_ids)
+                    .await
+                    .map(|snapshot| format!("{snapshot:?}"))
+                    .unwrap_or_else(|err| format!("snapshot_error={err:?}"));
+                let remaining = self
+                    .full_sync_handle
+                    .get_peer_sync_snapshot(endpoint_ids)
+                    .await
+                    .map(|snapshot| {
+                        target_peers
+                            .iter()
+                            .filter(|endpoint_id| {
+                                !snapshot
+                                    .get(*endpoint_id)
+                                    .is_some_and(|peer| peer.emitted_full_synced)
+                            })
+                            .copied()
+                            .collect::<HashSet<_>>()
+                    })
+                    .unwrap_or_default();
+                let connected_peers = self
+                    .active_samod_peers
+                    .read()
+                    .await
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let tasks = progress_repo.list_by_tag_prefix("sync/full/").await;
                 let diag = match tasks {
                     Ok(tasks) => {
@@ -784,9 +918,14 @@ impl IrohSyncRepo {
                             .map(|task| task.id.clone())
                             .take(16)
                             .collect::<Vec<_>>();
-                        format!("full_sync_tasks_total={}; full_sync_tasks_active={active}; sample_task_ids={ids:?}", tasks.len())
+                        format!(
+                            "full_sync_tasks_total={}; full_sync_tasks_active={active}; sample_task_ids={ids:?}; latest_snapshot={latest_snapshot}; connected_peers={connected_peers:?}",
+                            tasks.len()
+                        )
                     }
-                    Err(err) => format!("failed_listing_full_sync_tasks={err:?}"),
+                    Err(err) => format!(
+                        "failed_listing_full_sync_tasks={err:?}; latest_snapshot={latest_snapshot}; connected_peers={connected_peers:?}"
+                    ),
                 };
                 eyre::bail!("timed out waiting for full sync: remaining={remaining:?}; {diag}");
             }
@@ -834,6 +973,7 @@ mod tests {
         blobs_repo: Arc<BlobsRepo>,
         drawer: Arc<DrawerRepo>,
         progress_repo: Arc<ProgressRepo>,
+        progress_stop: crate::repos::RepoStopToken,
         drawer_stop: crate::repos::RepoStopToken,
         _plugs_repo: Arc<PlugsRepo>,
         plugs_stop: crate::repos::RepoStopToken,
@@ -848,36 +988,66 @@ mod tests {
 
     impl SyncTestNode {
         async fn stop(mut self) -> Res<()> {
-            tokio::time::timeout(Duration::from_secs(10), self.sync_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting sync stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(30)),
+                self.sync_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting sync stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.progress_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting progress stop"))??;
             self.doc_blobs_bridge_cancel.cancel();
             if let Some(handle) = self.doc_blobs_bridge_handle.take() {
                 tokio::time::timeout(
-                    Duration::from_secs(5),
-                    utils_rs::wait_on_handle_with_timeout(handle, Duration::from_secs(2)),
+                    utils_rs::scale_timeout(Duration::from_secs(5)),
+                    utils_rs::wait_on_handle_with_timeout(
+                        handle,
+                        utils_rs::scale_timeout(Duration::from_secs(2)),
+                    ),
                 )
                 .await
                 .map_err(|_| eyre::eyre!("timeout waiting doc blobs bridge join"))??;
             }
-            tokio::time::timeout(Duration::from_secs(10), self.drawer_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting drawer stop"))??;
-            tokio::time::timeout(Duration::from_secs(10), self.plugs_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting plugs stop"))??;
-            tokio::time::timeout(Duration::from_secs(10), self.config_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting config stop"))??;
-            tokio::time::timeout(Duration::from_secs(10), self.doc_blobs_index_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting doc blobs index stop"))??;
-            tokio::time::timeout(Duration::from_secs(10), self.sqlite_local_state_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting sqlite local state stop"))??;
-            tokio::time::timeout(Duration::from_secs(10), self.ctx.shutdown())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting ctx shutdown"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.doc_blobs_index_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting doc blobs index stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.sqlite_local_state_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting sqlite local state stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.config_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting config stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.drawer_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting drawer stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.plugs_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting plugs stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.ctx.shutdown(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting ctx shutdown"))??;
             Ok(())
         }
     }
@@ -1000,14 +1170,7 @@ mod tests {
         let repo_b_path = temp_root.path().join("repo-b");
 
         tokio::fs::create_dir_all(&repo_a_path).await?;
-        let rtx = RepoCtx::init(
-            &repo_a_path,
-            RepoOpenOptions {
-                ws_connector_url: None,
-            },
-            "test-device".into(),
-        )
-        .await?;
+        let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
         rtx.shutdown().await?;
         drop(rtx);
 
@@ -1084,7 +1247,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cloned_repo_registers_drawer_replicated_partition_on_open() -> Res<()> {
+    async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         std::env::set_var("DAYB_DISABLE_KEYRING", "1");
         let temp_root = tempfile::tempdir()?;
@@ -1092,14 +1255,7 @@ mod tests {
         let repo_b_path = temp_root.path().join("repo-b");
 
         tokio::fs::create_dir_all(&repo_a_path).await?;
-        let rtx = RepoCtx::init(
-            &repo_a_path,
-            RepoOpenOptions {
-                ws_connector_url: None,
-            },
-            "test-device".into(),
-        )
-        .await?;
+        let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
         rtx.shutdown().await?;
         drop(rtx);
 
@@ -1126,20 +1282,17 @@ mod tests {
             .big_repo
             .list_partitions_for_peer(&"peer-partition-visibility".into())
             .await?;
-        let drawer_partition_id = crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
-            &node_b.ctx.doc_drawer.document_id().clone(),
-        );
-        let drawer_partition = partitions
+        let core_partition = partitions
             .iter()
-            .find(|summary| summary.partition_id == drawer_partition_id);
+            .find(|summary| summary.partition_id == CORE_DOCS_PARTITION_ID);
         assert!(
-            drawer_partition.is_some(),
-            "cloned repo should register drawer replicated partition on open: {partitions:?}"
+            core_partition.is_some(),
+            "cloned repo should register core docs partition on open: {partitions:?}"
         );
-        let drawer_partition = drawer_partition.expect("checked above");
+        let core_partition = core_partition.expect("checked above");
         assert!(
-            drawer_partition.member_count >= 2,
-            "drawer replicated partition should include drawer/app docs after sync boot: {drawer_partition:?}"
+            core_partition.member_count >= 2,
+            "core docs partition should include drawer/app docs after sync boot: {core_partition:?}"
         );
 
         node_b.stop().await?;
@@ -1154,14 +1307,7 @@ mod tests {
         let repo_path = temp_root.path().join("repo-a");
         tokio::fs::create_dir_all(&repo_path).await?;
 
-        let rtx = RepoCtx::init(
-            &repo_path,
-            RepoOpenOptions {
-                ws_connector_url: None,
-            },
-            "test-device".into(),
-        )
-        .await?;
+        let rtx = RepoCtx::init(&repo_path, RepoOpenOptions {}, "test-device".into()).await?;
         rtx.shutdown().await?;
         drop(rtx);
 
@@ -1306,14 +1452,7 @@ mod tests {
         let repo_b_path = temp_root.path().join("repo-b");
 
         tokio::fs::create_dir_all(&repo_a_path).await?;
-        let rtx = RepoCtx::init(
-            &repo_a_path,
-            RepoOpenOptions {
-                ws_connector_url: None,
-            },
-            "test-device".into(),
-        )
-        .await?;
+        let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
         rtx.shutdown().await?;
         drop(rtx);
 
@@ -1458,14 +1597,7 @@ mod tests {
         }
 
         tokio::fs::create_dir_all(repo_a_path).await?;
-        let rtx = RepoCtx::init(
-            repo_a_path,
-            RepoOpenOptions {
-                ws_connector_url: None,
-            },
-            "test-device".into(),
-        )
-        .await?;
+        let rtx = RepoCtx::init(repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
         let source_repo_id = rtx.repo_id.clone();
         let source_repo_user_id = crate::repo::get_or_init_repo_user_id(&rtx.sql.db_pool).await?;
         rtx.shutdown().await?;
@@ -1504,66 +1636,20 @@ mod tests {
         source_url: &str,
         destination: &std::path::Path,
     ) -> Res<()> {
-        if destination.exists() {
-            let mut read_dir = tokio::fs::read_dir(destination).await?;
-            if read_dir.next_entry().await?.is_some() {
-                eyre::bail!(
-                    "bootstrap clone destination must be empty: {}",
-                    destination.display()
-                );
-            }
-        } else {
-            tokio::fs::create_dir_all(destination).await?;
-        }
-
-        let bootstrap = crate::sync::resolve_bootstrap_from_url(source_url).await?;
-        let sqlite_path = destination.join("sqlite.db");
-        let sql = crate::app::SqlCtx::new(&format!("sqlite://{}", sqlite_path.display())).await?;
-        crate::app::globals::set_repo_id(&sql.db_pool, &bootstrap.repo_id).await?;
-        let identity =
-            crate::secrets::SecretRepo::load_or_init_identity(&sql.db_pool, &bootstrap.repo_id)
-                .await?;
-        let _repo_user_id = crate::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
-
-        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
-            storage: am_utils_rs::repo::StorageConfig::Disk {
-                path: destination.join("samod"),
-                big_repo_sqlite_url: None,
-            },
-            peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
-        })
-        .await?;
-        crate::sync::connect_and_pull_required_docs_once(
-            &big_repo,
-            identity.iroh_secret_key.clone(),
-            &bootstrap,
-            Duration::from_secs(30),
-        )
-        .await?;
-        crate::app::globals::set_init_state(
-            &sql.db_pool,
-            &crate::app::globals::InitState::Created {
-                doc_id_app: bootstrap.app_doc_id,
-                doc_id_drawer: bootstrap.drawer_doc_id,
+        crate::sync::clone_repo_init_from_url(
+            source_url,
+            destination,
+            crate::sync::CloneRepoInitOptions {
+                timeout: Duration::from_secs(30),
             },
         )
         .await?;
-        crate::repo::mark_repo_initialized(destination).await?;
-        big_repo_stop.stop().await?;
         Ok(())
     }
 
     async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
-        let rtx = Arc::new(
-            RepoCtx::open(
-                repo_root,
-                RepoOpenOptions {
-                    ws_connector_url: None,
-                },
-                "test-device".into(),
-            )
-            .await?,
-        );
+        let rtx =
+            Arc::new(RepoCtx::open(repo_root, RepoOpenOptions {}, "test-device".into()).await?);
         let blobs_repo = BlobsRepo::new(
             rtx.layout.blobs_root.clone(),
             rtx.local_user_path.clone(),
@@ -1614,7 +1700,7 @@ mod tests {
                 Arc::clone(&drawer_repo),
                 Arc::clone(&doc_blobs_index_repo),
             );
-        let progress_repo = ProgressRepo::boot(rtx.sql.db_pool.clone()).await?;
+        let (progress_repo, progress_stop) = ProgressRepo::boot(rtx.sql.db_pool.clone()).await?;
         let (sync_repo, sync_stop) = IrohSyncRepo::boot(
             Arc::clone(&rtx),
             Arc::clone(&config_repo),
@@ -1629,6 +1715,7 @@ mod tests {
             blobs_repo,
             drawer: drawer_repo,
             progress_repo,
+            progress_stop,
             drawer_stop,
             _plugs_repo: plugs_repo,
             plugs_stop,
@@ -1646,7 +1733,7 @@ mod tests {
         drawer_repo: Arc<DrawerRepo>,
         doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     ) -> (CancellationToken, JoinHandle<()>) {
-        let drawer_listener = drawer_repo.subscribe(SubscribeOpts::new(1024));
+        let drawer_listener = drawer_repo.subscribe(SubscribeOpts::new(16_384));
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let handle = tokio::spawn(async move {
@@ -1654,25 +1741,28 @@ mod tests {
                 tokio::select! {
                     biased;
                     _ = cancel_for_task.cancelled() => break,
-                    evt = drawer_listener.recv_lossy_async() => {
-                        let Ok(evt) = evt else {
-                            break;
-                        };
-                        match evt.as_ref() {
-                            crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
-                                doc_blobs_index_repo.enqueue_delete(id.clone()).unwrap_or_log();
-                            }
-                            crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
-                                if let Some(heads) = entry.branches.get("main") {
-                                    doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                    evt = drawer_listener.recv_async() => {
+                        match evt {
+                            Ok(evt) => match evt.as_ref() {
+                                crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
+                                    doc_blobs_index_repo.enqueue_delete(id.clone()).unwrap_or_log();
                                 }
-                            }
-                            crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
-                                if let Some(heads) = entry.branches.get("main") {
-                                    doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                                crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
+                                    if let Some(heads) = entry.branches.get("main") {
+                                        doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                                    }
                                 }
+                                crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
+                                    if let Some(heads) = entry.branches.get("main") {
+                                        doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                                    }
+                                }
+                                crate::drawer::DrawerEvent::ListChanged { .. } => {}
+                            },
+                            Err(crate::repos::RecvError::Dropped { dropped_count }) => {
+                                panic!("doc blobs bridge dropped {dropped_count} drawer events");
                             }
-                            crate::drawer::DrawerEvent::ListChanged { .. } => {}
+                            Err(crate::repos::RecvError::Closed) => break,
                         }
                     }
                 }

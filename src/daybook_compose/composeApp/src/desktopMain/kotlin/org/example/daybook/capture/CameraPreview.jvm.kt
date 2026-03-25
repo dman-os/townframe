@@ -3,12 +3,7 @@ package org.example.daybook.capture
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,15 +19,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.unit.dp
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
+import java.util.logging.Logger
 import javax.imageio.ImageIO
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.example.daybook.capture.data.CameraFrameSample
 import org.example.daybook.uniffi.CameraDeviceInfo
 import org.example.daybook.uniffi.CameraPreviewFfi
 import org.example.daybook.uniffi.CameraPreviewFrame
@@ -40,6 +37,8 @@ import org.example.daybook.uniffi.CameraPreviewFrameEncoding
 import org.example.daybook.uniffi.CameraPreviewFrameListener
 import org.example.daybook.uniffi.FfiException
 import org.jetbrains.skia.Image as SkiaImage
+
+private val previewLogger: Logger = Logger.getLogger("DaybookCameraPreviewJvm")
 
 private fun CameraPreviewFrame.toImageBitmap(): ImageBitmap {
     return when (encoding) {
@@ -94,22 +93,35 @@ private fun CameraPreviewFrame.toJpegBytes(): ByteArray {
     }
 }
 
+private fun jpegToImageBitmap(jpegBytes: ByteArray): ImageBitmap {
+    return SkiaImage.makeFromEncoded(jpegBytes).toComposeImageBitmap()
+}
+
+private fun CameraPreviewFrame.toFrameSample(): CameraFrameSample {
+    return CameraFrameSample(
+        widthPx = widthPx.toInt(),
+        heightPx = heightPx.toInt(),
+        jpegBytes = toJpegBytes()
+    )
+}
+
 @Composable
 actual fun DaybookCameraPreview(
     cameraPreviewFfi: CameraPreviewFfi,
     modifier: Modifier,
+    selectedDeviceId: Int?,
+    onAvailableDevicesChanged: ((List<CameraDeviceInfo>, Int?) -> Unit)?,
     onImageSaved: ((ByteArray) -> Unit)?,
-    onCaptureRequested: (() -> Unit)?
+    onFrameAvailable: ((CameraFrameSample) -> Unit)?
 ) {
     val captureContext = LocalCameraCaptureContext.current
     val coroutineScope = rememberCoroutineScope()
 
     var devices by remember { mutableStateOf<List<CameraDeviceInfo>>(emptyList()) }
-    var selectedDeviceId by remember { mutableStateOf<Int?>(null) }
-    var expandedMenu by remember { mutableStateOf(false) }
     var latestFrame by remember { mutableStateOf<CameraPreviewFrame?>(null) }
     var latestImageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    var streamStarted by remember { mutableStateOf(false) }
 
     val noOpListener =
         remember {
@@ -124,7 +136,7 @@ actual fun DaybookCameraPreview(
         try {
             val listedDevices = cameraPreviewFfi.listDevices()
             devices = listedDevices
-            selectedDeviceId = listedDevices.firstOrNull()?.deviceId?.toInt()
+            onAvailableDevicesChanged?.invoke(listedDevices, listedDevices.firstOrNull()?.deviceId?.toInt())
             errorText = if (listedDevices.isEmpty()) "No camera devices found." else null
         } catch (ffiError: FfiException) {
             errorText = ffiError.message()
@@ -132,22 +144,75 @@ actual fun DaybookCameraPreview(
     }
 
     LaunchedEffect(cameraPreviewFfi, selectedDeviceId) {
-        val deviceId = selectedDeviceId ?: return@LaunchedEffect
+        val deviceId = selectedDeviceId
+        if (deviceId == null) {
+            latestFrame = null
+            latestImageBitmap = null
+            streamStarted = false
+            runCatching { cameraPreviewFfi.stopStream() }.onFailure { error ->
+                previewLogger.warning("failed stopping stream on deselect: ${error.message ?: error}")
+                errorText = "Failed stopping camera stream: ${error.message ?: error}"
+            }
+            return@LaunchedEffect
+        }
         try {
             cameraPreviewFfi.startStream(deviceId.toUInt(), noOpListener)
+            streamStarted = true
             errorText = null
+            awaitCancellation()
         } catch (ffiError: FfiException) {
+            streamStarted = false
             errorText = ffiError.message()
+        } finally {
+            streamStarted = false
+            runCatching { cameraPreviewFfi.stopStream() }.onFailure { error ->
+                previewLogger.warning("failed stopping stream: ${error.message ?: error}")
+                errorText = "Failed stopping camera stream: ${error.message ?: error}"
+            }
         }
     }
 
-    LaunchedEffect(cameraPreviewFfi, selectedDeviceId) {
-        if (selectedDeviceId == null) return@LaunchedEffect
+    LaunchedEffect(cameraPreviewFfi, selectedDeviceId, streamStarted, onFrameAvailable) {
+        if (selectedDeviceId == null || !streamStarted) return@LaunchedEffect
+        var consecutiveFailures = 0
         while (isActive) {
-            val nextFrame = cameraPreviewFfi.`takeLatestFrame`()
-            if (nextFrame != null) {
-                latestFrame = nextFrame
-                latestImageBitmap = withContext(Dispatchers.IO) { nextFrame.toImageBitmap() }
+            if (!streamStarted) break
+            try {
+                val nextFrame = cameraPreviewFfi.`takeLatestFrame`()
+                if (nextFrame != null) {
+                    consecutiveFailures = 0
+                    errorText = null
+                    latestFrame = nextFrame
+                    if (nextFrame.encoding == CameraPreviewFrameEncoding.RGB24) {
+                        val jpegBytes = withContext(Dispatchers.IO) { nextFrame.toJpegBytes() }
+                        latestImageBitmap = withContext(Dispatchers.IO) { jpegToImageBitmap(jpegBytes) }
+                        if (onFrameAvailable != null) {
+                            val sample =
+                                CameraFrameSample(
+                                    widthPx = nextFrame.widthPx.toInt(),
+                                    heightPx = nextFrame.heightPx.toInt(),
+                                    jpegBytes = jpegBytes
+                                )
+                            withContext(Dispatchers.Default) {
+                                onFrameAvailable.invoke(sample)
+                            }
+                        }
+                    } else {
+                        latestImageBitmap = withContext(Dispatchers.IO) { nextFrame.toImageBitmap() }
+                        if (onFrameAvailable != null) {
+                            val sample = withContext(Dispatchers.IO) { nextFrame.toFrameSample() }
+                            withContext(Dispatchers.Default) {
+                                onFrameAvailable.invoke(sample)
+                            }
+                        }
+                    }
+                }
+            } catch (error: Throwable) {
+                consecutiveFailures += 1
+                previewLogger.warning("camera preview frame processing failed: ${error.message ?: error}")
+                if (consecutiveFailures >= 5) {
+                    errorText = "Camera preview failed repeatedly. Please restart camera stream."
+                }
             }
             delay(12)
         }
@@ -179,6 +244,7 @@ actual fun DaybookCameraPreview(
         onDispose {
             captureContext?.setCaptureCallback(null)
             captureContext?.setCanCapture(false)
+            streamStarted = false
             cameraPreviewFfi.stopStream()
         }
     }
@@ -192,83 +258,31 @@ actual fun DaybookCameraPreview(
                 Text(text = errorText ?: "Loading camera devices...")
             }
         } else {
-            Column(modifier = Modifier.fillMaxSize()) {
-                Box(
-                    modifier = Modifier.padding(8.dp),
-                    contentAlignment = Alignment.TopEnd
-                ) {
-                    DeviceSelectionMenu(
-                        devices = devices,
-                        selectedDeviceId = selectedDeviceId,
-                        expanded = expandedMenu,
-                        onExpandedChange = { expandedMenu = it },
-                        onDeviceSelected = { selectedDeviceId = it }
+            Box(
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surface)
+            ) {
+                if (latestImageBitmap != null) {
+                    Image(
+                        bitmap = latestImageBitmap!!,
+                        contentDescription = "Camera preview",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                        alignment = Alignment.Center
                     )
                 }
 
-                Box(
-                    modifier =
-                        Modifier
-                            .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.surface)
-                ) {
-                    if (latestImageBitmap != null) {
-                        Image(
-                            bitmap = latestImageBitmap!!,
-                            contentDescription = "Camera preview",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Fit,
-                            alignment = Alignment.Center
-                        )
-                    }
-
-                    if (errorText != null) {
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(text = errorText ?: "Camera error")
-                        }
+                if (errorText != null) {
+                    val message = errorText
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = message!!)
                     }
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DeviceSelectionMenu(
-    devices: List<CameraDeviceInfo>,
-    selectedDeviceId: Int?,
-    expanded: Boolean,
-    onExpandedChange: (Boolean) -> Unit,
-    onDeviceSelected: (Int) -> Unit
-) {
-    val selectedLabel =
-        devices
-            .firstOrNull { it.deviceId.toInt() == selectedDeviceId }
-            ?.label ?: "Select camera"
-
-    Box {
-        Button(onClick = { onExpandedChange(!expanded) }) {
-            Text(
-                text = selectedLabel,
-                style = MaterialTheme.typography.bodyMedium
-            )
-        }
-
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { onExpandedChange(false) }
-        ) {
-            devices.forEach { device ->
-                DropdownMenuItem(
-                    text = { Text(device.label) },
-                    onClick = {
-                        onDeviceSelected(device.deviceId.toInt())
-                        onExpandedChange(false)
-                    }
-                )
             }
         }
     }

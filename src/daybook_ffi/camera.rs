@@ -27,6 +27,186 @@ pub trait CameraPreviewFrameListener: Send + Sync + 'static {
     fn on_camera_preview_frame(&self, frame: CameraPreviewFrame);
 }
 
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct CameraNormalizedRect {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+#[derive(Clone, Debug, uniffi::Enum)]
+pub enum CameraOverlay {
+    Grid,
+    QrBounds {
+        bounds: CameraNormalizedRect,
+        frame_width_px: u32,
+        frame_height_px: u32,
+    },
+}
+
+#[uniffi::export(with_foreign)]
+pub trait CameraQrEventListener: Send + Sync + 'static {
+    fn on_camera_qr_overlays_updated(&self, overlays: Vec<CameraOverlay>);
+    fn on_camera_qr_detected(&self, decoded_text: String);
+    fn on_camera_qr_error(&self, message: String);
+}
+
+#[derive(uniffi::Object)]
+pub struct CameraQrAnalyzerFfi {
+    listener: std::sync::Mutex<Option<std::sync::Arc<dyn CameraQrEventListener>>>,
+}
+
+fn normalize_rect(
+    width_px: u32,
+    height_px: u32,
+    corners: &[rqrr::Point; 4],
+) -> Option<CameraNormalizedRect> {
+    if width_px == 0 || height_px == 0 {
+        return None;
+    }
+
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+
+    for point in corners {
+        let point_x = point.x as f32;
+        let point_y = point.y as f32;
+        min_x = min_x.min(point_x);
+        min_y = min_y.min(point_y);
+        max_x = max_x.max(point_x);
+        max_y = max_y.max(point_y);
+    }
+
+    let width = width_px as f32;
+    let height = height_px as f32;
+    let left = (min_x / width).clamp(0.0, 1.0);
+    let top = (min_y / height).clamp(0.0, 1.0);
+    let right = (max_x / width).clamp(0.0, 1.0);
+    let bottom = (max_y / height).clamp(0.0, 1.0);
+
+    Some(CameraNormalizedRect {
+        left,
+        top,
+        right,
+        bottom,
+    })
+}
+
+fn camera_frame_to_luma(
+    encoding: &CameraPreviewFrameEncoding,
+    width_px: u32,
+    height_px: u32,
+    frame_bytes: &[u8],
+) -> Result<image::GrayImage, FfiError> {
+    match encoding {
+        CameraPreviewFrameEncoding::Jpeg => {
+            let decoded = image::load_from_memory(frame_bytes).map_err(|error| {
+                FfiError::from(eyre::eyre!("failed decoding camera frame: {error}"))
+            })?;
+            Ok(decoded.to_luma8())
+        }
+        CameraPreviewFrameEncoding::Rgb24 => {
+            let rgb = image::RgbImage::from_raw(width_px, height_px, frame_bytes.to_vec())
+                .ok_or_else(|| {
+                    FfiError::from(eyre::eyre!(
+                        "invalid rgb24 frame dimensions {}x{} for {} bytes",
+                        width_px,
+                        height_px,
+                        frame_bytes.len()
+                    ))
+                })?;
+            Ok(image::DynamicImage::ImageRgb8(rgb).to_luma8())
+        }
+    }
+}
+
+fn publish_qr_for_frame(
+    listener: &std::sync::Arc<dyn CameraQrEventListener>,
+    encoding: &CameraPreviewFrameEncoding,
+    width_px: u32,
+    height_px: u32,
+    frame_bytes: &[u8],
+) -> Result<(), FfiError> {
+    let grayscale = camera_frame_to_luma(encoding, width_px, height_px, frame_bytes)?;
+    let mut prepared = rqrr::PreparedImage::prepare(grayscale);
+    let grids = prepared.detect_grids();
+
+    let mut overlays = Vec::with_capacity(grids.len() + 1);
+    overlays.push(CameraOverlay::Grid);
+    for grid in &grids {
+        if let Some(bounds) = normalize_rect(width_px, height_px, &grid.bounds) {
+            overlays.push(CameraOverlay::QrBounds {
+                bounds,
+                frame_width_px: width_px,
+                frame_height_px: height_px,
+            });
+        }
+    }
+    listener.on_camera_qr_overlays_updated(overlays);
+
+    for grid in grids {
+        match grid.decode() {
+            Ok((_meta, decoded_text)) => listener.on_camera_qr_detected(decoded_text),
+            Err(error) => listener.on_camera_qr_error(format!("qr decode failed: {error}")),
+        }
+    }
+    Ok(())
+}
+
+#[uniffi::export]
+impl CameraQrAnalyzerFfi {
+    #[uniffi::constructor]
+    pub fn load() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            listener: std::sync::Mutex::new(None),
+        })
+    }
+
+    pub fn set_listener(&self, listener: std::sync::Arc<dyn CameraQrEventListener>) {
+        let mut guard = self
+            .listener
+            .lock()
+            .expect("camera qr listener mutex should not be poisoned");
+        *guard = Some(listener);
+    }
+
+    pub fn clear_listener(&self) {
+        let mut guard = self
+            .listener
+            .lock()
+            .expect("camera qr listener mutex should not be poisoned");
+        *guard = None;
+    }
+
+    pub fn submit_jpeg_frame(
+        &self,
+        width_px: u32,
+        height_px: u32,
+        frame_bytes: Vec<u8>,
+    ) -> Result<(), FfiError> {
+        let listener = {
+            let guard = self
+                .listener
+                .lock()
+                .expect("camera qr listener mutex should not be poisoned");
+            guard
+                .as_ref()
+                .map(std::sync::Arc::clone)
+                .ok_or_else(|| FfiError::from(eyre::eyre!("camera qr listener not initialized")))?
+        };
+
+        publish_qr_for_frame(
+            &listener,
+            &CameraPreviewFrameEncoding::Jpeg,
+            width_px,
+            height_px,
+            &frame_bytes,
+        )
+    }
+}
 #[derive(uniffi::Object)]
 pub struct CameraPreviewFfi {
     #[cfg(all(
@@ -40,10 +220,29 @@ pub struct CameraPreviewFfi {
     feature = "nokhwa",
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
-#[derive(Default)]
 struct DesktopCameraState {
     stream: Option<nokhwa::CallbackCamera>,
     latest_frame: std::sync::Arc<std::sync::Mutex<Option<CameraPreviewFrame>>>,
+    qr_listener:
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<dyn CameraQrEventListener>>>>,
+    qr_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    qr_last_decode_at: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+}
+
+#[cfg(all(
+    feature = "nokhwa",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+impl Default for DesktopCameraState {
+    fn default() -> Self {
+        Self {
+            stream: None,
+            latest_frame: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            qr_listener: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            qr_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            qr_last_decode_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
 }
 
 #[cfg(all(
@@ -143,6 +342,96 @@ impl CameraPreviewFfi {
         }
     }
 
+    pub fn supports_native_qr_analysis(&self) -> bool {
+        #[cfg(all(
+            feature = "nokhwa",
+            any(target_os = "linux", target_os = "macos", target_os = "windows")
+        ))]
+        {
+            true
+        }
+        #[cfg(not(all(
+            feature = "nokhwa",
+            any(target_os = "linux", target_os = "macos", target_os = "windows")
+        )))]
+        {
+            false
+        }
+    }
+
+    pub fn set_qr_listener(&self, listener: std::sync::Arc<dyn CameraQrEventListener>) {
+        #[cfg(all(
+            feature = "nokhwa",
+            any(target_os = "linux", target_os = "macos", target_os = "windows")
+        ))]
+        {
+            let state_guard = self
+                .state
+                .lock()
+                .expect("camera state mutex should not be poisoned");
+            let mut listener_guard = state_guard
+                .qr_listener
+                .lock()
+                .expect("qr listener mutex should not be poisoned");
+            *listener_guard = Some(listener);
+        }
+        #[cfg(not(all(
+            feature = "nokhwa",
+            any(target_os = "linux", target_os = "macos", target_os = "windows")
+        )))]
+        {
+            let _ = listener;
+        }
+    }
+
+    pub fn clear_qr_listener(&self) {
+        #[cfg(all(
+            feature = "nokhwa",
+            any(target_os = "linux", target_os = "macos", target_os = "windows")
+        ))]
+        {
+            let state_guard = self
+                .state
+                .lock()
+                .expect("camera state mutex should not be poisoned");
+            let mut listener_guard = state_guard
+                .qr_listener
+                .lock()
+                .expect("qr listener mutex should not be poisoned");
+            *listener_guard = None;
+        }
+    }
+
+    pub fn set_qr_analysis_enabled(&self, enabled: bool) {
+        #[cfg(all(
+            feature = "nokhwa",
+            any(target_os = "linux", target_os = "macos", target_os = "windows")
+        ))]
+        {
+            let state_guard = self
+                .state
+                .lock()
+                .expect("camera state mutex should not be poisoned");
+            state_guard
+                .qr_enabled
+                .store(enabled, std::sync::atomic::Ordering::Release);
+            if !enabled {
+                let mut last_decode_guard = state_guard
+                    .qr_last_decode_at
+                    .lock()
+                    .expect("qr decode timestamp mutex should not be poisoned");
+                *last_decode_guard = None;
+            }
+        }
+        #[cfg(not(all(
+            feature = "nokhwa",
+            any(target_os = "linux", target_os = "macos", target_os = "windows")
+        )))]
+        {
+            let _ = enabled;
+        }
+    }
+
     pub fn start_stream(
         &self,
         device_id: u32,
@@ -177,6 +466,9 @@ impl CameraPreviewFfi {
 
             let latest_frame = std::sync::Arc::clone(&state_guard.latest_frame);
             let _listener = std::sync::Arc::clone(&listener);
+            let qr_listener = std::sync::Arc::clone(&state_guard.qr_listener);
+            let qr_enabled = std::sync::Arc::clone(&state_guard.qr_enabled);
+            let qr_last_decode_at = std::sync::Arc::clone(&state_guard.qr_last_decode_at);
 
             let mut stream = nokhwa::CallbackCamera::new(
                 selected_info.index().clone(),
@@ -206,7 +498,53 @@ impl CameraPreviewFfi {
                     let mut latest_frame_guard = latest_frame
                         .lock()
                         .expect("latest frame mutex should not be poisoned");
-                    *latest_frame_guard = Some(frame);
+                    *latest_frame_guard = Some(frame.clone());
+                    drop(latest_frame_guard);
+                    _listener.on_camera_preview_frame(frame.clone());
+
+                    if !qr_enabled.load(std::sync::atomic::Ordering::Acquire) {
+                        return;
+                    }
+
+                    let should_decode_now = {
+                        let mut last_decode_guard = qr_last_decode_at
+                            .lock()
+                            .expect("qr decode timestamp mutex should not be poisoned");
+                        let now = std::time::Instant::now();
+                        let ready = match *last_decode_guard {
+                            Some(last) => {
+                                now.duration_since(last) >= std::time::Duration::from_millis(200)
+                            }
+                            None => true,
+                        };
+                        if ready {
+                            *last_decode_guard = Some(now);
+                        }
+                        ready
+                    };
+                    if !should_decode_now {
+                        return;
+                    }
+
+                    let listener_for_qr = {
+                        let listener_guard = qr_listener
+                            .lock()
+                            .expect("qr listener mutex should not be poisoned");
+                        listener_guard.as_ref().map(std::sync::Arc::clone)
+                    };
+
+                    if let Some(listener_for_qr) = listener_for_qr {
+                        if let Err(error) = publish_qr_for_frame(
+                            &listener_for_qr,
+                            &frame.encoding,
+                            frame.width_px,
+                            frame.height_px,
+                            &frame.frame_bytes,
+                        ) {
+                            listener_for_qr
+                                .on_camera_qr_error(format!("failed preparing qr frame: {error}"));
+                        }
+                    }
                 },
             )
             .map_err(|error| FfiError::from(eyre::eyre!("failed creating stream: {error}")))?;
@@ -251,6 +589,9 @@ impl CameraPreviewFfi {
                 .lock()
                 .expect("latest frame mutex should not be poisoned");
             *latest_frame_guard = None;
+            state_guard
+                .qr_enabled
+                .store(false, std::sync::atomic::Ordering::Release);
             Ok(())
         }
 

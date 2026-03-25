@@ -6,24 +6,11 @@ use crate::sync::store::SyncStoreHandle;
 use crate::sync::PartitionAccessPolicy;
 
 use irpc::WithChannels;
-use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 pub struct SyncNodeHandle {
-    msg_tx: mpsc::UnboundedSender<SyncNodeMsg>,
     rpc_tx: tokio::sync::mpsc::Sender<PartitionSyncRpcMessage>,
     rpc_client: irpc::Client<PartitionSyncRpc>,
-}
-
-enum SyncNodeMsg {
-    RegisterPeer {
-        peer: PeerKey,
-        resp: oneshot::Sender<Res<()>>,
-    },
-    UnregisterPeer {
-        peer: PeerKey,
-        resp: oneshot::Sender<Res<()>>,
-    },
 }
 
 impl SyncNodeHandle {
@@ -33,28 +20,6 @@ impl SyncNodeHandle {
 
     pub fn local_sender(&self) -> tokio::sync::mpsc::Sender<PartitionSyncRpcMessage> {
         self.rpc_tx.clone()
-    }
-
-    pub async fn register_local_peer(&self, peer: PeerKey) -> Res<()> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        self.msg_tx
-            .send(SyncNodeMsg::RegisterPeer {
-                peer,
-                resp: resp_tx,
-            })
-            .wrap_err(ERROR_ACTOR)?;
-        resp_rx.await.wrap_err(ERROR_CHANNEL)?
-    }
-
-    pub async fn unregister_local_peer(&self, peer: PeerKey) -> Res<()> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        self.msg_tx
-            .send(SyncNodeMsg::UnregisterPeer {
-                peer,
-                resp: resp_tx,
-            })
-            .wrap_err(ERROR_ACTOR)?;
-        resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
 }
 
@@ -82,7 +47,6 @@ pub async fn spawn_sync_node(
     sync_store: SyncStoreHandle,
     access_policy: Arc<dyn PartitionAccessPolicy>,
 ) -> Res<(SyncNodeHandle, SyncNodeStopToken)> {
-    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
     let (rpc_tx, mut rpc_rx) = tokio::sync::mpsc::channel(1024);
     let rpc_client = irpc::Client::<PartitionSyncRpc>::local(rpc_tx.clone());
 
@@ -103,21 +67,6 @@ pub async fn spawn_sync_node(
                 tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => break,
-                    msg = msg_rx.recv() => {
-                        let Some(msg) = msg else {
-                            break;
-                        };
-                        match msg {
-                            SyncNodeMsg::RegisterPeer { peer, resp } => {
-                                let out = worker.sync_store.register_peer(peer).await;
-                                resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-                            }
-                            SyncNodeMsg::UnregisterPeer { peer, resp } => {
-                                let out = worker.sync_store.unregister_peer(peer).await;
-                                resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-                            }
-                        }
-                    }
                     msg = rpc_rx.recv() => {
                         let Some(msg) = msg else {
                             break;
@@ -131,11 +80,7 @@ pub async fn spawn_sync_node(
     };
     let join_handle = tokio::spawn(async { fut.await.unwrap() });
     Ok((
-        SyncNodeHandle {
-            msg_tx,
-            rpc_tx,
-            rpc_client,
-        },
+        SyncNodeHandle { rpc_tx, rpc_client },
         SyncNodeStopToken {
             cancel_token,
             subscription_tasks,
@@ -292,14 +237,14 @@ impl SyncNodeWorker {
     async fn ensure_known_peer(&self, peer: &PeerKey) -> Result<(), PartitionSyncError> {
         let known = self
             .sync_store
-            .is_peer_registered(peer.clone())
+            .is_peer_allowed(peer.clone())
             .await
             .map_err(map_store_err)?;
         if known {
             return Ok(());
         }
         Err(PartitionSyncError::Internal {
-            message: format!("peer {peer:?} is not registered in sync node"),
+            message: format!("peer {peer:?} is not allowed in sync node"),
         })
     }
 }

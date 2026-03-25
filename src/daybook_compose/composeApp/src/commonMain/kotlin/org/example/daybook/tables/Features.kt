@@ -7,6 +7,7 @@ import androidx.compose.material.icons.automirrored.filled.LibraryBooks
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material3.Icon
@@ -89,7 +90,10 @@ fun rememberSidebarFeatures(navController: NavHostController): List<FeatureItem>
  * For compact layout: everything except Home, Capture, Documents goes in the menu.
  */
 @Composable
-fun rememberMenuFeatures(navController: NavHostController): List<FeatureItem> {
+fun rememberMenuFeatures(
+    navController: NavHostController,
+    onShowCloneShare: () -> Unit = {}
+): List<FeatureItem> {
     val scope = rememberCoroutineScope()
     val allFeatures = rememberAllFeatures(navController)
 
@@ -101,6 +105,11 @@ fun rememberMenuFeatures(navController: NavHostController): List<FeatureItem> {
 
     return otherFeatures +
         listOf(
+            FeatureItem(FeatureKeys.CloneShare, { Icon(Icons.Default.QrCode2, contentDescription = "Clone") }, "Clone") {
+                scope.launch {
+                    onShowCloneShare()
+                }
+            },
             FeatureItem(FeatureKeys.Settings, { Icon(Icons.Default.Settings, contentDescription = "Settings") }, "Settings") {
                 scope.launch {
                     navController.navigate(AppScreens.Settings.name)

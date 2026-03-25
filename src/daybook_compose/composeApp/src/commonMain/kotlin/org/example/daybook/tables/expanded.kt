@@ -116,12 +116,13 @@ fun ExpandedLayout(
     modifier: Modifier = Modifier,
     navController: NavHostController,
     extraAction: (() -> Unit)? = null,
-    contentType: DaybookContentType
+    contentType: DaybookContentType,
+    onShowCloneShare: () -> Unit = {}
 ) {
     var showFeaturesMenu by remember { mutableStateOf(false) }
     val navBarFeatures = rememberNavBarFeatures(navController)
     val sidebarFeatures = rememberSidebarFeatures(navController)
-    val menuFeatures = rememberMenuFeatures(navController)
+    val menuFeatures = rememberMenuFeatures(navController, onShowCloneShare = onShowCloneShare)
     val scope = rememberCoroutineScope()
 
     // Tables ViewModel

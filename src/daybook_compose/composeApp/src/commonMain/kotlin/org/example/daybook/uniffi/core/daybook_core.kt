@@ -1629,6 +1629,8 @@ public object FfiConverterTypeFacetDisplayHint: FfiConverterRustBuffer<FacetDisp
 data class KnownRepoEntry (
     var `id`: kotlin.String
     , 
+    var `name`: kotlin.String
+    , 
     var `path`: kotlin.String
     , 
     var `createdAtUnixSecs`: kotlin.Long
@@ -1652,6 +1654,7 @@ public object FfiConverterTypeKnownRepoEntry: FfiConverterRustBuffer<KnownRepoEn
         return KnownRepoEntry(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterLong.read(buf),
             FfiConverterLong.read(buf),
         )
@@ -1659,6 +1662,7 @@ public object FfiConverterTypeKnownRepoEntry: FfiConverterRustBuffer<KnownRepoEn
 
     override fun allocationSize(value: KnownRepoEntry) = (
             FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`) +
             FfiConverterString.allocationSize(value.`path`) +
             FfiConverterLong.allocationSize(value.`createdAtUnixSecs`) +
             FfiConverterLong.allocationSize(value.`lastOpenedAtUnixSecs`)
@@ -1666,6 +1670,7 @@ public object FfiConverterTypeKnownRepoEntry: FfiConverterRustBuffer<KnownRepoEn
 
     override fun write(value: KnownRepoEntry, buf: ByteBuffer) {
             FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
             FfiConverterString.write(value.`path`, buf)
             FfiConverterLong.write(value.`createdAtUnixSecs`, buf)
             FfiConverterLong.write(value.`lastOpenedAtUnixSecs`, buf)

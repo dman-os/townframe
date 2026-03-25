@@ -63,21 +63,6 @@ jobs:
         uses: mxschmitt/action-tmate@v3
         with:
           detached: true
-
-      - name: remove unused files
-        # based on https://dev.to/mathio/squeezing-disk-space-from-github-actions-runners-an-engineers-guide-3pjg
-        run: |
-          sudo rm -rf /usr/lib/jvm
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/julia*
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /opt/microsoft /opt/google
-          sudo rm -rf /opt/az
-          sudo rm -rf /usr/local/share/powershell
-          # sudo rm -rf /opt/hostedtoolcache
       - uses: actions/checkout@v4
       - id: meta
         name: resolve release metadata
@@ -335,6 +320,8 @@ jobs:
 
       - uses: DeterminateSystems/flakehub-cache-action@v3
 
+      - uses: denoland/setup-deno@v2
+
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -354,7 +341,7 @@ jobs:
 
       - name: build android apk
         run: |
-          nix develop .#ci-android --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew $DAYBOOK_ANDROID_GRADLE_TASK -PdaybookProfile=$DAYBOOK_COMPOSE_PROFILE --no-daemon --no-configuration-cache'
+          nix develop .#ci-android --command bash -lc 'export PROTOC="$(command -v protoc)"; deno run -A ./x/build-a-dayb.ts'
 
       - id: archive-android
         name: archive android artifacts

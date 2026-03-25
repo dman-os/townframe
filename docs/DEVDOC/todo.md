@@ -23,6 +23,7 @@
 
 ## Stack
 
+- [ ] Sync panel
 - [ ] P2P
   - [x] iroh
   - [ ] better URLs
@@ -83,18 +84,18 @@
 - [ ] /commands
 - [ ] Grouped facets `Body { order: ["db://self/facet", ["db://self/facet2", "db://self/facet2], ]}`
 - [ ] Avoid automerge perf footguns
-  - [ ] fork_at
+  - [x] fork_at
     - We don't need to use fork_at for ReadDoc
       - Does autosurgeon support this?
   - [ ] get_changes
 - [ ] Adopt an rust actor framework
-  - [ ] IRPC!
+  - [x] IRPC!
   - [ ] Consider futures-signals
 - [ ] Tutorial
 - [ ] CI/CD
   - [ ] Kotlin tests
   - [ ] Version tagging and releases
-  - [ ] Continuius builds on push to main
+  - [x] Continuius builds on push to main
   - [ ] Publish
     - [ ] Docker image
     - [ ] WASM OCI
@@ -107,7 +108,7 @@
 - [ ] sqlite
   - [ ] SQL table schema/data update path
   - [ ] Replace sqlite-vec
-- [ ] Replace Path with camino at certain places
+- [x] Replace Path with camino at certain places
 - [ ] Explore multi doc drawer
   - [ ] Drawer doc migration where a drawer is marked as deprecated and all devices that have seen it must merge it into the active docs. This allows eventually consistent garbage collection
 - [ ] Redirects/Docmerging/Redactions
@@ -180,7 +181,7 @@
     - [ ] https://daybook.com (taken :/)
     - [ ] https://townframe.com (taken :/)
     - [ ] https://db.tf (not avail :/)
-    - [ ] https://daybook.tf
+    - [ ] https://daybook.tf (need to be french citizen??)
     - [ ] https://ton.tf (taken :/)
     - [ ] https://ton.app (taken :/)
       - [ ] https://mother.ton.app

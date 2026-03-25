@@ -148,64 +148,56 @@ pub async fn spawn_switch_worker(
         predicate_resolved: HashMap::new(),
     };
 
-    let events = worker.rt.plugs_repo.events_for_init().await?;
-    for event in events {
-        let event = Arc::new(event);
-        worker
-            .track_event_heads(&SwitchEvent::Plugs(Arc::clone(&event)))
-            .await
-            .unwrap_or_log();
-        worker
-            .dispatch_to_listeners(&SwitchEvent::Plugs(event))
-            .await
-            .unwrap_or_log();
-    }
-
-    let events = worker.rt.drawer.events_for_init().await?;
-    for event in events {
-        let event = Arc::new(event);
-        worker
-            .track_event_heads(&SwitchEvent::Drawer(Arc::clone(&event)))
-            .await
-            .unwrap_or_log();
-        worker
-            .dispatch_to_listeners(&SwitchEvent::Drawer(event))
-            .await
-            .unwrap_or_log();
-    }
-
-    let events = worker.rt.dispatch_repo.events_for_init().await?;
-    for event in events {
-        let event = Arc::new(event);
-        worker
-            .track_event_heads(&SwitchEvent::Dispatch(Arc::clone(&event)))
-            .await
-            .unwrap_or_log();
-        worker
-            .dispatch_to_listeners(&SwitchEvent::Dispatch(event))
-            .await
-            .unwrap_or_log();
-    }
-
-    let events = worker.rt.config_repo.events_for_init().await?;
-    for event in events {
-        let event = Arc::new(event);
-        worker
-            .track_event_heads(&SwitchEvent::Config(Arc::clone(&event)))
-            .await
-            .unwrap_or_log();
-        worker
-            .dispatch_to_listeners(&SwitchEvent::Config(event))
-            .await
-            .unwrap_or_log();
-    }
-
     let cancel_token = tokio_util::sync::CancellationToken::new();
     let rt_cancel_token = worker.rt.cancel_token.clone();
     let fut = {
         let cancel_token = cancel_token.clone();
         let rt_cancel_token = rt_cancel_token.clone();
         async move {
+            let events = worker.rt.plugs_repo.events_for_init().await?;
+            for event in events {
+                let event = Arc::new(event);
+                worker
+                    .track_event_heads(&SwitchEvent::Plugs(Arc::clone(&event)))
+                    .await?;
+                worker
+                    .dispatch_to_listeners(&SwitchEvent::Plugs(event))
+                    .await?;
+            }
+
+            let events = worker.rt.drawer.events_for_init().await?;
+            for event in events {
+                let event = Arc::new(event);
+                worker
+                    .track_event_heads(&SwitchEvent::Drawer(Arc::clone(&event)))
+                    .await?;
+                worker
+                    .dispatch_to_listeners(&SwitchEvent::Drawer(event))
+                    .await?;
+            }
+
+            let events = worker.rt.dispatch_repo.events_for_init().await?;
+            for event in events {
+                let event = Arc::new(event);
+                worker
+                    .track_event_heads(&SwitchEvent::Dispatch(Arc::clone(&event)))
+                    .await?;
+                worker
+                    .dispatch_to_listeners(&SwitchEvent::Dispatch(event))
+                    .await?;
+            }
+
+            let events = worker.rt.config_repo.events_for_init().await?;
+            for event in events {
+                let event = Arc::new(event);
+                worker
+                    .track_event_heads(&SwitchEvent::Config(Arc::clone(&event)))
+                    .await?;
+                worker
+                    .dispatch_to_listeners(&SwitchEvent::Config(event))
+                    .await?;
+            }
+
             loop {
                 tokio::select! {
                     biased;

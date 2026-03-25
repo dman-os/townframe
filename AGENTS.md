@@ -29,6 +29,10 @@
   - This is especially critical in Kotlin or UI code. 
     - If an error occurs that can't be handled, it should crash the program or show a toast if it's not critical. 
   - It's very hard to imagine cases where this is not true.
+  - Unless a tokio task is expected to fail and has a channel for reporting failures, the last handler should call `.unwrap` on any unexpected errors at the end.
+    - Think a pattern like `let fut = async {/*body*/ eyre::Ok(()) }; tokio::spawn(async { fut.await.unwrap() })`
+    - We have a panic handler that will bring down the whole process when tasks panic.
+    - This ensures that we don't hide task failures until the join handler is seen at shutdown and so and so.
   - Another case where this is critical, don't ignore channel send errors in Rust.
     - Unless channel closure is a signal itself to the task to close, shutdown order should ascertain channels are always open.
     - Shutdown order is to be reverse of construction of order which means the entity that constructs the channel will always close after it's child.
@@ -116,4 +120,4 @@ Flag it for removal.
 Are tests repeating too much setup code?
 Consider using TDD or common cleanup code.
 
-Tools like snapshot tests, TDD and the macros for TDD found in the repo can help the in the longevity of a tests usefulness.
+Tools like snapshot tests, TDD and the macros for TDD found in the repo can help the in the longevity of a test's usefulness.

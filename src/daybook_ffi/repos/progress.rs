@@ -10,6 +10,7 @@ use daybook_core::progress::{
 pub struct ProgressRepoFfi {
     fcx: SharedFfiCtx,
     pub repo: Arc<ProgressRepo>,
+    stop_token: tokio::sync::Mutex<Option<daybook_core::repos::RepoStopToken>>,
 }
 
 impl daybook_core::repos::Repo for ProgressRepoFfi {
@@ -31,11 +32,22 @@ impl ProgressRepoFfi {
     #[uniffi::constructor]
     #[tracing::instrument(err, skip(fcx))]
     pub async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
-        let repo = fcx
+        let (repo, stop_token) = fcx
             .do_on_rt(ProgressRepo::boot(fcx.rcx.sql.db_pool.clone()))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
-        Ok(Arc::new(Self { fcx, repo }))
+        Ok(Arc::new(Self {
+            fcx,
+            repo,
+            stop_token: Some(stop_token).into(),
+        }))
+    }
+
+    pub async fn stop(&self) -> Result<(), FfiError> {
+        if let Some(stop_token) = self.stop_token.lock().await.take() {
+            stop_token.stop().await?;
+        }
+        Ok(())
     }
 
     pub async fn upsert_task(

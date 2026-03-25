@@ -17,6 +17,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,18 +29,27 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LargeTopAppBar
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -48,6 +58,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -61,19 +72,29 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import daybook.composeapp.generated.resources.Res
 import daybook.composeapp.generated.resources.compose_multiplatform
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import io.github.vinceglb.filekit.dialogs.compose.rememberDirectoryPickerLauncher
 import io.github.vinceglb.filekit.path
 import org.example.daybook.capture.CameraCaptureContext
 import org.example.daybook.capture.ProvideCameraCaptureContext
+import org.example.daybook.capture.data.CameraOverlay
+import org.example.daybook.capture.data.CameraPreviewQrBridge
+import org.example.daybook.capture.data.CameraQrOverlayBridge
 import org.example.daybook.capture.screens.CaptureScreen
+import org.example.daybook.capture.ui.DaybookCameraViewport
 import org.example.daybook.drawer.DrawerScreen
 import org.example.daybook.progress.ProgressList
+import org.example.daybook.progress.ProgressAmountBlock
 import org.example.daybook.settings.SettingsScreen
 import org.example.daybook.tables.CompactLayout
 import org.example.daybook.tables.ExpandedLayout
@@ -81,18 +102,23 @@ import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
 import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.CameraPreviewFfi
+import org.example.daybook.uniffi.CameraQrAnalyzerFfi
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.DispatchRepoFfi
 import org.example.daybook.uniffi.FfiCtx
 import org.example.daybook.uniffi.FfiException
-import org.example.daybook.uniffi.AppFfiCtx
 import org.example.daybook.uniffi.ProgressRepoFfi
 import org.example.daybook.uniffi.RtFfi
+import org.example.daybook.uniffi.SyncRepoFfi
+import org.example.daybook.uniffi.CloneBootstrapInfo
 import org.example.daybook.uniffi.TablesEventListener
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.KnownRepoEntry
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.uniffi.core.Panel
+import org.example.daybook.uniffi.core.ProgressTask
+import org.example.daybook.uniffi.core.ProgressTaskState
+import org.example.daybook.uniffi.core.ProgressUpdateDeets
 import org.example.daybook.uniffi.core.Tab
 import org.example.daybook.uniffi.core.Table
 import org.example.daybook.uniffi.core.TablesEvent
@@ -119,10 +145,22 @@ data class PermissionsContext(
     val hasNotifications: Boolean = false,
     val hasMicrophone: Boolean = false,
     val hasOverlay: Boolean = false,
-    val requestAllPermissions: () -> Unit = {}
+    val hasStorageRead: Boolean = false,
+    val hasStorageWrite: Boolean = false,
+    val requestPermissions: (PermissionRequest) -> Unit = {}
 ) {
-    val hasAll = hasCamera and hasNotifications and hasMicrophone and hasOverlay
+    val hasAll =
+        hasCamera and hasNotifications and hasMicrophone and hasOverlay and hasStorageRead and hasStorageWrite
 }
+
+data class PermissionRequest(
+    val camera: Boolean = false,
+    val notifications: Boolean = false,
+    val microphone: Boolean = false,
+    val overlay: Boolean = false,
+    val storageRead: Boolean = false,
+    val storageWrite: Boolean = false
+)
 
 data class AppContainer(
     val ffiCtx: FfiCtx,
@@ -134,6 +172,7 @@ data class AppContainer(
     val plugsRepo: org.example.daybook.uniffi.PlugsRepoFfi,
     val configRepo: ConfigRepoFfi,
     val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
+    val syncRepo: SyncRepoFfi,
     val cameraPreviewFfi: CameraPreviewFfi
 )
 
@@ -484,6 +523,13 @@ class TablesViewModel(val tablesRepo: TablesRepoFfi) : ViewModel() {
     }
 }
 
+private suspend fun warmUpTablesRepo(tablesRepo: TablesRepoFfi) {
+    tablesRepo.listWindows()
+    tablesRepo.listTabs()
+    tablesRepo.listPanels()
+    tablesRepo.listTables()
+}
+
 @Composable
 @Preview
 fun App(
@@ -492,87 +538,174 @@ fun App(
     extraAction: (() -> Unit)? = null,
     navController: NavHostController = rememberNavController()
 ) {
+    val permCtx = LocalPermCtx.current
     var initAttempt by remember { mutableStateOf(0) }
     var initState by remember { mutableStateOf<AppInitState>(AppInitState.Loading) }
     var pendingOpenRepoPath by remember { mutableStateOf<String?>(null) }
+    var cloneUiState by remember { mutableStateOf<CloneUiState?>(null) }
+    var createRepoUiState by remember { mutableStateOf<CreateRepoUiState?>(null) }
+    var cloneSourceUrlPendingOpen by remember { mutableStateOf<String?>(null) }
+    var cloneInitRequest by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var createRepoInitRequest by remember { mutableStateOf<String?>(null) }
+    var selectedWelcomeRepo by remember { mutableStateOf<KnownRepoEntry?>(null) }
+    var pendingForgetRepoId by remember { mutableStateOf<String?>(null) }
+    val cloneCameraPreviewFfi = remember { CameraPreviewFfi.load() }
+    val ffiServices = rememberAppFfiServices()
+
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose {
+            cloneCameraPreviewFfi.close()
+        }
+    }
 
     LaunchedEffect(initAttempt) {
         initState = AppInitState.Loading
+        selectedWelcomeRepo = null
         try {
-            val globalsCtx = AppFfiCtx.init()
-            val repoConfig = globalsCtx.getRepoConfig()
+            val repoConfig = ffiServices.getRepoConfig()
             val knownRepos = repoConfig.knownRepos
             val lastUsedRepo =
                 repoConfig.lastUsedRepoId?.let { lastUsedRepoId ->
                     knownRepos.find { repo -> repo.id == lastUsedRepoId }
                 }
-            val shouldOpenLastUsedRepo = lastUsedRepo != null && globalsCtx.isRepoUsable(lastUsedRepo.path)
-            globalsCtx.close()
+            val shouldOpenLastUsedRepo =
+                if (lastUsedRepo == null) {
+                    false
+                } else {
+                    val lastUsedRepoPath = lastUsedRepo.path
+                    ffiServices.isRepoUsable(lastUsedRepoPath)
+                }
 
-            if (shouldOpenLastUsedRepo) {
+            if (shouldOpenLastUsedRepo && lastUsedRepo != null) {
                 pendingOpenRepoPath = lastUsedRepo.path
                 initState = AppInitState.OpeningRepo(repoPath = lastUsedRepo.path)
             } else {
                 initState = AppInitState.Welcome(repos = knownRepos)
             }
         } catch (throwable: Throwable) {
+            if (throwable is CancellationException) throw throwable
+            cloneSourceUrlPendingOpen = null
             initState = AppInitState.Error(throwable)
         }
     }
 
     LaunchedEffect(pendingOpenRepoPath) {
         val repoPath = pendingOpenRepoPath ?: return@LaunchedEffect
+        var fcx: FfiCtx? = null
+        var tablesRepo: TablesRepoFfi? = null
+        var blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi? = null
+        var plugsRepo: org.example.daybook.uniffi.PlugsRepoFfi? = null
+        var drawerRepo: DrawerRepoFfi? = null
+        var configRepo: ConfigRepoFfi? = null
+        var dispatchRepo: DispatchRepoFfi? = null
+        var progressRepo: ProgressRepoFfi? = null
+        var syncRepo: SyncRepoFfi? = null
+        var rtFfi: RtFfi? = null
+        var cameraPreviewFfi: CameraPreviewFfi? = null
         try {
             initState = AppInitState.OpeningRepo(repoPath = repoPath)
-            val gcx = AppFfiCtx.init()
-            val fcx = FfiCtx.init(repoPath, gcx)
-            gcx.close()
-            val tablesRepo = TablesRepoFfi.load(fcx = fcx)
-            val blobsRepo =
+            fcx = ffiServices.openRepoFfiCtx(repoPath)
+            val fcxReady = fcx ?: error("ffi context initialization failed")
+            tablesRepo = TablesRepoFfi.load(fcx = fcxReady)
+            blobsRepo =
                 org.example.daybook.uniffi.BlobsRepoFfi
-                    .load(fcx = fcx)
-            val plugsRepo =
+                    .load(fcx = fcxReady)
+            plugsRepo =
                 org.example.daybook.uniffi.PlugsRepoFfi
-                    .load(fcx = fcx, blobsRepo = blobsRepo)
-            val drawerRepo = DrawerRepoFfi.load(fcx = fcx, plugsRepo = plugsRepo)
-            val configRepo = ConfigRepoFfi.load(fcx = fcx, plugRepo = plugsRepo)
-            val dispatchRepo = DispatchRepoFfi.load(fcx = fcx)
-            val progressRepo = ProgressRepoFfi.load(fcx = fcx)
-            val rtFfi =
+                    .load(fcx = fcxReady, blobsRepo = blobsRepo ?: error("blobs repo failed to load"))
+            drawerRepo =
+                DrawerRepoFfi.load(fcx = fcxReady, plugsRepo = plugsRepo ?: error("plugs repo failed to load"))
+            configRepo =
+                ConfigRepoFfi.load(fcx = fcxReady, plugRepo = plugsRepo ?: error("plugs repo failed to load"))
+            dispatchRepo = DispatchRepoFfi.load(fcx = fcxReady)
+            progressRepo = ProgressRepoFfi.load(fcx = fcxReady)
+            syncRepo =
+                SyncRepoFfi.load(
+                    fcx = fcxReady,
+                    configRepo = configRepo ?: error("config repo failed to load"),
+                    blobsRepo = blobsRepo ?: error("blobs repo failed to load"),
+                    drawerRepo = drawerRepo ?: error("drawer repo failed to load"),
+                    progressRepo = progressRepo ?: error("progress repo failed to load")
+                )
+            rtFfi =
                 RtFfi.load(
-                    fcx = fcx,
-                    drawerRepo = drawerRepo,
-                    plugsRepo = plugsRepo,
-                    dispatchRepo = dispatchRepo,
-                    progressRepo = progressRepo,
-                    blobsRepo = blobsRepo,
-                    configRepo = configRepo,
+                    fcx = fcxReady,
+                    drawerRepo = drawerRepo ?: error("drawer repo failed to load"),
+                    plugsRepo = plugsRepo ?: error("plugs repo failed to load"),
+                    dispatchRepo = dispatchRepo ?: error("dispatch repo failed to load"),
+                    progressRepo = progressRepo ?: error("progress repo failed to load"),
+                    blobsRepo = blobsRepo ?: error("blobs repo failed to load"),
+                    configRepo = configRepo ?: error("config repo failed to load"),
                     deviceId = "compose-client"
                 )
-            val cameraPreviewFfi = CameraPreviewFfi.load()
-
-            val tablesViewModel = TablesViewModel(tablesRepo)
-            tablesViewModel.initializeFirstTime()
+            cameraPreviewFfi = CameraPreviewFfi.load()
+            warmUpTablesRepo(tablesRepo ?: error("tables repo failed to load"))
 
             initState =
                 AppInitState.Ready(
                     AppContainer(
-                        ffiCtx = fcx,
-                        drawerRepo = drawerRepo,
-                        tablesRepo = tablesRepo,
-                        dispatchRepo = dispatchRepo,
-                        progressRepo = progressRepo,
-                        rtFfi = rtFfi,
-                        plugsRepo = plugsRepo,
-                        configRepo = configRepo,
-                        blobsRepo = blobsRepo,
-                        cameraPreviewFfi = cameraPreviewFfi
+                        ffiCtx = fcxReady,
+                        drawerRepo = drawerRepo ?: error("drawer repo failed to load"),
+                        tablesRepo = tablesRepo ?: error("tables repo failed to load"),
+                        dispatchRepo = dispatchRepo ?: error("dispatch repo failed to load"),
+                        progressRepo = progressRepo ?: error("progress repo failed to load"),
+                        rtFfi = rtFfi ?: error("rt ffi failed to load"),
+                        plugsRepo = plugsRepo ?: error("plugs repo failed to load"),
+                        configRepo = configRepo ?: error("config repo failed to load"),
+                        blobsRepo = blobsRepo ?: error("blobs repo failed to load"),
+                        syncRepo = syncRepo ?: error("sync repo failed to load"),
+                        cameraPreviewFfi = cameraPreviewFfi ?: error("camera preview ffi failed to load")
                     )
                 )
+            tablesRepo = null
+            blobsRepo = null
+            plugsRepo = null
+            drawerRepo = null
+            configRepo = null
+            dispatchRepo = null
+            progressRepo = null
+            syncRepo = null
+            rtFfi = null
+            cameraPreviewFfi = null
+            fcx = null
         } catch (throwable: Throwable) {
+            if (throwable is CancellationException) throw throwable
+            cameraPreviewFfi?.close()
+            try {
+                val syncRepoRef = syncRepo
+                if (syncRepoRef != null) {
+                    syncRepoRef.stop()
+                }
+            } catch (cleanupError: Throwable) {
+                throwable.addSuppressed(cleanupError)
+            }
+            syncRepo?.close()
+            progressRepo?.close()
+            dispatchRepo?.close()
+            rtFfi?.close()
+            drawerRepo?.close()
+            tablesRepo?.close()
+            plugsRepo?.close()
+            configRepo?.close()
+            blobsRepo?.close()
+            fcx?.close()
+            cloneSourceUrlPendingOpen = null
             initState = AppInitState.Error(throwable)
         } finally {
             pendingOpenRepoPath = null
+        }
+    }
+
+    LaunchedEffect(pendingForgetRepoId) {
+        val repoId = pendingForgetRepoId ?: return@LaunchedEffect
+        try {
+            val repoConfig = ffiServices.forgetKnownRepo(repoId)
+            selectedWelcomeRepo = null
+            initState = AppInitState.Welcome(repos = repoConfig.knownRepos)
+        } catch (throwable: Throwable) {
+            initState = AppInitState.Error(throwable)
+        } finally {
+            pendingForgetRepoId = null
         }
     }
 
@@ -583,16 +716,43 @@ fun App(
             }
 
             is AppInitState.Welcome -> {
-                WelcomeScreen(
+                WelcomeFlowNavHost(
                     repos = state.repos,
-                    onOpenRepo = { selectedRepoPath ->
-                        pendingOpenRepoPath = selectedRepoPath
-                    }
+                    permCtx = permCtx,
+                    cameraPreviewFfi = cloneCameraPreviewFfi,
+                    selectedWelcomeRepo = selectedWelcomeRepo,
+                    cloneUiState = cloneUiState,
+                    createRepoUiState = createRepoUiState,
+                    cloneSourceUrlPendingOpen = cloneSourceUrlPendingOpen,
+                    cloneInitRequest = cloneInitRequest,
+                    createRepoInitRequest = createRepoInitRequest,
+                    pendingForgetRepoId = pendingForgetRepoId,
+                    onSelectedWelcomeRepoChange = { selectedWelcomeRepo = it },
+                    onCloneUiStateChange = { cloneUiState = it },
+                    onCreateRepoUiStateChange = { createRepoUiState = it },
+                    onCloneSourceUrlPendingOpenChange = { cloneSourceUrlPendingOpen = it },
+                    onCloneInitRequestChange = { cloneInitRequest = it },
+                    onCreateRepoInitRequestChange = { createRepoInitRequest = it },
+                    onPendingOpenRepoPath = { pendingOpenRepoPath = it },
+                    onPendingForgetRepoId = { pendingForgetRepoId = it }
                 )
             }
 
             is AppInitState.OpeningRepo -> {
-                LoadingScreen(message = "Opening repo: ${state.repoPath}")
+                val syncingState = cloneUiState as? CloneUiState.Syncing
+                if (syncingState != null) {
+                    CloneSyncScreen(
+                        progressRepo = null,
+                        state = syncingState,
+                        onSyncInBackground = {},
+                        onRetry = {
+                            cloneSourceUrlPendingOpen = syncingState.sourceUrl
+                            pendingOpenRepoPath = state.repoPath
+                        }
+                    )
+                } else {
+                    LoadingScreen(message = "Opening repo: ${state.repoPath}")
+                }
             }
 
             is AppInitState.Error -> {
@@ -609,6 +769,12 @@ fun App(
                 // Ensure FFI resources are closed when the composition leaves
                 androidx.compose.runtime.DisposableEffect(appContainer) {
                     onDispose {
+                        runBlocking(Dispatchers.IO) {
+                            runCatching { appContainer.syncRepo.stop() }
+                                .onFailure { error -> println("sync repo stop failed: $error") }
+                            runCatching { appContainer.progressRepo.stop() }
+                                .onFailure { error -> println("progress repo stop failed: $error") }
+                        }
                         appContainer.drawerRepo.close()
                         appContainer.tablesRepo.close()
                         appContainer.dispatchRepo.close()
@@ -616,6 +782,8 @@ fun App(
                         appContainer.rtFfi.close()
                         appContainer.plugsRepo.close()
                         appContainer.configRepo.close()
+                        appContainer.blobsRepo.close()
+                        appContainer.syncRepo.close()
                         appContainer.cameraPreviewFfi.close()
                         appContainer.ffiCtx.close()
                     }
@@ -624,21 +792,84 @@ fun App(
                 CompositionLocalProvider(
                     LocalContainer provides appContainer
                 ) {
-                    // Provide camera capture context for coordination between camera and bottom bar
-                    val cameraCaptureContext = remember { CameraCaptureContext() }
-                    val chromeStateManager = remember { ChromeStateManager() }
-                    ProvideCameraCaptureContext(cameraCaptureContext) {
-                        CompositionLocalProvider(
-                            LocalChromeStateManager provides chromeStateManager
-                        ) {
-                            AdaptiveAppLayout(
-                                modifier = surfaceModifier,
-                                navController = navController,
-                                extraAction = extraAction
-                            )
+                    val syncingState = cloneUiState as? CloneUiState.Syncing
+                    if (syncingState != null) {
+                        CloneSyncScreen(
+                            progressRepo = appContainer.progressRepo,
+                            state = syncingState,
+                            onSyncInBackground = {
+                                if (syncingState.initialSyncComplete) {
+                                    cloneUiState = null
+                                }
+                            },
+                            onRetry = {
+                                cloneSourceUrlPendingOpen = syncingState.sourceUrl
+                            }
+                        )
+                    } else {
+                        // Provide camera capture context for coordination between camera and bottom bar
+                        val cameraCaptureContext = remember { CameraCaptureContext() }
+                        val chromeStateManager = remember { ChromeStateManager() }
+                        ProvideCameraCaptureContext(cameraCaptureContext) {
+                            CompositionLocalProvider(
+                                LocalChromeStateManager provides chromeStateManager
+                            ) {
+                                val bigDialogState = remember { BigDialogState() }
+                                AdaptiveAppLayout(
+                                    modifier = surfaceModifier,
+                                    navController = navController,
+                                    extraAction = extraAction,
+                                    bigDialogState = bigDialogState
+                                )
+                            }
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // FIXME: does this really need to live at the top level App composable??
+    LaunchedEffect(initState, cloneSourceUrlPendingOpen) {
+        val ready = initState as? AppInitState.Ready ?: return@LaunchedEffect
+        val sourceUrl = cloneSourceUrlPendingOpen ?: return@LaunchedEffect
+        cloneUiState =
+            CloneUiState.Syncing(
+                sourceUrl = sourceUrl,
+                initialSyncComplete = false,
+                phaseMessage = "Pulling required docs…",
+                errorMessage = null
+            )
+        try {
+            ready.container.syncRepo.connectUrl(sourceUrl)
+            val current = cloneUiState as? CloneUiState.Syncing
+            if (current != null && current.sourceUrl == sourceUrl) {
+                cloneUiState =
+                    current.copy(
+                        initialSyncComplete = true,
+                        phaseMessage = "Required docs synced. Remaining sync is running.",
+                        errorMessage = null
+                    )
+            }
+        } catch (error: Throwable) {
+            // FIXME: connect URL goes through FFI, does it also
+            // drop the rust future?
+            if (error is CancellationException) {
+                // Normal during route/state transitions; not a sync failure.
+                return@LaunchedEffect
+            }
+            val current = cloneUiState as? CloneUiState.Syncing
+            if (current != null && current.sourceUrl == sourceUrl) {
+                cloneUiState =
+                    current.copy(
+                        initialSyncComplete = false,
+                        phaseMessage = "Failed while pulling required docs.",
+                        errorMessage = "Connect failed: ${describeThrowable(error)}"
+                    )
+            }
+        } finally {
+            if (cloneSourceUrlPendingOpen == sourceUrl) {
+                cloneSourceUrlPendingOpen = null
             }
         }
     }
@@ -648,7 +879,8 @@ fun App(
 fun AdaptiveAppLayout(
     modifier: Modifier = Modifier,
     navController: NavHostController,
-    extraAction: (() -> Unit)? = null
+    extraAction: (() -> Unit)? = null,
+    bigDialogState: BigDialogState
 ) {
     val platform = getPlatform()
     val screenWidth = platform.getScreenWidthDp()
@@ -681,6 +913,7 @@ fun AdaptiveAppLayout(
         contentType = contentType,
         navController = navController,
         extraAction = extraAction,
+        bigDialogState = bigDialogState,
         modifier = modifier
     )
 }
@@ -692,34 +925,48 @@ fun DaybookHomeScreen(
     contentType: DaybookContentType,
     navController: NavHostController,
     extraAction: (() -> Unit)? = null,
+    bigDialogState: BigDialogState,
     modifier: Modifier = Modifier
 ) {
-    when (navigationType) {
-        DaybookNavigationType.PERMANENT_NAVIGATION_DRAWER -> {
-            ExpandedLayout(
-                modifier = modifier,
-                navController = navController,
-                extraAction = extraAction,
-                contentType = contentType
-            )
+    Box(modifier = modifier.fillMaxSize()) {
+        when (navigationType) {
+            DaybookNavigationType.PERMANENT_NAVIGATION_DRAWER -> {
+                ExpandedLayout(
+                    modifier = Modifier.fillMaxSize(),
+                    navController = navController,
+                    extraAction = extraAction,
+                    contentType = contentType,
+                    onShowCloneShare = { bigDialogState.show() }
+                )
+            }
+
+            DaybookNavigationType.NAVIGATION_RAIL -> {
+                ExpandedLayout(
+                    modifier = Modifier.fillMaxSize(),
+                    navController = navController,
+                    extraAction = extraAction,
+                    contentType = contentType,
+                    onShowCloneShare = { bigDialogState.show() }
+                )
+            }
+
+            DaybookNavigationType.BOTTOM_NAVIGATION -> {
+                CompactLayout(
+                    modifier = Modifier.fillMaxSize(),
+                    navController = navController,
+                    extraAction = extraAction,
+                    contentType = contentType,
+                    onShowCloneShare = { bigDialogState.show() }
+                )
+            }
         }
 
-        DaybookNavigationType.NAVIGATION_RAIL -> {
-            ExpandedLayout(
-                modifier = modifier,
-                navController = navController,
-                extraAction = extraAction,
-                contentType = contentType
-            )
-        }
-
-        DaybookNavigationType.BOTTOM_NAVIGATION -> {
-            CompactLayout(
-                modifier = modifier,
-                navController = navController,
-                extraAction = extraAction,
-                contentType = contentType
-            )
+        BigDialogHost(
+            state = bigDialogState,
+            narrowScreen = navigationType == DaybookNavigationType.BOTTOM_NAVIGATION,
+            modifier = Modifier.fillMaxSize()
+        ) {
+            CloneShareDialogContent(onClose = { bigDialogState.dismiss() })
         }
     }
 }
@@ -946,7 +1193,16 @@ fun Routes(
                                 Text("All permissions avail")
                             } else {
                                 Button(onClick = {
-                                    permCtx.requestAllPermissions()
+                                    permCtx.requestPermissions(
+                                        PermissionRequest(
+                                            camera = true,
+                                            notifications = true,
+                                            microphone = true,
+                                            overlay = true,
+                                            storageRead = true,
+                                            storageWrite = true
+                                        )
+                                    )
                                 }) {
                                     Text("Ask for permissions")
                                 }
@@ -992,7 +1248,7 @@ private fun LoadingScreen(message: String = "Preparing Daybook…") {
             verticalArrangement = Arrangement.Center
         ) {
             Text(
-                text = "📖",
+                text = "🌞",
                 fontSize = 80.sp,
                 modifier = Modifier.scale(scale)
             )
@@ -1002,84 +1258,6 @@ private fun LoadingScreen(message: String = "Preparing Daybook…") {
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
             )
-        }
-    }
-}
-
-@Composable
-private fun WelcomeScreen(
-    repos: List<KnownRepoEntry>,
-    onOpenRepo: (String) -> Unit
-) {
-    val openRepoLauncher = rememberDirectoryPickerLauncher { directory ->
-        val selectedPath = directory?.path ?: return@rememberDirectoryPickerLauncher
-        onOpenRepo(selectedPath)
-    }
-
-    val createRepoLauncher = rememberDirectoryPickerLauncher { directory ->
-        val selectedPath = directory?.path ?: return@rememberDirectoryPickerLauncher
-        onOpenRepo(selectedPath)
-    }
-
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.surface
-    ) {
-        Column(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Text(
-                text = "Welcome to Daybook",
-                style = MaterialTheme.typography.headlineMedium
-            )
-            Text(
-                text = "Select a repository to continue",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
-            )
-
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = { createRepoLauncher.launch() }) {
-                    Icon(Icons.Default.CreateNewFolder, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Create New Repo")
-                }
-                Button(onClick = { openRepoLauncher.launch() }) {
-                    Icon(Icons.Default.FolderOpen, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Open Directory")
-                }
-            }
-
-            HorizontalDivider()
-
-            if (repos.isEmpty()) {
-                Text(
-                    text = "No known repositories yet.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
-            } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(repos, key = { repo -> repo.id }) { repo ->
-                        Surface(
-                            modifier = Modifier.fillMaxWidth().clickable { onOpenRepo(repo.path) },
-                            shape = MaterialTheme.shapes.medium,
-                            tonalElevation = 2.dp
-                        ) {
-                            Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
-                                Text(text = repo.path, style = MaterialTheme.typography.bodyLarge)
-                                Text(
-                                    text = "Last opened: ${repo.lastOpenedAtUnixSecs}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 }

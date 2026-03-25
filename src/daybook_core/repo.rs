@@ -25,9 +25,7 @@ pub struct RepoLayout {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct RepoOpenOptions {
-    pub ws_connector_url: Option<String>,
-}
+pub struct RepoOpenOptions {}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct RepoLockInfo {
@@ -165,7 +163,7 @@ impl RepoCtx {
     async fn open_inner(
         layout: RepoLayout,
         lock_guard: RepoLockGuard,
-        options: RepoOpenOptions,
+        _options: RepoOpenOptions,
         local_device_name: String,
         initialize_repo: bool,
     ) -> Res<Self> {
@@ -240,17 +238,21 @@ impl RepoCtx {
             partition_forwarders,
         )
         .await?;
-        if let Some(ws_connector_url) = options.ws_connector_url {
-            std::mem::drop(
-                big_repo
-                    .spawn_ws_connector(ws_connector_url.parse()?)
-                    .await?,
-            );
-        }
 
         let doc_app_cell = tokio::sync::OnceCell::new();
         let doc_drawer_cell = tokio::sync::OnceCell::new();
-        init_from_globals(&big_repo, &sql.db_pool, &doc_app_cell, &doc_drawer_cell).await?;
+        init_from_globals(
+            &big_repo,
+            &sql.db_pool,
+            &doc_app_cell,
+            &doc_drawer_cell,
+            if initialize_repo {
+                crate::app::InitFromGlobalsMode::CreateFresh
+            } else {
+                crate::app::InitFromGlobalsMode::RequireExisting
+            },
+        )
+        .await?;
         let doc_app = doc_app_cell
             .get()
             .expect("doc_app cell should be initialized")
@@ -498,6 +500,32 @@ pub async fn is_repo_initialized(repo_root: &std::path::Path) -> Res<bool> {
     Ok(utils_rs::file_exists(&layout.marker_path).await?)
 }
 
+pub async fn is_repo_bootstrapped(repo_root: &std::path::Path) -> Res<bool> {
+    if !is_repo_initialized(repo_root).await? {
+        return Ok(false);
+    }
+    let layout = repo_layout(repo_root)?;
+    if !layout.sqlite_path.exists() {
+        return Ok(false);
+    }
+    let sql_config = SqlConfig {
+        database_url: format!("sqlite://{}", layout.sqlite_path.display()),
+    };
+    let sql = SqlCtx::new(&sql_config.database_url)
+        .await
+        .wrap_err_with(|| {
+            format!(
+                "failed opening repo sqlite while checking bootstrap state: {}",
+                layout.sqlite_path.display()
+            )
+        })?;
+    let init_state = crate::app::globals::get_init_state(&sql.db_pool).await?;
+    Ok(matches!(
+        init_state,
+        crate::app::globals::InitState::Created { .. }
+    ))
+}
+
 pub async fn upsert_known_repo(
     sql: &SqlitePool,
     repo_root: &std::path::Path,
@@ -506,6 +534,11 @@ pub async fn upsert_known_repo(
         .wrap_err_with(|| format!("error absolutizing repo path {}", repo_root.display()))?;
     let repo_path = repo_root.display().to_string();
     let now_unix_secs = jiff::Timestamp::now().as_second();
+    let inferred_name = repo_root
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| repo_path.clone());
     let mut repo_config = globals::get_repo_config(sql).await?;
     if let Some(existing_repo) = repo_config
         .known_repos
@@ -513,6 +546,9 @@ pub async fn upsert_known_repo(
         .find(|repo| repo.path == repo_path)
     {
         existing_repo.last_opened_at_unix_secs = now_unix_secs;
+        if existing_repo.name.is_empty() {
+            existing_repo.name = inferred_name;
+        }
         let repo = existing_repo.clone();
         repo_config.last_used_repo_id = Some(repo.id.clone());
         globals::set_repo_config(sql, &repo_config).await?;
@@ -521,6 +557,7 @@ pub async fn upsert_known_repo(
 
     let repo = KnownRepoEntry {
         id: repo_path.clone(),
+        name: inferred_name,
         path: repo_path,
         created_at_unix_secs: now_unix_secs,
         last_opened_at_unix_secs: now_unix_secs,

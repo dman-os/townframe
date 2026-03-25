@@ -16,41 +16,59 @@ impl SecretRepo {
 
     pub async fn load_or_init_identity(sql: &SqlitePool, repo_id: &str) -> Res<RepoIdentity> {
         let repo_id = repo_id.to_string();
-        if std::env::var("DAYB_DISABLE_KEYRING")
-            .map(|value| value == "1")
-            .unwrap_or(false)
-        {
-            let secret = load_or_init_fallback_secret(sql, &repo_id).await?;
-            let public = secret.public();
+        let fallback_secret = load_or_init_fallback_secret(sql, &repo_id).await?;
+        let fallback_secret_hex = data_encoding::HEXLOWER.encode(&fallback_secret.to_bytes());
+        if is_keyring_disabled() {
+            let public = fallback_secret.public();
             return Ok(RepoIdentity {
                 repo_id,
-                iroh_secret_key: secret,
+                iroh_secret_key: fallback_secret.clone(),
                 iroh_public_key: public,
             });
         }
         let service_name = format!("daybook.repo.{repo_id}");
         let secret = match keyring::Entry::new(&service_name, Self::KEYRING_USERNAME) {
             Ok(entry) => match entry.get_password() {
-                Ok(secret_hex) => {
-                    let secret = decode_secret_hex(&secret_hex)?;
-                    let encoded = data_encoding::HEXLOWER.encode(&secret.to_bytes());
-                    let _ = ensure_fallback_secret(sql, &repo_id, &encoded).await?;
-                    secret
-                }
+                Ok(secret_hex) => match decode_secret_hex(&secret_hex) {
+                    Ok(keyring_secret) => {
+                        if keyring_secret.to_bytes() != fallback_secret.to_bytes() {
+                            warn!(
+                                "keyring and fallback iroh secrets diverged; using fallback secret"
+                            );
+                            if let Err(err) = entry.set_password(&fallback_secret_hex) {
+                                warn!(?err, "failed repairing keyring secret from fallback value");
+                            }
+                            fallback_secret.clone()
+                        } else {
+                            keyring_secret
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            ?err,
+                            "invalid iroh secret key in keyring, repairing from fallback"
+                        );
+                        if let Err(set_err) = entry.set_password(&fallback_secret_hex) {
+                            warn!(
+                                ?set_err,
+                                "failed repairing keyring secret from fallback value"
+                            );
+                        }
+                        fallback_secret.clone()
+                    }
+                },
                 Err(keyring::Error::NoEntry) => {
-                    let secret = load_or_init_fallback_secret(sql, &repo_id).await?;
-                    let encoded = data_encoding::HEXLOWER.encode(&secret.to_bytes());
-                    if let Err(err) = entry.set_password(&encoded) {
+                    if let Err(err) = entry.set_password(&fallback_secret_hex) {
                         warn!(?err, "failed backfilling keyring from fallback secret");
                     }
-                    secret
+                    fallback_secret.clone()
                 }
                 Err(err) => {
                     warn!(
                         ?err,
                         "error reading iroh secret key from keyring, using fallback"
                     );
-                    load_or_init_fallback_secret(sql, &repo_id).await?
+                    fallback_secret.clone()
                 }
             },
             Err(err) => {
@@ -58,7 +76,7 @@ impl SecretRepo {
                     ?err,
                     "error creating keyring entry, using fallback secret store"
                 );
-                load_or_init_fallback_secret(sql, &repo_id).await?
+                fallback_secret.clone()
             }
         };
 
@@ -69,6 +87,46 @@ impl SecretRepo {
             iroh_public_key: public,
         })
     }
+
+    pub async fn set_identity_from_secret_hex(
+        sql: &SqlitePool,
+        repo_id: &str,
+        secret_hex: &str,
+    ) -> Res<RepoIdentity> {
+        let secret = decode_secret_hex(secret_hex)?;
+        let encoded = data_encoding::HEXLOWER.encode(&secret.to_bytes());
+        let fallback_key = fallback_secret_key(repo_id);
+        sqlx::query(
+            "INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(&fallback_key)
+        .bind(&encoded)
+        .execute(sql)
+        .await?;
+        if !is_keyring_disabled() {
+            let service_name = format!("daybook.repo.{repo_id}");
+            if let Ok(entry) = keyring::Entry::new(&service_name, Self::KEYRING_USERNAME) {
+                if let Err(err) = entry.set_password(&encoded) {
+                    warn!(
+                        ?err,
+                        "failed setting keyring secret from provisioned clone identity"
+                    );
+                }
+            }
+        }
+        let public = secret.public();
+        Ok(RepoIdentity {
+            repo_id: repo_id.to_string(),
+            iroh_secret_key: secret,
+            iroh_public_key: public,
+        })
+    }
+}
+
+fn is_keyring_disabled() -> bool {
+    std::env::var("DAYB_DISABLE_KEYRING")
+        .map(|value| value == "1")
+        .unwrap_or(false)
 }
 
 fn fallback_secret_key(repo_id: &str) -> String {

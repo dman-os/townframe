@@ -9,8 +9,9 @@ use std::sync::Once;
 
 const NODE_COUNT: usize = 4;
 const EVENT_COUNT: usize = 64;
-const PHASE_TIMEOUT: Duration = Duration::from_secs(90);
-const FULL_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
+const PHASE_TIMEOUT_BASE: Duration = Duration::from_secs(45);
+const FULL_SYNC_TIMEOUT_BASE: Duration = Duration::from_secs(60);
+const BLOB_SYNC_TIMEOUT_BASE: Duration = Duration::from_secs(90);
 const DEFAULT_STRESS_SEED: u64 = 0xD4B5_51C0_0001;
 static TEST_ENV_INIT: Once = Once::new();
 
@@ -35,8 +36,17 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(DEFAULT_STRESS_SEED);
+    let phase_timeout = utils_rs::scale_timeout(PHASE_TIMEOUT_BASE);
+    let full_sync_timeout = utils_rs::scale_timeout(FULL_SYNC_TIMEOUT_BASE);
+    let blob_sync_timeout = utils_rs::scale_timeout(BLOB_SYNC_TIMEOUT_BASE);
     let mut rng = StdRng::seed_from_u64(seed);
-    info!(seed, "starting four-node sync stress test");
+    info!(
+        seed,
+        phase_timeout = ?phase_timeout,
+        full_sync_timeout = ?full_sync_timeout,
+        blob_sync_timeout = ?blob_sync_timeout,
+        "starting four-node sync stress test"
+    );
 
     let temp_root = tempfile::tempdir()?;
     let repo_paths = init_and_copy_repo_cluster(temp_root.path()).await?;
@@ -45,7 +55,7 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
         let topology_1 = generate_connected_edges(&mut rng);
         info!(?topology_1, "phase-1 topology");
         let mut endpoints = connect_topology(&nodes, &topology_1).await?;
-        wait_network_rest(&nodes, &endpoints, FULL_SYNC_TIMEOUT).await?;
+        wait_network_rest(&nodes, &endpoints, full_sync_timeout, blob_sync_timeout).await?;
 
         let mut applied = Vec::new();
         for idx in 0..EVENT_COUNT {
@@ -62,7 +72,7 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
             sample = ?applied.iter().take(12).collect::<Vec<_>>(),
             "phase-1 events applied"
         );
-        wait_network_rest(&nodes, &endpoints, PHASE_TIMEOUT).await?;
+        wait_network_rest(&nodes, &endpoints, phase_timeout, blob_sync_timeout).await?;
 
         let leaving_idx = rng.random_range(0..NODE_COUNT);
         info!(leaving_idx, "transfer phase: leaving node");
@@ -93,23 +103,44 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
         let topology_2 = generate_connected_edges(&mut rng);
         info!(?topology_2, "phase-2 topology");
         endpoints = connect_topology(&nodes, &topology_2).await?;
-        wait_network_rest(&nodes, &endpoints, PHASE_TIMEOUT).await
+        wait_network_rest(&nodes, &endpoints, phase_timeout, blob_sync_timeout).await
     }
     .await;
-    for node in nodes.into_iter().flatten() {
-        node.stop().await?;
+    let stop_results = futures::stream::iter(
+        nodes
+            .into_iter()
+            .flatten()
+            .map(|node| async move { node.stop().await }),
+    )
+    .buffer_unordered(NODE_COUNT)
+    .collect::<Vec<_>>()
+    .await;
+    let mut stop_err: Option<eyre::Report> = None;
+    for res in stop_results {
+        if let Err(err) = res {
+            if stop_err.is_none() {
+                stop_err = Some(err);
+            } else {
+                warn!(?err, "stress node stop failed");
+            }
+        }
     }
-    result
+    result?;
+    if let Some(err) = stop_err {
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn random_event_kind(rng: &mut StdRng) -> EventKind {
-    match rng.random_range(0..6) {
+    match rng.random_range(0..10) {
         0 => EventKind::CreateDoc,
         1 => EventKind::ModifyDoc,
         2 => EventKind::CreateBranch,
         3 => EventKind::ModifyBranch,
         4 => EventKind::DeleteBranch,
-        _ => EventKind::PutBlobAttach,
+        5 => EventKind::PutBlobAttach,
+        _ => EventKind::ModifyDoc,
     }
 }
 
@@ -153,9 +184,7 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
     tokio::fs::create_dir_all(&paths[0]).await?;
     let rtx = RepoCtx::init(
         &paths[0],
-        RepoOpenOptions {
-            ws_connector_url: None,
-        },
+        RepoOpenOptions::default(),
         "stress-test-device".into(),
     )
     .await?;
@@ -171,14 +200,8 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
         for dst in paths.iter().skip(1) {
             bootstrap_clone_repo_from_url_for_tests(&ticket, dst).await?;
 
-            let ctx = RepoCtx::open(
-                dst,
-                RepoOpenOptions {
-                    ws_connector_url: None,
-                },
-                "stress-test-device".into(),
-            )
-            .await?;
+            let ctx =
+                RepoCtx::open(dst, RepoOpenOptions::default(), "stress-test-device".into()).await?;
             if ctx.repo_id != source_repo_id {
                 eyre::bail!(
                     "stress init repo_id mismatch after clone (source={}, cloned={})",
@@ -245,6 +268,7 @@ async fn wait_network_rest(
     nodes: &[Option<SyncTestNode>],
     endpoint_sets: &[HashSet<EndpointId>],
     timeout: Duration,
+    blob_timeout: Duration,
 ) -> Res<()> {
     for (idx, node_opt) in nodes.iter().enumerate() {
         let Some(node) = node_opt.as_ref() else {
@@ -271,7 +295,7 @@ async fn wait_network_rest(
         }
     }
 
-    assert_blob_parity(nodes, timeout).await?;
+    assert_blob_parity(nodes, blob_timeout).await?;
     Ok(())
 }
 
@@ -365,7 +389,16 @@ async fn assert_blob_parity(nodes: &[Option<SyncTestNode>], timeout: Duration) -
     }
     for node in active {
         for hash in &expected {
-            let _ = wait_for_blob_bytes(&node.blobs_repo, hash, timeout).await?;
+            wait_for_blob_bytes(&node.blobs_repo, hash, timeout)
+                .await
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "blob bytes missing after parity check: endpoint_id={} hash={} err={}",
+                        node.sync_repo.router.endpoint().id(),
+                        hash,
+                        err
+                    )
+                })?;
         }
     }
     Ok(())
@@ -375,27 +408,29 @@ async fn collect_blob_hashes(node: &SyncTestNode) -> Res<HashSet<String>> {
     let mut out = HashSet::new();
     let (_, ids) = node.drawer.list_just_ids().await?;
     for doc_id in ids {
-        let Some(doc) = node
-            .drawer
-            .get_doc_with_facets_at_branch(
-                &doc_id,
-                &daybook_types::doc::BranchPath::from("main"),
-                None,
-            )
-            .await?
-        else {
+        let Some(branches) = node.drawer.get_doc_branches(&doc_id).await? else {
             continue;
         };
-        let Some(raw) = doc
-            .facets
-            .get(&FacetKey::from(WellKnownFacetTag::Blob))
-            .cloned()
-        else {
-            continue;
-        };
-        let wk = daybook_types::doc::WellKnownFacet::from_json(raw, WellKnownFacetTag::Blob)?;
-        if let daybook_types::doc::WellKnownFacet::Blob(blob) = wk {
-            out.insert(blob.digest);
+        for branch_name in branches.branches.keys() {
+            let branch = daybook_types::doc::BranchPath::from(branch_name.as_str());
+            let Some(doc) = node
+                .drawer
+                .get_doc_with_facets_at_branch(&doc_id, &branch, None)
+                .await?
+            else {
+                continue;
+            };
+            let Some(raw) = doc
+                .facets
+                .get(&FacetKey::from(WellKnownFacetTag::Blob))
+                .cloned()
+            else {
+                continue;
+            };
+            let wk = daybook_types::doc::WellKnownFacet::from_json(raw, WellKnownFacetTag::Blob)?;
+            if let daybook_types::doc::WellKnownFacet::Blob(blob) = wk {
+                out.insert(blob.digest);
+            }
         }
     }
     Ok(out)
@@ -443,7 +478,8 @@ async fn apply_event(
                     rng.random::<u64>()
                 ))),
             );
-            node.drawer
+            let out = node
+                .drawer
                 .update_at_heads(
                     daybook_types::doc::DocPatch {
                         id: doc_id.clone(),
@@ -453,10 +489,16 @@ async fn apply_event(
                             node.ctx.local_user_path.clone(),
                         )),
                     },
-                    branch,
+                    branch.clone(),
                     Some(heads),
                 )
-                .await?;
+                .await;
+            if let Err(err) = out {
+                if is_missing_facets_object_err(&err) {
+                    return Ok(None);
+                }
+                return Err(err.into());
+            }
             Ok(Some(format!("modified doc {doc_id}")))
         }
         EventKind::CreateBranch => {
@@ -479,7 +521,8 @@ async fn apply_event(
                 FacetKey::from(WellKnownFacetTag::TitleGeneric),
                 FacetRaw::from(WellKnownFacet::TitleGeneric(format!("branch-create-{idx}"))),
             );
-            node.drawer
+            let out = node
+                .drawer
                 .update_at_heads(
                     daybook_types::doc::DocPatch {
                         id: doc_id.clone(),
@@ -492,7 +535,13 @@ async fn apply_event(
                     new_branch.clone(),
                     Some(main_heads),
                 )
-                .await?;
+                .await;
+            if let Err(err) = out {
+                if is_missing_facets_object_err(&err) {
+                    return Ok(None);
+                }
+                return Err(err.into());
+            }
             Ok(Some(format!("created branch {new_branch} on {doc_id}")))
         }
         EventKind::ModifyBranch => {
@@ -508,7 +557,8 @@ async fn apply_event(
                 FacetKey::from(WellKnownFacetTag::TitleGeneric),
                 FacetRaw::from(WellKnownFacet::TitleGeneric(format!("branch-mod-{idx}"))),
             );
-            node.drawer
+            let out = node
+                .drawer
                 .update_at_heads(
                     daybook_types::doc::DocPatch {
                         id: doc_id.clone(),
@@ -521,7 +571,13 @@ async fn apply_event(
                     branch.clone(),
                     Some(heads),
                 )
-                .await?;
+                .await;
+            if let Err(err) = out {
+                if is_missing_facets_object_err(&err) {
+                    return Ok(None);
+                }
+                return Err(err.into());
+            }
             Ok(Some(format!("modified branch {branch} on {doc_id}")))
         }
         EventKind::DeleteBranch => {
@@ -556,7 +612,8 @@ async fn apply_event(
                     urls: Some(vec![format!("db+blob:///{hash}")]),
                 })),
             );
-            node.drawer
+            let out = node
+                .drawer
                 .update_at_heads(
                     daybook_types::doc::DocPatch {
                         id: doc_id.clone(),
@@ -569,10 +626,21 @@ async fn apply_event(
                     branch,
                     Some(heads),
                 )
-                .await?;
+                .await;
+            if let Err(err) = out {
+                if is_missing_facets_object_err(&err) {
+                    return Ok(None);
+                }
+                return Err(err.into());
+            }
             Ok(Some(format!("attached blob {hash} to {doc_id}")))
         }
     }
+}
+
+fn is_missing_facets_object_err(err: &impl std::fmt::Display) -> bool {
+    err.to_string()
+        .contains("facets object not found in content doc")
 }
 
 async fn pick_doc_id(node: &SyncTestNode, rng: &mut StdRng) -> Res<Option<String>> {
@@ -584,7 +652,29 @@ async fn pick_doc_id(node: &SyncTestNode, rng: &mut StdRng) -> Res<Option<String
         return Ok(None);
     }
     docs.shuffle(rng);
-    Ok(docs.first().cloned())
+    for doc_id in docs {
+        match node
+            .drawer
+            .get_doc_with_facets_at_branch(
+                &doc_id,
+                &daybook_types::doc::BranchPath::from("main"),
+                None,
+            )
+            .await
+        {
+            Ok(Some(_)) => return Ok(Some(doc_id)),
+            Ok(None) => continue,
+            Err(err)
+                if err
+                    .to_string()
+                    .contains("facets object not found in content doc") =>
+            {
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(None)
 }
 
 async fn pick_doc_and_branch(

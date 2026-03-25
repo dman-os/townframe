@@ -11,6 +11,7 @@ object FeatureKeys {
     const val Drawer = "nav_drawer"
     const val Tables = "nav_tables"
     const val Progress = "nav_progress"
+    const val CloneShare = "nav_clone_share"
     const val Settings = "nav_settings"
 }
 

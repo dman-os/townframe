@@ -3,6 +3,35 @@
 // FIXME: provide a devshell for building onnxcore (python and so on)
 
 import { $ } from "./utils.ts";
+import { walk } from "jsr:@std/fs@1.0.23/walk";
+
+async function removeTreeIfExists(targetPath: string) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await Deno.remove(targetPath, { recursive: true });
+      return;
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      const isRetryable = message.includes("Directory not empty") ||
+        message.includes("resource busy");
+      if (!isRetryable || attempt === 4) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+    }
+  }
+}
+
+async function cleanupOrtBuildArtifacts(sourceDir: {
+  join(path: string): { toString(): string };
+}) {
+  // Keep extracted ORT sources for reuse, but drop heavy generated Android build output.
+  const androidBuildPath = `${sourceDir.join("build").toString()}/Android`;
+  await removeTreeIfExists(androidBuildPath);
+}
 
 const abiToTriple = {
   "arm64-v8a": "aarch64-linux-android",
@@ -22,6 +51,8 @@ if (!(composeProfile === "debug" || composeProfile === "release")) {
   );
 }
 const gradleVariant = composeProfile === "release" ? "Release" : "Debug";
+const gradleTask = $.env.DAYBOOK_ANDROID_GRADLE_TASK ??
+  `assemble${gradleVariant}`;
 const ortBuildConfig = $.env.ORT_BUILD_CONFIG ??
   (composeProfile === "release" ? "Release" : "Debug");
 
@@ -29,44 +60,95 @@ const ortSourceTag = $.env.ORT_SOURCE_TAG ?? "v1.24.1";
 const androidApiLevel = $.env.ANDROID_API_LEVEL ?? "31";
 const androidNdkRoot = $.env.ANDROID_NDK_ROOT;
 if (!androidNdkRoot) throw new Error("ANDROID_NDK_ROOT must be set");
+const ndkRevision = $.env.ANDROID_NDK_REVISION ??
+  androidNdkRoot.split(/[\\/]/).filter((part) => part.length > 0).at(-1) ??
+  "unknown-ndk";
+const buildKeySuffix = `api${androidApiLevel}-ndk${ndkRevision}`.replaceAll(
+  /[^\w.-]+/g,
+  "_",
+);
 
 const ortRootDir = $.relativeDir("../target/ort");
 const sourceArchivePath = ortRootDir.join(`onnxruntime-${ortSourceTag}.tar.gz`);
-const sourceDir = ortRootDir.join("onnxruntime-src");
+const sourceDir = ortRootDir.join(`onnxruntime-src-${ortSourceTag}`);
 const sourceCompleteFile = ortRootDir.join(`.source-${ortSourceTag}.complete`);
-const buildCompleteFile = ortRootDir.join(
-  `.build-${triple}-${ortBuildConfig.toLowerCase()}.complete`,
+const distDir = ortRootDir.join(
+  "dist",
+  ortSourceTag,
+  triple,
+  ortBuildConfig,
+  buildKeySuffix,
 );
-const libDirFile = ortRootDir.join(`ort-lib-location-${triple}.txt`);
+const distCompleteFile = ortRootDir.join(
+  `.dist-${ortSourceTag}-${triple}-${ortBuildConfig.toLowerCase()}-${buildKeySuffix}.complete`,
+);
+const libDirFile = ortRootDir.join(
+  `ort-lib-location-${ortSourceTag}-${triple}-${ortBuildConfig.toLowerCase()}-${buildKeySuffix}.txt`,
+);
 
 await ortRootDir.ensureDir();
 
-if (!(await sourceCompleteFile.exists())) {
-  await $.request(
-    `https://github.com/microsoft/onnxruntime/archive/refs/tags/${ortSourceTag}.tar.gz`,
-  )
-    .showProgress()
-    .pipeToPath(sourceArchivePath);
-  await sourceDir.ensureRemove();
-  await sourceDir.ensureDir();
-  await $`bsdtar --extract --file ${sourceArchivePath} --directory ${sourceDir} --strip-components=1`;
-  await sourceCompleteFile.writeText("ok\n");
-}
+if (!((await distCompleteFile.exists()) && (await libDirFile.exists()))) {
+  const needsSourceExtract = !(await sourceDir.exists());
+  if (!(await sourceCompleteFile.exists()) || needsSourceExtract) {
+    if (!(await sourceArchivePath.exists())) {
+      await $.request(
+        `https://github.com/microsoft/onnxruntime/archive/refs/tags/${ortSourceTag}.tar.gz`,
+      )
+        .showProgress()
+        .pipeToPath(sourceArchivePath);
+    }
+    if (needsSourceExtract && await sourceCompleteFile.exists()) {
+      await Deno.remove(sourceCompleteFile.toString());
+    }
+    await removeTreeIfExists(sourceDir.toString());
+    await sourceDir.ensureDir();
+    await $`bsdtar --extract --file ${sourceArchivePath} --directory ${sourceDir} --strip-components=1`;
+    await sourceCompleteFile.writeText("ok\n");
+  }
 
-if (!(await buildCompleteFile.exists())) {
-  await $`bash ./build.sh --update --build --config ${ortBuildConfig} --parallel --compile_no_warning_as_error --skip_submodule_sync --android --android_abi=${abi} --android_api=${androidApiLevel} --android_ndk_path=${androidNdkRoot}`
+  await $`bash ./build.sh --update --build --config ${ortBuildConfig} --parallel --compile_no_warning_as_error --skip_submodule_sync --build_shared_lib --android --android_abi=${abi} --android_api=${androidApiLevel} --android_ndk_path=${androidNdkRoot}`
     .cwd(
       sourceDir,
     );
-  await libDirFile.writeText(
-    `${sourceDir.join("build", "Android", ortBuildConfig)}\n`,
-  );
-  await buildCompleteFile.writeText("ok\n");
+  const builtLibDir = sourceDir.join("build", "Android", ortBuildConfig);
+  const sharedLibPaths: string[] = [];
+  for await (
+    const entry of walk(builtLibDir.toString(), {
+      includeDirs: false,
+      followSymlinks: false,
+    })
+  ) {
+    if (!entry.isFile) continue;
+    if (!entry.name.includes(".so")) continue;
+    sharedLibPaths.push(entry.path);
+  }
+  if (sharedLibPaths.length === 0) {
+    throw new Error(
+      `ORT build did not produce shared libraries under ${builtLibDir}`,
+    );
+  }
+  await removeTreeIfExists(distDir.toString());
+  await distDir.ensureDir();
+  for (const sourceLibPath of sharedLibPaths) {
+    await $`cp ${sourceLibPath} ${distDir}`;
+  }
+  await libDirFile.writeText(`${distDir}\n`);
+  await distCompleteFile.writeText("ok\n");
 }
 
-await $`./gradlew install${gradleVariant} -PdaybookProfile=${composeProfile}`
+if (await sourceDir.exists()) {
+  await cleanupOrtBuildArtifacts(sourceDir);
+}
+
+await $`./gradlew ${gradleTask} -PdaybookProfile=${composeProfile} -PortLibLocation=${
+  (await libDirFile.readText()).trim()
+} -PortLibProfile=${
+  $.env.ORT_LIB_PROFILE ?? ortBuildConfig
+} -PortPreferDynamicLink=${$.env.ORT_PREFER_DYNAMIC_LINK ?? "1"}`
   .cwd($.relativeDir("../src/daybook_compose/"))
   .env({
     ORT_LIB_LOCATION: (await libDirFile.readText()).trim(),
     ORT_LIB_PROFILE: $.env.ORT_LIB_PROFILE ?? ortBuildConfig,
+    ORT_PREFER_DYNAMIC_LINK: $.env.ORT_PREFER_DYNAMIC_LINK ?? "1",
   });

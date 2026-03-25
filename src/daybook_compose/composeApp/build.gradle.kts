@@ -4,6 +4,7 @@ import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
 import org.gradle.api.tasks.Copy
+import org.gradle.api.tasks.Delete
 import org.gradle.api.tasks.Exec
 import org.gradle.process.CommandLineArgumentProvider
 import java.io.File
@@ -262,6 +263,24 @@ data class AndroidRustToolchain(
 )
 
 val repoRoot = rootProject.rootDir.parentFile!!.parentFile!!
+val cargoTargetDir =
+    System.getenv("CARGO_TARGET_DIR")
+        ?.takeIf { it.isNotBlank() }
+        ?.let(::File)
+        ?: File(repoRoot, "target")
+val ortLibLocation =
+    (findProperty("ortLibLocation") as String?)
+        ?.takeIf { it.isNotBlank() }
+        ?: System.getenv("ORT_LIB_LOCATION")?.takeIf { it.isNotBlank() }
+val ortLibProfile =
+    (findProperty("ortLibProfile") as String?)
+        ?.takeIf { it.isNotBlank() }
+        ?: System.getenv("ORT_LIB_PROFILE")?.takeIf { it.isNotBlank() }
+val ortPreferDynamicLink =
+    ((findProperty("ortPreferDynamicLink") as String?)
+        ?.takeIf { it.isNotBlank() }
+        ?: System.getenv("ORT_PREFER_DYNAMIC_LINK")
+        ?: "0") != "0"
 
 fun resolveDaybookComposeProfile(): String {
     val rawProfile =
@@ -285,12 +304,14 @@ tasks.register<Exec>("buildRustDesktopDebug") {
     group = "build"
     description = "Build Rust daybook_ffi (debug) for desktop with nokhwa"
     commandLine("cargo", "build", "-p", "daybook_ffi", "--features", "nokhwa")
+    environment("CARGO_TARGET_DIR", cargoTargetDir.absolutePath)
 }
 
 tasks.register<Exec>("buildRustDesktopRelease") {
     group = "build"
     description = "Build Rust daybook_ffi (release) for desktop with nokhwa"
     commandLine("cargo", "build", "-p", "daybook_ffi", "--release", "--features", "nokhwa")
+    environment("CARGO_TARGET_DIR", cargoTargetDir.absolutePath)
 }
 
 fun androidRustToolchainForAbi(targetAbi: String, ndkToolchainBinDir: String): AndroidRustToolchain? {
@@ -362,56 +383,57 @@ fun registerRustAndroidCopyTask(
     buildTaskName: String,
     sourceLibPath: String,
 ) =
-    tasks.register<Copy>(taskName) {
+    run {
+        val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
+        val destSoFile = File(destDir, "libdaybook_ffi.so")
+        val destLibcxxFile = File(destDir, "libc++_shared.so")
+
+        tasks.register<Copy>(taskName) {
         group = "build"
         description = "Copy Rust daybook_ffi and libc++_shared.so to Android jniLibs"
 
         dependsOn(buildTaskName)
 
-        val sourceSoFile = File(repoRoot, sourceLibPath)
+        val sourceSoFile = File(cargoTargetDir, sourceLibPath.removePrefix("target/"))
+        val ortLibDir = ortLibLocation?.let(::File)
+        val ortSharedLibs =
+            if (ortPreferDynamicLink && ortLibDir != null && ortLibDir.exists()) {
+                ortLibDir
+                    .listFiles()
+                    ?.filter { it.isFile && it.name.contains(".so") }
+                    ?.toList()
+                    ?: emptyList()
+            } else {
+                emptyList()
+            }
         val androidNdkRoot = System.getenv("ANDROID_NDK_ROOT")
         val libcxxSourceFile =
             if (!androidNdkRoot.isNullOrBlank()) ndkLibCppSharedForAbi(targetAbi, androidNdkRoot) else null
-        val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
-        val destSoFile = File(destDir, "libdaybook_ffi.so")
-        val destLibcxxFile = File(destDir, "libc++_shared.so")
-        
+
         doFirst {
             if (!sourceSoFile.exists()) {
-                throw GradleException("Missing Rust library: ${sourceSoFile.absolutePath}")
+                throw GradleException("Missing Rust Android library: ${sourceSoFile.absolutePath}")
             }
-            if (androidNdkRoot.isNullOrBlank()) {
-                throw GradleException("ANDROID_NDK_ROOT is not set; cannot locate libc++_shared.so")
+            destDir.mkdirs()
+            destSoFile.delete()
+            destLibcxxFile.delete()
+            if (ortSharedLibs.isNotEmpty()) {
+                logger.lifecycle(
+                    "Copying ${ortSharedLibs.size} ORT shared libraries from ${ortLibDir?.absolutePath} (profile=${ortLibProfile ?: "unknown"})"
+                )
             }
-            if (libcxxSourceFile == null || !libcxxSourceFile.exists()) {
-                throw GradleException("Missing libc++_shared.so for ABI $targetAbi")
-            }
-        }
-
-        onlyIf {
-            val needsRustCopy = !destSoFile.exists() || sourceSoFile.lastModified() > destSoFile.lastModified()
-            val needsLibcxxCopy =
-                libcxxSourceFile?.let { source ->
-                    !destLibcxxFile.exists() || source.lastModified() > destLibcxxFile.lastModified()
-                } ?: false
-            needsRustCopy || needsLibcxxCopy
         }
 
         from(sourceSoFile)
         if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
             from(libcxxSourceFile)
         }
+        if (ortSharedLibs.isNotEmpty()) {
+            from(ortSharedLibs)
+        }
         into(destDir)
-
-        inputs.file(sourceSoFile)
-        if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
-            inputs.file(libcxxSourceFile)
-        }
-        outputs.file(destSoFile)
-        if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
-            outputs.file(destLibcxxFile)
-        }
     }
+}
 
 // Debug variant: build Rust in debug mode
 tasks.register<Exec>("buildRustAndroidDebug") {
@@ -419,6 +441,14 @@ tasks.register<Exec>("buildRustAndroidDebug") {
     description = "Build Rust daybook_ffi (debug) for Android ABIs"
 
     commandLine("cargo", "build", "-p", "daybook_ffi", "--no-default-features", "--target", targetRustTriple)
+    environment("CARGO_TARGET_DIR", cargoTargetDir.absolutePath)
+    if (!ortLibLocation.isNullOrBlank()) {
+        environment("ORT_LIB_LOCATION", ortLibLocation)
+    }
+    if (!ortLibProfile.isNullOrBlank()) {
+        environment("ORT_LIB_PROFILE", ortLibProfile)
+    }
+    environment("ORT_PREFER_DYNAMIC_LINK", if (ortPreferDynamicLink) "1" else "0")
     val ndkToolchainBinDir = System.getenv("ANDROID_NDK_TOOLCHAIN_BIN_DIR")
     if (!ndkToolchainBinDir.isNullOrBlank()) {
         val toolchain = androidRustToolchainForAbi(targetAbi, ndkToolchainBinDir)
@@ -448,6 +478,14 @@ tasks.register<Exec>("buildRustAndroidRelease") {
     description = "Build Rust daybook_ffi (release) for Android ABIs"
 
     commandLine("cargo", "build", "-p", "daybook_ffi", "--no-default-features", "--release", "--target", targetRustTriple)
+    environment("CARGO_TARGET_DIR", cargoTargetDir.absolutePath)
+    if (!ortLibLocation.isNullOrBlank()) {
+        environment("ORT_LIB_LOCATION", ortLibLocation)
+    }
+    if (!ortLibProfile.isNullOrBlank()) {
+        environment("ORT_LIB_PROFILE", ortLibProfile)
+    }
+    environment("ORT_PREFER_DYNAMIC_LINK", if (ortPreferDynamicLink) "1" else "0")
     val ndkToolchainBinDir = System.getenv("ANDROID_NDK_TOOLCHAIN_BIN_DIR")
     if (!ndkToolchainBinDir.isNullOrBlank()) {
         val toolchain = androidRustToolchainForAbi(targetAbi, ndkToolchainBinDir)
@@ -484,7 +522,7 @@ tasks.register<Copy>("copyRustDesktopDebugToComposeApp") {
     description = "Copy desktop debug Rust FFI library to Compose desktop app directory"
     dependsOn("buildRustDesktopDebug")
 
-    val sourceLibFile = File(repoRoot, "target/debug/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}")
+    val sourceLibFile = File(cargoTargetDir, "debug/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}")
     val destLibDir = File(desktopComposeAppDir(false), "lib/app")
     val destLibFile = File(destLibDir, sourceLibFile.name)
 
@@ -507,7 +545,7 @@ tasks.register<Copy>("copyRustDesktopReleaseToComposeApp") {
     description = "Copy desktop release Rust FFI library to Compose desktop app directory"
     dependsOn("buildRustDesktopRelease")
 
-    val sourceLibFile = File(repoRoot, "target/release/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}")
+    val sourceLibFile = File(cargoTargetDir, "release/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}")
     val destLibDir = File(desktopComposeAppDir(true), "lib/app")
     val destLibFile = File(destLibDir, sourceLibFile.name)
 
@@ -593,8 +631,8 @@ tasks.matching {
     dependsOn("copyRustDesktopReleaseToComposeApp")
     doFirst {
         val rustDesktopReleaseLib = File(
-            repoRoot,
-            "target/release/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}"
+            cargoTargetDir,
+            "release/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}"
         )
         if (!rustDesktopReleaseLib.exists()) {
             throw GradleException(
@@ -617,8 +655,8 @@ tasks.register("prepareLinuxdeployComposeAppDirDayb") {
 
     val sourceLibFile =
         File(
-            repoRoot,
-            "target/${if (daybookComposeIsReleaseProfile) "release" else "debug"}/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}",
+            cargoTargetDir,
+            "${if (daybookComposeIsReleaseProfile) "release" else "debug"}/${rustDesktopLibraryNameForHost(hostOsForNativePackaging)}",
         )
     val destLibDir = File(desktopComposeAppDir(daybookComposeIsReleaseProfile), "lib/app")
     val destLibFile = File(destLibDir, sourceLibFile.name)
@@ -656,7 +694,7 @@ tasks.register<Exec>("buildNativeImageDayb") {
     val outputDir = file("build/compose/native/$resourcesDirNameForNativePackaging")
     val outputFile = File(outputDir, "daybook")
     val reachabilityDir = file("reachability-metadata/linux")
-    val rustLibFile = File(repoRoot, "target/release/libdaybook_ffi.so")
+    val rustLibFile = File(cargoTargetDir, "release/libdaybook_ffi.so")
     val nativeImageCmd = System.getenv("NATIVE_IMAGE_BIN") ?: "native-image"
 
     fun findUberJar(resourcesDirName: String): File {

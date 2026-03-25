@@ -25,8 +25,8 @@ import org.example.daybook.MainFeatureActionButton
 import org.example.daybook.ProvideChromeState
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
-import org.example.daybook.capture.DaybookCameraPreview
 import org.example.daybook.capture.LocalCameraCaptureContext
+import org.example.daybook.capture.ui.DaybookCameraViewport
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.buildBodyFacet
 import org.example.daybook.ui.buildSelfFacetRefUrl
@@ -332,12 +332,11 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
         Box(modifier = modifier.fillMaxSize()) {
             when (captureMode) {
                 CaptureMode.CAMERA -> {
-                    DaybookCameraPreview(
+                    DaybookCameraViewport(
                         cameraPreviewFfi = container.cameraPreviewFfi,
                         onImageSaved = { byteArray ->
                             vm.saveImage(byteArray)
-                        },
-                        onCaptureRequested = {}
+                        }
                     )
                 }
 
