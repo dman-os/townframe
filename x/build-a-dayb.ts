@@ -60,17 +60,25 @@ const ortSourceTag = $.env.ORT_SOURCE_TAG ?? "v1.24.1";
 const androidApiLevel = $.env.ANDROID_API_LEVEL ?? "31";
 const androidNdkRoot = $.env.ANDROID_NDK_ROOT;
 if (!androidNdkRoot) throw new Error("ANDROID_NDK_ROOT must be set");
-const ndkRevision =
-  $.env.ANDROID_NDK_REVISION ??
+const ndkRevision = $.env.ANDROID_NDK_REVISION ??
   androidNdkRoot.split(/[\\/]/).filter((part) => part.length > 0).at(-1) ??
   "unknown-ndk";
-const buildKeySuffix = `api${androidApiLevel}-ndk${ndkRevision}`.replaceAll(/[^\w.-]+/g, "_");
+const buildKeySuffix = `api${androidApiLevel}-ndk${ndkRevision}`.replaceAll(
+  /[^\w.-]+/g,
+  "_",
+);
 
 const ortRootDir = $.relativeDir("../target/ort");
 const sourceArchivePath = ortRootDir.join(`onnxruntime-${ortSourceTag}.tar.gz`);
 const sourceDir = ortRootDir.join(`onnxruntime-src-${ortSourceTag}`);
 const sourceCompleteFile = ortRootDir.join(`.source-${ortSourceTag}.complete`);
-const distDir = ortRootDir.join("dist", ortSourceTag, triple, ortBuildConfig, buildKeySuffix);
+const distDir = ortRootDir.join(
+  "dist",
+  ortSourceTag,
+  triple,
+  ortBuildConfig,
+  buildKeySuffix,
+);
 const distCompleteFile = ortRootDir.join(
   `.dist-${ortSourceTag}-${triple}-${ortBuildConfig.toLowerCase()}-${buildKeySuffix}.complete`,
 );
@@ -133,7 +141,11 @@ if (await sourceDir.exists()) {
   await cleanupOrtBuildArtifacts(sourceDir);
 }
 
-await $`./gradlew ${gradleTask} -PdaybookProfile=${composeProfile} -PortLibLocation=${(await libDirFile.readText()).trim()} -PortLibProfile=${$.env.ORT_LIB_PROFILE ?? ortBuildConfig} -PortPreferDynamicLink=${$.env.ORT_PREFER_DYNAMIC_LINK ?? "1"}`
+await $`./gradlew ${gradleTask} -PdaybookProfile=${composeProfile} -PortLibLocation=${
+  (await libDirFile.readText()).trim()
+} -PortLibProfile=${
+  $.env.ORT_LIB_PROFILE ?? ortBuildConfig
+} -PortPreferDynamicLink=${$.env.ORT_PREFER_DYNAMIC_LINK ?? "1"}`
   .cwd($.relativeDir("../src/daybook_compose/"))
   .env({
     ORT_LIB_LOCATION: (await libDirFile.readText()).trim(),

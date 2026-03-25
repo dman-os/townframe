@@ -642,7 +642,8 @@ impl IrohSyncRepo {
         if self.cancel_token.is_cancelled() {
             return Ok(());
         }
-        self.spawn_connect_known_devices_once("connection-close").await;
+        self.spawn_connect_known_devices_once("connection-close")
+            .await;
         Ok(())
     }
 
