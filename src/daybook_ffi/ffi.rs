@@ -78,6 +78,25 @@ fn app_private_clone_parent_dir(acx: &AppCtx) -> std::path::PathBuf {
 }
 
 fn resolve_clone_destination_for_app(acx: &AppCtx, destination: &str) -> Res<std::path::PathBuf> {
+    let raw = std::path::PathBuf::from(destination);
+
+    #[cfg(not(target_os = "android"))]
+    {
+        if raw.is_absolute() {
+            return std::path::absolute(&raw)
+                .wrap_err_with(|| format!("failed resolving clone destination {}", raw.display()));
+        }
+        let parent = app_private_clone_parent_dir(acx);
+        std::fs::create_dir_all(&parent).wrap_err_with(|| {
+            format!(
+                "failed creating clone parent directory {}",
+                parent.display()
+            )
+        })?;
+        std::path::absolute(parent.join(raw)).wrap_err("failed resolving clone destination")
+    }
+
+    #[cfg(target_os = "android")]
     fn canonicalize_existing_ancestor(path: &std::path::Path) -> Res<std::path::PathBuf> {
         let mut cursor = path.to_path_buf();
         loop {
@@ -93,39 +112,41 @@ fn resolve_clone_destination_for_app(acx: &AppCtx, destination: &str) -> Res<std
         }
     }
 
-    let parent = app_private_clone_parent_dir(acx);
-    std::fs::create_dir_all(&parent).wrap_err_with(|| {
-        format!(
-            "failed creating clone parent directory {}",
-            parent.display()
-        )
-    })?;
-    let parent_canon = std::fs::canonicalize(&parent).wrap_err_with(|| {
-        format!(
-            "failed resolving clone parent directory {}",
-            parent.display()
-        )
-    })?;
-    let raw = std::path::PathBuf::from(destination);
-    let destination_candidate = if raw.is_absolute() {
-        raw
-    } else {
-        parent_canon.join(raw)
-    };
-    let destination_abs = std::path::absolute(&destination_candidate).wrap_err_with(|| {
-        format!(
-            "failed resolving clone destination {}",
-            destination_candidate.display()
-        )
-    })?;
-    let destination_canon = canonicalize_existing_ancestor(&destination_abs)?;
-    if !destination_canon.starts_with(&parent_canon) {
-        eyre::bail!(
-            "clone destination must be under app-private storage: {}",
-            parent_canon.display()
-        );
+    #[cfg(target_os = "android")]
+    {
+        let parent = app_private_clone_parent_dir(acx);
+        std::fs::create_dir_all(&parent).wrap_err_with(|| {
+            format!(
+                "failed creating clone parent directory {}",
+                parent.display()
+            )
+        })?;
+        let parent_canon = std::fs::canonicalize(&parent).wrap_err_with(|| {
+            format!(
+                "failed resolving clone parent directory {}",
+                parent.display()
+            )
+        })?;
+        let destination_candidate = if raw.is_absolute() {
+            raw
+        } else {
+            parent_canon.join(raw)
+        };
+        let destination_abs = std::path::absolute(&destination_candidate).wrap_err_with(|| {
+            format!(
+                "failed resolving clone destination {}",
+                destination_candidate.display()
+            )
+        })?;
+        let destination_canon = canonicalize_existing_ancestor(&destination_abs)?;
+        if !destination_canon.starts_with(&parent_canon) {
+            eyre::bail!(
+                "clone destination must be under app-private storage: {}",
+                parent_canon.display()
+            );
+        }
+        Ok(destination_abs)
     }
-    Ok(destination_abs)
 }
 
 impl FfiCtx {

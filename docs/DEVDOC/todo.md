@@ -23,6 +23,7 @@
 
 ## Stack
 
+- [ ] Sync panel
 - [ ] P2P
   - [x] iroh
   - [ ] better URLs
