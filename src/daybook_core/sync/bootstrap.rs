@@ -89,16 +89,7 @@ impl IrohSyncRepo {
 
 impl IrohSyncRepo {
     async fn current_endpoint_addr_for_clone(&self) -> iroh::EndpointAddr {
-        let mut endpoint_addr = self.router.endpoint().addr();
-        if endpoint_addr.addrs.is_empty() {
-            let mut ticks = tokio::time::interval(Duration::from_millis(200));
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            while endpoint_addr.addrs.is_empty() && std::time::Instant::now() < deadline {
-                ticks.tick().await;
-                endpoint_addr = self.router.endpoint().addr();
-            }
-        }
-        endpoint_addr
+        self.router.endpoint().addr()
     }
 
     pub async fn current_bootstrap_state(&self) -> SyncBootstrapState {
@@ -613,12 +604,10 @@ async fn ensure_blob_hash_present(
     while let Some(item) = stream.next().await {
         match item {
             DownloadProgressItem::DownloadError => {
-                saw_error = true;
-                last_error = Some("download error".to_string());
+                eyre::bail!("blob download reported error for hash {hash}: download error");
             }
             DownloadProgressItem::Error(err) => {
-                saw_error = true;
-                last_error = Some(format!("{err:?}"));
+                eyre::bail!("blob download reported error for hash {hash}: {err:?}");
             }
             item @ DownloadProgressItem::ProviderFailed { .. } => {
                 saw_error = true;

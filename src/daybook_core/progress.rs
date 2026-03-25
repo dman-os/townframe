@@ -229,7 +229,7 @@ impl crate::repos::Repo for ProgressRepo {
 }
 
 impl ProgressRepo {
-    pub async fn boot(db_pool: sqlx::SqlitePool) -> Res<Arc<Self>> {
+    pub async fn boot(db_pool: sqlx::SqlitePool) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let mut worker = ProgressWorker {
             db_pool,
             cache: ProgressCache::default(),
@@ -239,15 +239,27 @@ impl ProgressRepo {
         worker.preload_cache().await?;
 
         let (sender, mut rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            worker.run(&mut rx).await.unwrap_or_log();
+        let main_cancel_token = CancellationToken::new();
+        let repo_cancel_token = main_cancel_token.child_token();
+        let worker_cancel_token = main_cancel_token.clone();
+        let worker_handle = tokio::spawn(async move {
+            worker
+                .run(&mut rx, worker_cancel_token)
+                .await
+                .unwrap_or_log();
         });
 
-        Ok(Arc::new(Self {
+        let repo = Arc::new(Self {
             sender,
             registry: crate::repos::ListenersRegistry::new(),
-            cancel_token: CancellationToken::new(),
-        }))
+            cancel_token: repo_cancel_token,
+        });
+        let stop = crate::repos::RepoStopToken {
+            cancel_token: main_cancel_token,
+            worker_handle: Some(worker_handle),
+        };
+
+        Ok((repo, stop))
     }
 
     pub async fn upsert_task(&self, args: CreateProgressTaskArgs) -> Res<()> {
@@ -410,10 +422,17 @@ impl ProgressRepo {
 }
 
 impl ProgressWorker {
-    async fn run(&mut self, rx: &mut mpsc::UnboundedReceiver<ProgressMsg>) -> Res<()> {
+    async fn run(
+        &mut self,
+        rx: &mut mpsc::UnboundedReceiver<ProgressMsg>,
+        cancel_token: CancellationToken,
+    ) -> Res<()> {
         let mut ticker = tokio::time::interval(FLUSH_INTERVAL);
         loop {
             tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    break;
+                }
                 _ = ticker.tick() => {
                     self.flush_persist_queue().await?;
                 }

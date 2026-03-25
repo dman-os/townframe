@@ -1047,6 +1047,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_set_retention_override(
     ): Short
+    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_stop(
+    ): Short
     external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_upsert_task(
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_known_devices_once(
@@ -1056,6 +1058,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_qr_png(
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_url(
+    ): Short
+    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_with_qr_png(
     ): Short
     external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_stop(
     ): Short
@@ -1395,6 +1399,8 @@ external fun uniffi_daybook_ffi_fn_method_progressrepoffi_mark_viewed(`ptr`: Lon
 ): Long
 external fun uniffi_daybook_ffi_fn_method_progressrepoffi_set_retention_override(`ptr`: Long,`taskId`: RustBuffer.ByValue,`retentionOverride`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_stop(`ptr`: Long,
+): Long
 external fun uniffi_daybook_ffi_fn_method_progressrepoffi_upsert_task(`ptr`: Long,`args`: RustBufferCreateProgressTaskArgs.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_clone_syncrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1410,6 +1416,8 @@ external fun uniffi_daybook_ffi_fn_method_syncrepoffi_connect_url(`ptr`: Long,`s
 external fun uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_qr_png(`ptr`: Long,`sizePx`: Int,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_url(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_with_qr_png(`ptr`: Long,`sizePx`: Int,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_syncrepoffi_stop(`ptr`: Long,
 ): Long
@@ -1792,6 +1800,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_set_retention_override() != 53529.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_stop() != 7397.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_upsert_task() != 16899.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1805,6 +1816,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_url() != 44496.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_with_qr_png() != 53043.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_stop() != 4650.toShort()) {
@@ -8062,6 +8076,8 @@ public interface ProgressRepoFfiInterface {
     
     suspend fun `setRetentionOverride`(`taskId`: kotlin.String, `retentionOverride`: ProgressRetentionPolicy?)
     
+    suspend fun `stop`()
+    
     suspend fun `upsertTask`(`args`: CreateProgressTaskArgs)
     
     companion object
@@ -8356,6 +8372,28 @@ open class ProgressRepoFfi: Disposable, AutoCloseable, ProgressRepoFfiInterface
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_set_retention_override(
                 uniffiHandle,
                 FfiConverterString.lower(`taskId`),FfiConverterOptionalTypeProgressRetentionPolicy.lower(`retentionOverride`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_stop(
+                uniffiHandle,
+                
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
@@ -8845,6 +8883,8 @@ public interface SyncRepoFfiInterface {
     
     suspend fun `getTicketUrl`(): kotlin.String
     
+    suspend fun `getTicketWithQrPng`(`sizePx`: kotlin.UInt): CloneTicketWithQr
+    
     suspend fun `stop`()
     
     companion object
@@ -9026,6 +9066,27 @@ open class SyncRepoFfi: Disposable, AutoCloseable, SyncRepoFfiInterface
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterString.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getTicketWithQrPng`(`sizePx`: kotlin.UInt) : CloneTicketWithQr {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_with_qr_png(
+                uniffiHandle,
+                FfiConverterUInt.lower(`sizePx`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeCloneTicketWithQr.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -10364,6 +10425,44 @@ public object FfiConverterTypeCloneInitResult: FfiConverterRustBuffer<CloneInitR
 
 
 
+data class CloneTicketWithQr (
+    var `ticketUrl`: kotlin.String
+    , 
+    var `qrPngBytes`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCloneTicketWithQr: FfiConverterRustBuffer<CloneTicketWithQr> {
+    override fun read(buf: ByteBuffer): CloneTicketWithQr {
+        return CloneTicketWithQr(
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CloneTicketWithQr) = (
+            FfiConverterString.allocationSize(value.`ticketUrl`) +
+            FfiConverterByteArray.allocationSize(value.`qrPngBytes`)
+    )
+
+    override fun write(value: CloneTicketWithQr, buf: ByteBuffer) {
+            FfiConverterString.write(value.`ticketUrl`, buf)
+            FfiConverterByteArray.write(value.`qrPngBytes`, buf)
+    }
+}
+
+
+
 data class FacetKeyDisplayHintEntry (
     var `key`: kotlin.String
     , 
@@ -11429,3 +11528,66 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

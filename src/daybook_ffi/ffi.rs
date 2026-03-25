@@ -56,6 +56,12 @@ pub struct CloneDestinationCheck {
     pub is_empty: bool,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CloneTicketWithQr {
+    pub ticket_url: String,
+    pub qr_png_bytes: Vec<u8>,
+}
+
 fn bootstrap_to_ffi(bootstrap: daybook_core::sync::SyncBootstrapState) -> CloneBootstrapInfo {
     CloneBootstrapInfo {
         endpoint_id: bootstrap.endpoint_id.to_string(),

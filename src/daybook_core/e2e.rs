@@ -23,6 +23,7 @@ pub struct DaybookTestContext {
     pub plugs_stop: crate::repos::RepoStopToken,
     pub config_stop: crate::repos::RepoStopToken,
     pub dispatch_stop: crate::repos::RepoStopToken,
+    pub progress_stop: crate::repos::RepoStopToken,
     pub acx_stop: am_utils_rs::BigRepoStopToken,
     pub rt_stop: crate::rt::RtStopToken,
     pub rt: Arc<crate::rt::Rt>,
@@ -117,6 +118,7 @@ impl DaybookTestContext {
         self.plugs_stop.stop().await?;
         self.config_stop.stop().await?;
         self.dispatch_stop.stop().await?;
+        self.progress_stop.stop().await?;
         self.acx_stop.stop().await?;
         Ok(())
     }
@@ -198,7 +200,8 @@ pub async fn test_cx_with_options(
         local_user_path.clone(),
     )
     .await?;
-    let progress_repo = crate::progress::ProgressRepo::boot(sql_ctx.db_pool.clone()).await?;
+    let (progress_repo, progress_stop) =
+        crate::progress::ProgressRepo::boot(sql_ctx.db_pool.clone()).await?;
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -257,6 +260,7 @@ pub async fn test_cx_with_options(
         plugs_stop,
         config_stop,
         dispatch_stop,
+        progress_stop,
         acx_stop,
         rt_stop,
         _temp_dir: temp_dir,

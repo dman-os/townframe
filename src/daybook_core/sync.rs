@@ -1017,6 +1017,7 @@ mod tests {
         blobs_repo: Arc<BlobsRepo>,
         drawer: Arc<DrawerRepo>,
         progress_repo: Arc<ProgressRepo>,
+        progress_stop: crate::repos::RepoStopToken,
         drawer_stop: crate::repos::RepoStopToken,
         _plugs_repo: Arc<PlugsRepo>,
         plugs_stop: crate::repos::RepoStopToken,
@@ -1034,6 +1035,9 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(10), self.sync_stop.stop())
                 .await
                 .map_err(|_| eyre::eyre!("timeout waiting sync stop"))??;
+            tokio::time::timeout(Duration::from_secs(10), self.progress_stop.stop())
+                .await
+                .map_err(|_| eyre::eyre!("timeout waiting progress stop"))??;
             self.doc_blobs_bridge_cancel.cancel();
             if let Some(handle) = self.doc_blobs_bridge_handle.take() {
                 tokio::time::timeout(
@@ -1713,7 +1717,7 @@ mod tests {
                 Arc::clone(&drawer_repo),
                 Arc::clone(&doc_blobs_index_repo),
             );
-        let progress_repo = ProgressRepo::boot(rtx.sql.db_pool.clone()).await?;
+        let (progress_repo, progress_stop) = ProgressRepo::boot(rtx.sql.db_pool.clone()).await?;
         let (sync_repo, sync_stop) = IrohSyncRepo::boot(
             Arc::clone(&rtx),
             Arc::clone(&config_repo),
@@ -1728,6 +1732,7 @@ mod tests {
             blobs_repo,
             drawer: drawer_repo,
             progress_repo,
+            progress_stop,
             drawer_stop,
             _plugs_repo: plugs_repo,
             plugs_stop,

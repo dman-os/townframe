@@ -1,8 +1,12 @@
+// FIXME: i don't like the name of this file, surely we'll have other 
+// uses for QR?
+
 package org.example.daybook.capture.data
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.TimeSource
 import org.example.daybook.uniffi.CameraOverlay as FfiCameraOverlay
 import org.example.daybook.uniffi.CameraPreviewFfi
@@ -11,10 +15,12 @@ import org.example.daybook.uniffi.CameraQrEventListener
 
 private fun createQrListener(
     state: MutableStateFlow<CameraOverlayState>,
+    isSessionActive: () -> Boolean,
     onDetectedText: ((String) -> Unit)?
 ): CameraQrEventListener =
     object : CameraQrEventListener {
         override fun onCameraQrOverlaysUpdated(overlays: List<FfiCameraOverlay>) {
+            if (!isSessionActive()) return
             state.update { prior ->
                 prior.copy(
                     overlays =
@@ -37,11 +43,13 @@ private fun createQrListener(
         }
 
         override fun onCameraQrDetected(decodedText: String) {
+            if (!isSessionActive()) return
             state.update { prior -> prior.copy(lastDetectedText = decodedText) }
             onDetectedText?.invoke(decodedText)
         }
 
         override fun onCameraQrError(message: String) {
+            if (!isSessionActive()) return
             state.update { prior -> prior.copy(latestError = message) }
         }
     }
@@ -55,19 +63,30 @@ class CameraQrOverlayBridge(
 
     private var lastSubmitAt: kotlin.time.TimeMark? = null
     private var started = false
+    private val sessionEpoch = AtomicLong(0)
 
-    private val listener = createQrListener(_state, onDetectedText)
+    private val listener =
+        createQrListener(
+            state = _state,
+            isSessionActive = {
+                val activeEpoch = sessionEpoch.get()
+                started && activeEpoch != 0L
+            },
+            onDetectedText = onDetectedText
+        )
 
     fun start() {
         if (started) return
+        sessionEpoch.incrementAndGet()
         analyzer.setListener(listener)
         started = true
     }
 
     fun stop() {
         if (!started) return
-        analyzer.clearListener()
+        sessionEpoch.incrementAndGet()
         started = false
+        analyzer.clearListener()
         lastSubmitAt = null
         _state.value = CameraOverlayState()
     }
@@ -103,11 +122,21 @@ class CameraPreviewQrBridge(
     val state: StateFlow<CameraOverlayState> = _state
 
     private var started = false
+    private val sessionEpoch = AtomicLong(0)
 
-    private val listener = createQrListener(_state, onDetectedText)
+    private val listener =
+        createQrListener(
+            state = _state,
+            isSessionActive = {
+                val activeEpoch = sessionEpoch.get()
+                started && activeEpoch != 0L
+            },
+            onDetectedText = onDetectedText
+        )
 
     fun start() {
         if (started) return
+        sessionEpoch.incrementAndGet()
         cameraPreviewFfi.setQrListener(listener)
         cameraPreviewFfi.setQrAnalysisEnabled(true)
         started = true
@@ -115,9 +144,10 @@ class CameraPreviewQrBridge(
 
     fun stop() {
         if (!started) return
+        sessionEpoch.incrementAndGet()
+        started = false
         cameraPreviewFfi.setQrAnalysisEnabled(false)
         cameraPreviewFfi.clearQrListener()
-        started = false
         _state.value = CameraOverlayState()
     }
 }

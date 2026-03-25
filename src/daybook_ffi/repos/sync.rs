@@ -1,4 +1,4 @@
-use crate::ffi::{CloneBootstrapInfo, FfiError, SharedFfiCtx};
+use crate::ffi::{CloneBootstrapInfo, CloneTicketWithQr, FfiError, SharedFfiCtx};
 use crate::interlude::*;
 
 use crate::repos::blobs::BlobsRepoFfi;
@@ -114,6 +114,35 @@ impl SyncRepoFfi {
                         .map_err(|err| eyre::eyre!("failed to render QR PNG bytes: {err}"))?;
                 }
                 Ok::<Vec<u8>, FfiError>(png_bytes)
+            })
+            .await
+    }
+
+    async fn get_ticket_with_qr_png(
+        self: Arc<Self>,
+        size_px: u32,
+    ) -> Result<CloneTicketWithQr, FfiError> {
+        let this = Arc::clone(&self);
+        self.fcx
+            .do_on_rt(async move {
+                let ticket_url = this.repo.get_ticket_url().await?;
+                let qr_code = QrCode::new(ticket_url.as_bytes())
+                    .map_err(|err| eyre::eyre!("failed to encode QR ticket: {err}"))?;
+                let image = qr_code
+                    .render::<image::Luma<u8>>()
+                    .min_dimensions(size_px, size_px)
+                    .build();
+                let mut png_bytes = Vec::new();
+                {
+                    let mut cursor = std::io::Cursor::new(&mut png_bytes);
+                    image::DynamicImage::ImageLuma8(image)
+                        .write_to(&mut cursor, image::ImageFormat::Png)
+                        .map_err(|err| eyre::eyre!("failed to render QR PNG bytes: {err}"))?;
+                }
+                Ok::<CloneTicketWithQr, FfiError>(CloneTicketWithQr {
+                    ticket_url,
+                    qr_png_bytes: png_bytes,
+                })
             })
             .await
     }

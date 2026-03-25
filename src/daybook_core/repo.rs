@@ -246,7 +246,11 @@ impl RepoCtx {
             &sql.db_pool,
             &doc_app_cell,
             &doc_drawer_cell,
-            !initialize_repo,
+            if initialize_repo {
+                crate::app::InitFromGlobalsMode::CreateFresh
+            } else {
+                crate::app::InitFromGlobalsMode::RequireExisting
+            },
         )
         .await?;
         let doc_app = doc_app_cell

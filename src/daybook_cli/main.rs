@@ -17,7 +17,7 @@ use clap::builder::styling::AnsiColor;
 use clap::*;
 
 use daybook_core::drawer::DrawerRepo;
-use daybook_core::plugs::{manifest, PlugsRepo};
+use daybook_core::plugs::manifest;
 use daybook_core::repos::Repo;
 use daybook_core::sync::IrohSyncEvent;
 
@@ -647,19 +647,9 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         return Ok(code);
     }
 
-    let ctx = (Box::pin(lazy::repo_ctx())
-        as std::pin::Pin<Box<dyn std::future::Future<Output = Res<SharedCtx>> + Send + 'static>>)
-        .await?;
-    let drawer = (Box::pin(lazy::drawer_repo())
-        as std::pin::Pin<
-            Box<dyn std::future::Future<Output = Res<Arc<DrawerRepo>>> + Send + 'static>,
-        >)
-        .await?;
-    let plugs_repo = (Box::pin(lazy::plugs_repo())
-        as std::pin::Pin<
-            Box<dyn std::future::Future<Output = Res<Arc<PlugsRepo>>> + Send + 'static>,
-        >)
-        .await?;
+    let ctx = Box::pin(lazy::repo_ctx()).await?;
+    let drawer = Box::pin(lazy::drawer_repo()).await?;
+    let plugs_repo = Box::pin(lazy::plugs_repo()).await?;
 
     let plugs = plugs_repo.list_plugs().await;
 
@@ -742,15 +732,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
             Some((name, sub_matches)) => {
                 info!(?name, "XXX");
                 let details = command_details.remove(name).unwrap();
-                let rt = (Box::pin(lazy::daybook_rt())
-                    as std::pin::Pin<
-                        Box<
-                            dyn std::future::Future<Output = Res<Arc<daybook_core::rt::Rt>>>
-                                + Send
-                                + 'static,
-                        >,
-                    >)
-                    .await?;
+                let rt = Box::pin(lazy::daybook_rt()).await?;
                 let ecx = ExecCtx {
                     rt: Arc::clone(&rt),
                     _cx: Arc::clone(&ctx),
@@ -1029,6 +1011,7 @@ mod tests {
     use daybook_core::config::ConfigRepo;
     use daybook_core::index::DocBlobsIndexRepo;
     use daybook_core::local_state::SqliteLocalStateRepo;
+    use daybook_core::plugs::PlugsRepo;
     use daybook_core::progress::ProgressRepo;
     use daybook_core::repo::{RepoCtx, RepoOpenOptions};
     use daybook_core::repos::RepoStopToken;
@@ -1041,6 +1024,7 @@ mod tests {
         drawer: Arc<DrawerRepo>,
         sync_repo: Arc<IrohSyncRepo>,
         sync_stop: daybook_core::sync::IrohSyncRepoStopToken,
+        progress_stop: daybook_core::repos::RepoStopToken,
         plugs_stop: daybook_core::repos::RepoStopToken,
         drawer_stop: daybook_core::repos::RepoStopToken,
         config_stop: daybook_core::repos::RepoStopToken,
@@ -1051,6 +1035,7 @@ mod tests {
     impl CliSyncNode {
         async fn stop(self) -> Res<()> {
             self.sync_stop.stop().await?;
+            self.progress_stop.stop().await?;
             self.drawer_stop.stop().await?;
             self.plugs_stop.stop().await?;
             self.config_stop.stop().await?;
@@ -1114,7 +1099,7 @@ mod tests {
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
-        let progress_repo = ProgressRepo::boot(ctx.sql.db_pool.clone()).await?;
+        let (progress_repo, progress_stop) = ProgressRepo::boot(ctx.sql.db_pool.clone()).await?;
         let (sync_repo, sync_stop) = IrohSyncRepo::boot(
             Arc::clone(&ctx),
             Arc::clone(&config_repo),
@@ -1129,6 +1114,7 @@ mod tests {
             drawer: drawer_repo,
             sync_repo,
             sync_stop,
+            progress_stop,
             plugs_stop,
             drawer_stop,
             config_stop,
@@ -1255,6 +1241,8 @@ mod lazy {
             if let Err(err) = callback().await {
                 if first_err.is_none() {
                     first_err = Some(err);
+                } else {
+                    warn!(?err, "shutdown callback failed after first error");
                 }
             }
         }
@@ -1489,7 +1477,8 @@ mod lazy {
         match PROGRESS
             .get_or_try_init(|| async {
                 let ctx = repo_ctx().await?;
-                let repo = ProgressRepo::boot(ctx.sql.db_pool.clone()).await?;
+                let (repo, stop) = ProgressRepo::boot(ctx.sql.db_pool.clone()).await?;
+                register_shutdown(move || async move { stop.stop().await });
                 Ok(repo)
             })
             .await

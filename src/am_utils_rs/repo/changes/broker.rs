@@ -97,13 +97,7 @@ pub fn spawn_doc_listener(
     };
     let log_doc_id = doc_id.clone();
     let join_handle = tokio::spawn(async move {
-        if let Err(error) = fut.await {
-            error!(
-                ?error,
-                ?log_doc_id,
-                "repo doc listener task exited with error"
-            );
-        }
+         fut.await.unwrap()
     });
 
     Ok((

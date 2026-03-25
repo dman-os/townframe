@@ -24,6 +24,7 @@ import java.io.ByteArrayOutputStream
 import java.util.logging.Logger
 import javax.imageio.ImageIO
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -138,12 +139,25 @@ actual fun DaybookCameraPreview(
     }
 
     LaunchedEffect(cameraPreviewFfi, selectedDeviceId) {
-        val deviceId = selectedDeviceId ?: return@LaunchedEffect
+        val deviceId = selectedDeviceId
+        if (deviceId == null) {
+            latestFrame = null
+            latestImageBitmap = null
+            runCatching { cameraPreviewFfi.stopStream() }.onFailure {
+                previewLogger.warning("failed stopping stream on deselect: ${it.message ?: it}")
+            }
+            return@LaunchedEffect
+        }
         try {
             cameraPreviewFfi.startStream(deviceId.toUInt(), noOpListener)
             errorText = null
+            awaitCancellation()
         } catch (ffiError: FfiException) {
             errorText = ffiError.message()
+        } finally {
+            runCatching { cameraPreviewFfi.stopStream() }.onFailure {
+                previewLogger.warning("failed stopping stream: ${it.message ?: it}")
+            }
         }
     }
 
@@ -155,6 +169,7 @@ actual fun DaybookCameraPreview(
                 val nextFrame = cameraPreviewFfi.`takeLatestFrame`()
                 if (nextFrame != null) {
                     consecutiveFailures = 0
+                    errorText = null
                     latestFrame = nextFrame
                     latestImageBitmap = withContext(Dispatchers.IO) { nextFrame.toImageBitmap() }
                     if (onFrameAvailable != null) {

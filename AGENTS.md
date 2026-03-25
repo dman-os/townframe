@@ -29,7 +29,7 @@
   - This is especially critical in Kotlin or UI code. 
     - If an error occurs that can't be handled, it should crash the program or show a toast if it's not critical. 
   - It's very hard to imagine cases where this is not true.
-  - Unless a tokio task is expected to fail and has a channel for reporting failures, the last handler should call `.unwrap` on any unexepcted errors at the end.
+  - Unless a tokio task is expected to fail and has a channel for reporting failures, the last handler should call `.unwrap` on any unexpected errors at the end.
     - Think a pattern like `let fut = async {/*body*/ eyre::Ok(()) }; tokio::spawn(async { fut.await.unwrap() })`
     - We have a panic handler that will bring down the whole process when tasks panic.
     - This ensures that we don't hide task failures until the join handler is seen at shutdown and so and so.

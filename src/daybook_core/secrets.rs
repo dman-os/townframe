@@ -29,18 +29,29 @@ impl SecretRepo {
         let service_name = format!("daybook.repo.{repo_id}");
         let secret = match keyring::Entry::new(&service_name, Self::KEYRING_USERNAME) {
             Ok(entry) => match entry.get_password() {
-                Ok(secret_hex) => {
-                    let keyring_secret = decode_secret_hex(&secret_hex)?;
-                    if keyring_secret.to_bytes() != fallback_secret.to_bytes() {
-                        warn!("keyring and fallback iroh secrets diverged; using fallback secret");
-                        if let Err(err) = entry.set_password(&fallback_secret_hex) {
-                            warn!(?err, "failed repairing keyring secret from fallback value");
+                Ok(secret_hex) => match decode_secret_hex(&secret_hex) {
+                    Ok(keyring_secret) => {
+                        if keyring_secret.to_bytes() != fallback_secret.to_bytes() {
+                            warn!("keyring and fallback iroh secrets diverged; using fallback secret");
+                            if let Err(err) = entry.set_password(&fallback_secret_hex) {
+                                warn!(?err, "failed repairing keyring secret from fallback value");
+                            }
+                            fallback_secret.clone()
+                        } else {
+                            keyring_secret
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            ?err,
+                            "invalid iroh secret key in keyring, repairing from fallback"
+                        );
+                        if let Err(set_err) = entry.set_password(&fallback_secret_hex) {
+                            warn!(?set_err, "failed repairing keyring secret from fallback value");
                         }
                         fallback_secret.clone()
-                    } else {
-                        keyring_secret
                     }
-                }
+                },
                 Err(keyring::Error::NoEntry) => {
                     if let Err(err) = entry.set_password(&fallback_secret_hex) {
                         warn!(?err, "failed backfilling keyring from fallback secret");

@@ -508,7 +508,7 @@ mod tests {
                 &sql_ctx.db_pool,
                 &doc_app,
                 &doc_drawer,
-                true,
+                daybook_core::app::InitFromGlobalsMode::CreateFresh,
             )
             .await?;
 

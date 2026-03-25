@@ -4,8 +4,7 @@
 
 import { $ } from "./utils.ts";
 
-async function removeTreeIfExists(path: { toString(): string }) {
-  const targetPath = path.toString();
+async function removeTreeIfExists(targetPath: string) {
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       await Deno.remove(targetPath, { recursive: true });
@@ -29,9 +28,8 @@ async function cleanupOrtBuildArtifacts(sourceDir: {
   join(path: string): { toString(): string };
 }) {
   // Keep extracted ORT sources for reuse, but drop heavy generated Android build output.
-  await removeTreeIfExists({
-    toString: () => `${sourceDir.join("build").toString()}/Android`,
-  });
+  const androidBuildPath = `${sourceDir.join("build").toString()}/Android`;
+  await removeTreeIfExists(androidBuildPath);
 }
 
 const abiToTriple = {
@@ -86,7 +84,7 @@ if (!(await distCompleteFile.exists())) {
         .showProgress()
         .pipeToPath(sourceArchivePath);
     }
-    await removeTreeIfExists(sourceDir);
+    await removeTreeIfExists(sourceDir.toString());
     await sourceDir.ensureDir();
     await $`bsdtar --extract --file ${sourceArchivePath} --directory ${sourceDir} --strip-components=1`;
     await sourceCompleteFile.writeText("ok\n");
@@ -108,7 +106,7 @@ if (!(await distCompleteFile.exists())) {
       `ORT build did not produce shared libraries under ${builtLibDir}`,
     );
   }
-  await removeTreeIfExists(distDir);
+  await removeTreeIfExists(distDir.toString());
   await distDir.ensureDir();
   for (const sourceLibPath of sharedLibPaths) {
     await $`cp ${sourceLibPath} ${distDir}`;
