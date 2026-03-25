@@ -41,6 +41,8 @@ pub struct IrohSyncRepo {
     active_samod_peers: tokio::sync::RwLock<HashMap<EndpointId, ActivePeerState>>,
     full_sync_handle: full::WorkerHandle,
     sync_store: am_utils_rs::sync::store::SyncStoreHandle,
+    reconnect_task_cancel: CancellationToken,
+    reconnect_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
     // bootstrap_docs: tokio::sync::Mutex<Vec<iroh_docs::api::Doc>>,
     // active_endpoint_ids: tokio::sync::RwLock<HashMap<String, ()>>,
 }
@@ -97,6 +99,8 @@ pub enum IrohSyncEvent {
 pub struct IrohSyncRepoStopToken {
     cancel_token: CancellationToken,
     worker_handle: JoinHandle<()>,
+    reconnect_task_cancel: CancellationToken,
+    reconnect_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
     router: iroh::protocol::Router,
     partition_sync_stop_token: am_utils_rs::sync::node::SyncNodeStopToken,
     repo_rpc_stop_token: am_utils_rs::repo::rpc::RepoRpcStopToken,
@@ -106,6 +110,15 @@ pub struct IrohSyncRepoStopToken {
 impl IrohSyncRepoStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
+        self.reconnect_task_cancel.cancel();
+        let reconnect_handle = self.reconnect_task.lock().await.take();
+        if let Some(handle) = reconnect_handle {
+            utils_rs::wait_on_handle_with_timeout(
+                handle,
+                utils_rs::scale_timeout(Duration::from_secs(60)),
+            )
+            .await?;
+        }
         // Worker shutdown drains active repo connections; each connection stop can wait up to 5s.
         utils_rs::wait_on_handle_with_timeout(
             self.worker_handle,
@@ -191,6 +204,8 @@ impl IrohSyncRepo {
         let (incoming_conn_tx, incoming_conn_rx) = tokio::sync::mpsc::unbounded_channel();
         let (conn_end_tx, conn_end_rx) = tokio::sync::mpsc::unbounded_channel();
         let (clone_rpc_tx, clone_rpc_rx) = tokio::sync::mpsc::channel(128);
+        let reconnect_task_cancel = CancellationToken::new();
+        let reconnect_task = Arc::new(tokio::sync::Mutex::new(None));
         let (partition_sync_store, partition_sync_store_stop_token) =
             am_utils_rs::sync::store::spawn_sync_store(rcx.big_repo.state_pool().clone()).await?;
         let (partition_sync_node, partition_sync_stop_token) =
@@ -272,6 +287,8 @@ impl IrohSyncRepo {
             conn_end_signal_tx: conn_end_tx,
             full_sync_handle,
             sync_store: partition_sync_store.clone(),
+            reconnect_task_cancel: reconnect_task_cancel.clone(),
+            reconnect_task: Arc::clone(&reconnect_task),
             // bootstrap_docs: tokio::sync::Mutex::new(Vec::new()),
             // active_endpoint_ids: tokio::sync::RwLock::new(HashMap::new()),
         });
@@ -314,6 +331,8 @@ impl IrohSyncRepo {
             IrohSyncRepoStopToken {
                 cancel_token,
                 worker_handle,
+                reconnect_task_cancel,
+                reconnect_task,
                 router,
                 partition_sync_stop_token,
                 repo_rpc_stop_token,
@@ -341,18 +360,31 @@ impl IrohSyncRepo {
         .into()
     }
 
-    fn spawn_connect_known_devices_once(self: &Arc<Self>, trigger: &'static str) {
-        let repo = Arc::clone(self);
-        tokio::spawn(async move {
-            if repo.cancel_token.is_cancelled() {
+    async fn spawn_connect_known_devices_once(self: &Arc<Self>, trigger: &'static str) {
+        let mut reconnect_task = self.reconnect_task.lock().await;
+        if let Some(existing) = reconnect_task.as_ref() {
+            if !existing.is_finished() {
                 return;
             }
-            if let Err(err) = repo.connect_known_devices_once().await {
-                if !repo.cancel_token.is_cancelled() {
-                    warn!(?err, trigger, "known-device reconnect failed");
+        }
+        if let Some(done) = reconnect_task.take() {
+            let _ = done.await;
+        }
+        let repo = Arc::clone(self);
+        let task_cancel = self.reconnect_task_cancel.child_token();
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                _ = task_cancel.cancelled() => {}
+                out = repo.connect_known_devices_once() => {
+                    if let Err(err) = out {
+                        if !repo.cancel_token.is_cancelled() && !task_cancel.is_cancelled() {
+                            warn!(?err, trigger, "known-device reconnect failed");
+                        }
+                    }
                 }
             }
         });
+        *reconnect_task = Some(handle);
     }
 
     async fn machine_loop(
@@ -370,7 +402,7 @@ impl IrohSyncRepo {
             .subscribe(crate::repos::SubscribeOpts { capacity: 64 });
         let mut reconnect_tick = tokio::time::interval(Duration::from_secs(15));
         reconnect_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        self.spawn_connect_known_devices_once("initial");
+        self.spawn_connect_known_devices_once("initial").await;
         loop {
             tokio::select! {
                 biased;
@@ -403,13 +435,13 @@ impl IrohSyncRepo {
                     self.handle_conn_end(signal).await?;
                 }
                 _ = reconnect_tick.tick() => {
-                    self.spawn_connect_known_devices_once("periodic");
+                    self.spawn_connect_known_devices_once("periodic").await;
                 }
                 val = config_listener.recv_async() => {
                     match val {
                         Ok(event) => {
                             if matches!(&*event, crate::config::ConfigEvent::SyncDevicesChanged) {
-                                self.spawn_connect_known_devices_once("config-change");
+                                self.spawn_connect_known_devices_once("config-change").await;
                             }
                         }
                         Err(crate::repos::RecvError::Closed) => {
@@ -610,7 +642,7 @@ impl IrohSyncRepo {
         if self.cancel_token.is_cancelled() {
             return Ok(());
         }
-        self.spawn_connect_known_devices_once("connection-close");
+        self.spawn_connect_known_devices_once("connection-close").await;
         Ok(())
     }
 
@@ -987,6 +1019,18 @@ mod tests {
             .map_err(|_| eyre::eyre!("timeout waiting doc blobs index stop"))??;
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.sqlite_local_state_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting sqlite local state stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.config_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting config stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
                 self.drawer_stop.stop(),
             )
             .await
@@ -997,18 +1041,6 @@ mod tests {
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting plugs stop"))??;
-            tokio::time::timeout(
-                utils_rs::scale_timeout(Duration::from_secs(10)),
-                self.config_stop.stop(),
-            )
-            .await
-            .map_err(|_| eyre::eyre!("timeout waiting config stop"))??;
-            tokio::time::timeout(
-                utils_rs::scale_timeout(Duration::from_secs(10)),
-                self.sqlite_local_state_stop.stop(),
-            )
-            .await
-            .map_err(|_| eyre::eyre!("timeout waiting sqlite local state stop"))??;
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
                 self.ctx.shutdown(),

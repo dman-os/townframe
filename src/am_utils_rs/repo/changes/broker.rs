@@ -95,17 +95,9 @@ pub fn spawn_doc_listener(
         }
         .instrument(span)
     };
-    let spawn_cancel_token = cancel_token.clone();
     let join_handle = tokio::spawn(async move {
         if let Err(err) = fut.await {
-            if spawn_cancel_token.is_cancelled() {
-                debug!(
-                    ?err,
-                    "doc change broker finished with error during shutdown"
-                );
-            } else {
-                error!(?err, "doc change broker send loop failed");
-            }
+            error!(?err, "doc change broker send loop failed");
         }
     });
 
@@ -150,16 +142,16 @@ impl DocChangeBroker {
                 heads: Arc::clone(&new_heads),
                 origin: changes.origin.clone(),
             }])
-            .or_else(|err| {
+            .map_err(|err| {
                 if self.cancel_token.is_cancelled() {
                     debug!(
                         ?err,
                         ?doc_id,
                         "head_tx closed during broker shutdown; dropping late head notification"
                     );
-                    Ok(())
+                    eyre::eyre!("shutdown: broker is cancelled")
                 } else {
-                    Err(eyre::eyre!("channel error: closed?: {err:?}"))
+                    eyre::eyre!("channel error: closed?: {err:?}")
                 }
             })?;
         if !(self.has_candidate_listener)(self.handle.document_id(), &changes.origin) {
@@ -184,16 +176,16 @@ impl DocChangeBroker {
         });
 
         if !all_changes.is_empty() {
-            self.change_tx.send(all_changes).or_else(|err| {
+            self.change_tx.send(all_changes).map_err(|err| {
                 if self.cancel_token.is_cancelled() {
                     debug!(
                         ?err,
                         ?doc_id,
                         "change_tx closed during broker shutdown; dropping late change notification"
                     );
-                    Ok(())
+                    eyre::eyre!("shutdown: broker is cancelled")
                 } else {
-                    Err(eyre::eyre!("channel error: closed?: {err:?}"))
+                    eyre::eyre!("channel error: closed?: {err:?}")
                 }
             })?;
         }

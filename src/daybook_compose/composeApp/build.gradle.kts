@@ -268,6 +268,19 @@ val cargoTargetDir =
         ?.takeIf { it.isNotBlank() }
         ?.let(::File)
         ?: File(repoRoot, "target")
+val ortLibLocation =
+    (findProperty("ortLibLocation") as String?)
+        ?.takeIf { it.isNotBlank() }
+        ?: System.getenv("ORT_LIB_LOCATION")?.takeIf { it.isNotBlank() }
+val ortLibProfile =
+    (findProperty("ortLibProfile") as String?)
+        ?.takeIf { it.isNotBlank() }
+        ?: System.getenv("ORT_LIB_PROFILE")?.takeIf { it.isNotBlank() }
+val ortPreferDynamicLink =
+    ((findProperty("ortPreferDynamicLink") as String?)
+        ?.takeIf { it.isNotBlank() }
+        ?: System.getenv("ORT_PREFER_DYNAMIC_LINK")
+        ?: "0") != "0"
 
 fun resolveDaybookComposeProfile(): String {
     val rawProfile =
@@ -382,6 +395,17 @@ fun registerRustAndroidCopyTask(
         dependsOn(buildTaskName)
 
         val sourceSoFile = File(cargoTargetDir, sourceLibPath.removePrefix("target/"))
+        val ortLibDir = ortLibLocation?.let(::File)
+        val ortSharedLibs =
+            if (ortPreferDynamicLink && ortLibDir != null && ortLibDir.exists()) {
+                ortLibDir
+                    .listFiles()
+                    ?.filter { it.isFile && it.name.contains(".so") }
+                    ?.toList()
+                    ?: emptyList()
+            } else {
+                emptyList()
+            }
         val androidNdkRoot = System.getenv("ANDROID_NDK_ROOT")
         val libcxxSourceFile =
             if (!androidNdkRoot.isNullOrBlank()) ndkLibCppSharedForAbi(targetAbi, androidNdkRoot) else null
@@ -393,11 +417,19 @@ fun registerRustAndroidCopyTask(
             destDir.mkdirs()
             destSoFile.delete()
             destLibcxxFile.delete()
+            if (ortSharedLibs.isNotEmpty()) {
+                logger.lifecycle(
+                    "Copying ${ortSharedLibs.size} ORT shared libraries from ${ortLibDir?.absolutePath} (profile=${ortLibProfile ?: "unknown"})"
+                )
+            }
         }
 
         from(sourceSoFile)
         if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
             from(libcxxSourceFile)
+        }
+        if (ortSharedLibs.isNotEmpty()) {
+            from(ortSharedLibs)
         }
         into(destDir)
     }
@@ -410,6 +442,13 @@ tasks.register<Exec>("buildRustAndroidDebug") {
 
     commandLine("cargo", "build", "-p", "daybook_ffi", "--no-default-features", "--target", targetRustTriple)
     environment("CARGO_TARGET_DIR", cargoTargetDir.absolutePath)
+    if (!ortLibLocation.isNullOrBlank()) {
+        environment("ORT_LIB_LOCATION", ortLibLocation)
+    }
+    if (!ortLibProfile.isNullOrBlank()) {
+        environment("ORT_LIB_PROFILE", ortLibProfile)
+    }
+    environment("ORT_PREFER_DYNAMIC_LINK", if (ortPreferDynamicLink) "1" else "0")
     val ndkToolchainBinDir = System.getenv("ANDROID_NDK_TOOLCHAIN_BIN_DIR")
     if (!ndkToolchainBinDir.isNullOrBlank()) {
         val toolchain = androidRustToolchainForAbi(targetAbi, ndkToolchainBinDir)
@@ -440,6 +479,13 @@ tasks.register<Exec>("buildRustAndroidRelease") {
 
     commandLine("cargo", "build", "-p", "daybook_ffi", "--no-default-features", "--release", "--target", targetRustTriple)
     environment("CARGO_TARGET_DIR", cargoTargetDir.absolutePath)
+    if (!ortLibLocation.isNullOrBlank()) {
+        environment("ORT_LIB_LOCATION", ortLibLocation)
+    }
+    if (!ortLibProfile.isNullOrBlank()) {
+        environment("ORT_LIB_PROFILE", ortLibProfile)
+    }
+    environment("ORT_PREFER_DYNAMIC_LINK", if (ortPreferDynamicLink) "1" else "0")
     val ndkToolchainBinDir = System.getenv("ANDROID_NDK_TOOLCHAIN_BIN_DIR")
     if (!ndkToolchainBinDir.isNullOrBlank()) {
         val toolchain = androidRustToolchainForAbi(targetAbi, ndkToolchainBinDir)

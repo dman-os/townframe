@@ -121,6 +121,7 @@ actual fun DaybookCameraPreview(
     var latestFrame by remember { mutableStateOf<CameraPreviewFrame?>(null) }
     var latestImageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    var streamStarted by remember { mutableStateOf(false) }
 
     val noOpListener =
         remember {
@@ -147,28 +148,35 @@ actual fun DaybookCameraPreview(
         if (deviceId == null) {
             latestFrame = null
             latestImageBitmap = null
-            runCatching { cameraPreviewFfi.stopStream() }.onFailure {
-                previewLogger.warning("failed stopping stream on deselect: ${it.message ?: it}")
+            streamStarted = false
+            runCatching { cameraPreviewFfi.stopStream() }.onFailure { error ->
+                previewLogger.warning("failed stopping stream on deselect: ${error.message ?: error}")
+                errorText = "Failed stopping camera stream: ${error.message ?: error}"
             }
             return@LaunchedEffect
         }
         try {
             cameraPreviewFfi.startStream(deviceId.toUInt(), noOpListener)
+            streamStarted = true
             errorText = null
             awaitCancellation()
         } catch (ffiError: FfiException) {
+            streamStarted = false
             errorText = ffiError.message()
         } finally {
-            runCatching { cameraPreviewFfi.stopStream() }.onFailure {
-                previewLogger.warning("failed stopping stream: ${it.message ?: it}")
+            streamStarted = false
+            runCatching { cameraPreviewFfi.stopStream() }.onFailure { error ->
+                previewLogger.warning("failed stopping stream: ${error.message ?: error}")
+                errorText = "Failed stopping camera stream: ${error.message ?: error}"
             }
         }
     }
 
-    LaunchedEffect(cameraPreviewFfi, selectedDeviceId, onFrameAvailable) {
-        if (selectedDeviceId == null) return@LaunchedEffect
+    LaunchedEffect(cameraPreviewFfi, selectedDeviceId, streamStarted, onFrameAvailable) {
+        if (selectedDeviceId == null || !streamStarted) return@LaunchedEffect
         var consecutiveFailures = 0
         while (isActive) {
+            if (!streamStarted) break
             try {
                 val nextFrame = cameraPreviewFfi.`takeLatestFrame`()
                 if (nextFrame != null) {
@@ -185,13 +193,17 @@ actual fun DaybookCameraPreview(
                                     heightPx = nextFrame.heightPx.toInt(),
                                     jpegBytes = jpegBytes
                                 )
-                            onFrameAvailable.invoke(sample)
+                            withContext(Dispatchers.Default) {
+                                onFrameAvailable.invoke(sample)
+                            }
                         }
                     } else {
                         latestImageBitmap = withContext(Dispatchers.IO) { nextFrame.toImageBitmap() }
                         if (onFrameAvailable != null) {
                             val sample = withContext(Dispatchers.IO) { nextFrame.toFrameSample() }
-                            onFrameAvailable.invoke(sample)
+                            withContext(Dispatchers.Default) {
+                                onFrameAvailable.invoke(sample)
+                            }
                         }
                     }
                 }
@@ -232,6 +244,7 @@ actual fun DaybookCameraPreview(
         onDispose {
             captureContext?.setCaptureCallback(null)
             captureContext?.setCanCapture(false)
+            streamStarted = false
             cameraPreviewFfi.stopStream()
         }
     }

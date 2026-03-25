@@ -21,6 +21,7 @@ private fun createQrListener(
         override fun onCameraQrOverlaysUpdated(overlays: List<FfiCameraOverlay>) {
             if (!isSessionActive()) return
             state.update { prior ->
+                if (!isSessionActive()) return@update prior
                 prior.copy(
                     overlays =
                         overlays.mapNotNull { overlay ->
@@ -44,12 +45,16 @@ private fun createQrListener(
         override fun onCameraQrDetected(decodedText: String) {
             if (!isSessionActive()) return
             state.update { prior -> prior.copy(lastDetectedText = decodedText) }
+            if (!isSessionActive()) return
             onDetectedText?.invoke(decodedText)
         }
 
         override fun onCameraQrError(message: String) {
             if (!isSessionActive()) return
-            state.update { prior -> prior.copy(latestError = message) }
+            state.update { prior ->
+                if (!isSessionActive()) return@update prior
+                prior.copy(latestError = message)
+            }
         }
     }
 
@@ -76,7 +81,6 @@ class CameraQrOverlayBridge(
     fun start() {
         if (started) return
         val sessionToken = nextSessionToken()
-        started = true
         val sessionListener =
             createQrListener(
                 state = _state,
@@ -85,6 +89,7 @@ class CameraQrOverlayBridge(
             )
         listener = sessionListener
         analyzer.setListener(sessionListener)
+        started = true
     }
 
     fun stop() {
@@ -111,7 +116,9 @@ class CameraQrOverlayBridge(
                 frameBytes = sample.jpegBytes
             )
         }.onFailure { throwable ->
+            if (!started) return@onFailure
             _state.update { prior ->
+                if (!started) return@update prior
                 prior.copy(
                     latestError = throwable.message ?: throwable::class.simpleName
                 )
@@ -142,7 +149,6 @@ class CameraPreviewQrBridge(
     fun start() {
         if (started) return
         val sessionToken = nextSessionToken()
-        started = true
         val sessionListener =
             createQrListener(
                 state = _state,
@@ -152,6 +158,7 @@ class CameraPreviewQrBridge(
         listener = sessionListener
         cameraPreviewFfi.setQrListener(sessionListener)
         cameraPreviewFfi.setQrAnalysisEnabled(true)
+        started = true
     }
 
     fun stop() {

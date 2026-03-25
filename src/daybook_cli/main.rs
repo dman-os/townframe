@@ -1039,11 +1039,11 @@ mod tests {
         async fn stop(self) -> Res<()> {
             self.sync_stop.stop().await?;
             self.progress_stop.stop().await?;
-            self.drawer_stop.stop().await?;
-            self.plugs_stop.stop().await?;
-            self.config_stop.stop().await?;
             self.doc_blobs_index_stop.stop().await?;
             self.sqlite_local_state_stop.stop().await?;
+            self.config_stop.stop().await?;
+            self.drawer_stop.stop().await?;
+            self.plugs_stop.stop().await?;
             self.ctx.shutdown().await?;
             Ok(())
         }

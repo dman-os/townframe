@@ -271,24 +271,6 @@ pub async fn clone_repo_init_from_url(
             eyre::bail!("provisioned public key mismatch while cloning");
         }
         let _repo_user_id = crate::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS sync_allowed_peers(
-                peer_key TEXT PRIMARY KEY,
-                endpoint_id TEXT NULL
-            )
-            "#,
-        )
-        .execute(&sql.db_pool)
-        .await?;
-        let source_peer_key = format!("/{}/{}", bootstrap.repo_id, bootstrap.endpoint_id);
-        sqlx::query(
-            "INSERT INTO sync_allowed_peers(peer_key, endpoint_id) VALUES(?, ?) ON CONFLICT(peer_key) DO UPDATE SET endpoint_id = excluded.endpoint_id",
-        )
-        .bind(source_peer_key)
-        .bind(bootstrap.endpoint_id.to_string())
-        .execute(&sql.db_pool)
-        .await?;
         let mut sync_config = crate::app::globals::get_sync_config(&sql.db_pool).await?;
         if !sync_config
             .known_devices
@@ -317,6 +299,15 @@ pub async fn clone_repo_init_from_url(
             peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
         })
         .await?;
+        let source_peer_key = format!("/{}/{}", bootstrap.repo_id, bootstrap.endpoint_id);
+        let (sync_store, sync_store_stop) =
+            am_utils_rs::sync::store::spawn_sync_store(big_repo.state_pool().clone()).await?;
+        let allow_res = sync_store
+            .allow_peer(source_peer_key, Some(bootstrap.endpoint_id))
+            .await;
+        let stop_res = sync_store_stop.stop().await;
+        allow_res?;
+        stop_res?;
         let local_peer_key = format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key);
         let blobs_repo = crate::blobs::BlobsRepo::new(
             staging.join("blobs"),
