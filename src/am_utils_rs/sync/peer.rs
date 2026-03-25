@@ -248,7 +248,15 @@ pub async fn spawn_peer_sync_worker(
             }
             debug!(result = ?run_res.as_ref().map(|_| ()), "peer sync worker future exiting");
             if let Err(err) = run_res {
-                warn!(?err, "peer sync worker exiting with abnormal error");
+                let is_closed_by_peer = err.chain().any(|cause| {
+                    let msg = cause.to_string();
+                    msg.contains("closed by peer: 0") || msg.contains("closed by peer")
+                });
+                if is_closed_by_peer {
+                    info!("peer sync worker exited after remote close");
+                } else {
+                    warn!(?err, "peer sync worker exiting with abnormal error");
+                }
             }
         }
         .instrument(span)

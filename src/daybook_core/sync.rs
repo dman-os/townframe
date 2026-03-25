@@ -34,7 +34,7 @@ pub struct IrohSyncRepo {
     router: iroh::protocol::Router,
 
     config_repo: Arc<crate::config::ConfigRepo>,
-    doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
+    _doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
 
     conn_end_signal_tx: tokio::sync::mpsc::UnboundedSender<am_utils_rs::repo::ConnFinishSignal>,
@@ -107,12 +107,19 @@ impl IrohSyncRepoStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
         // Worker shutdown drains active repo connections; each connection stop can wait up to 5s.
-        utils_rs::wait_on_handle_with_timeout(self.worker_handle, Duration::from_secs(10)).await?;
+        utils_rs::wait_on_handle_with_timeout(
+            self.worker_handle,
+            utils_rs::scale_timeout(Duration::from_secs(60)),
+        )
+        .await?;
         // NOTE: we only add timeouts for stop tokens that don't have internal
         // timeouts
-        tokio::time::timeout(Duration::from_secs(10), self.router.shutdown())
-            .await
-            .map_err(|_| eyre::eyre!("timeout for waiting router shutdown"))??;
+        tokio::time::timeout(
+            utils_rs::scale_timeout(Duration::from_secs(60)),
+            self.router.shutdown(),
+        )
+        .await
+        .map_err(|_| eyre::eyre!("timeout for waiting router shutdown"))??;
         self.repo_rpc_stop_token.stop().await?;
         self.partition_sync_stop_token.stop().await?;
 
@@ -257,7 +264,7 @@ impl IrohSyncRepo {
             rcx,
             router: router.clone(),
             config_repo,
-            doc_blobs_index_repo,
+            _doc_blobs_index_repo: doc_blobs_index_repo,
             progress_repo,
             cancel_token: cancel_token.clone(),
             registry: crate::repos::ListenersRegistry::new(),
@@ -807,8 +814,6 @@ impl IrohSyncRepo {
         endpoint_ids: &[EndpointId],
         timeout: Duration,
     ) -> Res<()> {
-        use crate::repos::Repo;
-
         self.ensure_repo_live()?;
         let Some(progress_repo) = self.progress_repo.clone() else {
             eyre::bail!("wait_for_full_sync requires a progress-enabled IrohSyncRepo");
@@ -821,140 +826,50 @@ impl IrohSyncRepo {
             .full_sync_handle
             .get_peer_sync_snapshot(endpoint_ids)
             .await?;
-        let mut remaining = target_peers
-            .iter()
-            .filter(|endpoint_id| {
-                !initial_snapshot
-                    .get(*endpoint_id)
-                    .is_some_and(|snapshot| snapshot.emitted_full_synced)
-            })
-            .copied()
-            .collect::<HashSet<_>>();
         debug!(
             target_peers = ?target_peers,
             initial_snapshot = ?initial_snapshot,
-            remaining = ?remaining,
             "wait_for_full_sync initial state"
         );
-        let listener = self
-            .registry
-            .subscribe::<IrohSyncEvent>(crate::repos::SubscribeOpts { capacity: 1024 });
-        let doc_blobs_listener = self
-            .doc_blobs_index_repo
-            .subscribe(crate::repos::SubscribeOpts { capacity: 1024 });
         let timeout_outcome = tokio::time::timeout(timeout, async {
-            let mut tick = tokio::time::interval(Duration::from_millis(100));
-            let listener = listener;
-            let doc_blobs_listener = doc_blobs_listener;
-            let mut quiet_since: Option<std::time::Instant> = None;
-            let mut heartbeat_at = std::time::Instant::now();
-            loop {
-                let now = std::time::Instant::now();
-                if remaining.is_empty() {
-                    match quiet_since {
-                        None => quiet_since = Some(now),
-                        Some(since) if now.duration_since(since) >= Duration::from_millis(3000) => {
-                            break;
-                        }
-                        Some(_) => {}
-                    }
-                } else {
-                    quiet_since = None;
-                }
-                tokio::select! {
-                    val = listener.recv_async() => {
-                        let event = val.map_err(|err| match err {
-                            crate::repos::RecvError::Closed => eyre::eyre!("sync listener closed"),
-                            crate::repos::RecvError::Dropped { dropped_count } => {
-                                eyre::eyre!("sync listener dropped events: dropped_count={dropped_count}")
-                            }
-                        })?;
-                        match event.as_ref() {
-                            IrohSyncEvent::PeerFullySynced { endpoint_id, .. } => {
-                                remaining.remove(endpoint_id);
-                                quiet_since = None;
-                            }
-                            IrohSyncEvent::StalePeer { endpoint_id } => {
-                                if target_peers.contains(endpoint_id) {
-                                    remaining.insert(*endpoint_id);
-                                    quiet_since = None;
-                                }
-                            }
-                            IrohSyncEvent::BlobDownloadStarted { .. } => {
-                                quiet_since = None;
-                            }
-                            IrohSyncEvent::BlobDownloadFinished { .. } => {
-                                quiet_since = None;
-                            }
-                            _ => {}
-                        }
-                    }
-                    val = doc_blobs_listener.recv_async() => {
-                        match val {
-                            Ok(_) => {
-                                quiet_since = None;
-                            }
-                            Err(crate::repos::RecvError::Closed) => {
-                                eyre::bail!("doc blobs index listener closed");
-                            }
-                            Err(crate::repos::RecvError::Dropped { dropped_count }) => {
-                                eyre::bail!("doc blobs index listener dropped events: dropped_count={dropped_count}");
-                            }
-                        }
-                    }
-                    _ = tick.tick() => {
-                        if !remaining.is_empty()
-                            && now.duration_since(heartbeat_at) >= Duration::from_secs(2)
-                        {
-                            heartbeat_at = now;
-                            let latest_snapshot = self
-                                .full_sync_handle
-                                .get_peer_sync_snapshot(endpoint_ids)
-                                .await?;
-                            for endpoint_id in &target_peers {
-                                let emitted_full_synced = latest_snapshot
-                                    .get(endpoint_id)
-                                    .is_some_and(|snapshot| snapshot.emitted_full_synced);
-                                if emitted_full_synced {
-                                    remaining.remove(endpoint_id);
-                                }
-                            }
-                            let tasks = progress_repo
-                                .list_by_tag_prefix("sync/full/")
-                                .await
-                                .map(|tasks| {
-                                    let active = tasks
-                                        .iter()
-                                        .filter(|task| task.state == crate::progress::ProgressTaskState::Active)
-                                        .count();
-                                    let ids = tasks.iter().map(|task| task.id.clone()).take(12).collect::<Vec<_>>();
-                                    (tasks.len(), active, ids)
-                                });
-                            match tasks {
-                                Ok((task_count, active_count, ids)) => {
-                                    debug!(
-                                        remaining = ?remaining,
-                                        latest_snapshot = ?latest_snapshot,
-                                        task_count,
-                                        active_count,
-                                        task_ids = ?ids,
-                                        "wait_for_full_sync heartbeat"
-                                    );
-                                }
-                                Err(err) => {
-                                    warn!(?err, remaining = ?remaining, "wait_for_full_sync heartbeat failed listing progress tasks");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            self.full_sync_handle
+                .wait_for_peers_fully_synced(endpoint_ids)
+                .await?;
             eyre::Ok(())
         })
         .await;
         match timeout_outcome {
             Ok(out) => out?,
             Err(_) => {
+                let latest_snapshot = self
+                    .full_sync_handle
+                    .get_peer_sync_snapshot(endpoint_ids)
+                    .await
+                    .map(|snapshot| format!("{snapshot:?}"))
+                    .unwrap_or_else(|err| format!("snapshot_error={err:?}"));
+                let remaining = self
+                    .full_sync_handle
+                    .get_peer_sync_snapshot(endpoint_ids)
+                    .await
+                    .map(|snapshot| {
+                        target_peers
+                            .iter()
+                            .filter(|endpoint_id| {
+                                !snapshot
+                                    .get(*endpoint_id)
+                                    .is_some_and(|peer| peer.emitted_full_synced)
+                            })
+                            .copied()
+                            .collect::<HashSet<_>>()
+                    })
+                    .unwrap_or_default();
+                let connected_peers = self
+                    .active_samod_peers
+                    .read()
+                    .await
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let tasks = progress_repo.list_by_tag_prefix("sync/full/").await;
                 let diag = match tasks {
                     Ok(tasks) => {
@@ -967,9 +882,14 @@ impl IrohSyncRepo {
                             .map(|task| task.id.clone())
                             .take(16)
                             .collect::<Vec<_>>();
-                        format!("full_sync_tasks_total={}; full_sync_tasks_active={active}; sample_task_ids={ids:?}", tasks.len())
+                        format!(
+                            "full_sync_tasks_total={}; full_sync_tasks_active={active}; sample_task_ids={ids:?}; latest_snapshot={latest_snapshot}; connected_peers={connected_peers:?}",
+                            tasks.len()
+                        )
                     }
-                    Err(err) => format!("failed_listing_full_sync_tasks={err:?}"),
+                    Err(err) => format!(
+                        "failed_listing_full_sync_tasks={err:?}; latest_snapshot={latest_snapshot}; connected_peers={connected_peers:?}"
+                    ),
                 };
                 eyre::bail!("timed out waiting for full sync: remaining={remaining:?}; {diag}");
             }
@@ -1032,39 +952,66 @@ mod tests {
 
     impl SyncTestNode {
         async fn stop(mut self) -> Res<()> {
-            tokio::time::timeout(Duration::from_secs(10), self.sync_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting sync stop"))??;
-            tokio::time::timeout(Duration::from_secs(10), self.progress_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting progress stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(30)),
+                self.sync_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting sync stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.progress_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting progress stop"))??;
             self.doc_blobs_bridge_cancel.cancel();
             if let Some(handle) = self.doc_blobs_bridge_handle.take() {
                 tokio::time::timeout(
-                    Duration::from_secs(5),
-                    utils_rs::wait_on_handle_with_timeout(handle, Duration::from_secs(2)),
+                    utils_rs::scale_timeout(Duration::from_secs(5)),
+                    utils_rs::wait_on_handle_with_timeout(
+                        handle,
+                        utils_rs::scale_timeout(Duration::from_secs(2)),
+                    ),
                 )
                 .await
                 .map_err(|_| eyre::eyre!("timeout waiting doc blobs bridge join"))??;
             }
-            tokio::time::timeout(Duration::from_secs(10), self.drawer_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting drawer stop"))??;
-            tokio::time::timeout(Duration::from_secs(10), self.plugs_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting plugs stop"))??;
-            tokio::time::timeout(Duration::from_secs(10), self.config_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting config stop"))??;
-            tokio::time::timeout(Duration::from_secs(10), self.doc_blobs_index_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting doc blobs index stop"))??;
-            tokio::time::timeout(Duration::from_secs(10), self.sqlite_local_state_stop.stop())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting sqlite local state stop"))??;
-            tokio::time::timeout(Duration::from_secs(10), self.ctx.shutdown())
-                .await
-                .map_err(|_| eyre::eyre!("timeout waiting ctx shutdown"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.doc_blobs_index_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting doc blobs index stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.drawer_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting drawer stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.plugs_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting plugs stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.config_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting config stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.sqlite_local_state_stop.stop(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting sqlite local state stop"))??;
+            tokio::time::timeout(
+                utils_rs::scale_timeout(Duration::from_secs(10)),
+                self.ctx.shutdown(),
+            )
+            .await
+            .map_err(|_| eyre::eyre!("timeout waiting ctx shutdown"))??;
             Ok(())
         }
     }
@@ -1750,7 +1697,7 @@ mod tests {
         drawer_repo: Arc<DrawerRepo>,
         doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     ) -> (CancellationToken, JoinHandle<()>) {
-        let drawer_listener = drawer_repo.subscribe(SubscribeOpts::new(1024));
+        let drawer_listener = drawer_repo.subscribe(SubscribeOpts::new(16_384));
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let handle = tokio::spawn(async move {
@@ -1758,25 +1705,28 @@ mod tests {
                 tokio::select! {
                     biased;
                     _ = cancel_for_task.cancelled() => break,
-                    evt = drawer_listener.recv_lossy_async() => {
-                        let Ok(evt) = evt else {
-                            break;
-                        };
-                        match evt.as_ref() {
-                            crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
-                                doc_blobs_index_repo.enqueue_delete(id.clone()).unwrap_or_log();
-                            }
-                            crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
-                                if let Some(heads) = entry.branches.get("main") {
-                                    doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                    evt = drawer_listener.recv_async() => {
+                        match evt {
+                            Ok(evt) => match evt.as_ref() {
+                                crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
+                                    doc_blobs_index_repo.enqueue_delete(id.clone()).unwrap_or_log();
                                 }
-                            }
-                            crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
-                                if let Some(heads) = entry.branches.get("main") {
-                                    doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                                crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
+                                    if let Some(heads) = entry.branches.get("main") {
+                                        doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                                    }
                                 }
+                                crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
+                                    if let Some(heads) = entry.branches.get("main") {
+                                        doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                                    }
+                                }
+                                crate::drawer::DrawerEvent::ListChanged { .. } => {}
+                            },
+                            Err(crate::repos::RecvError::Dropped { dropped_count }) => {
+                                panic!("doc blobs bridge dropped {dropped_count} drawer events");
                             }
-                            crate::drawer::DrawerEvent::ListChanged { .. } => {}
+                            Err(crate::repos::RecvError::Closed) => break,
                         }
                     }
                 }

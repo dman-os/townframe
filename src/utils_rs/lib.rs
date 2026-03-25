@@ -661,6 +661,39 @@ pub async fn wait_on_handle_with_timeout<T>(
     }
 }
 
+/// Multiplies timeout durations to accommodate slow environments (e.g. CI/stress tests).
+///
+/// Sources, in priority order:
+/// 1. runtime env var `UTILS_RS_TIMEOUT_MULTIPLIER`
+/// 2. compile-time env var `UTILS_RS_TIMEOUT_MULTIPLIER` via `option_env!`
+///
+/// Values must be positive integers. Invalid values fall back to `1`.
+pub fn timeout_multiplier() -> u32 {
+    static MULTIPLIER: LazyLock<u32> = LazyLock::new(|| {
+        let runtime_val = std::env::var("UTILS_RS_TIMEOUT_MULTIPLIER").ok();
+        let build_val = option_env!("UTILS_RS_TIMEOUT_MULTIPLIER").map(|value| value.to_string());
+        let raw = runtime_val.or(build_val);
+        let Some(raw) = raw else {
+            return 1;
+        };
+        match raw.parse::<u32>() {
+            Ok(mult) if mult >= 1 => mult,
+            _ => {
+                warn!(
+                    value = %raw,
+                    "invalid UTILS_RS_TIMEOUT_MULTIPLIER; falling back to 1"
+                );
+                1
+            }
+        }
+    });
+    *MULTIPLIER
+}
+
+pub fn scale_timeout(timeout: Duration) -> Duration {
+    timeout.saturating_mul(timeout_multiplier())
+}
+
 pub async fn wait_on_handle<T>(
     join_handle: tokio::task::JoinHandle<T>,
 ) -> Result<T, tokio::task::JoinError> {

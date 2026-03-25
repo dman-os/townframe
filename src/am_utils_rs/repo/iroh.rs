@@ -54,15 +54,37 @@ impl BigRepo {
             shutdown_confirmed: Arc::clone(&shutdown_confirmed),
         };
         let handle = repo
-            .dial(samod::BackoffConfig::default(), Arc::new(dialer))
+            .dial(
+                samod::BackoffConfig {
+                    max_retries: Some(0),
+                    ..Default::default()
+                },
+                Arc::new(dialer),
+            )
             .wrap_err("error setting up dialer")?;
-
         let peer_info = handle
             .established()
             .await
             .wrap_err("error during handshake")?;
+        let conn_id = tokio::time::timeout(
+            utils_rs::scale_timeout(Duration::from_secs(2)),
+            async {
+                loop {
+                    if let Some(conn_id) = handle.connection_id() {
+                        break conn_id;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            },
+        )
+        .await
+        .map_err(|_| {
+            eyre::eyre!(
+                "dialer established without connection_id before timeout: endpoint_id={endpoint_id} peer_id={}",
+                peer_info.peer_id
+            )
+        })?;
         let peer_id: Arc<str> = peer_info.peer_id.as_str().into();
-        let conn_id = handle.connection_id().expect(ERROR_IMPOSSIBLE);
 
         let cancel_token = CancellationToken::new();
         let fut = {
@@ -71,10 +93,12 @@ impl BigRepo {
             async move {
                 let mut events = handle.events();
                 let mut last_reason = None;
+                let mut should_emit_finish_signal = true;
                 loop {
                     tokio::select! {
                         _ = cancel_token.cancelled() => {
                             debug!("cancel token lit");
+                            should_emit_finish_signal = false;
                             shutdown_confirmed.store(true, Ordering::SeqCst);
                             handle.close();
                             let cloned = maybe_conn.lock().expect(ERROR_MUTEX).clone();
@@ -111,6 +135,8 @@ impl BigRepo {
                                 DialerEvent::Reconnecting { attempt } => {
                                     if shutdown_confirmed.load(Ordering::SeqCst) {
                                         debug!(attempt, "skipping reconnect because shutdown was confirmed");
+                                        last_reason = Some("peer is shutting down".into());
+                                        handle.close();
                                         break;
                                     }
                                     info!(?attempt, "trying to reconnect to peer");
@@ -124,20 +150,25 @@ impl BigRepo {
                                         500,
                                         b"samod connection stream ended abruptly",
                                     );
-                                    if let Some(tx) = end_signal_tx {
-                                        tx.send(crate::repo::ConnFinishSignal {
-                                            conn_id,
-                                            peer_id,
-                                            // FIXME: find better reason type
-                                            reason: last_reason.unwrap_or_else(|| "max re-connention attempts reached".into()),
-                                        })
-                                        .inspect_err(|_| warn!("connection owner closed before finish"))
-                                        .ok();
-                                    }
+                                    last_reason = Some(
+                                        last_reason
+                                            .unwrap_or_else(|| "max re-connention attempts reached".into()),
+                                    );
                                     break;
                                 }
                             }
                         }
+                    }
+                }
+                if should_emit_finish_signal {
+                    if let Some(tx) = end_signal_tx {
+                        tx.send(crate::repo::ConnFinishSignal {
+                            conn_id,
+                            peer_id,
+                            reason: last_reason.unwrap_or_else(|| "connection closed".into()),
+                        })
+                        .inspect_err(|_| warn!("connection owner closed before finish"))
+                        .ok();
                     }
                 }
                 eyre::Ok(())

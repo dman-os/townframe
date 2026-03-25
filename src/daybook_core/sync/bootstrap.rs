@@ -197,21 +197,24 @@ pub async fn connect_and_pull_required_partitions_once(
         .spawn_connection_iroh(&endpoint, bootstrap.endpoint_addr.clone(), None)
         .await?;
 
-    let pull_res = pull_required_partitions_once(
-        big_repo,
-        blobs_repo,
-        local_peer_key,
-        &endpoint,
-        bootstrap,
-        timeout,
-    )
+    let result: Res<()> = async {
+        let pull_res = pull_required_partitions_once(
+            big_repo,
+            blobs_repo,
+            local_peer_key,
+            &endpoint,
+            bootstrap,
+            timeout,
+        )
+        .await;
+        let stop_res = conn.stop().await;
+        pull_res?;
+        stop_res?;
+        Ok(())
+    }
     .await;
-    let stop_res = conn.stop().await;
-
-    pull_res?;
-    stop_res?;
     endpoint.close().await;
-    Ok(())
+    result
 }
 
 #[tracing::instrument(skip(source_url, destination, options))]
@@ -397,23 +400,6 @@ fn next_clone_staging_dir(parent: &std::path::Path) -> Res<std::path::PathBuf> {
     );
 }
 
-async fn pull_required_docs_once(
-    big_repo: &SharedBigRepo,
-    app_doc_id: &DocumentId,
-    drawer_doc_id: &DocumentId,
-) -> Res<()> {
-    let app = big_repo.find_doc_handle(app_doc_id).await?;
-    let drawer = big_repo.find_doc_handle(drawer_doc_id).await?;
-    if app.is_none() || drawer.is_none() {
-        eyre::bail!(
-            "required core docs missing locally (app_present={}, drawer_present={})",
-            app.is_some(),
-            drawer.is_some()
-        );
-    }
-    Ok(())
-}
-
 async fn pull_required_partitions_once(
     big_repo: &SharedBigRepo,
     blobs_repo: &Arc<crate::blobs::BlobsRepo>,
@@ -468,19 +454,6 @@ async fn pull_required_partitions_once(
         let mut attempts = 0usize;
         loop {
             attempts += 1;
-            let last_pull_error = match pull_required_docs_once(
-                big_repo,
-                &bootstrap.app_doc_id,
-                &bootstrap.drawer_doc_id,
-            )
-                .await
-            {
-                Ok(()) => None,
-                Err(err) => {
-                    debug!(?err, "waiting for required docs to materialize locally");
-                    Some(err.to_string())
-                }
-            };
             let app = big_repo.find_doc_handle(&bootstrap.app_doc_id).await?.is_some();
             let drawer = big_repo.find_doc_handle(&bootstrap.drawer_doc_id).await?.is_some();
             if app && drawer {
@@ -491,7 +464,6 @@ async fn pull_required_partitions_once(
                     attempts,
                     app_doc_id = %bootstrap.app_doc_id,
                     drawer_doc_id = %bootstrap.drawer_doc_id,
-                    ?last_pull_error,
                     "still waiting for required docs after clone bootstrap pull attempt"
                 );
             }
@@ -618,13 +590,14 @@ async fn ensure_blob_hash_present(
             | DownloadProgressItem::PartComplete { .. } => {}
         }
     }
-    if saw_error {
-        if let Some(details) = last_error {
-            eyre::bail!("blob download reported error for hash {hash}: {details}");
+    let blob_present = blobs_repo.iroh_store().blobs().has(iroh_hash).await?;
+    if !blob_present {
+        if saw_error {
+            if let Some(details) = last_error {
+                eyre::bail!("blob download reported error for hash {hash}: {details}");
+            }
+            eyre::bail!("blob download reported error for hash {hash}");
         }
-        eyre::bail!("blob download reported error for hash {hash}");
-    }
-    if !blobs_repo.iroh_store().blobs().has(iroh_hash).await? {
         eyre::bail!("blob not found in iroh store after download for hash {hash}");
     }
     blobs_repo.put_from_store(hash).await?;

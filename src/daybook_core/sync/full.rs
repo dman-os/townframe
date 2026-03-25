@@ -138,12 +138,28 @@ enum Msg {
         endpoint_ids: Vec<EndpointId>,
         resp: tokio::sync::oneshot::Sender<HashMap<EndpointId, PeerSyncSnapshot>>,
     },
+    WaitForPeersFullySynced {
+        endpoint_ids: Vec<EndpointId>,
+        resp: tokio::sync::oneshot::Sender<()>,
+    },
 }
 type DocPeerStateView = HashMap<ConnectionId, samod::PeerDocState>;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct PeerSyncSnapshot {
     pub emitted_full_synced: bool,
+    pub bootstrap_ready: bool,
+    pub bootstrap_synced_docs: u64,
+    pub bootstrap_remaining_docs: u64,
+    pub samod_pending_docs: u64,
+    pub live_ready: bool,
+    pub has_peer_session: bool,
+}
+
+struct FullSyncWaiter {
+    remaining: HashSet<EndpointId>,
+    resp: tokio::sync::oneshot::Sender<()>,
 }
 
 #[derive(Debug)]
@@ -232,6 +248,16 @@ impl WorkerHandle {
         self.msg_tx.send(msg).wrap_err(ERROR_ACTOR)?;
         rx.await.wrap_err(ERROR_CHANNEL)
     }
+
+    pub async fn wait_for_peers_fully_synced(&self, endpoint_ids: &[EndpointId]) -> Res<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let msg = Msg::WaitForPeersFullySynced {
+            endpoint_ids: endpoint_ids.to_vec(),
+            resp: tx,
+        };
+        self.msg_tx.send(msg).wrap_err(ERROR_ACTOR)?;
+        rx.await.wrap_err(ERROR_CHANNEL)
+    }
 }
 
 pub struct StopToken {
@@ -242,7 +268,11 @@ pub struct StopToken {
 impl StopToken {
     pub async fn stop(self) -> Result<(), utils_rs::WaitOnHandleError> {
         self.cancel_token.cancel();
-        utils_rs::wait_on_handle_with_timeout(self.join_handle, Duration::from_secs(5)).await
+        utils_rs::wait_on_handle_with_timeout(
+            self.join_handle,
+            utils_rs::scale_timeout(Duration::from_secs(5)),
+        )
+        .await
     }
 }
 
@@ -256,7 +286,7 @@ pub async fn start_full_sync_worker(
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
     let (sync_progress_tx, mut sync_progress_rx) = mpsc::channel::<SyncProgressMsg>(8192);
     let (samod_sync_tx, mut samod_sync_rx) = mpsc::channel::<SamodSyncRequest>(8192);
-    let (events_tx, events_rx) = tokio::sync::broadcast::channel(16);
+    let (events_tx, events_rx) = tokio::sync::broadcast::channel(1024);
 
     let cancel_token = CancellationToken::new();
 
@@ -292,7 +322,9 @@ pub async fn start_full_sync_worker(
         known_peer_set: default(),
         conn_by_peer: default(),
         endpoint_by_peer_key: default(),
+        seen_peer_keys: default(),
         peer_partition_sessions: default(),
+        full_sync_waiters: Vec::new(),
 
         max_active_sync_workers: 24,
     };
@@ -304,7 +336,6 @@ pub async fn start_full_sync_worker(
         let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
         async move {
             let mut sync_progress_buf = Vec::with_capacity(512);
-            let mut samod_sync_buf = Vec::with_capacity(512);
             loop {
                 if !worker.scheduler.partitions_to_refresh.is_empty() {
                     worker.batch_refresh_paritions().await?;
@@ -342,11 +373,11 @@ pub async fn start_full_sync_worker(
                         }
                         worker.handle_sync_progress_batch(&mut sync_progress_buf).await?;
                     }
-                    count = samod_sync_rx.recv_many(&mut samod_sync_buf, 512) => {
-                        if count == 0 {
+                    val = samod_sync_rx.recv() => {
+                        let Some(req) = val else {
                             continue;
-                        }
-                        worker.handle_samod_sync_batch(&mut samod_sync_buf).await?;
+                        };
+                        worker.handle_samod_sync_request(req).await?;
                     }
                     _ = janitor_tick.tick() => {
                         worker.backoff_janitor_enqueue_due();
@@ -364,8 +395,11 @@ pub async fn start_full_sync_worker(
                 session.forward_cancel_token.cancel();
                 session.stop.stop().await?;
                 for join_handle in session.forward_handles.drain(..) {
-                    utils_rs::wait_on_handle_with_timeout(join_handle, Duration::from_secs(1))
-                        .await?;
+                    utils_rs::wait_on_handle_with_timeout(
+                        join_handle,
+                        utils_rs::scale_timeout(Duration::from_secs(1)),
+                    )
+                    .await?;
                 }
             }
             eyre::Ok(())
@@ -373,7 +407,9 @@ pub async fn start_full_sync_worker(
     };
     let join_handle = tokio::task::spawn(
         async {
-            fut.await.unwrap();
+            if let Err(err) = fut.await {
+                warn!(?err, "full sync worker task exited with error");
+            }
         }
         .instrument(tracing::info_span!("FullSyncWorker task")),
     );
@@ -416,7 +452,9 @@ struct Worker {
     known_peer_set: HashMap<ConnectionId, PeerSyncState>,
     conn_by_peer: HashMap<EndpointId, ConnectionId>,
     endpoint_by_peer_key: HashMap<PeerKey, EndpointId>,
+    seen_peer_keys: HashSet<PeerKey>,
     peer_partition_sessions: HashMap<EndpointId, PeerPartitionSession>,
+    full_sync_waiters: Vec<FullSyncWaiter>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -641,6 +679,36 @@ impl Worker {
         Some(peer_state.peer_key.clone())
     }
 
+    fn peer_is_fully_synced(&self, endpoint_id: EndpointId) -> bool {
+        let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
+            return false;
+        };
+        self.known_peer_set
+            .get(&conn_id)
+            .is_some_and(|peer_state| peer_state.emitted_full_synced)
+    }
+
+    fn refresh_full_sync_waiters(&mut self) {
+        if self.full_sync_waiters.is_empty() {
+            return;
+        }
+        let mut pending = std::mem::take(&mut self.full_sync_waiters);
+        for mut waiter in pending.drain(..) {
+            waiter
+                .remaining
+                .retain(|endpoint_id| !self.peer_is_fully_synced(*endpoint_id));
+            if waiter.remaining.is_empty() {
+                waiter
+                    .resp
+                    .send(())
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
+            } else {
+                self.full_sync_waiters.push(waiter);
+            }
+        }
+    }
+
     fn available_doc_boot_budget(&self) -> usize {
         self.scheduler
             .available_doc_boot_budget(self.max_active_sync_workers)
@@ -701,9 +769,11 @@ impl Worker {
                 self.conn_by_peer.insert(endpoint_id, conn_id);
                 self.endpoint_by_peer_key
                     .insert(peer_key.clone(), endpoint_id);
+                self.seen_peer_keys.insert(peer_key.clone());
                 for part_key in new_parts {
                     self.add_peer_to_part(part_key, endpoint_id).await?;
                 }
+                self.refresh_full_sync_waiters();
                 resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             Msg::DelPeer { endpoint_id, resp } => {
@@ -720,6 +790,7 @@ impl Worker {
                 }
                 self.endpoint_by_peer_key
                     .retain(|_peer_key, cached_endpoint| *cached_endpoint != endpoint_id);
+                self.refresh_full_sync_waiters();
                 resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             Msg::DocPeerStateViewUpdated { doc_id, diff } => {
@@ -800,6 +871,14 @@ impl Worker {
                             endpoint_id,
                             PeerSyncSnapshot {
                                 emitted_full_synced: peer_state.emitted_full_synced,
+                                bootstrap_ready: peer_state.bootstrap_ready,
+                                bootstrap_synced_docs: peer_state.bootstrap_synced_docs,
+                                bootstrap_remaining_docs: peer_state.bootstrap_remaining_docs,
+                                samod_pending_docs: peer_state.samod_pending_docs,
+                                live_ready: peer_state.live_ready,
+                                has_peer_session: self
+                                    .peer_partition_sessions
+                                    .contains_key(&endpoint_id),
                             },
                         ))
                     })
@@ -807,6 +886,20 @@ impl Worker {
                 resp.send(snapshot)
                     .inspect_err(|_| warn!(ERROR_CALLER))
                     .ok();
+            }
+            Msg::WaitForPeersFullySynced { endpoint_ids, resp } => {
+                let remaining = endpoint_ids
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .filter(|endpoint_id| !self.peer_is_fully_synced(*endpoint_id))
+                    .collect::<HashSet<_>>();
+                if remaining.is_empty() {
+                    resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                } else {
+                    self.full_sync_waiters
+                        .push(FullSyncWaiter { remaining, resp });
+                }
             }
         }
         eyre::Ok(())
@@ -988,8 +1081,11 @@ impl Worker {
         if let Some(mut session) = session {
             session.forward_cancel_token.cancel();
             for join_handle in session.forward_handles.drain(..) {
-                if let Err(err) =
-                    utils_rs::wait_on_handle_with_timeout(join_handle, Duration::from_secs(1)).await
+                if let Err(err) = utils_rs::wait_on_handle_with_timeout(
+                    join_handle,
+                    utils_rs::scale_timeout(Duration::from_secs(1)),
+                )
+                .await
                 {
                     warn!(
                         endpoint_id = ?endpoint_id,
@@ -1090,34 +1186,14 @@ impl Worker {
             session.forward_cancel_token.cancel();
             session.stop.stop().await?;
             for join_handle in session.forward_handles.drain(..) {
-                utils_rs::wait_on_handle_with_timeout(join_handle, Duration::from_secs(1)).await?;
+                utils_rs::wait_on_handle_with_timeout(
+                    join_handle,
+                    utils_rs::scale_timeout(Duration::from_secs(1)),
+                )
+                .await?;
             }
         }
         self.scheduler.clear_peer_cursor_acks(endpoint_id);
-        Ok(())
-    }
-
-    async fn handle_samod_sync_batch(&mut self, buffer: &mut Vec<SamodSyncRequest>) -> Res<()> {
-        for req in buffer.drain(..) {
-            match req {
-                SamodSyncRequest::PartitionMemberEvent { peer_key, event } => {
-                    self.handle_partition_member_event(peer_key, event).await?;
-                }
-                SamodSyncRequest::PartitionDocEvent { peer_key, event } => {
-                    self.handle_partition_doc_event(peer_key, event).await?;
-                }
-                SamodSyncRequest::ImportDoc {
-                    peer_key,
-                    partition_id,
-                    doc_id,
-                    cursor,
-                } => {
-                    self.enqueue_doc_import_request(peer_key, partition_id, doc_id, cursor)
-                        .await?
-                }
-                other => self.handle_samod_sync_request(other).await?,
-            }
-        }
         Ok(())
     }
 
@@ -1158,7 +1234,10 @@ impl Worker {
         event: am_utils_rs::sync::protocol::PartitionMemberEvent,
     ) -> Res<()> {
         let Some(endpoint_id) = self.endpoint_for_peer_key(&peer_key) else {
-            debug!(peer_key, partition_id = %event.partition_id, "dropping member event for unknown peer");
+            self.handle_unknown_peer_request(
+                &peer_key,
+                format!("partition member event for {}", event.partition_id),
+            )?;
             return Ok(());
         };
         let existing = self
@@ -1212,7 +1291,10 @@ impl Worker {
     ) -> Res<()> {
         if BlobScope::from_partition_id(&event.partition_id).is_some() {
             let Some(endpoint_id) = self.endpoint_for_peer_key(&peer_key) else {
-                debug!(peer_key, partition_id = %event.partition_id, "dropping blob-scope doc event for unknown peer");
+                self.handle_unknown_peer_request(
+                    &peer_key,
+                    format!("blob-scope doc event for {}", event.partition_id),
+                )?;
                 return Ok(());
             };
             self.scheduler.note_cursor_ready_immediate(
@@ -1285,7 +1367,10 @@ impl Worker {
             .parse::<DocumentId>()
             .map_err(|err| ferr!("invalid doc id '{}': {err}", doc_id))?;
         let Some(endpoint_id) = self.endpoint_for_peer_key(&peer_key) else {
-            debug!(peer_key, %doc_id, "dropping samod doc sync request for unknown peer");
+            self.handle_unknown_peer_request(
+                &peer_key,
+                format!("request doc sync for {}", doc_id),
+            )?;
             return Ok(());
         };
         self.emit_stale_peer(endpoint_id).await?;
@@ -1332,7 +1417,10 @@ impl Worker {
             .parse::<DocumentId>()
             .map_err(|err| ferr!("invalid doc id '{}': {err}", doc_id))?;
         let Some(endpoint_id) = self.endpoint_for_peer_key(&peer_key) else {
-            debug!(peer_key, %doc_id, "dropping doc-deleted request for unknown peer");
+            self.handle_unknown_peer_request(
+                &peer_key,
+                format!("doc deleted request for {}", doc_id),
+            )?;
             return Ok(());
         };
         self.emit_stale_peer(endpoint_id).await?;
@@ -1398,7 +1486,10 @@ impl Worker {
             .parse::<DocumentId>()
             .map_err(|err| ferr!("invalid doc id '{}': {err}", doc_id))?;
         let Some(endpoint_id) = self.endpoint_for_peer_key(&peer_key) else {
-            debug!(peer_key, %doc_id, "dropping import-doc request for unknown peer");
+            self.handle_unknown_peer_request(
+                &peer_key,
+                format!("import doc request for {}", doc_id),
+            )?;
             return Ok(());
         };
         self.emit_stale_peer(endpoint_id).await?;
@@ -1452,13 +1543,24 @@ impl Worker {
                 partition_id: partition_id.clone(),
                 cursor: next_cursor,
             }) {
-                warn!(
-                    endpoint_id = ?endpoint_id,
-                    partition_id = %partition_id,
-                    cursor = next_cursor,
-                    ?err,
-                    "failed sending cursor advance ack to peer worker"
-                );
+                match err {
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                        warn!(
+                            endpoint_id = ?endpoint_id,
+                            partition_id = %partition_id,
+                            cursor = next_cursor,
+                            "failed sending cursor advance ack to peer worker: channel closed"
+                        );
+                    }
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                        warn!(
+                            endpoint_id = ?endpoint_id,
+                            partition_id = %partition_id,
+                            cursor = next_cursor,
+                            "failed sending cursor advance ack to peer worker: channel full"
+                        );
+                    }
+                }
                 self.scheduler.peer_sessions_to_refresh.insert(endpoint_id);
                 break;
             }
@@ -1485,13 +1587,24 @@ impl Worker {
                 cursor,
             })
         {
-            warn!(
-                endpoint_id = ?endpoint_id,
-                partition_id = %partition_id,
-                cursor,
-                ?err,
-                "failed sending member cursor advance ack to peer worker"
-            );
+            match err {
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    warn!(
+                        endpoint_id = ?endpoint_id,
+                        partition_id = %partition_id,
+                        cursor,
+                        "failed sending member cursor advance ack to peer worker: channel closed"
+                    );
+                }
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    warn!(
+                        endpoint_id = ?endpoint_id,
+                        partition_id = %partition_id,
+                        cursor,
+                        "failed sending member cursor advance ack to peer worker: channel full"
+                    );
+                }
+            }
             self.scheduler.peer_sessions_to_refresh.insert(endpoint_id);
         }
         Ok(())
@@ -1725,7 +1838,7 @@ impl Worker {
         let mut partitions_to_advance = Vec::new();
         for (conn_id, diff) in diff {
             let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) else {
-                warn!(?conn_id, "unkown connection for FullSyncWorker");
+                debug!(?conn_id, "unknown connection for FullSyncWorker");
                 continue;
             };
             let they_have_our_changes = diff
@@ -2428,7 +2541,21 @@ impl Worker {
             self.emit_full_sync_event(FullSyncEvent::StalePeer { endpoint_id })
                 .await?;
         }
+        self.refresh_full_sync_waiters();
         Ok(())
+    }
+
+    fn handle_unknown_peer_request(&self, peer_key: &str, context: String) -> Res<()> {
+        if self.seen_peer_keys.contains(peer_key) {
+            debug!(
+                peer_key,
+                context, "ignoring stale request for disconnected peer"
+            );
+            return Ok(());
+        }
+        eyre::bail!(
+            "received sync request for never-seen peer: peer_key={peer_key}; context={context}"
+        );
     }
 
     async fn emit_full_sync_event(&self, event: FullSyncEvent) -> Res<()> {

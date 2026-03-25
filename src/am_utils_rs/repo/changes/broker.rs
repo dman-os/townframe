@@ -95,10 +95,7 @@ pub fn spawn_doc_listener(
         }
         .instrument(span)
     };
-    let log_doc_id = doc_id.clone();
-    let join_handle = tokio::spawn(async move {
-         fut.await.unwrap()
-    });
+    let join_handle = tokio::spawn(async move { fut.await.unwrap() });
 
     Ok((
         DocChangeBrokerHandle {
