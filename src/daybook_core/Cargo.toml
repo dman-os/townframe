@@ -24,6 +24,7 @@ daybook_types = { workspace = true, features = [
     "uniffi",
     "wit",
     "schemars",
+    "manifest"
 ] }
 mltools = { workspace = true, features = ["hf_hub", "tests"] }
 utils_rs = { workspace = true, features = ["hash", "native", "downloader"] }
@@ -60,7 +61,6 @@ garde.workspace = true
 struct-patch.workspace = true
 data-encoding.workspace = true
 bs58.workspace = true
-semver = "1"
 addr.workspace = true
 
 #

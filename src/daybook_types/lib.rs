@@ -14,6 +14,11 @@ pub mod doc;
 mod test;
 pub mod url;
 
+#[cfg(feature = "manifest")]
+pub mod manifest;
+
+pub mod reference;
+
 #[cfg(feature = "wit")]
 pub mod wit;
 

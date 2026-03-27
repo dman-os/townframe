@@ -1,5 +1,9 @@
 use crate::interlude::*;
-use crate::plugs::reference::select_json_path_values;
+
+use crate::reference::select_json_path_values;
+
+#[cfg(feature = "automerge")]
+use autosurgeon::{Hydrate, Reconcile};
 
 use garde::Validate;
 
@@ -204,9 +208,10 @@ pub struct FacetDisplayHint {
     pub deets: FacetKeyDisplayDeets,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, Reconcile, Hydrate, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
 pub enum FacetKeyDisplayDeets {
     #[default]
     DebugPrint,
@@ -219,9 +224,10 @@ pub enum FacetKeyDisplayDeets {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Default, Deserialize, Reconcile, Hydrate, PartialEq)]
+#[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
 pub enum DateTimeFacetDisplayType {
     #[default]
     TimeAndDate,
@@ -258,9 +264,9 @@ impl RoutineManifest {
         &self,
     ) -> (
         std::collections::HashSet<String>,
-        std::collections::HashSet<daybook_types::doc::FacetKey>,
+        std::collections::HashSet<crate::doc::FacetKey>,
     ) {
-        use daybook_types::doc::{FacetKey, FacetTag};
+        use crate::doc::{FacetKey, FacetTag};
         let mut read_tags = std::collections::HashSet::new();
         let mut read_keys = std::collections::HashSet::new();
         let facet_acl = match &self.deets {
@@ -437,8 +443,8 @@ pub enum DocPredicateEvalRequirement {
 
 #[derive(Debug, Clone)]
 pub enum DocPredicateEvalResolved {
-    FullDoc(Arc<daybook_types::doc::Doc>),
-    FacetsOfTag(Vec<(daybook_types::doc::FacetKey, daybook_types::doc::FacetRaw)>),
+    FullDoc(Arc<crate::doc::Doc>),
+    FacetsOfTag(Vec<(crate::doc::FacetKey, crate::doc::FacetRaw)>),
     FacetManifest(Arc<HashMap<String, Vec<FacetReferenceManifest>>>),
 }
 
@@ -470,7 +476,7 @@ impl DocPredicateClause {
 
     pub fn evaluate(
         &self,
-        doc: &daybook_types::doc::Doc,
+        doc: &crate::doc::Doc,
         mode: DocPredicateEvalMode,
         resolved: &HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
     ) -> bool {
@@ -518,7 +524,7 @@ impl DocPredicateClause {
         }
     }
 
-    pub fn matches(&self, doc: &daybook_types::doc::Doc) -> bool {
+    pub fn matches(&self, doc: &crate::doc::Doc) -> bool {
         self.evaluate(doc, DocPredicateEvalMode::ApproxInterest, &HashMap::new())
     }
 
@@ -552,7 +558,7 @@ impl DocPredicateClause {
 }
 
 fn doc_facets_have_manifest_declared_reference_to_tag(
-    source_facets: &[(daybook_types::doc::FacetKey, daybook_types::doc::FacetRaw)],
+    source_facets: &[(crate::doc::FacetKey, crate::doc::FacetRaw)],
     source_tag: &str,
     target_tag: &str,
     facet_reference_specs: &HashMap<String, Vec<FacetReferenceManifest>>,
@@ -600,9 +606,9 @@ fn facet_has_reference_to_tag(
             };
 
             for url_str in url_strings {
-                let Ok(matches_target) = daybook_types::url::facet_ref_str_targets_tag(
+                let Ok(matches_target) = crate::url::facet_ref_str_targets_tag(
                     url_str,
-                    &daybook_types::doc::FacetTag::from(target_tag),
+                    &crate::doc::FacetTag::from(target_tag),
                 ) else {
                     continue;
                 };

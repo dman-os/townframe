@@ -5,8 +5,8 @@ use crate::local_state::SqliteLocalStateRepo;
 
 use crate::blobs::BlobsRepo;
 use crate::drawer::DrawerRepo;
-use crate::plugs::manifest;
 use crate::plugs::PlugsRepo;
+use daybook_types::manifest;
 
 use daybook_types::doc::{FacetKey, FacetTag};
 use std::collections::BTreeMap;
@@ -660,7 +660,7 @@ impl Rt {
             .get(routine_name)
             .ok_or_else(|| ferr!("routine not found in plug manifest: {plug_id}/{routine_name}"))?;
 
-        use crate::plugs::manifest::RoutineManifestDeets;
+        use daybook_types::manifest::RoutineManifestDeets;
         let (dispatch_id, mut args) = match (&routine_man.deets, args) {
             (
                 RoutineManifestDeets::DocFacet {

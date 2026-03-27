@@ -233,6 +233,8 @@
             wasm-tools
             cargo-leptos
             trunk
+
+            maestro
           ];
 
           devOnlyInputs = with pkgs; [

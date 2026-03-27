@@ -12,13 +12,16 @@ path = "lib.rs"
 crate-type = ["rlib"]
 
 [features]
-default = ["automerge", "uniffi", "wit"]
+default = ["automerge", "uniffi", "wit", "manifest"]
 automerge = ["dep:autosurgeon", "dep:automerge"]
 uniffi = ["dep:uniffi", "dep:uuid"]
 wit = ["dep:wit-bindgen"]
 schemars = ["dep:schemars"]
+manifest = ["dep:garde", "dep:semver"]
 
 [dependencies]
+
+#
 # encoding
 serde.workspace = true
 serde_json.workspace = true
@@ -33,30 +36,40 @@ schemars = { version = "1.2", features = [
     "indexmap2",
 ], optional = true }
 
+#
 # internal
 api_utils_rs = { workspace = true, default-features = false }
 utils_rs = { workspace = true, default-features = false }
 am_utils_rs = { workspace = true, default-features = false }
 
+#
 # error
 thiserror.workspace = true
 displaydoc.workspace = true
 
-# time (needed for root Doc type)
-time = { workspace = true, features = ["serde"] }
+#
+# ds
+garde = { workspace = true, optional = true }
+semver = { workspace = true, optional = true }
+# time = { workspace = true, features = ["serde"] }
 
+#
 # automerge
 autosurgeon = { workspace = true, features = ["uuid"], optional = true }
 automerge = { workspace = true, optional = true }
 
+#
 # ffi
 uniffi = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 
+#
 # wit
 wit-bindgen = { workspace = true, optional = true }
 
 pastey.workspace = true
+
+#
 # os
 addr.workspace = true
 blake3.workspace = true

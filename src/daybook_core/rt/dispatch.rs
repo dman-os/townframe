@@ -35,11 +35,11 @@ pub struct FacetRoutineArgs {
     pub heads: ChangeHashSet,
     pub facet_key: String,
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
-    pub facet_acl: Vec<crate::plugs::manifest::RoutineFacetAccess>,
+    pub facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
-    pub config_prop_acl: Vec<crate::plugs::manifest::RoutineFacetAccess>,
+    pub config_prop_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
-    pub local_state_acl: Vec<crate::plugs::manifest::RoutineLocalStateAccess>,
+    pub local_state_acl: Vec<daybook_types::manifest::RoutineLocalStateAccess>,
 }
 
 #[derive(Default, Reconcile, Hydrate)]

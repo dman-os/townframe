@@ -120,4 +120,4 @@ Flag it for removal.
 Are tests repeating too much setup code?
 Consider using TDD or common cleanup code.
 
-Tools like snapshot tests, TDD and the macros for TDD found in the repo can help the in the longevity of a test's usefulness.
+Tools like snapshot tests, TDD and the macros for TDD found in the repo can help in the longevity of a test's usefulness.

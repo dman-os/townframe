@@ -2250,7 +2250,6 @@ dependencies = [
  "samod",
  "schemars 1.2.0",
  "scopeguard",
- "semver",
  "serde",
  "serde_json",
  "sqlite-vec",
@@ -2345,14 +2344,15 @@ dependencies = [
  "camino",
  "data-encoding",
  "displaydoc",
+ "garde",
  "pastey",
  "schemars 1.2.0",
+ "semver",
  "serde",
  "serde_json",
  "serde_with",
  "struct-patch",
  "thiserror 2.0.18",
- "time",
  "uniffi",
  "utils_rs",
  "uuid",
@@ -7092,6 +7092,23 @@ dependencies = [
  "quick-xml",
  "serde",
  "time",
+]
+
+[[package]]
+name = "plug_dayledger"
+version = "0.1.0"
+dependencies = [
+ "am_utils_rs",
+ "api_utils_rs",
+ "color-eyre",
+ "daybook_types",
+ "displaydoc",
+ "multihash",
+ "serde",
+ "thiserror 2.0.18",
+ "utils_rs",
+ "wflow_sdk",
+ "wit-bindgen 0.52.0",
 ]
 
 [[package]]

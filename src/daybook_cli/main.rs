@@ -17,9 +17,9 @@ use clap::builder::styling::AnsiColor;
 use clap::*;
 
 use daybook_core::drawer::DrawerRepo;
-use daybook_core::plugs::manifest;
 use daybook_core::repos::Repo;
 use daybook_core::sync::IrohSyncEvent;
+use daybook_types::manifest;
 
 mod config;
 mod context;

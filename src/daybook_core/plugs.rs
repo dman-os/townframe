@@ -1,8 +1,7 @@
 use crate::interlude::*;
 use tokio_util::sync::CancellationToken;
 
-pub mod manifest;
-pub mod reference;
+use daybook_types::manifest;
 
 pub fn system_plugs() -> Vec<manifest::PlugManifest> {
     use daybook_types::doc::*;
@@ -1843,7 +1842,7 @@ fn validate_facet_reference_manifests(
 ) -> Res<()> {
     let schema_json = serde_json::to_value(value_schema)?;
     for reference_manifest in references {
-        let Some(reference_node) = crate::plugs::reference::schema_node_for_json_path(
+        let Some(reference_node) = daybook_types::reference::schema_node_for_json_path(
             &schema_json,
             &reference_manifest.json_path,
         )?
@@ -1857,7 +1856,7 @@ fn validate_facet_reference_manifests(
 
         match reference_manifest.reference_kind {
             manifest::FacetReferenceKind::UrlFacet => {
-                if !crate::plugs::reference::schema_allows_url_reference(reference_node) {
+                if !daybook_types::reference::schema_allows_url_reference(reference_node) {
                     eyre::bail!(
                         "invalid reference json_path '{}' for facet tag '{}': schema node must allow a URL string or an array of URL strings",
                         reference_manifest.json_path,
@@ -1868,7 +1867,7 @@ fn validate_facet_reference_manifests(
         }
 
         if let Some(at_commit_json_path) = &reference_manifest.at_commit_json_path {
-            let Some(at_commit_node) = crate::plugs::reference::schema_node_for_json_path(
+            let Some(at_commit_node) = daybook_types::reference::schema_node_for_json_path(
                 &schema_json,
                 at_commit_json_path,
             )?
@@ -1879,7 +1878,7 @@ fn validate_facet_reference_manifests(
                     facet_tag
                 );
             };
-            if !crate::plugs::reference::schema_allows_array_of_strings(at_commit_node) {
+            if !daybook_types::reference::schema_allows_array_of_strings(at_commit_node) {
                 eyre::bail!(
                     "invalid at_commit_json_path '{}' for facet tag '{}': schema node must allow an array of commit hashes",
                     at_commit_json_path,

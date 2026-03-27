@@ -1,8 +1,9 @@
 use crate::interlude::*;
 
+use daybook_types::manifest::FacetDisplayHint;
 use tokio_util::sync::CancellationToken;
 
-use crate::plugs::{manifest::FacetDisplayHint, PlugsRepo};
+use crate::plugs::PlugsRepo;
 use crate::stores::Versioned;
 
 #[derive(Reconcile, Hydrate, Clone)]
@@ -24,7 +25,7 @@ pub struct UserMeta {
 
 impl Default for ConfigStore {
     fn default() -> Self {
-        use crate::plugs::manifest::*;
+        use daybook_types::manifest::*;
 
         let mut key_configs = HashMap::new();
 

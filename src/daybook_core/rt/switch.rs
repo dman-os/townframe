@@ -3,14 +3,14 @@ use crate::interlude::*;
 use std::collections::BTreeMap;
 
 use crate::drawer::DrawerEvent;
-use crate::plugs::manifest::{
-    DocPredicateEvalMode, DocPredicateEvalRequirement, DocPredicateEvalResolved,
-};
 use crate::plugs::PlugsEvent;
 use crate::rt::dispatch::DispatchEvent;
 use crate::rt::Rt;
 use daybook_types::doc::BranchPath;
 use daybook_types::doc::{Doc, DocId, FacetKey};
+use daybook_types::manifest::{
+    DocPredicateEvalMode, DocPredicateEvalRequirement, DocPredicateEvalResolved,
+};
 
 const SUBSCRIPTION_CAPACITY: usize = 256;
 
@@ -77,12 +77,12 @@ pub struct SwtchSinkInterest {
     pub consume_plugs: bool,
     pub consume_dispatch: bool,
     pub consume_config: bool,
-    pub drawer_predicate: Option<crate::plugs::manifest::DocPredicateClause>,
+    pub drawer_predicate: Option<daybook_types::manifest::DocPredicateClause>,
 }
 
 #[derive(Default, Debug, Clone)]
 pub struct SwitchSinkOutcome {
-    pub drawer_predicate_update: Option<crate::plugs::manifest::DocPredicateClause>,
+    pub drawer_predicate_update: Option<daybook_types::manifest::DocPredicateClause>,
 }
 
 pub struct SwitchSinkCtx<'a> {
@@ -108,7 +108,7 @@ struct PreparedSwitchSink {
     consume_plugs: bool,
     consume_dispatch: bool,
     consume_config: bool,
-    drawer_predicate: Option<crate::plugs::manifest::DocPredicateClause>,
+    drawer_predicate: Option<daybook_types::manifest::DocPredicateClause>,
 }
 
 pub async fn spawn_switch_worker(
@@ -396,7 +396,7 @@ impl SwitchWorker {
     async fn drawer_event_matches_listener(
         &mut self,
         event: &Arc<DrawerEvent>,
-        predicate: Option<&crate::plugs::manifest::DocPredicateClause>,
+        predicate: Option<&daybook_types::manifest::DocPredicateClause>,
     ) -> Res<bool> {
         fn resolve_meta_predicate_requirements(
             requirements: &HashSet<DocPredicateEvalRequirement>,
@@ -951,8 +951,8 @@ mod tests {
                 },
                 outcome: Some(SwitchSinkOutcome {
                     drawer_predicate_update: Some(
-                        crate::plugs::manifest::DocPredicateClause::HasTag(
-                            crate::plugs::manifest::FacetTag("example.tag".into()),
+                        daybook_types::manifest::DocPredicateClause::HasTag(
+                            daybook_types::manifest::FacetTag("example.tag".into()),
                         ),
                     ),
                 }),
@@ -971,7 +971,7 @@ mod tests {
         let predicate = runtime_listeners[0].drawer_predicate.clone();
         assert!(matches!(
             predicate,
-            Some(crate::plugs::manifest::DocPredicateClause::HasTag(_))
+            Some(daybook_types::manifest::DocPredicateClause::HasTag(_))
         ));
         Ok(())
     }

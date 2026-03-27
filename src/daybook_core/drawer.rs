@@ -691,7 +691,7 @@ impl DrawerRepo {
     async fn facet_manifest_for_tag(
         &self,
         facet_tag: &str,
-    ) -> Option<crate::plugs::manifest::FacetManifest> {
+    ) -> Option<daybook_types::manifest::FacetManifest> {
         if let Some(plugs_repo) = &self.plugs_repo {
             return plugs_repo.get_facet_manifest_by_tag(facet_tag).await;
         }
@@ -699,7 +699,7 @@ impl DrawerRepo {
         // FIXME: I hate this
         if cfg!(test) {
             static SYSTEM_FACET_MANIFESTS: std::sync::OnceLock<
-                HashMap<String, crate::plugs::manifest::FacetManifest>,
+                HashMap<String, daybook_types::manifest::FacetManifest>,
             > = std::sync::OnceLock::new();
             let system_facet_manifests = SYSTEM_FACET_MANIFESTS.get_or_init(|| {
                 let mut out = HashMap::new();
@@ -771,9 +771,9 @@ impl DrawerRepo {
         resulting_facet_keys: &HashSet<FacetKey>,
         origin_facet_key: &FacetKey,
         origin_facet_value: &FacetRaw,
-        reference_manifest: &crate::plugs::manifest::FacetReferenceManifest,
+        reference_manifest: &daybook_types::manifest::FacetReferenceManifest,
     ) -> Res<()> {
-        let selected_values = crate::plugs::reference::select_json_path_values(
+        let selected_values = daybook_types::reference::select_json_path_values(
             origin_facet_value,
             &reference_manifest.json_path,
         )?;
@@ -816,7 +816,7 @@ impl DrawerRepo {
         }
 
         if let Some(at_commit_json_path) = &reference_manifest.at_commit_json_path {
-            let at_commit_values = crate::plugs::reference::select_json_path_values(
+            let at_commit_values = daybook_types::reference::select_json_path_values(
                 origin_facet_value,
                 at_commit_json_path,
             )?;

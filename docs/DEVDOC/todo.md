@@ -69,7 +69,7 @@
   - [ ] Assert samod fsyncs reliably
   - [ ] Notification handling
     - [ ] How to avoid missing triage work?
-- [ ] Keychains for secrets
+- [x] Keychains for secrets
 - [ ] Predicates for losing/gaining facets
 
 - [ ] Cleanup and show it to people

@@ -313,7 +313,7 @@ pub struct FacetTokenRw {
     pub heads: ChangeHashSet,
     pub facet_key: daybook_types::doc::FacetKey,
     #[allow(dead_code)]
-    pub facet_acl: Vec<crate::plugs::manifest::RoutineFacetAccess>,
+    pub facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
 }
 
 impl capabilities::HostFacetTokenRw for SharedWashCtx {

@@ -13,6 +13,7 @@ members = [
   "./src/macros",
   "./src/mltools/",
   "./src/pauperfuse/",
+  "./src/plug_dayledger/",
   "./src/test_wflows",
   "./src/utils_rs",
   # "./src/wash_plugin_pglite/",
@@ -90,6 +91,7 @@ bytes = "1"
 url = "2.5.7"
 addr = "0.15.6"
 scopeguard = "1.2.0"
+semver = "1"
 
 #
 # encoding
