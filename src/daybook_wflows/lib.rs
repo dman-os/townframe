@@ -123,16 +123,11 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
         use wflows::*;
         wflow_sdk::route_wflows!(args, {
-            "pseudo-label" => |cx, _args: serde_json::Value| pseudo_labeler::run(cx),
             "test-label" => |cx, _args: serde_json::Value| test_labeler::run(cx),
             "ocr-image" => |cx, _args: serde_json::Value| ocr_image::run(cx),
             "embed-image" => |cx, _args: serde_json::Value| embed_image::run(cx),
             "embed-text" => |cx, _args: serde_json::Value| embed_text::run(cx),
             "index-embedding" => |cx, _args: serde_json::Value| index_embedding::run(cx),
-            "classify-image-label" => |cx, _args: serde_json::Value| classify_image_label::run(cx),
-            "learn-image-label-proposals" => |cx, _args: serde_json::Value| {
-                learn_image_label_proposals::run(cx)
-            },
         })
     }
 }

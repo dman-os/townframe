@@ -29,4 +29,3 @@ uniffi::setup_scaffolding!();
 
 #[cfg(feature = "uniffi")]
 custom_type_set!();
-

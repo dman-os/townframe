@@ -104,6 +104,7 @@ DAYB_REPO_PATH=/tmp/repo1 cargo r -p daybook_cli --help
 cargo x --help
 
 # test rust code
+# nextest is preferred test runner
 RUST_LOG_TEST=info cargo nextest run
 # lint rust code
 cargo clippy --all-targets --all-features

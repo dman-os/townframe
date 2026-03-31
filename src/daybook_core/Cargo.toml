@@ -13,6 +13,7 @@ path = "lib.rs"
 [features]
 default = ["uniffi"]
 uniffi = ["dep:uniffi"]
+test-support = ["dep:tempfile"]
 
 [dependencies]
 #
@@ -38,6 +39,8 @@ wflow = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 zstd.workspace = true
+sha2 = "0.10.9"
+semver.workspace = true
 
 #
 # error
@@ -90,6 +93,9 @@ samod = { workspace = true, features = ["tokio", "tungstenite-rustls-webpki-root
 #
 # http
 reqwest.workspace = true
+oci-client = "0.15.0"
+oci-spec = "0.8.4"
+oci-wasm = "0.3.0"
 
 #
 # db
@@ -136,6 +142,7 @@ rand.workspace = true
 keyring = "3.6.3"
 irpc-iroh = "0.12.0"
 irpc = "0.12.0"
+tempfile = { workspace = true, optional = true }
 
 [build-dependencies]
 uniffi = { workspace = true, features = ["build"], optional = true }

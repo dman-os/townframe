@@ -17,12 +17,6 @@ fn create_test_doc() -> Doc {
         FacetRaw::from(WellKnownFacet::LabelGeneric("label-1".to_string())),
     );
     props.insert(
-        FacetKey::from(WellKnownFacetTag::PseudoLabel),
-        FacetRaw::from(WellKnownFacet::PseudoLabel(
-            vec!["pseudo-label".to_string()],
-        )),
-    );
-    props.insert(
         FacetKey::from(WellKnownFacetTag::Note),
         FacetRaw::from(WellKnownFacet::Note("Test note".into())),
     );
@@ -138,10 +132,6 @@ fn test_doc_with_all_prop_types() -> Res<()> {
             width_px: 1920,
             height_px: 1080,
         })),
-    );
-    props.insert(
-        FacetKey::from(WellKnownFacetTag::PseudoLabel),
-        FacetRaw::from(WellKnownFacet::PseudoLabel(vec!["p1".to_string()])),
     );
     props.insert(
         FacetKey::from(WellKnownFacetTag::PathGeneric),

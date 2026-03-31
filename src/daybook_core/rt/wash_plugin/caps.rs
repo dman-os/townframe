@@ -275,6 +275,15 @@ pub(super) async fn resolve_blob_path_from_blob_facet(
     plugin: &DaybookPlugin,
     blob: &daybook_types::doc::Blob,
 ) -> Result<std::path::PathBuf, String> {
+    let hash = blob_hash_from_blob_facet(blob)?;
+    plugin
+        .blobs_repo
+        .get_path(&hash)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+pub(super) fn blob_hash_from_blob_facet(blob: &daybook_types::doc::Blob) -> Result<String, String> {
     let Some(urls) = blob.urls.as_ref() else {
         return Err("blob facet is missing urls".to_string());
     };
@@ -297,12 +306,7 @@ pub(super) async fn resolve_blob_path_from_blob_facet(
     if hash.is_empty() {
         return Err("blob url path is missing hash".to_string());
     }
-
-    plugin
-        .blobs_repo
-        .get_path(hash)
-        .await
-        .map_err(|err| err.to_string())
+    Ok(hash.to_string())
 }
 
 pub struct FacetTokenRw {

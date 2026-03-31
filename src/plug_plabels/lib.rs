@@ -1,0 +1,440 @@
+#[allow(unused)]
+mod interlude {
+    pub use api_utils_rs::prelude::*;
+
+    pub use std::str::FromStr;
+}
+mod types;
+
+#[cfg(target_arch = "wasm32")]
+mod wit {
+    wit_bindgen::generate!({
+        path: "wit",
+        world: "bundle",
+
+        // generate_all,
+        // async: true,
+        with: {
+            "wasi:keyvalue/store@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::store,
+            "wasi:keyvalue/atomics@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::atomics,
+            "wasi:logging/logging@0.1.0-draft": api_utils_rs::wit::wasi::logging::logging,
+            "wasmcloud:postgres/types@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::types,
+            "wasmcloud:postgres/query@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::query,
+            "wasi:io/poll@0.2.6": api_utils_rs::wit::wasi::io::poll,
+            "wasi:clocks/monotonic-clock@0.2.6": api_utils_rs::wit::wasi::clocks::monotonic_clock,
+            "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
+            "wasi:config/runtime@0.2.0-draft": api_utils_rs::wit::wasi::config::runtime,
+
+            "townframe:api-utils/utils": api_utils_rs::wit::utils,
+            "townframe:wflow/types": wflow_sdk::wit::townframe::wflow::types,
+            "townframe:wflow/host": wflow_sdk::wit::townframe::wflow::host,
+            "townframe:wflow/bundle": generate,
+
+            "townframe:mltools/ocr": generate,
+            "townframe:mltools/embed": generate,
+            "townframe:sql/types": generate,
+
+            "townframe:daybook-types/doc": generate,
+
+            "townframe:daybook/types": generate,
+            "townframe:daybook/drawer": generate,
+            "townframe:daybook/capabilities": generate,
+            "townframe:daybook/facet-routine": generate,
+            "townframe:daybook/sqlite-connection": generate,
+            "townframe:daybook/mltools-ocr": generate,
+            "townframe:daybook/mltools-embed": generate,
+            "townframe:daybook/mltools-image-tools": generate,
+            "townframe:daybook/mltools-llm-chat": generate,
+        }
+    });
+}
+#[cfg(test)]
+mod e2e;
+#[cfg(target_arch = "wasm32")]
+mod wflows;
+
+#[cfg(target_arch = "wasm32")]
+use crate::interlude::*;
+use daybook_types::manifest::{
+    CommandDeets, CommandManifest, DocPredicateClause, FacetDependencyManifest, FacetManifest,
+    PlugManifest, ProcessorDeets, ProcessorManifest, RoutineFacetAccess, RoutineImpl,
+    RoutineLocalStateAccess, RoutineManifest, RoutineManifestDeets,
+};
+use std::sync::Arc;
+
+#[cfg(target_arch = "wasm32")]
+use crate::wit::exports::townframe::wflow::bundle::JobResult;
+
+#[cfg(target_arch = "wasm32")]
+wit::export!(Component with_types_in wit);
+
+#[cfg(target_arch = "wasm32")]
+struct Component;
+
+#[cfg(target_arch = "wasm32")]
+fn tuple_list_get<'a, T>(pairs: &'a [(String, T)], key: &str) -> Option<&'a T> {
+    pairs
+        .iter()
+        .find(|(entry_key, _)| entry_key == key)
+        .map(|(_, entry_value)| entry_value)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn tuple_list_take<T>(pairs: &mut Vec<(String, T)>, key: &str) -> Option<T> {
+    let ix = pairs.iter().position(|(entry_key, _)| entry_key == key)?;
+    Some(pairs.swap_remove(ix).1)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn row_text(
+    row: &crate::wit::townframe::sql::types::ResultRow,
+    name: &str,
+) -> Option<String> {
+    row.iter().find_map(|entry| match &entry.value {
+        crate::wit::townframe::sql::types::SqlValue::Text(value) if entry.column_name == name => {
+            Some(value.clone())
+        }
+        _ => None,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn row_i64(
+    row: &crate::wit::townframe::sql::types::ResultRow,
+    name: &str,
+) -> Option<i64> {
+    row.iter().find_map(|entry| match &entry.value {
+        crate::wit::townframe::sql::types::SqlValue::Integer(value)
+            if entry.column_name == name =>
+        {
+            Some(*value)
+        }
+        _ => None,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn row_blob(
+    row: &crate::wit::townframe::sql::types::ResultRow,
+    name: &str,
+) -> Option<Vec<u8>> {
+    row.iter().find_map(|entry| match &entry.value {
+        crate::wit::townframe::sql::types::SqlValue::Blob(value) if entry.column_name == name => {
+            Some(value.clone())
+        }
+        _ => None,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn embedding_bytes_to_f32(bytes: &[u8]) -> Res<Vec<f32>> {
+    if !bytes.len().is_multiple_of(4) {
+        eyre::bail!(
+            "embedding bytes length {} is not divisible by 4",
+            bytes.len()
+        );
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+#[cfg(target_arch = "wasm32")]
+impl wit::exports::townframe::wflow::bundle::Guest for Component {
+    fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
+        use wflows::*;
+        wflow_sdk::route_wflows!(args, {
+            "plabel-note-classify" => |cx, _args: serde_json::Value| {
+                plabel_note_classify::run(cx)
+            },
+            "plabel-image-classify" => |cx, _args: serde_json::Value| {
+                plabel_image_classify::run(cx)
+            },
+            "plabel-image-candidates-learn" => |cx, _args: serde_json::Value| {
+                plabel_image_candidates_learn::run(cx)
+            },
+        })
+    }
+}
+
+pub fn plug_manifest() -> PlugManifest {
+    use crate::types::{PlabelFacetTag, PseudoLabelCandidatesFacet};
+    use daybook_types::doc::{Blob, Embedding, Note, WellKnownFacetTag};
+    use daybook_types::manifest::{LocalStateManifest, PlugDependencyManifest};
+
+    PlugManifest {
+        namespace: "daybook".into(),
+        name: "plabels".into(),
+        version: "0.0.1".parse().unwrap(),
+        title: "Pseudo Labels".into(),
+        desc: "Pseudo-labeling routines and facets".into(),
+        local_states: [
+            (
+                "image-label-classifier".into(),
+                Arc::new(LocalStateManifest::SqliteFile {}),
+            ),
+            (
+                "image-label-proposals".into(),
+                Arc::new(LocalStateManifest::SqliteFile {}),
+            ),
+        ]
+        .into(),
+        dependencies: [(
+            "@daybook/core@v0.0.1".into(),
+            PlugDependencyManifest {
+                keys: vec![
+                    FacetDependencyManifest {
+                        key_tag: WellKnownFacetTag::Note.into(),
+                        value_schema: schemars::schema_for!(Note),
+                    },
+                    FacetDependencyManifest {
+                        key_tag: WellKnownFacetTag::Blob.into(),
+                        value_schema: schemars::schema_for!(Blob),
+                    },
+                    FacetDependencyManifest {
+                        key_tag: WellKnownFacetTag::Embedding.into(),
+                        value_schema: schemars::schema_for!(Embedding),
+                    },
+                ],
+                local_states: vec![],
+            }
+            .into(),
+        )]
+        .into(),
+        routines: [
+            (
+                "plabel-note-classify".into(),
+                RoutineManifest {
+                    r#impl: RoutineImpl::Wflow {
+                        key: "plabel-note-classify".into(),
+                        bundle: "plug_plabels".into(),
+                    },
+                    deets: RoutineManifestDeets::DocFacet {
+                        working_facet_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
+                        facet_acl: vec![
+                            RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Note.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                            },
+                            RoutineFacetAccess {
+                                tag: PlabelFacetTag::PseudoLabel.as_str().into(),
+                                key_id: None,
+                                read: true,
+                                write: true,
+                            },
+                        ],
+                        config_prop_acl: vec![],
+                    },
+                    local_state_acl: vec![],
+                }
+                .into(),
+            ),
+            (
+                "plabel-image-classify".into(),
+                RoutineManifest {
+                    r#impl: RoutineImpl::Wflow {
+                        key: "plabel-image-classify".into(),
+                        bundle: "plug_plabels".into(),
+                    },
+                    deets: RoutineManifestDeets::DocFacet {
+                        working_facet_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
+                        facet_acl: vec![
+                            RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Blob.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                            },
+                            RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Embedding.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                            },
+                            RoutineFacetAccess {
+                                tag: PlabelFacetTag::PseudoLabel.as_str().into(),
+                                key_id: None,
+                                read: true,
+                                write: true,
+                            },
+                        ],
+                        config_prop_acl: vec![RoutineFacetAccess {
+                            tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
+                            key_id: Some("plabel-image-label-candidates".into()),
+                            read: true,
+                            write: true,
+                        }],
+                    },
+                    local_state_acl: vec![RoutineLocalStateAccess {
+                        plug_id: "@daybook/plabels".into(),
+                        local_state_key: "image-label-classifier".into(),
+                    }],
+                }
+                .into(),
+            ),
+            (
+                "plabel-image-candidates-learn".into(),
+                RoutineManifest {
+                    r#impl: RoutineImpl::Wflow {
+                        key: "plabel-image-candidates-learn".into(),
+                        bundle: "plug_plabels".into(),
+                    },
+                    deets: RoutineManifestDeets::DocFacet {
+                        working_facet_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
+                        facet_acl: vec![
+                            RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Blob.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                            },
+                            RoutineFacetAccess {
+                                tag: WellKnownFacetTag::Embedding.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                            },
+                            RoutineFacetAccess {
+                                tag: PlabelFacetTag::PseudoLabel.as_str().into(),
+                                key_id: None,
+                                read: true,
+                                write: true,
+                            },
+                        ],
+                        config_prop_acl: vec![RoutineFacetAccess {
+                            tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
+                            key_id: Some("plabel-image-label-candidates".into()),
+                            read: true,
+                            write: true,
+                        }],
+                    },
+                    local_state_acl: vec![RoutineLocalStateAccess {
+                        plug_id: "@daybook/plabels".into(),
+                        local_state_key: "image-label-proposals".into(),
+                    }],
+                }
+                .into(),
+            ),
+        ]
+        .into(),
+        wflow_bundles: [(
+            "plug_plabels".into(),
+            daybook_types::manifest::WflowBundleManifest {
+                keys: vec![
+                    "plabel-note-classify".into(),
+                    "plabel-image-classify".into(),
+                    "plabel-image-candidates-learn".into(),
+                ],
+                component_urls: vec!["build://component/plug_plabels.wasm".parse().unwrap()],
+            }
+            .into(),
+        )]
+        .into(),
+        commands: [
+            (
+                "plabel-note-classify".into(),
+                CommandManifest {
+                    desc: "Classify note content into pseudo labels".into(),
+                    deets: CommandDeets::DocCommand {
+                        routine_name: "plabel-note-classify".into(),
+                    },
+                }
+                .into(),
+            ),
+            (
+                "plabel-image-classify".into(),
+                CommandManifest {
+                    desc: "Classify image documents with pseudo labels".into(),
+                    deets: CommandDeets::DocCommand {
+                        routine_name: "plabel-image-classify".into(),
+                    },
+                }
+                .into(),
+            ),
+            (
+                "plabel-image-candidates-learn".into(),
+                CommandManifest {
+                    desc: "Learn/merge pseudo-label candidates from images".into(),
+                    deets: CommandDeets::DocCommand {
+                        routine_name: "plabel-image-candidates-learn".into(),
+                    },
+                }
+                .into(),
+            ),
+        ]
+        .into(),
+        processors: [
+            (
+                "plabel-note-classify".into(),
+                ProcessorManifest {
+                    desc: "Auto classify text notes into pseudo labels".into(),
+                    deets: ProcessorDeets::DocProcessor {
+                        routine_name: "plabel-note-classify".into(),
+                        predicate: DocPredicateClause::And(vec![
+                            DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
+                            DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                WellKnownFacetTag::Blob.into(),
+                            ))),
+                            DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                PlabelFacetTag::PseudoLabel.as_str().into(),
+                            ))),
+                        ]),
+                    },
+                }
+                .into(),
+            ),
+            (
+                "plabel-image-classify".into(),
+                ProcessorManifest {
+                    desc: "Auto classify image docs into pseudo labels".into(),
+                    deets: ProcessorDeets::DocProcessor {
+                        routine_name: "plabel-image-classify".into(),
+                        predicate: DocPredicateClause::And(vec![
+                            DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),
+                            DocPredicateClause::HasTag(WellKnownFacetTag::Embedding.into()),
+                            DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                PlabelFacetTag::PseudoLabel.as_str().into(),
+                            ))),
+                        ]),
+                    },
+                }
+                .into(),
+            ),
+            (
+                "plabel-image-candidates-learn".into(),
+                ProcessorManifest {
+                    desc: "Learn pseudo-label candidates from images".into(),
+                    deets: ProcessorDeets::DocProcessor {
+                        routine_name: "plabel-image-candidates-learn".into(),
+                        predicate: DocPredicateClause::And(vec![
+                            DocPredicateClause::HasTag(PlabelFacetTag::PseudoLabel.as_str().into()),
+                            DocPredicateClause::HasReferenceToTag {
+                                source_tag: WellKnownFacetTag::Embedding.into(),
+                                target_tag: WellKnownFacetTag::Blob.into(),
+                            },
+                        ]),
+                    },
+                }
+                .into(),
+            ),
+        ]
+        .into(),
+        facets: vec![
+            FacetManifest {
+                key_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
+                value_schema: schemars::schema_for!(Vec<String>),
+                display_config: Default::default(),
+                references: vec![],
+            },
+            FacetManifest {
+                key_tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
+                value_schema: schemars::schema_for!(PseudoLabelCandidatesFacet),
+                display_config: Default::default(),
+                references: vec![],
+            },
+        ],
+    }
+}

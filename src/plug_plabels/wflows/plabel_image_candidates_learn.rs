@@ -1,12 +1,15 @@
 use super::super::*;
 use crate::interlude::*;
+use crate::types::{pseudo_label_candidates_key, PseudoLabelCandidate, PseudoLabelCandidatesFacet};
 use crate::{embedding_bytes_to_f32, row_blob, row_i64, row_text};
 use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
+/// Learns/merges pseudo-label candidates from new images into the shared
+/// candidate-set config facet. This routine does not write labels on docs.
 const NOMIC_VISION_MODEL_ID: &str = "nomic-ai/nomic-embed-vision-v1.5";
 const NOMIC_TEXT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
-const PROPOSAL_SET_CONFIG_FACET_ID: &str = "daybook_wip_learned_image_label_proposals";
-const LOCAL_STATE_KEY: &str = "@daybook/wip/learned-image-label-proposals";
+const PROPOSAL_SET_CONFIG_FACET_ID: &str = "plabel-image-label-candidates";
+const LOCAL_STATE_KEY: &str = "@daybook/plabels/image-label-proposals";
 const DOWNSIZE_MAX_SIDE: u32 = 896;
 const DOWNSIZE_JPEG_QUALITY: u8 = 80;
 const DEDUPE_CENTROID_SIM_MIN: f64 = 0.92;
@@ -55,11 +58,7 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             ))
         })?;
 
-    let config_facet_key = daybook_types::doc::FacetKey {
-        tag: daybook_types::doc::FacetTag::WellKnown(WellKnownFacetTag::PseudoLabelCandidates),
-        id: PROPOSAL_SET_CONFIG_FACET_ID.into(),
-    }
-    .to_string();
+    let config_facet_key = pseudo_label_candidates_key(PROPOSAL_SET_CONFIG_FACET_ID).to_string();
     let rw_config_token = tuple_list_get(&args.rw_config_facet_tokens, &config_facet_key);
     let ro_config_token = tuple_list_get(&args.ro_config_facet_tokens, &config_facet_key);
     if rw_config_token.is_none() && ro_config_token.is_none() {
@@ -144,8 +143,12 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
         if merged != proposal_set {
             proposal_set = merged;
             if let Some(token) = rw_config_token {
-                let facet_raw: daybook_types::doc::FacetRaw =
-                    daybook_types::doc::WellKnownFacet::PseudoLabelCandidates(proposal_set).into();
+                let facet_raw: daybook_types::doc::FacetRaw = serde_json::to_value(proposal_set)
+                    .map_err(|err| {
+                        JobErrorX::Terminal(ferr!(
+                            "error serializing plug_plabels proposal set facet: {err}"
+                        ))
+                    })?;
                 let facet_raw = serde_json::to_string(&facet_raw).expect(ERROR_JSON);
                 token
                     .update(&facet_raw)
@@ -204,9 +207,7 @@ Example:
 fn load_or_init_proposal_set(
     rw_config_token: Option<&crate::wit::townframe::daybook::capabilities::FacetTokenRw>,
     ro_config_token: Option<&crate::wit::townframe::daybook::capabilities::FacetTokenRo>,
-) -> Result<daybook_types::doc::PseudoLabelCandidatesFacet, JobErrorX> {
-    use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
-
+) -> Result<PseudoLabelCandidatesFacet, JobErrorX> {
     if let Some(token) = rw_config_token {
         if token.exists() {
             let raw = token.get();
@@ -216,21 +217,22 @@ fn load_or_init_proposal_set(
                         "error parsing config proposal set facet json: {err}"
                     ))
                 })?;
-            return match WellKnownFacet::from_json(
-                facet_raw,
-                WellKnownFacetTag::PseudoLabelCandidates,
-            )
-            .map_err(|err| {
-                JobErrorX::Terminal(err.wrap_err("config facet is not PseudoLabelCandidates"))
-            })? {
-                WellKnownFacet::PseudoLabelCandidates(value) => Ok(value),
-                _ => unreachable!(),
-            };
+            return serde_json::from_value::<PseudoLabelCandidatesFacet>(facet_raw).map_err(
+                |err| {
+                    JobErrorX::Terminal(ferr!(
+                        "config facet is not plug_plabels pseudo label candidates: {err}"
+                    ))
+                },
+            );
         }
 
-        let value = daybook_types::doc::PseudoLabelCandidatesFacet { labels: vec![] };
+        let value = PseudoLabelCandidatesFacet { labels: vec![] };
         let facet_raw: daybook_types::doc::FacetRaw =
-            WellKnownFacet::PseudoLabelCandidates(value.clone()).into();
+            serde_json::to_value(value.clone()).map_err(|err| {
+                JobErrorX::Terminal(ferr!(
+                    "error serializing default plug_plabels proposal set: {err}"
+                ))
+            })?;
         let facet_raw = serde_json::to_string(&facet_raw).expect(ERROR_JSON);
         token
             .update(&facet_raw)
@@ -241,7 +243,7 @@ fn load_or_init_proposal_set(
 
     if let Some(token) = ro_config_token {
         if !token.exists() {
-            return Ok(daybook_types::doc::PseudoLabelCandidatesFacet { labels: vec![] });
+            return Ok(PseudoLabelCandidatesFacet { labels: vec![] });
         }
         let raw = token.get();
         let facet_raw: daybook_types::doc::FacetRaw =
@@ -250,16 +252,14 @@ fn load_or_init_proposal_set(
                     "error parsing ro config proposal set facet json: {err}"
                 ))
             })?;
-        return match WellKnownFacet::from_json(facet_raw, WellKnownFacetTag::PseudoLabelCandidates)
-            .map_err(|err| {
-                JobErrorX::Terminal(err.wrap_err("ro config facet is not PseudoLabelCandidates"))
-            })? {
-            WellKnownFacet::PseudoLabelCandidates(value) => Ok(value),
-            _ => unreachable!(),
-        };
+        return serde_json::from_value::<PseudoLabelCandidatesFacet>(facet_raw).map_err(|err| {
+            JobErrorX::Terminal(ferr!(
+                "ro config facet is not plug_plabels pseudo label candidates: {err}"
+            ))
+        });
     }
 
-    Ok(daybook_types::doc::PseudoLabelCandidatesFacet { labels: vec![] })
+    Ok(PseudoLabelCandidatesFacet { labels: vec![] })
 }
 
 fn ensure_embedding_cache_schema(
@@ -409,16 +409,16 @@ fn collapse_whitespace(text: &str) -> String {
 
 #[derive(Debug, Clone)]
 struct ProposalNode {
-    label: daybook_types::doc::PseudoLabelCandidate,
+    label: PseudoLabelCandidate,
     centroid: Vec<f32>,
     is_new: bool,
 }
 
 fn merge_label_proposal_with_dedupe(
     sqlite_connection: &crate::wit::townframe::daybook::sqlite_connection::Connection,
-    existing: &daybook_types::doc::PseudoLabelCandidatesFacet,
+    existing: &PseudoLabelCandidatesFacet,
     new_label: NormalizedProposal,
-) -> Result<daybook_types::doc::PseudoLabelCandidatesFacet, JobErrorX> {
+) -> Result<PseudoLabelCandidatesFacet, JobErrorX> {
     let mut nodes = Vec::with_capacity(existing.labels.len() + 1);
     for label in &existing.labels {
         let centroid = proposal_centroid(sqlite_connection, &label.prompts)?;
@@ -428,7 +428,7 @@ fn merge_label_proposal_with_dedupe(
             is_new: false,
         });
     }
-    let new_node = daybook_types::doc::PseudoLabelCandidate {
+    let new_node = PseudoLabelCandidate {
         label: new_label.label,
         prompts: new_label.prompts,
         negative_prompts: new_label.negative_prompts,
@@ -479,15 +479,12 @@ fn merge_label_proposal_with_dedupe(
             .unwrap_or(usize::MAX)
     });
 
-    Ok(daybook_types::doc::PseudoLabelCandidatesFacet {
+    Ok(PseudoLabelCandidatesFacet {
         labels: merged_labels,
     })
 }
 
-fn merge_cluster_labels(
-    nodes: &[ProposalNode],
-    members: &[usize],
-) -> daybook_types::doc::PseudoLabelCandidate {
+fn merge_cluster_labels(nodes: &[ProposalNode], members: &[usize]) -> PseudoLabelCandidate {
     let mut canonical_label = None::<String>;
     let mut canonical_is_new = true;
     for &member_ix in members {
@@ -526,7 +523,7 @@ fn merge_cluster_labels(
         PROMPTS_MAX_COUNT_PER_LABEL,
     );
 
-    daybook_types::doc::PseudoLabelCandidate {
+    PseudoLabelCandidate {
         label: canonical_label.unwrap_or_else(|| "image".to_string()),
         prompts,
         negative_prompts,

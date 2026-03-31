@@ -66,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .success(),
         "error building daybook_wflows wasm"
     );
+
     // let cwasm_path = out_dir.join("daybook_wflows.cwasm");
     // assert!(
     //     std::process::Command::new("wasmtime")
@@ -130,6 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if profile == "release" { 19 } else { 1 },
     )
     .map_err(|err| format!("error compress writing daybook_wflows.wasm.zst: {err}"))?;
+
     Ok(())
 }
 

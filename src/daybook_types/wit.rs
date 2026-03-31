@@ -48,8 +48,6 @@ pub mod doc {
     pub enum WellKnownFacet {
         RefGeneric(DocId),
         LabelGeneric(String),
-        PseudoLabel(Vec<String>),
-        PseudoLabelCandidates(PseudoLabelCandidatesFacet),
         TitleGeneric(String),
         PathGeneric(String),
         ImageMetadata(ImageMetadata),
@@ -60,20 +58,6 @@ pub mod doc {
         Dmeta(Dmeta),
         Note(Note),
         Blob(Blob),
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    #[serde(rename_all = "camelCase")]
-    pub struct PseudoLabelCandidate {
-        pub label: String,
-        pub prompts: Vec<String>,
-        pub negative_prompts: Vec<String>,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    #[serde(rename_all = "camelCase")]
-    pub struct PseudoLabelCandidatesFacet {
-        pub labels: Vec<PseudoLabelCandidate>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -214,20 +198,6 @@ pub mod doc {
             match val {
                 root_doc::WellKnownFacet::RefGeneric(val) => Self::RefGeneric(val),
                 root_doc::WellKnownFacet::LabelGeneric(val) => Self::LabelGeneric(val),
-                root_doc::WellKnownFacet::PseudoLabel(val) => Self::PseudoLabel(val),
-                root_doc::WellKnownFacet::PseudoLabelCandidates(val) => {
-                    Self::PseudoLabelCandidates(PseudoLabelCandidatesFacet {
-                        labels: val
-                            .labels
-                            .into_iter()
-                            .map(|label| PseudoLabelCandidate {
-                                label: label.label,
-                                prompts: label.prompts,
-                                negative_prompts: label.negative_prompts,
-                            })
-                            .collect(),
-                    })
-                }
                 root_doc::WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
                 root_doc::WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val.to_string()),
                 root_doc::WellKnownFacet::ImageMetadata(val) => {
@@ -329,20 +299,6 @@ pub mod doc {
             Ok(match val {
                 WellKnownFacet::RefGeneric(val) => Self::RefGeneric(val),
                 WellKnownFacet::LabelGeneric(val) => Self::LabelGeneric(val),
-                WellKnownFacet::PseudoLabel(val) => Self::PseudoLabel(val),
-                WellKnownFacet::PseudoLabelCandidates(val) => {
-                    Self::PseudoLabelCandidates(root_doc::PseudoLabelCandidatesFacet {
-                        labels: val
-                            .labels
-                            .into_iter()
-                            .map(|label| root_doc::PseudoLabelCandidate {
-                                label: label.label,
-                                prompts: label.prompts,
-                                negative_prompts: label.negative_prompts,
-                            })
-                            .collect(),
-                    })
-                }
                 WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
                 WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val),
                 WellKnownFacet::ImageMetadata(val) => {

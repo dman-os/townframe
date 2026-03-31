@@ -1,6 +1,7 @@
 use crate::interlude::*;
 use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
+/// Classifies note content into short pseudo-labels via the LLM chat capability.
 pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::drawer;
     use crate::wit::townframe::daybook::facet_routine;
@@ -112,8 +113,8 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     let new_labels = vec![llm_response];
 
     cx.effect(|| {
-        let new_facet: daybook_types::doc::FacetRaw =
-            WellKnownFacet::PseudoLabel(new_labels).into();
+        let new_facet: daybook_types::doc::FacetRaw = serde_json::to_value(new_labels)
+            .map_err(|err| JobErrorX::Terminal(ferr!("error serializing pseudo labels: {err}")))?;
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
         working_facet_token
             .update(&new_facet)

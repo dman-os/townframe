@@ -1,18 +1,19 @@
-use crate::interlude::*;
+use utils_rs::prelude::*;
 
 use daybook_types::doc::{AddDocArgs, Blob, FacetKey, WellKnownFacet, WellKnownFacetTag};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
-    let test_cx = crate::e2e::test_cx_with_options(
+    let test_cx = daybook_core::test_support::test_cx_with_options(
         utils_rs::function_full!(),
-        crate::e2e::DaybookTestCxOptions {
+        daybook_core::test_support::DaybookTestCxOptions {
             provision_mltools_models: true,
         },
     )
     .await?;
+    super::common::import_plabels_oci(&test_cx).await?;
 
-    let image_bytes = include_bytes!("./sample-receipt.jpg");
+    let image_bytes = include_bytes!("../../daybook_core/e2e/sample-receipt.jpg");
     let blob_hash = test_cx.rt.blobs_repo.put(image_bytes).await?;
 
     let blob_facet = Blob {
@@ -36,7 +37,7 @@ async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;
 
     let embedding_key = FacetKey::from(WellKnownFacetTag::Embedding);
-    let label_key = FacetKey::from(WellKnownFacetTag::PseudoLabel);
+    let label_key = crate::types::pseudo_label_key();
     let mut updated_doc = None;
     for _ in 0..1200 {
         if let Some(doc) = test_cx
@@ -81,11 +82,8 @@ async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
     let label_raw = updated_doc
         .facets
         .get(&label_key)
-        .ok_or_eyre("image classifier did not write PseudoLabel facet")?;
-    let label_facet = WellKnownFacet::from_json(label_raw.clone(), WellKnownFacetTag::PseudoLabel)?;
-    let WellKnownFacet::PseudoLabel(labels) = label_facet else {
-        eyre::bail!("pseudo-label facet had unexpected type");
-    };
+        .ok_or_eyre("image classifier did not write pseudo label facet")?;
+    let labels: Vec<String> = serde_json::from_value(label_raw.clone())?;
     assert!(
         labels.iter().any(|label| label == "receipt-image"),
         "expected receipt-image in pseudo labels, got {labels:?}"

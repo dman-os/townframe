@@ -121,3 +121,8 @@ Are tests repeating too much setup code?
 Consider using TDD or common cleanup code.
 
 Tools like snapshot tests, TDD and the macros for TDD found in the repo can help in the longevity of a test's usefulness.
+
+- Avoid Cargo integration tests (`crate/tests/*.rs`) unless explicitly requested.
+- Prefer in-crate test modules instead:
+  - unit tests inline in the relevant module
+  - cross-module end-to-end style tests in a crate-local `e2e` module (for example `src/my_crate/e2e.rs` with submodules in `src/my_crate/e2e/`).

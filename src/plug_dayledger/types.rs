@@ -1,6 +1,5 @@
 use crate::interlude::*;
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Amount {
@@ -139,4 +138,3 @@ daybook_types::define_enum_and_tag!(
         }
     }
 );
-

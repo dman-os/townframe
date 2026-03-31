@@ -2243,6 +2243,9 @@ dependencies = [
  "libsqlite3-sys",
  "loom",
  "mltools",
+ "oci-client",
+ "oci-spec",
+ "oci-wasm",
  "once_cell",
  "pastey",
  "rand 0.9.2",
@@ -2250,8 +2253,10 @@ dependencies = [
  "samod",
  "schemars 1.2.0",
  "scopeguard",
+ "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlite-vec",
  "sqlx",
  "struct-patch",
@@ -4129,6 +4134,22 @@ dependencies = [
  "hyper-util",
  "pin-project-lite",
  "tokio",
+ "tower-service",
+]
+
+[[package]]
+name = "hyper-tls"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "native-tls",
+ "tokio",
+ "tokio-native-tls",
  "tower-service",
 ]
 
@@ -7117,6 +7138,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "plug_plabels"
+version = "0.1.0"
+dependencies = [
+ "am_utils_rs",
+ "api_utils_rs",
+ "color-eyre",
+ "daybook_core",
+ "daybook_types",
+ "displaydoc",
+ "multihash",
+ "schemars 1.2.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "utils_rs",
+ "wflow_sdk",
+ "wit-bindgen 0.52.0",
+]
+
+[[package]]
 name = "png"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7994,10 +8035,12 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-rustls",
+ "hyper-tls",
  "hyper-util",
  "js-sys",
  "log",
  "mime",
+ "native-tls",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -8009,6 +8052,7 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
+ "tokio-native-tls",
  "tokio-rustls 0.26.1",
  "tokio-util",
  "tower",
@@ -9714,6 +9758,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.106",
+]
+
+[[package]]
+name = "tokio-native-tls"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
+dependencies = [
+ "native-tls",
+ "tokio",
 ]
 
 [[package]]
@@ -12602,6 +12656,7 @@ dependencies = [
  "bon",
  "clap",
  "data-encoding",
+ "daybook_types",
  "dotenv-flow",
  "fastembed",
  "heck",
@@ -12612,13 +12667,19 @@ dependencies = [
  "irpc-iroh",
  "libsqlite3-sys",
  "mltools",
+ "oci-spec",
+ "oci-wasm",
  "ollama-rs",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "sqlite-vec",
  "sqlx",
  "tokio",
  "tracing",
+ "url",
  "utils_rs",
+ "zstd",
 ]
 
 [[package]]

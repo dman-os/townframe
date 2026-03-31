@@ -118,6 +118,12 @@ struct ObjectPaths {
     meta: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobMaterializeRequest {
+    Filename(String),
+    Extension(String),
+}
+
 pub const BLOB_SCHEME: &str = "db+blob";
 pub const BLOB_SCOPE_DOCS_PARTITION_ID: &str = "blob_scope/docs";
 pub const BLOB_SCOPE_PLUGS_PARTITION_ID: &str = "blob_scope/plugs";
@@ -401,6 +407,54 @@ impl BlobsRepo {
         Ok(self.get_path(hash).await.is_ok())
     }
 
+    pub async fn cleanup_staging(&self) -> Res<()> {
+        let staging_root = self.root.join("staging");
+        if tokio::fs::try_exists(&staging_root).await? {
+            tokio::fs::remove_dir_all(&staging_root).await?;
+        }
+        tokio::fs::create_dir_all(&staging_root).await?;
+        Ok(())
+    }
+
+    pub async fn materialize(&self, hash: &str, request: BlobMaterializeRequest) -> Res<PathBuf> {
+        let source_path = self.get_path(hash).await?;
+        let filename = match request {
+            BlobMaterializeRequest::Filename(name) => Self::sanitize_requested_filename(&name)?,
+            BlobMaterializeRequest::Extension(ext) => {
+                let ext = Self::sanitize_requested_extension(&ext)?;
+                format!("{hash}.{ext}")
+            }
+        };
+        let staging_dir = self.root.join("staging").join(hash);
+        tokio::fs::create_dir_all(&staging_dir).await?;
+        let materialized_path = staging_dir.join(filename);
+        if tokio::fs::try_exists(&materialized_path).await? {
+            return Ok(materialized_path);
+        }
+        match tokio::fs::hard_link(&source_path, &materialized_path).await {
+            Ok(_) => Ok(materialized_path),
+            Err(_) => {
+                self.atomic_copy_file(&source_path, &materialized_path)
+                    .await?;
+                Ok(materialized_path)
+            }
+        }
+    }
+
+    pub async fn materialize_with_meta_extension(
+        &self,
+        hash: &str,
+        filename_stem: &str,
+    ) -> Res<PathBuf> {
+        let ext = self.preferred_extension_from_meta(hash).await?;
+        let stem = Self::sanitize_requested_stem(filename_stem)?;
+        self.materialize(
+            hash,
+            BlobMaterializeRequest::Filename(format!("{stem}.{ext}")),
+        )
+        .await
+    }
+
     pub async fn put_from_store(&self, hash: &str) -> Res<String> {
         let object_paths = self.object_paths(hash)?;
         tokio::fs::create_dir_all(&object_paths.dir).await?;
@@ -444,6 +498,78 @@ impl BlobsRepo {
             meta: dir.join(format!("{hash}.meta")),
             dir,
         })
+    }
+
+    async fn preferred_extension_from_meta(&self, hash: &str) -> Res<String> {
+        let object_paths = self.object_paths(hash)?;
+        if let Some(meta) = self.read_meta(&object_paths.meta).await? {
+            if let Some(mime) = meta.mime.as_deref() {
+                if let Some(ext) = Self::extension_from_mime(mime) {
+                    return Ok(ext.to_string());
+                }
+            }
+            if let Some(source_ext) = meta
+                .source_paths
+                .iter()
+                .filter_map(|path| Path::new(path).extension())
+                .filter_map(|ext| ext.to_str())
+                .find(|ext| !ext.is_empty())
+            {
+                return Self::sanitize_requested_extension(source_ext);
+            }
+        }
+        eyre::bail!("blob metadata has no materializable extension for hash {hash}");
+    }
+
+    fn extension_from_mime(mime: &str) -> Option<&'static str> {
+        match mime.split(';').next().map(str::trim) {
+            Some("image/jpeg" | "image/jpg") => Some("jpg"),
+            Some("image/png") => Some("png"),
+            Some("image/gif") => Some("gif"),
+            Some("image/bmp") => Some("bmp"),
+            Some("image/webp") => Some("webp"),
+            Some("text/plain") => Some("txt"),
+            Some("application/json") => Some("json"),
+            Some("application/yaml" | "text/yaml" | "text/x-yaml") => Some("yaml"),
+            _ => None,
+        }
+    }
+
+    fn sanitize_requested_stem(stem: &str) -> Res<String> {
+        let stem = stem.trim();
+        eyre::ensure!(!stem.is_empty(), "filename stem must not be empty");
+        eyre::ensure!(
+            !stem.contains('/') && !stem.contains('\\'),
+            "filename stem must not contain path separators"
+        );
+        eyre::ensure!(stem != "." && stem != "..", "invalid filename stem");
+        Ok(stem.to_string())
+    }
+
+    fn sanitize_requested_extension(extension: &str) -> Res<String> {
+        let ext = extension.trim().trim_start_matches('.');
+        eyre::ensure!(!ext.is_empty(), "extension must not be empty");
+        eyre::ensure!(
+            !ext.contains('/') && !ext.contains('\\'),
+            "extension must not contain path separators"
+        );
+        eyre::ensure!(
+            ext.bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-'),
+            "extension contains invalid characters: '{ext}'"
+        );
+        Ok(ext.to_ascii_lowercase())
+    }
+
+    fn sanitize_requested_filename(filename: &str) -> Res<String> {
+        let filename = filename.trim();
+        eyre::ensure!(!filename.is_empty(), "filename must not be empty");
+        eyre::ensure!(
+            !filename.contains('/') && !filename.contains('\\'),
+            "filename must not contain path separators"
+        );
+        eyre::ensure!(filename != "." && filename != "..", "invalid filename");
+        Ok(filename.to_string())
     }
 
     async fn read_meta(&self, path: &Path) -> Res<Option<BlobMetaV1>> {
@@ -920,6 +1046,35 @@ mod tests {
         let (repo, _temp) = setup().await;
         assert!(repo.get_path("bafakehash").await.is_err());
         assert!(repo.put_from_store("bafakehash").await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn materialize_uses_hash_filename_layout() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let hash = repo.put(b"materialize-layout").await?;
+        let out = repo
+            .materialize(
+                &hash,
+                BlobMaterializeRequest::Filename("preview.yaml".into()),
+            )
+            .await?;
+        let expected = repo.root.join("staging").join(&hash).join("preview.yaml");
+        assert_eq!(out, expected);
+        assert!(tokio::fs::try_exists(&out).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cleanup_staging_removes_materialized_files() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let hash = repo.put(b"cleanup-me").await?;
+        let out = repo
+            .materialize(&hash, BlobMaterializeRequest::Extension("jpg".into()))
+            .await?;
+        assert!(tokio::fs::try_exists(&out).await?);
+        repo.cleanup_staging().await?;
+        assert!(!tokio::fs::try_exists(&out).await?);
         Ok(())
     }
 }

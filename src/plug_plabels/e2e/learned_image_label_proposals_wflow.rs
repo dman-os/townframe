@@ -1,21 +1,22 @@
-use crate::interlude::*;
+use utils_rs::prelude::*;
 
 use daybook_types::doc::{AddDocArgs, Blob, FacetKey, WellKnownFacet, WellKnownFacetTag};
 
-const PROPOSAL_SET_CONFIG_FACET_ID: &str = "daybook_wip_learned_image_label_proposals";
+const PROPOSAL_SET_CONFIG_FACET_ID: &str = "plabel-image-label-candidates";
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "real multimodal e2e; slow and environment-dependent"]
 async fn test_learned_image_label_proposals_receipt_twice_prints_labels() -> Res<()> {
-    let test_cx = crate::e2e::test_cx_with_options(
+    let test_cx = daybook_core::test_support::test_cx_with_options(
         utils_rs::function_full!(),
-        crate::e2e::DaybookTestCxOptions {
+        daybook_core::test_support::DaybookTestCxOptions {
             provision_mltools_models: true,
         },
     )
     .await?;
+    super::common::import_plabels_oci(&test_cx).await?;
 
-    let image_bytes = include_bytes!("./sample-receipt.jpg");
+    let image_bytes = include_bytes!("../../daybook_core/e2e/sample-receipt.jpg");
 
     let _doc_a = add_blob_image_doc(&test_cx, image_bytes).await?;
     let proposal_set_after_first = wait_for_proposal_set(&test_cx, 300).await?;
@@ -52,7 +53,7 @@ async fn test_learned_image_label_proposals_receipt_twice_prints_labels() -> Res
     Ok(())
 }
 
-fn assert_proposal_set_invariants(set: &daybook_types::doc::PseudoLabelCandidatesFacet) -> Res<()> {
+fn assert_proposal_set_invariants(set: &crate::types::PseudoLabelCandidatesFacet) -> Res<()> {
     let mut seen_labels = std::collections::BTreeSet::new();
 
     for label in &set.labels {
@@ -123,11 +124,11 @@ fn is_snake_case_label(label: &str) -> bool {
         && !label.contains("__")
         && label
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 async fn add_blob_image_doc(
-    test_cx: &crate::e2e::DaybookTestContext,
+    test_cx: &daybook_core::test_support::DaybookTestContext,
     image_bytes: &[u8],
 ) -> Res<daybook_types::doc::DocId> {
     let blob_hash = test_cx.rt.blobs_repo.put(image_bytes).await?;
@@ -155,17 +156,14 @@ async fn add_blob_image_doc(
 }
 
 async fn wait_for_proposal_set(
-    test_cx: &crate::e2e::DaybookTestContext,
+    test_cx: &daybook_core::test_support::DaybookTestContext,
     timeout_secs: u64,
-) -> Res<daybook_types::doc::PseudoLabelCandidatesFacet> {
+) -> Res<crate::types::PseudoLabelCandidatesFacet> {
     let config_doc_id = test_cx
         ._config_repo
         .get_or_init_global_props_doc_id(&test_cx.drawer_repo)
         .await?;
-    let proposal_set_key = FacetKey {
-        tag: daybook_types::doc::FacetTag::WellKnown(WellKnownFacetTag::PseudoLabelCandidates),
-        id: PROPOSAL_SET_CONFIG_FACET_ID.into(),
-    };
+    let proposal_set_key = crate::types::pseudo_label_candidates_key(PROPOSAL_SET_CONFIG_FACET_ID);
 
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_secs);
@@ -188,13 +186,8 @@ async fn wait_for_proposal_set(
             .await?
         {
             if let Some(raw) = doc.facets.get(&proposal_set_key) {
-                let facet = WellKnownFacet::from_json(
-                    raw.clone(),
-                    WellKnownFacetTag::PseudoLabelCandidates,
-                )?;
-                let WellKnownFacet::PseudoLabelCandidates(value) = facet else {
-                    eyre::bail!("proposal set config facet had unexpected type");
-                };
+                let value: crate::types::PseudoLabelCandidatesFacet =
+                    serde_json::from_value(raw.clone())?;
                 if !value.labels.is_empty() {
                     return Ok(value);
                 }

@@ -1,15 +1,18 @@
 use super::super::*;
 use crate::interlude::*;
+use crate::types::{pseudo_label_candidates_key, PseudoLabelCandidate, PseudoLabelCandidatesFacet};
 use crate::{embedding_bytes_to_f32, row_i64, row_text};
 use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
+/// Classifies an image doc into pseudo-labels using a candidate set and
+/// a sqlite-backed prompt/centroid index.
 const NOMIC_VISION_MODEL_ID: &str = "nomic-ai/nomic-embed-vision-v1.5";
 const NOMIC_TEXT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
 const IMAGE_LABEL_RECEIPT: &str = "receipt-image";
 const IMAGE_LABEL_TWITTER_SCREENSHOT: &str = "twitter-screenshot";
 const IMAGE_LABEL_MINECRAFT: &str = "minecraft";
-const IMAGE_LABEL_LOCAL_STATE_KEY: &str = "@daybook/wip/image-label-classifier";
-const IMAGE_LABEL_SET_CONFIG_FACET_ID: &str = "daybook-wip-image-label-set";
+const IMAGE_LABEL_LOCAL_STATE_KEY: &str = "@daybook/plabels/image-label-classifier";
+const IMAGE_LABEL_SET_CONFIG_FACET_ID: &str = "plabel-image-label-candidates";
 const LABEL_SET_CACHE_SCHEMA_VERSION: i64 = 1;
 const PROMPT_HIT_MIN_SCORE: f64 = 0.040;
 const PROMPT_MAX_MIN_SCORE: f64 = 0.045;
@@ -121,11 +124,8 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     let sqlite_connection = tuple_list_get(&args.sqlite_connections, IMAGE_LABEL_LOCAL_STATE_KEY)
         .or_else(|| args.sqlite_connections.first().map(|(_, token)| token))
         .ok_or_else(|| JobErrorX::Terminal(ferr!("no sqlite connection available")))?;
-    let config_label_set_facet_key = daybook_types::doc::FacetKey {
-        tag: daybook_types::doc::FacetTag::WellKnown(WellKnownFacetTag::PseudoLabelCandidates),
-        id: IMAGE_LABEL_SET_CONFIG_FACET_ID.into(),
-    }
-    .to_string();
+    let config_label_set_facet_key =
+        pseudo_label_candidates_key(IMAGE_LABEL_SET_CONFIG_FACET_ID).to_string();
     let rw_config_label_set_token =
         tuple_list_get(&args.rw_config_facet_tokens, &config_label_set_facet_key);
     let ro_config_label_set_token =
@@ -207,16 +207,19 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
                 let facet_raw: daybook_types::doc::FacetRaw = serde_json::from_str(&raw).map_err(
                     |err| JobErrorX::Terminal(ferr!("error parsing config label set facet json: {err}")),
                 )?;
-                match WellKnownFacet::from_json(facet_raw, WellKnownFacetTag::PseudoLabelCandidates)
-                    .map_err(|err| JobErrorX::Terminal(err.wrap_err("config facet is not PseudoLabelCandidates")))?
-                {
-                    WellKnownFacet::PseudoLabelCandidates(value) => value,
-                    _ => unreachable!(),
-                }
+                serde_json::from_value::<PseudoLabelCandidatesFacet>(facet_raw).map_err(|err| {
+                    JobErrorX::Terminal(ferr!(
+                        "config facet is not plug_plabels pseudo label candidates: {err}"
+                    ))
+                })?
             } else {
                 let value = default_image_pseudo_label_set();
-                let facet_raw: daybook_types::doc::FacetRaw =
-                    WellKnownFacet::PseudoLabelCandidates(value.clone()).into();
+                let facet_raw: daybook_types::doc::FacetRaw = serde_json::to_value(value.clone())
+                    .map_err(|err| {
+                        JobErrorX::Terminal(ferr!(
+                            "error serializing default pseudo label candidate set: {err}"
+                        ))
+                    })?;
                 let facet_raw = serde_json::to_string(&facet_raw).expect(ERROR_JSON);
                 token.update(&facet_raw)
                     .wrap_err("error writing default PseudoLabelCandidates config facet")
@@ -232,12 +235,13 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             let raw = token.get();
             let facet_raw: daybook_types::doc::FacetRaw = serde_json::from_str(&raw)
                 .map_err(|err| JobErrorX::Terminal(ferr!("error parsing config label set facet json: {err}")))?;
-            let value = match WellKnownFacet::from_json(facet_raw, WellKnownFacetTag::PseudoLabelCandidates)
-                .map_err(|err| JobErrorX::Terminal(err.wrap_err("config facet is not PseudoLabelCandidates")))?
-            {
-                WellKnownFacet::PseudoLabelCandidates(value) => value,
-                _ => unreachable!(),
-            };
+            let value = serde_json::from_value::<PseudoLabelCandidatesFacet>(facet_raw).map_err(
+                |err| {
+                    JobErrorX::Terminal(ferr!(
+                        "config facet is not plug_plabels pseudo label candidates: {err}"
+                    ))
+                },
+            )?;
             (value, heads_json)
         } else {
             return Ok(Json(()));
@@ -599,8 +603,10 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
             output_labels.push(best_label);
         }
 
-        let new_facet: daybook_types::doc::FacetRaw =
-            WellKnownFacet::PseudoLabel(output_labels).into();
+        let new_facet: daybook_types::doc::FacetRaw = serde_json::to_value(output_labels)
+            .map_err(|err| {
+                JobErrorX::Terminal(ferr!("error serializing pseudo labels: {err}"))
+            })?;
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
         working_facet_token
             .update(&new_facet)
@@ -629,8 +635,7 @@ struct CacheEmbeddingRow<'a> {
     vector: &'a [f32],
 }
 
-fn default_image_pseudo_label_set() -> daybook_types::doc::PseudoLabelCandidatesFacet {
-    use daybook_types::doc::{PseudoLabelCandidate, PseudoLabelCandidatesFacet};
+fn default_image_pseudo_label_set() -> PseudoLabelCandidatesFacet {
     PseudoLabelCandidatesFacet {
         labels: vec![
             PseudoLabelCandidate {
