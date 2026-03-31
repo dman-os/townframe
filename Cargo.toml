@@ -91,7 +91,7 @@ bytes = "1"
 url = "2.5.7"
 addr = "0.15.6"
 scopeguard = "1.2.0"
-semver = "1"
+semver = { version = "1", features = ["serde"] }
 
 #
 # encoding

@@ -1,5 +1,13 @@
 # duck-log
 
+## 2026-03-31 | first feature, i'll be damned
+
+Okay, time to implement the personal ledger plugin for this shitshow.
+This can be incredibly wide so I'll focus on my personal usecases.
+- Track hledger and plaintextaccounting sensiblities
+- Parse recipet photos, transfer screenshots, PDF exports
+- Parse email, SMS
+
 ## 2026-03-18 | sync hell 2
 
 Finally merged the sync work.
