@@ -2,7 +2,7 @@ use utils_rs::prelude::*;
 
 use daybook_types::doc::{AddDocArgs, Blob, FacetKey, WellKnownFacet, WellKnownFacetTag};
 
-const PROPOSAL_SET_CONFIG_FACET_ID: &str = "plabel-image-label-candidates";
+const PROPOSAL_SET_CONFIG_FACET_ID: &str = "label-candidates";
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "real multimodal e2e; slow and environment-dependent"]

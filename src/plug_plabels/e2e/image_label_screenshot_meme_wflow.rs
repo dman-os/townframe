@@ -66,14 +66,20 @@ async fn test_image_label_fallback_multi_label_screenshot_meme() -> Res<()> {
         .facets
         .get(&pseudo_label_key)
         .ok_or_eyre("image classifier did not write pseudo label facet")?;
-    let labels: Vec<String> = serde_json::from_value(pseudo_label_raw.clone())?;
+    let labels: crate::types::PseudoLabel = serde_json::from_value(pseudo_label_raw.clone())?;
+    assert_eq!(labels.algorithm_tag, "label-image/embed-gauntlet-nomic-v1");
+    assert!(!labels.source_ref.is_empty());
+    assert!(!labels.candidate_set_ref.is_empty());
 
     assert!(
-        labels.iter().any(|label| label == "twitter-screenshot"),
+        labels
+            .labels
+            .iter()
+            .any(|label| label.label == "twitter-screenshot"),
         "expected twitter-screenshot in pseudo labels, got {labels:?}"
     );
     assert!(
-        labels.iter().any(|label| label == "minecraft"),
+        labels.labels.iter().any(|label| label.label == "minecraft"),
         "expected minecraft in pseudo labels, got {labels:?}"
     );
 
