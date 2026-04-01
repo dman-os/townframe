@@ -128,7 +128,7 @@
             wayland
             wayland-protocols
             wayland-scanner
-            openssl
+
             at-spi2-atk
             atkmm
             gdk-pixbuf
