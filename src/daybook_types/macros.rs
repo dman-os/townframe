@@ -1,7 +1,8 @@
 #[macro_export]
 macro_rules! custom_type_set {
     () => {
-        use crate::interlude::*;
+        use utils_rs::prelude::*;
+        use utils_rs::ToAnyhow;
 
         uniffi::custom_type!(Timestamp, i64, {
             remote,

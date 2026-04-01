@@ -19,6 +19,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             routines: default(),
             wflow_bundles: default(),
             commands: default(),
+            inits: default(),
             processors: default(),
             facets: vec![
                 FacetManifest {
@@ -171,19 +172,21 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             working_facet_tag: WellKnownFacetTag::Note.into(),
                             facet_acl: vec![
                                 RoutineFacetAccess {
+                                    owner_plug_id: None,
                                     tag: WellKnownFacetTag::Blob.into(),
                                     key_id: None,
                                     read: true,
                                     write: false,
                                 },
                                 RoutineFacetAccess {
+                                    owner_plug_id: None,
                                     tag: WellKnownFacetTag::Note.into(),
                                     key_id: None,
                                     read: true,
                                     write: true,
                                 },
                             ],
-                            config_prop_acl: vec![],
+                            config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
                     }
@@ -200,19 +203,21 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             working_facet_tag: WellKnownFacetTag::Embedding.into(),
                             facet_acl: vec![
                                 RoutineFacetAccess {
+                                    owner_plug_id: None,
                                     tag: WellKnownFacetTag::Blob.into(),
                                     key_id: None,
                                     read: true,
                                     write: false,
                                 },
                                 RoutineFacetAccess {
+                                    owner_plug_id: None,
                                     tag: WellKnownFacetTag::Embedding.into(),
                                     key_id: None,
                                     read: true,
                                     write: true,
                                 },
                             ],
-                            config_prop_acl: vec![],
+                            config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
                     }
@@ -229,19 +234,21 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             working_facet_tag: WellKnownFacetTag::Embedding.into(),
                             facet_acl: vec![
                                 RoutineFacetAccess {
+                                    owner_plug_id: None,
                                     tag: WellKnownFacetTag::Note.into(),
                                     key_id: None,
                                     read: true,
                                     write: false,
                                 },
                                 RoutineFacetAccess {
+                                    owner_plug_id: None,
                                     tag: WellKnownFacetTag::Embedding.into(),
                                     key_id: None,
                                     read: true,
                                     write: true,
                                 },
                             ],
-                            config_prop_acl: vec![],
+                            config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
                     }
@@ -257,12 +264,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::Embedding.into(),
                             facet_acl: vec![RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: WellKnownFacetTag::Embedding.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
                             }],
-                            config_prop_acl: vec![],
+                            config_facet_acl: vec![],
                         },
                         local_state_acl: vec![RoutineLocalStateAccess {
                             plug_id: "@daybook/wip".into(),
@@ -282,12 +290,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::LabelGeneric.into(),
                             facet_acl: vec![RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: WellKnownFacetTag::LabelGeneric.into(),
                                 key_id: None,
                                 read: true,
                                 write: true,
                             }],
-                            config_prop_acl: vec![],
+                            config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
                     }
@@ -339,6 +348,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 ),
             ]
             .into(),
+            inits: default(),
             processors: [
                 (
                     "ocr-image".into(),
@@ -485,9 +495,10 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
     plugs
 }
 
-#[derive(Default, Reconcile, Hydrate)]
+#[derive(Reconcile, Hydrate)]
 pub struct PlugsStore {
     pub manifests: HashMap<String, Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>,
+    pub plug_config_doc_ids: Versioned<ThroughJson<HashMap<String, String>>>,
 
     /// Index: property tag -> plug id (@ns/name)
     #[autosurgeon(with = "am_utils_rs::codecs::skip")]
@@ -495,6 +506,20 @@ pub struct PlugsStore {
     /// Index: property tag -> facet manifest
     #[autosurgeon(with = "am_utils_rs::codecs::skip")]
     pub facet_manifests: HashMap<String, manifest::FacetManifest>,
+}
+
+impl Default for PlugsStore {
+    fn default() -> Self {
+        Self {
+            manifests: default(),
+            plug_config_doc_ids: Versioned {
+                vtag: VersionTag::nil(),
+                val: ThroughJson(default()),
+            },
+            tag_to_plug: default(),
+            facet_manifests: default(),
+        }
+    }
 }
 
 impl PlugsStore {
@@ -547,6 +572,7 @@ pub struct PlugsRepo {
     store: crate::stores::AmStoreHandle<PlugsStore>,
     blobs: Arc<crate::blobs::BlobsRepo>,
     mutation_mutex: tokio::sync::Mutex<()>,
+    plug_config_doc_init_lock: tokio::sync::Mutex<()>,
     local_actor_id: ActorId,
     local_peer_id: String,
     cancel_token: CancellationToken,
@@ -562,6 +588,7 @@ pub enum PlugsEvent {
     PlugAdded { id: String, heads: ChangeHashSet },
     PlugChanged { id: String, heads: ChangeHashSet },
     PlugDeleted { id: String, heads: ChangeHashSet },
+    ConfigDocsChanged { heads: ChangeHashSet },
 }
 
 pub const OCI_PLUG_ARTIFACT_TYPE: &str = "application/vnd.daybook.plug.v1";
@@ -640,6 +667,7 @@ impl PlugsRepo {
             local_peer_id: big_repo.samod_repo().peer_id().to_string(),
             registry: Arc::clone(&registry),
             mutation_mutex: tokio::sync::Mutex::new(()),
+            plug_config_doc_init_lock: tokio::sync::Mutex::new(()),
             cancel_token: cancel_token.clone(),
             _change_listener_tickets: vec![ticket],
             _change_broker_leases: vec![broker],
@@ -837,6 +865,27 @@ impl PlugsRepo {
                             delivered_events.push(PlugsEvent::PlugDeleted { id, heads });
                         }
                     }
+                    PlugsEvent::ConfigDocsChanged { heads } => {
+                        let Some((new_versioned, _)) = self
+                            .big_repo
+                            .hydrate_path_at_heads::<Versioned<ThroughJson<HashMap<String, String>>>>(
+                                &self.app_doc_id,
+                                &heads.0,
+                                automerge::ROOT,
+                                vec![PlugsStore::prop().into(), "plug_config_doc_ids".into()],
+                            )
+                            .await?
+                        else {
+                            warn!("ignoring stale config-docs patch: value missing at heads");
+                            continue;
+                        };
+                        self.store
+                            .mutate_sync(|store| {
+                                store.plug_config_doc_ids = new_versioned;
+                            })
+                            .await?;
+                        delivered_events.push(PlugsEvent::ConfigDocsChanged { heads });
+                    }
                 }
             }
             self.registry.notify(delivered_events.drain(..));
@@ -950,6 +999,17 @@ impl PlugsRepo {
                     heads,
                 });
             }
+            automerge::PatchAction::PutMap {
+                key,
+                value: (automerge::Value::Scalar(scalar), _),
+                ..
+            } if patch.path.len() == 2
+                && patch.path[1].1 == automerge::Prop::Map("plug_config_doc_ids".into())
+                && key == "vtag"
+                && matches!(&**scalar, automerge::ScalarValue::Bytes(_)) =>
+            {
+                out.push(PlugsEvent::ConfigDocsChanged { heads });
+            }
             _ => {}
         }
         Ok(())
@@ -973,6 +1033,53 @@ impl PlugsRepo {
         self.store
             .query_sync(|store| store.manifests.get(id).map(|man| Arc::clone(&man.val)))
             .await
+    }
+
+    pub async fn get_plug_config_doc_id(&self, plug_id: &str) -> Option<String> {
+        let plug_id = plug_id.to_string();
+        self.store
+            .query_sync(move |store| store.plug_config_doc_ids.val.0.get(&plug_id).cloned())
+            .await
+    }
+
+    pub async fn set_plug_config_doc_id(&self, plug_id: &str, doc_id: String) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let plug_id = plug_id.to_string();
+        self.store
+            .mutate_sync(move |store| {
+                let mut config_doc_ids = store.plug_config_doc_ids.val.0.clone();
+                config_doc_ids.insert(plug_id, doc_id);
+                store
+                    .plug_config_doc_ids
+                    .replace(self.local_actor_id.clone(), ThroughJson(config_doc_ids));
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_or_init_plug_config_doc_id(
+        &self,
+        plug_id: &str,
+        drawer_repo: &crate::drawer::DrawerRepo,
+    ) -> Res<String> {
+        if let Some(doc_id) = self.get_plug_config_doc_id(plug_id).await {
+            return Ok(doc_id);
+        }
+        let _guard = self.plug_config_doc_init_lock.lock().await;
+        if let Some(doc_id) = self.get_plug_config_doc_id(plug_id).await {
+            return Ok(doc_id);
+        }
+        let doc_id = drawer_repo
+            .add(daybook_types::doc::AddDocArgs {
+                branch_path: daybook_types::doc::BranchPath::from("main"),
+                facets: HashMap::new(),
+                user_path: None,
+            })
+            .await?;
+        self.set_plug_config_doc_id(plug_id, doc_id.clone()).await?;
+        Ok(doc_id)
     }
 
     pub async fn get_display_hint(&self, prop_tag: &str) -> Option<manifest::FacetDisplayHint> {
@@ -1648,6 +1755,19 @@ impl PlugsRepo {
                 }
             }
         }
+        for (init_name, init_manifest) in &manifest.inits {
+            match &init_manifest.deets {
+                manifest::InitDeets::InvokeRoutine { routine_name } => {
+                    if !manifest.routines.contains_key(routine_name) {
+                        eyre::bail!(
+                            "Invalid init deets: routine '{}' not found in plug (init='{}')",
+                            routine_name,
+                            init_name
+                        );
+                    }
+                }
+            }
+        }
 
         for (processor_name, processor_manifest) in &manifest.processors {
             match &processor_manifest.deets {
@@ -1718,6 +1838,23 @@ impl PlugsRepo {
                 available_tags.insert(key.key_tag.to_string());
             }
         }
+        let dependency_base_ids: HashSet<String> = manifest
+            .dependencies
+            .keys()
+            .map(|dep_id_full| {
+                if dep_id_full.starts_with('@') {
+                    let parts: Vec<&str> =
+                        dep_id_full.strip_prefix('@').unwrap().split('@').collect();
+                    format!("@{}", parts[0])
+                } else {
+                    dep_id_full
+                        .split('@')
+                        .next()
+                        .expect("dependency id should be non-empty")
+                        .to_string()
+                }
+            })
+            .collect();
         let mut available_local_states: HashSet<(String, String)> = manifest
             .local_states
             .keys()
@@ -1746,10 +1883,18 @@ impl PlugsRepo {
                     eyre::bail!("Invalid ACL in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}", routine_name, access.tag);
                 }
             }
-            for access in routine.config_prop_acl() {
+            for access in routine.config_facet_acl() {
+                let owner_plug_id = access.owner_plug_id.as_deref().unwrap_or(&plug_id);
+                if owner_plug_id != plug_id && !dependency_base_ids.contains(owner_plug_id) {
+                    eyre::bail!(
+                        "Invalid config_facet_acl in routine '{}': owner plug '{}' is neither this plug nor a declared dependency",
+                        routine_name,
+                        owner_plug_id
+                    );
+                }
                 if !available_tags.contains(&access.tag.to_string()) {
                     eyre::bail!(
-                        "Invalid config_prop_acl in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
+                        "Invalid config_facet_acl in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
                         routine_name,
                         access.tag
                     );
@@ -1988,6 +2133,7 @@ mod tests {
             routines: default(),
             wflow_bundles: default(),
             commands: default(),
+            inits: default(),
             processors: default(),
         }
     }

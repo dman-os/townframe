@@ -122,6 +122,9 @@ pub struct PlugManifest {
     #[garde(dive)]
     pub commands: HashMap<KeyGeneric, Arc<CommandManifest>>,
     #[garde(dive)]
+    #[serde(default)]
+    pub inits: HashMap<KeyGeneric, Arc<InitManifest>>,
+    #[garde(dive)]
     pub processors: HashMap<KeyGeneric, Arc<ProcessorManifest>>,
 }
 
@@ -303,11 +306,11 @@ impl RoutineManifest {
         }
     }
 
-    pub fn config_prop_acl(&self) -> &[RoutineFacetAccess] {
+    pub fn config_facet_acl(&self) -> &[RoutineFacetAccess] {
         match &self.deets {
             RoutineManifestDeets::DocFacet {
-                config_prop_acl, ..
-            } => config_prop_acl.as_slice(),
+                config_facet_acl, ..
+            } => config_facet_acl.as_slice(),
             _ => &[],
         }
     }
@@ -341,7 +344,7 @@ pub enum RoutineManifestDeets {
         facet_acl: Vec<RoutineFacetAccess>,
         #[garde(dive)]
         #[serde(default)]
-        config_prop_acl: Vec<RoutineFacetAccess>,
+        config_facet_acl: Vec<RoutineFacetAccess>,
     },
     // DocCollator { predicate },
     // DocPropCollator { predicate },
@@ -350,6 +353,10 @@ pub enum RoutineManifestDeets {
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutineFacetAccess {
+    /// Required for config_facet_acl entries to disambiguate owner config doc.
+    #[serde(default)]
+    #[garde(inner(length(min = 1)))]
+    pub owner_plug_id: Option<String>,
     #[garde(dive)]
     pub tag: FacetTag,
     /// When set, access is to this tag+id only; when absent, access is to any facet with this tag.
@@ -391,6 +398,35 @@ pub struct CommandManifest {
 #[serde(rename_all = "camelCase")]
 pub enum CommandDeets {
     DocCommand {
+        #[garde(dive)]
+        routine_name: KeyGeneric,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct InitManifest {
+    #[garde(length(min = 1))]
+    pub desc: String,
+    #[garde(dive)]
+    pub run_mode: InitRunMode,
+    #[garde(dive)]
+    pub deets: InitDeets,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
+pub enum InitRunMode {
+    PerInstall,
+    PerBoot,
+    PerNode,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum InitDeets {
+    InvokeRoutine {
         #[garde(dive)]
         routine_name: KeyGeneric,
     },

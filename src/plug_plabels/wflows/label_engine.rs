@@ -217,7 +217,7 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
             })?;
         (value, heads_json)
     } else {
-        return Ok(());
+        (default_label_set(), "[]".to_string())
     };
 
     req.sqlite_connection
@@ -534,10 +534,6 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
             .partial_cmp(&left_candidate.composite_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    if candidates.is_empty() {
-        return Ok(());
-    }
-
     let mut shortlisted: Vec<LabelCandidateMetrics> = Vec::new();
     for candidate in candidates
         .into_iter()
@@ -567,12 +563,10 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
         shortlisted.push(candidate);
     }
 
-    let Some(best_score) = shortlisted
+    let best_score = shortlisted
         .first()
         .map(|candidate| candidate.composite_score)
-    else {
-        return Ok(());
-    };
+        .unwrap_or(0.0);
 
     let mut output_labels = shortlisted
         .iter()
@@ -582,10 +576,6 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
             score: candidate.composite_score,
         })
         .collect::<Vec<_>>();
-    if output_labels.is_empty() {
-        return Ok(());
-    }
-
     let candidate_set_ref = daybook_types::url::build_facet_ref(
         daybook_types::url::FACET_SELF_DOC_ID,
         &pseudo_label_candidates_key(req.candidate_set_id),

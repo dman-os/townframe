@@ -160,8 +160,9 @@ async fn wait_for_proposal_set(
     timeout_secs: u64,
 ) -> Res<crate::types::PseudoLabelCandidatesFacet> {
     let config_doc_id = test_cx
-        ._config_repo
-        .get_or_init_global_props_doc_id(&test_cx.drawer_repo)
+        .rt
+        .plugs_repo
+        .get_or_init_plug_config_doc_id("@daybook/plabels", &test_cx.drawer_repo)
         .await?;
     let proposal_set_key = crate::types::pseudo_label_candidates_key(PROPOSAL_SET_CONFIG_FACET_ID);
 

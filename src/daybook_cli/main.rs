@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! FIXME: use ctrl_c handlers aross major await points
 //! FIXME: make each command a submodule
 

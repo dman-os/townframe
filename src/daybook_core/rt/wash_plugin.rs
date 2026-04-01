@@ -332,6 +332,7 @@ pub struct DaybookPlugin {
     blobs_repo: Arc<crate::blobs::BlobsRepo>,
     sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     config_repo: Arc<crate::config::ConfigRepo>,
+    plugs_repo: Arc<crate::plugs::PlugsRepo>,
 }
 
 impl DaybookPlugin {
@@ -341,6 +342,7 @@ impl DaybookPlugin {
         blobs_repo: Arc<crate::blobs::BlobsRepo>,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
         config_repo: Arc<crate::config::ConfigRepo>,
+        plugs_repo: Arc<crate::plugs::PlugsRepo>,
     ) -> Self {
         Self {
             drawer_repo,
@@ -348,6 +350,7 @@ impl DaybookPlugin {
             blobs_repo,
             sqlite_local_state_repo,
             config_repo,
+            plugs_repo,
         }
     }
 
@@ -603,9 +606,10 @@ impl facet_routine::Host for SharedWashCtx {
             branch_path: target_branch_path,
             staging_branch_path,
             facet_acl,
-            config_prop_acl,
+            config_facet_acl,
             local_state_acl,
         }) = &dispatch.args;
+        let ActiveDispatchDeets::Wflow { plug_id, .. } = &dispatch.deets;
         // Use staging branch path from dispatch (already set when job was created)
         let staging_branch_path = staging_branch_path.clone();
 
@@ -662,23 +666,44 @@ impl facet_routine::Host for SharedWashCtx {
             }
         }
 
-        if !config_prop_acl.is_empty() {
-            let config_doc_id = dayook_plugin
-                .config_repo
-                .get_or_init_global_props_doc_id(&dayook_plugin.drawer_repo)
-                .await
-                .map_err(|err| {
-                    anyhow::anyhow!("error getting/initializing global props config doc: {err}")
-                })?;
-            let config_heads = dayook_plugin
-                .drawer_repo
-                .get_doc_branches(&config_doc_id)
-                .await
-                .map_err(|err| anyhow::anyhow!("error getting config doc branches: {err}"))?
-                .and_then(|doc| doc.branches.get("main").cloned())
-                .ok_or_else(|| anyhow::anyhow!("global props config doc missing main branch"))?;
-
-            for access in config_prop_acl {
+        if !config_facet_acl.is_empty() {
+            let mut owner_config_docs: HashMap<String, (String, ChangeHashSet)> = HashMap::new();
+            for access in config_facet_acl {
+                let owner_plug_id = access
+                    .owner_plug_id
+                    .clone()
+                    .unwrap_or_else(|| plug_id.clone());
+                let (config_doc_id, config_heads) = if let Some(found) =
+                    owner_config_docs.get(&owner_plug_id)
+                {
+                    found.clone()
+                } else {
+                    let config_doc_id = dayook_plugin
+                            .plugs_repo
+                            .get_or_init_plug_config_doc_id(&owner_plug_id, &dayook_plugin.drawer_repo)
+                            .await
+                            .map_err(|err| {
+                                anyhow::anyhow!(
+                                    "error getting/initializing config doc for plug {owner_plug_id}: {err}"
+                                )
+                            })?;
+                    let config_heads = dayook_plugin
+                        .drawer_repo
+                        .get_doc_branches(&config_doc_id)
+                        .await
+                        .map_err(|err| anyhow::anyhow!("error getting config doc branches: {err}"))?
+                        .and_then(|doc| doc.branches.get("main").cloned())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "config doc missing main branch for plug {owner_plug_id}"
+                            )
+                        })?;
+                    owner_config_docs.insert(
+                        owner_plug_id.clone(),
+                        (config_doc_id.clone(), config_heads.clone()),
+                    );
+                    (config_doc_id, config_heads)
+                };
                 let config_facet_key = access
                     .key_id
                     .as_ref()

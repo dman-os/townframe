@@ -53,8 +53,6 @@ mod e2e;
 #[cfg(target_arch = "wasm32")]
 mod wflows;
 
-#[cfg(target_arch = "wasm32")]
-use crate::interlude::*;
 use daybook_types::manifest::{
     CommandDeets, CommandManifest, DocPredicateClause, FacetDependencyManifest, FacetManifest,
     PlugManifest, ProcessorDeets, ProcessorManifest, RoutineFacetAccess, RoutineImpl,
@@ -63,103 +61,106 @@ use daybook_types::manifest::{
 use std::sync::Arc;
 
 #[cfg(target_arch = "wasm32")]
-use crate::wit::exports::townframe::wflow::bundle::JobResult;
+mod wasm_runtime {
+    use crate::interlude::*;
+    use crate::wit::exports::townframe::wflow::bundle::JobResult;
 
-#[cfg(target_arch = "wasm32")]
-wit::export!(Component with_types_in wit);
+    wit::export!(Component with_types_in wit);
 
-#[cfg(target_arch = "wasm32")]
-struct Component;
+    struct Component;
 
-#[cfg(target_arch = "wasm32")]
-fn tuple_list_get<'a, T>(pairs: &'a [(String, T)], key: &str) -> Option<&'a T> {
-    pairs
-        .iter()
-        .find(|(entry_key, _)| entry_key == key)
-        .map(|(_, entry_value)| entry_value)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn tuple_list_take<T>(pairs: &mut Vec<(String, T)>, key: &str) -> Option<T> {
-    let ix = pairs.iter().position(|(entry_key, _)| entry_key == key)?;
-    Some(pairs.swap_remove(ix).1)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn row_text(
-    row: &crate::wit::townframe::sql::types::ResultRow,
-    name: &str,
-) -> Option<String> {
-    row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Text(value) if entry.column_name == name => {
-            Some(value.clone())
-        }
-        _ => None,
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn row_i64(
-    row: &crate::wit::townframe::sql::types::ResultRow,
-    name: &str,
-) -> Option<i64> {
-    row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Integer(value)
-            if entry.column_name == name =>
-        {
-            Some(*value)
-        }
-        _ => None,
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn row_blob(
-    row: &crate::wit::townframe::sql::types::ResultRow,
-    name: &str,
-) -> Option<Vec<u8>> {
-    row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Blob(value) if entry.column_name == name => {
-            Some(value.clone())
-        }
-        _ => None,
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn embedding_bytes_to_f32(bytes: &[u8]) -> Res<Vec<f32>> {
-    if !bytes.len().is_multiple_of(4) {
-        eyre::bail!(
-            "embedding bytes length {} is not divisible by 4",
-            bytes.len()
-        );
+    pub(crate) fn tuple_list_get<'a, T>(pairs: &'a [(String, T)], key: &str) -> Option<&'a T> {
+        pairs
+            .iter()
+            .find(|(entry_key, _)| entry_key == key)
+            .map(|(_, entry_value)| entry_value)
     }
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect())
-}
 
-#[cfg(target_arch = "wasm32")]
-impl wit::exports::townframe::wflow::bundle::Guest for Component {
-    fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
-        use wflows::*;
-        wflow_sdk::route_wflows!(args, {
-            "label-note" => |cx, _args: serde_json::Value| {
-                label_note::run(cx)
-            },
-            "label-image" => |cx, _args: serde_json::Value| {
-                label_image::run(cx)
-            },
-            "learn-image-label-candidates" => |cx, _args: serde_json::Value| {
-                learn_image_label_candidates::run(cx)
-            },
-            "learn-note-label-candidates" => |cx, _args: serde_json::Value| {
-                learn_note_label_candidates::run(cx)
-            },
+    pub(crate) fn tuple_list_take<T>(pairs: &mut Vec<(String, T)>, key: &str) -> Option<T> {
+        let ix = pairs.iter().position(|(entry_key, _)| entry_key == key)?;
+        Some(pairs.swap_remove(ix).1)
+    }
+
+    pub(crate) fn row_text(
+        row: &crate::wit::townframe::sql::types::ResultRow,
+        name: &str,
+    ) -> Option<String> {
+        row.iter().find_map(|entry| match &entry.value {
+            crate::wit::townframe::sql::types::SqlValue::Text(value)
+                if entry.column_name == name =>
+            {
+                Some(value.clone())
+            }
+            _ => None,
         })
     }
+
+    pub(crate) fn row_i64(
+        row: &crate::wit::townframe::sql::types::ResultRow,
+        name: &str,
+    ) -> Option<i64> {
+        row.iter().find_map(|entry| match &entry.value {
+            crate::wit::townframe::sql::types::SqlValue::Integer(value)
+                if entry.column_name == name =>
+            {
+                Some(*value)
+            }
+            _ => None,
+        })
+    }
+
+    pub(crate) fn row_blob(
+        row: &crate::wit::townframe::sql::types::ResultRow,
+        name: &str,
+    ) -> Option<Vec<u8>> {
+        row.iter().find_map(|entry| match &entry.value {
+            crate::wit::townframe::sql::types::SqlValue::Blob(value)
+                if entry.column_name == name =>
+            {
+                Some(value.clone())
+            }
+            _ => None,
+        })
+    }
+
+    pub(crate) fn embedding_bytes_to_f32(bytes: &[u8]) -> Res<Vec<f32>> {
+        if !bytes.len().is_multiple_of(4) {
+            eyre::bail!(
+                "embedding bytes length {} is not divisible by 4",
+                bytes.len()
+            );
+        }
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect())
+    }
+
+    impl crate::wit::exports::townframe::wflow::bundle::Guest for Component {
+        fn run(args: crate::wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
+            use crate::wflows::*;
+            wflow_sdk::route_wflows!(args, {
+                "label-note" => |cx, _args: serde_json::Value| {
+                    label_note::run(cx)
+                },
+                "label-image" => |cx, _args: serde_json::Value| {
+                    label_image::run(cx)
+                },
+                "learn-image-label-candidates" => |cx, _args: serde_json::Value| {
+                    learn_image_label_candidates::run(cx)
+                },
+                "learn-note-label-candidates" => |cx, _args: serde_json::Value| {
+                    learn_note_label_candidates::run(cx)
+                },
+            })
+        }
+    }
 }
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) use wasm_runtime::{
+    embedding_bytes_to_f32, row_blob, row_i64, row_text, tuple_list_get, tuple_list_take,
+};
 
 pub fn plug_manifest() -> PlugManifest {
     use crate::types::{PlabelFacetTag, PseudoLabel, PseudoLabelCandidatesFacet};
@@ -217,19 +218,22 @@ pub fn plug_manifest() -> PlugManifest {
                         working_facet_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
                         facet_acl: vec![
                             RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: WellKnownFacetTag::Note.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
                             },
                             RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: PlabelFacetTag::PseudoLabel.as_str().into(),
                                 key_id: None,
                                 read: true,
                                 write: true,
                             },
                         ],
-                        config_prop_acl: vec![RoutineFacetAccess {
+                        config_facet_acl: vec![RoutineFacetAccess {
+                            owner_plug_id: None,
                             tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
                             key_id: Some("label-candidates".into()),
                             read: true,
@@ -254,25 +258,29 @@ pub fn plug_manifest() -> PlugManifest {
                         working_facet_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
                         facet_acl: vec![
                             RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: WellKnownFacetTag::Blob.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
                             },
                             RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: WellKnownFacetTag::Embedding.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
                             },
                             RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: PlabelFacetTag::PseudoLabel.as_str().into(),
                                 key_id: None,
                                 read: true,
                                 write: true,
                             },
                         ],
-                        config_prop_acl: vec![RoutineFacetAccess {
+                        config_facet_acl: vec![RoutineFacetAccess {
+                            owner_plug_id: None,
                             tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
                             key_id: Some("label-candidates".into()),
                             read: true,
@@ -297,25 +305,29 @@ pub fn plug_manifest() -> PlugManifest {
                         working_facet_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
                         facet_acl: vec![
                             RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: WellKnownFacetTag::Blob.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
                             },
                             RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: WellKnownFacetTag::Embedding.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
                             },
                             RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: PlabelFacetTag::PseudoLabel.as_str().into(),
                                 key_id: None,
                                 read: true,
                                 write: true,
                             },
                         ],
-                        config_prop_acl: vec![RoutineFacetAccess {
+                        config_facet_acl: vec![RoutineFacetAccess {
+                            owner_plug_id: None,
                             tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
                             key_id: Some("label-candidates".into()),
                             read: true,
@@ -340,19 +352,22 @@ pub fn plug_manifest() -> PlugManifest {
                         working_facet_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
                         facet_acl: vec![
                             RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: WellKnownFacetTag::Note.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
                             },
                             RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: PlabelFacetTag::PseudoLabel.as_str().into(),
                                 key_id: None,
                                 read: true,
                                 write: true,
                             },
                         ],
-                        config_prop_acl: vec![RoutineFacetAccess {
+                        config_facet_acl: vec![RoutineFacetAccess {
+                            owner_plug_id: None,
                             tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
                             key_id: Some("label-candidates".into()),
                             read: true,
@@ -425,6 +440,7 @@ pub fn plug_manifest() -> PlugManifest {
             ),
         ]
         .into(),
+        inits: std::collections::HashMap::new(),
         processors: [
             (
                 "label-note".into(),

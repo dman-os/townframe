@@ -39,9 +39,6 @@ pub fn run(cx: WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     let config_facet_key = crate::types::pseudo_label_candidates_key(CANDIDATE_SET_ID).to_string();
     let rw_config_token = tuple_list_get(&args.rw_config_facet_tokens, &config_facet_key);
     let ro_config_token = tuple_list_get(&args.ro_config_facet_tokens, &config_facet_key);
-    if rw_config_token.is_none() && ro_config_token.is_none() {
-        return Ok(());
-    }
 
     let embedding_raw = embedding_facet_token.get();
     let embedding_json: daybook_types::doc::FacetRaw = serde_json::from_str(&embedding_raw)

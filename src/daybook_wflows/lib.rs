@@ -68,6 +68,7 @@ fn tuple_list_take<T>(pairs: &mut Vec<(String, T)>, key: &str) -> Option<T> {
     Some(pairs.swap_remove(ix).1)
 }
 
+/*
 pub(crate) fn row_text(
     row: &crate::wit::townframe::sql::types::ResultRow,
     name: &str,
@@ -118,6 +119,7 @@ pub(crate) fn embedding_bytes_to_f32(bytes: &[u8]) -> Res<Vec<f32>> {
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect())
 }
+*/
 
 impl wit::exports::townframe::wflow::bundle::Guest for Component {
     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {

@@ -535,6 +535,7 @@ impl SwitchWorker {
                     PlugsEvent::PlugAdded { heads, .. } => heads.clone(),
                     PlugsEvent::PlugChanged { heads, .. } => heads.clone(),
                     PlugsEvent::PlugDeleted { heads, .. } => heads.clone(),
+                    PlugsEvent::ConfigDocsChanged { heads } => heads.clone(),
                 };
                 self.store
                     .mutate_sync(|store| {
@@ -545,6 +546,7 @@ impl SwitchWorker {
             SwitchEvent::Dispatch(event) => {
                 let dispatch_heads = match &**event {
                     DispatchEvent::DispatchAdded { heads, .. } => heads.clone(),
+                    DispatchEvent::DispatchUpdated { heads, .. } => heads.clone(),
                     DispatchEvent::DispatchDeleted { heads, .. } => heads.clone(),
                 };
                 self.store
