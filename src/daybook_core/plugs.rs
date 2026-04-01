@@ -1193,7 +1193,12 @@ impl PlugsRepo {
         opts: OciImportOptions,
     ) -> Res<ImportedPlug> {
         let reference: oci_client::Reference = reference.parse()?;
-        let client = oci_client::Client::new(oci_client::client::ClientConfig::default());
+        let client_config = oci_client::client::ClientConfig {
+            connect_timeout: Some(std::time::Duration::from_secs(15)),
+            read_timeout: Some(std::time::Duration::from_secs(300)),
+            ..Default::default()
+        };
+        let client = oci_client::Client::new(client_config);
         let (manifest, source_digest) = client.pull_manifest(&reference, &auth).await?;
         let (target_manifest, target_ref) = match manifest {
             oci_client::manifest::OciManifest::Image(manifest) => (manifest, reference.clone()),

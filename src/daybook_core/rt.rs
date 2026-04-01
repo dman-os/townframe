@@ -200,6 +200,7 @@ impl Rt {
         config: RtConfig,
         app_doc_id: DocumentId,
         wflow_db_url: String,
+        sql_pool: sqlx::SqlitePool,
         big_repo: SharedBigRepo,
         drawer: Arc<DrawerRepo>,
         plugs_repo: Arc<PlugsRepo>,
@@ -211,14 +212,13 @@ impl Rt {
         local_state_root: PathBuf,
     ) -> Res<(Arc<Self>, RtStopToken)> {
         let wcx = wflow::Ctx::init(&wflow_db_url).await?;
-        let init_local_state_root = local_state_root.join("init");
         let (sqlite_local_state_repo, sqlite_local_state_stop) =
             SqliteLocalStateRepo::boot(local_state_root).await?;
         let (init_repo, init_repo_stop) = InitRepo::load(
             Arc::clone(&big_repo),
             app_doc_id.clone(),
             local_actor_id.clone(),
-            init_local_state_root,
+            sql_pool,
         )
         .await?;
 
@@ -479,16 +479,24 @@ impl Rt {
     }
 
     async fn collect_plug_and_dependency_order(&self, plug_id: &str) -> Res<Vec<String>> {
-        fn dep_base_id(dep_id_full: &str) -> String {
+        fn dep_base_id(dep_id_full: &str) -> Res<String> {
             if dep_id_full.starts_with('@') {
-                let parts: Vec<&str> = dep_id_full.strip_prefix('@').unwrap().split('@').collect();
-                format!("@{}", parts[0])
-            } else {
-                dep_id_full
+                let without_prefix = dep_id_full
+                    .strip_prefix('@')
+                    .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id_full}"))?;
+                let base = without_prefix
                     .split('@')
                     .next()
-                    .expect("dep id should be non-empty")
-                    .to_string()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id_full}"))?;
+                Ok(format!("@{base}"))
+            } else {
+                let base = dep_id_full
+                    .split('@')
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id_full}"))?;
+                Ok(base.to_string())
             }
         }
 
@@ -519,7 +527,7 @@ impl Rt {
                 .dependencies
                 .keys()
                 .map(|raw| dep_base_id(raw))
-                .collect::<Vec<_>>();
+                .collect::<Res<Vec<_>>>()?;
             deps.sort();
             for dep in deps.into_iter().rev() {
                 if !permanent.contains(&dep) {
@@ -862,9 +870,18 @@ impl Rt {
             .dispatch_repo
             .list_waiting_on(completed_dispatch_id)
             .await;
-        for (waiting_id, _waiting_dispatch) in waiting_dispatches {
+        for (waiting_id, waiting_dispatch) in waiting_dispatches {
             if !is_success {
                 self.dispatch_repo.set_waiting_failed(&waiting_id).await?;
+                for hook in &waiting_dispatch.on_success_hooks {
+                    match hook {
+                        DispatchOnSuccessHook::InitMarkDone { init_id, .. } => {
+                            self.init_repo
+                                .clear_running_dispatch(init_id, &waiting_id)
+                                .await?;
+                        }
+                    }
+                }
                 continue;
             }
             if let Some(ready_dispatch) = self
@@ -1191,10 +1208,17 @@ impl Rt {
             return Ok(());
         }
         match &dispatch.deets {
-            ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
+            ActiveDispatchDeets::Wflow {
+                wflow_job_id,
+                entry_id,
+                ..
+            } => {
                 let Some(wflow_job_id) = wflow_job_id.as_ref() else {
                     return Ok(());
                 };
+                if entry_id.is_none() {
+                    return Ok(());
+                }
                 self.progress_repo
                     .add_update(
                         dispatch_id,

@@ -51,7 +51,6 @@ displaydoc.workspace = true
 # ds
 garde = { workspace = true, optional = true }
 semver = { workspace = true, optional = true }
-# time = { workspace = true, features = ["serde"] }
 
 #
 # automerge

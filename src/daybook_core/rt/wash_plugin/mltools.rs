@@ -117,16 +117,24 @@ impl mltools_embed::Host for SharedWashCtx {
 }
 
 fn extension_for_blob_mime(mime: &str) -> Result<&'static str, String> {
-    match mime.split(';').next().map(str::trim) {
-        Some("image/jpeg" | "image/jpg") => Ok("jpg"),
-        Some("image/png") => Ok("png"),
-        Some("image/gif") => Ok("gif"),
-        Some("image/bmp") => Ok("bmp"),
-        Some("image/webp") => Ok("webp"),
-        Some(value) => Err(format!(
+    let token = mime
+        .split(';')
+        .next()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if token.is_empty() {
+        return Err("empty image mime".to_string());
+    }
+    match token.as_str() {
+        "image/jpeg" | "image/jpg" => Ok("jpg"),
+        "image/png" => Ok("png"),
+        "image/gif" => Ok("gif"),
+        "image/bmp" => Ok("bmp"),
+        "image/webp" => Ok("webp"),
+        value => Err(format!(
             "unsupported image mime for embedding materialization: {value}"
         )),
-        None => Err("empty image mime".to_string()),
     }
 }
 

@@ -417,7 +417,8 @@ impl BlobsRepo {
     }
 
     pub async fn materialize(&self, hash: &str, request: BlobMaterializeRequest) -> Res<PathBuf> {
-        let source_path = self.get_path(hash).await?;
+        self.put_from_store(hash).await?;
+        let source_path = self.object_paths(hash)?.blob;
         let filename = match request {
             BlobMaterializeRequest::Filename(name) => Self::sanitize_requested_filename(&name)?,
             BlobMaterializeRequest::Extension(ext) => {
@@ -1073,6 +1074,34 @@ mod tests {
             .materialize(&hash, BlobMaterializeRequest::Extension("jpg".into()))
             .await?;
         assert!(tokio::fs::try_exists(&out).await?);
+        repo.cleanup_staging().await?;
+        assert!(!tokio::fs::try_exists(&out).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn materialize_reference_blob_survives_source_mutation_and_delete() -> Res<()> {
+        let (repo, temp) = setup().await;
+        let source = temp.path().join("ref-source.txt");
+        tokio::fs::write(&source, b"original-reference-bytes").await?;
+        let source_abs = source.canonicalize()?;
+
+        let hash = repo.put_path_reference(&source_abs).await?;
+        let out = repo
+            .materialize(&hash, BlobMaterializeRequest::Filename("snapshot.txt".into()))
+            .await?;
+        let before = tokio::fs::read(&out).await?;
+        assert_eq!(before, b"original-reference-bytes");
+
+        tokio::fs::write(&source_abs, b"mutated-reference-bytes").await?;
+        let after_mutation = tokio::fs::read(&out).await?;
+        assert_eq!(after_mutation, b"original-reference-bytes");
+
+        tokio::fs::remove_file(&source_abs).await?;
+        assert!(tokio::fs::try_exists(&out).await?);
+        let after_delete = tokio::fs::read(&out).await?;
+        assert_eq!(after_delete, b"original-reference-bytes");
+
         repo.cleanup_staging().await?;
         assert!(!tokio::fs::try_exists(&out).await?);
         Ok(())

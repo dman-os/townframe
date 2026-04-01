@@ -55,8 +55,9 @@ mod wflows;
 
 use daybook_types::manifest::{
     CommandDeets, CommandManifest, DocPredicateClause, FacetDependencyManifest, FacetManifest,
-    PlugManifest, ProcessorDeets, ProcessorManifest, RoutineFacetAccess, RoutineImpl,
-    RoutineLocalStateAccess, RoutineManifest, RoutineManifestDeets,
+    FacetReferenceKind, FacetReferenceManifest, PlugManifest, ProcessorDeets, ProcessorManifest,
+    RoutineFacetAccess, RoutineImpl, RoutineLocalStateAccess, RoutineManifest,
+    RoutineManifestDeets,
 };
 use std::sync::Arc;
 
@@ -163,7 +164,9 @@ pub(crate) use wasm_runtime::{
 };
 
 pub fn plug_manifest() -> PlugManifest {
-    use crate::types::{PlabelFacetTag, PseudoLabel, PseudoLabelCandidatesFacet};
+    use crate::types::{
+        PlabelFacetTag, PseudoLabel, PseudoLabelCandidatesFacet, PseudoLabelError,
+    };
     use daybook_types::doc::{Blob, Embedding, Note, WellKnownFacetTag};
     use daybook_types::manifest::{LocalStateManifest, PlugDependencyManifest};
 
@@ -219,7 +222,7 @@ pub fn plug_manifest() -> PlugManifest {
                         facet_acl: vec![
                             RoutineFacetAccess {
                                 owner_plug_id: None,
-                                tag: WellKnownFacetTag::Note.into(),
+                                tag: WellKnownFacetTag::Embedding.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
@@ -227,6 +230,13 @@ pub fn plug_manifest() -> PlugManifest {
                             RoutineFacetAccess {
                                 owner_plug_id: None,
                                 tag: PlabelFacetTag::PseudoLabel.as_str().into(),
+                                key_id: None,
+                                read: true,
+                                write: true,
+                            },
+                            RoutineFacetAccess {
+                                owner_plug_id: None,
+                                tag: PlabelFacetTag::PseudoLabelErrorFacet.as_str().into(),
                                 key_id: None,
                                 read: true,
                                 write: true,
@@ -278,6 +288,13 @@ pub fn plug_manifest() -> PlugManifest {
                                 read: true,
                                 write: true,
                             },
+                            RoutineFacetAccess {
+                                owner_plug_id: None,
+                                tag: PlabelFacetTag::PseudoLabelErrorFacet.as_str().into(),
+                                key_id: None,
+                                read: true,
+                                write: true,
+                            },
                         ],
                         config_facet_acl: vec![RoutineFacetAccess {
                             owner_plug_id: None,
@@ -318,13 +335,6 @@ pub fn plug_manifest() -> PlugManifest {
                                 read: true,
                                 write: false,
                             },
-                            RoutineFacetAccess {
-                                owner_plug_id: None,
-                                tag: PlabelFacetTag::PseudoLabel.as_str().into(),
-                                key_id: None,
-                                read: true,
-                                write: true,
-                            },
                         ],
                         config_facet_acl: vec![RoutineFacetAccess {
                             owner_plug_id: None,
@@ -357,13 +367,6 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: false,
-                            },
-                            RoutineFacetAccess {
-                                owner_plug_id: None,
-                                tag: PlabelFacetTag::PseudoLabel.as_str().into(),
-                                key_id: None,
-                                read: true,
-                                write: true,
                             },
                         ],
                         config_facet_acl: vec![RoutineFacetAccess {
@@ -450,11 +453,15 @@ pub fn plug_manifest() -> PlugManifest {
                         routine_name: "label-note".into(),
                         predicate: DocPredicateClause::And(vec![
                             DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
+                            DocPredicateClause::HasTag(WellKnownFacetTag::Embedding.into()),
                             DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
                                 WellKnownFacetTag::Blob.into(),
                             ))),
                             DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
                                 PlabelFacetTag::PseudoLabel.as_str().into(),
+                            ))),
+                            DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                PlabelFacetTag::PseudoLabelErrorFacet.as_str().into(),
                             ))),
                         ]),
                     },
@@ -473,6 +480,9 @@ pub fn plug_manifest() -> PlugManifest {
                             DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
                                 PlabelFacetTag::PseudoLabel.as_str().into(),
                             ))),
+                            DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
+                                PlabelFacetTag::PseudoLabelErrorFacet.as_str().into(),
+                            ))),
                         ]),
                     },
                 }
@@ -485,7 +495,35 @@ pub fn plug_manifest() -> PlugManifest {
                 key_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
                 value_schema: schemars::schema_for!(PseudoLabel),
                 display_config: Default::default(),
-                references: vec![],
+                references: vec![
+                    FacetReferenceManifest {
+                        reference_kind: FacetReferenceKind::UrlFacet,
+                        json_path: "$.sourceRef".into(),
+                        at_commit_json_path: None,
+                    },
+                    FacetReferenceManifest {
+                        reference_kind: FacetReferenceKind::UrlFacet,
+                        json_path: "$.candidateSetRef".into(),
+                        at_commit_json_path: None,
+                    },
+                ],
+            },
+            FacetManifest {
+                key_tag: PlabelFacetTag::PseudoLabelErrorFacet.as_str().into(),
+                value_schema: schemars::schema_for!(PseudoLabelError),
+                display_config: Default::default(),
+                references: vec![
+                    FacetReferenceManifest {
+                        reference_kind: FacetReferenceKind::UrlFacet,
+                        json_path: "$.sourceRef".into(),
+                        at_commit_json_path: None,
+                    },
+                    FacetReferenceManifest {
+                        reference_kind: FacetReferenceKind::UrlFacet,
+                        json_path: "$.candidateSetRef".into(),
+                        at_commit_json_path: None,
+                    },
+                ],
             },
             FacetManifest {
                 key_tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),

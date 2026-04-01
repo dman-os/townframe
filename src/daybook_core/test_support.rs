@@ -224,6 +224,7 @@ pub async fn test_cx_with_options(
 
     let db_path = temp_dir.path().join("wflow.db");
     let wflow_db_url = format!("sqlite:{}?mode=rwc", db_path.display());
+    plugs_repo.ensure_system_plugs().await?;
 
     let (rt, rt_stop) = crate::rt::Rt::boot(
         crate::rt::RtConfig {
@@ -231,6 +232,7 @@ pub async fn test_cx_with_options(
         },
         app_doc_id,
         wflow_db_url,
+        sql_ctx.db_pool.clone(),
         Arc::clone(&big_repo),
         Arc::clone(&drawer_repo),
         Arc::clone(&plugs_repo),
@@ -242,8 +244,6 @@ pub async fn test_cx_with_options(
         temp_dir.path().join("local_states"),
     )
     .await?;
-
-    plugs_repo.ensure_system_plugs().await?;
 
     Ok(DaybookTestContext {
         _acx: big_repo,

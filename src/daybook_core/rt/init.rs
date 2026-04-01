@@ -1,25 +1,21 @@
 use crate::interlude::*;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use std::str::FromStr;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerInstallDeets {
+    pub completed_at: String,
+    pub completed_by_actor_id: String,
+}
 
 #[derive(Reconcile, Hydrate)]
 pub struct InitStore {
-    pub per_install_done: Versioned<ThroughJson<HashMap<String, bool>>>,
-    pub running_dispatches: Versioned<ThroughJson<HashMap<String, String>>>,
+    pub per_install_done: HashMap<String, Versioned<ThroughJson<PerInstallDeets>>>,
 }
 
 impl Default for InitStore {
     fn default() -> Self {
         Self {
-            per_install_done: Versioned {
-                vtag: VersionTag::nil(),
-                val: ThroughJson(default()),
-            },
-            running_dispatches: Versioned {
-                vtag: VersionTag::nil(),
-                val: ThroughJson(default()),
-            },
+            per_install_done: default(),
         }
     }
 }
@@ -44,6 +40,7 @@ pub struct InitRepo {
     store: crate::stores::AmStoreHandle<InitStore>,
     local_actor_id: ActorId,
     sql_pool: sqlx::SqlitePool,
+    running_dispatches: tokio::sync::RwLock<HashMap<String, String>>,
     per_boot_done: tokio::sync::RwLock<HashSet<String>>,
     cancel_token: CancellationToken,
     local_peer_id: String,
@@ -66,19 +63,8 @@ impl InitRepo {
         big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
         local_actor_id: ActorId,
-        local_state_root: PathBuf,
+        sql_pool: sqlx::SqlitePool,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
-        tokio::fs::create_dir_all(&local_state_root).await?;
-        let sqlite_path = local_state_root.join("init_repo.sqlite");
-        let connect_options =
-            SqliteConnectOptions::from_str(&format!("sqlite://{}", sqlite_path.display()))?
-                .journal_mode(SqliteJournalMode::Wal)
-                .busy_timeout(std::time::Duration::from_secs(5))
-                .create_if_missing(true);
-        let sql_pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(connect_options)
-            .await?;
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS init_per_node (
@@ -117,6 +103,7 @@ impl InitRepo {
             store,
             local_actor_id,
             sql_pool,
+            running_dispatches: default(),
             per_boot_done: default(),
             cancel_token: cancel_token.clone(),
             local_peer_id,
@@ -211,7 +198,6 @@ impl InitRepo {
                 self.store
                     .mutate_sync(|store| {
                         store.per_install_done = new_store.per_install_done;
-                        store.running_dispatches = new_store.running_dispatches;
                     })
                     .await?;
                 self.registry.notify(events.drain(..));
@@ -293,13 +279,7 @@ impl InitRepo {
             daybook_types::manifest::InitRunMode::PerInstall => {
                 self.store
                     .query_sync(|store| {
-                        store
-                            .per_install_done
-                            .val
-                            .0
-                            .get(init_id)
-                            .copied()
-                            .unwrap_or(false)
+                        store.per_install_done.contains_key(init_id)
                     })
                     .await
             }
@@ -328,11 +308,20 @@ impl InitRepo {
                 let init_id = init_id.to_string();
                 self.store
                     .mutate_sync(move |store| {
-                        let mut map = store.per_install_done.val.0.clone();
-                        map.insert(init_id, true);
-                        store
-                            .per_install_done
-                            .replace(self.local_actor_id.clone(), ThroughJson(map));
+                        let deets = PerInstallDeets {
+                            completed_at: jiff::Timestamp::now().to_string(),
+                            completed_by_actor_id: self.local_actor_id.to_string(),
+                        };
+                        let versioned = match store.per_install_done.get(&init_id) {
+                            Some(_) => Versioned::update(
+                                self.local_actor_id.clone(),
+                                ThroughJson(deets),
+                            ),
+                            None => {
+                                Versioned::mint(self.local_actor_id.clone(), ThroughJson(deets))
+                            }
+                        };
+                        store.per_install_done.insert(init_id, versioned);
                     })
                     .await?;
             }
@@ -358,40 +347,30 @@ impl InitRepo {
 
     pub async fn get_running_dispatch(&self, init_id: &str) -> Option<String> {
         let init_id = init_id.to_string();
-        self.store
-            .query_sync(move |store| store.running_dispatches.val.0.get(&init_id).cloned())
+        self.running_dispatches
+            .read()
             .await
+            .get(&init_id)
+            .cloned()
     }
 
     pub async fn set_running_dispatch(&self, init_id: &str, dispatch_id: &str) -> Res<()> {
-        let init_id = init_id.to_string();
-        let dispatch_id = dispatch_id.to_string();
-        self.store
-            .mutate_sync(move |store| {
-                let mut map = store.running_dispatches.val.0.clone();
-                map.insert(init_id, dispatch_id);
-                store
-                    .running_dispatches
-                    .replace(self.local_actor_id.clone(), ThroughJson(map));
-            })
-            .await?;
+        self.running_dispatches
+            .write()
+            .await
+            .insert(init_id.to_string(), dispatch_id.to_string());
         Ok(())
     }
 
     pub async fn clear_running_dispatch(&self, init_id: &str, dispatch_id: &str) -> Res<()> {
-        let init_id = init_id.to_string();
-        let dispatch_id = dispatch_id.to_string();
-        self.store
-            .mutate_sync(move |store| {
-                let mut map = store.running_dispatches.val.0.clone();
-                if map.get(&init_id) == Some(&dispatch_id) {
-                    map.remove(&init_id);
-                }
-                store
-                    .running_dispatches
-                    .replace(self.local_actor_id.clone(), ThroughJson(map));
-            })
-            .await?;
+        let mut running = self.running_dispatches.write().await;
+        if running
+            .get(init_id)
+            .map(|current| current == dispatch_id)
+            .unwrap_or(false)
+        {
+            running.remove(init_id);
+        }
         Ok(())
     }
 }

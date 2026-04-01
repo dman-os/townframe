@@ -20,17 +20,8 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
     let mut args = facet_routine::get_args();
-    let _working_facet_token =
-        tuple_list_get(&args.rw_facet_tokens, &args.facet_key).ok_or_else(|| {
-            JobErrorX::Terminal(ferr!(
-                "working facet key '{}' not found in rw_facet_tokens",
-                args.facet_key
-            ))
-        })?;
-
     let embedding_facet_key =
         daybook_types::doc::FacetKey::from(WellKnownFacetTag::Embedding).to_string();
-    let blob_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Blob).to_string();
 
     let mut ro_facet_tokens = std::mem::take(&mut args.ro_facet_tokens);
     let embedding_facet_token = tuple_list_take(&mut ro_facet_tokens, &embedding_facet_key)
@@ -40,14 +31,9 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
                 embedding_facet_key
             ))
         })?;
-    let blob_facet_token =
-        tuple_list_take(&mut ro_facet_tokens, &blob_facet_key).ok_or_else(|| {
-            JobErrorX::Terminal(ferr!(
-                "blob facet key '{}' not found in ro_facet_tokens",
-                blob_facet_key
-            ))
-        })?;
-
+    if !embedding_facet_token.exists() {
+        return Ok(());
+    }
     let sqlite_connection =
         tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY).ok_or_else(|| {
             JobErrorX::Terminal(ferr!("missing sqlite connection '{LOCAL_STATE_KEY}'"))
@@ -86,6 +72,17 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     };
     if parsed_ref.facet_key.tag != daybook_types::doc::FacetTag::WellKnown(WellKnownFacetTag::Blob)
     {
+        return Ok(());
+    }
+    let blob_facet_key = parsed_ref.facet_key.to_string();
+    let blob_facet_token =
+        tuple_list_take(&mut ro_facet_tokens, &blob_facet_key).ok_or_else(|| {
+            JobErrorX::Terminal(ferr!(
+                "blob facet key '{}' referenced by embedding not found in ro_facet_tokens",
+                blob_facet_key
+            ))
+        })?;
+    if !blob_facet_token.exists() {
         return Ok(());
     }
 

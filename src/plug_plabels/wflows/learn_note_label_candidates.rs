@@ -11,20 +11,13 @@ use wflow_sdk::{JobErrorX, Json, WflowCtx};
 const NOMIC_TEXT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
 const CANDIDATE_SET_CONFIG_FACET_ID: &str = "label-candidates";
 const LOCAL_STATE_KEY: &str = "@daybook/plabels/label-candidates-learner";
+const MAX_NOTE_PROMPT_LEN: usize = 4_000;
 
 pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
     let mut args = facet_routine::get_args();
-    let _working_facet_token =
-        tuple_list_get(&args.rw_facet_tokens, &args.facet_key).ok_or_else(|| {
-            JobErrorX::Terminal(ferr!(
-                "working facet key '{}' not found in rw_facet_tokens",
-                args.facet_key
-            ))
-        })?;
-
     let note_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Note).to_string();
 
     let mut ro_facet_tokens = std::mem::take(&mut args.ro_facet_tokens);
@@ -67,7 +60,8 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
         let mut proposal_set = load_or_init_proposal_set(rw_config_token, ro_config_token)?;
         ensure_embedding_cache_schema(sqlite_connection)?;
 
-        let llm_text = mltools_llm_chat::llm_chat(&build_note_prompt(&note.content))
+        let note_snippet = note_prompt_snippet(&note.content);
+        let llm_text = mltools_llm_chat::llm_chat(&build_note_prompt(&note_snippet))
             .map_err(|err| JobErrorX::Terminal(ferr!("error calling note llm: {err}")))?;
 
         let Some(parsed_proposal) = parse_llm_answer(&llm_text) else {
@@ -103,6 +97,10 @@ pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
     })?;
 
     Ok(())
+}
+
+fn note_prompt_snippet(note_content: &str) -> String {
+    note_content.chars().take(MAX_NOTE_PROMPT_LEN).collect()
 }
 
 fn build_note_prompt(note_content: &str) -> String {

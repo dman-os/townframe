@@ -1,7 +1,7 @@
 use crate::interlude::*;
 use crate::types::{
     pseudo_label_candidates_key, PseudoLabel, PseudoLabelCandidate, PseudoLabelCandidatesFacet,
-    PseudoLabelEntry,
+    PseudoLabelEntry, PseudoLabelError,
 };
 use crate::{row_i64, row_text};
 use wflow_sdk::JobErrorX;
@@ -72,8 +72,10 @@ pub struct LabelRequest<'a> {
     pub rw_config_token: Option<&'a crate::wit::townframe::daybook::capabilities::FacetTokenRw>,
     pub ro_config_token: Option<&'a crate::wit::townframe::daybook::capabilities::FacetTokenRo>,
     pub working_facet_token: &'a crate::wit::townframe::daybook::capabilities::FacetTokenRw,
+    pub error_facet_token: &'a crate::wit::townframe::daybook::capabilities::FacetTokenRw,
     pub input_vector_json: &'a str,
-    pub source_ref: &'a str,
+    pub source_ref: &'a Url,
+    pub source_ref_heads: Option<Vec<String>>,
     pub algorithm_tag: &'a str,
     pub candidate_set_id: &'a str,
 }
@@ -170,8 +172,9 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
     }
 
     let config_facet_key = pseudo_label_candidates_key(req.candidate_set_id).to_string();
-    let (label_set, config_heads_json) = if let Some(token) = req.rw_config_token {
-        let heads_json = serde_json::to_string(&token.heads()).expect(ERROR_JSON);
+    let (label_set, config_heads_json, config_heads) = if let Some(token) = req.rw_config_token {
+        let heads = token.heads();
+        let heads_json = serde_json::to_string(&heads).expect(ERROR_JSON);
         let label_set = if token.exists() {
             let raw = token.get();
             let facet_raw: daybook_types::doc::FacetRaw =
@@ -198,12 +201,13 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
                 .map_err(JobErrorX::Terminal)?;
             value
         };
-        (label_set, heads_json)
+        (label_set, heads_json, Some(heads))
     } else if let Some(token) = req.ro_config_token {
         if !token.exists() {
             return Ok(());
         }
-        let heads_json = serde_json::to_string(&token.heads()).expect(ERROR_JSON);
+        let heads = token.heads();
+        let heads_json = serde_json::to_string(&heads).expect(ERROR_JSON);
         let raw = token.get();
         let facet_raw: daybook_types::doc::FacetRaw =
             serde_json::from_str(&raw).map_err(|err| {
@@ -215,9 +219,9 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
                     "config facet is not plug_plabels pseudo label candidates: {err}"
                 ))
             })?;
-        (value, heads_json)
+        (value, heads_json, Some(heads))
     } else {
-        (default_label_set(), "[]".to_string())
+        (default_label_set(), "[]".to_string(), None)
     };
 
     req.sqlite_connection
@@ -254,8 +258,8 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
         .sqlite_connection
         .query(
             "SELECT version_id, facet_heads_json, schema_version, model_tag, embedding_dim \
-             FROM image_label_label_set_versions WHERE is_current = 1 ORDER BY version_id DESC LIMIT 1",
-            &[],
+             FROM image_label_label_set_versions WHERE facet_key = ?1 AND is_current = 1 ORDER BY version_id DESC LIMIT 1",
+            &[SqlValue::Text(config_facet_key.clone())],
         )
         .map_err(|err| JobErrorX::Terminal(ferr!("error loading label set cache version: {err:?}")))?;
     let current_version_row = current_version_rows.first();
@@ -385,8 +389,8 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
         }
         req.sqlite_connection
             .query(
-                "UPDATE image_label_label_set_versions SET is_current = 0 WHERE is_current = 1",
-                &[],
+                "UPDATE image_label_label_set_versions SET is_current = 0 WHERE facet_key = ?1",
+                &[SqlValue::Text(config_facet_key.clone())],
             )
             .map_err(|err| {
                 JobErrorX::Terminal(ferr!(
@@ -422,6 +426,7 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
         )
         .map_err(|err| JobErrorX::Terminal(ferr!("error loading scored label rows: {err:?}")))?;
     if scored_rows.is_empty() {
+        write_no_hit_error(&req, "no-scored-rows", None, config_heads.as_deref())?;
         return Ok(());
     }
 
@@ -465,6 +470,7 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
     }
 
     if by_label.is_empty() {
+        write_no_hit_error(&req, "no-label-candidates", None, config_heads.as_deref())?;
         return Ok(());
     }
 
@@ -535,6 +541,9 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut shortlisted: Vec<LabelCandidateMetrics> = Vec::new();
+    let top_candidate = candidates.first().map(|candidate| {
+        (candidate.label.clone(), candidate.composite_score)
+    });
     for candidate in candidates
         .into_iter()
         .take(MAX_LABEL_CANDIDATES_TO_GAUNTLET)
@@ -563,10 +572,15 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
         shortlisted.push(candidate);
     }
 
-    let best_score = shortlisted
-        .first()
-        .map(|candidate| candidate.composite_score)
-        .unwrap_or(0.0);
+    let Some(best_score) = shortlisted.first().map(|candidate| candidate.composite_score) else {
+        write_no_hit_error(
+            &req,
+            "gauntlet-rejected",
+            top_candidate,
+            config_heads.as_deref(),
+        )?;
+        return Ok(());
+    };
 
     let mut output_labels = shortlisted
         .iter()
@@ -580,13 +594,14 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
         daybook_types::url::FACET_SELF_DOC_ID,
         &pseudo_label_candidates_key(req.candidate_set_id),
     )
-    .map_err(JobErrorX::Terminal)?
-    .to_string();
+    .map_err(JobErrorX::Terminal)?;
+    let candidate_set_ref = with_heads_fragment(candidate_set_ref, config_heads.as_deref())?;
+    let source_ref = with_heads_fragment(req.source_ref.clone(), req.source_ref_heads.as_deref())?;
     let new_facet = PseudoLabel {
         algorithm_tag: req.algorithm_tag.into(),
         top_score: best_score,
         labels: std::mem::take(&mut output_labels),
-        source_ref: req.source_ref.into(),
+        source_ref,
         candidate_set_ref,
     };
     let new_facet: daybook_types::doc::FacetRaw = serde_json::to_value(new_facet)
@@ -597,6 +612,50 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
         .wrap_err("error updating label facet")
         .map_err(JobErrorX::Terminal)?;
     Ok(())
+}
+
+fn write_no_hit_error(
+    req: &LabelRequest<'_>,
+    reason: &str,
+    top_candidate: Option<(String, f64)>,
+    candidate_set_heads: Option<&[String]>,
+) -> Result<(), JobErrorX> {
+    let candidate_set_ref = daybook_types::url::build_facet_ref(
+        daybook_types::url::FACET_SELF_DOC_ID,
+        &pseudo_label_candidates_key(req.candidate_set_id),
+    )
+    .map_err(JobErrorX::Terminal)?;
+    let candidate_set_ref = with_heads_fragment(candidate_set_ref, candidate_set_heads)?;
+    let source_ref = with_heads_fragment(req.source_ref.clone(), req.source_ref_heads.as_deref())?;
+    let (top_candidate_label, top_candidate_score) = match top_candidate {
+        Some((label, score)) => (Some(label), Some(score)),
+        None => (None, None),
+    };
+    let facet = PseudoLabelError::NoHit {
+        reason: reason.to_string(),
+        algorithm_tag: req.algorithm_tag.to_string(),
+        source_ref,
+        candidate_set_ref,
+        top_candidate_label,
+        top_candidate_score,
+    };
+    let facet_raw: daybook_types::doc::FacetRaw = serde_json::to_value(facet)
+        .map_err(|err| JobErrorX::Terminal(ferr!("error serializing pseudo label error: {err}")))?;
+    let facet_raw = serde_json::to_string(&facet_raw).expect(ERROR_JSON);
+    req.error_facet_token
+        .update(&facet_raw)
+        .wrap_err("error updating label error facet")
+        .map_err(JobErrorX::Terminal)?;
+    Ok(())
+}
+
+fn with_heads_fragment(mut url: Url, heads: Option<&[String]>) -> Result<Url, JobErrorX> {
+    if let Some(heads) = heads {
+        if !heads.is_empty() {
+            url.set_fragment(Some(&heads.join("|")));
+        }
+    }
+    Ok(url)
 }
 
 fn null_anchor_prompts() -> &'static [&'static str] {

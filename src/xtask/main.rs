@@ -667,7 +667,7 @@ async fn read_static_component_bytes(
     component_url: &url::Url,
     wasm_target_dir: &Path,
 ) -> Res<Vec<u8>> {
-    let static_name = component_url.path();
+    let static_name = component_url.path().trim_start_matches('/');
     eyre::ensure!(
         !static_name.is_empty(),
         "static component URL must include a path, got '{}'",

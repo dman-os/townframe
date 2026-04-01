@@ -85,8 +85,8 @@ async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
         .ok_or_eyre("image classifier did not write pseudo label facet")?;
     let labels: crate::types::PseudoLabel = serde_json::from_value(label_raw.clone())?;
     assert_eq!(labels.algorithm_tag, "label-image/embed-gauntlet-nomic-v1");
-    assert!(!labels.source_ref.is_empty());
-    assert!(!labels.candidate_set_ref.is_empty());
+    assert!(!labels.source_ref.as_str().is_empty());
+    assert!(!labels.candidate_set_ref.as_str().is_empty());
     assert!(
         labels
             .labels

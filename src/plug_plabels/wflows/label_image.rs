@@ -1,5 +1,4 @@
 use super::super::*;
-use crate::embedding_bytes_to_f32;
 use crate::interlude::*;
 use crate::wflows::label_engine::{self, LabelRequest};
 use wflow_sdk::WflowCtx;
@@ -31,6 +30,9 @@ pub fn run(cx: WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
                 embedding_facet_key
             ))
         })?;
+    if !embedding_facet_token.exists() {
+        return Ok(());
+    }
 
     let sqlite_connection = tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY)
         .or_else(|| args.sqlite_connections.first().map(|(_, token)| token))
@@ -39,6 +41,15 @@ pub fn run(cx: WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     let config_facet_key = crate::types::pseudo_label_candidates_key(CANDIDATE_SET_ID).to_string();
     let rw_config_token = tuple_list_get(&args.rw_config_facet_tokens, &config_facet_key);
     let ro_config_token = tuple_list_get(&args.ro_config_facet_tokens, &config_facet_key);
+    let error_facet_key = crate::types::pseudo_label_error_key().to_string();
+    let error_facet_token = tuple_list_get(&args.rw_facet_tokens, &error_facet_key).ok_or_else(
+        || {
+            wflow_sdk::JobErrorX::Terminal(ferr!(
+                "error facet key '{}' not found",
+                error_facet_key
+            ))
+        },
+    )?;
 
     let embedding_raw = embedding_facet_token.get();
     let embedding_json: daybook_types::doc::FacetRaw = serde_json::from_str(&embedding_raw)
@@ -73,10 +84,7 @@ pub fn run(cx: WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         return Ok(());
     }
 
-    let vector = embedding_bytes_to_f32(&embedding.vector)
-        .map_err(|err| wflow_sdk::JobErrorX::Terminal(err.wrap_err("invalid embedding bytes")))?;
-    let vector_json = daybook_types::doc::embedding_f32_slice_to_le_bytes(&vector);
-    let vector_json = daybook_types::doc::embedding_f32_bytes_to_json(&vector_json, 768)
+    let vector_json = daybook_types::doc::embedding_f32_bytes_to_json(&embedding.vector, 768)
         .map_err(wflow_sdk::JobErrorX::Terminal)?;
 
     cx.effect(|| {
@@ -85,8 +93,10 @@ pub fn run(cx: WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
             rw_config_token,
             ro_config_token,
             working_facet_token,
+            error_facet_token,
             input_vector_json: &vector_json,
-            source_ref: embedding.facet_ref.as_str(),
+            source_ref: &embedding.facet_ref,
+            source_ref_heads: Some(am_utils_rs::serialize_commit_heads(&embedding.ref_heads.0)),
             algorithm_tag: IMAGE_LABEL_ALGORITHM_TAG,
             candidate_set_id: CANDIDATE_SET_ID,
         })
