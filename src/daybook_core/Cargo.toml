@@ -93,9 +93,9 @@ samod = { workspace = true, features = ["tokio", "tungstenite-rustls-webpki-root
 #
 # http
 reqwest.workspace = true
-oci-client = "0.15.0"
+oci-client = { version = "0.15.0", default-features = false, features = ["rustls-tls-native-roots"] }
 oci-spec = "0.8.4"
-oci-wasm = "0.3.0"
+oci-wasm = { version = "0.3.0", default-features = false, features = ["rustls-tls"] }
 
 #
 # db

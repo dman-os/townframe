@@ -46,7 +46,7 @@ indenter = "0.3.4"
 data-encoding.workspace = true
 ollama-rs = { version = "0.3.4", default-features = false, features = ["rustls"] }
 oci-spec = "0.8.4"
-oci-wasm = "0.3.0"
+oci-wasm = { version = "0.3.0", default-features = false, features = ["rustls-tls"] }
 sha2 = "0.10.9"
 zstd.workspace = true
 url.workspace = true
