@@ -574,7 +574,7 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
             consume_plugs: false,
             consume_dispatch: false,
             consume_config: false,
-            drawer_predicate: Some(crate::plugs::manifest::DocPredicateClause::HasTag(
+            drawer_predicate: Some(daybook_types::manifest::DocPredicateClause::HasTag(
                 WellKnownFacetTag::Blob.into(),
             )),
         }

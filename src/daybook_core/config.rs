@@ -1,8 +1,9 @@
 use crate::interlude::*;
 
+use daybook_types::manifest::FacetDisplayHint;
 use tokio_util::sync::CancellationToken;
 
-use crate::plugs::{manifest::FacetDisplayHint, PlugsRepo};
+use crate::plugs::PlugsRepo;
 use crate::stores::Versioned;
 
 #[derive(Reconcile, Hydrate, Clone)]
@@ -10,7 +11,6 @@ pub struct ConfigStore {
     pub facet_display: HashMap<String, Versioned<ThroughJson<FacetDisplayHint>>>,
     pub users: HashMap<String, Versioned<ThroughJson<UserMeta>>>,
     pub mltools: Versioned<ThroughJson<mltools::Config>>,
-    pub global_props_doc_id: Versioned<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reconcile, Hydrate)]
@@ -24,7 +24,7 @@ pub struct UserMeta {
 
 impl Default for ConfigStore {
     fn default() -> Self {
-        use crate::plugs::manifest::*;
+        use daybook_types::manifest::*;
 
         let mut key_configs = HashMap::new();
 
@@ -70,10 +70,6 @@ impl Default for ConfigStore {
                 }
                 .into(),
             },
-            global_props_doc_id: Versioned {
-                vtag: VersionTag::nil(),
-                val: None,
-            },
         }
     }
 }
@@ -99,12 +95,10 @@ pub struct ConfigRepo {
     store: crate::stores::AmStoreHandle<ConfigStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     plug_repo: Arc<PlugsRepo>,
-    local_user_path: daybook_types::doc::UserPath,
     local_actor_id: ActorId,
     local_peer_id: String,
     sql_pool: sqlx::SqlitePool,
     cancel_token: CancellationToken,
-    global_props_doc_init_lock: tokio::sync::Mutex<()>,
     sync_config_lock: tokio::sync::Mutex<()>,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
@@ -178,12 +172,10 @@ impl ConfigRepo {
             store,
             registry: Arc::clone(&registry),
             plug_repo,
-            local_user_path,
             local_actor_id,
             local_peer_id: big_repo.samod_repo().peer_id().to_string(),
             sql_pool,
             cancel_token: cancel_token.clone(),
-            global_props_doc_init_lock: tokio::sync::Mutex::new(()),
             sync_config_lock: tokio::sync::Mutex::new(()),
             _change_listener_tickets: vec![ticket],
             _change_broker_leases: vec![broker],
@@ -282,7 +274,6 @@ impl ConfigRepo {
                         store.facet_display = new_store.facet_display;
                         store.users = new_store.users;
                         store.mltools = new_store.mltools;
-                        store.global_props_doc_id = new_store.global_props_doc_id;
                     })
                     .await?;
 
@@ -357,10 +348,7 @@ impl ConfigRepo {
                     return Ok(());
                 }
 
-                if matches!(
-                    section_key.as_ref(),
-                    "facet_display" | "users" | "mltools" | "global_props_doc_id"
-                ) {
+                if matches!(section_key.as_ref(), "facet_display" | "users" | "mltools") {
                     out.push(ConfigEvent::Changed { heads });
                 }
             }
@@ -450,48 +438,6 @@ impl ConfigRepo {
             })
             .await?;
         Ok(())
-    }
-
-    pub async fn get_global_props_doc_id(&self) -> Option<daybook_types::doc::DocId> {
-        self.store
-            .query_sync(|store| store.global_props_doc_id.val.clone())
-            .await
-    }
-
-    pub async fn set_global_props_doc_id(&self, doc_id: daybook_types::doc::DocId) -> Res<()> {
-        if self.cancel_token.is_cancelled() {
-            eyre::bail!("repo is stopped");
-        }
-        self.store
-            .mutate_sync(move |store| {
-                store
-                    .global_props_doc_id
-                    .replace(self.local_actor_id.clone(), Some(doc_id));
-            })
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_or_init_global_props_doc_id(
-        &self,
-        drawer_repo: &crate::drawer::DrawerRepo,
-    ) -> Res<daybook_types::doc::DocId> {
-        if let Some(doc_id) = self.get_global_props_doc_id().await {
-            return Ok(doc_id);
-        }
-        let _guard = self.global_props_doc_init_lock.lock().await;
-        if let Some(doc_id) = self.get_global_props_doc_id().await {
-            return Ok(doc_id);
-        }
-        let doc_id = drawer_repo
-            .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
-                facets: HashMap::new(),
-                user_path: Some(self.local_user_path.clone()),
-            })
-            .await?;
-        self.set_global_props_doc_id(doc_id.clone()).await?;
-        Ok(doc_id)
     }
 
     pub async fn get_actor_user_path(

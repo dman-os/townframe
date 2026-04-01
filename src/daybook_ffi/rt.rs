@@ -38,12 +38,14 @@ impl RtFfi {
         let repo_root = cx.layout.repo_root.to_path_buf();
         let wflow_db_url = format!("sqlite:{}?mode=rwc", repo_root.join("wflow.db").display());
         let local_state_root = repo_root.join("local_states");
+        plugs_repo.repo.ensure_system_plugs().await?;
 
         let (rt, stop_token) = fcx
             .do_on_rt(daybook_core::rt::Rt::boot(
                 daybook_core::rt::RtConfig { device_id },
                 cx.doc_app.document_id().clone(),
                 wflow_db_url,
+                cx.sql.db_pool.clone(),
                 Arc::clone(&cx.big_repo),
                 Arc::clone(&drawer_repo.repo),
                 Arc::clone(&plugs_repo.repo),

@@ -5,11 +5,11 @@ use crate::ffi::{FfiError, SharedFfiCtx};
 use crate::repos::plugs::PlugsRepoFfi;
 use crate::repos::progress::ProgressRepoFfi;
 use daybook_core::config::{ConfigEvent, ConfigRepo};
-use daybook_core::plugs::manifest::FacetDisplayHint;
 use daybook_core::progress::{
     CreateProgressTaskArgs, ProgressFinalState, ProgressRetentionPolicy, ProgressSeverity,
     ProgressUnit, ProgressUpdate, ProgressUpdateDeets,
 };
+use daybook_types::manifest::FacetDisplayHint;
 
 #[derive(uniffi::Record)]
 pub struct FacetKeyDisplayHintEntry {

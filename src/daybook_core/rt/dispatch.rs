@@ -6,17 +6,47 @@ use crate::interlude::*;
 pub struct ActiveDispatch {
     pub deets: ActiveDispatchDeets,
     pub args: ActiveDispatchArgs,
+    #[serde(default = "dispatch_status_active")]
+    pub status: DispatchStatus,
+    #[serde(default)]
+    pub waiting_on_dispatch_ids: Vec<String>,
+    #[serde(default)]
+    pub on_success_hooks: Vec<DispatchOnSuccessHook>,
+}
+
+fn dispatch_status_active() -> DispatchStatus {
+    DispatchStatus::Active
+}
+
+#[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum DispatchStatus {
+    Waiting,
+    Active,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
+pub enum DispatchOnSuccessHook {
+    InitMarkDone {
+        init_id: String,
+        run_mode: daybook_types::manifest::InitRunMode,
+    },
 }
 
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
 pub enum ActiveDispatchDeets {
     Wflow {
-        wflow_partition_id: String,
-        entry_id: u64,
+        #[serde(default)]
+        wflow_partition_id: Option<String>,
+        #[serde(default)]
+        entry_id: Option<u64>,
         plug_id: String,
         bundle_name: String,
         wflow_key: String,
-        wflow_job_id: String,
+        #[serde(default)]
+        wflow_job_id: Option<String>,
     },
 }
 
@@ -35,15 +65,16 @@ pub struct FacetRoutineArgs {
     pub heads: ChangeHashSet,
     pub facet_key: String,
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
-    pub facet_acl: Vec<crate::plugs::manifest::RoutineFacetAccess>,
+    pub facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
-    pub config_prop_acl: Vec<crate::plugs::manifest::RoutineFacetAccess>,
+    pub config_facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
-    pub local_state_acl: Vec<crate::plugs::manifest::RoutineLocalStateAccess>,
+    pub local_state_acl: Vec<daybook_types::manifest::RoutineLocalStateAccess>,
 }
 
 #[derive(Default, Reconcile, Hydrate)]
 pub struct DispatchStore {
+    pub dispatches: HashMap<String, Versioned<ThroughJson<Arc<ActiveDispatch>>>>,
     pub active_dispatches: HashMap<String, Versioned<ThroughJson<Arc<ActiveDispatch>>>>,
     pub wflow_to_dispatch: HashMap<String, String>,
     pub cancelled_dispatches: HashMap<String, bool>,
@@ -78,6 +109,7 @@ pub struct DispatchRepo {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum DispatchEvent {
     DispatchAdded { id: String, heads: ChangeHashSet },
+    DispatchUpdated { id: String, heads: ChangeHashSet },
     DispatchDeleted { id: String, heads: ChangeHashSet },
 }
 
@@ -212,7 +244,7 @@ impl DispatchRepo {
                                 automerge::ROOT,
                                 vec![
                                     DispatchStore::prop().into(),
-                                    "active_dispatches".into(),
+                                    "dispatches".into(),
                                     autosurgeon::Prop::Key(id.clone().into()),
                                 ],
                             )
@@ -229,23 +261,79 @@ impl DispatchRepo {
                             .mutate_sync(|store| {
                                 match &new_versioned.deets {
                                     ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
-                                        store
-                                            .wflow_to_dispatch
-                                            .insert(wflow_job_id.clone(), id.clone());
+                                        if let Some(wflow_job_id) = wflow_job_id {
+                                            store
+                                                .wflow_to_dispatch
+                                                .insert(wflow_job_id.clone(), id.clone());
+                                        }
                                     }
                                 }
-                                store.active_dispatches.insert(id.clone(), new_versioned);
+                                store.dispatches.insert(id.clone(), new_versioned.clone());
+                                if new_versioned.status == DispatchStatus::Active {
+                                    store.active_dispatches.insert(id.clone(), new_versioned);
+                                }
+                            })
+                            .await?;
+                    }
+                    DispatchEvent::DispatchUpdated { id, heads } => {
+                        let Some((new_versioned, _)) = self
+                            .big_repo
+                            .hydrate_path_at_heads::<Versioned<ThroughJson<Arc<ActiveDispatch>>>>(
+                                &self.app_doc_id,
+                                &heads.0,
+                                automerge::ROOT,
+                                vec![
+                                    DispatchStore::prop().into(),
+                                    "dispatches".into(),
+                                    autosurgeon::Prop::Key(id.clone().into()),
+                                ],
+                            )
+                            .await?
+                        else {
+                            continue;
+                        };
+                        self.store
+                            .mutate_sync(|store| {
+                                if let Some(old) =
+                                    store.dispatches.insert(id.clone(), new_versioned.clone())
+                                {
+                                    if let ActiveDispatchDeets::Wflow {
+                                        wflow_job_id: Some(job),
+                                        ..
+                                    } = &old.deets
+                                    {
+                                        store.wflow_to_dispatch.remove(job);
+                                    }
+                                }
+                                if let ActiveDispatchDeets::Wflow {
+                                    wflow_job_id: Some(job),
+                                    ..
+                                } = &new_versioned.deets
+                                {
+                                    store.wflow_to_dispatch.insert(job.clone(), id.clone());
+                                }
+                                match new_versioned.status {
+                                    DispatchStatus::Active => {
+                                        store.active_dispatches.insert(id.clone(), new_versioned);
+                                    }
+                                    _ => {
+                                        store.active_dispatches.remove(id);
+                                    }
+                                }
                             })
                             .await?;
                     }
                     DispatchEvent::DispatchDeleted { id, .. } => {
                         self.store
                             .mutate_sync(|store| {
+                                store.dispatches.remove(id);
                                 if let Some(old_dispatch) = store.active_dispatches.remove(id) {
-                                    match &old_dispatch.deets {
-                                        ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
-                                            store.wflow_to_dispatch.remove(wflow_job_id);
-                                        }
+                                    if let ActiveDispatchDeets::Wflow {
+                                        wflow_job_id: Some(wflow_job_id),
+                                        ..
+                                    } = &old_dispatch.deets
+                                    {
+                                        store.wflow_to_dispatch.remove(wflow_job_id);
                                     }
                                 }
                             })
@@ -283,7 +371,7 @@ impl DispatchRepo {
             }
         }
         if !am_utils_rs::repo::big_repo_path_prefix_matches(
-            &[DispatchStore::prop().into(), "active_dispatches".into()],
+            &[DispatchStore::prop().into(), "dispatches".into()],
             &patch.path,
         ) {
             return Ok(());
@@ -315,11 +403,10 @@ impl DispatchRepo {
                         heads: dispatch_heads,
                     }
                 } else {
-                    panic!("dispatch update detected")
-                    // DispatchEvent::DispatchUpdated {
-                    //     id: dispatch_id.clone(),
-                    //     heads: dispatch_heads,
-                    // }
+                    DispatchEvent::DispatchUpdated {
+                        id: dispatch_id.clone(),
+                        heads: dispatch_heads,
+                    }
                 });
             }
             automerge::PatchAction::DeleteMap { key, .. } if patch.path.len() == 2 => {
@@ -362,7 +449,7 @@ impl DispatchRepo {
         let heads = self.get_dispatch_heads();
         let dispatch_ids = self
             .store
-            .query_sync(|store| store.active_dispatches.keys().cloned().collect::<Vec<_>>())
+            .query_sync(|store| store.dispatches.keys().cloned().collect::<Vec<_>>())
             .await;
         let mut events = Vec::with_capacity(dispatch_ids.len());
         for id in dispatch_ids {
@@ -383,11 +470,27 @@ impl DispatchRepo {
         self.store
             .query_sync(|store| {
                 store
-                    .active_dispatches
+                    .dispatches
                     .get(id)
-                    .map(|versioned| Arc::clone(versioned))
+                    .map(|versioned| Arc::clone(&versioned.val.0))
             })
             .await
+    }
+
+    pub async fn get_active(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
+        self.store
+            .query_sync(|store| {
+                let dispatch = store.dispatches.get(id)?;
+                if dispatch.status != DispatchStatus::Active {
+                    return None;
+                }
+                Some(Arc::clone(&dispatch.val.0))
+            })
+            .await
+    }
+
+    pub async fn get_any(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
+        self.get(id).await
     }
 
     pub async fn get_wflow_part_frontier(&self, wflow_part_id: &str) -> Option<u64> {
@@ -410,10 +513,13 @@ impl DispatchRepo {
         self.store
             .query_sync(|store| {
                 let disp_id = store.wflow_to_dispatch.get(job_id)?;
-                store
-                    .active_dispatches
-                    .get(disp_id)
-                    .map(|versioned| Arc::clone(versioned))
+                store.dispatches.get(disp_id).and_then(|versioned| {
+                    if versioned.status == DispatchStatus::Active {
+                        Some(Arc::clone(&versioned.val.0))
+                    } else {
+                        None
+                    }
+                })
             })
             .await
     }
@@ -423,19 +529,27 @@ impl DispatchRepo {
         let (_, hash) = self
             .store
             .mutate_sync(|store| {
-                let versioned =
-                    Versioned::mint(self.local_actor_id.clone(), Arc::clone(&dispatch).into());
+                let versioned = {
+                    let versioned: Versioned<ThroughJson<Arc<ActiveDispatch>>> =
+                        Versioned::mint(self.local_actor_id.clone(), Arc::clone(&dispatch).into());
+                    versioned
+                };
 
-                match &dispatch.deets {
-                    ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
-                        let old = store
-                            .wflow_to_dispatch
-                            .insert(wflow_job_id.clone(), id.clone());
-                        assert!(old.is_none(), "fishy");
-                    }
+                if let ActiveDispatchDeets::Wflow {
+                    wflow_job_id: Some(wflow_job_id),
+                    ..
+                } = &dispatch.deets
+                {
+                    let old = store
+                        .wflow_to_dispatch
+                        .insert(wflow_job_id.clone(), id.clone());
+                    assert!(old.is_none(), "fishy");
                 }
                 store.cancelled_dispatches.remove(&id);
-                store.active_dispatches.insert(id.clone(), versioned);
+                store.dispatches.insert(id.clone(), versioned.clone());
+                if dispatch.status == DispatchStatus::Active {
+                    store.active_dispatches.insert(id.clone(), versioned);
+                }
             })
             .await?;
         let heads = ChangeHashSet(hash.into_iter().collect());
@@ -446,28 +560,47 @@ impl DispatchRepo {
         Ok(())
     }
 
-    pub async fn remove(&self, id: String) -> Res<Option<Arc<ActiveDispatch>>> {
+    pub async fn complete(
+        &self,
+        id: String,
+        status: DispatchStatus,
+    ) -> Res<Option<Arc<ActiveDispatch>>> {
+        assert!(matches!(
+            status,
+            DispatchStatus::Succeeded | DispatchStatus::Failed | DispatchStatus::Cancelled
+        ));
         let (old, hash) = self
             .store
             .mutate_sync(|store| {
-                let old = store.active_dispatches.remove(&id);
+                let old = store.dispatches.get(&id).cloned();
                 store.cancelled_dispatches.remove(&id);
-                if let Some(old_dispatch) = &old {
-                    match &old_dispatch.deets {
-                        ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
-                            store.wflow_to_dispatch.remove(wflow_job_id);
-                        }
+                if let Some(old_dispatch) = old.as_ref() {
+                    let old_dispatch = &old_dispatch.val.0;
+                    if let ActiveDispatchDeets::Wflow {
+                        wflow_job_id: Some(wflow_job_id),
+                        ..
+                    } = &old_dispatch.deets
+                    {
+                        store.wflow_to_dispatch.remove(wflow_job_id);
                     }
+                }
+                store.active_dispatches.remove(&id);
+                if let Some(old_dispatch) = old.as_ref() {
+                    let mut next = (*old_dispatch.val.0).clone();
+                    next.status = status;
+                    let versioned: Versioned<ThroughJson<Arc<ActiveDispatch>>> =
+                        Versioned::update(self.local_actor_id.clone(), Arc::new(next).into());
+                    store.dispatches.insert(id.clone(), versioned);
                 }
                 old
             })
             .await?;
         let heads = ChangeHashSet(hash.into_iter().collect());
-        self.registry.notify([DispatchEvent::DispatchDeleted {
+        self.registry.notify([DispatchEvent::DispatchUpdated {
             id,
             heads: heads.clone(),
         }]);
-        Ok(old.map(|disp| disp.val.0))
+        Ok(old.map(|disp| Arc::clone(&disp.val.0)))
     }
 
     pub async fn list(&self) -> Vec<(String, Arc<ActiveDispatch>)> {
@@ -476,7 +609,7 @@ impl DispatchRepo {
                 store
                     .active_dispatches
                     .iter()
-                    .map(|(key, item)| (key.clone(), Arc::clone(item)))
+                    .map(|(key, item)| (key.clone(), Arc::clone(&item.val.0)))
                     .collect()
             })
             .await
@@ -488,7 +621,14 @@ impl DispatchRepo {
         let id = id.to_string();
         let exists = self
             .store
-            .query_sync(|store| store.active_dispatches.contains_key(&id))
+            .query_sync(|store| {
+                store.dispatches.get(&id).is_some_and(|dispatch| {
+                    matches!(
+                        dispatch.status,
+                        DispatchStatus::Active | DispatchStatus::Waiting
+                    )
+                })
+            })
             .await;
         if !exists {
             eyre::bail!("dispatch not found under {id}");
@@ -504,6 +644,200 @@ impl DispatchRepo {
             })
             .await?;
         Ok(marked_now)
+    }
+
+    pub async fn list_waiting_on(
+        &self,
+        dependency_dispatch_id: &str,
+    ) -> Vec<(String, Arc<ActiveDispatch>)> {
+        let dependency_dispatch_id = dependency_dispatch_id.to_string();
+        self.store
+            .query_sync(move |store| {
+                store
+                    .dispatches
+                    .iter()
+                    .filter_map(|(id, dispatch)| {
+                        if dispatch.status == DispatchStatus::Waiting
+                            && dispatch
+                                .waiting_on_dispatch_ids
+                                .iter()
+                                .any(|dep| dep == &dependency_dispatch_id)
+                        {
+                            Some((id.clone(), Arc::clone(&dispatch.val.0)))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .await
+    }
+
+    pub async fn remove_waiting_dependency(
+        &self,
+        dispatch_id: &str,
+        dependency_dispatch_id: &str,
+    ) -> Res<Option<Arc<ActiveDispatch>>> {
+        let dispatch_id = dispatch_id.to_string();
+        let dependency_dispatch_id = dependency_dispatch_id.to_string();
+        let (next, _hash) = self
+            .store
+            .mutate_sync(|store| {
+                let cur = store.dispatches.get(&dispatch_id).cloned()?;
+                if cur.status != DispatchStatus::Waiting {
+                    return None;
+                }
+                let mut updated = (*cur.val.0).clone();
+                updated
+                    .waiting_on_dispatch_ids
+                    .retain(|dep| dep != &dependency_dispatch_id);
+                let ready = updated.waiting_on_dispatch_ids.is_empty();
+                let versioned: Versioned<ThroughJson<Arc<ActiveDispatch>>> = Versioned::update(
+                    self.local_actor_id.clone(),
+                    Arc::new(updated.clone()).into(),
+                );
+                store.dispatches.insert(dispatch_id.clone(), versioned);
+                if ready {
+                    Some(Arc::new(updated))
+                } else {
+                    None
+                }
+            })
+            .await?;
+        Ok(next)
+    }
+
+    pub async fn activate_waiting(
+        &self,
+        dispatch_id: &str,
+        deets: ActiveDispatchDeets,
+    ) -> Res<Arc<ActiveDispatch>> {
+        let dispatch_id = dispatch_id.to_string();
+        let (next, hash) = self
+            .store
+            .try_mutate_sync(|store| {
+                let Some(cur) = store.dispatches.get(&dispatch_id).cloned() else {
+                    eyre::bail!("dispatch not found under {dispatch_id}");
+                };
+                if cur.status != DispatchStatus::Waiting {
+                    eyre::bail!("dispatch is not waiting: {dispatch_id}");
+                }
+                if !cur.waiting_on_dispatch_ids.is_empty() {
+                    eyre::bail!("dispatch still has unresolved dependencies: {dispatch_id}");
+                }
+                let mut updated = (*cur.val.0).clone();
+                updated.status = DispatchStatus::Active;
+                updated.deets = deets;
+                let arc = Arc::new(updated.clone());
+                let versioned: Versioned<ThroughJson<Arc<ActiveDispatch>>> =
+                    Versioned::update(self.local_actor_id.clone(), Arc::clone(&arc).into());
+                store
+                    .dispatches
+                    .insert(dispatch_id.clone(), versioned.clone());
+                store
+                    .active_dispatches
+                    .insert(dispatch_id.clone(), versioned);
+                if let ActiveDispatchDeets::Wflow {
+                    wflow_job_id: Some(job),
+                    ..
+                } = &updated.deets
+                {
+                    store
+                        .wflow_to_dispatch
+                        .insert(job.clone(), dispatch_id.clone());
+                }
+                Ok(arc)
+            })
+            .await?;
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([DispatchEvent::DispatchUpdated {
+            id: dispatch_id,
+            heads,
+        }]);
+        Ok(next)
+    }
+
+    pub async fn update_active_deets(
+        &self,
+        dispatch_id: &str,
+        deets: ActiveDispatchDeets,
+    ) -> Res<Arc<ActiveDispatch>> {
+        let dispatch_id = dispatch_id.to_string();
+        let (next, hash) = self
+            .store
+            .try_mutate_sync(|store| {
+                let Some(cur) = store.dispatches.get(&dispatch_id).cloned() else {
+                    eyre::bail!("dispatch not found under {dispatch_id}");
+                };
+                if cur.status != DispatchStatus::Active {
+                    eyre::bail!("dispatch is not active: {dispatch_id}");
+                }
+                let mut updated = (*cur.val.0).clone();
+                if let ActiveDispatchDeets::Wflow {
+                    wflow_job_id: Some(job),
+                    ..
+                } = &updated.deets
+                {
+                    store.wflow_to_dispatch.remove(job);
+                }
+                updated.deets = deets;
+                let arc = Arc::new(updated.clone());
+                let versioned: Versioned<ThroughJson<Arc<ActiveDispatch>>> =
+                    Versioned::update(self.local_actor_id.clone(), Arc::clone(&arc).into());
+                store
+                    .dispatches
+                    .insert(dispatch_id.clone(), versioned.clone());
+                store
+                    .active_dispatches
+                    .insert(dispatch_id.clone(), versioned);
+                if let ActiveDispatchDeets::Wflow {
+                    wflow_job_id: Some(job),
+                    ..
+                } = &updated.deets
+                {
+                    store
+                        .wflow_to_dispatch
+                        .insert(job.clone(), dispatch_id.clone());
+                }
+                Ok(arc)
+            })
+            .await?;
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([DispatchEvent::DispatchUpdated {
+            id: dispatch_id,
+            heads,
+        }]);
+        Ok(next)
+    }
+
+    pub async fn set_waiting_failed(&self, dispatch_id: &str) -> Res<()> {
+        let dispatch_id = dispatch_id.to_string();
+        let (_, hash) = self
+            .store
+            .mutate_sync(|store| {
+                if let Some(cur) = store.dispatches.get(&dispatch_id).cloned() {
+                    if let ActiveDispatchDeets::Wflow {
+                        wflow_job_id: Some(wflow_job_id),
+                        ..
+                    } = &cur.val.0.deets
+                    {
+                        store.wflow_to_dispatch.remove(wflow_job_id);
+                    }
+                    store.cancelled_dispatches.remove(&dispatch_id);
+                    let mut updated = (*cur.val.0).clone();
+                    updated.status = DispatchStatus::Failed;
+                    let versioned: Versioned<ThroughJson<Arc<ActiveDispatch>>> =
+                        Versioned::update(self.local_actor_id.clone(), Arc::new(updated).into());
+                    store.dispatches.insert(dispatch_id.clone(), versioned);
+                }
+            })
+            .await?;
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([DispatchEvent::DispatchUpdated {
+            id: dispatch_id,
+            heads,
+        }]);
+        Ok(())
     }
 }
 
@@ -530,12 +864,12 @@ mod tests {
     fn mock_dispatch(job_id: &str) -> Arc<ActiveDispatch> {
         Arc::new(ActiveDispatch {
             deets: ActiveDispatchDeets::Wflow {
-                wflow_partition_id: "part-1".to_string(),
-                entry_id: 1,
+                wflow_partition_id: Some("part-1".to_string()),
+                entry_id: Some(1),
                 plug_id: "@test/plug".to_string(),
                 bundle_name: "bundle".to_string(),
                 wflow_key: "key".to_string(),
-                wflow_job_id: job_id.to_string(),
+                wflow_job_id: Some(job_id.to_string()),
             },
             args: ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
                 doc_id: "doc1".to_string(),
@@ -544,9 +878,12 @@ mod tests {
                 heads: ChangeHashSet(default()),
                 facet_key: "facet".to_string(),
                 facet_acl: vec![],
-                config_prop_acl: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
             }),
+            status: DispatchStatus::Active,
+            waiting_on_dispatch_ids: vec![],
+            on_success_hooks: vec![],
         })
     }
 

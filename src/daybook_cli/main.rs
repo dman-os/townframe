@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! FIXME: use ctrl_c handlers aross major await points
 //! FIXME: make each command a submodule
 
@@ -17,9 +19,9 @@ use clap::builder::styling::AnsiColor;
 use clap::*;
 
 use daybook_core::drawer::DrawerRepo;
-use daybook_core::plugs::manifest;
 use daybook_core::repos::Repo;
 use daybook_core::sync::IrohSyncEvent;
+use daybook_types::manifest;
 
 mod config;
 mod context;
@@ -1345,6 +1347,7 @@ mod lazy {
                     daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
                 )
                 .await?;
+                plugs.ensure_system_plugs().await?;
                 register_shutdown(move || async move { plugs_stop.stop().await });
                 Ok(plugs)
             })
@@ -1536,6 +1539,7 @@ mod lazy {
                     },
                     ctx.doc_app.document_id().clone(),
                     format!("sqlite://{}", ctx.layout.sqlite_path.display()),
+                    ctx.sql.db_pool.clone(),
                     Arc::clone(&ctx.big_repo),
                     Arc::clone(&drawer),
                     Arc::clone(&plugs),

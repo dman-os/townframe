@@ -120,6 +120,7 @@ pub mod version_updates {
     use crate::config::ConfigStore;
     use crate::plugs::PlugsStore;
     use crate::rt::dispatch::DispatchStore;
+    use crate::rt::init::InitStore;
     use crate::rt::switch::SwitchStateStore;
     use crate::tables::TablesStore;
 
@@ -152,6 +153,12 @@ pub mod version_updates {
             ROOT,
             DispatchStore::prop().as_ref(),
             DispatchStore::default(),
+        )?;
+        reconcile_prop(
+            &mut doc,
+            ROOT,
+            InitStore::prop().as_ref(),
+            InitStore::default(),
         )?;
         reconcile_prop(
             &mut doc,

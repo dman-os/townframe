@@ -68,6 +68,7 @@ fn tuple_list_take<T>(pairs: &mut Vec<(String, T)>, key: &str) -> Option<T> {
     Some(pairs.swap_remove(ix).1)
 }
 
+/*
 pub(crate) fn row_text(
     row: &crate::wit::townframe::sql::types::ResultRow,
     name: &str,
@@ -118,21 +119,17 @@ pub(crate) fn embedding_bytes_to_f32(bytes: &[u8]) -> Res<Vec<f32>> {
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect())
 }
+*/
 
 impl wit::exports::townframe::wflow::bundle::Guest for Component {
     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
         use wflows::*;
         wflow_sdk::route_wflows!(args, {
-            "pseudo-label" => |cx, _args: serde_json::Value| pseudo_labeler::run(cx),
             "test-label" => |cx, _args: serde_json::Value| test_labeler::run(cx),
             "ocr-image" => |cx, _args: serde_json::Value| ocr_image::run(cx),
             "embed-image" => |cx, _args: serde_json::Value| embed_image::run(cx),
             "embed-text" => |cx, _args: serde_json::Value| embed_text::run(cx),
             "index-embedding" => |cx, _args: serde_json::Value| index_embedding::run(cx),
-            "classify-image-label" => |cx, _args: serde_json::Value| classify_image_label::run(cx),
-            "learn-image-label-proposals" => |cx, _args: serde_json::Value| {
-                learn_image_label_proposals::run(cx)
-            },
         })
     }
 }

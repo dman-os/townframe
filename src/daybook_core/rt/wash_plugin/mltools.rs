@@ -81,10 +81,24 @@ impl mltools_embed::Host for SharedWashCtx {
             Err(err) => return Ok(Err(err)),
         };
         let plugin = DaybookPlugin::from_ctx(self);
-        let image_path = match super::caps::resolve_blob_path_from_blob_facet(&plugin, &blob).await
-        {
+        let blob_hash = match super::caps::blob_hash_from_blob_facet(&blob) {
             Ok(value) => value,
             Err(err) => return Ok(Err(err)),
+        };
+        let requested_ext = match extension_for_blob_mime(blob.mime.as_str()) {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err)),
+        };
+        let image_path = match plugin
+            .blobs_repo
+            .materialize(
+                &blob_hash,
+                crate::blobs::BlobMaterializeRequest::Extension(requested_ext.to_string()),
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
         };
         let mltools_ctx = mltools_ctx_from_config_repo(&plugin).await;
 
@@ -99,6 +113,28 @@ impl mltools_embed::Host for SharedWashCtx {
             dimensions: result.dimensions,
             model_id: result.model_id,
         }))
+    }
+}
+
+fn extension_for_blob_mime(mime: &str) -> Result<&'static str, String> {
+    let token = mime
+        .split(';')
+        .next()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if token.is_empty() {
+        return Err("empty image mime".to_string());
+    }
+    match token.as_str() {
+        "image/jpeg" | "image/jpg" => Ok("jpg"),
+        "image/png" => Ok("png"),
+        "image/gif" => Ok("gif"),
+        "image/bmp" => Ok("bmp"),
+        "image/webp" => Ok("webp"),
+        value => Err(format!(
+            "unsupported image mime for embedding materialization: {value}"
+        )),
     }
 }
 

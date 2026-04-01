@@ -1,5 +1,9 @@
 use crate::interlude::*;
-use crate::plugs::reference::select_json_path_values;
+
+use crate::reference::select_json_path_values;
+
+#[cfg(feature = "automerge")]
+use autosurgeon::{Hydrate, Reconcile};
 
 use garde::Validate;
 
@@ -118,6 +122,9 @@ pub struct PlugManifest {
     #[garde(dive)]
     pub commands: HashMap<KeyGeneric, Arc<CommandManifest>>,
     #[garde(dive)]
+    #[serde(default)]
+    pub inits: HashMap<KeyGeneric, Arc<InitManifest>>,
+    #[garde(dive)]
     pub processors: HashMap<KeyGeneric, Arc<ProcessorManifest>>,
 }
 
@@ -204,9 +211,10 @@ pub struct FacetDisplayHint {
     pub deets: FacetKeyDisplayDeets,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, Reconcile, Hydrate, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
 pub enum FacetKeyDisplayDeets {
     #[default]
     DebugPrint,
@@ -219,9 +227,10 @@ pub enum FacetKeyDisplayDeets {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Default, Deserialize, Reconcile, Hydrate, PartialEq)]
+#[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
 pub enum DateTimeFacetDisplayType {
     #[default]
     TimeAndDate,
@@ -258,9 +267,9 @@ impl RoutineManifest {
         &self,
     ) -> (
         std::collections::HashSet<String>,
-        std::collections::HashSet<daybook_types::doc::FacetKey>,
+        std::collections::HashSet<crate::doc::FacetKey>,
     ) {
-        use daybook_types::doc::{FacetKey, FacetTag};
+        use crate::doc::{FacetKey, FacetTag};
         let mut read_tags = std::collections::HashSet::new();
         let mut read_keys = std::collections::HashSet::new();
         let facet_acl = match &self.deets {
@@ -297,11 +306,11 @@ impl RoutineManifest {
         }
     }
 
-    pub fn config_prop_acl(&self) -> &[RoutineFacetAccess] {
+    pub fn config_facet_acl(&self) -> &[RoutineFacetAccess] {
         match &self.deets {
             RoutineManifestDeets::DocFacet {
-                config_prop_acl, ..
-            } => config_prop_acl.as_slice(),
+                config_facet_acl, ..
+            } => config_facet_acl.as_slice(),
             _ => &[],
         }
     }
@@ -335,7 +344,7 @@ pub enum RoutineManifestDeets {
         facet_acl: Vec<RoutineFacetAccess>,
         #[garde(dive)]
         #[serde(default)]
-        config_prop_acl: Vec<RoutineFacetAccess>,
+        config_facet_acl: Vec<RoutineFacetAccess>,
     },
     // DocCollator { predicate },
     // DocPropCollator { predicate },
@@ -344,6 +353,10 @@ pub enum RoutineManifestDeets {
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutineFacetAccess {
+    /// Required for config_facet_acl entries to disambiguate owner config doc.
+    #[serde(default)]
+    #[garde(inner(length(min = 1)))]
+    pub owner_plug_id: Option<String>,
     #[garde(dive)]
     pub tag: FacetTag,
     /// When set, access is to this tag+id only; when absent, access is to any facet with this tag.
@@ -385,6 +398,35 @@ pub struct CommandManifest {
 #[serde(rename_all = "camelCase")]
 pub enum CommandDeets {
     DocCommand {
+        #[garde(dive)]
+        routine_name: KeyGeneric,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct InitManifest {
+    #[garde(length(min = 1))]
+    pub desc: String,
+    #[garde(dive)]
+    pub run_mode: InitRunMode,
+    #[garde(dive)]
+    pub deets: InitDeets,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
+pub enum InitRunMode {
+    PerInstall,
+    PerBoot,
+    PerNode,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum InitDeets {
+    InvokeRoutine {
         #[garde(dive)]
         routine_name: KeyGeneric,
     },
@@ -437,8 +479,8 @@ pub enum DocPredicateEvalRequirement {
 
 #[derive(Debug, Clone)]
 pub enum DocPredicateEvalResolved {
-    FullDoc(Arc<daybook_types::doc::Doc>),
-    FacetsOfTag(Vec<(daybook_types::doc::FacetKey, daybook_types::doc::FacetRaw)>),
+    FullDoc(Arc<crate::doc::Doc>),
+    FacetsOfTag(Vec<(crate::doc::FacetKey, crate::doc::FacetRaw)>),
     FacetManifest(Arc<HashMap<String, Vec<FacetReferenceManifest>>>),
 }
 
@@ -470,7 +512,7 @@ impl DocPredicateClause {
 
     pub fn evaluate(
         &self,
-        doc: &daybook_types::doc::Doc,
+        doc: &crate::doc::Doc,
         mode: DocPredicateEvalMode,
         resolved: &HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
     ) -> bool {
@@ -518,7 +560,7 @@ impl DocPredicateClause {
         }
     }
 
-    pub fn matches(&self, doc: &daybook_types::doc::Doc) -> bool {
+    pub fn matches(&self, doc: &crate::doc::Doc) -> bool {
         self.evaluate(doc, DocPredicateEvalMode::ApproxInterest, &HashMap::new())
     }
 
@@ -552,7 +594,7 @@ impl DocPredicateClause {
 }
 
 fn doc_facets_have_manifest_declared_reference_to_tag(
-    source_facets: &[(daybook_types::doc::FacetKey, daybook_types::doc::FacetRaw)],
+    source_facets: &[(crate::doc::FacetKey, crate::doc::FacetRaw)],
     source_tag: &str,
     target_tag: &str,
     facet_reference_specs: &HashMap<String, Vec<FacetReferenceManifest>>,
@@ -600,9 +642,9 @@ fn facet_has_reference_to_tag(
             };
 
             for url_str in url_strings {
-                let Ok(matches_target) = daybook_types::url::facet_ref_str_targets_tag(
+                let Ok(matches_target) = crate::url::facet_ref_str_targets_tag(
                     url_str,
-                    &daybook_types::doc::FacetTag::from(target_tag),
+                    &crate::doc::FacetTag::from(target_tag),
                 ) else {
                     continue;
                 };

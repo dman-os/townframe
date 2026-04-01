@@ -72,6 +72,11 @@ jobs:
         run: |
           nix develop .#ci-rust --command cargo --color=always build -p test_wflows --target wasm32-wasip2
 
+      - name: build plug OCI artifacts
+        run: |
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_plabels
+
       - name: kotlin tests
         run: |
           nix develop .#ci-desktop --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew :composeApp:desktopTest --no-daemon --no-configuration-cache'
@@ -84,7 +89,7 @@ jobs:
 
       - name: rust tests
         run: |
-          nix develop .#ci-rust --command cargo --color=always nextest run --workspace --all-features --no-fail-fast --retries 1
+          nix develop .#ci-rust --command cargo --color=always nextest run --workspace --all-features --no-fail-fast --retries 2
         env:
           RUST_BACKTRACE: 1
           # RUST_LOG_TEST: debug

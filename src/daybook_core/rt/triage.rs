@@ -10,7 +10,7 @@ use crate::rt::{DispatchArgs, Rt};
 use daybook_types::doc::BranchPath;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacetTag};
 
-use crate::plugs::manifest::{
+use daybook_types::manifest::{
     DocPredicateEvalMode, DocPredicateEvalRequirement, DocPredicateEvalResolved,
     FacetReferenceManifest, KeyGeneric, ProcessorDeets, ProcessorManifest, RoutineManifest,
     RoutineManifestDeets,

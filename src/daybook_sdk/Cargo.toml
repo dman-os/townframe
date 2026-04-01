@@ -1,0 +1,41 @@
+[package]
+name = "daybook_sdk"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "daybook_sdk"
+path = "lib.rs"
+
+# [features]
+# default = ["uniffi"]
+# uniffi = ["dep:uniffi"]
+
+[dependencies]
+#
+# internal
+api_utils_rs = { workspace = true, features = ["automerge"] }
+daybook_types = { workspace = true, features = [
+    "automerge",
+    "uniffi",
+    "wit",
+    "schemars",
+] }
+
+#
+# encoding
+serde.workspace = true
+serde_json.workspace = true
+zstd.workspace = true
+
+#
+# error
+displaydoc.workspace = true
+thiserror.workspace = true
+
+#
+# ds
+semver = "1"

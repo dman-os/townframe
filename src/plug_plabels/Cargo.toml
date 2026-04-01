@@ -1,0 +1,49 @@
+[package]
+name = "plug_plabels"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "lib.rs"
+
+[[bin]]
+name = "manifest"
+path = "manifest.rs"
+
+[dependencies]
+utils_rs = { workspace = true }
+api_utils_rs.workspace = true
+am_utils_rs.workspace = true
+wflow_sdk.workspace = true
+daybook_types = { workspace = true, features = ["wit", "automerge", "manifest", "schemars"] }
+
+# genai = "0.4.1"
+# llm = "1.3.4"
+
+# ds
+multihash.workspace = true
+
+# serde
+serde.workspace = true
+serde_json.workspace = true
+
+# error
+color-eyre.workspace = true
+thiserror.workspace = true
+displaydoc.workspace = true
+
+wit-bindgen.workspace = true
+schemars = { version = "1.2", features = [
+    "uuid1",
+    "semver1",
+    "url2",
+    "jiff02",
+    "indexmap2",
+] }
+
+[dev-dependencies]
+daybook_core = { workspace = true, features = ["test-support"] }

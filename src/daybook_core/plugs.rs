@@ -1,14 +1,13 @@
 use crate::interlude::*;
 use tokio_util::sync::CancellationToken;
 
-pub mod manifest;
-pub mod reference;
+use daybook_types::manifest;
 
 pub fn system_plugs() -> Vec<manifest::PlugManifest> {
     use daybook_types::doc::*;
     use manifest::*;
 
-    vec![
+    let plugs = vec![
         PlugManifest {
             namespace: "daybook".into(),
             name: "core".into(),
@@ -20,6 +19,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             routines: default(),
             wflow_bundles: default(),
             commands: default(),
+            inits: default(),
             processors: default(),
             facets: vec![
                 FacetManifest {
@@ -63,6 +63,16 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 FacetManifest {
                     key_tag: WellKnownFacetTag::ImageMetadata.into(),
                     value_schema: schemars::schema_for!(ImageMetadata),
+                    display_config: default(),
+                    references: vec![FacetReferenceManifest {
+                        reference_kind: FacetReferenceKind::UrlFacet,
+                        json_path: "/facetRef".into(),
+                        at_commit_json_path: Some("/refHeads".into()),
+                    }],
+                },
+                FacetManifest {
+                    key_tag: WellKnownFacetTag::Embedding.into(),
+                    value_schema: schemars::schema_for!(daybook_types::doc::Embedding),
                     display_config: default(),
                     references: vec![FacetReferenceManifest {
                         reference_kind: FacetReferenceKind::UrlFacet,
@@ -119,14 +129,6 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     "doc-facet-ref-index".into(),
                     Arc::new(LocalStateManifest::SqliteFile {}),
                 ),
-                (
-                    "image-label-classifier".into(),
-                    Arc::new(LocalStateManifest::SqliteFile {}),
-                ),
-                (
-                    "learned-image-label-proposals".into(),
-                    Arc::new(LocalStateManifest::SqliteFile {}),
-                ),
             ]
             .into(),
             dependencies: [
@@ -147,6 +149,10 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 key_tag: WellKnownFacetTag::Blob.into(),
                                 value_schema: schemars::schema_for!(Blob),
                             },
+                            FacetDependencyManifest {
+                                key_tag: WellKnownFacetTag::Embedding.into(),
+                                value_schema: schemars::schema_for!(daybook_types::doc::Embedding),
+                            },
                         ],
                         local_states: vec![],
                     }
@@ -155,35 +161,6 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             ]
             .into(),
             routines: [
-                (
-                    "pseudo-label".into(),
-                    RoutineManifest {
-                        r#impl: RoutineImpl::Wflow {
-                            key: "pseudo-label".into(),
-                            bundle: "daybook_wflows".into(),
-                        },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::PseudoLabel.into(),
-                            facet_acl: vec![
-                                RoutineFacetAccess {
-                                    tag: WellKnownFacetTag::Note.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: false,
-                                },
-                                RoutineFacetAccess {
-                                    tag: WellKnownFacetTag::PseudoLabel.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: true,
-                                },
-                            ],
-                            config_prop_acl: vec![],
-                        },
-                        local_state_acl: vec![],
-                    }
-                    .into(),
-                ),
                 (
                     "ocr-image".into(),
                     RoutineManifest {
@@ -195,24 +172,21 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             working_facet_tag: WellKnownFacetTag::Note.into(),
                             facet_acl: vec![
                                 RoutineFacetAccess {
+                                    owner_plug_id: None,
                                     tag: WellKnownFacetTag::Blob.into(),
                                     key_id: None,
                                     read: true,
                                     write: false,
                                 },
                                 RoutineFacetAccess {
+                                    owner_plug_id: None,
                                     tag: WellKnownFacetTag::Note.into(),
                                     key_id: None,
                                     read: true,
                                     write: true,
                                 },
                             ],
-                            config_prop_acl: vec![RoutineFacetAccess {
-                                tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
-                                key_id: Some("daybook-wip-image-label-set".into()),
-                                read: true,
-                                write: true,
-                            }],
+                            config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
                     }
@@ -229,19 +203,21 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             working_facet_tag: WellKnownFacetTag::Embedding.into(),
                             facet_acl: vec![
                                 RoutineFacetAccess {
+                                    owner_plug_id: None,
                                     tag: WellKnownFacetTag::Blob.into(),
                                     key_id: None,
                                     read: true,
                                     write: false,
                                 },
                                 RoutineFacetAccess {
+                                    owner_plug_id: None,
                                     tag: WellKnownFacetTag::Embedding.into(),
                                     key_id: None,
                                     read: true,
                                     write: true,
                                 },
                             ],
-                            config_prop_acl: vec![],
+                            config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
                     }
@@ -258,64 +234,23 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             working_facet_tag: WellKnownFacetTag::Embedding.into(),
                             facet_acl: vec![
                                 RoutineFacetAccess {
+                                    owner_plug_id: None,
                                     tag: WellKnownFacetTag::Note.into(),
                                     key_id: None,
                                     read: true,
                                     write: false,
                                 },
                                 RoutineFacetAccess {
+                                    owner_plug_id: None,
                                     tag: WellKnownFacetTag::Embedding.into(),
                                     key_id: None,
                                     read: true,
                                     write: true,
                                 },
                             ],
-                            config_prop_acl: vec![],
+                            config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
-                    }
-                    .into(),
-                ),
-                (
-                    "classify-image-label".into(),
-                    RoutineManifest {
-                        r#impl: RoutineImpl::Wflow {
-                            key: "classify-image-label".into(),
-                            bundle: "daybook_wflows".into(),
-                        },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::PseudoLabel.into(),
-                            facet_acl: vec![
-                                RoutineFacetAccess {
-                                    tag: WellKnownFacetTag::Blob.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: false,
-                                },
-                                RoutineFacetAccess {
-                                    tag: WellKnownFacetTag::Embedding.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: false,
-                                },
-                                RoutineFacetAccess {
-                                    tag: WellKnownFacetTag::PseudoLabel.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: true,
-                                },
-                            ],
-                            config_prop_acl: vec![RoutineFacetAccess {
-                                tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
-                                key_id: Some("daybook-wip-image-label-set".into()),
-                                read: true,
-                                write: true,
-                            }],
-                        },
-                        local_state_acl: vec![RoutineLocalStateAccess {
-                            plug_id: "@daybook/wip".into(),
-                            local_state_key: "image-label-classifier".into(),
-                        }],
                     }
                     .into(),
                 ),
@@ -329,59 +264,17 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::Embedding.into(),
                             facet_acl: vec![RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: WellKnownFacetTag::Embedding.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
                             }],
-                            config_prop_acl: vec![],
+                            config_facet_acl: vec![],
                         },
                         local_state_acl: vec![RoutineLocalStateAccess {
                             plug_id: "@daybook/wip".into(),
                             local_state_key: "doc-embedding-index".into(),
-                        }],
-                    }
-                    .into(),
-                ),
-                (
-                    "learn-image-label-proposals".into(),
-                    RoutineManifest {
-                        r#impl: RoutineImpl::Wflow {
-                            key: "learn-image-label-proposals".into(),
-                            bundle: "daybook_wflows".into(),
-                        },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::PseudoLabel.into(),
-                            facet_acl: vec![
-                                RoutineFacetAccess {
-                                    tag: WellKnownFacetTag::Blob.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: false,
-                                },
-                                RoutineFacetAccess {
-                                    tag: WellKnownFacetTag::Embedding.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: false,
-                                },
-                                RoutineFacetAccess {
-                                    tag: WellKnownFacetTag::PseudoLabel.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: true,
-                                },
-                            ],
-                            config_prop_acl: vec![RoutineFacetAccess {
-                                tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
-                                key_id: Some("daybook_wip_learned_image_label_proposals".into()),
-                                read: true,
-                                write: true,
-                            }],
-                        },
-                        local_state_acl: vec![RoutineLocalStateAccess {
-                            plug_id: "@daybook/wip".into(),
-                            local_state_key: "learned-image-label-proposals".into(),
                         }],
                     }
                     .into(),
@@ -397,12 +290,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         deets: RoutineManifestDeets::DocFacet {
                             working_facet_tag: WellKnownFacetTag::LabelGeneric.into(),
                             facet_acl: vec![RoutineFacetAccess {
+                                owner_plug_id: None,
                                 tag: WellKnownFacetTag::LabelGeneric.into(),
                                 key_id: None,
                                 read: true,
                                 write: true,
                             }],
-                            config_prop_acl: vec![],
+                            config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
                     }
@@ -411,16 +305,6 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             ]
             .into(),
             commands: [
-                (
-                    "pseudo-label".into(),
-                    CommandManifest {
-                        desc: "Use LLM to label the document".into(),
-                        deets: CommandDeets::DocCommand {
-                            routine_name: "pseudo-label".into(),
-                        },
-                    }
-                    .into(),
-                ),
                 (
                     "embed-image".into(),
                     CommandManifest {
@@ -442,32 +326,11 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     .into(),
                 ),
                 (
-                    "classify-image-label".into(),
-                    CommandManifest {
-                        desc: "Classify image embedding into a label using local state KNN".into(),
-                        deets: CommandDeets::DocCommand {
-                            routine_name: "classify-image-label".into(),
-                        },
-                    }
-                    .into(),
-                ),
-                (
                     "index-embedding".into(),
                     CommandManifest {
                         desc: "Index embedding facet into local vector store".into(),
                         deets: CommandDeets::DocCommand {
                             routine_name: "index-embedding".into(),
-                        },
-                    }
-                    .into(),
-                ),
-                (
-                    "learn-image-label-proposals".into(),
-                    CommandManifest {
-                        desc: "Learn image label proposals into a global pseudo-label proposal set"
-                            .into(),
-                        deets: CommandDeets::DocCommand {
-                            routine_name: "learn-image-label-proposals".into(),
                         },
                     }
                     .into(),
@@ -485,23 +348,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 ),
             ]
             .into(),
+            inits: default(),
             processors: [
-                (
-                    "pseudo-label".into(),
-                    ProcessorManifest {
-                        desc: "Use LLM to label the document content".into(),
-                        deets: ProcessorDeets::DocProcessor {
-                            routine_name: "pseudo-label".into(),
-                            predicate: DocPredicateClause::And(vec![
-                                DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
-                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
-                                    WellKnownFacetTag::Blob.into(),
-                                ))),
-                            ]),
-                        },
-                    }
-                    .into(),
-                ),
                 (
                     "ocr-image".into(),
                     ProcessorManifest {
@@ -552,20 +400,6 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     WellKnownFacetTag::Embedding.into(),
                                 ))),
                             ]),
-                        },
-                    }
-                    .into(),
-                ),
-                (
-                    "classify-image-label".into(),
-                    ProcessorManifest {
-                        desc: "Classify image embeddings into local fallback labels".into(),
-                        deets: ProcessorDeets::DocProcessor {
-                            routine_name: "classify-image-label".into(),
-                            predicate: DocPredicateClause::HasReferenceToTag {
-                                source_tag: WellKnownFacetTag::Embedding.into(),
-                                target_tag: WellKnownFacetTag::Blob.into(),
-                            },
                         },
                     }
                     .into(),
@@ -628,14 +462,11 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     "daybook_wflows".into(),
                     WflowBundleManifest {
                         keys: vec![
-                            "pseudo-label".into(),
                             "test-label".into(),
                             "ocr-image".into(),
                             "embed-image".into(),
                             "embed-text".into(),
                             "index-embedding".into(),
-                            "classify-image-label".into(),
-                            "learn-image-label-proposals".into(),
                         ],
                         // FIXME: make this more generic
                         component_urls: vec![
@@ -657,40 +488,17 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 ),
             ]
             .into(),
-            facets: vec![
-                //
-                FacetManifest {
-                    key_tag: WellKnownFacetTag::PseudoLabel.into(),
-                    value_schema: schemars::schema_for!(Vec<String>),
-                    display_config: default(),
-                    references: default(),
-                },
-                FacetManifest {
-                    key_tag: WellKnownFacetTag::PseudoLabelCandidates.into(),
-                    value_schema: schemars::schema_for!(
-                        daybook_types::doc::PseudoLabelCandidatesFacet
-                    ),
-                    display_config: default(),
-                    references: default(),
-                },
-                FacetManifest {
-                    key_tag: WellKnownFacetTag::Embedding.into(),
-                    value_schema: schemars::schema_for!(daybook_types::doc::Embedding),
-                    display_config: default(),
-                    references: vec![FacetReferenceManifest {
-                        reference_kind: FacetReferenceKind::UrlFacet,
-                        json_path: "/facetRef".into(),
-                        at_commit_json_path: Some("/refHeads".into()),
-                    }],
-                },
-            ],
+            facets: vec![],
         },
-    ]
+    ];
+
+    plugs
 }
 
-#[derive(Default, Reconcile, Hydrate)]
+#[derive(Reconcile, Hydrate)]
 pub struct PlugsStore {
     pub manifests: HashMap<String, Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>,
+    pub plug_config_doc_ids: Versioned<ThroughJson<HashMap<String, String>>>,
 
     /// Index: property tag -> plug id (@ns/name)
     #[autosurgeon(with = "am_utils_rs::codecs::skip")]
@@ -698,6 +506,20 @@ pub struct PlugsStore {
     /// Index: property tag -> facet manifest
     #[autosurgeon(with = "am_utils_rs::codecs::skip")]
     pub facet_manifests: HashMap<String, manifest::FacetManifest>,
+}
+
+impl Default for PlugsStore {
+    fn default() -> Self {
+        Self {
+            manifests: default(),
+            plug_config_doc_ids: Versioned {
+                vtag: VersionTag::nil(),
+                val: ThroughJson(default()),
+            },
+            tag_to_plug: default(),
+            facet_manifests: default(),
+        }
+    }
 }
 
 impl PlugsStore {
@@ -750,6 +572,7 @@ pub struct PlugsRepo {
     store: crate::stores::AmStoreHandle<PlugsStore>,
     blobs: Arc<crate::blobs::BlobsRepo>,
     mutation_mutex: tokio::sync::Mutex<()>,
+    plug_config_doc_init_lock: tokio::sync::Mutex<()>,
     local_actor_id: ActorId,
     local_peer_id: String,
     cancel_token: CancellationToken,
@@ -765,6 +588,51 @@ pub enum PlugsEvent {
     PlugAdded { id: String, heads: ChangeHashSet },
     PlugChanged { id: String, heads: ChangeHashSet },
     PlugDeleted { id: String, heads: ChangeHashSet },
+    ConfigDocsChanged { heads: ChangeHashSet },
+}
+
+pub const OCI_PLUG_ARTIFACT_TYPE: &str = "application/vnd.daybook.plug.v1";
+pub const OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE: &str =
+    "application/vnd.daybook.plug.manifest.v1+json";
+
+fn parse_dep_base_id(dep_id: &str) -> Res<String> {
+    if dep_id.starts_with('@') {
+        let without_prefix = dep_id
+            .strip_prefix('@')
+            .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id}"))?;
+        let base = without_prefix
+            .split('@')
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id}"))?;
+        Ok(format!("@{base}"))
+    } else {
+        let base = dep_id
+            .split('@')
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id}"))?;
+        Ok(base.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OciImportOptions {
+    pub strict: bool,
+}
+
+impl Default for OciImportOptions {
+    fn default() -> Self {
+        Self { strict: true }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportedPlug {
+    pub plug_id: String,
+    pub version: semver::Version,
+    pub imported_blob_hashes: Vec<String>,
+    pub source_digest: Option<String>,
 }
 
 impl crate::repos::Repo for PlugsRepo {
@@ -820,6 +688,7 @@ impl PlugsRepo {
             local_peer_id: big_repo.samod_repo().peer_id().to_string(),
             registry: Arc::clone(&registry),
             mutation_mutex: tokio::sync::Mutex::new(()),
+            plug_config_doc_init_lock: tokio::sync::Mutex::new(()),
             cancel_token: cancel_token.clone(),
             _change_listener_tickets: vec![ticket],
             _change_broker_leases: vec![broker],
@@ -1017,6 +886,27 @@ impl PlugsRepo {
                             delivered_events.push(PlugsEvent::PlugDeleted { id, heads });
                         }
                     }
+                    PlugsEvent::ConfigDocsChanged { heads } => {
+                        let Some((new_versioned, _)) = self
+                            .big_repo
+                            .hydrate_path_at_heads::<Versioned<ThroughJson<HashMap<String, String>>>>(
+                                &self.app_doc_id,
+                                &heads.0,
+                                automerge::ROOT,
+                                vec![PlugsStore::prop().into(), "plug_config_doc_ids".into()],
+                            )
+                            .await?
+                        else {
+                            warn!("ignoring stale config-docs patch: value missing at heads");
+                            continue;
+                        };
+                        self.store
+                            .mutate_sync(|store| {
+                                store.plug_config_doc_ids = new_versioned;
+                            })
+                            .await?;
+                        delivered_events.push(PlugsEvent::ConfigDocsChanged { heads });
+                    }
                 }
             }
             self.registry.notify(delivered_events.drain(..));
@@ -1130,6 +1020,17 @@ impl PlugsRepo {
                     heads,
                 });
             }
+            automerge::PatchAction::PutMap {
+                key,
+                value: (automerge::Value::Scalar(scalar), _),
+                ..
+            } if patch.path.len() == 2
+                && patch.path[1].1 == automerge::Prop::Map("plug_config_doc_ids".into())
+                && key == "vtag"
+                && matches!(&**scalar, automerge::ScalarValue::Bytes(_)) =>
+            {
+                out.push(PlugsEvent::ConfigDocsChanged { heads });
+            }
             _ => {}
         }
         Ok(())
@@ -1153,6 +1054,53 @@ impl PlugsRepo {
         self.store
             .query_sync(|store| store.manifests.get(id).map(|man| Arc::clone(&man.val)))
             .await
+    }
+
+    pub async fn get_plug_config_doc_id(&self, plug_id: &str) -> Option<String> {
+        let plug_id = plug_id.to_string();
+        self.store
+            .query_sync(move |store| store.plug_config_doc_ids.val.0.get(&plug_id).cloned())
+            .await
+    }
+
+    pub async fn set_plug_config_doc_id(&self, plug_id: &str, doc_id: String) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let plug_id = plug_id.to_string();
+        self.store
+            .mutate_sync(move |store| {
+                let mut config_doc_ids = store.plug_config_doc_ids.val.0.clone();
+                config_doc_ids.insert(plug_id, doc_id);
+                store
+                    .plug_config_doc_ids
+                    .replace(self.local_actor_id.clone(), ThroughJson(config_doc_ids));
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_or_init_plug_config_doc_id(
+        &self,
+        plug_id: &str,
+        drawer_repo: &crate::drawer::DrawerRepo,
+    ) -> Res<String> {
+        if let Some(doc_id) = self.get_plug_config_doc_id(plug_id).await {
+            return Ok(doc_id);
+        }
+        let _guard = self.plug_config_doc_init_lock.lock().await;
+        if let Some(doc_id) = self.get_plug_config_doc_id(plug_id).await {
+            return Ok(doc_id);
+        }
+        let doc_id = drawer_repo
+            .add(daybook_types::doc::AddDocArgs {
+                branch_path: daybook_types::doc::BranchPath::from("main"),
+                facets: HashMap::new(),
+                user_path: None,
+            })
+            .await?;
+        self.set_plug_config_doc_id(plug_id, doc_id.clone()).await?;
+        Ok(doc_id)
     }
 
     pub async fn get_display_hint(&self, prop_tag: &str) -> Option<manifest::FacetDisplayHint> {
@@ -1205,6 +1153,104 @@ impl PlugsRepo {
             .await
     }
 
+    pub async fn import_from_oci_layout(
+        &self,
+        layout_root: &std::path::Path,
+        opts: OciImportOptions,
+    ) -> Res<ImportedPlug> {
+        let _oci_layout = oci_spec::image::OciLayout::from_file(layout_root.join("oci-layout"))?;
+        let index = oci_spec::image::ImageIndex::from_file(layout_root.join("index.json"))?;
+        let selected_manifest_descriptor = index
+            .manifests()
+            .first()
+            .cloned()
+            .ok_or_eyre("oci index has no manifests")?;
+        let selected_manifest_sha = selected_manifest_descriptor
+            .as_digest_sha256()
+            .ok_or_eyre("oci index manifest descriptor must use sha256 digest")?
+            .to_string();
+        let manifest_bytes = Self::read_oci_layout_blob_by_sha(layout_root, &selected_manifest_sha)
+            .await
+            .wrap_err("error reading selected OCI manifest blob from layout")?;
+        let oci_manifest: oci_client::manifest::OciManifest =
+            serde_json::from_slice(&manifest_bytes)?;
+
+        let image_manifest = match oci_manifest {
+            oci_client::manifest::OciManifest::Image(manifest) => manifest,
+            oci_client::manifest::OciManifest::ImageIndex(index_manifest) => {
+                let nested_descriptor = index_manifest
+                    .manifests
+                    .first()
+                    .ok_or_eyre("nested OCI image index has no manifests")?;
+                let nested_sha = Self::sha256_hex_from_digest_str(&nested_descriptor.digest)?;
+                let nested_bytes = Self::read_oci_layout_blob_by_sha(layout_root, &nested_sha)
+                    .await
+                    .wrap_err("error reading nested OCI manifest blob from layout")?;
+                match serde_json::from_slice::<oci_client::manifest::OciManifest>(&nested_bytes)? {
+                    oci_client::manifest::OciManifest::Image(manifest) => manifest,
+                    oci_client::manifest::OciManifest::ImageIndex(_) => {
+                        eyre::bail!("nested OCI manifest must resolve to an image manifest")
+                    }
+                }
+            }
+        };
+
+        self.import_from_oci_image_manifest(
+            image_manifest,
+            Some(selected_manifest_sha),
+            opts,
+            |digest| async move {
+                let sha = Self::sha256_hex_from_digest_str(&digest)?;
+                Self::read_oci_layout_blob_by_sha(layout_root, &sha).await
+            },
+        )
+        .await
+    }
+
+    pub async fn import_from_oci_registry(
+        &self,
+        reference: &str,
+        auth: oci_client::secrets::RegistryAuth,
+        opts: OciImportOptions,
+    ) -> Res<ImportedPlug> {
+        let reference: oci_client::Reference = reference.parse()?;
+        let client_config = oci_client::client::ClientConfig {
+            connect_timeout: Some(std::time::Duration::from_secs(15)),
+            read_timeout: Some(std::time::Duration::from_secs(300)),
+            ..Default::default()
+        };
+        let client = oci_client::Client::new(client_config);
+        let (manifest, source_digest) = client.pull_manifest(&reference, &auth).await?;
+        let (target_manifest, target_ref) = match manifest {
+            oci_client::manifest::OciManifest::Image(manifest) => (manifest, reference.clone()),
+            oci_client::manifest::OciManifest::ImageIndex(index_manifest) => {
+                let desc = index_manifest
+                    .manifests
+                    .first()
+                    .ok_or_eyre("oci image index has no manifests")?;
+                let target_ref = reference.clone_with_digest(desc.digest.clone());
+                let (nested, _) = client.pull_manifest(&target_ref, &auth).await?;
+                let oci_client::manifest::OciManifest::Image(manifest) = nested else {
+                    eyre::bail!("nested OCI manifest must resolve to an image manifest");
+                };
+                (manifest, target_ref)
+            }
+        };
+
+        self.import_from_oci_image_manifest(target_manifest, Some(source_digest), opts, |digest| {
+            let client = &client;
+            let target_ref = &target_ref;
+            async move {
+                let mut out = Vec::new();
+                client
+                    .pull_blob(target_ref, digest.as_str(), &mut out)
+                    .await?;
+                eyre::Ok(out)
+            }
+        })
+        .await
+    }
+
     /// Add a new plug to the repo after validating it.
     ///
     /// This method follows a literate programming approach to clearly document
@@ -1244,20 +1290,19 @@ impl PlugsRepo {
                             ))?;
                         }
                         "static" => {
-                            let wasm_zst_bytes = match url.path() {
-                                "daybook_wflows.wasm.zst" => {
-                                    include_bytes!(concat!(
-                                        env!("OUT_DIR"),
-                                        "/daybook_wflows.wasm.zst"
-                                    ))
-                                }
+                            let wasm_zst_bytes: &[u8] = match url.path() {
+                                "daybook_wflows.wasm.zst" => include_bytes!(concat!(
+                                    env!("OUT_DIR"),
+                                    "/daybook_wflows.wasm.zst"
+                                ))
+                                .as_slice(),
                                 _ => {
                                     eyre::bail!("unsupported static wasm component_url");
                                 }
                             };
                             let data = tokio::task::spawn_blocking(move || {
                                 let mut wasm_bytes = vec![];
-                                zstd::stream::copy_decode(&wasm_zst_bytes[..], &mut wasm_bytes)
+                                zstd::stream::copy_decode(wasm_zst_bytes, &mut wasm_bytes)
                                     .wrap_err("error decompressing serialized component")?;
                                 eyre::Ok(wasm_bytes)
                             })
@@ -1330,6 +1375,141 @@ impl PlugsRepo {
         }]);
 
         Ok(())
+    }
+
+    async fn import_from_oci_image_manifest<F, Fut>(
+        &self,
+        image_manifest: oci_client::manifest::OciImageManifest,
+        source_digest: Option<String>,
+        opts: OciImportOptions,
+        mut pull_blob_by_digest: F,
+    ) -> Res<ImportedPlug>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = Res<Vec<u8>>>,
+    {
+        let mut manifest_layer: Option<Vec<u8>> = None;
+        let mut oci_digest_to_repo_hash: HashMap<String, String> = HashMap::new();
+        let mut imported_blob_hashes = vec![];
+
+        for layer in &image_manifest.layers {
+            let layer_bytes = pull_blob_by_digest(layer.digest.clone())
+                .await
+                .wrap_err_with(|| format!("error pulling OCI layer blob '{}'", layer.digest))?;
+            if opts.strict {
+                Self::validate_sha256_digest(&layer.digest, &layer_bytes)?;
+            }
+            let repo_hash = self.blobs.put(&layer_bytes).await?;
+            oci_digest_to_repo_hash.insert(layer.digest.clone(), repo_hash.clone());
+            imported_blob_hashes.push(repo_hash);
+            if layer.media_type == OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE {
+                if manifest_layer.is_some() {
+                    eyre::bail!(
+                        "OCI artifact contains multiple '{}' layers",
+                        OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE
+                    );
+                }
+                manifest_layer = Some(layer_bytes);
+            }
+        }
+
+        let manifest_layer = manifest_layer.ok_or_eyre(format!(
+            "missing required '{}' layer",
+            OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE
+        ))?;
+
+        let manifest_json: serde_json::Value = serde_json::from_slice(&manifest_layer)
+            .wrap_err("error parsing plug manifest layer JSON")?;
+        let rewritten_manifest_json =
+            Self::rewrite_oci_component_urls(manifest_json, &oci_digest_to_repo_hash)?;
+        let plug_manifest: manifest::PlugManifest = serde_json::from_value(rewritten_manifest_json)
+            .wrap_err("error parsing rewritten plug manifest JSON into PlugManifest")?;
+        let plug_id = plug_manifest.id();
+        let plug_version = plug_manifest.version.clone();
+
+        self.add(plug_manifest).await?;
+
+        Ok(ImportedPlug {
+            plug_id,
+            version: plug_version,
+            imported_blob_hashes,
+            source_digest,
+        })
+    }
+
+    fn rewrite_oci_component_urls(
+        mut manifest_json: serde_json::Value,
+        oci_digest_to_repo_hash: &HashMap<String, String>,
+    ) -> Res<serde_json::Value> {
+        let bundles = manifest_json
+            .get_mut("wflowBundles")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_eyre("plug manifest JSON missing object at 'wflowBundles'")?;
+
+        for bundle in bundles.values_mut() {
+            let component_urls = bundle
+                .get_mut("componentUrls")
+                .and_then(serde_json::Value::as_array_mut)
+                .ok_or_eyre("plug manifest JSON bundle missing array at 'componentUrls'")?;
+
+            for url_value in component_urls.iter_mut() {
+                let Some(url_str) = url_value.as_str() else {
+                    eyre::bail!("componentUrls entries must be strings");
+                };
+                if !url_str.starts_with("oci://sha256:") {
+                    eyre::bail!("componentUrls entries must be OCI digests: '{url_str}'");
+                }
+                let digest_hex = url_str.trim_start_matches("oci://sha256:");
+                if digest_hex.is_empty() {
+                    eyre::bail!("empty digest in OCI URL '{url_str}'");
+                }
+                let digest_key = format!("sha256:{digest_hex}");
+                let Some(repo_hash) = oci_digest_to_repo_hash.get(&digest_key) else {
+                    eyre::bail!(
+                        "OCI URL '{url_str}' references missing layer digest '{digest_key}'"
+                    );
+                };
+                *url_value = serde_json::Value::String(format!(
+                    "{}:///{repo_hash}",
+                    crate::blobs::BLOB_SCHEME
+                ));
+            }
+        }
+
+        Ok(manifest_json)
+    }
+
+    fn sha256_hex_from_digest_str(digest: &str) -> Res<String> {
+        let Some((algo, hex)) = digest.split_once(':') else {
+            eyre::bail!("invalid OCI digest '{digest}'");
+        };
+        eyre::ensure!(
+            algo == "sha256",
+            "unsupported OCI digest algorithm '{algo}'"
+        );
+        eyre::ensure!(!hex.is_empty(), "empty OCI digest hex");
+        Ok(hex.to_string())
+    }
+
+    fn validate_sha256_digest(digest: &str, bytes: &[u8]) -> Res<()> {
+        use sha2::{Digest as _, Sha256};
+        let expected_hex = Self::sha256_hex_from_digest_str(digest)?;
+        let actual_hex = format!("{:x}", Sha256::digest(bytes));
+        eyre::ensure!(
+            expected_hex.eq_ignore_ascii_case(&actual_hex),
+            "OCI blob digest mismatch for '{digest}'"
+        );
+        Ok(())
+    }
+
+    async fn read_oci_layout_blob_by_sha(
+        layout_root: &std::path::Path,
+        sha_hex: &str,
+    ) -> Res<Vec<u8>> {
+        let path = layout_root.join("blobs").join("sha256").join(sha_hex);
+        tokio::fs::read(&path)
+            .await
+            .wrap_err_with(|| format!("error reading OCI layout blob '{}'", path.display()))
     }
 
     fn blob_hashes_for_manifest(manifest: &manifest::PlugManifest) -> Res<HashSet<String>> {
@@ -1513,17 +1693,7 @@ impl PlugsRepo {
         // 2. The specific keys being requested are actually defined by that plug.
         // 3. The requested schema is compatible with what the provider offers.
         for (dep_id_full, dep_manifest) in &manifest.dependencies {
-            let dep_base_id = if dep_id_full.starts_with('@') {
-                // For strings like "@ns/name@1.2.3", we want "@ns/name"
-                let parts: Vec<&str> = dep_id_full.strip_prefix('@').unwrap().split('@').collect();
-                format!("@{}", parts[0])
-            } else {
-                dep_id_full
-                    .split('@')
-                    .next()
-                    .ok_or_eyre("invalid dependency id")?
-                    .to_string()
-            };
+            let dep_base_id = parse_dep_base_id(dep_id_full)?;
             let provider = self
                 .get(&dep_base_id)
                 .await
@@ -1601,6 +1771,19 @@ impl PlugsRepo {
                 }
             }
         }
+        for (init_name, init_manifest) in &manifest.inits {
+            match &init_manifest.deets {
+                manifest::InitDeets::InvokeRoutine { routine_name } => {
+                    if !manifest.routines.contains_key(routine_name) {
+                        eyre::bail!(
+                            "Invalid init deets: routine '{}' not found in plug (init='{}')",
+                            routine_name,
+                            init_name
+                        );
+                    }
+                }
+            }
+        }
 
         for (processor_name, processor_manifest) in &manifest.processors {
             match &processor_manifest.deets {
@@ -1671,22 +1854,18 @@ impl PlugsRepo {
                 available_tags.insert(key.key_tag.to_string());
             }
         }
+        let dependency_base_ids: HashSet<String> = manifest
+            .dependencies
+            .keys()
+            .map(|dep_id_full| parse_dep_base_id(dep_id_full))
+            .collect::<Res<HashSet<_>>>()?;
         let mut available_local_states: HashSet<(String, String)> = manifest
             .local_states
             .keys()
             .map(|key| (plug_id.clone(), key.to_string()))
             .collect();
         for (dep_id_full, dep_manifest) in &manifest.dependencies {
-            let dep_base_id = if dep_id_full.starts_with('@') {
-                let parts: Vec<&str> = dep_id_full.strip_prefix('@').unwrap().split('@').collect();
-                format!("@{}", parts[0])
-            } else {
-                dep_id_full
-                    .split('@')
-                    .next()
-                    .ok_or_eyre("invalid dependency id")?
-                    .to_string()
-            };
+            let dep_base_id = parse_dep_base_id(dep_id_full)?;
             for local_state in &dep_manifest.local_states {
                 available_local_states
                     .insert((dep_base_id.clone(), local_state.local_state_key.to_string()));
@@ -1699,10 +1878,18 @@ impl PlugsRepo {
                     eyre::bail!("Invalid ACL in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}", routine_name, access.tag);
                 }
             }
-            for access in routine.config_prop_acl() {
+            for access in routine.config_facet_acl() {
+                let owner_plug_id = access.owner_plug_id.as_deref().unwrap_or(&plug_id);
+                if owner_plug_id != plug_id && !dependency_base_ids.contains(owner_plug_id) {
+                    eyre::bail!(
+                        "Invalid config_facet_acl in routine '{}': owner plug '{}' is neither this plug nor a declared dependency",
+                        routine_name,
+                        owner_plug_id
+                    );
+                }
                 if !available_tags.contains(&access.tag.to_string()) {
                     eyre::bail!(
-                        "Invalid config_prop_acl in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
+                        "Invalid config_facet_acl in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
                         routine_name,
                         access.tag
                     );
@@ -1843,7 +2030,7 @@ fn validate_facet_reference_manifests(
 ) -> Res<()> {
     let schema_json = serde_json::to_value(value_schema)?;
     for reference_manifest in references {
-        let Some(reference_node) = crate::plugs::reference::schema_node_for_json_path(
+        let Some(reference_node) = daybook_types::reference::schema_node_for_json_path(
             &schema_json,
             &reference_manifest.json_path,
         )?
@@ -1857,7 +2044,7 @@ fn validate_facet_reference_manifests(
 
         match reference_manifest.reference_kind {
             manifest::FacetReferenceKind::UrlFacet => {
-                if !crate::plugs::reference::schema_allows_url_reference(reference_node) {
+                if !daybook_types::reference::schema_allows_url_reference(reference_node) {
                     eyre::bail!(
                         "invalid reference json_path '{}' for facet tag '{}': schema node must allow a URL string or an array of URL strings",
                         reference_manifest.json_path,
@@ -1868,7 +2055,7 @@ fn validate_facet_reference_manifests(
         }
 
         if let Some(at_commit_json_path) = &reference_manifest.at_commit_json_path {
-            let Some(at_commit_node) = crate::plugs::reference::schema_node_for_json_path(
+            let Some(at_commit_node) = daybook_types::reference::schema_node_for_json_path(
                 &schema_json,
                 at_commit_json_path,
             )?
@@ -1879,7 +2066,7 @@ fn validate_facet_reference_manifests(
                     facet_tag
                 );
             };
-            if !crate::plugs::reference::schema_allows_array_of_strings(at_commit_node) {
+            if !daybook_types::reference::schema_allows_array_of_strings(at_commit_node) {
                 eyre::bail!(
                     "invalid at_commit_json_path '{}' for facet tag '{}': schema node must allow an array of commit hashes",
                     at_commit_json_path,
@@ -1941,6 +2128,7 @@ mod tests {
             routines: default(),
             wflow_bundles: default(),
             commands: default(),
+            inits: default(),
             processors: default(),
         }
     }

@@ -1,10 +1,12 @@
-use crate::drawer::DrawerRepo;
 use crate::interlude::*;
-use crate::plugs::manifest::{DocPredicateClause, FacetReferenceKind, FacetReferenceManifest};
-use crate::plugs::reference::select_json_path_values;
+
+use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
 use crate::repos::Repo;
+
 use daybook_types::doc::{BranchPath, ChangeHashSet, DocId, FacetKey};
+use daybook_types::manifest::{DocPredicateClause, FacetReferenceKind, FacetReferenceManifest};
+use daybook_types::reference::select_json_path_values;
 use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
 use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;

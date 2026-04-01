@@ -2243,6 +2243,9 @@ dependencies = [
  "libsqlite3-sys",
  "loom",
  "mltools",
+ "oci-client",
+ "oci-spec",
+ "oci-wasm",
  "once_cell",
  "pastey",
  "rand 0.9.2",
@@ -2253,6 +2256,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlite-vec",
  "sqlx",
  "struct-patch",
@@ -2345,14 +2349,15 @@ dependencies = [
  "camino",
  "data-encoding",
  "displaydoc",
+ "garde",
  "pastey",
  "schemars 1.2.0",
+ "semver",
  "serde",
  "serde_json",
  "serde_with",
  "struct-patch",
  "thiserror 2.0.18",
- "time",
  "uniffi",
  "utils_rs",
  "uuid",
@@ -7092,6 +7097,48 @@ dependencies = [
  "quick-xml",
  "serde",
  "time",
+]
+
+[[package]]
+name = "plug_dayledger"
+version = "0.1.0"
+dependencies = [
+ "am_utils_rs",
+ "api_utils_rs",
+ "automerge",
+ "color-eyre",
+ "daybook_types",
+ "displaydoc",
+ "multihash",
+ "pastey",
+ "schemars 1.2.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+ "utils_rs",
+ "wflow_sdk",
+ "wit-bindgen 0.52.0",
+]
+
+[[package]]
+name = "plug_plabels"
+version = "0.1.0"
+dependencies = [
+ "am_utils_rs",
+ "api_utils_rs",
+ "color-eyre",
+ "daybook_core",
+ "daybook_types",
+ "displaydoc",
+ "multihash",
+ "schemars 1.2.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "utils_rs",
+ "wflow_sdk",
+ "wit-bindgen 0.52.0",
 ]
 
 [[package]]
@@ -12580,6 +12627,8 @@ dependencies = [
  "bon",
  "clap",
  "data-encoding",
+ "daybook_core",
+ "daybook_types",
  "dotenv-flow",
  "fastembed",
  "heck",
@@ -12590,13 +12639,19 @@ dependencies = [
  "irpc-iroh",
  "libsqlite3-sys",
  "mltools",
+ "oci-spec",
+ "oci-wasm",
  "ollama-rs",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "sqlite-vec",
  "sqlx",
  "tokio",
  "tracing",
+ "url",
  "utils_rs",
+ "zstd",
 ]
 
 [[package]]

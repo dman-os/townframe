@@ -13,6 +13,8 @@ members = [
   "./src/macros",
   "./src/mltools/",
   "./src/pauperfuse/",
+  "./src/plug_dayledger/",
+  "./src/plug_plabels/",
   "./src/test_wflows",
   "./src/utils_rs",
   # "./src/wash_plugin_pglite/",
@@ -56,6 +58,7 @@ macros = { path = "./src/macros" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
+plug_plabels = { path = "./src/plug_plabels", default-features = false }
 mltools = { path = "./src/mltools", default-features = false }
 pauperfuse = { path = "./src/pauperfuse", default-features = false }
 wflow = { path = "./src/wflow", default-features = false }
@@ -90,6 +93,7 @@ bytes = "1"
 url = "2.5.7"
 addr = "0.15.6"
 scopeguard = "1.2.0"
+semver = { version = "1", features = ["serde"] }
 
 #
 # encoding

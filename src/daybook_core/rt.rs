@@ -5,8 +5,8 @@ use crate::local_state::SqliteLocalStateRepo;
 
 use crate::blobs::BlobsRepo;
 use crate::drawer::DrawerRepo;
-use crate::plugs::manifest;
 use crate::plugs::PlugsRepo;
+use daybook_types::manifest;
 
 use daybook_types::doc::{FacetKey, FacetTag};
 use std::collections::BTreeMap;
@@ -27,13 +27,16 @@ use wflow::{
 };
 
 pub mod dispatch;
+pub mod init;
 pub mod switch;
 pub mod triage;
 pub mod wash_plugin;
 
 use dispatch::{
-    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchRepo, FacetRoutineArgs,
+    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchOnSuccessHook, DispatchRepo,
+    FacetRoutineArgs,
 };
+use init::InitRepo;
 
 pub struct RtConfig {
     pub device_id: String,
@@ -47,6 +50,7 @@ pub struct Rt {
     pub config_repo: Arc<ConfigRepo>,
     pub wflow_ingress: Arc<dyn wflow::WflowIngress>,
     pub dispatch_repo: Arc<dispatch::DispatchRepo>,
+    pub init_repo: Arc<InitRepo>,
     pub progress_repo: Arc<crate::progress::ProgressRepo>,
     pub big_repo: SharedBigRepo,
     pub wflow_part_state: Arc<PartitionWorkingState>,
@@ -74,6 +78,7 @@ pub struct RtStopToken {
     doc_facet_set_index_stop: crate::index::DocFacetSetIndexStopToken,
     doc_facet_ref_index_stop: crate::index::DocFacetRefIndexStopToken,
     sqlite_local_state_stop: crate::repos::RepoStopToken,
+    init_repo_stop: crate::repos::RepoStopToken,
 }
 
 impl RtStopToken {
@@ -153,6 +158,12 @@ impl RtStopToken {
                 "error stopping sqlite_local_state_repo during shutdown - continuing"
             );
         }
+        if let Err(err) = self.init_repo_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping init_repo during shutdown - continuing"
+            );
+        }
 
         if let Err(err) =
             utils_rs::wait_on_handle_with_timeout(self.partition_watcher, Duration::from_secs(10))
@@ -189,6 +200,7 @@ impl Rt {
         config: RtConfig,
         app_doc_id: DocumentId,
         wflow_db_url: String,
+        sql_pool: sqlx::SqlitePool,
         big_repo: SharedBigRepo,
         drawer: Arc<DrawerRepo>,
         plugs_repo: Arc<PlugsRepo>,
@@ -202,6 +214,13 @@ impl Rt {
         let wcx = wflow::Ctx::init(&wflow_db_url).await?;
         let (sqlite_local_state_repo, sqlite_local_state_stop) =
             SqliteLocalStateRepo::boot(local_state_root).await?;
+        let (init_repo, init_repo_stop) = InitRepo::load(
+            Arc::clone(&big_repo),
+            app_doc_id.clone(),
+            local_actor_id.clone(),
+            sql_pool,
+        )
+        .await?;
 
         let (doc_facet_set_index_repo, doc_facet_set_index_stop) =
             crate::index::DocFacetSetIndexRepo::boot(
@@ -232,6 +251,7 @@ impl Rt {
             Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
             Arc::clone(&config_repo),
+            Arc::clone(&plugs_repo),
         ));
         let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {})
             .wrap_err("error creating utils plugin")?;
@@ -307,6 +327,7 @@ impl Rt {
             big_repo,
             wflow_ingress,
             dispatch_repo,
+            init_repo,
             progress_repo,
             wcx,
             wash_host,
@@ -324,31 +345,43 @@ impl Rt {
             local_actor_id,
         });
 
+        // Ensure init routines are queued at boot according to each init run mode.
+        let mut plug_ids = rt
+            .plugs_repo
+            .list_plugs()
+            .await
+            .into_iter()
+            .map(|plug| plug.id())
+            .collect::<Vec<_>>();
+        plug_ids.sort();
+        for plug_id in plug_ids {
+            let _ = rt.ensure_plug_init_dispatches(&plug_id).await?;
+        }
+
         // Start the DocTriageWorker to automatically queue jobs when docs are added
-        let triage_listeners: BTreeMap<
-            String,
-            Box<dyn crate::rt::switch::SwitchSink + Send + Sync>,
-        > = [
-            (
-                "doc_processor".to_string(),
-                crate::rt::triage::doc_processor_triage_listener(),
-            ),
-            (
-                "doc_blobs".to_string(),
-                doc_blobs_index_repo.triage_listener(),
-            ),
-            (
-                "facet_set".to_string(),
-                doc_facet_set_index_repo.triage_listener(),
-            ),
-            (
-                "facet_ref".to_string(),
-                doc_facet_ref_index_repo.triage_listener(),
-            ),
-        ]
-        .into();
+        let switch_sinks: BTreeMap<String, Box<dyn crate::rt::switch::SwitchSink + Send + Sync>> =
+            [
+                // FIXME: rename the methods to switch sinks
+                (
+                    "doc_processor".to_string(),
+                    crate::rt::triage::doc_processor_triage_listener(),
+                ),
+                (
+                    "doc_blobs".to_string(),
+                    doc_blobs_index_repo.triage_listener(),
+                ),
+                (
+                    "facet_set".to_string(),
+                    doc_facet_set_index_repo.triage_listener(),
+                ),
+                (
+                    "facet_ref".to_string(),
+                    doc_facet_ref_index_repo.triage_listener(),
+                ),
+            ]
+            .into();
         let switch_worker =
-            crate::rt::switch::spawn_switch_worker(Arc::clone(&rt), app_doc_id, triage_listeners)
+            crate::rt::switch::spawn_switch_worker(Arc::clone(&rt), app_doc_id, switch_sinks)
                 .await?;
 
         let partition_watcher = tokio::spawn({
@@ -366,6 +399,7 @@ impl Rt {
                 doc_facet_set_index_stop,
                 doc_facet_ref_index_stop,
                 sqlite_local_state_stop,
+                init_repo_stop,
                 wflow_part_handle,
             },
         ))
@@ -414,11 +448,25 @@ impl Rt {
             };
             let (idx, entry) = entry?;
             if let Some(entry) = entry {
-                self.handle_wflow_entry(idx, entry).await?;
+                if let Err(err) = self.handle_wflow_entry(idx, entry).await {
+                    if self.cancel_token.is_cancelled() {
+                        debug!(error = %err, "ignoring wflow entry error during shutdown");
+                        break;
+                    }
+                    return Err(err);
+                }
             };
-            self.dispatch_repo
+            if let Err(err) = self
+                .dispatch_repo
                 .set_wflow_part_frontier(self.local_wflow_part_id.clone(), idx)
-                .await?;
+                .await
+            {
+                if self.cancel_token.is_cancelled() {
+                    debug!(error = %err, "ignoring frontier write error during shutdown");
+                    break;
+                }
+                return Err(err);
+            }
         }
         Ok(())
     }
@@ -429,6 +477,134 @@ impl Rt {
         }
         Ok(())
     }
+
+    async fn collect_plug_and_dependency_order(&self, plug_id: &str) -> Res<Vec<String>> {
+        fn dep_base_id(dep_id_full: &str) -> Res<String> {
+            if dep_id_full.starts_with('@') {
+                let without_prefix = dep_id_full
+                    .strip_prefix('@')
+                    .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id_full}"))?;
+                let base = without_prefix
+                    .split('@')
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id_full}"))?;
+                Ok(format!("@{base}"))
+            } else {
+                let base = dep_id_full
+                    .split('@')
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id_full}"))?;
+                Ok(base.to_string())
+            }
+        }
+
+        let mut permanent = HashSet::new();
+        let mut temporary = HashSet::new();
+        let mut out = vec![];
+        let mut stack: Vec<(String, bool)> = vec![(plug_id.to_string(), false)];
+        while let Some((cur, expanded)) = stack.pop() {
+            if permanent.contains(&cur) {
+                continue;
+            }
+            if expanded {
+                temporary.remove(&cur);
+                permanent.insert(cur.clone());
+                out.push(cur);
+                continue;
+            }
+            if !temporary.insert(cur.clone()) {
+                eyre::bail!("circular plug dependencies detected around {cur}");
+            }
+            stack.push((cur.clone(), true));
+            let plug = self
+                .plugs_repo
+                .get(&cur)
+                .await
+                .ok_or_else(|| ferr!("plug not found in repo: {cur}"))?;
+            let mut deps = plug
+                .dependencies
+                .keys()
+                .map(|raw| dep_base_id(raw))
+                .collect::<Res<Vec<_>>>()?;
+            deps.sort();
+            for dep in deps.into_iter().rev() {
+                if !permanent.contains(&dep) {
+                    stack.push((dep, false));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn ensure_plug_init_dispatches(&self, plug_id: &str) -> Res<Vec<String>> {
+        let order = self.collect_plug_and_dependency_order(plug_id).await?;
+        let mut unresolved_init_dispatch_ids = vec![];
+        for plug_id in order {
+            let plug = self
+                .plugs_repo
+                .get(&plug_id)
+                .await
+                .ok_or_else(|| ferr!("plug not found in repo: {plug_id}"))?;
+            let mut init_keys = plug.inits.keys().cloned().collect::<Vec<_>>();
+            init_keys.sort();
+
+            for init_key in init_keys {
+                let init_manifest = plug.inits.get(&init_key).ok_or_else(|| {
+                    ferr!("init not found in plug manifest: {plug_id}/{init_key}")
+                })?;
+                let init_id = init::InitRepo::init_id(&plug_id, &plug.version, &init_key.0);
+                if self
+                    .init_repo
+                    .is_done(&init_manifest.run_mode, &init_id)
+                    .await?
+                {
+                    continue;
+                }
+                if let Some(running_dispatch_id) =
+                    self.init_repo.get_running_dispatch(&init_id).await
+                {
+                    unresolved_init_dispatch_ids.push(running_dispatch_id);
+                    continue;
+                }
+                let daybook_types::manifest::InitDeets::InvokeRoutine { routine_name } =
+                    &init_manifest.deets;
+                let config_doc_id = self
+                    .plugs_repo
+                    .get_or_init_plug_config_doc_id(&plug_id, &self.drawer)
+                    .await?;
+                let config_heads = self
+                    .drawer
+                    .get_doc_branches(&config_doc_id)
+                    .await?
+                    .and_then(|doc| doc.branches.get("main").cloned())
+                    .ok_or_else(|| ferr!("config doc missing main branch for plug {plug_id}"))?;
+                let dispatch_id = self
+                    .dispatch_no_gate(
+                        &plug_id,
+                        &routine_name.0,
+                        DispatchArgs::DocFacet {
+                            doc_id: config_doc_id,
+                            branch_path: daybook_types::doc::BranchPath::from("main"),
+                            heads: config_heads,
+                            facet_key: None,
+                        },
+                        vec![DispatchOnSuccessHook::InitMarkDone {
+                            init_id: init_id.clone(),
+                            run_mode: init_manifest.run_mode.clone(),
+                        }],
+                        unresolved_init_dispatch_ids.clone(),
+                    )
+                    .await?;
+                self.init_repo
+                    .set_running_dispatch(&init_id, &dispatch_id)
+                    .await?;
+                unresolved_init_dispatch_ids.push(dispatch_id);
+            }
+        }
+        Ok(unresolved_init_dispatch_ids)
+    }
     #[tracing::instrument(skip(self, entry))]
     async fn handle_wflow_entry(&self, entry_id: u64, entry: PartitionLogEntry) -> Res<()> {
         let PartitionLogEntry::JobEffectResult(event) = entry else {
@@ -437,7 +613,7 @@ impl Rt {
         let Some((dispatch_id, _)) = event.job_id.rsplit_once('-') else {
             return Ok(());
         };
-        let Some(dispatch) = self.dispatch_repo.get(dispatch_id).await else {
+        let Some(dispatch) = self.dispatch_repo.get_active(dispatch_id).await else {
             return Ok(());
         };
         let ActiveDispatchDeets::Wflow {
@@ -445,7 +621,10 @@ impl Rt {
             wflow_key,
             ..
         } = &dispatch.deets;
-        if wflow_job_id != event.job_id.as_ref() {
+        let Some(wflow_job_id) = wflow_job_id.as_ref() else {
+            return Ok(());
+        };
+        if wflow_job_id.as_str() != event.job_id.as_ref() {
             debug!(
                 %dispatch_id,
                 active_job_id = %wflow_job_id,
@@ -565,28 +744,9 @@ impl Rt {
                 ..
             }) = &dispatch.args;
 
-            let is_success = matches!(&event.result, JobRunResult::Success { .. });
-            self.progress_repo
-                .add_update(
-                    dispatch_id,
-                    crate::progress::ProgressUpdate {
-                        at: jiff::Timestamp::now(),
-                        title: None,
-                        deets: crate::progress::ProgressUpdateDeets::Completed {
-                            state: if is_success {
-                                crate::progress::ProgressFinalState::Succeeded
-                            } else if matches!(&event.result, JobRunResult::Aborted) {
-                                crate::progress::ProgressFinalState::Cancelled
-                            } else {
-                                crate::progress::ProgressFinalState::Failed
-                            },
-                            message: None,
-                        },
-                    },
-                )
-                .await?;
+            let mut merged_successfully = matches!(&event.result, JobRunResult::Success { .. });
 
-            if is_success {
+            if merged_successfully {
                 // Merge staging branch into target branch
                 info!(
                     ?doc_id,
@@ -604,28 +764,41 @@ impl Rt {
                         warn!(
                             ?doc_id,
                             ?name,
-                            "staging branch missing during merge; skipping merge/delete"
+                            "staging branch missing during merge; treating dispatch as failed"
                         );
-                        self.dispatch_repo.remove(dispatch_id.into()).await?;
-                        return Ok(());
+                        merged_successfully = false;
                     }
                     Err(err) => {
                         return Err(eyre::eyre!(err).wrap_err("error merging staging branch"));
                     }
                 }
 
-                // Delete the staging branch after successful merge
-                info!(
-                    ?doc_id,
-                    ?staging_branch_path,
-                    "deleting staging branch after successful merge"
-                );
-                self.drawer
-                    .delete_branch(doc_id, staging_branch_path, None)
-                    .await
-                    .wrap_err("error deleting staging branch after merge")?;
-            } else {
-                // Delete staging branch on failure
+                if merged_successfully {
+                    // Delete the staging branch after successful merge
+                    info!(
+                        ?doc_id,
+                        ?staging_branch_path,
+                        "deleting staging branch after successful merge"
+                    );
+                    self.drawer
+                        .delete_branch(doc_id, staging_branch_path, None)
+                        .await
+                        .or_else(|err| match err {
+                            crate::drawer::types::DrawerError::BranchNotFound { .. } => {
+                                debug!(
+                                    ?doc_id,
+                                    ?staging_branch_path,
+                                    "staging branch already removed after successful merge"
+                                );
+                                Ok(false)
+                            }
+                            other => Err(other),
+                        })
+                        .wrap_err("error deleting staging branch after merge")?;
+                }
+            }
+            if !merged_successfully {
+                // Delete staging branch on failure if it exists.
                 info!(
                     ?doc_id,
                     ?staging_branch_path,
@@ -634,11 +807,224 @@ impl Rt {
                 self.drawer
                     .delete_branch(doc_id, staging_branch_path, None)
                     .await
+                    .or_else(|err| match err {
+                        crate::drawer::types::DrawerError::BranchNotFound { .. } => Ok(false),
+                        other => Err(other),
+                    })
                     .wrap_err("error deleting staging branch")?;
+                for hook in &dispatch.on_success_hooks {
+                    match hook {
+                        DispatchOnSuccessHook::InitMarkDone { init_id, .. } => {
+                            self.init_repo
+                                .clear_running_dispatch(init_id, dispatch_id)
+                                .await?;
+                        }
+                    }
+                }
+            } else {
+                for hook in &dispatch.on_success_hooks {
+                    match hook {
+                        DispatchOnSuccessHook::InitMarkDone { init_id, run_mode } => {
+                            self.init_repo.mark_done(run_mode, init_id).await?;
+                            self.init_repo
+                                .clear_running_dispatch(init_id, dispatch_id)
+                                .await?;
+                        }
+                    }
+                }
             }
 
-            self.dispatch_repo.remove(dispatch_id.into()).await?;
+            let final_status = if merged_successfully {
+                dispatch::DispatchStatus::Succeeded
+            } else if matches!(&event.result, JobRunResult::Aborted) {
+                dispatch::DispatchStatus::Cancelled
+            } else {
+                dispatch::DispatchStatus::Failed
+            };
+            self.progress_repo
+                .add_update(
+                    dispatch_id,
+                    crate::progress::ProgressUpdate {
+                        at: jiff::Timestamp::now(),
+                        title: None,
+                        deets: crate::progress::ProgressUpdateDeets::Completed {
+                            state: if matches!(final_status, dispatch::DispatchStatus::Succeeded) {
+                                crate::progress::ProgressFinalState::Succeeded
+                            } else if matches!(final_status, dispatch::DispatchStatus::Cancelled) {
+                                crate::progress::ProgressFinalState::Cancelled
+                            } else {
+                                crate::progress::ProgressFinalState::Failed
+                            },
+                            message: None,
+                        },
+                    },
+                )
+                .await?;
+            self.dispatch_repo
+                .complete(dispatch_id.into(), final_status.clone())
+                .await?;
+            self.release_waiting_dispatches(
+                dispatch_id,
+                matches!(final_status, dispatch::DispatchStatus::Succeeded),
+            )
+            .await?;
         }
+        Ok(())
+    }
+
+    async fn release_waiting_dispatches(
+        &self,
+        completed_dispatch_id: &str,
+        is_success: bool,
+    ) -> Res<()> {
+        let waiting_dispatches = self
+            .dispatch_repo
+            .list_waiting_on(completed_dispatch_id)
+            .await;
+        for (waiting_id, waiting_dispatch) in waiting_dispatches {
+            if !is_success {
+                self.dispatch_repo.set_waiting_failed(&waiting_id).await?;
+                self.progress_repo
+                    .add_update(
+                        &waiting_id,
+                        crate::progress::ProgressUpdate {
+                            at: jiff::Timestamp::now(),
+                            title: None,
+                            deets: crate::progress::ProgressUpdateDeets::Completed {
+                                state: crate::progress::ProgressFinalState::Failed,
+                                message: Some(
+                                    "dependency dispatch failed; waiting dispatch cancelled"
+                                        .to_string(),
+                                ),
+                            },
+                        },
+                    )
+                    .await?;
+                for hook in &waiting_dispatch.on_success_hooks {
+                    match hook {
+                        DispatchOnSuccessHook::InitMarkDone { init_id, .. } => {
+                            self.init_repo
+                                .clear_running_dispatch(init_id, &waiting_id)
+                                .await?;
+                        }
+                    }
+                }
+                continue;
+            }
+            if let Some(ready_dispatch) = self
+                .dispatch_repo
+                .remove_waiting_dependency(&waiting_id, completed_dispatch_id)
+                .await?
+            {
+                self.start_waiting_dispatch(waiting_id, ready_dispatch)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn start_waiting_dispatch(
+        &self,
+        dispatch_id: String,
+        waiting_dispatch: Arc<ActiveDispatch>,
+    ) -> Res<()> {
+        let ActiveDispatchDeets::Wflow {
+            plug_id,
+            bundle_name,
+            wflow_key,
+            wflow_job_id,
+            ..
+        } = &waiting_dispatch.deets;
+        let Some(job_id) = wflow_job_id.as_ref() else {
+            eyre::bail!("waiting dispatch missing job id: {dispatch_id}");
+        };
+        let plug_man = self
+            .plugs_repo
+            .get(plug_id)
+            .await
+            .ok_or_else(|| ferr!("plug not found in repo: {plug_id}"))?;
+        let bundle_man = plug_man
+            .wflow_bundles
+            .get(bundle_name.as_str())
+            .ok_or_else(|| {
+                ferr!("bundle not found in plug manifest: plug={plug_id} bundle={bundle_name}")
+            })?;
+        let key: daybook_types::manifest::KeyGeneric = wflow_key.clone().into();
+        let _workload_id = ensure_bundle_workload_running(
+            &self.wcx,
+            &self.wash_host,
+            &self.blobs_repo,
+            plug_id.clone(),
+            bundle_name.clone(),
+            bundle_man,
+        )
+        .await?;
+        let initial_deets = ActiveDispatchDeets::Wflow {
+            wflow_partition_id: None,
+            entry_id: None,
+            plug_id: plug_id.clone(),
+            bundle_name: bundle_name.clone(),
+            wflow_key: wflow_key.clone(),
+            wflow_job_id: Some(job_id.clone()),
+        };
+        self.dispatch_repo
+            .activate_waiting(&dispatch_id, initial_deets)
+            .await?;
+        let entry_id = match self
+            .wflow_ingress
+            .add_job(
+                job_id.clone().into(),
+                &key,
+                serde_json::to_string(&()).expect(ERROR_JSON),
+                None,
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                self.dispatch_repo
+                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
+                    .await?;
+                return Err(err).wrap_err_with(|| {
+                    format!("error scheduling deferred job for dispatch {dispatch_id}")
+                });
+            }
+        };
+        let deets = ActiveDispatchDeets::Wflow {
+            wflow_partition_id: Some(self.local_wflow_part_id.clone()),
+            entry_id: Some(entry_id),
+            plug_id: plug_id.clone(),
+            bundle_name: bundle_name.clone(),
+            wflow_key: wflow_key.clone(),
+            wflow_job_id: Some(job_id.clone()),
+        };
+        if let Err(err) = self
+            .dispatch_repo
+            .update_active_deets(&dispatch_id, deets)
+            .await
+        {
+            let _ = self
+                .wflow_ingress
+                .cancel_job(
+                    Arc::from(job_id.as_ref()),
+                    format!("rollback scheduling for dispatch {dispatch_id}"),
+                )
+                .await;
+            return Err(err);
+        }
+        self.progress_repo
+            .add_update(
+                &dispatch_id,
+                crate::progress::ProgressUpdate {
+                    at: jiff::Timestamp::now(),
+                    title: None,
+                    deets: crate::progress::ProgressUpdateDeets::Status {
+                        severity: crate::progress::ProgressSeverity::Info,
+                        message: "dependencies resolved, dispatch queued".to_string(),
+                    },
+                },
+            )
+            .await?;
         Ok(())
     }
 
@@ -647,6 +1033,36 @@ impl Rt {
         plug_id: &str,
         routine_name: &str,
         args: DispatchArgs,
+    ) -> Res<String> {
+        self.dispatch_raw(plug_id, routine_name, args, vec![]).await
+    }
+
+    async fn dispatch_raw(
+        &self,
+        plug_id: &str,
+        routine_name: &str,
+        args: DispatchArgs,
+        on_success_hooks: Vec<DispatchOnSuccessHook>,
+    ) -> Res<String> {
+        self.ensure_rt_live()?;
+        let waiting_on_dispatch_ids = self.ensure_plug_init_dispatches(plug_id).await?;
+        self.dispatch_no_gate(
+            plug_id,
+            routine_name,
+            args,
+            on_success_hooks,
+            waiting_on_dispatch_ids,
+        )
+        .await
+    }
+
+    async fn dispatch_no_gate(
+        &self,
+        plug_id: &str,
+        routine_name: &str,
+        args: DispatchArgs,
+        on_success_hooks: Vec<DispatchOnSuccessHook>,
+        waiting_on_dispatch_ids: Vec<String>,
     ) -> Res<String> {
         self.ensure_rt_live()?;
 
@@ -660,8 +1076,8 @@ impl Rt {
             .get(routine_name)
             .ok_or_else(|| ferr!("routine not found in plug manifest: {plug_id}/{routine_name}"))?;
 
-        use crate::plugs::manifest::RoutineManifestDeets;
-        let (dispatch_id, mut args) = match (&routine_man.deets, args) {
+        use daybook_types::manifest::RoutineManifestDeets;
+        let (mut dispatch_id, mut args) = match (&routine_man.deets, args) {
             (
                 RoutineManifestDeets::DocFacet {
                     working_facet_tag, ..
@@ -699,7 +1115,7 @@ impl Rt {
                         heads,
                         facet_key,
                         facet_acl: routine_man.facet_acl().to_vec(),
-                        config_prop_acl: routine_man.config_prop_acl().to_vec(),
+                        config_facet_acl: routine_man.config_facet_acl().to_vec(),
                         local_state_acl: routine_man.local_state_acl.clone(),
                         staging_branch_path: daybook_types::doc::BranchPath::from(
                             "/tmp/placeholder",
@@ -713,32 +1129,30 @@ impl Rt {
                 ));
             }
         };
-        if let Some(_disp) = self.dispatch_repo.get(&dispatch_id).await {
-            warn!(?dispatch_id, "dispatch already active");
-            return Ok(dispatch_id);
+        if let Some(existing) = self.dispatch_repo.get_any(&dispatch_id).await {
+            if matches!(
+                existing.status,
+                dispatch::DispatchStatus::Waiting | dispatch::DispatchStatus::Active
+            ) {
+                let can_reuse = serde_json::to_string(&existing.on_success_hooks)
+                    .expect(ERROR_JSON)
+                    == serde_json::to_string(&on_success_hooks).expect(ERROR_JSON)
+                    && existing.waiting_on_dispatch_ids == waiting_on_dispatch_ids;
+                if can_reuse {
+                    warn!(?dispatch_id, "dispatch already pending/active");
+                    return Ok(dispatch_id);
+                }
+                dispatch_id = format!("{dispatch_id}-{}", Uuid::new_v4().bs58());
+            }
         }
+
+        let is_waiting = !waiting_on_dispatch_ids.is_empty();
 
         let deets = match &routine_man.r#impl {
             manifest::RoutineImpl::Wflow {
                 key,
                 bundle: bundle_name,
             } => {
-                let bundle_man = plug_man.wflow_bundles.get(bundle_name).ok_or_else(|| {
-                    ferr!(
-                        "bundle not found in plug manifest: routine={plug_id}/{routine_name} bundle={bundle_name} key={key}"
-                    )
-                })?;
-
-                let _workload_id = ensure_bundle_workload_running(
-                    &self.wcx,
-                    &self.wash_host,
-                    &self.blobs_repo,
-                    plug_id.into(),
-                    bundle_name.0.clone(),
-                    bundle_man,
-                )
-                .await?;
-
                 // let fqk = format!("{workload_id}/{key}");
                 let job_id = format!("{dispatch_id}-{id}", id = Uuid::new_v4().bs58());
                 let staging_branch_path =
@@ -748,30 +1162,61 @@ impl Rt {
                 let ActiveDispatchArgs::FacetRoutine(ref mut facet_args) = args;
                 facet_args.staging_branch_path = staging_branch_path.clone();
 
-                let entry_id = self
-                    .wflow_ingress
-                    .add_job(
-                        job_id.clone().into(),
-                        key,
-                        // &fqk,
-                        serde_json::to_string(&()).expect(ERROR_JSON),
-                        None,
-                    )
-                    .await
-                    .wrap_err_with(|| {
-                        format!("error scheduling job for {plug_id}/{routine_name}")
+                let mut entry_id = None;
+                let mut wflow_partition_id = None;
+                if !is_waiting {
+                    let bundle_man = plug_man.wflow_bundles.get(bundle_name).ok_or_else(|| {
+                        ferr!(
+                            "bundle not found in plug manifest: routine={plug_id}/{routine_name} bundle={bundle_name} key={key}"
+                        )
                     })?;
+                    let _workload_id = ensure_bundle_workload_running(
+                        &self.wcx,
+                        &self.wash_host,
+                        &self.blobs_repo,
+                        plug_id.into(),
+                        bundle_name.0.clone(),
+                        bundle_man,
+                    )
+                    .await?;
+
+                    entry_id = Some(
+                        self.wflow_ingress
+                            .add_job(
+                                job_id.clone().into(),
+                                key,
+                                serde_json::to_string(&()).expect(ERROR_JSON),
+                                None,
+                            )
+                            .await
+                            .wrap_err_with(|| {
+                                format!("error scheduling job for {plug_id}/{routine_name}")
+                            })?,
+                    );
+                    wflow_partition_id = Some(self.local_wflow_part_id.clone());
+                }
+
                 ActiveDispatchDeets::Wflow {
-                    wflow_partition_id: self.local_wflow_part_id.clone(),
+                    wflow_partition_id,
                     entry_id,
                     plug_id: plug_id.into(),
                     bundle_name: bundle_name.0.clone(),
                     wflow_key: key.0.clone(),
-                    wflow_job_id: job_id,
+                    wflow_job_id: Some(job_id),
                 }
             }
         };
-        let active_dispatch = Arc::new(ActiveDispatch { args, deets });
+        let active_dispatch = Arc::new(ActiveDispatch {
+            args,
+            deets,
+            status: if is_waiting {
+                dispatch::DispatchStatus::Waiting
+            } else {
+                dispatch::DispatchStatus::Active
+            },
+            waiting_on_dispatch_ids,
+            on_success_hooks,
+        });
         self.dispatch_repo
             .add(dispatch_id.clone(), Arc::clone(&active_dispatch))
             .await?;
@@ -800,7 +1245,11 @@ impl Rt {
                     title: Some(title),
                     deets: crate::progress::ProgressUpdateDeets::Status {
                         severity: crate::progress::ProgressSeverity::Info,
-                        message: "dispatch queued".to_string(),
+                        message: if is_waiting {
+                            "dispatch waiting on dependencies".to_string()
+                        } else {
+                            "dispatch queued".to_string()
+                        },
                     },
                 },
             )
@@ -813,16 +1262,54 @@ impl Rt {
 
         let dispatch = self
             .dispatch_repo
-            .get(dispatch_id)
+            .get_any(dispatch_id)
             .await
             .ok_or_else(|| ferr!("dispatch not found under {dispatch_id}"))?;
+        if matches!(
+            dispatch.status,
+            dispatch::DispatchStatus::Succeeded
+                | dispatch::DispatchStatus::Failed
+                | dispatch::DispatchStatus::Cancelled
+        ) {
+            return Ok(());
+        }
+        if matches!(dispatch.status, dispatch::DispatchStatus::Waiting) {
+            self.dispatch_repo
+                .complete(dispatch_id.into(), dispatch::DispatchStatus::Cancelled)
+                .await?;
+            self.release_waiting_dispatches(dispatch_id, false).await?;
+            self.progress_repo
+                .add_update(
+                    dispatch_id,
+                    crate::progress::ProgressUpdate {
+                        at: jiff::Timestamp::now(),
+                        title: None,
+                        deets: crate::progress::ProgressUpdateDeets::Completed {
+                            state: crate::progress::ProgressFinalState::Cancelled,
+                            message: Some("dispatch cancelled while waiting".to_string()),
+                        },
+                    },
+                )
+                .await?;
+            return Ok(());
+        }
         let marked_now = self.dispatch_repo.mark_cancelled(dispatch_id).await?;
         if !marked_now {
             debug!(%dispatch_id, "cancel already requested; skipping duplicate cancel");
             return Ok(());
         }
         match &dispatch.deets {
-            ActiveDispatchDeets::Wflow { wflow_job_id, .. } => {
+            ActiveDispatchDeets::Wflow {
+                wflow_job_id,
+                entry_id,
+                ..
+            } => {
+                let Some(wflow_job_id) = wflow_job_id.as_ref() else {
+                    return Ok(());
+                };
+                if entry_id.is_none() {
+                    return Ok(());
+                }
                 self.progress_repo
                     .add_update(
                         dispatch_id,
@@ -838,7 +1325,7 @@ impl Rt {
                     .await?;
                 self.wflow_ingress
                     .cancel_job(
-                        Arc::from(wflow_job_id.as_str()),
+                        Arc::from(wflow_job_id.as_ref()),
                         format!("cancel requested for dispatch {dispatch_id}"),
                     )
                     .await
@@ -862,9 +1349,17 @@ impl Rt {
         let listener_handle = self.dispatch_repo.subscribe(SubscribeOpts::new(128));
 
         // check if the dispatch exists first
-        let Some(_dispatch) = self.dispatch_repo.get(dispatch_id).await else {
+        let Some(dispatch) = self.dispatch_repo.get_any(dispatch_id).await else {
             return Ok(());
         };
+        if matches!(
+            dispatch.status,
+            dispatch::DispatchStatus::Succeeded
+                | dispatch::DispatchStatus::Failed
+                | dispatch::DispatchStatus::Cancelled
+        ) {
+            return Ok(());
+        }
 
         tokio::time::timeout(timeout, async {
             loop {
@@ -872,10 +1367,28 @@ impl Rt {
                     .recv_async()
                     .await
                     .map_err(|err| eyre::eyre!("dispatch listener closed: {err:?}"))?;
-                if let dispatch::DispatchEvent::DispatchDeleted { id, .. } = &*event {
-                    if id == dispatch_id {
+                match &*event {
+                    dispatch::DispatchEvent::DispatchDeleted { id, .. } if id == dispatch_id => {
                         return Ok::<(), eyre::Report>(());
                     }
+                    dispatch::DispatchEvent::DispatchUpdated { id, .. }
+                    | dispatch::DispatchEvent::DispatchAdded { id, .. }
+                        if id == dispatch_id =>
+                    {
+                        if let Some(cur) = self.dispatch_repo.get_any(dispatch_id).await {
+                            if matches!(
+                                cur.status,
+                                dispatch::DispatchStatus::Succeeded
+                                    | dispatch::DispatchStatus::Failed
+                                    | dispatch::DispatchStatus::Cancelled
+                            ) {
+                                return Ok::<(), eyre::Report>(());
+                            }
+                        } else {
+                            return Ok::<(), eyre::Report>(());
+                        }
+                    }
+                    _ => {}
                 }
             }
         })

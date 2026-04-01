@@ -167,6 +167,7 @@ impl RepoCtx {
         local_device_name: String,
         initialize_repo: bool,
     ) -> Res<Self> {
+        cleanup_blobs_staging_dir(&layout.blobs_root).await?;
         let sql_config = SqlConfig {
             database_url: format!("sqlite://{}", layout.sqlite_path.display()),
         };
@@ -492,6 +493,15 @@ pub async fn mark_repo_initialized(repo_root: &std::path::Path) -> Res<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
     let _file = tokio::fs::File::create(layout.marker_path).await?;
+    Ok(())
+}
+
+async fn cleanup_blobs_staging_dir(blobs_root: &std::path::Path) -> Res<()> {
+    let staging_root = blobs_root.join("staging");
+    if tokio::fs::try_exists(&staging_root).await? {
+        tokio::fs::remove_dir_all(&staging_root).await?;
+    }
+    tokio::fs::create_dir_all(&staging_root).await?;
     Ok(())
 }
 
