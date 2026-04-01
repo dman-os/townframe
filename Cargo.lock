@@ -12656,6 +12656,7 @@ dependencies = [
  "bon",
  "clap",
  "data-encoding",
+ "daybook_core",
  "daybook_types",
  "dotenv-flow",
  "fastembed",

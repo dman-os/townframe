@@ -278,9 +278,7 @@ impl InitRepo {
         Ok(match run_mode {
             daybook_types::manifest::InitRunMode::PerInstall => {
                 self.store
-                    .query_sync(|store| {
-                        store.per_install_done.contains_key(init_id)
-                    })
+                    .query_sync(|store| store.per_install_done.contains_key(init_id))
                     .await
             }
             daybook_types::manifest::InitRunMode::PerNode => {
@@ -313,10 +311,9 @@ impl InitRepo {
                             completed_by_actor_id: self.local_actor_id.to_string(),
                         };
                         let versioned = match store.per_install_done.get(&init_id) {
-                            Some(_) => Versioned::update(
-                                self.local_actor_id.clone(),
-                                ThroughJson(deets),
-                            ),
+                            Some(_) => {
+                                Versioned::update(self.local_actor_id.clone(), ThroughJson(deets))
+                            }
                             None => {
                                 Versioned::mint(self.local_actor_id.clone(), ThroughJson(deets))
                             }
@@ -347,11 +344,7 @@ impl InitRepo {
 
     pub async fn get_running_dispatch(&self, init_id: &str) -> Option<String> {
         let init_id = init_id.to_string();
-        self.running_dispatches
-            .read()
-            .await
-            .get(&init_id)
-            .cloned()
+        self.running_dispatches.read().await.get(&init_id).cloned()
     }
 
     pub async fn set_running_dispatch(&self, init_id: &str, dispatch_id: &str) -> Res<()> {

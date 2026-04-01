@@ -64,6 +64,7 @@ use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 mod wasm_runtime {
     use crate::interlude::*;
+    use crate::wit;
     use crate::wit::exports::townframe::wflow::bundle::JobResult;
 
     wit::export!(Component with_types_in wit);
@@ -164,9 +165,7 @@ pub(crate) use wasm_runtime::{
 };
 
 pub fn plug_manifest() -> PlugManifest {
-    use crate::types::{
-        PlabelFacetTag, PseudoLabel, PseudoLabelCandidatesFacet, PseudoLabelError,
-    };
+    use crate::types::{PlabelFacetTag, PseudoLabel, PseudoLabelCandidatesFacet, PseudoLabelError};
     use daybook_types::doc::{Blob, Embedding, Note, WellKnownFacetTag};
     use daybook_types::manifest::{LocalStateManifest, PlugDependencyManifest};
 
@@ -360,15 +359,13 @@ pub fn plug_manifest() -> PlugManifest {
                     },
                     deets: RoutineManifestDeets::DocFacet {
                         working_facet_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
-                        facet_acl: vec![
-                            RoutineFacetAccess {
-                                owner_plug_id: None,
-                                tag: WellKnownFacetTag::Note.into(),
-                                key_id: None,
-                                read: true,
-                                write: false,
-                            },
-                        ],
+                        facet_acl: vec![RoutineFacetAccess {
+                            owner_plug_id: None,
+                            tag: WellKnownFacetTag::Note.into(),
+                            key_id: None,
+                            read: true,
+                            write: false,
+                        }],
                         config_facet_acl: vec![RoutineFacetAccess {
                             owner_plug_id: None,
                             tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
@@ -512,18 +509,7 @@ pub fn plug_manifest() -> PlugManifest {
                 key_tag: PlabelFacetTag::PseudoLabelErrorFacet.as_str().into(),
                 value_schema: schemars::schema_for!(PseudoLabelError),
                 display_config: Default::default(),
-                references: vec![
-                    FacetReferenceManifest {
-                        reference_kind: FacetReferenceKind::UrlFacet,
-                        json_path: "$.sourceRef".into(),
-                        at_commit_json_path: None,
-                    },
-                    FacetReferenceManifest {
-                        reference_kind: FacetReferenceKind::UrlFacet,
-                        json_path: "$.candidateSetRef".into(),
-                        at_commit_json_path: None,
-                    },
-                ],
+                references: vec![],
             },
             FacetManifest {
                 key_tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),

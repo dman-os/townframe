@@ -873,6 +873,22 @@ impl Rt {
         for (waiting_id, waiting_dispatch) in waiting_dispatches {
             if !is_success {
                 self.dispatch_repo.set_waiting_failed(&waiting_id).await?;
+                self.progress_repo
+                    .add_update(
+                        &waiting_id,
+                        crate::progress::ProgressUpdate {
+                            at: jiff::Timestamp::now(),
+                            title: None,
+                            deets: crate::progress::ProgressUpdateDeets::Completed {
+                                state: crate::progress::ProgressFinalState::Failed,
+                                message: Some(
+                                    "dependency dispatch failed; waiting dispatch cancelled"
+                                        .to_string(),
+                                ),
+                            },
+                        },
+                    )
+                    .await?;
                 for hook in &waiting_dispatch.on_success_hooks {
                     match hook {
                         DispatchOnSuccessHook::InitMarkDone { init_id, .. } => {
@@ -1021,7 +1037,7 @@ impl Rt {
             .ok_or_else(|| ferr!("routine not found in plug manifest: {plug_id}/{routine_name}"))?;
 
         use daybook_types::manifest::RoutineManifestDeets;
-        let (dispatch_id, mut args) = match (&routine_man.deets, args) {
+        let (mut dispatch_id, mut args) = match (&routine_man.deets, args) {
             (
                 RoutineManifestDeets::DocFacet {
                     working_facet_tag, ..
@@ -1078,8 +1094,15 @@ impl Rt {
                 existing.status,
                 dispatch::DispatchStatus::Waiting | dispatch::DispatchStatus::Active
             ) {
-                warn!(?dispatch_id, "dispatch already pending/active");
-                return Ok(dispatch_id);
+                let can_reuse = serde_json::to_string(&existing.on_success_hooks)
+                    .expect(ERROR_JSON)
+                    == serde_json::to_string(&on_success_hooks).expect(ERROR_JSON)
+                    && existing.waiting_on_dispatch_ids == waiting_on_dispatch_ids;
+                if can_reuse {
+                    warn!(?dispatch_id, "dispatch already pending/active");
+                    return Ok(dispatch_id);
+                }
+                dispatch_id = format!("{dispatch_id}-{}", Uuid::new_v4().bs58());
             }
         }
 
@@ -1258,9 +1281,17 @@ impl Rt {
         let listener_handle = self.dispatch_repo.subscribe(SubscribeOpts::new(128));
 
         // check if the dispatch exists first
-        let Some(_dispatch) = self.dispatch_repo.get(dispatch_id).await else {
+        let Some(dispatch) = self.dispatch_repo.get_any(dispatch_id).await else {
             return Ok(());
         };
+        if matches!(
+            dispatch.status,
+            dispatch::DispatchStatus::Succeeded
+                | dispatch::DispatchStatus::Failed
+                | dispatch::DispatchStatus::Cancelled
+        ) {
+            return Ok(());
+        }
 
         tokio::time::timeout(timeout, async {
             loop {
@@ -1268,10 +1299,28 @@ impl Rt {
                     .recv_async()
                     .await
                     .map_err(|err| eyre::eyre!("dispatch listener closed: {err:?}"))?;
-                if let dispatch::DispatchEvent::DispatchDeleted { id, .. } = &*event {
-                    if id == dispatch_id {
+                match &*event {
+                    dispatch::DispatchEvent::DispatchDeleted { id, .. } if id == dispatch_id => {
                         return Ok::<(), eyre::Report>(());
                     }
+                    dispatch::DispatchEvent::DispatchUpdated { id, .. }
+                    | dispatch::DispatchEvent::DispatchAdded { id, .. }
+                        if id == dispatch_id =>
+                    {
+                        if let Some(cur) = self.dispatch_repo.get_any(dispatch_id).await {
+                            if matches!(
+                                cur.status,
+                                dispatch::DispatchStatus::Succeeded
+                                    | dispatch::DispatchStatus::Failed
+                                    | dispatch::DispatchStatus::Cancelled
+                            ) {
+                                return Ok::<(), eyre::Report>(());
+                            }
+                        } else {
+                            return Ok::<(), eyre::Report>(());
+                        }
+                    }
+                    _ => {}
                 }
             }
         })

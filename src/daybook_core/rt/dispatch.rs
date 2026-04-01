@@ -750,17 +750,31 @@ impl DispatchRepo {
 
     pub async fn set_waiting_failed(&self, dispatch_id: &str) -> Res<()> {
         let dispatch_id = dispatch_id.to_string();
-        self.store
+        let (_, hash) = self
+            .store
             .mutate_sync(|store| {
                 if let Some(cur) = store.dispatches.get(&dispatch_id).cloned() {
+                    if let ActiveDispatchDeets::Wflow {
+                        wflow_job_id: Some(wflow_job_id),
+                        ..
+                    } = &cur.val.0.deets
+                    {
+                        store.wflow_to_dispatch.remove(wflow_job_id);
+                    }
+                    store.cancelled_dispatches.remove(&dispatch_id);
                     let mut updated = (*cur.val.0).clone();
                     updated.status = DispatchStatus::Failed;
                     let versioned: Versioned<ThroughJson<Arc<ActiveDispatch>>> =
                         Versioned::update(self.local_actor_id.clone(), Arc::new(updated).into());
-                    store.dispatches.insert(dispatch_id, versioned);
+                    store.dispatches.insert(dispatch_id.clone(), versioned);
                 }
             })
             .await?;
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([DispatchEvent::DispatchDeleted {
+            id: dispatch_id,
+            heads,
+        }]);
         Ok(())
     }
 }

@@ -23,6 +23,7 @@ dotenv-flow.workspace = true
 utils_rs = { workspace = true, features = ["native", "hash"] }
 mltools = { workspace = true, default-features = true, features = ["tests"] }
 daybook_types = { workspace = true, features = ["automerge", "schemars", "manifest"] }
+daybook_core = { workspace = true }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "tracing"] }
 serde = { workspace = true, features = ["derive"] }

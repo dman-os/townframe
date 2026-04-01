@@ -541,9 +541,9 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut shortlisted: Vec<LabelCandidateMetrics> = Vec::new();
-    let top_candidate = candidates.first().map(|candidate| {
-        (candidate.label.clone(), candidate.composite_score)
-    });
+    let top_candidate = candidates
+        .first()
+        .map(|candidate| (candidate.label.clone(), candidate.composite_score));
     for candidate in candidates
         .into_iter()
         .take(MAX_LABEL_CANDIDATES_TO_GAUNTLET)
@@ -572,7 +572,10 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
         shortlisted.push(candidate);
     }
 
-    let Some(best_score) = shortlisted.first().map(|candidate| candidate.composite_score) else {
+    let Some(best_score) = shortlisted
+        .first()
+        .map(|candidate| candidate.composite_score)
+    else {
         write_no_hit_error(
             &req,
             "gauntlet-rejected",

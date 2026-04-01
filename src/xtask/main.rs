@@ -408,9 +408,6 @@ async fn main_main() -> Res<()> {
     Ok(())
 }
 
-const OCI_PLUG_ARTIFACT_TYPE: &str = "application/vnd.daybook.plug.v1";
-const OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE: &str = "application/vnd.daybook.plug.manifest.v1+json";
-
 async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()> {
     use daybook_types::manifest::PlugManifest;
     use oci_spec::image::{
@@ -577,7 +574,7 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
     let oci_manifest_layer_digest: oci_spec::image::Digest =
         format!("sha256:{oci_manifest_payload_digest_hex}").parse()?;
     layer_descriptors.push(Descriptor::new(
-        MediaType::Other(OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE.into()),
+        MediaType::Other(daybook_core::plugs::OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE.into()),
         oci_manifest_payload.len() as u64,
         oci_manifest_layer_digest,
     ));
@@ -595,7 +592,9 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
     let image_manifest = ImageManifestBuilder::default()
         .schema_version(2u32)
         .media_type(MediaType::ImageManifest)
-        .artifact_type(MediaType::Other(OCI_PLUG_ARTIFACT_TYPE.into()))
+        .artifact_type(MediaType::Other(
+            daybook_core::plugs::OCI_PLUG_ARTIFACT_TYPE.into(),
+        ))
         .config(config_desc)
         .layers(layer_descriptors)
         .build()?;
@@ -617,7 +616,9 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
     let image_index = ImageIndexBuilder::default()
         .schema_version(2u32)
         .media_type(MediaType::ImageIndex)
-        .artifact_type(MediaType::Other(OCI_PLUG_ARTIFACT_TYPE.into()))
+        .artifact_type(MediaType::Other(
+            daybook_core::plugs::OCI_PLUG_ARTIFACT_TYPE.into(),
+        ))
         .manifests(vec![index_manifest_desc])
         .build()?;
     image_index

@@ -42,33 +42,31 @@ pub fn run(cx: WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     let rw_config_token = tuple_list_get(&args.rw_config_facet_tokens, &config_facet_key);
     let ro_config_token = tuple_list_get(&args.ro_config_facet_tokens, &config_facet_key);
     let error_facet_key = crate::types::pseudo_label_error_key().to_string();
-    let error_facet_token = tuple_list_get(&args.rw_facet_tokens, &error_facet_key).ok_or_else(
-        || {
-            wflow_sdk::JobErrorX::Terminal(ferr!(
-                "error facet key '{}' not found",
-                error_facet_key
-            ))
-        },
-    )?;
+    let error_facet_token =
+        tuple_list_get(&args.rw_facet_tokens, &error_facet_key).ok_or_else(|| {
+            wflow_sdk::JobErrorX::Terminal(ferr!("error facet key '{}' not found", error_facet_key))
+        })?;
 
     let embedding_raw = embedding_facet_token.get();
     let embedding_json: daybook_types::doc::FacetRaw = serde_json::from_str(&embedding_raw)
         .map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!("error parsing embedding facet json: {err}"))
         })?;
-    let embedding =
-        match WellKnownFacet::from_json(embedding_json, WellKnownFacetTag::Embedding).map_err(
-            |err| wflow_sdk::JobErrorX::Terminal(err.wrap_err("input facet is not embedding")),
-        )? {
-            WellKnownFacet::Embedding(value) => value,
-            _ => unreachable!(),
-        };
+    let embedding = match WellKnownFacet::from_json(embedding_json, WellKnownFacetTag::Embedding)
+        .map_err(|err| {
+            wflow_sdk::JobErrorX::Terminal(err.wrap_err("input facet is not embedding"))
+        })? {
+        WellKnownFacet::Embedding(value) => value,
+        _ => unreachable!(),
+    };
     if embedding.dtype != daybook_types::doc::EmbeddingDtype::F32 || embedding.compression.is_some()
     {
         return Ok(());
     }
     if embedding.dim != 768
-        || !embedding.model_tag.eq_ignore_ascii_case(NOMIC_TEXT_MODEL_ID)
+        || !embedding
+            .model_tag
+            .eq_ignore_ascii_case(NOMIC_TEXT_MODEL_ID)
     {
         return Ok(());
     }

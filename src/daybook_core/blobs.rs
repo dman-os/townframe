@@ -1088,7 +1088,10 @@ mod tests {
 
         let hash = repo.put_path_reference(&source_abs).await?;
         let out = repo
-            .materialize(&hash, BlobMaterializeRequest::Filename("snapshot.txt".into()))
+            .materialize(
+                &hash,
+                BlobMaterializeRequest::Filename("snapshot.txt".into()),
+            )
             .await?;
         let before = tokio::fs::read(&out).await?;
         assert_eq!(before, b"original-reference-bytes");

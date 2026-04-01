@@ -595,6 +595,27 @@ pub const OCI_PLUG_ARTIFACT_TYPE: &str = "application/vnd.daybook.plug.v1";
 pub const OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE: &str =
     "application/vnd.daybook.plug.manifest.v1+json";
 
+fn parse_dep_base_id(dep_id: &str) -> Res<String> {
+    if dep_id.starts_with('@') {
+        let without_prefix = dep_id
+            .strip_prefix('@')
+            .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id}"))?;
+        let base = without_prefix
+            .split('@')
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id}"))?;
+        Ok(format!("@{base}"))
+    } else {
+        let base = dep_id
+            .split('@')
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id}"))?;
+        Ok(base.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct OciImportOptions {
     pub strict: bool,
@@ -1436,7 +1457,7 @@ impl PlugsRepo {
                     eyre::bail!("componentUrls entries must be strings");
                 };
                 if !url_str.starts_with("oci://sha256:") {
-                    continue;
+                    eyre::bail!("componentUrls entries must be OCI digests: '{url_str}'");
                 }
                 let digest_hex = url_str.trim_start_matches("oci://sha256:");
                 if digest_hex.is_empty() {
@@ -1672,17 +1693,7 @@ impl PlugsRepo {
         // 2. The specific keys being requested are actually defined by that plug.
         // 3. The requested schema is compatible with what the provider offers.
         for (dep_id_full, dep_manifest) in &manifest.dependencies {
-            let dep_base_id = if dep_id_full.starts_with('@') {
-                // For strings like "@ns/name@1.2.3", we want "@ns/name"
-                let parts: Vec<&str> = dep_id_full.strip_prefix('@').unwrap().split('@').collect();
-                format!("@{}", parts[0])
-            } else {
-                dep_id_full
-                    .split('@')
-                    .next()
-                    .ok_or_eyre("invalid dependency id")?
-                    .to_string()
-            };
+            let dep_base_id = parse_dep_base_id(dep_id_full)?;
             let provider = self
                 .get(&dep_base_id)
                 .await
@@ -1846,36 +1857,15 @@ impl PlugsRepo {
         let dependency_base_ids: HashSet<String> = manifest
             .dependencies
             .keys()
-            .map(|dep_id_full| {
-                if dep_id_full.starts_with('@') {
-                    let parts: Vec<&str> =
-                        dep_id_full.strip_prefix('@').unwrap().split('@').collect();
-                    format!("@{}", parts[0])
-                } else {
-                    dep_id_full
-                        .split('@')
-                        .next()
-                        .expect("dependency id should be non-empty")
-                        .to_string()
-                }
-            })
-            .collect();
+            .map(|dep_id_full| parse_dep_base_id(dep_id_full))
+            .collect::<Res<HashSet<_>>>()?;
         let mut available_local_states: HashSet<(String, String)> = manifest
             .local_states
             .keys()
             .map(|key| (plug_id.clone(), key.to_string()))
             .collect();
         for (dep_id_full, dep_manifest) in &manifest.dependencies {
-            let dep_base_id = if dep_id_full.starts_with('@') {
-                let parts: Vec<&str> = dep_id_full.strip_prefix('@').unwrap().split('@').collect();
-                format!("@{}", parts[0])
-            } else {
-                dep_id_full
-                    .split('@')
-                    .next()
-                    .ok_or_eyre("invalid dependency id")?
-                    .to_string()
-            };
+            let dep_base_id = parse_dep_base_id(dep_id_full)?;
             for local_state in &dep_manifest.local_states {
                 available_local_states
                     .insert((dep_base_id.clone(), local_state.local_state_key.to_string()));

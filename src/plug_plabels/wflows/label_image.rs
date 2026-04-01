@@ -42,14 +42,10 @@ pub fn run(cx: WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     let rw_config_token = tuple_list_get(&args.rw_config_facet_tokens, &config_facet_key);
     let ro_config_token = tuple_list_get(&args.ro_config_facet_tokens, &config_facet_key);
     let error_facet_key = crate::types::pseudo_label_error_key().to_string();
-    let error_facet_token = tuple_list_get(&args.rw_facet_tokens, &error_facet_key).ok_or_else(
-        || {
-            wflow_sdk::JobErrorX::Terminal(ferr!(
-                "error facet key '{}' not found",
-                error_facet_key
-            ))
-        },
-    )?;
+    let error_facet_token =
+        tuple_list_get(&args.rw_facet_tokens, &error_facet_key).ok_or_else(|| {
+            wflow_sdk::JobErrorX::Terminal(ferr!("error facet key '{}' not found", error_facet_key))
+        })?;
 
     let embedding_raw = embedding_facet_token.get();
     let embedding_json: daybook_types::doc::FacetRaw = serde_json::from_str(&embedding_raw)
