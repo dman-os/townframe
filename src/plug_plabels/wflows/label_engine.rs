@@ -718,8 +718,8 @@ fn sqlite_vec_rowid_cosine_similarity(
     let rows = sqlite_connection
         .query(
             "SELECT (1.0 - vec_distance_cosine(v1.embedding, v2.embedding)) AS score \
-             FROM image_label_prompt_vec v1 JOIN image_label_prompt_vec v2 \
-             ON v1.rowid = ?1 AND v2.rowid = ?2",
+             FROM image_label_prompt_vec v1, image_label_prompt_vec v2 \
+             WHERE v1.rowid = ?1 AND v2.rowid = ?2",
             &[
                 SqlValue::Integer(left_rowid),
                 SqlValue::Integer(right_rowid),

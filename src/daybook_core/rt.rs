@@ -613,7 +613,7 @@ impl Rt {
         let Some((dispatch_id, _)) = event.job_id.rsplit_once('-') else {
             return Ok(());
         };
-        let Some(dispatch) = self.dispatch_repo.get(dispatch_id).await else {
+        let Some(dispatch) = self.dispatch_repo.get_active(dispatch_id).await else {
             return Ok(());
         };
         let ActiveDispatchDeets::Wflow {
@@ -783,6 +783,17 @@ impl Rt {
                     self.drawer
                         .delete_branch(doc_id, staging_branch_path, None)
                         .await
+                        .or_else(|err| match err {
+                            crate::drawer::types::DrawerError::BranchNotFound { .. } => {
+                                debug!(
+                                    ?doc_id,
+                                    ?staging_branch_path,
+                                    "staging branch already removed after successful merge"
+                                );
+                                Ok(false)
+                            }
+                            other => Err(other),
+                        })
                         .wrap_err("error deleting staging branch after merge")?;
                 }
             }
@@ -948,7 +959,18 @@ impl Rt {
             bundle_man,
         )
         .await?;
-        let entry_id = self
+        let initial_deets = ActiveDispatchDeets::Wflow {
+            wflow_partition_id: None,
+            entry_id: None,
+            plug_id: plug_id.clone(),
+            bundle_name: bundle_name.clone(),
+            wflow_key: wflow_key.clone(),
+            wflow_job_id: Some(job_id.clone()),
+        };
+        self.dispatch_repo
+            .activate_waiting(&dispatch_id, initial_deets)
+            .await?;
+        let entry_id = match self
             .wflow_ingress
             .add_job(
                 job_id.clone().into(),
@@ -957,10 +979,17 @@ impl Rt {
                 None,
             )
             .await
-            .wrap_err_with(|| {
-                format!("error scheduling deferred job for dispatch {dispatch_id}")
-            })?;
-
+        {
+            Ok(value) => value,
+            Err(err) => {
+                self.dispatch_repo
+                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
+                    .await?;
+                return Err(err).wrap_err_with(|| {
+                    format!("error scheduling deferred job for dispatch {dispatch_id}")
+                });
+            }
+        };
         let deets = ActiveDispatchDeets::Wflow {
             wflow_partition_id: Some(self.local_wflow_part_id.clone()),
             entry_id: Some(entry_id),
@@ -969,9 +998,20 @@ impl Rt {
             wflow_key: wflow_key.clone(),
             wflow_job_id: Some(job_id.clone()),
         };
-        self.dispatch_repo
-            .activate_waiting(&dispatch_id, deets)
-            .await?;
+        if let Err(err) = self
+            .dispatch_repo
+            .update_active_deets(&dispatch_id, deets)
+            .await
+        {
+            let _ = self
+                .wflow_ingress
+                .cancel_job(
+                    Arc::from(job_id.as_ref()),
+                    format!("rollback scheduling for dispatch {dispatch_id}"),
+                )
+                .await;
+            return Err(err);
+        }
         self.progress_repo
             .add_update(
                 &dispatch_id,
@@ -1222,9 +1262,37 @@ impl Rt {
 
         let dispatch = self
             .dispatch_repo
-            .get(dispatch_id)
+            .get_any(dispatch_id)
             .await
             .ok_or_else(|| ferr!("dispatch not found under {dispatch_id}"))?;
+        if matches!(
+            dispatch.status,
+            dispatch::DispatchStatus::Succeeded
+                | dispatch::DispatchStatus::Failed
+                | dispatch::DispatchStatus::Cancelled
+        ) {
+            return Ok(());
+        }
+        if matches!(dispatch.status, dispatch::DispatchStatus::Waiting) {
+            self.dispatch_repo
+                .complete(dispatch_id.into(), dispatch::DispatchStatus::Cancelled)
+                .await?;
+            self.release_waiting_dispatches(dispatch_id, false).await?;
+            self.progress_repo
+                .add_update(
+                    dispatch_id,
+                    crate::progress::ProgressUpdate {
+                        at: jiff::Timestamp::now(),
+                        title: None,
+                        deets: crate::progress::ProgressUpdateDeets::Completed {
+                            state: crate::progress::ProgressFinalState::Cancelled,
+                            message: Some("dispatch cancelled while waiting".to_string()),
+                        },
+                    },
+                )
+                .await?;
+            return Ok(());
+        }
         let marked_now = self.dispatch_repo.mark_cancelled(dispatch_id).await?;
         if !marked_now {
             debug!(%dispatch_id, "cancel already requested; skipping duplicate cancel");

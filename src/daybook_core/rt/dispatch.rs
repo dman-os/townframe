@@ -469,6 +469,17 @@ impl DispatchRepo {
     pub async fn get(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
         self.store
             .query_sync(|store| {
+                store
+                    .dispatches
+                    .get(id)
+                    .map(|versioned| Arc::clone(&versioned.val.0))
+            })
+            .await
+    }
+
+    pub async fn get_active(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
+        self.store
+            .query_sync(|store| {
                 let dispatch = store.dispatches.get(id)?;
                 if dispatch.status != DispatchStatus::Active {
                     return None;
@@ -479,14 +490,7 @@ impl DispatchRepo {
     }
 
     pub async fn get_any(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
-        self.store
-            .query_sync(|store| {
-                store
-                    .dispatches
-                    .get(id)
-                    .map(|versioned| Arc::clone(&versioned.val.0))
-            })
-            .await
+        self.get(id).await
     }
 
     pub async fn get_wflow_part_frontier(&self, wflow_part_id: &str) -> Option<u64> {
@@ -548,13 +552,11 @@ impl DispatchRepo {
                 }
             })
             .await?;
-        if dispatch.status == DispatchStatus::Active {
-            let heads = ChangeHashSet(hash.into_iter().collect());
-            self.registry.notify([DispatchEvent::DispatchAdded {
-                id,
-                heads: heads.clone(),
-            }]);
-        }
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([DispatchEvent::DispatchAdded {
+            id,
+            heads: heads.clone(),
+        }]);
         Ok(())
     }
 
@@ -594,7 +596,7 @@ impl DispatchRepo {
             })
             .await?;
         let heads = ChangeHashSet(hash.into_iter().collect());
-        self.registry.notify([DispatchEvent::DispatchDeleted {
+        self.registry.notify([DispatchEvent::DispatchUpdated {
             id,
             heads: heads.clone(),
         }]);
@@ -619,7 +621,14 @@ impl DispatchRepo {
         let id = id.to_string();
         let exists = self
             .store
-            .query_sync(|store| store.active_dispatches.contains_key(&id))
+            .query_sync(|store| {
+                store.dispatches.get(&id).is_some_and(|dispatch| {
+                    matches!(
+                        dispatch.status,
+                        DispatchStatus::Active | DispatchStatus::Waiting
+                    )
+                })
+            })
             .await;
         if !exists {
             eyre::bail!("dispatch not found under {id}");
@@ -748,6 +757,59 @@ impl DispatchRepo {
         Ok(next)
     }
 
+    pub async fn update_active_deets(
+        &self,
+        dispatch_id: &str,
+        deets: ActiveDispatchDeets,
+    ) -> Res<Arc<ActiveDispatch>> {
+        let dispatch_id = dispatch_id.to_string();
+        let (next, hash) = self
+            .store
+            .try_mutate_sync(|store| {
+                let Some(cur) = store.dispatches.get(&dispatch_id).cloned() else {
+                    eyre::bail!("dispatch not found under {dispatch_id}");
+                };
+                if cur.status != DispatchStatus::Active {
+                    eyre::bail!("dispatch is not active: {dispatch_id}");
+                }
+                let mut updated = (*cur.val.0).clone();
+                if let ActiveDispatchDeets::Wflow {
+                    wflow_job_id: Some(job),
+                    ..
+                } = &updated.deets
+                {
+                    store.wflow_to_dispatch.remove(job);
+                }
+                updated.deets = deets;
+                let arc = Arc::new(updated.clone());
+                let versioned: Versioned<ThroughJson<Arc<ActiveDispatch>>> =
+                    Versioned::update(self.local_actor_id.clone(), Arc::clone(&arc).into());
+                store
+                    .dispatches
+                    .insert(dispatch_id.clone(), versioned.clone());
+                store
+                    .active_dispatches
+                    .insert(dispatch_id.clone(), versioned);
+                if let ActiveDispatchDeets::Wflow {
+                    wflow_job_id: Some(job),
+                    ..
+                } = &updated.deets
+                {
+                    store
+                        .wflow_to_dispatch
+                        .insert(job.clone(), dispatch_id.clone());
+                }
+                Ok(arc)
+            })
+            .await?;
+        let heads = ChangeHashSet(hash.into_iter().collect());
+        self.registry.notify([DispatchEvent::DispatchUpdated {
+            id: dispatch_id,
+            heads,
+        }]);
+        Ok(next)
+    }
+
     pub async fn set_waiting_failed(&self, dispatch_id: &str) -> Res<()> {
         let dispatch_id = dispatch_id.to_string();
         let (_, hash) = self
@@ -771,7 +833,7 @@ impl DispatchRepo {
             })
             .await?;
         let heads = ChangeHashSet(hash.into_iter().collect());
-        self.registry.notify([DispatchEvent::DispatchDeleted {
+        self.registry.notify([DispatchEvent::DispatchUpdated {
             id: dispatch_id,
             heads,
         }]);

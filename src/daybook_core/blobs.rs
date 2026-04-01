@@ -5,6 +5,7 @@ use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
 use iroh_blobs::store::fs::FsStore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Component, Path};
 use tokio::io::AsyncWriteExt;
 
 #[async_trait]
@@ -417,7 +418,7 @@ impl BlobsRepo {
     }
 
     pub async fn materialize(&self, hash: &str, request: BlobMaterializeRequest) -> Res<PathBuf> {
-        self.put_from_store(hash).await?;
+        self.ensure_local_object_no_meta_rewrite(hash).await?;
         let source_path = self.object_paths(hash)?.blob;
         let filename = match request {
             BlobMaterializeRequest::Filename(name) => Self::sanitize_requested_filename(&name)?,
@@ -447,6 +448,15 @@ impl BlobsRepo {
         hash: &str,
         filename_stem: &str,
     ) -> Res<PathBuf> {
+        let object_paths = self.object_paths(hash)?;
+        let meta = self
+            .read_meta(&object_paths.meta)
+            .await?
+            .ok_or_else(|| eyre::eyre!("blob metadata not found for hash {hash}"))?;
+        eyre::ensure!(
+            meta.mime.as_deref().is_some() || !meta.source_paths.is_empty(),
+            "materialize_with_meta_extension requires blob metadata with mime or source_paths for hash {hash}"
+        );
         let ext = self.preferred_extension_from_meta(hash).await?;
         let stem = Self::sanitize_requested_stem(filename_stem)?;
         self.materialize(
@@ -480,6 +490,20 @@ impl BlobsRepo {
         self.write_meta(&object_paths.meta, &meta).await?;
 
         Ok(hash.to_string())
+    }
+
+    async fn ensure_local_object_no_meta_rewrite(&self, hash: &str) -> Res<()> {
+        let object_paths = self.object_paths(hash)?;
+        tokio::fs::create_dir_all(&object_paths.dir).await?;
+        if !tokio::fs::try_exists(&object_paths.blob).await? {
+            let iroh_hash = daybook_hash_to_iroh_hash(hash)?;
+            self.iroh_store
+                .blobs()
+                .export(iroh_hash, &object_paths.blob)
+                .await
+                .map_err(|err| eyre::eyre!("error exporting blob from iroh store: {err:?}"))?;
+        }
+        Ok(())
     }
 
     fn object_paths(&self, hash: &str) -> Res<ObjectPaths> {
@@ -539,11 +563,18 @@ impl BlobsRepo {
     fn sanitize_requested_stem(stem: &str) -> Res<String> {
         let stem = stem.trim();
         eyre::ensure!(!stem.is_empty(), "filename stem must not be empty");
+        let mut components = Path::new(stem).components();
+        let Some(first) = components.next() else {
+            eyre::bail!("filename stem must not be empty");
+        };
         eyre::ensure!(
-            !stem.contains('/') && !stem.contains('\\'),
-            "filename stem must not contain path separators"
+            matches!(first, Component::Normal(_)) && components.next().is_none(),
+            "filename stem must be a single normal path component"
         );
-        eyre::ensure!(stem != "." && stem != "..", "invalid filename stem");
+        eyre::ensure!(
+            !stem.contains(':'),
+            "filename stem must not contain path prefixes"
+        );
         Ok(stem.to_string())
     }
 
@@ -565,11 +596,18 @@ impl BlobsRepo {
     fn sanitize_requested_filename(filename: &str) -> Res<String> {
         let filename = filename.trim();
         eyre::ensure!(!filename.is_empty(), "filename must not be empty");
+        let mut components = Path::new(filename).components();
+        let Some(first) = components.next() else {
+            eyre::bail!("filename must not be empty");
+        };
         eyre::ensure!(
-            !filename.contains('/') && !filename.contains('\\'),
-            "filename must not contain path separators"
+            matches!(first, Component::Normal(_)) && components.next().is_none(),
+            "filename must be a single normal path component"
         );
-        eyre::ensure!(filename != "." && filename != "..", "invalid filename");
+        eyre::ensure!(
+            !filename.contains(':'),
+            "filename must not contain path prefixes"
+        );
         Ok(filename.to_string())
     }
 

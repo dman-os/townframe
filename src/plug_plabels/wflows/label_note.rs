@@ -34,9 +34,10 @@ pub fn run(cx: WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         return Ok(());
     }
 
-    let sqlite_connection = tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY)
-        .or_else(|| args.sqlite_connections.first().map(|(_, token)| token))
-        .ok_or_else(|| wflow_sdk::JobErrorX::Terminal(ferr!("no sqlite connection available")))?;
+    let sqlite_connection =
+        tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY).ok_or_else(|| {
+            wflow_sdk::JobErrorX::Terminal(ferr!("missing sqlite connection '{LOCAL_STATE_KEY}'"))
+        })?;
 
     let config_facet_key = crate::types::pseudo_label_candidates_key(CANDIDATE_SET_ID).to_string();
     let rw_config_token = tuple_list_get(&args.rw_config_facet_tokens, &config_facet_key);
