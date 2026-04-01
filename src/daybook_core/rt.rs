@@ -1217,9 +1217,39 @@ impl Rt {
             waiting_on_dispatch_ids,
             on_success_hooks,
         });
-        self.dispatch_repo
+        if let Err(add_err) = self
+            .dispatch_repo
             .add(dispatch_id.clone(), Arc::clone(&active_dispatch))
-            .await?;
+            .await
+        {
+            let ActiveDispatchDeets::Wflow {
+                wflow_job_id,
+                entry_id,
+                ..
+            } = &active_dispatch.deets;
+            if entry_id.is_some() {
+                if let Some(wflow_job_id) = wflow_job_id.as_ref() {
+                    if let Err(cancel_err) = self
+                        .wflow_ingress
+                        .cancel_job(
+                            Arc::from(wflow_job_id.as_ref()),
+                            format!(
+                                "rollback scheduling for dispatch {dispatch_id} after dispatch store failure"
+                            ),
+                        )
+                        .await
+                    {
+                        warn!(
+                            %dispatch_id,
+                            %wflow_job_id,
+                            ?cancel_err,
+                            "failed to rollback queued wflow job after dispatch add failure"
+                        );
+                    }
+                }
+            }
+            return Err(add_err);
+        }
         let mut tags = vec![
             "/type/dispatch".to_string(),
             format!("/dispatch/{dispatch_id}"),
