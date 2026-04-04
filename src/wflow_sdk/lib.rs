@@ -47,6 +47,25 @@ pub struct WflowCtx {
 
 pub struct Json<T>(pub T);
 
+pub trait RecvCodec: Sized {
+    fn decode(value_json: &str) -> Result<Self, JobErrorX>;
+}
+
+impl<T> RecvCodec for Json<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    fn decode(value_json: &str) -> Result<Self, JobErrorX> {
+        let value = serde_json::from_str(value_json).map_err(|err| {
+            JobErrorX::Terminal(ferr!(
+                "error parsing workflow message json for '{type_name}': {err:?}",
+                type_name = std::any::type_name::<T>()
+            ))
+        })?;
+        Ok(Json(value))
+    }
+}
+
 impl WflowCtx {
     pub fn effect<F, O>(&self, func: F) -> Result<O, JobErrorX>
     where
@@ -96,9 +115,9 @@ impl WflowCtx {
         }
     }
 
-    pub fn recv<T>(&self) -> Result<Json<T>, JobErrorX>
+    pub fn recv<O>(&self) -> Result<O, JobErrorX>
     where
-        T: serde::de::DeserializeOwned,
+        O: RecvCodec,
     {
         let state = host::next_step(&self.job.job_id)
             .map_err(|err| JobErrorX::Terminal(ferr!("error getting next op: {err}")))?;
@@ -110,13 +129,7 @@ impl WflowCtx {
                 })?
             }
         };
-        let value = serde_json::from_str(&value_json).map_err(|err| {
-            JobErrorX::Terminal(ferr!(
-                "error parsing workflow message json for '{type_name}': {err:?}",
-                type_name = std::any::type_name::<T>()
-            ))
-        })?;
-        Ok(Json(value))
+        O::decode(&value_json)
     }
 }
 

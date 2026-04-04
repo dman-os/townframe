@@ -734,7 +734,7 @@ impl Rt {
                     .await?;
                 false
             }
-            JobRunResult::StepEffect(..) => false,
+            JobRunResult::StepEffect(..) | JobRunResult::StepWait(..) => false,
         };
         if is_done {
             // Handle staging branch cleanup based on success/failure
