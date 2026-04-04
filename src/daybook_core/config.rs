@@ -84,8 +84,13 @@ impl crate::stores::AmStore for ConfigStore {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum ConfigEvent {
-    Changed { heads: ChangeHashSet },
-    SyncDevicesChanged,
+    Changed {
+        heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
+    },
+    SyncDevicesChanged {
+        origin: crate::event_origin::SwitchEventOrigin,
+    },
 }
 
 pub struct ConfigRepo {
@@ -115,6 +120,12 @@ impl crate::repos::Repo for ConfigRepo {
 }
 
 impl ConfigRepo {
+    fn local_origin(&self) -> crate::event_origin::SwitchEventOrigin {
+        crate::event_origin::SwitchEventOrigin::Local {
+            actor_id: self.local_actor_id.to_string(),
+        }
+    }
+
     pub async fn load(
         big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
@@ -283,6 +294,34 @@ impl ConfigRepo {
         Ok(())
     }
 
+    pub async fn upsert_actor_user_path(
+        &self,
+        actor_id: automerge::ActorId,
+        user_path: daybook_types::doc::UserPath,
+    ) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let actor_id_str = actor_id.to_string();
+        self.store
+            .mutate_sync(move |store| {
+                let next = UserMeta {
+                    user_path,
+                    seen_at: Timestamp::now(),
+                };
+                if let Some(existing) = store.users.get_mut(&actor_id_str) {
+                    existing.replace(self.local_actor_id.clone(), next.into());
+                } else {
+                    store.users.insert(
+                        actor_id_str,
+                        Versioned::mint(self.local_actor_id.clone(), next.into()),
+                    );
+                }
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn diff_events(
         &self,
         from: ChangeHashSet,
@@ -311,6 +350,7 @@ impl ConfigRepo {
     pub async fn events_for_init(&self) -> Res<Vec<ConfigEvent>> {
         Ok(vec![ConfigEvent::Changed {
             heads: ChangeHashSet(self.get_config_heads().await?),
+            origin: self.local_origin(),
         }])
     }
 
@@ -347,9 +387,38 @@ impl ConfigRepo {
                 ) {
                     return Ok(());
                 }
+                let vtag = match val {
+                    automerge::Value::Scalar(scalar) => match &**scalar {
+                        automerge::ScalarValue::Bytes(bytes) => VersionTag::hydrate_bytes(bytes)?,
+                        _ => unreachable!("guard above ensures bytes"),
+                    },
+                    _ => unreachable!("guard above ensures scalar"),
+                };
+                let event_origin = if vtag.actor_id == self.local_actor_id {
+                    crate::event_origin::SwitchEventOrigin::Local {
+                        actor_id: vtag.actor_id.to_string(),
+                    }
+                } else {
+                    match origin {
+                        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote {
+                            peer_id, ..
+                        }) => crate::event_origin::SwitchEventOrigin::Remote {
+                            peer_id: peer_id.to_string(),
+                        },
+                        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+                            crate::event_origin::SwitchEventOrigin::Bootstrap
+                        }
+                        _ => crate::event_origin::SwitchEventOrigin::Remote {
+                            peer_id: "unknown".to_string(),
+                        },
+                    }
+                };
 
                 if matches!(section_key.as_ref(), "facet_display" | "users" | "mltools") {
-                    out.push(ConfigEvent::Changed { heads });
+                    out.push(ConfigEvent::Changed {
+                        heads,
+                        origin: event_origin.clone(),
+                    });
                 }
             }
             _ => {}
@@ -479,7 +548,9 @@ impl ConfigRepo {
             config.known_devices.push(device);
         }
         crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
-        self.registry.notify([ConfigEvent::SyncDevicesChanged]);
+        self.registry.notify([ConfigEvent::SyncDevicesChanged {
+            origin: self.local_origin(),
+        }]);
         Ok(())
     }
 
@@ -496,7 +567,9 @@ impl ConfigRepo {
         let removed = config.known_devices.len() != before;
         if removed {
             crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
-            self.registry.notify([ConfigEvent::SyncDevicesChanged]);
+            self.registry.notify([ConfigEvent::SyncDevicesChanged {
+                origin: self.local_origin(),
+            }]);
         }
         Ok(removed)
     }
@@ -527,7 +600,79 @@ impl ConfigRepo {
                 last_connected_at: None,
             });
         crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
-        self.registry.notify([ConfigEvent::SyncDevicesChanged]);
+        self.registry.notify([ConfigEvent::SyncDevicesChanged {
+            origin: self.local_origin(),
+        }]);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn upsert_actor_user_path_registers_directory_entries() -> Res<()> {
+        let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
+        let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: "test-config-actors".into(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        })
+        .await?;
+
+        let app_doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
+        let app_doc_handle = big_repo.add_doc(app_doc).await?;
+        let app_doc_id = app_doc_handle.document_id().clone();
+
+        let temp = tempfile::tempdir()?;
+        let blobs_repo = crate::blobs::BlobsRepo::new(
+            temp.path().join("blobs"),
+            local_user_path.to_string(),
+            Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
+                big_repo.partition_store(),
+            )),
+        )
+        .await?;
+        let (plugs_repo, plugs_stop) = crate::plugs::PlugsRepo::load(
+            Arc::clone(&big_repo),
+            Arc::clone(&blobs_repo),
+            app_doc_id.clone(),
+            local_user_path.clone(),
+        )
+        .await?;
+        let sql_ctx = crate::app::SqlCtx::new("sqlite::memory:").await?;
+        let (config_repo, config_stop) = ConfigRepo::load(
+            Arc::clone(&big_repo),
+            app_doc_id,
+            plugs_repo,
+            local_user_path.clone(),
+            sql_ctx.db_pool.clone(),
+        )
+        .await?;
+
+        for scope in [
+            "config-repo",
+            "plugs-repo",
+            "drawer-repo",
+            "dispatch-repo",
+            "tables-repo",
+            "init-repo",
+        ] {
+            let scoped_path = daybook_types::doc::user_path::for_repo(&local_user_path, scope)?;
+            let scoped_actor = daybook_types::doc::user_path::to_actor_id(&scoped_path);
+            config_repo
+                .upsert_actor_user_path(scoped_actor.clone(), scoped_path.clone())
+                .await?;
+            let found = config_repo
+                .get_actor_user_path(&scoped_actor)
+                .await
+                .ok_or_else(|| eyre::eyre!("missing actor mapping for scope {scope}"))?;
+            assert_eq!(found, scoped_path);
+        }
+
+        config_stop.stop().await?;
+        plugs_stop.stop().await?;
+        blobs_repo.shutdown().await?;
         Ok(())
     }
 }

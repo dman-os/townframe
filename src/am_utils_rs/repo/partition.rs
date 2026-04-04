@@ -1,6 +1,5 @@
 use crate::interlude::*;
 
-use sqlx::QueryBuilder;
 use std::collections::HashSet;
 use std::str::FromStr;
 
@@ -138,24 +137,9 @@ impl BigRepo {
         doc_id: &str,
         allowed_partitions: &[PartitionId],
     ) -> Res<bool> {
-        if allowed_partitions.is_empty() {
-            return Ok(false);
-        }
-        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT EXISTS(SELECT 1 FROM partition_membership_state WHERE item_id = ",
-        );
-        query.push_bind(doc_id);
-        query.push(" AND present = 1 AND partition_id IN (");
-        let mut separated = query.separated(", ");
-        for partition_id in allowed_partitions {
-            separated.push_bind(partition_id);
-        }
-        separated.push_unseparated("))");
-        let exists: i64 = query
-            .build_query_scalar()
-            .fetch_one(&self.state_pool)
-            .await?;
-        Ok(exists == 1)
+        self.partition_store
+            .is_item_present_in_membership_partitions(doc_id, allowed_partitions)
+            .await
     }
 
     async fn find_first_inaccessible_doc_in_partitions(
@@ -163,29 +147,9 @@ impl BigRepo {
         doc_ids: &[String],
         allowed_partitions: &[PartitionId],
     ) -> Res<Option<String>> {
-        if doc_ids.is_empty() || allowed_partitions.is_empty() {
-            return Ok(doc_ids.first().cloned());
-        }
-        let mut query = QueryBuilder::<sqlx::Sqlite>::new("WITH requested(doc_id) AS (SELECT ");
-        for (idx, doc_id) in doc_ids.iter().enumerate() {
-            if idx > 0 {
-                query.push(" UNION ALL SELECT ");
-            }
-            query.push_bind(doc_id);
-        }
-        query.push(") SELECT requested.doc_id FROM requested WHERE NOT EXISTS (");
-        query.push("SELECT 1 FROM partition_membership_state m WHERE m.item_id = requested.doc_id");
-        query.push(" AND m.present = 1 AND m.partition_id IN (");
-        let mut partitions = query.separated(", ");
-        for partition_id in allowed_partitions {
-            partitions.push_bind(partition_id);
-        }
-        partitions.push_unseparated(")) LIMIT 1");
-        let denied = query
-            .build_query_scalar::<String>()
-            .fetch_optional(&self.state_pool)
-            .await?;
-        Ok(denied)
+        self.partition_store
+            .find_first_item_missing_membership_in_partitions(doc_ids, allowed_partitions)
+            .await
     }
 }
 

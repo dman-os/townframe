@@ -1423,6 +1423,7 @@ mod lazy {
                     Arc::clone(&ctx.big_repo),
                     ctx.doc_app.document_id().clone(),
                     daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+                    ctx.sql.db_pool.clone(),
                 )
                 .await?;
                 register_shutdown(move || async move { dispatch_stop.stop().await });

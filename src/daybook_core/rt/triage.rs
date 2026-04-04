@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use crate::drawer::DrawerEvent;
-use crate::rt::dispatch::DispatchEvent;
+use crate::rt::dispatch::{DispatchEvent, DispatchOnSuccessHook};
 use crate::rt::switch::{
     facet_keys_set_to_meta_doc, SwitchEvent, SwitchSink, SwitchSinkCtx, SwitchSinkOutcome,
     SwtchSinkInterest,
@@ -11,16 +11,18 @@ use daybook_types::doc::BranchPath;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacetTag};
 
 use daybook_types::manifest::{
-    DocPredicateEvalMode, DocPredicateEvalRequirement, DocPredicateEvalResolved,
-    FacetReferenceManifest, KeyGeneric, ProcessorDeets, ProcessorManifest, RoutineManifest,
-    RoutineManifestDeets,
+    ChangeOriginDeets, DocPredicateEvalMode, DocPredicateEvalRequirement, DocPredicateEvalResolved,
+    FacetReferenceManifest, KeyGeneric, NodePredicate, ProcessorDeets, ProcessorEventPredicate,
+    ProcessorManifest, RoutineManifest, RoutineManifestDeets,
 };
 
 struct PreparedProcessor {
+    processor_full_id: String,
     plug_id: String,
     routine_name: KeyGeneric,
     processor_manifest: Arc<ProcessorManifest>,
     routine_manifest: Arc<RoutineManifest>,
+    event_predicate: ProcessorEventPredicate,
     /// Tag-level: any facet with this tag counts as read.
     read_tags: HashSet<String>,
     /// Key-level: only this tag+id counts as read.
@@ -35,6 +37,8 @@ struct DocProcessorTriageListener {
     facet_reference_specs: Arc<HashMap<String, Vec<FacetReferenceManifest>>>,
     predicate_requirements: HashSet<DocPredicateEvalRequirement>,
     predicate_resolved: HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
+    dispatch_to_job: HashMap<String, (DocId, String)>,
+    job_to_dispatch: HashMap<String, String>,
 }
 
 impl DocProcessorTriageListener {
@@ -57,9 +61,10 @@ impl DocProcessorTriageListener {
                     .or_default()
                     .extend(facet.references.iter().cloned());
             }
-            for processor in plug.processors.values() {
+            for (processor_name, processor) in &plug.processors {
                 match &processor.deets {
                     ProcessorDeets::DocProcessor {
+                        event_predicate,
                         predicate,
                         routine_name,
                     } => {
@@ -76,16 +81,21 @@ impl DocProcessorTriageListener {
                             .map(|tag| tag.0.clone())
                             .collect();
                         let mut read_keys: HashSet<FacetKey> = HashSet::new();
+                        event_predicate
+                            .doc_change_predicate
+                            .append_referenced_facet_scope(&mut read_tags, &mut read_keys);
                         let (acl_tags, acl_keys) = routine.read_facet_set();
                         read_tags.extend(acl_tags);
                         read_keys.extend(acl_keys);
                         triage_read_tags.extend(read_tags.iter().cloned());
                         triage_read_keys.extend(read_keys.iter().cloned());
                         self.cached_processors.push(PreparedProcessor {
+                            processor_full_id: format!("{plug_id}/{processor_name}"),
                             plug_id: plug_id.clone(),
                             routine_name: routine_name.clone(),
                             processor_manifest: Arc::clone(processor),
                             routine_manifest: Arc::clone(routine),
+                            event_predicate: event_predicate.clone(),
                             read_tags,
                             read_keys,
                         });
@@ -99,6 +109,7 @@ impl DocProcessorTriageListener {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, doc, doc_heads, ctx))]
     async fn triage_doc(
         &mut self,
@@ -107,20 +118,30 @@ impl DocProcessorTriageListener {
         doc_heads: &ChangeHashSet,
         doc: &Doc,
         branch_path: daybook_types::doc::BranchPath,
+        event_origin: &crate::event_origin::SwitchEventOrigin,
         changed_facet_keys: Option<&HashSet<FacetKey>>,
     ) -> Res<()> {
         let rt = ctx
             .rt
             .ok_or_else(|| ferr!("triage listener context missing rt"))?;
-        let store = ctx
-            .store
-            .ok_or_else(|| ferr!("triage listener context missing store"))?;
         debug!(
             processor_count = self.cached_processors.len(),
             "triaging doc"
         );
         let mut full_doc_for_reference_predicates: Option<Option<Arc<Doc>>> = None;
         for processor in &self.cached_processors {
+            let should_run =
+                evaluate_node_predicate(&processor.event_predicate.node_predicate, event_origin);
+            if !should_run {
+                continue;
+            }
+            if !processor
+                .event_predicate
+                .doc_change_predicate
+                .evaluate_change(changed_facet_keys)
+            {
+                continue;
+            }
             if let Some(changed) = changed_facet_keys {
                 if !changed_intersects_read_set(changed, &processor.read_tags, &processor.read_keys)
                 {
@@ -207,6 +228,7 @@ impl DocProcessorTriageListener {
             info!(
                 plug_id = %processor.plug_id,
                 routine_name = %processor.routine_name,
+                processor_full_id = %processor.processor_full_id,
                 ?doc_id,
                 "dispatching job"
             );
@@ -223,13 +245,8 @@ impl DocProcessorTriageListener {
                     facet_key: None,
                 },
             };
-            let job_key = format!(
-                "{}:{}:{}",
-                doc_id, processor.plug_id, processor.routine_name.0
-            );
-            let old_dispatch = store
-                .query_sync(|store| store.job_to_dispatch.get(&job_key).cloned())
-                .await;
+            let job_key = format!("{}:{}", doc_id, processor.processor_full_id);
+            let old_dispatch = self.job_to_dispatch.get(&job_key).cloned();
             if let Some(dispatch_id) = old_dispatch {
                 info!(
                     ?dispatch_id,
@@ -237,22 +254,29 @@ impl DocProcessorTriageListener {
                 );
                 continue;
             }
+            let done_token = make_processor_done_token(
+                doc_id,
+                &processor.processor_full_id,
+                &branch_path,
+                doc_heads,
+            );
             let dispatch_id = rt
-                .dispatch(&processor.plug_id, &processor.routine_name.0, args)
+                .dispatch_raw(
+                    &processor.plug_id,
+                    &processor.routine_name.0,
+                    args,
+                    vec![DispatchOnSuccessHook::ProcessorRunLog {
+                        doc_id: doc_id.clone(),
+                        processor_full_id: processor.processor_full_id.clone(),
+                        done_token,
+                    }],
+                )
                 .await?;
-            store
-                .mutate_sync(|store| {
-                    store.job_to_dispatch.insert(job_key, dispatch_id.clone());
-                    store.dispatch_to_job.insert(
-                        dispatch_id,
-                        (
-                            doc_id.clone(),
-                            processor.plug_id.clone(),
-                            processor.routine_name.0.clone(),
-                        ),
-                    );
-                })
-                .await?;
+            self.job_to_dispatch.insert(job_key, dispatch_id.clone());
+            self.dispatch_to_job.insert(
+                dispatch_id,
+                (doc_id.clone(), processor.processor_full_id.clone()),
+            );
         }
         Ok(())
     }
@@ -285,17 +309,10 @@ impl SwitchSink for DocProcessorTriageListener {
             SwitchEvent::Config(_) => {}
             SwitchEvent::Dispatch(event) => {
                 if let DispatchEvent::DispatchDeleted { id, .. } = &**event {
-                    let store = ctx
-                        .store
-                        .ok_or_else(|| ferr!("triage listener context missing store"))?;
-                    store
-                        .mutate_sync(|store| {
-                            if let Some(job) = store.dispatch_to_job.remove(id) {
-                                let job_key = format!("{}:{}:{}", job.0, job.1, job.2);
-                                store.job_to_dispatch.remove(&job_key);
-                            }
-                        })
-                        .await?;
+                    if let Some(job) = self.dispatch_to_job.remove(id) {
+                        let job_key = format!("{}:{}", job.0, job.1);
+                        self.job_to_dispatch.remove(&job_key);
+                    }
                 }
             }
             SwitchEvent::Drawer(event) => match &**event {
@@ -305,6 +322,7 @@ impl SwitchSink for DocProcessorTriageListener {
                     id,
                     entry,
                     drawer_heads,
+                    origin,
                 } => {
                     for (branch_name, heads) in &entry.branches {
                         let branch_path = BranchPath::from(branch_name.as_str());
@@ -330,6 +348,7 @@ impl SwitchSink for DocProcessorTriageListener {
                             heads,
                             &meta_doc,
                             branch_path,
+                            origin,
                             Some(&changed_facet_keys_set),
                         )
                         .await
@@ -341,7 +360,7 @@ impl SwitchSink for DocProcessorTriageListener {
                     entry,
                     diff,
                     drawer_heads,
-                    ..
+                    origin,
                 } => {
                     let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
                     let has_non_dmeta_change = diff
@@ -397,6 +416,7 @@ impl SwitchSink for DocProcessorTriageListener {
                             heads,
                             &meta_doc,
                             branch_path,
+                            origin,
                             changed_facet_keys_set.as_ref(),
                         )
                         .await
@@ -419,6 +439,78 @@ fn changed_intersects_read_set(
         .any(|key| read_tags.contains(&key.tag.to_string()) || read_keys.contains(key))
 }
 
+fn evaluate_node_predicate(
+    predicate: &NodePredicate,
+    origin: &crate::event_origin::SwitchEventOrigin,
+) -> bool {
+    match predicate {
+        NodePredicate::ChangeOrigin(ChangeOriginDeets::Local) => {
+            matches!(origin, crate::event_origin::SwitchEventOrigin::Local { .. })
+        }
+    }
+}
+
+fn make_processor_done_token(
+    doc_id: &DocId,
+    processor_full_id: &str,
+    branch_path: &daybook_types::doc::BranchPath,
+    heads: &ChangeHashSet,
+) -> String {
+    use std::hash::{Hash, Hasher};
+    // Deterministic fingerprint of this evaluated processor work item.
+    let mut hasher = std::hash::DefaultHasher::default();
+    doc_id.hash(&mut hasher);
+    processor_full_id.hash(&mut hasher);
+    branch_path.hash(&mut hasher);
+    heads.hash(&mut hasher);
+    utils_rs::hash::encode_base58_multibase(hasher.finish().to_le_bytes())
+}
+
 pub fn doc_processor_triage_listener() -> Box<dyn SwitchSink + Send + Sync> {
     Box::<DocProcessorTriageListener>::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_predicate_change_origin_local() {
+        let predicate = NodePredicate::ChangeOrigin(ChangeOriginDeets::Local);
+        assert!(evaluate_node_predicate(
+            &predicate,
+            &crate::event_origin::SwitchEventOrigin::Local {
+                actor_id: "a".into()
+            }
+        ));
+        assert!(!evaluate_node_predicate(
+            &predicate,
+            &crate::event_origin::SwitchEventOrigin::Remote {
+                peer_id: "p".into()
+            }
+        ));
+        assert!(!evaluate_node_predicate(
+            &predicate,
+            &crate::event_origin::SwitchEventOrigin::Bootstrap
+        ));
+    }
+
+    #[test]
+    fn doc_change_predicate_changed_facet_tags() {
+        use daybook_types::manifest::DocChangePredicate;
+        let mut changed = HashSet::new();
+        changed.insert(FacetKey {
+            tag: "org.example.note".into(),
+            id: "main".into(),
+        });
+        changed.insert(FacetKey {
+            tag: "org.example.todo".into(),
+            id: "x".into(),
+        });
+        let pred = DocChangePredicate::ChangedFacetTags(vec!["org.example.todo".into()]);
+        assert!(pred.evaluate_change(Some(&changed)));
+        let pred = DocChangePredicate::ChangedFacetTags(vec!["org.example.unknown".into()]);
+        assert!(!pred.evaluate_change(Some(&changed)));
+        assert!(!pred.evaluate_change(None));
+    }
 }

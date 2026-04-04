@@ -457,6 +457,105 @@ impl PartitionStore {
         Ok(exists == 1)
     }
 
+    pub async fn item_payload(
+        &self,
+        partition_id: &PartitionId,
+        item_id: &str,
+    ) -> Res<Option<serde_json::Value>> {
+        let payload_json = sqlx::query_scalar::<_, String>(
+            "SELECT item_payload_json FROM partition_item_state WHERE partition_id = ? AND item_id = ? AND deleted = 0",
+        )
+        .bind(partition_id)
+        .bind(item_id)
+        .fetch_optional(&self.state_pool)
+        .await?;
+        payload_json
+            .map(|json| serde_json::from_str::<serde_json::Value>(&json))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    pub async fn item_row_count(&self, partition_id: &PartitionId, item_id: &str) -> Res<i64> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(1) FROM partition_item_state WHERE partition_id = ? AND item_id = ?",
+        )
+        .bind(partition_id)
+        .bind(item_id)
+        .fetch_one(&self.state_pool)
+        .await?;
+        Ok(count)
+    }
+
+    pub async fn list_known_item_ids(&self) -> Res<Vec<String>> {
+        let ids = sqlx::query_scalar(
+            r#"
+            SELECT DISTINCT item_id AS doc_id FROM partition_membership_state
+            UNION
+            SELECT DISTINCT item_id AS doc_id FROM partition_item_state
+            "#,
+        )
+        .fetch_all(&self.state_pool)
+        .await?;
+        Ok(ids)
+    }
+
+    pub async fn is_item_present_in_membership_partitions(
+        &self,
+        item_id: &str,
+        allowed_partitions: &[PartitionId],
+    ) -> Res<bool> {
+        if allowed_partitions.is_empty() {
+            return Ok(false);
+        }
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT EXISTS(SELECT 1 FROM partition_membership_state WHERE item_id = ",
+        );
+        query.push_bind(item_id);
+        query.push(" AND present = 1 AND partition_id IN (");
+        let mut separated = query.separated(", ");
+        for partition_id in allowed_partitions {
+            separated.push_bind(partition_id);
+        }
+        separated.push_unseparated("))");
+        let exists: i64 = query
+            .build_query_scalar()
+            .fetch_one(&self.state_pool)
+            .await?;
+        Ok(exists == 1)
+    }
+
+    pub async fn find_first_item_missing_membership_in_partitions(
+        &self,
+        item_ids: &[String],
+        allowed_partitions: &[PartitionId],
+    ) -> Res<Option<String>> {
+        if item_ids.is_empty() || allowed_partitions.is_empty() {
+            return Ok(item_ids.first().cloned());
+        }
+        let mut query =
+            sqlx::QueryBuilder::<sqlx::Sqlite>::new("WITH requested(item_id) AS (SELECT ");
+        for (idx, item_id) in item_ids.iter().enumerate() {
+            if idx > 0 {
+                query.push(" UNION ALL SELECT ");
+            }
+            query.push_bind(item_id);
+        }
+        query.push(") SELECT requested.item_id FROM requested WHERE NOT EXISTS (");
+        query
+            .push("SELECT 1 FROM partition_membership_state m WHERE m.item_id = requested.item_id");
+        query.push(" AND m.present = 1 AND m.partition_id IN (");
+        let mut partitions = query.separated(", ");
+        for partition_id in allowed_partitions {
+            partitions.push_bind(partition_id);
+        }
+        partitions.push_unseparated(")) LIMIT 1");
+        let denied = query
+            .build_query_scalar::<String>()
+            .fetch_optional(&self.state_pool)
+            .await?;
+        Ok(denied)
+    }
+
     pub async fn list_partitions_for_peer(&self, _peer: &PeerKey) -> Res<ListPartitionsResponse> {
         let rows = sqlx::query(
             r#"

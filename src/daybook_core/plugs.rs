@@ -355,6 +355,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     ProcessorManifest {
                         desc: "Extract OCR text from blob image into note".into(),
                         deets: ProcessorDeets::DocProcessor {
+                            event_predicate: default(),
                             routine_name: "ocr-image".into(),
                             predicate: DocPredicateClause::And(vec![
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),
@@ -371,6 +372,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     ProcessorManifest {
                         desc: "Compute image embedding facet from image blob".into(),
                         deets: ProcessorDeets::DocProcessor {
+                            event_predicate: default(),
                             routine_name: "embed-image".into(),
                             predicate: DocPredicateClause::And(vec![
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),
@@ -390,6 +392,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     ProcessorManifest {
                         desc: "Compute embedding facet from note content".into(),
                         deets: ProcessorDeets::DocProcessor {
+                            event_predicate: default(),
                             routine_name: "embed-text".into(),
                             predicate: DocPredicateClause::And(vec![
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
@@ -409,6 +412,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     ProcessorManifest {
                         desc: "Index embedding facets into local sqlite vec store".into(),
                         deets: ProcessorDeets::DocProcessor {
+                            event_predicate: default(),
                             routine_name: "index-embedding".into(),
                             predicate: DocPredicateClause::HasTag(
                                 WellKnownFacetTag::Embedding.into(),
@@ -440,6 +444,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     ProcessorManifest {
                         desc: "Add a test LabelGeneric for testing".into(),
                         deets: ProcessorDeets::DocProcessor {
+                            event_predicate: default(),
                             routine_name: "test-label".into(),
                             predicate: DocPredicateClause::And(vec![
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
@@ -585,10 +590,25 @@ pub struct PlugsRepo {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PlugsEvent {
     // ListChanged { heads: ChangeHashSet },
-    PlugAdded { id: String, heads: ChangeHashSet },
-    PlugChanged { id: String, heads: ChangeHashSet },
-    PlugDeleted { id: String, heads: ChangeHashSet },
-    ConfigDocsChanged { heads: ChangeHashSet },
+    PlugAdded {
+        id: String,
+        heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
+    },
+    PlugChanged {
+        id: String,
+        heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
+    },
+    PlugDeleted {
+        id: String,
+        heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
+    },
+    ConfigDocsChanged {
+        heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
+    },
 }
 
 pub const OCI_PLUG_ARTIFACT_TYPE: &str = "application/vnd.daybook.plug.v1";
@@ -646,6 +666,12 @@ impl crate::repos::Repo for PlugsRepo {
 }
 
 impl PlugsRepo {
+    fn local_origin(&self) -> crate::event_origin::SwitchEventOrigin {
+        crate::event_origin::SwitchEventOrigin::Local {
+            actor_id: self.local_actor_id.to_string(),
+        }
+    }
+
     pub async fn load(
         big_repo: SharedBigRepo,
         blobs: Arc<crate::blobs::BlobsRepo>,
@@ -767,7 +793,8 @@ impl PlugsRepo {
             for event in events.drain(..) {
                 let is_added = matches!(event, PlugsEvent::PlugAdded { .. });
                 match event {
-                    PlugsEvent::PlugAdded { id, heads } | PlugsEvent::PlugChanged { id, heads } => {
+                    PlugsEvent::PlugAdded { id, heads, origin }
+                    | PlugsEvent::PlugChanged { id, heads, origin } => {
                         let Some((new_versioned, _)) = self
                             .big_repo
                             .hydrate_path_at_heads::<Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>(
@@ -841,12 +868,12 @@ impl PlugsRepo {
                             })
                             .await?;
                         delivered_events.push(if is_added {
-                            PlugsEvent::PlugAdded { id, heads }
+                            PlugsEvent::PlugAdded { id, heads, origin }
                         } else {
-                            PlugsEvent::PlugChanged { id, heads }
+                            PlugsEvent::PlugChanged { id, heads, origin }
                         });
                     }
-                    PlugsEvent::PlugDeleted { id, heads } => {
+                    PlugsEvent::PlugDeleted { id, heads, origin } => {
                         let removed_manifest = self
                             .store
                             .query_sync(|store| {
@@ -883,10 +910,10 @@ impl PlugsRepo {
                                     store.rebuild_indices();
                                 })
                                 .await?;
-                            delivered_events.push(PlugsEvent::PlugDeleted { id, heads });
+                            delivered_events.push(PlugsEvent::PlugDeleted { id, heads, origin });
                         }
                     }
-                    PlugsEvent::ConfigDocsChanged { heads } => {
+                    PlugsEvent::ConfigDocsChanged { heads, origin } => {
                         let Some((new_versioned, _)) = self
                             .big_repo
                             .hydrate_path_at_heads::<Versioned<ThroughJson<HashMap<String, String>>>>(
@@ -905,7 +932,7 @@ impl PlugsRepo {
                                 store.plug_config_doc_ids = new_versioned;
                             })
                             .await?;
-                        delivered_events.push(PlugsEvent::ConfigDocsChanged { heads });
+                        delivered_events.push(PlugsEvent::ConfigDocsChanged { heads, origin });
                     }
                 }
             }
@@ -950,6 +977,7 @@ impl PlugsRepo {
             events.push(PlugsEvent::PlugAdded {
                 id,
                 heads: heads.clone(),
+                origin: self.local_origin(),
             });
         }
         Ok(events)
@@ -963,6 +991,17 @@ impl PlugsRepo {
         origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
         exclude_peer: Option<&str>,
     ) -> Res<()> {
+        let mut event_origin = match origin {
+            Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
+                crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: peer_id.to_string(),
+                }
+            }
+            Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+                crate::event_origin::SwitchEventOrigin::Bootstrap
+            }
+            _ => self.local_origin(),
+        };
         if let Some(origin) = origin {
             match origin {
                 am_utils_rs::repo::BigRepoChangeOrigin::Local => return Ok(()),
@@ -998,15 +1037,37 @@ impl PlugsRepo {
                         _ => return Ok(()),
                     };
                     let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
+                    if vtag.actor_id == self.local_actor_id {
+                        event_origin = crate::event_origin::SwitchEventOrigin::Local {
+                            actor_id: vtag.actor_id.to_string(),
+                        };
+                    } else {
+                        event_origin = match origin {
+                            Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote {
+                                peer_id,
+                                ..
+                            }) => crate::event_origin::SwitchEventOrigin::Remote {
+                                peer_id: peer_id.to_string(),
+                            },
+                            Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+                                crate::event_origin::SwitchEventOrigin::Bootstrap
+                            }
+                            _ => crate::event_origin::SwitchEventOrigin::Remote {
+                                peer_id: "unknown".to_string(),
+                            },
+                        };
+                    }
                     if vtag.version.is_nil() {
                         out.push(PlugsEvent::PlugAdded {
                             id: plug_id.clone(),
-                            heads,
+                            heads: heads.clone(),
+                            origin: event_origin.clone(),
                         });
                     } else {
                         out.push(PlugsEvent::PlugChanged {
                             id: plug_id.clone(),
-                            heads,
+                            heads: heads.clone(),
+                            origin: event_origin.clone(),
                         });
                     }
                 }
@@ -1018,6 +1079,7 @@ impl PlugsRepo {
                 out.push(PlugsEvent::PlugDeleted {
                     id: key.clone(),
                     heads,
+                    origin: event_origin.clone(),
                 });
             }
             automerge::PatchAction::PutMap {
@@ -1029,7 +1091,33 @@ impl PlugsRepo {
                 && key == "vtag"
                 && matches!(&**scalar, automerge::ScalarValue::Bytes(_)) =>
             {
-                out.push(PlugsEvent::ConfigDocsChanged { heads });
+                let automerge::ScalarValue::Bytes(vtag_bytes) = &**scalar else {
+                    unreachable!("guard above ensures bytes")
+                };
+                let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
+                if vtag.actor_id == self.local_actor_id {
+                    event_origin = crate::event_origin::SwitchEventOrigin::Local {
+                        actor_id: vtag.actor_id.to_string(),
+                    };
+                } else {
+                    event_origin = match origin {
+                        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote {
+                            peer_id, ..
+                        }) => crate::event_origin::SwitchEventOrigin::Remote {
+                            peer_id: peer_id.to_string(),
+                        },
+                        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+                            crate::event_origin::SwitchEventOrigin::Bootstrap
+                        }
+                        _ => crate::event_origin::SwitchEventOrigin::Remote {
+                            peer_id: "unknown".to_string(),
+                        },
+                    };
+                }
+                out.push(PlugsEvent::ConfigDocsChanged {
+                    heads,
+                    origin: event_origin.clone(),
+                });
             }
             _ => {}
         }
@@ -1369,9 +1457,17 @@ impl PlugsRepo {
         let heads = ChangeHashSet(hash.into_iter().collect());
         // Notify listeners that the plug list or a specific plug has changed
         self.registry.notify([if is_update {
-            PlugsEvent::PlugChanged { id: plug_id, heads }
+            PlugsEvent::PlugChanged {
+                id: plug_id,
+                heads,
+                origin: self.local_origin(),
+            }
         } else {
-            PlugsEvent::PlugAdded { id: plug_id, heads }
+            PlugsEvent::PlugAdded {
+                id: plug_id,
+                heads,
+                origin: self.local_origin(),
+            }
         }]);
 
         Ok(())
@@ -1790,6 +1886,7 @@ impl PlugsRepo {
                 manifest::ProcessorDeets::DocProcessor {
                     routine_name,
                     predicate: _,
+                    event_predicate: _,
                 } => {
                     if !manifest.routines.contains_key(routine_name) {
                         eyre::bail!(
@@ -1928,6 +2025,7 @@ impl PlugsRepo {
                 manifest::ProcessorDeets::DocProcessor {
                     predicate,
                     routine_name: _,
+                    event_predicate: _,
                 } => {
                     for referenced_tag in predicate.referenced_tags() {
                         if !available_tags.contains(&referenced_tag.to_string()) {
@@ -2547,6 +2645,7 @@ mod tests {
             manifest::ProcessorManifest {
                 desc: "Processor".into(),
                 deets: manifest::ProcessorDeets::DocProcessor {
+                    event_predicate: default(),
                     predicate: manifest::DocPredicateClause::HasTag("org.test.tag".into()),
                     routine_name: "missing-routine".into(),
                 },
@@ -2599,6 +2698,7 @@ mod tests {
             manifest::ProcessorManifest {
                 desc: "Processor".into(),
                 deets: manifest::ProcessorDeets::DocProcessor {
+                    event_predicate: default(),
                     predicate: manifest::DocPredicateClause::HasTag("org.test.missing".into()),
                     routine_name: "routine1".into(),
                 },

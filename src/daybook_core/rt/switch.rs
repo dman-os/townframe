@@ -20,9 +20,6 @@ pub struct SwitchStateStore {
     pub plug_heads: Option<ChangeHashSet>,
     pub dispatch_heads: Option<ChangeHashSet>,
     pub config_heads: Option<ChangeHashSet>,
-
-    pub dispatch_to_job: HashMap<String, (DocId, String, String)>,
-    pub job_to_dispatch: HashMap<String, String>,
 }
 
 #[async_trait]
@@ -437,6 +434,7 @@ impl SwitchWorker {
                 id,
                 entry,
                 drawer_heads,
+                ..
             } => {
                 let Some(heads) = entry.branches.get("main") else {
                     return Ok(false);
@@ -519,7 +517,7 @@ impl SwitchWorker {
         match event {
             SwitchEvent::Drawer(event) => {
                 let drawer_heads = match &**event {
-                    DrawerEvent::ListChanged { drawer_heads } => drawer_heads.clone(),
+                    DrawerEvent::ListChanged { drawer_heads, .. } => drawer_heads.clone(),
                     DrawerEvent::DocAdded { drawer_heads, .. } => drawer_heads.clone(),
                     DrawerEvent::DocUpdated { drawer_heads, .. } => drawer_heads.clone(),
                     DrawerEvent::DocDeleted { drawer_heads, .. } => drawer_heads.clone(),
@@ -535,7 +533,7 @@ impl SwitchWorker {
                     PlugsEvent::PlugAdded { heads, .. } => heads.clone(),
                     PlugsEvent::PlugChanged { heads, .. } => heads.clone(),
                     PlugsEvent::PlugDeleted { heads, .. } => heads.clone(),
-                    PlugsEvent::ConfigDocsChanged { heads } => heads.clone(),
+                    PlugsEvent::ConfigDocsChanged { heads, .. } => heads.clone(),
                 };
                 self.store
                     .mutate_sync(|store| {
@@ -557,8 +555,8 @@ impl SwitchWorker {
             }
             SwitchEvent::Config(event) => {
                 let config_heads = match &**event {
-                    crate::config::ConfigEvent::Changed { heads } => Some(heads.clone()),
-                    crate::config::ConfigEvent::SyncDevicesChanged => None,
+                    crate::config::ConfigEvent::Changed { heads, .. } => Some(heads.clone()),
+                    crate::config::ConfigEvent::SyncDevicesChanged { .. } => None,
                 };
                 self.store
                     .mutate_sync(|store| {
@@ -615,6 +613,60 @@ mod tests {
                 .expect("switch test call lock poisoned")
                 .push(self.name.clone());
             Ok(self.outcome.clone().unwrap_or_default())
+        }
+    }
+
+    struct OriginCaptureListener {
+        seen: StdArc<Mutex<Vec<crate::event_origin::SwitchEventOrigin>>>,
+    }
+
+    #[async_trait]
+    impl SwitchSink for OriginCaptureListener {
+        fn interest(&self) -> SwtchSinkInterest {
+            SwtchSinkInterest {
+                consume_drawer: true,
+                consume_plugs: true,
+                consume_dispatch: true,
+                consume_config: true,
+                drawer_predicate: None,
+            }
+        }
+
+        async fn on_event(
+            &mut self,
+            event: &SwitchEvent,
+            _ctx: &SwitchSinkCtx<'_>,
+        ) -> Res<SwitchSinkOutcome> {
+            let origin = match event {
+                SwitchEvent::Drawer(event) => match &**event {
+                    DrawerEvent::ListChanged { origin, .. }
+                    | DrawerEvent::DocAdded { origin, .. }
+                    | DrawerEvent::DocUpdated { origin, .. }
+                    | DrawerEvent::DocDeleted { origin, .. } => origin.clone(),
+                },
+                SwitchEvent::Plugs(event) => match &**event {
+                    PlugsEvent::PlugAdded { origin, .. }
+                    | PlugsEvent::PlugChanged { origin, .. }
+                    | PlugsEvent::PlugDeleted { origin, .. }
+                    | PlugsEvent::ConfigDocsChanged { origin, .. } => origin.clone(),
+                },
+                SwitchEvent::Dispatch(event) => match &**event {
+                    DispatchEvent::DispatchAdded { origin, .. }
+                    | DispatchEvent::DispatchUpdated { origin, .. }
+                    | DispatchEvent::DispatchDeleted { origin, .. } => origin.clone(),
+                },
+                SwitchEvent::Config(event) => match &**event {
+                    crate::config::ConfigEvent::Changed { origin, .. }
+                    | crate::config::ConfigEvent::SyncDevicesChanged { origin, .. } => {
+                        origin.clone()
+                    }
+                },
+            };
+            self.seen
+                .lock()
+                .expect("switch test origin lock poisoned")
+                .push(origin);
+            Ok(SwitchSinkOutcome::default())
         }
     }
 
@@ -872,6 +924,9 @@ mod tests {
             &SwitchEvent::Dispatch(Arc::new(DispatchEvent::DispatchDeleted {
                 id: "hello".into(),
                 heads: ChangeHashSet(Vec::new().into()),
+                origin: crate::event_origin::SwitchEventOrigin::Local {
+                    actor_id: "test-actor".into(),
+                },
             })),
         )
         .await?;
@@ -925,6 +980,9 @@ mod tests {
             &SwitchEvent::Dispatch(Arc::new(DispatchEvent::DispatchDeleted {
                 id: "hello".into(),
                 heads: ChangeHashSet(Vec::new().into()),
+                origin: crate::event_origin::SwitchEventOrigin::Local {
+                    actor_id: "test-actor".into(),
+                },
             })),
         )
         .await?;
@@ -967,6 +1025,9 @@ mod tests {
             &SwitchEvent::Plugs(Arc::new(PlugsEvent::PlugAdded {
                 id: "id".into(),
                 heads: ChangeHashSet(Vec::new().into()),
+                origin: crate::event_origin::SwitchEventOrigin::Local {
+                    actor_id: "test-actor".into(),
+                },
             })),
         )
         .await?;
@@ -975,6 +1036,79 @@ mod tests {
             predicate,
             Some(daybook_types::manifest::DocPredicateClause::HasTag(_))
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_switch_origin_metadata_propagates() -> Res<()> {
+        let seen = StdArc::new(Mutex::new(Vec::new()));
+        let listeners: BTreeMap<String, Box<dyn SwitchSink + Send + Sync>> = [(
+            "origin".to_string(),
+            Box::new(OriginCaptureListener {
+                seen: StdArc::clone(&seen),
+            }) as Box<dyn SwitchSink + Send + Sync>,
+        )]
+        .into();
+        let mut runtime_listeners = prepare_sinks(listeners);
+
+        dispatch_test_event(
+            &mut runtime_listeners,
+            &SwitchEvent::Drawer(Arc::new(DrawerEvent::ListChanged {
+                drawer_heads: ChangeHashSet(Vec::new().into()),
+                origin: crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: "peer-a".into(),
+                },
+            })),
+        )
+        .await?;
+        dispatch_test_event(
+            &mut runtime_listeners,
+            &SwitchEvent::Plugs(Arc::new(PlugsEvent::ConfigDocsChanged {
+                heads: ChangeHashSet(Vec::new().into()),
+                origin: crate::event_origin::SwitchEventOrigin::Bootstrap,
+            })),
+        )
+        .await?;
+        dispatch_test_event(
+            &mut runtime_listeners,
+            &SwitchEvent::Dispatch(Arc::new(DispatchEvent::DispatchDeleted {
+                id: "d".into(),
+                heads: ChangeHashSet(Vec::new().into()),
+                origin: crate::event_origin::SwitchEventOrigin::Local {
+                    actor_id: "actor-a".into(),
+                },
+            })),
+        )
+        .await?;
+        dispatch_test_event(
+            &mut runtime_listeners,
+            &SwitchEvent::Config(Arc::new(crate::config::ConfigEvent::SyncDevicesChanged {
+                origin: crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: "peer-b".into(),
+                },
+            })),
+        )
+        .await?;
+
+        let got = seen
+            .lock()
+            .expect("switch test origin lock poisoned")
+            .clone();
+        assert_eq!(
+            got,
+            vec![
+                crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: "peer-a".into()
+                },
+                crate::event_origin::SwitchEventOrigin::Bootstrap,
+                crate::event_origin::SwitchEventOrigin::Local {
+                    actor_id: "actor-a".into()
+                },
+                crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: "peer-b".into()
+                }
+            ]
+        );
         Ok(())
     }
 }

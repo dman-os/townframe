@@ -447,6 +447,7 @@ pub fn plug_manifest() -> PlugManifest {
                 ProcessorManifest {
                     desc: "Auto label text notes with pseudo labels".into(),
                     deets: ProcessorDeets::DocProcessor {
+                        event_predicate: Default::default(),
                         routine_name: "label-note".into(),
                         predicate: DocPredicateClause::And(vec![
                             DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
@@ -470,6 +471,7 @@ pub fn plug_manifest() -> PlugManifest {
                 ProcessorManifest {
                     desc: "Auto label image docs with pseudo labels".into(),
                     deets: ProcessorDeets::DocProcessor {
+                        event_predicate: Default::default(),
                         routine_name: "label-image".into(),
                         predicate: DocPredicateClause::And(vec![
                             DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),

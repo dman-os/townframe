@@ -96,6 +96,12 @@ struct BranchStateRow {
 }
 
 impl DrawerRepo {
+    fn local_origin(&self) -> crate::event_origin::SwitchEventOrigin {
+        crate::event_origin::SwitchEventOrigin::Local {
+            actor_id: self.local_actor_id.to_string(),
+        }
+    }
+
     pub async fn load(
         big_repo: SharedBigRepo,
         drawer_doc_id: DocumentId,
@@ -514,6 +520,19 @@ impl DrawerRepo {
         origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
         exclude_peer: Option<&str>,
     ) -> Res<()> {
+        let mut event_origin = match origin {
+            Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
+                crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: peer_id.to_string(),
+                }
+            }
+            Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+                crate::event_origin::SwitchEventOrigin::Bootstrap
+            }
+            _ => crate::event_origin::SwitchEventOrigin::Local {
+                actor_id: self.local_actor_id.to_string(),
+            },
+        };
         if let Some(origin) = origin {
             match origin {
                 am_utils_rs::repo::BigRepoChangeOrigin::Local => return Ok(()),
@@ -548,7 +567,26 @@ impl DrawerRepo {
                     },
                     _ => return Ok(()),
                 };
-                let _ = VersionTag::hydrate_bytes(vtag)?;
+                let vtag = VersionTag::hydrate_bytes(vtag)?;
+                if vtag.actor_id == self.local_actor_id {
+                    event_origin = crate::event_origin::SwitchEventOrigin::Local {
+                        actor_id: vtag.actor_id.to_string(),
+                    };
+                } else {
+                    event_origin = match origin {
+                        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote {
+                            peer_id, ..
+                        }) => crate::event_origin::SwitchEventOrigin::Remote {
+                            peer_id: peer_id.to_string(),
+                        },
+                        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+                            crate::event_origin::SwitchEventOrigin::Bootstrap
+                        }
+                        _ => crate::event_origin::SwitchEventOrigin::Remote {
+                            peer_id: "unknown".to_string(),
+                        },
+                    };
+                }
                 // docs.map.<doc_id>.version changed
                 let Some((_obj, automerge::Prop::Map(doc_id_str))) = patch.path.get(2) else {
                     return Ok(());
@@ -589,6 +627,7 @@ impl DrawerRepo {
                         id: doc_id,
                         entry,
                         drawer_heads,
+                        origin: event_origin.clone(),
                     });
                 } else {
                     let previous_heads = new_entry
@@ -611,6 +650,7 @@ impl DrawerRepo {
                         entry,
                         diff,
                         drawer_heads,
+                        origin: event_origin.clone(),
                     });
                 }
             }
@@ -625,6 +665,7 @@ impl DrawerRepo {
                     id: doc_id,
                     drawer_heads,
                     entry: None,
+                    origin: event_origin.clone(),
                 });
             }
             _ => {}
@@ -682,9 +723,13 @@ impl DrawerRepo {
                     .await?
                     .ok_or_eyre("current branch state missing during drawer init")?,
                 drawer_heads: drawer_heads.clone(),
+                origin: self.local_origin(),
             });
         }
-        events.push(DrawerEvent::ListChanged { drawer_heads });
+        events.push(DrawerEvent::ListChanged {
+            drawer_heads,
+            origin: self.local_origin(),
+        });
         Ok(events)
     }
 
@@ -1166,10 +1211,12 @@ impl DrawerRepo {
                     branches: [("main".to_string(), prepared.branch_heads)].into(),
                 },
                 drawer_heads: drawer_heads.clone(),
+                origin: self.local_origin(),
             });
         }
         events.push(DrawerEvent::ListChanged {
             drawer_heads: drawer_heads.clone(),
+            origin: self.local_origin(),
         });
         self.registry.notify(events);
         *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
@@ -1399,9 +1446,11 @@ impl DrawerRepo {
                 entry: updated_entry,
                 diff,
                 drawer_heads: drawer_heads.clone(),
+                origin: self.local_origin(),
             },
             DrawerEvent::ListChanged {
                 drawer_heads: drawer_heads.clone(),
+                origin: self.local_origin(),
             },
         ]);
 
@@ -1535,9 +1584,11 @@ impl DrawerRepo {
                 entry: updated_entry,
                 diff,
                 drawer_heads: drawer_heads.clone(),
+                origin: self.local_origin(),
             },
             DrawerEvent::ListChanged {
                 drawer_heads: drawer_heads.clone(),
+                origin: self.local_origin(),
             },
         ]);
 
@@ -1601,9 +1652,11 @@ impl DrawerRepo {
                     id: id.clone(),
                     entry: Some(entry.clone()),
                     drawer_heads: drawer_heads.clone(),
+                    origin: self.local_origin(),
                 },
                 DrawerEvent::ListChanged {
                     drawer_heads: drawer_heads.clone(),
+                    origin: self.local_origin(),
                 },
             ]);
             *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads;
@@ -2136,9 +2189,11 @@ impl DrawerRepo {
                 entry: updated_entry,
                 diff,
                 drawer_heads: drawer_heads.clone(),
+                origin: self.local_origin(),
             },
             DrawerEvent::ListChanged {
                 drawer_heads: drawer_heads.clone(),
+                origin: self.local_origin(),
             },
         ]);
 
@@ -3110,7 +3165,7 @@ mod tests {
                     added_ids.insert(id.clone());
                     doc_added_heads.push(drawer_heads.clone());
                 }
-                DrawerEvent::ListChanged { drawer_heads } => {
+                DrawerEvent::ListChanged { drawer_heads, .. } => {
                     list_changed_heads.push(drawer_heads.clone());
                 }
                 other => eyre::bail!("unexpected event: {other:?}"),

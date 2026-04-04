@@ -123,21 +123,25 @@ impl DocEntryDiff {
 pub enum DrawerEvent {
     ListChanged {
         drawer_heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
     },
     DocAdded {
         id: DocId,
         entry: DocNBranches,
         drawer_heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
     },
     DocUpdated {
         id: DocId,
         entry: DocNBranches,
         diff: DocEntryDiff,
         drawer_heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
     },
     DocDeleted {
         id: DocId,
         drawer_heads: ChangeHashSet,
         entry: Option<DocEntry>,
+        origin: crate::event_origin::SwitchEventOrigin,
     },
 }

@@ -38,6 +38,15 @@ use dispatch::{
 };
 use init::InitRepo;
 
+pub const PROCESSOR_RUNLOG_PARTITION_ID: &str = "processor-runlog/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProcessorRunlogDone {
+    pub done_by_peer_id: String,
+    pub done_token: String,
+    pub done_at: String,
+}
+
 pub struct RtConfig {
     pub device_id: String,
 }
@@ -195,6 +204,28 @@ pub enum DispatchArgs {
 }
 
 impl Rt {
+    pub fn processor_runlog_item_id(doc_id: &str, processor_full_id: &str) -> String {
+        format!("v1|doc:{doc_id}|proc:{processor_full_id}")
+    }
+
+    pub async fn get_processor_runlog_done(
+        &self,
+        doc_id: &str,
+        processor_full_id: &str,
+    ) -> Res<Option<ProcessorRunlogDone>> {
+        let item_id = Self::processor_runlog_item_id(doc_id, processor_full_id);
+        let payload = self
+            .big_repo
+            .partition_store()
+            .item_payload(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
+            .await?;
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+        let done = serde_json::from_value::<ProcessorRunlogDone>(payload)?;
+        Ok(Some(done))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn boot(
         config: RtConfig,
@@ -819,6 +850,7 @@ impl Rt {
                                 .clear_running_dispatch(init_id, dispatch_id)
                                 .await?;
                         }
+                        DispatchOnSuccessHook::ProcessorRunLog { .. } => {}
                     }
                 }
             } else {
@@ -829,6 +861,18 @@ impl Rt {
                             self.init_repo
                                 .clear_running_dispatch(init_id, dispatch_id)
                                 .await?;
+                        }
+                        DispatchOnSuccessHook::ProcessorRunLog {
+                            doc_id,
+                            processor_full_id,
+                            done_token,
+                        } => {
+                            self.record_processor_runlog_done(
+                                doc_id,
+                                processor_full_id,
+                                done_token,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -907,6 +951,7 @@ impl Rt {
                                 .clear_running_dispatch(init_id, &waiting_id)
                                 .await?;
                         }
+                        DispatchOnSuccessHook::ProcessorRunLog { .. } => {}
                     }
                 }
                 continue;
@@ -921,6 +966,22 @@ impl Rt {
             }
         }
         Ok(())
+    }
+
+    async fn record_processor_runlog_done(
+        &self,
+        doc_id: &str,
+        processor_full_id: &str,
+        done_token: &str,
+    ) -> Res<()> {
+        upsert_processor_runlog_item(
+            self.big_repo.partition_store().as_ref(),
+            &self.config.device_id,
+            doc_id,
+            processor_full_id,
+            done_token,
+        )
+        .await
     }
 
     async fn start_waiting_dispatch(
@@ -1423,6 +1484,93 @@ impl Rt {
             }
         })
         .await??;
+
+        Ok(())
+    }
+}
+
+async fn upsert_processor_runlog_item(
+    partition_store: &am_utils_rs::partition::PartitionStore,
+    done_by_peer_id: &str,
+    doc_id: &str,
+    processor_full_id: &str,
+    done_token: &str,
+) -> Res<()> {
+    let item_id = Rt::processor_runlog_item_id(doc_id, processor_full_id);
+    let payload = serde_json::json!({
+        "done_by_peer_id": done_by_peer_id,
+        "done_token": done_token,
+        "done_at": jiff::Timestamp::now().to_string(),
+    });
+    partition_store
+        .record_item_change(
+            &PROCESSOR_RUNLOG_PARTITION_ID.to_string(),
+            &item_id,
+            &payload,
+        )
+        .await
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use tokio::sync::broadcast;
+    use tokio_util::sync::CancellationToken;
+
+    async fn make_partition_store() -> Res<am_utils_rs::partition::PartitionStore> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        let (events_tx, _) = broadcast::channel(1024);
+        let store = am_utils_rs::partition::PartitionStore::new(
+            pool,
+            events_tx,
+            CancellationToken::new(),
+            std::sync::Arc::new(utils_rs::AbortableJoinSet::new()),
+        );
+        store.ensure_schema().await?;
+        store
+            .ensure_partition(&PROCESSOR_RUNLOG_PARTITION_ID.to_string())
+            .await?;
+        Ok(store)
+    }
+
+    #[tokio::test]
+    async fn processor_runlog_upsert_is_bounded_for_same_doc_processor() -> Res<()> {
+        let store = make_partition_store().await?;
+        let item_id = Rt::processor_runlog_item_id("doc-1", "@daybook/plabels/label-note");
+
+        upsert_processor_runlog_item(
+            &store,
+            "peer-a",
+            "doc-1",
+            "@daybook/plabels/label-note",
+            "token-1",
+        )
+        .await?;
+        upsert_processor_runlog_item(
+            &store,
+            "peer-a",
+            "doc-1",
+            "@daybook/plabels/label-note",
+            "token-2",
+        )
+        .await?;
+
+        let count = store
+            .item_row_count(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
+            .await?;
+        assert_eq!(count, 1, "runlog should overwrite in-place for same key");
+
+        let payload = store
+            .item_payload(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
+            .await?
+            .ok_or_eyre("expected runlog payload row")?;
+        assert_eq!(payload["done_by_peer_id"], serde_json::json!("peer-a"));
+        assert_eq!(payload["done_token"], serde_json::json!("token-2"));
 
         Ok(())
     }

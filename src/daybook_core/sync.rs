@@ -171,6 +171,7 @@ impl IrohSyncRepo {
         for blob_partition_id in [
             crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
             crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
+            crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.to_string(),
         ] {
             rcx.big_repo
                 .partition_store()
@@ -356,6 +357,7 @@ impl IrohSyncRepo {
             ),
             crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
             crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
+            crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.to_string(),
         ]
         .into()
     }
@@ -440,7 +442,10 @@ impl IrohSyncRepo {
                 val = config_listener.recv_async() => {
                     match val {
                         Ok(event) => {
-                            if matches!(&*event, crate::config::ConfigEvent::SyncDevicesChanged) {
+                            if matches!(
+                                &*event,
+                                crate::config::ConfigEvent::SyncDevicesChanged { .. }
+                            ) {
                                 self.spawn_connect_known_devices_once("config-change").await;
                             }
                         }

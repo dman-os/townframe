@@ -355,15 +355,7 @@ impl BigRepo {
     async fn ensure_persistent_change_brokers_for_known_docs(
         self: &Arc<Self>,
     ) -> Res<Vec<Arc<changes::DocChangeBrokerLease>>> {
-        let doc_ids: Vec<String> = sqlx::query_scalar(
-            r#"
-            SELECT DISTINCT item_id AS doc_id FROM partition_membership_state
-            UNION
-            SELECT DISTINCT item_id AS doc_id FROM partition_item_state
-            "#,
-        )
-        .fetch_all(&self.state_pool)
-        .await?;
+        let doc_ids = self.partition_store.list_known_item_ids().await?;
         let mut leases = Vec::new();
         for raw_doc_id in doc_ids {
             let Ok(doc_id) = DocumentId::from_str(&raw_doc_id) else {

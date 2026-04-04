@@ -186,12 +186,30 @@ pub async fn test_cx_with_options(
         sql_ctx.db_pool.clone(),
     )
     .await?;
+    let config_user_path =
+        daybook_types::doc::user_path::for_repo(&local_user_path, "config-repo")?;
+    let config_actor_id = daybook_types::doc::user_path::to_actor_id(&config_user_path);
+    config_repo
+        .upsert_actor_user_path(config_actor_id, config_user_path)
+        .await?;
+    let plugs_user_path = daybook_types::doc::user_path::for_repo(&local_user_path, "plugs-repo")?;
+    let plugs_actor_id = daybook_types::doc::user_path::to_actor_id(&plugs_user_path);
+    config_repo
+        .upsert_actor_user_path(plugs_actor_id, plugs_user_path)
+        .await?;
     let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
         Arc::clone(&big_repo),
         app_doc_id.clone(),
         local_user_path.clone(),
+        sql_ctx.db_pool.clone(),
     )
     .await?;
+    let dispatch_user_path =
+        daybook_types::doc::user_path::for_repo(&local_user_path, "dispatch-repo")?;
+    let dispatch_actor_id = daybook_types::doc::user_path::to_actor_id(&dispatch_user_path);
+    config_repo
+        .upsert_actor_user_path(dispatch_actor_id, dispatch_user_path)
+        .await?;
     let (progress_repo, progress_stop) =
         crate::progress::ProgressRepo::boot(sql_ctx.db_pool.clone()).await?;
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
@@ -211,6 +229,12 @@ pub async fn test_cx_with_options(
         Some(Arc::clone(&plugs_repo)),
     )
     .await?;
+    let drawer_user_path =
+        daybook_types::doc::user_path::for_repo(&local_user_path, "drawer-repo")?;
+    let drawer_actor_id = daybook_types::doc::user_path::to_actor_id(&drawer_user_path);
+    config_repo
+        .upsert_actor_user_path(drawer_actor_id, drawer_user_path)
+        .await?;
 
     if options.provision_mltools_models {
         let mltools_config = mltools::models::mobile_default(mltools::models::test_cache_dir())
