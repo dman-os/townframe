@@ -27,9 +27,10 @@ impl SecretRepo {
             });
         }
         let service_name = format!("daybook.repo.{repo_id}");
-        let entry = keyring::Entry::new(&service_name, Self::KEYRING_USERNAME).wrap_err_with(|| {
-            format!("failed creating keyring entry for iroh secret key ({service_name})")
-        })?;
+        let entry =
+            keyring::Entry::new(&service_name, Self::KEYRING_USERNAME).wrap_err_with(|| {
+                format!("failed creating keyring entry for iroh secret key ({service_name})")
+            })?;
         let secret = match entry.get_password() {
             Ok(secret_hex) => match decode_secret_hex(&secret_hex) {
                 Ok(keyring_secret) => {

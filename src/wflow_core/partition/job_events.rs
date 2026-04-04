@@ -20,6 +20,21 @@ pub struct JobCancelEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobMessageEvent {
+    pub job_id: Arc<str>,
+    pub message_id: Arc<str>,
+    pub timestamp: Timestamp,
+    pub payload_json: Arc<str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobTimerFiredEvent {
+    pub job_id: Arc<str>,
+    pub wait_id: u64,
+    pub timestamp: Timestamp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRunEvent {
     pub job_id: Arc<str>,
     pub timestamp: Timestamp,
@@ -36,6 +51,7 @@ pub struct JobRunEvent {
 pub enum JobRunResult {
     Success { value_json: Arc<str> },
     StepEffect(JobEffectResult),
+    StepWait(JobWaitResult),
     WorkerErr(JobRunWorkerError),
     WflowErr(JobError),
     Aborted,
@@ -75,6 +91,20 @@ pub struct JobEffectResult {
 pub enum JobEffectResultDeets {
     Success { value_json: Arc<str> },
     EffectErr(JobError),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobWaitResult {
+    pub step_id: u64,
+    pub attempt_id: u64,
+    pub start_at: Timestamp,
+    pub deets: JobWaitResultDeets,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum JobWaitResultDeets {
+    Timer { wait_id: u64, fire_at: Timestamp },
+    Message { wait_id: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

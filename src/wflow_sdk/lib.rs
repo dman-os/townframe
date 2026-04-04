@@ -79,6 +79,45 @@ impl WflowCtx {
             }
         }
     }
+
+    pub fn sleep(&self, duration: Duration) -> Result<(), JobErrorX> {
+        let state = host::next_step(&self.job.job_id)
+            .map_err(|err| JobErrorX::Terminal(ferr!("error getting next op: {err}")))?;
+        match state {
+            host::StepState::Completed(_completed) => Ok(()),
+            host::StepState::Active(active_op_state) => host::sleep(
+                &self.job.job_id,
+                active_op_state.id,
+                duration.as_millis().try_into().map_err(|_| {
+                    JobErrorX::Terminal(ferr!("duration too large for host sleep API"))
+                })?,
+            )
+            .map_err(|err| JobErrorX::Terminal(ferr!("error in host sleep call: {err}"))),
+        }
+    }
+
+    pub fn recv<T>(&self) -> Result<Json<T>, JobErrorX>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let state = host::next_step(&self.job.job_id)
+            .map_err(|err| JobErrorX::Terminal(ferr!("error getting next op: {err}")))?;
+        let value_json = match state {
+            host::StepState::Completed(completed) => completed.value_json,
+            host::StepState::Active(active_op_state) => {
+                host::recv_message(&self.job.job_id, active_op_state.id).map_err(|err| {
+                    JobErrorX::Terminal(ferr!("error receiving workflow message: {err}"))
+                })?
+            }
+        };
+        let value = serde_json::from_str(&value_json).map_err(|err| {
+            JobErrorX::Terminal(ferr!(
+                "error parsing workflow message json for '{type_name}': {err:?}",
+                type_name = std::any::type_name::<T>()
+            ))
+        })?;
+        Ok(Json(value))
+    }
 }
 
 /// Helper function to convert JobErrorX to JobError

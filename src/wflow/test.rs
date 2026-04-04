@@ -13,6 +13,10 @@ mod fails_until_told;
 mod keyvalue_plugin;
 #[cfg(test)]
 mod recover_from_log;
+#[cfg(test)]
+mod recv_message;
+#[cfg(test)]
+mod sleep_then_succeed;
 
 use wash_runtime::{host::HostApi, plugin, types, wit::WitInterface};
 use wflow_core::kvstore::log::KvStoreLog;
@@ -299,6 +303,19 @@ impl WflowTestContext {
     pub async fn cancel_job(&self, job_id: Arc<str>, reason: String) -> Res<u64> {
         use crate::WflowIngress;
         self.ingress.cancel_job(job_id, reason).await
+    }
+
+    /// Send a message to a workflow job
+    pub async fn send_job_message(
+        &self,
+        job_id: Arc<str>,
+        message_id: Arc<str>,
+        payload_json: String,
+    ) -> Res<u64> {
+        use crate::WflowIngress;
+        self.ingress
+            .send_message(job_id, message_id, payload_json)
+            .await
     }
 
     /// Wait until there are no active jobs, with a timeout
