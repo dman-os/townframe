@@ -185,6 +185,7 @@
           baseBuildInputs = with pkgs; [
             pkg-config
             openssl
+            dbus
             protobuf
             mold
             deno

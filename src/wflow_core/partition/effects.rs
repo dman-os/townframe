@@ -20,6 +20,9 @@ pub struct PartitionEffect {
 pub enum PartitionEffectDeets {
     RunJob(RunJobAttemptDeets),
     AbortRun { reason: Arc<str> },
+    WaitTimer(WaitTimerDeets),
+    WaitMessage(WaitMessageDeets),
+    CancelWait(CancelWaitDeets),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -33,4 +36,23 @@ impl From<RunJobAttemptDeets> for PartitionEffectDeets {
     fn from(value: RunJobAttemptDeets) -> Self {
         Self::RunJob(value)
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WaitTimerDeets {
+    pub wait_id: u64,
+    pub fire_at: Timestamp,
+    pub step_id: u64,
+    pub attempt_id: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WaitMessageDeets {
+    pub wait_id: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CancelWaitDeets {
+    pub wait_id: u64,
+    pub reason: Arc<str>,
 }

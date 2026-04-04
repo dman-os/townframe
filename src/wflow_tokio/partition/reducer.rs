@@ -202,11 +202,16 @@ impl TokioPartitionReducer {
             let effects_map = self.state.read_effects().await;
             effects_map
                 .iter()
-                .map(|(effect_id, effect)| {
-                    (
-                        effect_id.clone(),
-                        matches!(effect.deets, effects::PartitionEffectDeets::RunJob(..)),
-                    )
+                .filter_map(|(effect_id, effect)| {
+                    let is_run_job =
+                        matches!(effect.deets, effects::PartitionEffectDeets::RunJob(..));
+                    let should_reschedule = is_run_job
+                        || matches!(effect.deets, effects::PartitionEffectDeets::WaitTimer(..));
+                    if should_reschedule {
+                        Some((effect_id.clone(), is_run_job))
+                    } else {
+                        None
+                    }
                 })
                 .collect::<Vec<_>>()
         };
@@ -261,7 +266,9 @@ impl TokioPartitionReducer {
         match entry {
             log::PartitionLogEntry::JobEffectResult(..)
             | log::PartitionLogEntry::JobInit(..)
-            | log::PartitionLogEntry::JobCancel(..) => {
+            | log::PartitionLogEntry::JobCancel(..)
+            | log::PartitionLogEntry::JobMessage(..)
+            | log::PartitionLogEntry::JobTimerFired(..) => {
                 self.handle_job_event(entry_id, entry).await?;
             }
             log::PartitionLogEntry::JobPartitionEffects(effects) => {
@@ -378,6 +385,20 @@ impl TokioPartitionReducer {
                 }
                 log::PartitionLogEntry::JobCancel(evt) => {
                     wflow_core::partition::reduce::reduce_job_cancel_event(
+                        &mut jobs,
+                        &mut self.event_effects,
+                        evt,
+                    )
+                }
+                log::PartitionLogEntry::JobMessage(evt) => {
+                    wflow_core::partition::reduce::reduce_job_message_event(
+                        &mut jobs,
+                        &mut self.event_effects,
+                        evt,
+                    )
+                }
+                log::PartitionLogEntry::JobTimerFired(evt) => {
+                    wflow_core::partition::reduce::reduce_job_timer_fired_event(
                         &mut jobs,
                         &mut self.event_effects,
                         evt,

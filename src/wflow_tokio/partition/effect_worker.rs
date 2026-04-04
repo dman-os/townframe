@@ -60,10 +60,13 @@ pub fn start_tokio_effect_worker(
                 job_to_effect_id,
                 worker_id: Arc::clone(&worker_name),
                 sessions: default(),
+                pending_timers: default(),
                 log: pcx.log_ref(),
                 pcx,
             };
             debug!("starting");
+            let mut timer_tick = tokio::time::interval(Duration::from_millis(100));
+            timer_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     biased;
@@ -82,6 +85,9 @@ pub fn start_tokio_effect_worker(
                             break;
                         };
                         worker.handle_partition_effects(effect_id).await?;
+                    }
+                    _ = timer_tick.tick() => {
+                        worker.fire_due_timers().await?;
                     }
                 };
             }
@@ -107,6 +113,15 @@ struct TokioEffectWorker {
     job_to_effect_id: JobToEffectId,
     worker_id: WorkerId,
     sessions: HashMap<Arc<str>, CachedRunSession>,
+    pending_timers: HashMap<effects::EffectId, PendingTimer>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingTimer {
+    effect_id: effects::EffectId,
+    job_id: Arc<str>,
+    wait_id: u64,
+    fire_at: Timestamp,
 }
 
 enum CachedHostKind {
@@ -128,7 +143,7 @@ impl TokioEffectWorker {
             job_events::JobRunResult::StepEffect(job_events::JobEffectResult {
                 deets: job_events::JobEffectResultDeets::Success { .. },
                 ..
-            })
+            }) | job_events::JobRunResult::StepWait(_)
         )
     }
 
@@ -152,6 +167,72 @@ impl TokioEffectWorker {
     fn shutdown_sessions(&mut self) {
         for (_job_id, session) in std::mem::take(&mut self.sessions) {
             self.drop_cached_session(session);
+        }
+    }
+
+    async fn fire_due_timers(&mut self) -> Res<()> {
+        if self.pending_timers.is_empty() {
+            return Ok(());
+        }
+        let now = Timestamp::now();
+        let due_effect_ids = self
+            .pending_timers
+            .values()
+            .filter(|timer| timer.fire_at <= now)
+            .map(|timer| timer.effect_id.clone())
+            .collect::<Vec<_>>();
+
+        for effect_id in due_effect_ids {
+            let Some(timer) = self.pending_timers.remove(&effect_id) else {
+                continue;
+            };
+            {
+                let mut effects_map = self.state.write_effects().await;
+                effects_map.remove(&effect_id);
+            }
+            self.log
+                .append(&log::PartitionLogEntry::JobTimerFired(
+                    job_events::JobTimerFiredEvent {
+                        job_id: timer.job_id,
+                        wait_id: timer.wait_id,
+                        timestamp: now,
+                    },
+                ))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn cancel_wait_effects(&mut self, job_id: &Arc<str>, wait_id: u64) {
+        let remove_effect_ids = {
+            let effects_map = self.state.read_effects().await;
+            effects_map
+                .iter()
+                .filter_map(|(id, effect)| {
+                    if &effect.job_id != job_id {
+                        return None;
+                    }
+                    let found = match &effect.deets {
+                        effects::PartitionEffectDeets::WaitTimer(wait) => wait.wait_id == wait_id,
+                        effects::PartitionEffectDeets::WaitMessage(wait) => wait.wait_id == wait_id,
+                        _ => false,
+                    };
+                    if found {
+                        Some(id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        for effect_id in &remove_effect_ids {
+            self.pending_timers.remove(effect_id);
+        }
+        if !remove_effect_ids.is_empty() {
+            let mut effects_map = self.state.write_effects().await;
+            for effect_id in remove_effect_ids {
+                effects_map.remove(&effect_id);
+            }
         }
     }
 
@@ -217,6 +298,23 @@ impl TokioEffectWorker {
                         abort_token.cancel();
                     }
                 }
+                let mut effects_map = self.state.write_effects().await;
+                effects_map.remove(&effect_id);
+            }
+            effects::PartitionEffectDeets::WaitTimer(wait) => {
+                self.pending_timers.insert(
+                    effect_id.clone(),
+                    PendingTimer {
+                        effect_id: effect_id.clone(),
+                        job_id,
+                        wait_id: wait.wait_id,
+                        fire_at: wait.fire_at,
+                    },
+                );
+            }
+            effects::PartitionEffectDeets::WaitMessage(_) => {}
+            effects::PartitionEffectDeets::CancelWait(cancel) => {
+                self.cancel_wait_effects(&job_id, cancel.wait_id).await;
                 let mut effects_map = self.state.write_effects().await;
                 effects_map.remove(&effect_id);
             }

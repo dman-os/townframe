@@ -8,6 +8,8 @@ pub enum PartitionLogEntry {
     JobInit(job_events::JobInitEvent),
     JobEffectResult(job_events::JobRunEvent),
     JobCancel(job_events::JobCancelEvent),
+    JobMessage(job_events::JobMessageEvent),
+    JobTimerFired(job_events::JobTimerFiredEvent),
     JobPartitionEffects(JobPartitionEffectsLogEntry),
 }
 

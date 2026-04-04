@@ -66,6 +66,8 @@ interface host {
 
     next-step: func(job-id: job-id) -> result<step-state, string>;
     persist-step: func(job-id: job-id, step-id: step-id, value-json: json) -> result<_, string>;
+    sleep: func(job-id: job-id, step-id: step-id, duration-ms: u64) -> result<_, string>;
+    recv-message: func(job-id: job-id, step-id: step-id) -> result<json, string>;
 }
 
 // for starting invocations
@@ -88,6 +90,7 @@ interface ingress {
 interface partition-host {
     use types.{job-id};
     use metastore.{wflow-meta};
+    use types.{json};
 
     type partition-id = u64;
     
@@ -97,6 +100,7 @@ interface partition-host {
     }
 
     add-job: func(partition-id: partition-id, args: add-job-args);
+    send-message: func(partition-id: partition-id, job-id: job-id, payload-json: json);
 }
 
 interface metastore {

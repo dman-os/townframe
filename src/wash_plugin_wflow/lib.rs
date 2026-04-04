@@ -79,13 +79,31 @@ enum JobTrap {
         value_json: Arc<str>,
         attempt_id: u64,
     },
+    WaitStep {
+        step_id: u64,
+        attempt_id: u64,
+        start_at: Timestamp,
+        deets: WaitTrapDeets,
+    },
     RunComplete(Result<String, types::JobError>),
+}
+
+#[derive(Debug)]
+enum WaitTrapDeets {
+    Timer { wait_id: u64, fire_at: Timestamp },
+    Message { wait_id: u64 },
 }
 
 #[derive(Debug, Clone, Copy)]
 enum SessionResume {
     Continue,
     Stop,
+}
+
+fn wait_id_for(step_id: u64, attempt_id: u64) -> u64 {
+    let lo = step_id & 0xFFFF_FFFF;
+    let hi = (attempt_id & 0xFFFF_FFFF) << 32;
+    hi | lo
 }
 
 struct SessionHandle {
@@ -244,6 +262,130 @@ impl host::Host for SharedWashCtx {
             Some(SessionResume::Stop) | None => Ok(Err("session stopped".to_string())),
         }
     }
+
+    async fn sleep(
+        &mut self,
+        job_id: partition_host::JobId,
+        step_id: host::StepId,
+        duration_ms: u64,
+    ) -> wasmtime::Result<Result<(), String>> {
+        let plugin = WflowPlugin::from_ctx(self);
+        let Some(job) = plugin
+            .active_jobs
+            .read()
+            .expect(ERROR_MUTEX)
+            .get(job_id.as_str())
+            .cloned()
+        else {
+            anyhow::bail!("job not active");
+        };
+        let (attempt_id, start_at) = {
+            let active_step = job.active_step.lock().expect(ERROR_MUTEX);
+            let Some(active_step) = active_step.as_ref() else {
+                anyhow::bail!("step not active");
+            };
+            if active_step.step_id != step_id {
+                anyhow::bail!("given step_id is not active");
+            }
+            (active_step.attempt_id, active_step.start_at)
+        };
+
+        let fire_at = start_at
+            .checked_add(Duration::from_millis(duration_ms))
+            .expect("ts overflow");
+        let trap = JobTrap::WaitStep {
+            step_id,
+            attempt_id,
+            start_at,
+            deets: WaitTrapDeets::Timer {
+                wait_id: wait_id_for(step_id, attempt_id),
+                fire_at,
+            },
+        };
+
+        if job.yield_tx.send(trap).is_err() {
+            anyhow::bail!("session parent dropped");
+        }
+
+        let mut resume_rx = job.resume_rx.lock().await;
+        let cmd = tokio::select! {
+            _ = job.pause_cancel.cancelled() => {
+                return Ok(Err("session cancelled".to_string()));
+            }
+            cmd = resume_rx.recv() => cmd
+        };
+        match cmd {
+            Some(SessionResume::Continue) => Ok(Ok(())),
+            Some(SessionResume::Stop) | None => Ok(Err("session stopped".to_string())),
+        }
+    }
+
+    async fn recv_message(
+        &mut self,
+        job_id: partition_host::JobId,
+        step_id: host::StepId,
+    ) -> wasmtime::Result<Result<String, String>> {
+        let plugin = WflowPlugin::from_ctx(self);
+        let Some(job) = plugin
+            .active_jobs
+            .read()
+            .expect(ERROR_MUTEX)
+            .get(job_id.as_str())
+            .cloned()
+        else {
+            anyhow::bail!("job not active");
+        };
+        let (attempt_id, start_at) = {
+            let active_step = job.active_step.lock().expect(ERROR_MUTEX);
+            let Some(active_step) = active_step.as_ref() else {
+                anyhow::bail!("step not active");
+            };
+            if active_step.step_id != step_id {
+                anyhow::bail!("given step_id is not active");
+            }
+            (active_step.attempt_id, active_step.start_at)
+        };
+
+        let trap = JobTrap::WaitStep {
+            step_id,
+            attempt_id,
+            start_at,
+            deets: WaitTrapDeets::Message {
+                wait_id: wait_id_for(step_id, attempt_id),
+            },
+        };
+
+        if job.yield_tx.send(trap).is_err() {
+            anyhow::bail!("session parent dropped");
+        }
+
+        let mut resume_rx = job.resume_rx.lock().await;
+        let cmd = tokio::select! {
+            _ = job.pause_cancel.cancelled() => {
+                return Ok(Err("session cancelled".to_string()));
+            }
+            cmd = resume_rx.recv() => cmd
+        };
+        match cmd {
+            Some(SessionResume::Continue) => {
+                let journal = job.journal.lock().expect(ERROR_MUTEX);
+                let Some(step_state) = journal.steps.get(step_id as usize) else {
+                    anyhow::bail!("step missing from journal");
+                };
+                let wflow_core::partition::state::JobStepState::Effect { attempts } = step_state;
+                let Some(last_attempt) = attempts.last() else {
+                    anyhow::bail!("step has no attempts in journal");
+                };
+                let wflow_core::partition::job_events::JobEffectResultDeets::Success { value_json } =
+                    &last_attempt.deets
+                else {
+                    anyhow::bail!("step has no success value");
+                };
+                Ok(Ok(value_json.to_string()))
+            }
+            Some(SessionResume::Stop) | None => Ok(Err("session stopped".to_string())),
+        }
+    }
 }
 
 impl partition_host::Host for SharedWashCtx {
@@ -251,6 +393,15 @@ impl partition_host::Host for SharedWashCtx {
         &mut self,
         _id: partition_host::PartitionId,
         _args: partition_host::AddJobArgs,
+    ) -> wasmtime::Result<()> {
+        todo!()
+    }
+
+    async fn send_message(
+        &mut self,
+        _id: partition_host::PartitionId,
+        _job_id: partition_host::JobId,
+        _payload_json: String,
     ) -> wasmtime::Result<()> {
         todo!()
     }
@@ -370,6 +521,26 @@ impl WflowPlugin {
                     start_at,
                     end_at,
                     deets: job_events::JobEffectResultDeets::Success { value_json },
+                },
+            )),
+            JobTrap::WaitStep {
+                step_id,
+                attempt_id,
+                start_at,
+                deets,
+            } => Ok(job_events::JobRunResult::StepWait(
+                job_events::JobWaitResult {
+                    step_id,
+                    attempt_id,
+                    start_at,
+                    deets: match deets {
+                        WaitTrapDeets::Timer { wait_id, fire_at } => {
+                            job_events::JobWaitResultDeets::Timer { wait_id, fire_at }
+                        }
+                        WaitTrapDeets::Message { wait_id } => {
+                            job_events::JobWaitResultDeets::Message { wait_id }
+                        }
+                    },
                 },
             )),
             JobTrap::RunComplete(Ok(value_json)) => Ok(job_events::JobRunResult::Success {

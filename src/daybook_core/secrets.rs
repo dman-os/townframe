@@ -18,7 +18,7 @@ impl SecretRepo {
         let repo_id = repo_id.to_string();
         let fallback_secret = load_or_init_fallback_secret(sql, &repo_id).await?;
         let fallback_secret_hex = data_encoding::HEXLOWER.encode(&fallback_secret.to_bytes());
-        if is_keyring_disabled() {
+        if !should_use_keyring() {
             let public = fallback_secret.public();
             return Ok(RepoIdentity {
                 repo_id,
@@ -27,56 +27,43 @@ impl SecretRepo {
             });
         }
         let service_name = format!("daybook.repo.{repo_id}");
-        let secret = match keyring::Entry::new(&service_name, Self::KEYRING_USERNAME) {
-            Ok(entry) => match entry.get_password() {
-                Ok(secret_hex) => match decode_secret_hex(&secret_hex) {
-                    Ok(keyring_secret) => {
-                        if keyring_secret.to_bytes() != fallback_secret.to_bytes() {
-                            warn!(
-                                "keyring and fallback iroh secrets diverged; using fallback secret"
-                            );
-                            if let Err(err) = entry.set_password(&fallback_secret_hex) {
-                                warn!(?err, "failed repairing keyring secret from fallback value");
-                            }
-                            fallback_secret.clone()
-                        } else {
-                            keyring_secret
-                        }
-                    }
-                    Err(err) => {
-                        warn!(
-                            ?err,
-                            "invalid iroh secret key in keyring, repairing from fallback"
-                        );
-                        if let Err(set_err) = entry.set_password(&fallback_secret_hex) {
-                            warn!(
-                                ?set_err,
-                                "failed repairing keyring secret from fallback value"
-                            );
-                        }
+        let entry =
+            keyring::Entry::new(&service_name, Self::KEYRING_USERNAME).wrap_err_with(|| {
+                format!("failed creating keyring entry for iroh secret key ({service_name})")
+            })?;
+        let secret = match entry.get_password() {
+            Ok(secret_hex) => match decode_secret_hex(&secret_hex) {
+                Ok(keyring_secret) => {
+                    if keyring_secret.to_bytes() != fallback_secret.to_bytes() {
+                        warn!("keyring and fallback iroh secrets diverged; repairing keyring from fallback");
+                        entry
+                            .set_password(&fallback_secret_hex)
+                            .wrap_err("failed repairing keyring secret from fallback value")?;
                         fallback_secret.clone()
+                    } else {
+                        keyring_secret
                     }
-                },
-                Err(keyring::Error::NoEntry) => {
-                    if let Err(err) = entry.set_password(&fallback_secret_hex) {
-                        warn!(?err, "failed backfilling keyring from fallback secret");
-                    }
-                    fallback_secret.clone()
                 }
                 Err(err) => {
                     warn!(
                         ?err,
-                        "error reading iroh secret key from keyring, using fallback"
+                        "invalid iroh secret key in keyring, repairing from fallback"
                     );
+                    entry
+                        .set_password(&fallback_secret_hex)
+                        .wrap_err("failed repairing keyring secret from fallback value")?;
                     fallback_secret.clone()
                 }
             },
-            Err(err) => {
-                warn!(
-                    ?err,
-                    "error creating keyring entry, using fallback secret store"
-                );
+            Err(keyring::Error::NoEntry) => {
+                entry
+                    .set_password(&fallback_secret_hex)
+                    .wrap_err("failed backfilling keyring from fallback secret")?;
                 fallback_secret.clone()
+            }
+            Err(err) => {
+                return Err(eyre::eyre!(err))
+                    .wrap_err("failed reading iroh secret key from keyring");
             }
         };
 
@@ -103,16 +90,17 @@ impl SecretRepo {
         .bind(&encoded)
         .execute(sql)
         .await?;
-        if !is_keyring_disabled() {
+        if should_use_keyring() {
             let service_name = format!("daybook.repo.{repo_id}");
-            if let Ok(entry) = keyring::Entry::new(&service_name, Self::KEYRING_USERNAME) {
-                if let Err(err) = entry.set_password(&encoded) {
-                    warn!(
-                        ?err,
-                        "failed setting keyring secret from provisioned clone identity"
-                    );
-                }
-            }
+            let entry =
+                keyring::Entry::new(&service_name, Self::KEYRING_USERNAME).wrap_err_with(|| {
+                    format!(
+                        "failed creating keyring entry for provisioned clone identity ({service_name})"
+                    )
+                })?;
+            entry
+                .set_password(&encoded)
+                .wrap_err("failed setting keyring secret from provisioned clone identity")?;
         }
         let public = secret.public();
         Ok(RepoIdentity {
@@ -127,6 +115,29 @@ fn is_keyring_disabled() -> bool {
     std::env::var("DAYB_DISABLE_KEYRING")
         .map(|value| value == "1")
         .unwrap_or(false)
+}
+
+fn has_persistent_keyring_backend() -> bool {
+    match keyring::default::default_credential_builder().persistence() {
+        keyring::credential::CredentialPersistence::EntryOnly
+        | keyring::credential::CredentialPersistence::ProcessOnly => false,
+        keyring::credential::CredentialPersistence::UntilReboot
+        | keyring::credential::CredentialPersistence::UntilDelete => true,
+        _ => false,
+    }
+}
+
+fn should_use_keyring() -> bool {
+    if is_keyring_disabled() {
+        return false;
+    }
+    if !has_persistent_keyring_backend() {
+        warn!(
+            "keyring backend is not persistent on this target/build; using fallback secret store"
+        );
+        return false;
+    }
+    true
 }
 
 fn fallback_secret_key(repo_id: &str) -> String {

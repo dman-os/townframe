@@ -32,6 +32,7 @@ mod wit {
 use crate::interlude::*;
 
 use crate::wit::exports::townframe::wflow::bundle::JobResult;
+use std::time::Duration;
 use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
 wit::export!(Component with_types_in wit);
@@ -44,6 +45,8 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
             "fails_once" => |cx, args: FailsOnceArgs| fails_once(cx, args),
             "fails_until_told" => |cx, args: FailsUntilToldArgs| fails_until_told(cx, args),
             "effect_chain" => |cx, args: EffectChainArgs| effect_chain(cx, args),
+            "sleep_then_succeed" => |cx, args: SleepThenSucceedArgs| sleep_then_succeed(cx, args),
+            "recv_message" => |cx, args: RecvMessageArgs| recv_message(cx, args),
         })
     }
 }
@@ -141,5 +144,24 @@ fn effect_chain(cx: WflowCtx, args: EffectChainArgs) -> Result<(), JobErrorX> {
     for ii in 0..args.steps {
         cx.effect(|| Ok(Json(ii)))?;
     }
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SleepThenSucceedArgs {
+    millis: u64,
+}
+
+fn sleep_then_succeed(cx: WflowCtx, args: SleepThenSucceedArgs) -> Result<(), JobErrorX> {
+    cx.sleep(Duration::from_millis(args.millis))?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RecvMessageArgs {}
+
+fn recv_message(cx: WflowCtx, _args: RecvMessageArgs) -> Result<(), JobErrorX> {
+    let Json(value) = cx.recv::<Json<serde_json::Value>>()?;
+    let _ = value;
     Ok(())
 }
