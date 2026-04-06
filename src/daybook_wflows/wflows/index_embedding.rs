@@ -1,7 +1,7 @@
 use crate::interlude::*;
 use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
-pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
+pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::facet_routine;
     use crate::wit::townframe::sql::types::SqlValue;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};

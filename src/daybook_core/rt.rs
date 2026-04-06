@@ -200,6 +200,7 @@ pub enum DispatchArgs {
         branch_path: daybook_types::doc::BranchPath,
         heads: ChangeHashSet,
         facet_key: Option<String>,
+        wflow_args_json: Option<String>,
     },
 }
 
@@ -375,6 +376,7 @@ impl Rt {
             wflow_part_state,
             local_actor_id,
         });
+        rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
 
         // Ensure init routines are queued at boot according to each init run mode.
         let mut plug_ids = rt
@@ -620,6 +622,7 @@ impl Rt {
                             branch_path: daybook_types::doc::BranchPath::from("main"),
                             heads: config_heads,
                             facet_key: None,
+                            wflow_args_json: None,
                         },
                         vec![DispatchOnSuccessHook::InitMarkDone {
                             init_id: init_id.clone(),
@@ -851,6 +854,37 @@ impl Rt {
                                 .await?;
                         }
                         DispatchOnSuccessHook::ProcessorRunLog { .. } => {}
+                        DispatchOnSuccessHook::CommandInvokeReply {
+                            parent_wflow_job_id,
+                            request_id,
+                        } => {
+                            let reply = {
+                                let (status, value_json, error_json) =
+                                    command_invoke_reply_from_result(
+                                        &event.result,
+                                        dispatch_id,
+                                        merged_successfully,
+                                    );
+                                daybook_pdk::InvokeCommandReply {
+                                    request_id: request_id.clone(),
+                                    status,
+                                    value_json,
+                                    error_json,
+                                }
+                            };
+                            self.wflow_ingress
+                                .send_message(
+                                    Arc::from(parent_wflow_job_id.as_str()),
+                                    Arc::from(request_id.as_str()),
+                                    serde_json::to_string(&reply).expect(ERROR_JSON),
+                                )
+                                .await
+                                .wrap_err_with(|| {
+                                    format!(
+                                        "error sending command invoke reply to parent job {parent_wflow_job_id}"
+                                    )
+                                })?;
+                        }
                     }
                 }
             } else {
@@ -873,6 +907,37 @@ impl Rt {
                                 done_token,
                             )
                             .await?;
+                        }
+                        DispatchOnSuccessHook::CommandInvokeReply {
+                            parent_wflow_job_id,
+                            request_id,
+                        } => {
+                            let reply = {
+                                let (status, value_json, error_json) =
+                                    command_invoke_reply_from_result(
+                                        &event.result,
+                                        dispatch_id,
+                                        merged_successfully,
+                                    );
+                                daybook_pdk::InvokeCommandReply {
+                                    request_id: request_id.clone(),
+                                    status,
+                                    value_json,
+                                    error_json,
+                                }
+                            };
+                            self.wflow_ingress
+                                .send_message(
+                                    Arc::from(parent_wflow_job_id.as_str()),
+                                    Arc::from(request_id.as_str()),
+                                    serde_json::to_string(&reply).expect(ERROR_JSON),
+                                )
+                                .await
+                                .wrap_err_with(|| {
+                                    format!(
+                                        "error sending command invoke reply to parent job {parent_wflow_job_id}"
+                                    )
+                                })?;
                         }
                     }
                 }
@@ -952,6 +1017,7 @@ impl Rt {
                                 .await?;
                         }
                         DispatchOnSuccessHook::ProcessorRunLog { .. } => {}
+                        DispatchOnSuccessHook::CommandInvokeReply { .. } => {}
                     }
                 }
                 continue;
@@ -991,6 +1057,7 @@ impl Rt {
     ) -> Res<()> {
         let ActiveDispatchDeets::Wflow {
             plug_id,
+            routine_name,
             bundle_name,
             wflow_key,
             wflow_job_id,
@@ -1011,6 +1078,12 @@ impl Rt {
                 ferr!("bundle not found in plug manifest: plug={plug_id} bundle={bundle_name}")
             })?;
         let key: daybook_types::manifest::KeyGeneric = wflow_key.clone().into();
+        let job_args_json = match &waiting_dispatch.args {
+            ActiveDispatchArgs::FacetRoutine(facet_args) => facet_args
+                .wflow_args_json
+                .clone()
+                .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON)),
+        };
         let _workload_id = ensure_bundle_workload_running(
             &self.wcx,
             &self.wash_host,
@@ -1024,6 +1097,7 @@ impl Rt {
             wflow_partition_id: None,
             entry_id: None,
             plug_id: plug_id.clone(),
+            routine_name: routine_name.clone(),
             bundle_name: bundle_name.clone(),
             wflow_key: wflow_key.clone(),
             wflow_job_id: Some(job_id.clone()),
@@ -1033,12 +1107,7 @@ impl Rt {
             .await?;
         let entry_id = match self
             .wflow_ingress
-            .add_job(
-                job_id.clone().into(),
-                &key,
-                serde_json::to_string(&()).expect(ERROR_JSON),
-                None,
-            )
+            .add_job(job_id.clone().into(), &key, job_args_json, None)
             .await
         {
             Ok(value) => value,
@@ -1055,6 +1124,7 @@ impl Rt {
             wflow_partition_id: Some(self.local_wflow_part_id.clone()),
             entry_id: Some(entry_id),
             plug_id: plug_id.clone(),
+            routine_name: routine_name.clone(),
             bundle_name: bundle_name.clone(),
             wflow_key: wflow_key.clone(),
             wflow_job_id: Some(job_id.clone()),
@@ -1098,6 +1168,121 @@ impl Rt {
         self.dispatch_raw(plug_id, routine_name, args, vec![]).await
     }
 
+    pub async fn invoke_command_from_wflow_job(
+        &self,
+        parent_wflow_job_id: &str,
+        target_command_url: &str,
+        request: daybook_pdk::InvokeCommandRequest,
+    ) -> Res<String> {
+        self.ensure_rt_live()?;
+        let parent_dispatch = self
+            .dispatch_repo
+            .get_by_wflow_job(parent_wflow_job_id)
+            .await
+            .ok_or_else(|| {
+                ferr!("no active dispatch found for parent job: {parent_wflow_job_id}")
+            })?;
+        let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+            doc_id,
+            branch_path,
+            heads,
+            facet_key: _,
+            ..
+        }) = &parent_dispatch.args;
+        let ActiveDispatchDeets::Wflow {
+            plug_id,
+            routine_name,
+            ..
+        } = &parent_dispatch.deets;
+
+        let parent_plug_manifest = self
+            .plugs_repo
+            .get(plug_id)
+            .await
+            .ok_or_else(|| ferr!("parent plug not found for command invoke: {plug_id}"))?;
+        let parent_routine_manifest = parent_plug_manifest
+            .routines
+            .get(routine_name.as_str())
+            .ok_or_else(|| {
+                ferr!("parent routine not found for command invoke: {plug_id}/{routine_name}")
+            })?;
+
+        let target_ref = daybook_pdk::parse_command_url_str(target_command_url)
+            .map_err(|err| ferr!("invalid command URL in invoke token: {err}"))?;
+        let is_allowed =
+            parent_routine_manifest
+                .command_invoke_acl()
+                .iter()
+                .any(|allowlisted_url| {
+                    daybook_pdk::parse_command_url(allowlisted_url).is_ok_and(|parsed| {
+                        parsed.plug_id == target_ref.plug_id
+                            && parsed.command_name == target_ref.command_name
+                    })
+                });
+        if !is_allowed {
+            eyre::bail!(
+                "command target '{}' is not allowlisted by routine '{}'",
+                target_command_url,
+                routine_name
+            );
+        }
+
+        let target_plug_manifest =
+            self.plugs_repo
+                .get(&target_ref.plug_id)
+                .await
+                .ok_or_else(|| {
+                    ferr!(
+                        "target plug not found in command URL: {}",
+                        target_ref.plug_id
+                    )
+                })?;
+        let target_command_manifest = target_plug_manifest
+            .commands
+            .get(target_ref.command_name.as_str())
+            .ok_or_else(|| {
+                ferr!(
+                    "target command not found in command URL: {}/{}",
+                    target_ref.plug_id,
+                    target_ref.command_name
+                )
+            })?;
+        let manifest::CommandDeets::DocCommand {
+            routine_name: target_routine_name,
+        } = &target_command_manifest.deets;
+
+        let fixed_dispatch_id = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::hash::DefaultHasher::default();
+            dispatch_stable_identity(&parent_dispatch).hash(&mut hasher);
+            target_command_url.hash(&mut hasher);
+            request.request_id.hash(&mut hasher);
+            let hash = hasher.finish();
+            let encoded = utils_rs::hash::encode_base58_multibase(hash.to_le_bytes());
+            format!("cmdinvoke-{encoded}")
+        };
+
+        self.dispatch_no_gate_internal(
+            &target_ref.plug_id,
+            &target_routine_name.0,
+            DispatchArgs::DocFacet {
+                doc_id: doc_id.clone(),
+                branch_path: branch_path.clone(),
+                heads: heads.clone(),
+                facet_key: None,
+                wflow_args_json: Some(request.args_json.clone()),
+            },
+            vec![DispatchOnSuccessHook::CommandInvokeReply {
+                parent_wflow_job_id: parent_wflow_job_id.to_string(),
+                request_id: request.request_id,
+            }],
+            vec![],
+            Some(fixed_dispatch_id),
+            true,
+        )
+        .await
+    }
+
     async fn dispatch_raw(
         &self,
         plug_id: &str,
@@ -1107,12 +1292,14 @@ impl Rt {
     ) -> Res<String> {
         self.ensure_rt_live()?;
         let waiting_on_dispatch_ids = self.ensure_plug_init_dispatches(plug_id).await?;
-        self.dispatch_no_gate(
+        self.dispatch_no_gate_internal(
             plug_id,
             routine_name,
             args,
             on_success_hooks,
             waiting_on_dispatch_ids,
+            None,
+            false,
         )
         .await
     }
@@ -1124,6 +1311,29 @@ impl Rt {
         args: DispatchArgs,
         on_success_hooks: Vec<DispatchOnSuccessHook>,
         waiting_on_dispatch_ids: Vec<String>,
+    ) -> Res<String> {
+        self.dispatch_no_gate_internal(
+            plug_id,
+            routine_name,
+            args,
+            on_success_hooks,
+            waiting_on_dispatch_ids,
+            None,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_no_gate_internal(
+        &self,
+        plug_id: &str,
+        routine_name: &str,
+        args: DispatchArgs,
+        on_success_hooks: Vec<DispatchOnSuccessHook>,
+        waiting_on_dispatch_ids: Vec<String>,
+        fixed_dispatch_id: Option<String>,
+        reuse_terminal_on_match: bool,
     ) -> Res<String> {
         self.ensure_rt_live()?;
 
@@ -1148,6 +1358,7 @@ impl Rt {
                     heads,
                     branch_path,
                     facet_key,
+                    wflow_args_json,
                 },
             ) => {
                 let tag: FacetTag = working_facet_tag.0.clone().into();
@@ -1167,7 +1378,9 @@ impl Rt {
                     let hash = hasher.finish();
                     utils_rs::hash::encode_base58_multibase(hash.to_le_bytes())
                 };
-                let dispatch_id = format!("{plug_id}/{routine_name}-{dispatch_id}");
+                let dispatch_id = fixed_dispatch_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{plug_id}/{routine_name}-{dispatch_id}"));
                 (
                     dispatch_id,
                     ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
@@ -1178,6 +1391,7 @@ impl Rt {
                         facet_acl: routine_man.facet_acl().to_vec(),
                         config_facet_acl: routine_man.config_facet_acl().to_vec(),
                         local_state_acl: routine_man.local_state_acl.clone(),
+                        wflow_args_json,
                         staging_branch_path: daybook_types::doc::BranchPath::from(
                             "/tmp/placeholder",
                         ), // Will be set when job is created
@@ -1191,20 +1405,20 @@ impl Rt {
             }
         };
         if let Some(existing) = self.dispatch_repo.get_any(&dispatch_id).await {
-            if matches!(
-                existing.status,
-                dispatch::DispatchStatus::Waiting | dispatch::DispatchStatus::Active
-            ) {
-                let can_reuse = serde_json::to_string(&existing.on_success_hooks)
-                    .expect(ERROR_JSON)
-                    == serde_json::to_string(&on_success_hooks).expect(ERROR_JSON)
-                    && existing.waiting_on_dispatch_ids == waiting_on_dispatch_ids;
-                if can_reuse {
-                    warn!(?dispatch_id, "dispatch already pending/active");
-                    return Ok(dispatch_id);
-                }
-                dispatch_id = format!("{dispatch_id}-{}", Uuid::new_v4().bs58());
+            let can_reuse = serde_json::to_string(&existing.on_success_hooks).expect(ERROR_JSON)
+                == serde_json::to_string(&on_success_hooks).expect(ERROR_JSON)
+                && existing.waiting_on_dispatch_ids == waiting_on_dispatch_ids;
+            if can_reuse
+                && (reuse_terminal_on_match
+                    || matches!(
+                        existing.status,
+                        dispatch::DispatchStatus::Waiting | dispatch::DispatchStatus::Active
+                    ))
+            {
+                warn!(?dispatch_id, "dispatch already exists with same identity");
+                return Ok(dispatch_id);
             }
+            dispatch_id = format!("{dispatch_id}-{}", Uuid::new_v4().bs58());
         }
 
         let is_waiting = !waiting_on_dispatch_ids.is_empty();
@@ -1241,14 +1455,16 @@ impl Rt {
                     )
                     .await?;
 
+                    let wflow_args_json = {
+                        let ActiveDispatchArgs::FacetRoutine(ref facet_args) = args;
+                        facet_args
+                            .wflow_args_json
+                            .clone()
+                            .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON))
+                    };
                     entry_id = Some(
                         self.wflow_ingress
-                            .add_job(
-                                job_id.clone().into(),
-                                key,
-                                serde_json::to_string(&()).expect(ERROR_JSON),
-                                None,
-                            )
+                            .add_job(job_id.clone().into(), key, wflow_args_json, None)
                             .await
                             .wrap_err_with(|| {
                                 format!("error scheduling job for {plug_id}/{routine_name}")
@@ -1261,6 +1477,7 @@ impl Rt {
                     wflow_partition_id,
                     entry_id,
                     plug_id: plug_id.into(),
+                    routine_name: routine_name.to_string(),
                     bundle_name: bundle_name.0.clone(),
                     wflow_key: key.0.clone(),
                     wflow_job_id: Some(job_id),
@@ -1509,6 +1726,92 @@ async fn upsert_processor_runlog_item(
             &payload,
         )
         .await
+}
+
+fn dispatch_stable_identity(dispatch: &ActiveDispatch) -> String {
+    match (&dispatch.deets, &dispatch.args) {
+        (
+            ActiveDispatchDeets::Wflow {
+                plug_id,
+                routine_name,
+                ..
+            },
+            ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+                doc_id,
+                branch_path,
+                heads,
+                facet_key,
+                ..
+            }),
+        ) => format!(
+            "{plug_id}/{routine_name}|{doc_id}|{}|{}|{facet_key}",
+            branch_path.as_str(),
+            serde_json::to_string(heads).expect(ERROR_JSON)
+        ),
+    }
+}
+
+fn command_invoke_reply_from_result(
+    result: &JobRunResult,
+    dispatch_id: &str,
+    merged_successfully: bool,
+) -> (
+    daybook_pdk::InvokeCommandStatus,
+    Option<String>,
+    Option<String>,
+) {
+    if !merged_successfully {
+        let error_json = serde_json::json!({
+            "kind": "merge-failed",
+            "dispatch_id": dispatch_id,
+            "message": "workflow run succeeded but post-run branch merge failed",
+        });
+        return (
+            daybook_pdk::InvokeCommandStatus::Failed,
+            None,
+            Some(error_json.to_string()),
+        );
+    }
+    match result {
+        JobRunResult::Success { value_json } => (
+            daybook_pdk::InvokeCommandStatus::Succeeded,
+            Some(value_json.to_string()),
+            None,
+        ),
+        JobRunResult::Aborted => (daybook_pdk::InvokeCommandStatus::Cancelled, None, None),
+        JobRunResult::WflowErr(JobError::Terminal { error_json }) => (
+            daybook_pdk::InvokeCommandStatus::Failed,
+            None,
+            Some(error_json.to_string()),
+        ),
+        JobRunResult::WorkerErr(err) => {
+            let error_json = serde_json::json!({
+                "kind": "worker-error",
+                "dispatch_id": dispatch_id,
+                "error": format!("{err:?}"),
+            });
+            (
+                daybook_pdk::InvokeCommandStatus::Failed,
+                None,
+                Some(error_json.to_string()),
+            )
+        }
+        JobRunResult::WflowErr(JobError::Transient { error_json, .. }) => {
+            let wrapped = serde_json::json!({
+                "kind": "transient-exhausted",
+                "dispatch_id": dispatch_id,
+                "error_json": error_json,
+            });
+            (
+                daybook_pdk::InvokeCommandStatus::Failed,
+                None,
+                Some(wrapped.to_string()),
+            )
+        }
+        JobRunResult::StepEffect(_) | JobRunResult::StepWait(_) => {
+            unreachable!("non-terminal result reached terminal invoke reply")
+        }
+    }
 }
 
 #[cfg(test)]

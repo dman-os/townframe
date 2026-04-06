@@ -253,6 +253,7 @@ pub fn plug_manifest() -> PlugManifest {
                         plug_id: "@daybook/plabels".into(),
                         local_state_key: "label-classifier".into(),
                     }],
+                    command_invoke_acl: vec![],
                 }
                 .into(),
             ),
@@ -307,6 +308,7 @@ pub fn plug_manifest() -> PlugManifest {
                         plug_id: "@daybook/plabels".into(),
                         local_state_key: "label-classifier".into(),
                     }],
+                    command_invoke_acl: vec![],
                 }
                 .into(),
             ),
@@ -347,6 +349,7 @@ pub fn plug_manifest() -> PlugManifest {
                         plug_id: "@daybook/plabels".into(),
                         local_state_key: "label-candidates-learner".into(),
                     }],
+                    command_invoke_acl: vec![],
                 }
                 .into(),
             ),
@@ -378,6 +381,7 @@ pub fn plug_manifest() -> PlugManifest {
                         plug_id: "@daybook/plabels".into(),
                         local_state_key: "label-candidates-learner".into(),
                     }],
+                    command_invoke_acl: vec![],
                 }
                 .into(),
             ),

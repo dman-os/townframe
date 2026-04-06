@@ -8,7 +8,7 @@ const IMAGE_LABEL_ALGORITHM_TAG: &str = "label-image/embed-gauntlet-nomic-v1";
 const LOCAL_STATE_KEY: &str = "@daybook/plabels/label-classifier";
 const CANDIDATE_SET_ID: &str = "label-candidates";
 
-pub fn run(cx: WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
+pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 

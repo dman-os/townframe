@@ -152,8 +152,34 @@ impl host::Host for SharedWashCtx {
             anyhow::bail!("job not active");
         };
         let mut active_step = job.active_step.lock().expect(ERROR_MUTEX);
-        if active_step.is_some() {
-            // TODO: should be possible to implement this
+        if let Some(stale_active) = active_step.as_ref() {
+            let stale_step_id = stale_active.step_id;
+            let journal = job.journal.lock().expect(ERROR_MUTEX);
+            let stale_completed = journal.steps.get(stale_step_id as usize).and_then(|state| {
+                use wflow_core::partition::job_events::JobEffectResultDeets;
+                use wflow_core::partition::state::JobStepState;
+                let JobStepState::Effect { attempts } = state;
+                attempts.last().and_then(|attempt| match &attempt.deets {
+                    JobEffectResultDeets::Success { value_json } => Some(value_json.to_string()),
+                    JobEffectResultDeets::EffectErr(_) => None,
+                })
+            });
+            drop(journal);
+            if let Some(value_json) = stale_completed {
+                active_step.take();
+                job.cur_step
+                    .compare_exchange(
+                        stale_step_id,
+                        stale_step_id + 1,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                    .expect("impossible: wasm is single threaded");
+                return Ok(Ok(host::StepState::Completed(host::CompletedStepState {
+                    id: stale_step_id,
+                    value_json,
+                })));
+            }
             anyhow::bail!("concurrent steps not allowed");
         }
         let step_id = job.cur_step.load(std::sync::atomic::Ordering::Relaxed);

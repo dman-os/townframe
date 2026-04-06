@@ -16,6 +16,10 @@ mod recover_from_log;
 #[cfg(test)]
 mod recv_message;
 #[cfg(test)]
+mod recv_message_then_effect;
+#[cfg(test)]
+mod sleep_then_effect;
+#[cfg(test)]
 mod sleep_then_succeed;
 
 use wash_runtime::{host::HostApi, plugin, types, wit::WitInterface};

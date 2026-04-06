@@ -47,6 +47,8 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
             "effect_chain" => |cx, args: EffectChainArgs| effect_chain(cx, args),
             "sleep_then_succeed" => |cx, args: SleepThenSucceedArgs| sleep_then_succeed(cx, args),
             "recv_message" => |cx, args: RecvMessageArgs| recv_message(cx, args),
+            "recv_message_then_effect" => |cx, args: RecvMessageThenEffectArgs| recv_message_then_effect(cx, args),
+            "sleep_then_effect" => |cx, args: SleepThenEffectArgs| sleep_then_effect(cx, args),
         })
     }
 }
@@ -56,7 +58,7 @@ struct FailsOnceArgs {
     key: String,
 }
 
-fn fails_once(cx: WflowCtx, args: FailsOnceArgs) -> Result<(), JobErrorX> {
+fn fails_once(cx: &mut WflowCtx, args: FailsOnceArgs) -> Result<(), JobErrorX> {
     use api_utils_rs::wit::wasi::keyvalue::store;
 
     // Get the current value from keyvalue store
@@ -102,7 +104,7 @@ struct FailsUntilToldArgs {
     key: String,
 }
 
-fn fails_until_told(cx: WflowCtx, args: FailsUntilToldArgs) -> Result<(), JobErrorX> {
+fn fails_until_told(cx: &mut WflowCtx, args: FailsUntilToldArgs) -> Result<(), JobErrorX> {
     use api_utils_rs::wit::wasi::keyvalue::store;
 
     // Check if we should succeed by reading from keyvalue store
@@ -140,7 +142,7 @@ struct EffectChainArgs {
     steps: u64,
 }
 
-fn effect_chain(cx: WflowCtx, args: EffectChainArgs) -> Result<(), JobErrorX> {
+fn effect_chain(cx: &mut WflowCtx, args: EffectChainArgs) -> Result<(), JobErrorX> {
     for ii in 0..args.steps {
         cx.effect(|| Ok(Json(ii)))?;
     }
@@ -152,7 +154,7 @@ struct SleepThenSucceedArgs {
     millis: u64,
 }
 
-fn sleep_then_succeed(cx: WflowCtx, args: SleepThenSucceedArgs) -> Result<(), JobErrorX> {
+fn sleep_then_succeed(cx: &mut WflowCtx, args: SleepThenSucceedArgs) -> Result<(), JobErrorX> {
     cx.sleep(Duration::from_millis(args.millis))?;
     Ok(())
 }
@@ -160,8 +162,31 @@ fn sleep_then_succeed(cx: WflowCtx, args: SleepThenSucceedArgs) -> Result<(), Jo
 #[derive(Debug, Serialize, Deserialize)]
 struct RecvMessageArgs {}
 
-fn recv_message(cx: WflowCtx, _args: RecvMessageArgs) -> Result<(), JobErrorX> {
+fn recv_message(cx: &mut WflowCtx, _args: RecvMessageArgs) -> Result<(), JobErrorX> {
     let Json(value) = cx.recv::<Json<serde_json::Value>>()?;
     let _ = value;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RecvMessageThenEffectArgs {}
+
+fn recv_message_then_effect(
+    cx: &mut WflowCtx,
+    _args: RecvMessageThenEffectArgs,
+) -> Result<(), JobErrorX> {
+    let Json(_value) = cx.recv::<Json<serde_json::Value>>()?;
+    cx.effect(|| Ok(Json(serde_json::json!({"ok": true}))))?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SleepThenEffectArgs {
+    millis: u64,
+}
+
+fn sleep_then_effect(cx: &mut WflowCtx, args: SleepThenEffectArgs) -> Result<(), JobErrorX> {
+    cx.sleep(Duration::from_millis(args.millis))?;
+    cx.effect(|| Ok(Json(serde_json::json!({"slept": true}))))?;
     Ok(())
 }

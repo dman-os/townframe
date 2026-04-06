@@ -255,6 +255,9 @@ pub struct RoutineManifest {
     pub r#impl: RoutineImpl,
     #[garde(dive)]
     pub deets: RoutineManifestDeets,
+    #[garde(skip)]
+    #[serde(default)]
+    pub command_invoke_acl: Vec<Url>,
     #[garde(dive)]
     #[serde(default)]
     pub local_state_acl: Vec<RoutineLocalStateAccess>,
@@ -313,6 +316,10 @@ impl RoutineManifest {
             } => config_facet_acl.as_slice(),
             _ => &[],
         }
+    }
+
+    pub fn command_invoke_acl(&self) -> &[Url] {
+        self.command_invoke_acl.as_slice()
     }
 }
 

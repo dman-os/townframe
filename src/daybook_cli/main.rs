@@ -985,6 +985,7 @@ Routine impl: {routine_impl:?}
                                     branch_path: branch_path.clone(),
                                     heads: heads.clone(),
                                     facet_key: None,
+                                    wflow_args_json: None,
                                 },
                             )
                             .await?;

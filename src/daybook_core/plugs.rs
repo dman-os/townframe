@@ -189,6 +189,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
+                        command_invoke_acl: vec![],
                     }
                     .into(),
                 ),
@@ -220,6 +221,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
+                        command_invoke_acl: vec![],
                     }
                     .into(),
                 ),
@@ -251,6 +253,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
+                        command_invoke_acl: vec![],
                     }
                     .into(),
                 ),
@@ -276,6 +279,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             plug_id: "@daybook/wip".into(),
                             local_state_key: "doc-embedding-index".into(),
                         }],
+                        command_invoke_acl: vec![],
                     }
                     .into(),
                 ),
@@ -299,6 +303,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
+                        command_invoke_acl: vec![],
                     }
                     .into(),
                 ),
@@ -497,6 +502,10 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
         },
     ];
 
+    #[cfg(test)]
+    let mut plugs = plugs;
+    #[cfg(test)]
+    plugs.push(plug_test::plug_manifest());
     plugs
 }
 
@@ -1384,6 +1393,10 @@ impl PlugsRepo {
                                     "/daybook_wflows.wasm.zst"
                                 ))
                                 .as_slice(),
+                                "plug_test.wasm.zst" => {
+                                    include_bytes!(concat!(env!("OUT_DIR"), "/plug_test.wasm.zst"))
+                                        .as_slice()
+                                }
                                 _ => {
                                     eyre::bail!("unsupported static wasm component_url");
                                 }
@@ -1917,6 +1930,7 @@ impl PlugsRepo {
                     }
                     "static" => match url.path() {
                         "daybook_wflows.wasm.zst" => {}
+                        "plug_test.wasm.zst" => {}
                         _ => eyre::bail!("Unrecognized static component_url: {url}",),
                     },
                     scheme if scheme == crate::blobs::BLOB_SCHEME => {
@@ -1956,6 +1970,8 @@ impl PlugsRepo {
             .keys()
             .map(|dep_id_full| parse_dep_base_id(dep_id_full))
             .collect::<Res<HashSet<_>>>()?;
+        let mut cached_command_target_manifests: HashMap<String, Arc<manifest::PlugManifest>> =
+            HashMap::new();
         let mut available_local_states: HashSet<(String, String)> = manifest
             .local_states
             .keys()
@@ -2001,6 +2017,62 @@ impl PlugsRepo {
                         routine_name,
                         access.plug_id,
                         access.local_state_key
+                    );
+                }
+            }
+            for target_command_url in routine.command_invoke_acl() {
+                let parsed_target =
+                    daybook_pdk::parse_command_url(target_command_url).map_err(|err| {
+                        eyre::eyre!(
+                            "Invalid command_invoke_acl in routine '{}': url '{}' is invalid: {}",
+                            routine_name,
+                            target_command_url,
+                            err
+                        )
+                    })?;
+                if parsed_target.plug_id != plug_id
+                    && !dependency_base_ids.contains(&parsed_target.plug_id)
+                {
+                    eyre::bail!(
+                        "Invalid command_invoke_acl in routine '{}': target plug '{}' is neither this plug nor a declared dependency",
+                        routine_name,
+                        parsed_target.plug_id
+                    );
+                }
+                let command_exists = if parsed_target.plug_id == plug_id {
+                    manifest
+                        .commands
+                        .contains_key(parsed_target.command_name.as_str())
+                } else {
+                    let target_manifest = if let Some(cached) =
+                        cached_command_target_manifests.get(&parsed_target.plug_id)
+                    {
+                        Arc::clone(cached)
+                    } else {
+                        let loaded = self
+                            .get(&parsed_target.plug_id)
+                            .await
+                            .ok_or_else(|| {
+                                ferr!(
+                                    "Invalid command_invoke_acl in routine '{}': target plug '{}' not found",
+                                    routine_name,
+                                    parsed_target.plug_id
+                                )
+                            })?;
+                        cached_command_target_manifests
+                            .insert(parsed_target.plug_id.clone(), Arc::clone(&loaded));
+                        loaded
+                    };
+                    target_manifest
+                        .commands
+                        .contains_key(parsed_target.command_name.as_str())
+                };
+                if !command_exists {
+                    eyre::bail!(
+                        "Invalid command_invoke_acl in routine '{}': target command '{}/{}' not found",
+                        routine_name,
+                        parsed_target.plug_id,
+                        parsed_target.command_name
                     );
                 }
             }
@@ -2384,6 +2456,7 @@ mod tests {
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 local_state_acl: vec![],
+                command_invoke_acl: vec![],
             }
             .into(),
         );
@@ -2471,6 +2544,7 @@ mod tests {
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 local_state_acl: vec![],
+                command_invoke_acl: vec![],
             }
             .into(),
         );
@@ -2501,6 +2575,7 @@ mod tests {
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 local_state_acl: vec![],
+                command_invoke_acl: vec![],
             }
             .into(),
         );
@@ -2682,6 +2757,7 @@ mod tests {
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 local_state_acl: vec![],
+                command_invoke_acl: vec![],
             }
             .into(),
         );
@@ -2713,6 +2789,151 @@ mod tests {
             .to_string()
             .contains("Invalid processor predicate"));
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_command_invoke_acl_rejects_target_without_dependency() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path().join("component.wasm");
+        tokio::fs::write(&temp_path, b"dummy wasm").await?;
+        let file_url = url::Url::from_file_path(&temp_path).unwrap();
+
+        let mut target = mock_plug("target");
+        target.routines.insert(
+            "routine1".into(),
+            manifest::RoutineManifest {
+                r#impl: manifest::RoutineImpl::Wflow {
+                    key: "wflow1".into(),
+                    bundle: "bundle1".into(),
+                },
+                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                local_state_acl: vec![],
+                command_invoke_acl: vec![],
+            }
+            .into(),
+        );
+        target.commands.insert(
+            "cmd1".into(),
+            manifest::CommandManifest {
+                desc: "target command".into(),
+                deets: manifest::CommandDeets::DocCommand {
+                    routine_name: "routine1".into(),
+                },
+            }
+            .into(),
+        );
+        target.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec!["wflow1".into()],
+                component_urls: vec![file_url.clone()],
+            }
+            .into(),
+        );
+        repo.add(target).await?;
+
+        let mut caller = mock_plug("caller");
+        caller.routines.insert(
+            "routine1".into(),
+            manifest::RoutineManifest {
+                r#impl: manifest::RoutineImpl::Wflow {
+                    key: "wflow1".into(),
+                    bundle: "bundle1".into(),
+                },
+                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                local_state_acl: vec![],
+                command_invoke_acl: vec!["db+command:///@test/target/cmd1".parse().unwrap()],
+            }
+            .into(),
+        );
+        caller.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec!["wflow1".into()],
+                component_urls: vec![file_url.clone()],
+            }
+            .into(),
+        );
+
+        let result = repo.add(caller).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("declared dependency"));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_command_invoke_acl_rejects_missing_command() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path().join("component.wasm");
+        tokio::fs::write(&temp_path, b"dummy wasm").await?;
+        let file_url = url::Url::from_file_path(&temp_path).unwrap();
+
+        let mut provider = mock_plug("provider");
+        provider.routines.insert(
+            "routine1".into(),
+            manifest::RoutineManifest {
+                r#impl: manifest::RoutineImpl::Wflow {
+                    key: "wflow1".into(),
+                    bundle: "bundle1".into(),
+                },
+                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                local_state_acl: vec![],
+                command_invoke_acl: vec![],
+            }
+            .into(),
+        );
+        provider.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec!["wflow1".into()],
+                component_urls: vec![file_url.clone()],
+            }
+            .into(),
+        );
+        repo.add(provider).await?;
+
+        let mut caller = mock_plug("caller");
+        caller.dependencies.insert(
+            "@test/provider".into(),
+            manifest::PlugDependencyManifest {
+                keys: vec![],
+                local_states: vec![],
+            }
+            .into(),
+        );
+        caller.routines.insert(
+            "routine1".into(),
+            manifest::RoutineManifest {
+                r#impl: manifest::RoutineImpl::Wflow {
+                    key: "wflow1".into(),
+                    bundle: "bundle1".into(),
+                },
+                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                local_state_acl: vec![],
+                command_invoke_acl: vec!["db+command:///@test/provider/nope".parse().unwrap()],
+            }
+            .into(),
+        );
+        caller.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec!["wflow1".into()],
+                component_urls: vec![file_url],
+            }
+            .into(),
+        );
+
+        let result = repo.add(caller).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("target command"));
         Ok(())
     }
 

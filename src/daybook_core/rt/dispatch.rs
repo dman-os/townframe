@@ -38,6 +38,10 @@ pub enum DispatchOnSuccessHook {
         processor_full_id: String,
         done_token: String,
     },
+    CommandInvokeReply {
+        parent_wflow_job_id: String,
+        request_id: String,
+    },
 }
 
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
@@ -48,11 +52,21 @@ pub enum ActiveDispatchDeets {
         #[serde(default)]
         entry_id: Option<u64>,
         plug_id: String,
+        #[serde(default)]
+        routine_name: String,
         bundle_name: String,
         wflow_key: String,
         #[serde(default)]
         wflow_job_id: Option<String>,
     },
+}
+
+impl ActiveDispatchDeets {
+    pub fn routine_name(&self) -> &str {
+        match self {
+            Self::Wflow { routine_name, .. } => routine_name,
+        }
+    }
 }
 
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
@@ -75,6 +89,8 @@ pub struct FacetRoutineArgs {
     pub config_facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
     pub local_state_acl: Vec<daybook_types::manifest::RoutineLocalStateAccess>,
+    #[serde(default)]
+    pub wflow_args_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -764,6 +780,7 @@ mod tests {
                 wflow_partition_id: Some("part-a".into()),
                 entry_id: Some(1),
                 plug_id: "@test/plug".into(),
+                routine_name: "routine".into(),
                 bundle_name: "bundle".into(),
                 wflow_key: "key".into(),
                 wflow_job_id: Some(job_id.to_string()),
@@ -777,6 +794,7 @@ mod tests {
                 facet_acl: vec![],
                 config_facet_acl: vec![],
                 local_state_acl: vec![],
+                wflow_args_json: None,
             }),
             status: DispatchStatus::Active,
             waiting_on_dispatch_ids: vec![],
@@ -790,6 +808,7 @@ mod tests {
                 wflow_partition_id: None,
                 entry_id: None,
                 plug_id: "@test/plug".into(),
+                routine_name: "routine".into(),
                 bundle_name: "bundle".into(),
                 wflow_key: "key".into(),
                 wflow_job_id: Some(job_id.to_string()),
@@ -803,6 +822,7 @@ mod tests {
                 facet_acl: vec![],
                 config_facet_acl: vec![],
                 local_state_acl: vec![],
+                wflow_args_json: None,
             }),
             status: DispatchStatus::Waiting,
             waiting_on_dispatch_ids: waits_on.iter().map(|value| value.to_string()).collect(),
@@ -877,6 +897,7 @@ mod tests {
                 wflow_partition_id: Some("part-b".into()),
                 entry_id: Some(9),
                 plug_id: "@test/plug".into(),
+                routine_name: "routine".into(),
                 bundle_name: "bundle".into(),
                 wflow_key: "key".into(),
                 wflow_job_id: Some("job-wait-1".into()),

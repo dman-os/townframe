@@ -243,6 +243,7 @@ impl DocProcessorTriageListener {
                     branch_path: branch_path.clone(),
                     heads: doc_heads.clone(),
                     facet_key: None,
+                    wflow_args_json: None,
                 },
             };
             let job_key = format!("{}:{}", doc_id, processor.processor_full_id);

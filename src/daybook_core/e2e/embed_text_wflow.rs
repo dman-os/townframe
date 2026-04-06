@@ -47,6 +47,7 @@ async fn test_embed_text_workflow() -> Res<()> {
                 branch_path: daybook_types::doc::BranchPath::from("main"),
                 heads,
                 facet_key: None,
+                wflow_args_json: None,
             },
         )
         .await?;
