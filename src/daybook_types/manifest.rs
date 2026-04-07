@@ -500,31 +500,80 @@ pub enum ChangeOriginDeets {
 pub enum DocChangePredicate {
     #[default]
     Any,
+    Added,
+    Deleted,
     ChangedFacetTags(#[garde(dive)] Vec<FacetTag>),
     ChangedFacetKeys(#[garde(skip)] Vec<crate::doc::FacetKey>),
+    AddedFacetTags(#[garde(dive)] Vec<FacetTag>),
+    AddedFacetKeys(#[garde(skip)] Vec<crate::doc::FacetKey>),
+    RemovedFacetTags(#[garde(dive)] Vec<FacetTag>),
+    RemovedFacetKeys(#[garde(skip)] Vec<crate::doc::FacetKey>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocChangeKind {
+    Added,
+    Updated,
+    Deleted,
 }
 
 impl DocChangePredicate {
+    fn matches_tags(
+        tags: &[FacetTag],
+        keys: &std::collections::HashSet<crate::doc::FacetKey>,
+    ) -> bool {
+        keys.iter().any(|key| {
+            tags.iter()
+                .any(|tag| key.tag.to_string().as_str() == tag.0.as_str())
+        })
+    }
+
     pub fn evaluate_change(
         &self,
+        kind: DocChangeKind,
         changed_facet_keys: Option<&std::collections::HashSet<crate::doc::FacetKey>>,
+        added_facet_keys: Option<&std::collections::HashSet<crate::doc::FacetKey>>,
+        removed_facet_keys: Option<&std::collections::HashSet<crate::doc::FacetKey>>,
     ) -> bool {
         match self {
             Self::Any => true,
+            Self::Added => kind == DocChangeKind::Added,
+            Self::Deleted => kind == DocChangeKind::Deleted,
             Self::ChangedFacetTags(tags) => {
                 let Some(changed_facet_keys) = changed_facet_keys else {
                     return false;
                 };
-                changed_facet_keys.iter().any(|key| {
-                    tags.iter()
-                        .any(|tag| key.tag.to_string().as_str() == tag.0.as_str())
-                })
+                Self::matches_tags(tags, changed_facet_keys)
             }
             Self::ChangedFacetKeys(keys) => {
                 let Some(changed_facet_keys) = changed_facet_keys else {
                     return false;
                 };
                 keys.iter().any(|key| changed_facet_keys.contains(key))
+            }
+            Self::AddedFacetTags(tags) => {
+                let Some(added_facet_keys) = added_facet_keys else {
+                    return false;
+                };
+                Self::matches_tags(tags, added_facet_keys)
+            }
+            Self::AddedFacetKeys(keys) => {
+                let Some(added_facet_keys) = added_facet_keys else {
+                    return false;
+                };
+                keys.iter().any(|key| added_facet_keys.contains(key))
+            }
+            Self::RemovedFacetTags(tags) => {
+                let Some(removed_facet_keys) = removed_facet_keys else {
+                    return false;
+                };
+                Self::matches_tags(tags, removed_facet_keys)
+            }
+            Self::RemovedFacetKeys(keys) => {
+                let Some(removed_facet_keys) = removed_facet_keys else {
+                    return false;
+                };
+                keys.iter().any(|key| removed_facet_keys.contains(key))
             }
         }
     }
@@ -535,11 +584,23 @@ impl DocChangePredicate {
         read_keys: &mut std::collections::HashSet<crate::doc::FacetKey>,
     ) {
         match self {
-            Self::Any => {}
+            Self::Any | Self::Added | Self::Deleted => {}
             Self::ChangedFacetTags(tags) => {
                 read_tags.extend(tags.iter().map(|tag| tag.0.clone()));
             }
             Self::ChangedFacetKeys(keys) => {
+                read_keys.extend(keys.iter().cloned());
+            }
+            Self::AddedFacetTags(tags) => {
+                read_tags.extend(tags.iter().map(|tag| tag.0.clone()));
+            }
+            Self::AddedFacetKeys(keys) => {
+                read_keys.extend(keys.iter().cloned());
+            }
+            Self::RemovedFacetTags(tags) => {
+                read_tags.extend(tags.iter().map(|tag| tag.0.clone()));
+            }
+            Self::RemovedFacetKeys(keys) => {
                 read_keys.extend(keys.iter().cloned());
             }
         }

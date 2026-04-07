@@ -28,6 +28,8 @@ pub mod doc {
         pub created_at: Datetime,
         #[serde_as(as = "Vec<Datetime>")]
         pub updated_at: Vec<Datetime>,
+        #[serde_as(as = "Vec<Datetime>")]
+        pub deleted_at: Vec<Datetime>,
         pub uuid: Vec<String>,
     }
 
@@ -277,6 +279,11 @@ pub mod doc {
                                         .into_iter()
                                         .map(Into::into)
                                         .collect(),
+                                    deleted_at: meta
+                                        .deleted_at
+                                        .into_iter()
+                                        .map(Into::into)
+                                        .collect(),
                                     uuid: meta.uuid.into_iter().map(|id| id.to_string()).collect(),
                                 },
                             )
@@ -390,6 +397,11 @@ pub mod doc {
                                     created_at: meta.created_at.into(),
                                     updated_at: meta
                                         .updated_at
+                                        .into_iter()
+                                        .map(Into::into)
+                                        .collect(),
+                                    deleted_at: meta
+                                        .deleted_at
                                         .into_iter()
                                         .map(Into::into)
                                         .collect(),

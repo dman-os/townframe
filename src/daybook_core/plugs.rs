@@ -512,6 +512,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
 #[derive(Reconcile, Hydrate)]
 pub struct PlugsStore {
     pub manifests: HashMap<String, Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>,
+    pub manifests_deleted: HashMap<String, Vec<VersionTag>>,
     pub plug_config_doc_ids: Versioned<ThroughJson<HashMap<String, String>>>,
 
     /// Index: property tag -> plug id (@ns/name)
@@ -526,6 +527,7 @@ impl Default for PlugsStore {
     fn default() -> Self {
         Self {
             manifests: default(),
+            manifests_deleted: default(),
             plug_config_doc_ids: Versioned {
                 vtag: VersionTag::nil(),
                 val: ThroughJson(default()),
@@ -754,6 +756,30 @@ impl PlugsRepo {
             .with_document(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
     }
 
+    async fn latest_manifest_delete_actor(
+        &self,
+        plug_id: &str,
+        heads: &Arc<[automerge::ChangeHash]>,
+    ) -> Res<Option<ActorId>> {
+        let Some((tags, _)) = self
+            .big_repo
+            .hydrate_path_at_heads::<Vec<VersionTag>>(
+                &self.app_doc_id,
+                heads,
+                automerge::ROOT,
+                vec![
+                    PlugsStore::prop().into(),
+                    "manifests_deleted".into(),
+                    autosurgeon::Prop::Key(plug_id.to_string().into()),
+                ],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(tags.last().map(|tag| tag.actor_id.clone()))
+    }
+
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
@@ -969,6 +995,7 @@ impl PlugsRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
+            // Replay path: do not apply live-origin filtering.
             self.events_for_patch(&patch, &heads, &mut events, None, None)
                 .await?;
         }
@@ -976,6 +1003,7 @@ impl PlugsRepo {
     }
 
     pub async fn events_for_init(&self) -> Res<Vec<PlugsEvent>> {
+        // Init snapshot is synthesized from current local store state.
         let heads = self.get_plugs_heads();
         let plug_ids = self
             .store
@@ -997,32 +1025,13 @@ impl PlugsRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<PlugsEvent>,
-        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer: Option<&str>,
+        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer_id: Option<&str>,
     ) -> Res<()> {
-        let mut event_origin = match origin {
-            Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
-                crate::event_origin::SwitchEventOrigin::Remote {
-                    peer_id: peer_id.to_string(),
-                }
-            }
-            Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
-                crate::event_origin::SwitchEventOrigin::Bootstrap
-            }
-            _ => self.local_origin(),
-        };
-        if let Some(origin) = origin {
-            match origin {
-                am_utils_rs::repo::BigRepoChangeOrigin::Local => return Ok(()),
-                am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. } => {
-                    if let Some(exclude_peer) = exclude_peer {
-                        if peer_id.to_string() == exclude_peer {
-                            return Ok(());
-                        }
-                    }
-                }
-                am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap => {}
-            }
+        // Live notification path: local writes are emitted by mutators.
+        // Replay/diff paths pass `live_origin = None`.
+        if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id) {
+            return Ok(());
         }
         let heads = ChangeHashSet(Arc::clone(patch_heads));
         match &patch.action {
@@ -1046,26 +1055,11 @@ impl PlugsRepo {
                         _ => return Ok(()),
                     };
                     let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
-                    if vtag.actor_id == self.local_actor_id {
-                        event_origin = crate::event_origin::SwitchEventOrigin::Local {
-                            actor_id: vtag.actor_id.to_string(),
-                        };
-                    } else {
-                        event_origin = match origin {
-                            Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote {
-                                peer_id,
-                                ..
-                            }) => crate::event_origin::SwitchEventOrigin::Remote {
-                                peer_id: peer_id.to_string(),
-                            },
-                            Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
-                                crate::event_origin::SwitchEventOrigin::Bootstrap
-                            }
-                            _ => crate::event_origin::SwitchEventOrigin::Remote {
-                                peer_id: "unknown".to_string(),
-                            },
-                        };
-                    }
+                    let event_origin = crate::repos::resolve_origin_from_vtag_actor(
+                        &self.local_actor_id,
+                        &vtag.actor_id,
+                        live_origin,
+                    );
                     if vtag.version.is_nil() {
                         out.push(PlugsEvent::PlugAdded {
                             id: plug_id.clone(),
@@ -1085,10 +1079,17 @@ impl PlugsRepo {
                 if patch.path.len() == 2
                     && patch.path[1].1 == automerge::Prop::Map("manifests".into()) =>
             {
+                // Delete patches have no vtag; use delete tombstones at these heads when replaying.
+                let tombstone_actor_id = self.latest_manifest_delete_actor(key, patch_heads).await?;
+                let event_origin = crate::repos::resolve_origin_for_delete(
+                    &self.local_actor_id,
+                    live_origin,
+                    tombstone_actor_id.as_ref(),
+                );
                 out.push(PlugsEvent::PlugDeleted {
                     id: key.clone(),
                     heads,
-                    origin: event_origin.clone(),
+                    origin: event_origin,
                 });
             }
             automerge::PatchAction::PutMap {
@@ -1104,28 +1105,14 @@ impl PlugsRepo {
                     unreachable!("guard above ensures bytes")
                 };
                 let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
-                if vtag.actor_id == self.local_actor_id {
-                    event_origin = crate::event_origin::SwitchEventOrigin::Local {
-                        actor_id: vtag.actor_id.to_string(),
-                    };
-                } else {
-                    event_origin = match origin {
-                        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote {
-                            peer_id, ..
-                        }) => crate::event_origin::SwitchEventOrigin::Remote {
-                            peer_id: peer_id.to_string(),
-                        },
-                        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
-                            crate::event_origin::SwitchEventOrigin::Bootstrap
-                        }
-                        _ => crate::event_origin::SwitchEventOrigin::Remote {
-                            peer_id: "unknown".to_string(),
-                        },
-                    };
-                }
+                let event_origin = crate::repos::resolve_origin_from_vtag_actor(
+                    &self.local_actor_id,
+                    &vtag.actor_id,
+                    live_origin,
+                );
                 out.push(PlugsEvent::ConfigDocsChanged {
                     heads,
-                    origin: event_origin.clone(),
+                    origin: event_origin,
                 });
             }
             _ => {}

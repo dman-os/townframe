@@ -11,9 +11,9 @@ use daybook_types::doc::BranchPath;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacetTag};
 
 use daybook_types::manifest::{
-    ChangeOriginDeets, DocPredicateEvalMode, DocPredicateEvalRequirement, DocPredicateEvalResolved,
-    FacetReferenceManifest, KeyGeneric, NodePredicate, ProcessorDeets, ProcessorEventPredicate,
-    ProcessorManifest, RoutineManifest, RoutineManifestDeets,
+    ChangeOriginDeets, DocChangeKind, DocPredicateEvalMode, DocPredicateEvalRequirement,
+    DocPredicateEvalResolved, FacetReferenceManifest, KeyGeneric, NodePredicate, ProcessorDeets,
+    ProcessorEventPredicate, ProcessorManifest, RoutineManifest, RoutineManifestDeets,
 };
 
 struct PreparedProcessor {
@@ -119,7 +119,10 @@ impl DocProcessorTriageListener {
         doc: &Doc,
         branch_path: daybook_types::doc::BranchPath,
         event_origin: &crate::event_origin::SwitchEventOrigin,
+        change_kind: DocChangeKind,
         changed_facet_keys: Option<&HashSet<FacetKey>>,
+        added_facet_keys: Option<&HashSet<FacetKey>>,
+        removed_facet_keys: Option<&HashSet<FacetKey>>,
     ) -> Res<()> {
         let rt = ctx
             .rt
@@ -138,15 +141,33 @@ impl DocProcessorTriageListener {
             if !processor
                 .event_predicate
                 .doc_change_predicate
-                .evaluate_change(changed_facet_keys)
+                .evaluate_change(
+                    change_kind,
+                    changed_facet_keys,
+                    added_facet_keys,
+                    removed_facet_keys,
+                )
             {
                 continue;
             }
+            let mut all_changed = HashSet::new();
             if let Some(changed) = changed_facet_keys {
-                if !changed_intersects_read_set(changed, &processor.read_tags, &processor.read_keys)
-                {
-                    continue;
-                }
+                all_changed.extend(changed.iter().cloned());
+            }
+            if let Some(added) = added_facet_keys {
+                all_changed.extend(added.iter().cloned());
+            }
+            if let Some(removed) = removed_facet_keys {
+                all_changed.extend(removed.iter().cloned());
+            }
+            if !all_changed.is_empty()
+                && !changed_intersects_read_set(
+                    &all_changed,
+                    &processor.read_tags,
+                    &processor.read_keys,
+                )
+            {
+                continue;
             }
             let predicate = match &processor.processor_manifest.deets {
                 ProcessorDeets::DocProcessor { predicate, .. } => predicate,
@@ -318,7 +339,39 @@ impl SwitchSink for DocProcessorTriageListener {
             }
             SwitchEvent::Drawer(event) => match &**event {
                 DrawerEvent::ListChanged { .. } => {}
-                DrawerEvent::DocDeleted { .. } => {}
+                DrawerEvent::DocDeleted {
+                    id,
+                    deleted_facet_keys,
+                    drawer_heads,
+                    origin,
+                    ..
+                } => {
+                    let deleted_set: HashSet<FacetKey> =
+                        deleted_facet_keys.iter().cloned().collect();
+                    if !changed_intersects_read_set(
+                        &deleted_set,
+                        &self.triage_read_tags,
+                        &self.triage_read_keys,
+                    ) {
+                        return Ok(SwitchSinkOutcome::default());
+                    }
+                    let meta_doc = facet_keys_set_to_meta_doc(id, &deleted_set);
+                    let pseudo_branch = BranchPath::from("main");
+                    self.triage_doc(
+                        ctx,
+                        id,
+                        drawer_heads,
+                        &meta_doc,
+                        pseudo_branch,
+                        origin,
+                        DocChangeKind::Deleted,
+                        Some(&deleted_set),
+                        None,
+                        Some(&deleted_set),
+                    )
+                    .await
+                    .wrap_err("error triaging deleted doc")?;
+                }
                 DrawerEvent::DocAdded {
                     id,
                     entry,
@@ -350,7 +403,10 @@ impl SwitchSink for DocProcessorTriageListener {
                             &meta_doc,
                             branch_path,
                             origin,
+                            DocChangeKind::Added,
                             Some(&changed_facet_keys_set),
+                            Some(&changed_facet_keys_set),
+                            None,
                         )
                         .await
                         .wrap_err("error triaging doc")?;
@@ -386,6 +442,18 @@ impl SwitchSink for DocProcessorTriageListener {
                     } else {
                         return Ok(SwitchSinkOutcome::default());
                     };
+                    let added_facet_keys_set: Option<HashSet<FacetKey>> =
+                        if diff.added_facet_keys.is_empty() {
+                            None
+                        } else {
+                            Some(diff.added_facet_keys.iter().cloned().collect())
+                        };
+                    let removed_facet_keys_set: Option<HashSet<FacetKey>> =
+                        if diff.removed_facet_keys.is_empty() {
+                            None
+                        } else {
+                            Some(diff.removed_facet_keys.iter().cloned().collect())
+                        };
                     for (branch_name, heads) in &entry.branches {
                         let branch_path = BranchPath::from(branch_name.as_str());
                         if branch_path.to_string().starts_with("/tmp/") {
@@ -418,7 +486,10 @@ impl SwitchSink for DocProcessorTriageListener {
                             &meta_doc,
                             branch_path,
                             origin,
+                            DocChangeKind::Updated,
                             changed_facet_keys_set.as_ref(),
+                            added_facet_keys_set.as_ref(),
+                            removed_facet_keys_set.as_ref(),
                         )
                         .await
                         .wrap_err("error triaging doc")?;
@@ -498,7 +569,7 @@ mod tests {
 
     #[test]
     fn doc_change_predicate_changed_facet_tags() {
-        use daybook_types::manifest::DocChangePredicate;
+        use daybook_types::manifest::{DocChangeKind, DocChangePredicate};
         let mut changed = HashSet::new();
         changed.insert(FacetKey {
             tag: "org.example.note".into(),
@@ -509,9 +580,54 @@ mod tests {
             id: "x".into(),
         });
         let pred = DocChangePredicate::ChangedFacetTags(vec!["org.example.todo".into()]);
-        assert!(pred.evaluate_change(Some(&changed)));
+        assert!(pred.evaluate_change(
+            DocChangeKind::Updated,
+            Some(&changed),
+            None,
+            None
+        ));
         let pred = DocChangePredicate::ChangedFacetTags(vec!["org.example.unknown".into()]);
-        assert!(!pred.evaluate_change(Some(&changed)));
-        assert!(!pred.evaluate_change(None));
+        assert!(!pred.evaluate_change(
+            DocChangeKind::Updated,
+            Some(&changed),
+            None,
+            None
+        ));
+        assert!(!pred.evaluate_change(DocChangeKind::Updated, None, None, None));
+    }
+
+    #[test]
+    fn doc_change_predicate_added_deleted_and_removed_tags() {
+        use daybook_types::manifest::{DocChangeKind, DocChangePredicate};
+        let mut removed = HashSet::new();
+        removed.insert(FacetKey {
+            tag: "org.example.note".into(),
+            id: "main".into(),
+        });
+
+        assert!(DocChangePredicate::Added.evaluate_change(
+            DocChangeKind::Added,
+            None,
+            None,
+            None,
+        ));
+        assert!(!DocChangePredicate::Added.evaluate_change(
+            DocChangeKind::Updated,
+            None,
+            None,
+            None,
+        ));
+        assert!(DocChangePredicate::Deleted.evaluate_change(
+            DocChangeKind::Deleted,
+            None,
+            None,
+            None,
+        ));
+        assert!(DocChangePredicate::RemovedFacetTags(vec!["org.example.note".into()]).evaluate_change(
+            DocChangeKind::Deleted,
+            Some(&removed),
+            None,
+            Some(&removed),
+        ));
     }
 }

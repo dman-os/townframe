@@ -429,7 +429,27 @@ impl SwitchWorker {
         };
         match &**event {
             DrawerEvent::ListChanged { .. } => Ok(true),
-            DrawerEvent::DocDeleted { .. } => Ok(true),
+            DrawerEvent::DocDeleted {
+                id,
+                deleted_facet_keys,
+                ..
+            } => {
+                let deleted_set: HashSet<FacetKey> =
+                    deleted_facet_keys.iter().cloned().collect();
+                let meta_doc = facet_keys_set_to_meta_doc(id, &deleted_set);
+                self.predicate_requirements.clear();
+                predicate.append_requirements(&mut self.predicate_requirements);
+                resolve_meta_predicate_requirements(
+                    &self.predicate_requirements,
+                    &meta_doc,
+                    &mut self.predicate_resolved,
+                );
+                Ok(predicate.evaluate(
+                    &meta_doc,
+                    DocPredicateEvalMode::ApproxInterest,
+                    &self.predicate_resolved,
+                ))
+            }
             DrawerEvent::DocAdded {
                 id,
                 entry,
@@ -477,7 +497,14 @@ impl SwitchWorker {
                     return Ok(false);
                 }
                 let referenced_tags = predicate.referenced_tags();
-                if !diff.changed_facet_keys.iter().any(|facet_key| {
+                let union_changed: HashSet<FacetKey> = diff
+                    .changed_facet_keys
+                    .iter()
+                    .cloned()
+                    .chain(diff.added_facet_keys.iter().cloned())
+                    .chain(diff.removed_facet_keys.iter().cloned())
+                    .collect();
+                if !union_changed.iter().any(|facet_key| {
                     referenced_tags
                         .iter()
                         .any(|tag| tag.0 == facet_key.tag.to_string())

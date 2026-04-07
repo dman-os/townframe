@@ -28,7 +28,7 @@
   - [x] iroh
   - [ ] better URLs
   - [ ] auto-peer discovery
-  - [ ] QR based clone
+  - [x] QR based clone
   - [ ] RPC api versioning scheme
 - [ ] Deterministic doc ids for main docs [LOST]
 - [ ] Prune dependencies
@@ -74,9 +74,13 @@
 
 - [ ] Cleanup and show it to people
  
+- [ ] Interesting queries
+  - [ ] Expected processors not processed
+  - [ ] Deleted docs
 - [ ] Deletes
   - [ ] Blobs
   - [ ] Docs
+    - Consider not replicating deleted docs
 - [ ] Get rid of all RwLocks and all async mutexes
 - [ ] Use Arc<str> for progress.tags
 - [ ] Consider using lmdb or redb for the kvstore on wflow_tokio

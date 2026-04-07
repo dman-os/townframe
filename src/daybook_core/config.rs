@@ -9,7 +9,9 @@ use crate::stores::Versioned;
 #[derive(Reconcile, Hydrate, Clone)]
 pub struct ConfigStore {
     pub facet_display: HashMap<String, Versioned<ThroughJson<FacetDisplayHint>>>,
+    pub facet_display_deleted: HashMap<String, Vec<VersionTag>>,
     pub users: HashMap<String, Versioned<ThroughJson<UserMeta>>>,
+    pub users_deleted: HashMap<String, Vec<VersionTag>>,
     pub mltools: Versioned<ThroughJson<mltools::Config>>,
 }
 
@@ -59,7 +61,9 @@ impl Default for ConfigStore {
 
         Self {
             facet_display: key_configs,
+            facet_display_deleted: HashMap::new(),
             users: HashMap::new(),
+            users_deleted: HashMap::new(),
             mltools: Versioned {
                 vtag: VersionTag::nil(),
                 val: mltools::Config {
@@ -303,7 +307,8 @@ impl ConfigRepo {
             eyre::bail!("repo is stopped");
         }
         let actor_id_str = actor_id.to_string();
-        self.store
+        let (_, changed) = self
+            .store
             .mutate_sync(move |store| {
                 let next = UserMeta {
                     user_path,
@@ -319,6 +324,12 @@ impl ConfigRepo {
                 }
             })
             .await?;
+        if changed.is_some() {
+            self.registry.notify([ConfigEvent::Changed {
+                heads: ChangeHashSet(self.get_config_heads().await?),
+                origin: self.local_origin(),
+            }]);
+        }
         Ok(())
     }
 
@@ -341,6 +352,7 @@ impl ConfigRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
+            // Replay path: no live-origin semantics apply.
             self.events_for_patch(&patch, &heads, &mut events, None, None)
                 .await?;
         }
@@ -348,6 +360,7 @@ impl ConfigRepo {
     }
 
     pub async fn events_for_init(&self) -> Res<Vec<ConfigEvent>> {
+        // Init snapshot is a single "current heads changed" event.
         Ok(vec![ConfigEvent::Changed {
             heads: ChangeHashSet(self.get_config_heads().await?),
             origin: self.local_origin(),
@@ -359,15 +372,13 @@ impl ConfigRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<ConfigEvent>,
-        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer: Option<&str>,
+        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer_id: Option<&str>,
     ) -> Res<()> {
-        if let Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) = origin {
-            if let Some(exclude_peer) = exclude_peer {
-                if peer_id.to_string() == exclude_peer {
-                    return Ok(());
-                }
-            }
+        // Live notification path: local writes are emitted directly by mutators.
+        // Historical replay passes `live_origin = None` and must not be skipped.
+        if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id) {
+            return Ok(());
         }
         let heads = ChangeHashSet(Arc::clone(patch_heads));
 
@@ -394,25 +405,11 @@ impl ConfigRepo {
                     },
                     _ => unreachable!("guard above ensures scalar"),
                 };
-                let event_origin = if vtag.actor_id == self.local_actor_id {
-                    crate::event_origin::SwitchEventOrigin::Local {
-                        actor_id: vtag.actor_id.to_string(),
-                    }
-                } else {
-                    match origin {
-                        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote {
-                            peer_id, ..
-                        }) => crate::event_origin::SwitchEventOrigin::Remote {
-                            peer_id: peer_id.to_string(),
-                        },
-                        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
-                            crate::event_origin::SwitchEventOrigin::Bootstrap
-                        }
-                        _ => crate::event_origin::SwitchEventOrigin::Remote {
-                            peer_id: "unknown".to_string(),
-                        },
-                    }
-                };
+                let event_origin = crate::repos::resolve_origin_from_vtag_actor(
+                    &self.local_actor_id,
+                    &vtag.actor_id,
+                    live_origin,
+                );
 
                 if matches!(section_key.as_ref(), "facet_display" | "users" | "mltools") {
                     out.push(ConfigEvent::Changed {
@@ -473,7 +470,8 @@ impl ConfigRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        self.store
+        let (_, changed) = self
+            .store
             .mutate_sync(move |store| {
                 let Some(old) = store.facet_display.get_mut(&key) else {
                     store.facet_display.insert(
@@ -485,6 +483,12 @@ impl ConfigRepo {
                 old.replace(self.local_actor_id.clone(), hint.into());
             })
             .await?;
+        if changed.is_some() {
+            self.registry.notify([ConfigEvent::Changed {
+                heads: ChangeHashSet(self.get_config_heads().await?),
+                origin: self.local_origin(),
+            }]);
+        }
         Ok(())
     }
 
@@ -499,13 +503,20 @@ impl ConfigRepo {
             eyre::bail!("repo is stopped");
         }
 
-        self.store
+        let (_, changed) = self
+            .store
             .mutate_sync(move |store| {
                 store
                     .mltools
                     .replace(self.local_actor_id.clone(), config.into());
             })
             .await?;
+        if changed.is_some() {
+            self.registry.notify([ConfigEvent::Changed {
+                heads: ChangeHashSet(self.get_config_heads().await?),
+                origin: self.local_origin(),
+            }]);
+        }
         Ok(())
     }
 

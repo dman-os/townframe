@@ -221,11 +221,19 @@ pub struct TablesStore {
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     pub windows: HashMap<Uuid, Versioned<Window>>,
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
+    pub windows_deleted: HashMap<Uuid, Vec<VersionTag>>,
+    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     pub tables: HashMap<Uuid, Versioned<Table>>,
+    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
+    pub tables_deleted: HashMap<Uuid, Vec<VersionTag>>,
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     pub tabs: HashMap<Uuid, Versioned<Tab>>,
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
+    pub tabs_deleted: HashMap<Uuid, Vec<VersionTag>>,
+    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     pub panels: HashMap<Uuid, Versioned<Panel>>,
+    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
+    pub panels_deleted: HashMap<Uuid, Vec<VersionTag>>,
 
     // Indices for tracking relationships (not stored in CRDT)
     #[autosurgeon(with = "am_utils_rs::codecs::skip")]
@@ -790,6 +798,7 @@ impl TablesRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
+            // Replay path: do not apply live-origin filtering.
             self.events_for_patch(&patch, &heads, &mut events, None, None)
                 .await?;
         }
@@ -801,21 +810,11 @@ impl TablesRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<TablesEvent>,
-        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer: Option<&str>,
+        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer_id: Option<&str>,
     ) -> Res<()> {
-        if let Some(origin) = origin {
-            match origin {
-                am_utils_rs::repo::BigRepoChangeOrigin::Local => return Ok(()),
-                am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. } => {
-                    if let Some(exclude_peer) = exclude_peer {
-                        if peer_id.to_string() == exclude_peer {
-                            return Ok(());
-                        }
-                    }
-                }
-                am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap => {}
-            }
+        if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id) {
+            return Ok(());
         }
         let heads = ChangeHashSet(Arc::clone(patch_heads));
         match &patch.action {
@@ -1506,10 +1505,20 @@ impl TablesRepo {
                 let window_id = store.tab_to_window.get(&tab_id).copied();
 
                 // Remove the tab
+                store
+                    .tabs_deleted
+                    .entry(tab_id)
+                    .or_default()
+                    .push(VersionTag::update(self.local_actor_id.clone()));
                 store.tabs.remove(&tab_id);
 
                 // Remove all panels in this tab
                 for panel_id in panel_ids {
+                    store
+                        .panels_deleted
+                        .entry(panel_id)
+                        .or_default()
+                        .push(VersionTag::update(self.local_actor_id.clone()));
                     store.panels.remove(&panel_id);
                     store.panel_to_tab.remove(&panel_id);
                 }

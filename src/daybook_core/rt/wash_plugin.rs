@@ -128,6 +128,11 @@ mod binds_guest {
                                         .into_iter()
                                         .map(Into::into)
                                         .collect(),
+                                    deleted_at: meta
+                                        .deleted_at
+                                        .into_iter()
+                                        .map(Into::into)
+                                        .collect(),
                                     uuid: meta
                                         .uuid
                                         .into_iter()
@@ -261,6 +266,11 @@ mod binds_guest {
                                     )?,
                                     updated_at: facet_meta
                                         .updated_at
+                                        .into_iter()
+                                        .map(|dt| Timestamp::from_second(dt.seconds as i64))
+                                        .collect::<Result<_, _>>()?,
+                                    deleted_at: facet_meta
+                                        .deleted_at
                                         .into_iter()
                                         .map(|dt| Timestamp::from_second(dt.seconds as i64))
                                         .collect::<Result<_, _>>()?,
