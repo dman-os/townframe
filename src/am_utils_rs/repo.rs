@@ -321,6 +321,17 @@ impl BigRepo {
         self.partition_store.subscribe_partition_events()
     }
 
+    pub async fn subscribe_partition_doc_events_local(
+        &self,
+        partition_id: &crate::sync::protocol::PartitionId,
+        since: Option<u64>,
+        capacity: usize,
+    ) -> Res<tokio::sync::mpsc::Receiver<crate::sync::protocol::PartitionDocEvent>> {
+        self.partition_store
+            .subscribe_partition_doc_events_local(partition_id, since, capacity)
+            .await
+    }
+
     pub async fn ensure_change_broker(
         self: &Arc<Self>,
         handle: samod::DocHandle,

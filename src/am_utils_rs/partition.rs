@@ -915,6 +915,101 @@ impl PartitionStore {
             .spawn(async move { fut.await.unwrap() })?;
         Ok(rx)
     }
+
+    pub async fn subscribe_partition_doc_events_local(
+        &self,
+        partition_id: &PartitionId,
+        since: Option<u64>,
+        capacity: usize,
+    ) -> Res<tokio::sync::mpsc::Receiver<PartitionDocEvent>> {
+        ensure_partition_exists(&self.state_pool, partition_id).await?;
+        let partition_id = partition_id.clone();
+        let store = self.clone();
+        let cancel_token = self.partition_forwarder_cancel.clone();
+        let mut live_rx = self.partition_events_tx.subscribe();
+        let mut high_watermark = since.unwrap_or_default();
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity.max(1));
+        let fut = {
+            let span =
+                tracing::info_span!("partition local doc forwarder", partition_id = %partition_id);
+            async move {
+                loop {
+                    // Replay from cursor.
+                    loop {
+                        let (events, _next_cursor, has_more) = load_doc_partition_page(
+                            &store.state_pool,
+                            &PartitionCursorRequest {
+                                partition_id: partition_id.clone(),
+                                since: Some(high_watermark),
+                            },
+                            DEFAULT_EVENT_PAGE_LIMIT as usize,
+                        )
+                        .await?;
+                        if events.is_empty() {
+                            break;
+                        }
+                        for event in events {
+                            high_watermark = high_watermark.max(event.cursor);
+                            if tx.send(event).await.is_err() {
+                                return eyre::Ok(());
+                            }
+                        }
+                        if !has_more {
+                            break;
+                        }
+                    }
+
+                    // Tail live events until lag/close/cancel, then replay again from watermark.
+                    loop {
+                        let recv = cancel_token.run_until_cancelled(live_rx.recv()).await;
+                        let event = match recv {
+                            None => return eyre::Ok(()),
+                            Some(Ok(event)) => event,
+                            Some(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                                return eyre::Ok(())
+                            }
+                            Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => break,
+                        };
+                        if event.partition_id != partition_id {
+                            continue;
+                        }
+                        let txid = event.cursor;
+                        if txid <= high_watermark {
+                            continue;
+                        }
+                        let deets = match event.deets {
+                            PartitionEventDeets::ItemChanged { item_id, payload } => {
+                                PartitionDocEventDeets::ItemChanged {
+                                    item_id,
+                                    payload: serde_json::to_string(&payload).expect(ERROR_JSON),
+                                }
+                            }
+                            PartitionEventDeets::ItemDeleted { item_id, payload } => {
+                                PartitionDocEventDeets::ItemDeleted {
+                                    item_id,
+                                    payload: serde_json::to_string(&payload).expect(ERROR_JSON),
+                                }
+                            }
+                            _ => continue,
+                        };
+                        let doc_event = PartitionDocEvent {
+                            cursor: txid,
+                            partition_id: partition_id.clone(),
+                            deets,
+                        };
+                        high_watermark = txid;
+                        if tx.send(doc_event).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            .instrument(span)
+        };
+        self.partition_forwarders
+            .spawn(async move { fut.await.unwrap() })?;
+        Ok(rx)
+    }
 }
 
 async fn alloc_txid(conn: &mut sqlx::SqliteConnection) -> Res<u64> {
@@ -1244,6 +1339,49 @@ mod tests {
         let payload = serde_json::from_str::<serde_json::Value>(&payload_json)
             .expect("payload JSON should parse");
         assert_eq!(payload, expected_payload);
+    }
+
+    #[tokio::test]
+    async fn subscribe_partition_doc_events_local_replays_then_tails() {
+        let store = make_store().await;
+        let partition_id: PartitionId = "p-docs-local-sub".into();
+        let item_id = "item-1";
+        store
+            .add_member(&partition_id, item_id, &serde_json::json!({}))
+            .await
+            .expect("membership add should succeed");
+        store
+            .record_item_change(&partition_id, item_id, &serde_json::json!({"a": 1}))
+            .await
+            .expect("item change should succeed");
+
+        let mut rx = store
+            .subscribe_partition_doc_events_local(&partition_id, Some(0), 8)
+            .await
+            .expect("local doc subscription should start");
+
+        let replay_evt = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting replay event")
+            .expect("channel closed while waiting replay event");
+        assert_eq!(replay_evt.partition_id, partition_id);
+        assert!(matches!(
+            replay_evt.deets,
+            PartitionDocEventDeets::ItemChanged { .. }
+        ));
+
+        store
+            .record_item_deleted(&partition_id, item_id, &serde_json::json!({"a": 1}))
+            .await
+            .expect("item delete should succeed");
+        let live_evt = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting live event")
+            .expect("channel closed while waiting live event");
+        assert!(matches!(
+            live_evt.deets,
+            PartitionDocEventDeets::ItemDeleted { .. }
+        ));
     }
 
     #[tokio::test]

@@ -142,45 +142,6 @@ impl IrohSyncRepoStopToken {
 }
 
 impl IrohSyncRepo {
-    async fn ensure_local_drawer_partition_seeded(rcx: &RepoCtx) -> Res<()> {
-        let drawer_partition_id = crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
-            rcx.doc_drawer.document_id(),
-        );
-        let drawer_doc_id = rcx.doc_drawer.document_id().to_string();
-        let app_doc_id = rcx.doc_app.document_id().to_string();
-        rcx.big_repo
-            .partition_store()
-            .ensure_partition(&drawer_partition_id)
-            .await?;
-        rcx.big_repo
-            .partition_store()
-            .add_member(
-                &CORE_DOCS_PARTITION_ID.to_string(),
-                &drawer_doc_id,
-                &serde_json::json!({}),
-            )
-            .await?;
-        rcx.big_repo
-            .partition_store()
-            .add_member(
-                &CORE_DOCS_PARTITION_ID.to_string(),
-                &app_doc_id,
-                &serde_json::json!({}),
-            )
-            .await?;
-        for blob_partition_id in [
-            crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
-            crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
-            crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.to_string(),
-        ] {
-            rcx.big_repo
-                .partition_store()
-                .ensure_partition(&blob_partition_id)
-                .await?;
-        }
-        Ok(())
-    }
-
     pub async fn boot(
         rcx: Arc<RepoCtx>,
         config_repo: Arc<crate::config::ConfigRepo>,
@@ -264,7 +225,6 @@ impl IrohSyncRepo {
         config_repo
             .ensure_local_sync_device(router.endpoint().id(), &rcx.local_device_name)
             .await?;
-        Self::ensure_local_drawer_partition_seeded(&rcx).await?;
 
         let (mut full_sync_handle, full_stop_token) = full::start_full_sync_worker(
             Arc::clone(&rcx),

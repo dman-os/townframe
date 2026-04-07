@@ -243,6 +243,12 @@ impl Rt {
         local_actor_id: ActorId,
         local_state_root: PathBuf,
     ) -> Res<(Arc<Self>, RtStopToken)> {
+        crate::repo::ensure_expected_partitions_for_docs(
+            &big_repo,
+            &app_doc_id,
+            drawer.drawer_doc_id(),
+        )
+        .await?;
         let wcx = wflow::Ctx::init(&wflow_db_url).await?;
         let (sqlite_local_state_repo, sqlite_local_state_stop) =
             SqliteLocalStateRepo::boot(local_state_root).await?;

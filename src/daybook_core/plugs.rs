@@ -1080,7 +1080,8 @@ impl PlugsRepo {
                     && patch.path[1].1 == automerge::Prop::Map("manifests".into()) =>
             {
                 // Delete patches have no vtag; use delete tombstones at these heads when replaying.
-                let tombstone_actor_id = self.latest_manifest_delete_actor(key, patch_heads).await?;
+                let tombstone_actor_id =
+                    self.latest_manifest_delete_actor(key, patch_heads).await?;
                 let event_origin = crate::repos::resolve_origin_for_delete(
                     &self.local_actor_id,
                     live_origin,

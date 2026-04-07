@@ -262,6 +262,12 @@ impl RepoCtx {
             .get()
             .expect("doc_drawer cell should be initialized")
             .clone();
+        ensure_expected_partitions_for_docs(
+            &big_repo,
+            doc_app.document_id(),
+            doc_drawer.document_id(),
+        )
+        .await?;
 
         if initialize_repo {
             Self::run_repo_init_dance(
@@ -481,6 +487,38 @@ impl RepoCtx {
         blobs_repo.shutdown().await?;
         Ok(())
     }
+}
+
+pub(crate) async fn ensure_expected_partitions_for_docs(
+    big_repo: &SharedBigRepo,
+    doc_app_id: &DocumentId,
+    doc_drawer_id: &DocumentId,
+) -> Res<()> {
+    let partition_store = big_repo.partition_store();
+    for partition_id in [
+        crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(doc_drawer_id),
+        crate::sync::CORE_DOCS_PARTITION_ID.to_string(),
+        crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
+        crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
+        crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.to_string(),
+    ] {
+        partition_store.ensure_partition(&partition_id).await?;
+    }
+    partition_store
+        .add_member(
+            &crate::sync::CORE_DOCS_PARTITION_ID.to_string(),
+            &doc_drawer_id.to_string(),
+            &serde_json::json!({}),
+        )
+        .await?;
+    partition_store
+        .add_member(
+            &crate::sync::CORE_DOCS_PARTITION_ID.to_string(),
+            &doc_app_id.to_string(),
+            &serde_json::json!({}),
+        )
+        .await?;
+    Ok(())
 }
 
 pub async fn get_repo_user_id(sql: &SqlitePool) -> Res<Option<String>> {

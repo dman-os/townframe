@@ -118,11 +118,12 @@ impl DocProcessorTriageListener {
         doc_heads: &ChangeHashSet,
         doc: &Doc,
         branch_path: daybook_types::doc::BranchPath,
-        event_origin: &crate::event_origin::SwitchEventOrigin,
+        _event_origin: &crate::event_origin::SwitchEventOrigin,
         change_kind: DocChangeKind,
         changed_facet_keys: Option<&HashSet<FacetKey>>,
         added_facet_keys: Option<&HashSet<FacetKey>>,
         removed_facet_keys: Option<&HashSet<FacetKey>>,
+        local_changed_facet_keys: Option<&HashSet<FacetKey>>,
     ) -> Res<()> {
         let rt = ctx
             .rt
@@ -133,40 +134,22 @@ impl DocProcessorTriageListener {
         );
         let mut full_doc_for_reference_predicates: Option<Option<Arc<Doc>>> = None;
         for processor in &self.cached_processors {
-            let should_run =
-                evaluate_node_predicate(&processor.event_predicate.node_predicate, event_origin);
-            if !should_run {
-                continue;
-            }
-            if !processor
-                .event_predicate
-                .doc_change_predicate
-                .evaluate_change(
-                    change_kind,
-                    changed_facet_keys,
-                    added_facet_keys,
-                    removed_facet_keys,
-                )
-            {
-                continue;
-            }
-            let mut all_changed = HashSet::new();
-            if let Some(changed) = changed_facet_keys {
-                all_changed.extend(changed.iter().cloned());
-            }
-            if let Some(added) = added_facet_keys {
-                all_changed.extend(added.iter().cloned());
-            }
-            if let Some(removed) = removed_facet_keys {
-                all_changed.extend(removed.iter().cloned());
-            }
-            if !all_changed.is_empty()
-                && !changed_intersects_read_set(
-                    &all_changed,
-                    &processor.read_tags,
-                    &processor.read_keys,
-                )
-            {
+            let is_local_for_processor = local_changed_facet_keys
+                .map(|changed| {
+                    changed_intersects_read_set(changed, &processor.read_tags, &processor.read_keys)
+                })
+                .unwrap_or(false);
+            if !should_processor_run_for_event(
+                &processor.event_predicate.node_predicate,
+                &processor.event_predicate.doc_change_predicate,
+                is_local_for_processor,
+                change_kind,
+                changed_facet_keys,
+                added_facet_keys,
+                removed_facet_keys,
+                &processor.read_tags,
+                &processor.read_keys,
+            ) {
                 continue;
             }
             let predicate = match &processor.processor_manifest.deets {
@@ -368,6 +351,7 @@ impl SwitchSink for DocProcessorTriageListener {
                         Some(&deleted_set),
                         None,
                         Some(&deleted_set),
+                        None,
                     )
                     .await
                     .wrap_err("error triaging deleted doc")?;
@@ -393,8 +377,21 @@ impl SwitchSink for DocProcessorTriageListener {
                         else {
                             continue;
                         };
+                        let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
                         let changed_facet_keys_set: HashSet<FacetKey> =
                             facet_keys_set.iter().cloned().collect();
+                        let local_changed_facet_keys_set = rt
+                            .drawer
+                            .facet_keys_touched_by_local_actor(
+                                id,
+                                heads,
+                                &changed_facet_keys_set
+                                    .iter()
+                                    .filter(|key| **key != dmeta_key)
+                                    .cloned()
+                                    .collect::<Vec<_>>(),
+                            )
+                            .await?;
                         let meta_doc = facet_keys_set_to_meta_doc(id, &facet_keys_set);
                         self.triage_doc(
                             ctx,
@@ -407,6 +404,7 @@ impl SwitchSink for DocProcessorTriageListener {
                             Some(&changed_facet_keys_set),
                             Some(&changed_facet_keys_set),
                             None,
+                            Some(&local_changed_facet_keys_set),
                         )
                         .await
                         .wrap_err("error triaging doc")?;
@@ -478,6 +476,31 @@ impl SwitchSink for DocProcessorTriageListener {
                             debug!(?id, ?branch_path, "skipping triage for stale heads");
                             continue;
                         };
+                        let local_changed_facet_keys_set = rt
+                            .drawer
+                            .facet_keys_touched_by_local_actor(
+                                id,
+                                heads,
+                                &diff
+                                    .changed_facet_keys
+                                    .iter()
+                                    .cloned()
+                                    .chain(diff.added_facet_keys.iter().cloned())
+                                    .chain(diff.removed_facet_keys.iter().cloned())
+                                    .filter(|key| *key != FacetKey::from(WellKnownFacetTag::Dmeta))
+                                    .collect::<Vec<_>>(),
+                            )
+                            .await?;
+                        if changed_facet_keys_set
+                            .as_ref()
+                            .is_none_or(HashSet::is_empty)
+                            && added_facet_keys_set.as_ref().is_none_or(HashSet::is_empty)
+                            && removed_facet_keys_set
+                                .as_ref()
+                                .is_none_or(HashSet::is_empty)
+                        {
+                            continue;
+                        }
                         let meta_doc = facet_keys_set_to_meta_doc(id, &facet_keys_set);
                         self.triage_doc(
                             ctx,
@@ -490,6 +513,7 @@ impl SwitchSink for DocProcessorTriageListener {
                             changed_facet_keys_set.as_ref(),
                             added_facet_keys_set.as_ref(),
                             removed_facet_keys_set.as_ref(),
+                            Some(&local_changed_facet_keys_set),
                         )
                         .await
                         .wrap_err("error triaging doc")?;
@@ -511,14 +535,48 @@ fn changed_intersects_read_set(
         .any(|key| read_tags.contains(&key.tag.to_string()) || read_keys.contains(key))
 }
 
-fn evaluate_node_predicate(
-    predicate: &NodePredicate,
-    origin: &crate::event_origin::SwitchEventOrigin,
+#[allow(clippy::too_many_arguments)]
+fn should_processor_run_for_event(
+    node_predicate: &NodePredicate,
+    doc_change_predicate: &daybook_types::manifest::DocChangePredicate,
+    is_local_for_processor: bool,
+    change_kind: DocChangeKind,
+    changed_facet_keys: Option<&HashSet<FacetKey>>,
+    added_facet_keys: Option<&HashSet<FacetKey>>,
+    removed_facet_keys: Option<&HashSet<FacetKey>>,
+    read_tags: &HashSet<String>,
+    read_keys: &HashSet<FacetKey>,
 ) -> bool {
+    if !evaluate_node_predicate(node_predicate, is_local_for_processor) {
+        return false;
+    }
+    if !doc_change_predicate.evaluate_change(
+        change_kind,
+        changed_facet_keys,
+        added_facet_keys,
+        removed_facet_keys,
+    ) {
+        return false;
+    }
+    let mut all_changed = HashSet::new();
+    if let Some(changed) = changed_facet_keys {
+        all_changed.extend(changed.iter().cloned());
+    }
+    if let Some(added) = added_facet_keys {
+        all_changed.extend(added.iter().cloned());
+    }
+    if let Some(removed) = removed_facet_keys {
+        all_changed.extend(removed.iter().cloned());
+    }
+    if !all_changed.is_empty() && !changed_intersects_read_set(&all_changed, read_tags, read_keys) {
+        return false;
+    }
+    true
+}
+
+fn evaluate_node_predicate(predicate: &NodePredicate, is_local_for_processor: bool) -> bool {
     match predicate {
-        NodePredicate::ChangeOrigin(ChangeOriginDeets::Local) => {
-            matches!(origin, crate::event_origin::SwitchEventOrigin::Local { .. })
-        }
+        NodePredicate::ChangeOrigin(ChangeOriginDeets::Local) => is_local_for_processor,
     }
 }
 
@@ -545,26 +603,20 @@ pub fn doc_processor_triage_listener() -> Box<dyn SwitchSink + Send + Sync> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use daybook_types::manifest::DocChangePredicate;
+
+    fn fk(tag: &str, id: &str) -> FacetKey {
+        FacetKey {
+            tag: tag.into(),
+            id: id.into(),
+        }
+    }
 
     #[test]
     fn node_predicate_change_origin_local() {
         let predicate = NodePredicate::ChangeOrigin(ChangeOriginDeets::Local);
-        assert!(evaluate_node_predicate(
-            &predicate,
-            &crate::event_origin::SwitchEventOrigin::Local {
-                actor_id: "a".into()
-            }
-        ));
-        assert!(!evaluate_node_predicate(
-            &predicate,
-            &crate::event_origin::SwitchEventOrigin::Remote {
-                peer_id: "p".into()
-            }
-        ));
-        assert!(!evaluate_node_predicate(
-            &predicate,
-            &crate::event_origin::SwitchEventOrigin::Bootstrap
-        ));
+        assert!(evaluate_node_predicate(&predicate, true));
+        assert!(!evaluate_node_predicate(&predicate, false));
     }
 
     #[test]
@@ -580,19 +632,9 @@ mod tests {
             id: "x".into(),
         });
         let pred = DocChangePredicate::ChangedFacetTags(vec!["org.example.todo".into()]);
-        assert!(pred.evaluate_change(
-            DocChangeKind::Updated,
-            Some(&changed),
-            None,
-            None
-        ));
+        assert!(pred.evaluate_change(DocChangeKind::Updated, Some(&changed), None, None));
         let pred = DocChangePredicate::ChangedFacetTags(vec!["org.example.unknown".into()]);
-        assert!(!pred.evaluate_change(
-            DocChangeKind::Updated,
-            Some(&changed),
-            None,
-            None
-        ));
+        assert!(!pred.evaluate_change(DocChangeKind::Updated, Some(&changed), None, None));
         assert!(!pred.evaluate_change(DocChangeKind::Updated, None, None, None));
     }
 
@@ -605,12 +647,7 @@ mod tests {
             id: "main".into(),
         });
 
-        assert!(DocChangePredicate::Added.evaluate_change(
-            DocChangeKind::Added,
-            None,
-            None,
-            None,
-        ));
+        assert!(DocChangePredicate::Added.evaluate_change(DocChangeKind::Added, None, None, None,));
         assert!(!DocChangePredicate::Added.evaluate_change(
             DocChangeKind::Updated,
             None,
@@ -623,11 +660,189 @@ mod tests {
             None,
             None,
         ));
-        assert!(DocChangePredicate::RemovedFacetTags(vec!["org.example.note".into()]).evaluate_change(
-            DocChangeKind::Deleted,
-            Some(&removed),
-            None,
-            Some(&removed),
+        assert!(
+            DocChangePredicate::RemovedFacetTags(vec!["org.example.note".into()]).evaluate_change(
+                DocChangeKind::Deleted,
+                Some(&removed),
+                None,
+                Some(&removed),
+            )
+        );
+    }
+
+    #[test]
+    fn processor_event_gate_is_specific_and_rejects_adjacent_unsatisfying_events() {
+        let local_node = NodePredicate::ChangeOrigin(ChangeOriginDeets::Local);
+        let read_tags: HashSet<String> = ["org.example.note".to_string()].into();
+        let read_keys: HashSet<FacetKey> = HashSet::new();
+        let mut changed_note = HashSet::new();
+        changed_note.insert(fk("org.example.note", "main"));
+        let mut changed_todo = HashSet::new();
+        changed_todo.insert(fk("org.example.todo", "main"));
+        let mut removed_note = HashSet::new();
+        removed_note.insert(fk("org.example.note", "main"));
+
+        struct Case {
+            name: &'static str,
+            predicate: DocChangePredicate,
+            is_local_for_processor: bool,
+            kind: DocChangeKind,
+            changed: Option<HashSet<FacetKey>>,
+            added: Option<HashSet<FacetKey>>,
+            removed: Option<HashSet<FacetKey>>,
+            expect: bool,
+        }
+
+        let cases = vec![
+            Case {
+                name: "added matches exact added event",
+                predicate: DocChangePredicate::Added,
+                is_local_for_processor: true,
+                kind: DocChangeKind::Added,
+                changed: Some(changed_note.clone()),
+                added: Some(changed_note.clone()),
+                removed: None,
+                expect: true,
+            },
+            Case {
+                name: "added does not match adjacent updated",
+                predicate: DocChangePredicate::Added,
+                is_local_for_processor: true,
+                kind: DocChangeKind::Updated,
+                changed: Some(changed_note.clone()),
+                added: None,
+                removed: None,
+                expect: false,
+            },
+            Case {
+                name: "added does not match adjacent deleted",
+                predicate: DocChangePredicate::Added,
+                is_local_for_processor: true,
+                kind: DocChangeKind::Deleted,
+                changed: Some(changed_note.clone()),
+                added: None,
+                removed: Some(changed_note.clone()),
+                expect: false,
+            },
+            Case {
+                name: "deleted matches exact deleted event",
+                predicate: DocChangePredicate::Deleted,
+                is_local_for_processor: true,
+                kind: DocChangeKind::Deleted,
+                changed: Some(changed_note.clone()),
+                added: None,
+                removed: Some(changed_note.clone()),
+                expect: true,
+            },
+            Case {
+                name: "deleted does not match adjacent updated",
+                predicate: DocChangePredicate::Deleted,
+                is_local_for_processor: true,
+                kind: DocChangeKind::Updated,
+                changed: Some(changed_note.clone()),
+                added: None,
+                removed: None,
+                expect: false,
+            },
+            Case {
+                name: "changed tag matches only matching tag",
+                predicate: DocChangePredicate::ChangedFacetTags(vec!["org.example.note".into()]),
+                is_local_for_processor: true,
+                kind: DocChangeKind::Updated,
+                changed: Some(changed_note.clone()),
+                added: None,
+                removed: None,
+                expect: true,
+            },
+            Case {
+                name: "changed tag rejects adjacent non-matching tag",
+                predicate: DocChangePredicate::ChangedFacetTags(vec!["org.example.note".into()]),
+                is_local_for_processor: true,
+                kind: DocChangeKind::Updated,
+                changed: Some(changed_todo.clone()),
+                added: None,
+                removed: None,
+                expect: false,
+            },
+            Case {
+                name: "removed tag matches removed set",
+                predicate: DocChangePredicate::RemovedFacetTags(vec!["org.example.note".into()]),
+                is_local_for_processor: true,
+                kind: DocChangeKind::Deleted,
+                changed: Some(removed_note.clone()),
+                added: None,
+                removed: Some(removed_note.clone()),
+                expect: true,
+            },
+            Case {
+                name: "removed tag rejects deleted with other tag",
+                predicate: DocChangePredicate::RemovedFacetTags(vec!["org.example.note".into()]),
+                is_local_for_processor: true,
+                kind: DocChangeKind::Deleted,
+                changed: Some(changed_todo.clone()),
+                added: None,
+                removed: Some(changed_todo.clone()),
+                expect: false,
+            },
+            Case {
+                name: "local node predicate rejects when processor has no local overlap",
+                predicate: DocChangePredicate::ChangedFacetTags(vec!["org.example.note".into()]),
+                is_local_for_processor: false,
+                kind: DocChangeKind::Updated,
+                changed: Some(changed_note.clone()),
+                added: None,
+                removed: None,
+                expect: false,
+            },
+            Case {
+                name: "read-set gating rejects unrelated changed keys",
+                predicate: DocChangePredicate::ChangedFacetTags(vec!["org.example.todo".into()]),
+                is_local_for_processor: true,
+                kind: DocChangeKind::Updated,
+                changed: Some(changed_todo),
+                added: None,
+                removed: None,
+                expect: false,
+            },
+        ];
+
+        for case in cases {
+            let changed_ref = case.changed.as_ref();
+            let added_ref = case.added.as_ref();
+            let removed_ref = case.removed.as_ref();
+            let got = should_processor_run_for_event(
+                &local_node,
+                &case.predicate,
+                case.is_local_for_processor,
+                case.kind,
+                changed_ref,
+                added_ref,
+                removed_ref,
+                &read_tags,
+                &read_keys,
+            );
+            assert_eq!(got, case.expect, "case={}", case.name);
+        }
+    }
+
+    #[test]
+    fn changed_intersects_read_set_matches_by_tag_or_exact_key() {
+        let note_main = fk("org.example.note", "main");
+        let note_alt = fk("org.example.note", "alt");
+        let todo_main = fk("org.example.todo", "main");
+
+        let changed: HashSet<FacetKey> = [todo_main.clone()].into();
+        let read_tags: HashSet<String> = ["org.example.todo".to_string()].into();
+        let read_keys: HashSet<FacetKey> = HashSet::new();
+        assert!(changed_intersects_read_set(
+            &changed, &read_tags, &read_keys
+        ));
+
+        let changed: HashSet<FacetKey> = [note_alt].into();
+        let read_tags: HashSet<String> = HashSet::new();
+        let read_keys: HashSet<FacetKey> = [note_main].into();
+        assert!(!changed_intersects_read_set(
+            &changed, &read_tags, &read_keys
         ));
     }
 }
