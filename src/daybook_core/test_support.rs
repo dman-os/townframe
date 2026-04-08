@@ -216,6 +216,7 @@ pub async fn test_cx_with_options(
         Arc::clone(&big_repo),
         drawer_doc_id,
         local_user_path.clone(),
+        sql_ctx.db_pool.clone(),
         temp_dir.path().join("local_states"),
         Arc::new(std::sync::Mutex::new(
             crate::drawer::lru::KeyedLruPool::new(1000),

@@ -251,6 +251,8 @@ impl DocProcessorTriageListener {
                 routine_name = %processor.routine_name,
                 processor_full_id = %processor.processor_full_id,
                 ?doc_id,
+                branch_path = %branch_path,
+                heads = ?am_utils_rs::serialize_commit_heads(doc_heads.as_ref()),
                 "dispatching job"
             );
             let args = match &processor.routine_manifest.deets {
@@ -421,6 +423,7 @@ impl SwitchSink for DocProcessorTriageListener {
                             .drawer
                             .facet_keys_touched_by_local_actor(
                                 id,
+                                &branch_path,
                                 heads,
                                 &changed_facet_keys_set
                                     .iter()
@@ -517,6 +520,7 @@ impl SwitchSink for DocProcessorTriageListener {
                             .drawer
                             .facet_keys_touched_by_local_actor(
                                 id,
+                                &branch_path,
                                 heads,
                                 &diff
                                     .changed_facet_keys

@@ -11,6 +11,7 @@ pub mod dmeta;
 mod events;
 mod facet_recovery;
 pub mod lru;
+mod meta;
 mod mutations;
 mod queries;
 #[cfg(test)]
@@ -21,7 +22,7 @@ pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, 
 
 use cache::*;
 use lru::SharedKeyedLruPool;
-use types::{BranchSnapshot, DocDeleteTombstone, StoredBranchRef};
+use types::{BranchSnapshot, DocDeleteTombstone};
 
 use automerge::ReadDoc;
 use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, FacetRaw};
@@ -35,7 +36,7 @@ const DRAWER_REPLICATED_PARTITION_PREFIX: &str = "drawer.replicated";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BranchKind {
     Replicated,
-    Tmp,
+    Local,
 }
 pub struct DrawerRepo {
     pub big_repo: SharedBigRepo,
@@ -60,6 +61,7 @@ pub struct DrawerRepo {
     _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
     current_heads: std::sync::Mutex<ChangeHashSet>,
     drawer_am_handle: samod::DocHandle,
+    meta_db_pool: sqlx::SqlitePool,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
 }
 
@@ -69,6 +71,14 @@ struct ValidatedReference {
     url_value: String,
 }
 
+#[derive(Debug, Clone)]
+struct BranchRefRow {
+    branch_doc_id: String,
+    branch_kind: BranchKind,
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct BranchStateRow {
     branch_path: String,
@@ -82,10 +92,12 @@ impl DrawerRepo {
         &self.drawer_doc_id
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn load(
         big_repo: SharedBigRepo,
         drawer_doc_id: DocumentId,
         local_user_path: daybook_types::doc::UserPath,
+        meta_db_pool: sqlx::SqlitePool,
         _local_state_root: PathBuf,
         entry_pool: SharedKeyedLruPool<DocId>,
         doc_pool: SharedKeyedLruPool<FacetCacheKey>,
@@ -136,11 +148,14 @@ impl DrawerRepo {
             _change_broker_leases: vec![broker],
             current_heads: initial_heads.into(),
             drawer_am_handle,
+            meta_db_pool,
             #[cfg(not(test))]
             plugs_repo: Some(plugs_repo),
             #[cfg(test)]
             plugs_repo,
         });
+        repo.ensure_local_branch_schema().await?;
+        repo.migrate_legacy_local_branches_from_drawer_map().await?;
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
@@ -169,7 +184,7 @@ impl DrawerRepo {
             return Ok(BranchKind::Replicated);
         }
         if branch_path == "/tmp" || branch_path.starts_with("/tmp/") {
-            return Ok(BranchKind::Tmp);
+            return Ok(BranchKind::Local);
         }
         if branch_path.is_absolute() {
             return Ok(BranchKind::Replicated);
@@ -235,81 +250,26 @@ impl DrawerRepo {
         daybook_types::doc::user_path::to_actor_id(&scoped_user_path)
     }
 
-    async fn get_branch_state(
-        &self,
-        doc_id: &DocId,
-        branch_path: &daybook_types::doc::BranchPath,
-    ) -> Res<Option<BranchStateRow>> {
-        self.derive_branch_state(doc_id, branch_path).await
-    }
-
-    async fn list_branch_states(&self, doc_id: &DocId) -> Res<Vec<BranchStateRow>> {
-        self.derive_branch_states(doc_id).await
-    }
-
-    async fn get_entry_branch_ref(
-        &self,
-        doc_id: &DocId,
-        branch_path: &daybook_types::doc::BranchPath,
-    ) -> Res<Option<(StoredBranchRef, BranchKind)>> {
-        let Some(entry) = self.get_entry(doc_id).await? else {
-            return Ok(None);
-        };
-        let branch_path_str = branch_path.to_string();
-        let Some(branch_ref) = entry.branches.get(&branch_path_str) else {
-            return Ok(None);
-        };
-        let branch_kind = self.branch_kind_for_path(branch_path)?;
-        Ok(Some((branch_ref.clone(), branch_kind)))
-    }
-
-    async fn derive_branch_state(
-        &self,
-        doc_id: &DocId,
-        branch_path: &daybook_types::doc::BranchPath,
-    ) -> Res<Option<BranchStateRow>> {
-        let Some((branch_ref, branch_kind)) =
-            self.get_entry_branch_ref(doc_id, branch_path).await?
-        else {
-            return Ok(None);
-        };
-        let Some(handle) = self
-            .get_handle_by_branch_doc_id(&branch_ref.branch_doc_id)
-            .await?
-        else {
-            debug!(
-                doc_id = %doc_id,
-                branch_path = %branch_path,
-                branch_doc_id = %branch_ref.branch_doc_id,
-                "branch state unresolved; branch doc not available locally"
-            );
+    async fn get_branch_heads_by_doc_id(&self, branch_doc_id: &str) -> Res<Option<ChangeHashSet>> {
+        let Some(handle) = self.get_handle_by_branch_doc_id(branch_doc_id).await? else {
             return Ok(None);
         };
         let latest_heads = handle
             .with_document_local(|doc| ChangeHashSet(doc.get_heads().into()))
             .await?;
-        Ok(Some(BranchStateRow {
-            branch_path: branch_path.to_string(),
-            branch_doc_id: branch_ref.branch_doc_id,
-            latest_heads,
-            branch_kind,
-        }))
+        Ok(Some(latest_heads))
     }
 
-    async fn derive_branch_states(&self, doc_id: &DocId) -> Res<Vec<BranchStateRow>> {
-        let Some(entry) = self.get_entry(doc_id).await? else {
-            return Ok(Vec::new());
+    async fn get_branch_heads_for_path(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+    ) -> Res<Option<ChangeHashSet>> {
+        let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
+            return Ok(None);
         };
-        let mut out = Vec::new();
-        let mut branch_names = entry.branches.keys().cloned().collect::<Vec<_>>();
-        branch_names.sort();
-        for branch_path in branch_names {
-            let branch_path = daybook_types::doc::BranchPath::from(branch_path);
-            if let Some(branch_state) = self.derive_branch_state(doc_id, &branch_path).await? {
-                out.push(branch_state);
-            }
-        }
-        Ok(out)
+        self.get_branch_heads_by_doc_id(&branch_ref.branch_doc_id)
+            .await
     }
 
     async fn get_handle_by_branch_doc_id(
@@ -332,55 +292,64 @@ impl DrawerRepo {
         Ok(Some(handle))
     }
 
-    async fn resolve_handle_for_heads(
+    async fn resolve_handle_for_branch_heads(
         &self,
         doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
     ) -> Res<Option<am_utils_rs::repo::BigDocHandle>> {
-        let branch_states = self.list_branch_states(doc_id).await?;
-        for branch_state in &branch_states {
-            if &branch_state.latest_heads == heads {
-                return self
-                    .get_handle_by_branch_doc_id(&branch_state.branch_doc_id)
-                    .await;
-            }
-        }
-
-        for branch_state in branch_states {
-            let Some(handle) = self
-                .get_handle_by_branch_doc_id(&branch_state.branch_doc_id)
-                .await?
-            else {
-                continue;
-            };
-            let exists = handle
-                .with_document_local(|doc| {
-                    Ok::<bool, eyre::Report>(
-                        automerge::ReadDoc::get_at(doc, automerge::ROOT, "facets", heads)?
-                            .is_some(),
-                    )
-                })
-                .await??;
-            if exists {
-                return Ok(Some(handle));
-            }
-        }
-        Ok(None)
-    }
-
-    async fn current_doc_branches(&self, doc_id: &DocId) -> Res<Option<DocNBranches>> {
-        let branch_states = self.list_branch_states(doc_id).await?;
-        if branch_states.is_empty() && self.get_entry(doc_id).await?.is_none() {
+        let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
+            debug!(
+                ?doc_id,
+                branch_path = %branch_path,
+                heads = ?am_utils_rs::serialize_commit_heads(heads.as_ref()),
+                "resolve_handle_for_branch_heads: branch ref not found"
+            );
+            return Ok(None);
+        };
+        let Some(handle) = self
+            .get_handle_by_branch_doc_id(&branch_ref.branch_doc_id)
+            .await?
+        else {
+            debug!(
+                ?doc_id,
+                branch_path = %branch_path,
+                branch_doc_id = %branch_ref.branch_doc_id,
+                heads = ?am_utils_rs::serialize_commit_heads(heads.as_ref()),
+                "resolve_handle_for_branch_heads: branch handle not found locally"
+            );
+            return Ok(None);
+        };
+        let (contains_all_heads, missing_heads) = handle
+            .with_document_local(|doc| {
+                let mut missing = Vec::new();
+                for head in heads.iter() {
+                    if doc.get_change_by_hash(head).is_none() {
+                        missing.push(head.to_string());
+                    }
+                }
+                Ok::<(bool, Vec<String>), eyre::Report>((missing.is_empty(), missing))
+            })
+            .await??;
+        if !contains_all_heads {
+            debug!(
+                ?doc_id,
+                branch_path = %branch_path,
+                branch_doc_id = %branch_ref.branch_doc_id,
+                heads = ?am_utils_rs::serialize_commit_heads(heads.as_ref()),
+                ?missing_heads,
+                "resolve_handle_for_branch_heads: branch is missing requested heads"
+            );
             return Ok(None);
         }
-        let mut branches = HashMap::new();
-        for branch_state in branch_states {
-            branches.insert(branch_state.branch_path, branch_state.latest_heads);
-        }
-        Ok(Some(DocNBranches {
-            doc_id: doc_id.clone(),
-            branches,
-        }))
+        debug!(
+            ?doc_id,
+            branch_path = %branch_path,
+            branch_doc_id = %branch_ref.branch_doc_id,
+            heads = ?am_utils_rs::serialize_commit_heads(heads.as_ref()),
+            "resolve_handle_for_branch_heads: resolved successfully"
+        );
+        Ok(Some(handle))
     }
 
     async fn latest_doc_delete_tombstone(
@@ -409,7 +378,7 @@ impl DrawerRepo {
 
     async fn facet_keys_at_branch_snapshot(
         &self,
-        doc_id: &DocId,
+        _doc_id: &DocId,
         snapshot: &BranchSnapshot,
     ) -> Res<HashSet<FacetKey>> {
         let branch_doc_id = DocumentId::from_str(&snapshot.branch_doc_id)
@@ -437,13 +406,12 @@ impl DrawerRepo {
             }
             Ok(out)
         })?;
-        let _ = doc_id;
         Ok(keys)
     }
 
     async fn non_tmp_branch_snapshots_for_entry(
         &self,
-        doc_id: &DocId,
+        _doc_id: &DocId,
         entry: &DocEntry,
     ) -> Res<HashMap<String, BranchSnapshot>> {
         let mut out = HashMap::new();
@@ -452,44 +420,21 @@ impl DrawerRepo {
             if branch_path.to_string().starts_with("/tmp/") {
                 continue;
             }
-            let Some(state) = self.derive_branch_state(doc_id, &branch_path).await? else {
+            let Some(branch_heads) = self
+                .get_branch_heads_by_doc_id(&branch_ref.branch_doc_id)
+                .await?
+            else {
                 continue;
             };
             out.insert(
                 branch_name.clone(),
                 BranchSnapshot {
                     branch_doc_id: branch_ref.branch_doc_id.clone(),
-                    branch_heads: state.latest_heads,
+                    branch_heads,
                 },
             );
         }
         Ok(out)
-    }
-
-    fn current_drawer_entries(&self) -> Res<(ChangeHashSet, Vec<(DocId, DocEntry)>)> {
-        self.drawer_am_handle.with_document(|doc| {
-            let drawer_heads = ChangeHashSet(doc.get_heads().into());
-            let map_id = match doc.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
-                    match doc.get(&id, "map")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => eyre::bail!("invalid drawer shape"),
-                    }
-                }
-                None => return eyre::Ok((drawer_heads, Vec::new())),
-                _ => eyre::bail!("invalid drawer shape"),
-            };
-
-            let mut entries = Vec::new();
-            for item in doc.map_range(&map_id, ..) {
-                let doc_id = DocId::from(item.key.clone());
-                let entry: Option<DocEntry> = autosurgeon::hydrate_prop(doc, &map_id, item.key)?;
-                if let Some(entry) = entry {
-                    entries.push((doc_id, entry));
-                }
-            }
-            eyre::Ok((drawer_heads, entries))
-        })
     }
 
     async fn facet_manifest_for_tag(
@@ -744,23 +689,6 @@ impl DrawerRepo {
             facet_key: parsed_facet_ref.facet_key,
             url_value: url_value.to_string(),
         })
-    }
-
-    async fn hydrate_entry_at_heads(
-        &self,
-        doc_id: &DocId,
-        heads: &ChangeHashSet,
-    ) -> Res<Option<DocEntry>> {
-        let path = vec![
-            "docs".into(),
-            "map".into(),
-            autosurgeon::Prop::Key(doc_id.to_string().into()),
-        ];
-        let entry = self
-            .big_repo
-            .hydrate_path_at_heads::<DocEntry>(&self.drawer_doc_id, heads, automerge::ROOT, path)
-            .await?;
-        Ok(entry.map(|(entry_value, _)| entry_value))
     }
 
     fn local_origin(&self) -> crate::event_origin::SwitchEventOrigin {

@@ -42,12 +42,13 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let (_drawer_heads, doc_ids) = self.list_just_ids().await?;
-        let mut results = Vec::with_capacity(doc_ids.len());
-        for doc_id in doc_ids {
-            if let Some(entry) = self.current_doc_branches(&DocId::from(doc_id)).await? {
-                results.push(entry);
-            }
+        let (_drawer_heads, entries) = self.current_drawer_entries()?;
+        let mut results = Vec::with_capacity(entries.len());
+        for (doc_id, entry) in entries {
+            results.push(
+                self.current_doc_branches_from_entry(&doc_id, &entry)
+                    .await?,
+            );
         }
         Ok(results)
     }
@@ -92,10 +93,11 @@ impl DrawerRepo {
             Ok(None)
         }
     }
-    /// Fetch facets at given heads with Arc-backed values to avoid deep-cloning on cache hits.
-    pub(crate) async fn get_at_heads_with_facets_arc(
+    /// Fetch facets at branch heads with Arc-backed values to avoid deep-cloning on cache hits.
+    pub(crate) async fn get_at_branch_heads_with_facets_arc(
         &self,
         doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
         facet_keys: Option<Vec<FacetKey>>,
     ) -> Res<
@@ -108,7 +110,10 @@ impl DrawerRepo {
             eyre::bail!("repo is stopped");
         }
 
-        let Some(handle) = self.resolve_handle_for_heads(doc_id, heads).await? else {
+        let Some(handle) = self
+            .resolve_handle_for_branch_heads(doc_id, branch_path, heads)
+            .await?
+        else {
             return Ok(None);
         };
 
@@ -198,35 +203,12 @@ impl DrawerRepo {
         branch_path: &daybook_types::doc::BranchPath,
         facet_keys: Option<Vec<FacetKey>>,
     ) -> Res<Option<Arc<Doc>>> {
-        let Some(branch_state) = self.get_branch_state(doc_id, branch_path).await? else {
+        let Some(branch_heads) = self.get_branch_heads_for_path(doc_id, branch_path).await? else {
             return Ok(None);
         };
 
-        self.get_doc_with_facets_at_heads(doc_id, &branch_state.latest_heads, facet_keys)
+        self.get_doc_with_facets_at_branch_heads(doc_id, branch_path, &branch_heads, facet_keys)
             .await
-    }
-
-    pub async fn get_doc_branches_at_heads(
-        &self,
-        doc_id: &DocId,
-        heads: &ChangeHashSet,
-    ) -> Res<Option<DocNBranches>> {
-        if self.cancel_token.is_cancelled() {
-            eyre::bail!("repo is stopped");
-        }
-        let current_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
-        if heads != &current_heads {
-            let entry = self.get_entry_at_heads(doc_id, heads).await?;
-            return Ok(entry.map(|entry_value| DocNBranches {
-                doc_id: doc_id.clone(),
-                branches: entry_value
-                    .branches
-                    .into_keys()
-                    .map(|branch_name| (branch_name, ChangeHashSet::default()))
-                    .collect(),
-            }));
-        }
-        self.current_doc_branches(doc_id).await
     }
 
     pub async fn get_doc_branches(&self, doc_id: &DocId) -> Res<Option<DocNBranches>> {
@@ -236,15 +218,16 @@ impl DrawerRepo {
         self.current_doc_branches(doc_id).await
     }
 
-    /// Get a doc at specific heads (exact version). Delegates to get_at_heads_with_facets.
-    pub async fn get_doc_with_facets_at_heads(
+    /// Get a doc at specific branch heads (exact version).
+    pub async fn get_doc_with_facets_at_branch_heads(
         &self,
         id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
         facet_keys: Option<Vec<FacetKey>>,
     ) -> Res<Option<Arc<Doc>>> {
         let facets = self
-            .get_at_heads_with_facets_arc(id, heads, facet_keys)
+            .get_at_branch_heads_with_facets_arc(id, branch_path, heads, facet_keys)
             .await?
             .map(|(facets, _)| facets);
         let Some(facets) = facets else {
@@ -272,7 +255,7 @@ impl DrawerRepo {
         let Some(entry) = self.get_entry(doc_id).await? else {
             return Ok(None);
         };
-        let Some(branch_ref) = entry.branches.get(&branch_path.to_string()) else {
+        let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
             return Ok(None);
         };
         let Some(handle) = self
@@ -285,7 +268,7 @@ impl DrawerRepo {
             .with_document_local(|doc| ChangeHashSet(doc.get_heads().into()))
             .await?;
         let Some((facets, facet_heads_by_key)) = self
-            .get_at_heads_with_facets_arc(doc_id, &branch_heads, facet_keys)
+            .get_at_branch_heads_with_facets_arc(doc_id, branch_path, &branch_heads, facet_keys)
             .await?
         else {
             return Ok(None);
@@ -305,26 +288,6 @@ impl DrawerRepo {
         }))
     }
 
-    pub async fn get_with_heads_at_heads(
-        &self,
-        doc_id: &DocId,
-        branch_path: &daybook_types::doc::BranchPath,
-        _heads: &ChangeHashSet,
-        facet_keys: Option<Vec<FacetKey>>,
-    ) -> Res<Option<(Arc<Doc>, ChangeHashSet)>> {
-        if self.cancel_token.is_cancelled() {
-            eyre::bail!("repo is stopped");
-        }
-        let Some(branch_state) = self.get_branch_state(doc_id, branch_path).await? else {
-            return Ok(None);
-        };
-
-        let doc = self
-            .get_doc_with_facets_at_heads(doc_id, &branch_state.latest_heads, facet_keys)
-            .await?;
-        Ok(doc.map(|doc_value| (doc_value, branch_state.latest_heads)))
-    }
-
     pub async fn get_with_heads(
         &self,
         doc_id: &DocId,
@@ -334,35 +297,13 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let Some(branch_state) = self.get_branch_state(doc_id, branch_path).await? else {
+        let Some(branch_heads) = self.get_branch_heads_for_path(doc_id, branch_path).await? else {
             return Ok(None);
         };
         let doc = self
-            .get_doc_with_facets_at_heads(doc_id, &branch_state.latest_heads, facet_keys)
+            .get_doc_with_facets_at_branch_heads(doc_id, branch_path, &branch_heads, facet_keys)
             .await?;
-        Ok(doc.map(|doc| (doc, branch_state.latest_heads)))
-    }
-
-    pub async fn get_if_latest_at_heads(
-        &self,
-        doc_id: &DocId,
-        branch_path: &daybook_types::doc::BranchPath,
-        heads: &ChangeHashSet,
-        _drawer_heads: &ChangeHashSet,
-        facet_keys: Option<Vec<FacetKey>>,
-    ) -> Res<Option<Arc<Doc>>> {
-        if self.cancel_token.is_cancelled() {
-            eyre::bail!("repo is stopped");
-        }
-        let Some(branch_state) = self.get_branch_state(doc_id, branch_path).await? else {
-            return Ok(None);
-        };
-        if &branch_state.latest_heads == heads {
-            return self
-                .get_doc_with_facets_at_heads(doc_id, heads, facet_keys)
-                .await;
-        }
-        Ok(None)
+        Ok(doc.map(|doc| (doc, branch_heads)))
     }
 
     pub async fn get_if_latest(
@@ -375,21 +316,30 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let drawer_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
-        self.get_if_latest_at_heads(doc_id, branch_path, heads, &drawer_heads, facet_keys)
+        let Some(branch_heads) = self.get_branch_heads_for_path(doc_id, branch_path).await? else {
+            return Ok(None);
+        };
+        if &branch_heads != heads {
+            return Ok(None);
+        }
+        self.get_doc_with_facets_at_branch_heads(doc_id, branch_path, heads, facet_keys)
             .await
     }
 
-    /// Returns the set of facet keys present for the doc at the given heads, without hydrating facet values.
-    pub async fn facet_keys_at_heads(
+    /// Returns the set of facet keys present for the doc at branch heads, without hydrating facet values.
+    pub async fn facet_keys_at_branch_heads(
         &self,
         doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
     ) -> Res<Option<HashSet<FacetKey>>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let Some(handle) = self.resolve_handle_for_heads(doc_id, heads).await? else {
+        let Some(handle) = self
+            .resolve_handle_for_branch_heads(doc_id, branch_path, heads)
+            .await?
+        else {
             return Ok(None);
         };
         let keys = handle
@@ -421,25 +371,31 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let Some(branch_state) = self.get_branch_state(doc_id, branch_path).await? else {
+        let Some(branch_heads) = self.get_branch_heads_for_path(doc_id, branch_path).await? else {
             return Ok(None);
         };
-        if &branch_state.latest_heads == heads {
-            return self.facet_keys_at_heads(doc_id, heads).await;
+        if &branch_heads == heads {
+            return self
+                .facet_keys_at_branch_heads(doc_id, branch_path, heads)
+                .await;
         }
         Ok(None)
     }
 
-    pub async fn get_facet_heads_at_heads(
+    pub async fn get_facet_heads_at_branch_heads(
         &self,
         doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
         facet_key: &FacetKey,
     ) -> Res<Vec<automerge::ChangeHash>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let Some(handle) = self.resolve_handle_for_heads(doc_id, heads).await? else {
+        let Some(handle) = self
+            .resolve_handle_for_branch_heads(doc_id, branch_path, heads)
+            .await?
+        else {
             eyre::bail!("doc not found");
         };
         handle
@@ -458,10 +414,10 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let Some(branch_state) = self.get_branch_state(doc_id, branch_path).await? else {
+        let Some(branch_heads) = self.get_branch_heads_for_path(doc_id, branch_path).await? else {
             return Ok(None);
         };
-        self.get_facet_heads_at_heads(doc_id, &branch_state.latest_heads, facet_key)
+        self.get_facet_heads_at_branch_heads(doc_id, branch_path, &branch_heads, facet_key)
             .await
             .map(Some)
     }
@@ -469,20 +425,26 @@ impl DrawerRepo {
     pub async fn facet_keys_touched_by_local_actor(
         &self,
         doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
         facet_keys: &[FacetKey],
     ) -> Res<HashSet<FacetKey>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let Some(handle) = self.resolve_handle_for_heads(doc_id, heads).await? else {
+        let Some(handle) = self
+            .resolve_handle_for_branch_heads(doc_id, branch_path, heads)
+            .await?
+        else {
             return Ok(HashSet::new());
         };
         let local_actor_id = self.local_actor_id.clone();
         let local_branch_actor_id = self.content_actor_id(None, &handle.document_id().to_string());
         let mut out = HashSet::new();
         for key in facet_keys {
-            let facet_heads = self.get_facet_heads_at_heads(doc_id, heads, key).await?;
+            let facet_heads = self
+                .get_facet_heads_at_branch_heads(doc_id, branch_path, heads, key)
+                .await?;
             let is_local = handle
                 .with_document_local(|am_doc| {
                     for head in &facet_heads {

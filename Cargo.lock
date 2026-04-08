@@ -121,7 +121,7 @@ name = "am_utils_rs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "automerge",
+ "automerge 0.7.3",
  "autosurgeon",
  "bytes",
  "camino",
@@ -224,7 +224,7 @@ name = "api_utils_rs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "automerge",
+ "automerge 0.7.3",
  "autosurgeon",
  "color-eyre",
  "displaydoc",
@@ -625,7 +625,31 @@ dependencies = [
  "flate2",
  "getrandom 0.3.4",
  "hex",
- "hexane",
+ "hexane 0.1.7",
+ "itertools",
+ "leb128",
+ "rand 0.9.2",
+ "rustc-hash 2.1.1",
+ "serde",
+ "sha2 0.11.0-rc.2",
+ "smol_str",
+ "thiserror 2.0.18",
+ "tinyvec",
+ "tracing",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "automerge"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2aab56635599ee2e9df28d9ce180c155b8dbcdd96e4c3f62895fc6a44137d328"
+dependencies = [
+ "cfg-if 1.0.4",
+ "flate2",
+ "getrandom 0.3.4",
+ "hex",
+ "hexane 0.2.1",
  "itertools",
  "leb128",
  "rand 0.9.2",
@@ -644,7 +668,7 @@ name = "autosurgeon"
 version = "0.10.1"
 source = "git+https://github.com/dman-os/autosurgeon?rev=2896663de0e23f789cffe8e98bbbcbcbf21f23ad#2896663de0e23f789cffe8e98bbbcbcbf21f23ad"
 dependencies = [
- "automerge",
+ "automerge 0.7.3",
  "autosurgeon-derive",
  "pastey",
  "similar",
@@ -2328,7 +2352,7 @@ name = "daybook_cli"
 version = "0.1.0"
 dependencies = [
  "am_utils_rs",
- "automerge",
+ "automerge 0.7.3",
  "autosurgeon",
  "clap",
  "clap_complete",
@@ -2363,7 +2387,7 @@ dependencies = [
  "anyhow",
  "api_utils_rs",
  "async-trait",
- "automerge",
+ "automerge 0.7.3",
  "autosurgeon",
  "bs58",
  "color-eyre",
@@ -2435,7 +2459,7 @@ version = "0.1.0"
 dependencies = [
  "am_utils_rs",
  "api_utils_rs",
- "automerge",
+ "automerge 0.7.3",
  "autosurgeon",
  "daybook_core",
  "daybook_types",
@@ -2503,7 +2527,7 @@ dependencies = [
  "addr",
  "am_utils_rs",
  "api_utils_rs",
- "automerge",
+ "automerge 0.7.3",
  "autosurgeon",
  "blake3",
  "camino",
@@ -4095,6 +4119,16 @@ name = "hexane"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ab946df174dbf65fc07610c1f936b3e40b9ca7cfd09c0f827f9509a62e93a39"
+dependencies = [
+ "leb128",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "hexane"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f4ecba0bb4e14df997df7cab6d1b584c6432d8865cf2adfced814706d715a7b"
 dependencies = [
  "leb128",
  "thiserror 2.0.18",
@@ -7400,7 +7434,7 @@ version = "0.1.0"
 dependencies = [
  "am_utils_rs",
  "api_utils_rs",
- "automerge",
+ "automerge 0.7.3",
  "color-eyre",
  "daybook_types",
  "displaydoc",
@@ -8747,7 +8781,7 @@ version = "0.8.0"
 source = "git+https://github.com/dman-os/samod?rev=2cf21c6654c60872080dc73be2bf344f3cf3269f#2cf21c6654c60872080dc73be2bf344f3cf3269f"
 dependencies = [
  "async-channel",
- "automerge",
+ "automerge 0.7.3",
  "bytes",
  "chrono",
  "futures",
@@ -8768,7 +8802,7 @@ name = "samod-core"
 version = "0.8.0"
 source = "git+https://github.com/dman-os/samod?rev=2cf21c6654c60872080dc73be2bf344f3cf3269f#2cf21c6654c60872080dc73be2bf344f3cf3269f"
 dependencies = [
- "automerge",
+ "automerge 0.7.3",
  "base64 0.21.7",
  "bs58",
  "hex",
@@ -10614,7 +10648,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12988,6 +13022,7 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "automerge 0.8.0",
  "bon",
  "clap",
  "data-encoding",

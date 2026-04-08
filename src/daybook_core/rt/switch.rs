@@ -570,7 +570,12 @@ impl SwitchWorker {
                     return Ok(Some((branch_doc_id, next_state)));
                 }
                 let (diff, origin, deleted_facet_keys) = self
-                    .compute_partition_doc_diff(&doc_id, prev_heads.as_ref(), Some(&new_heads))
+                    .compute_partition_doc_diff(
+                        &doc_id,
+                        &BranchPath::from("main"),
+                        prev_heads.as_ref(),
+                        Some(&new_heads),
+                    )
                     .await?;
                 let entry = self
                     .rt
@@ -608,7 +613,12 @@ impl SwitchWorker {
                     return Ok(Some((branch_doc_id, next_state)));
                 }
                 let (diff, origin, deleted_facet_keys) = self
-                    .compute_partition_doc_diff(&doc_id, next_state.last_heads.as_ref(), None)
+                    .compute_partition_doc_diff(
+                        &doc_id,
+                        &BranchPath::from("main"),
+                        next_state.last_heads.as_ref(),
+                        None,
+                    )
                     .await?;
                 let evt = Arc::new(DrawerEvent::DocDeleted {
                     id: doc_id.clone(),
@@ -632,6 +642,7 @@ impl SwitchWorker {
     async fn compute_partition_doc_diff(
         &self,
         doc_id: &DocId,
+        branch_path: &BranchPath,
         prev_heads: Option<&ChangeHashSet>,
         next_heads: Option<&ChangeHashSet>,
     ) -> Res<(
@@ -644,7 +655,12 @@ impl SwitchWorker {
             if let Some(doc) = self
                 .rt
                 .drawer
-                .get_doc_with_facets_at_heads(doc_id, heads, Some(vec![dmeta_key.clone()]))
+                .get_doc_with_facets_at_branch_heads(
+                    doc_id,
+                    branch_path,
+                    heads,
+                    Some(vec![dmeta_key.clone()]),
+                )
                 .await?
             {
                 if let Some(dmeta_raw) = doc.facets.get(&dmeta_key) {
@@ -678,7 +694,12 @@ impl SwitchWorker {
             if let Some(doc) = self
                 .rt
                 .drawer
-                .get_doc_with_facets_at_heads(doc_id, heads, Some(vec![dmeta_key.clone()]))
+                .get_doc_with_facets_at_branch_heads(
+                    doc_id,
+                    branch_path,
+                    heads,
+                    Some(vec![dmeta_key.clone()]),
+                )
                 .await?
             {
                 if let Some(dmeta_raw) = doc.facets.get(&dmeta_key) {

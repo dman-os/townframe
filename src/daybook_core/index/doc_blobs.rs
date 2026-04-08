@@ -158,18 +158,20 @@ impl DocBlobsIndexRepo {
 
     async fn handle_worker_item(&self, item: DocBlobsIndexWorkItem) -> Res<()> {
         match item {
-            DocBlobsIndexWorkItem::Upsert { doc_id, heads } => {
-                match self.reindex_doc(&doc_id, &heads).await? {
-                    ReindexDocOutcome::Present => {
-                        self.registry
-                            .notify([DocBlobsIndexEvent::Updated { doc_id }]);
-                    }
-                    ReindexDocOutcome::Evicted => {
-                        self.registry
-                            .notify([DocBlobsIndexEvent::Deleted { doc_id }]);
-                    }
+            DocBlobsIndexWorkItem::Upsert {
+                doc_id,
+                branch_path,
+                heads,
+            } => match self.reindex_doc(&doc_id, &branch_path, &heads).await? {
+                ReindexDocOutcome::Present => {
+                    self.registry
+                        .notify([DocBlobsIndexEvent::Updated { doc_id }]);
                 }
-            }
+                ReindexDocOutcome::Evicted => {
+                    self.registry
+                        .notify([DocBlobsIndexEvent::Deleted { doc_id }]);
+                }
+            },
             DocBlobsIndexWorkItem::DeleteDoc { doc_id } => {
                 self.delete_doc(&doc_id).await?;
                 self.registry
@@ -182,9 +184,14 @@ impl DocBlobsIndexRepo {
     pub async fn reindex_doc(
         &self,
         doc_id: &DocId,
+        branch_path: &BranchPath,
         heads: &ChangeHashSet,
     ) -> Res<ReindexDocOutcome> {
-        let Some(facet_keys) = self.drawer_repo.facet_keys_at_heads(doc_id, heads).await? else {
+        let Some(facet_keys) = self
+            .drawer_repo
+            .facet_keys_at_branch_heads(doc_id, branch_path, heads)
+            .await?
+        else {
             self.delete_doc(doc_id).await?;
             return Ok(ReindexDocOutcome::Evicted);
         };
@@ -198,7 +205,12 @@ impl DocBlobsIndexRepo {
         }
         let facets = self
             .drawer_repo
-            .get_at_heads_with_facets_arc(doc_id, heads, Some(selected_blob_keys))
+            .get_at_branch_heads_with_facets_arc(
+                doc_id,
+                branch_path,
+                heads,
+                Some(selected_blob_keys),
+            )
             .await?
             .map(|(facets, _)| facets)
             .ok_or_eyre("doc didn't match expectation")?;
@@ -516,9 +528,18 @@ impl DocBlobsIndexRepo {
         })
     }
 
-    pub fn enqueue_upsert(&self, doc_id: DocId, heads: ChangeHashSet) -> Res<()> {
+    pub fn enqueue_upsert(
+        &self,
+        doc_id: DocId,
+        branch_path: BranchPath,
+        heads: ChangeHashSet,
+    ) -> Res<()> {
         self.work_tx
-            .send(DocBlobsIndexWorkItem::Upsert { doc_id, heads })
+            .send(DocBlobsIndexWorkItem::Upsert {
+                doc_id,
+                branch_path,
+                heads,
+            })
             .map_err(|err| ferr!("doc_blobs_index work queue closed: {err}"))?;
         Ok(())
     }
@@ -557,8 +578,14 @@ pub enum ReindexDocOutcome {
 
 #[derive(Debug, Clone)]
 enum DocBlobsIndexWorkItem {
-    Upsert { doc_id: DocId, heads: ChangeHashSet },
-    DeleteDoc { doc_id: DocId },
+    Upsert {
+        doc_id: DocId,
+        branch_path: BranchPath,
+        heads: ChangeHashSet,
+    },
+    DeleteDoc {
+        doc_id: DocId,
+    },
 }
 
 struct DocBlobsTriageListener {
@@ -610,7 +637,8 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
                 else {
                     return Ok(outcome);
                 };
-                self.index_repo.enqueue_upsert(id.clone(), heads.clone())?;
+                self.index_repo
+                    .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
             }
             crate::drawer::DrawerEvent::DocUpdated {
                 id,
@@ -638,7 +666,8 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
                 else {
                     return Ok(outcome);
                 };
-                self.index_repo.enqueue_upsert(id.clone(), heads.clone())?;
+                self.index_repo
+                    .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
             }
             crate::drawer::DrawerEvent::ListChanged { .. } => {}
         }
@@ -740,7 +769,11 @@ mod tests {
         let listener = repo.subscribe(SubscribeOpts::new(16));
         let missing_doc_id = "doc-missing-for-blob-index".to_string();
 
-        repo.enqueue_upsert(missing_doc_id.clone(), ChangeHashSet(default()))?;
+        repo.enqueue_upsert(
+            missing_doc_id.clone(),
+            BranchPath::from("main"),
+            ChangeHashSet(default()),
+        )?;
 
         let evt = listener
             .recv_async()
@@ -787,6 +820,7 @@ mod tests {
             Arc::clone(&big_repo),
             drawer_doc_id,
             local_user_path.clone(),
+            crate::app::SqlCtx::new("sqlite::memory:").await?.db_pool,
             temp_dir.path().join("drawer-local-state"),
             Arc::new(std::sync::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),
@@ -831,7 +865,7 @@ mod tests {
             .await?
             .and_then(|branches| branches.branches.get("main").cloned())
             .ok_or_eyre("expected main branch heads for test doc")?;
-        repo.enqueue_upsert(doc_id.clone(), heads)?;
+        repo.enqueue_upsert(doc_id.clone(), BranchPath::from("main"), heads)?;
 
         wait_for_partition_member_count(&big_repo, &partition_id, 1).await?;
         assert!(

@@ -152,10 +152,14 @@ impl DocFacetSetIndexRepo {
 
     async fn handle_worker_item(&self, item: DocFacetSetIndexWorkItem) -> Res<()> {
         match item {
-            DocFacetSetIndexWorkItem::Upsert { doc_id, heads } => {
+            DocFacetSetIndexWorkItem::Upsert {
+                doc_id,
+                branch_path,
+                heads,
+            } => {
                 let Some(facet_keys) = self
                     .drawer_repo
-                    .facet_keys_at_heads(&doc_id, &heads)
+                    .facet_keys_at_branch_heads(&doc_id, &branch_path, &heads)
                     .await?
                 else {
                     return Ok(());
@@ -328,9 +332,18 @@ impl DocFacetSetIndexRepo {
         })
     }
 
-    pub fn enqueue_upsert(&self, doc_id: DocId, heads: ChangeHashSet) -> Res<()> {
+    pub fn enqueue_upsert(
+        &self,
+        doc_id: DocId,
+        branch_path: BranchPath,
+        heads: ChangeHashSet,
+    ) -> Res<()> {
         self.work_tx
-            .send(DocFacetSetIndexWorkItem::Upsert { doc_id, heads })
+            .send(DocFacetSetIndexWorkItem::Upsert {
+                doc_id,
+                branch_path,
+                heads,
+            })
             .map_err(|err| ferr!("doc_facet_set_index work queue closed: {err}"))?;
         Ok(())
     }
@@ -345,8 +358,14 @@ impl DocFacetSetIndexRepo {
 
 #[derive(Debug, Clone)]
 enum DocFacetSetIndexWorkItem {
-    Upsert { doc_id: DocId, heads: ChangeHashSet },
-    DeleteDoc { doc_id: DocId },
+    Upsert {
+        doc_id: DocId,
+        branch_path: BranchPath,
+        heads: ChangeHashSet,
+    },
+    DeleteDoc {
+        doc_id: DocId,
+    },
 }
 
 struct FacetSetTriageListener {
@@ -396,7 +415,8 @@ impl crate::rt::switch::SwitchSink for FacetSetTriageListener {
                 else {
                     return Ok(outcome);
                 };
-                self.index_repo.enqueue_upsert(id.clone(), heads.clone())?;
+                self.index_repo
+                    .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
             }
             crate::drawer::DrawerEvent::DocUpdated {
                 id,
@@ -432,7 +452,8 @@ impl crate::rt::switch::SwitchSink for FacetSetTriageListener {
                     self.index_repo.enqueue_delete(id.clone())?;
                     return Ok(outcome);
                 };
-                self.index_repo.enqueue_upsert(id.clone(), heads.clone())?;
+                self.index_repo
+                    .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
             }
             crate::drawer::DrawerEvent::ListChanged { .. } => {}
         }

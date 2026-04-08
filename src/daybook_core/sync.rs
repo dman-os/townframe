@@ -1634,6 +1634,7 @@ mod tests {
             Arc::clone(&rtx.big_repo),
             rtx.doc_drawer.document_id().clone(),
             daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
+            rtx.sql.db_pool.clone(),
             rtx.layout.repo_root.join("local_state"),
             Arc::new(std::sync::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),
@@ -1714,12 +1715,24 @@ mod tests {
                                 }
                                 crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
                                     if let Some(heads) = entry.branches.get("main") {
-                                        doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                                        doc_blobs_index_repo
+                                            .enqueue_upsert(
+                                                id.clone(),
+                                                daybook_types::doc::BranchPath::from("main"),
+                                                heads.clone(),
+                                            )
+                                            .unwrap_or_log();
                                     }
                                 }
                                 crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
                                     if let Some(heads) = entry.branches.get("main") {
-                                        doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                                        doc_blobs_index_repo
+                                            .enqueue_upsert(
+                                                id.clone(),
+                                                daybook_types::doc::BranchPath::from("main"),
+                                                heads.clone(),
+                                            )
+                                            .unwrap_or_log();
                                     }
                                 }
                                 crate::drawer::DrawerEvent::ListChanged { .. } => {}

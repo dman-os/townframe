@@ -39,6 +39,10 @@ fn local_branch(name: &str) -> daybook_types::doc::BranchPath {
     daybook_types::doc::BranchPath::from(format!("/test-device/{name}"))
 }
 
+async fn new_meta_db_pool() -> Res<sqlx::SqlitePool> {
+    Ok(crate::app::SqlCtx::new("sqlite::memory:").await?.db_pool)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_smoke() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
@@ -63,6 +67,7 @@ async fn test_v2_smoke() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -160,6 +165,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -193,6 +199,14 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         .ok_or_eyre("missing main branch")?
         .clone();
 
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &daybook_types::doc::BranchPath::from("/tmp/job-1"),
+        &"main".into(),
+        &main_heads,
+        None,
+    )
+    .await?;
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -210,6 +224,14 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
     .await?;
     assert_eq!(big_repo.partition_member_count(&partition_id).await?, 1);
 
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-a"),
+        &"main".into(),
+        &main_heads,
+        None,
+    )
+    .await?;
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -265,6 +287,7 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -334,6 +357,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -444,6 +468,7 @@ async fn test_v2_merge() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -471,6 +496,14 @@ async fn test_v2_merge() -> Res<()> {
     let main_heads = entry.branches.get("main").unwrap().clone();
 
     // 2. Update branch-a
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-a"),
+        &"main".into(),
+        &main_heads,
+        None,
+    )
+    .await?;
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -488,6 +521,14 @@ async fn test_v2_merge() -> Res<()> {
     .await?;
 
     // 3. Update branch-b
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-b"),
+        &"main".into(),
+        &main_heads,
+        None,
+    )
+    .await?;
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -507,8 +548,14 @@ async fn test_v2_merge() -> Res<()> {
         .get(&*local_branch("branch-a").to_string())
         .unwrap()
         .clone();
-    repo.merge_from_heads(&doc_id, &"main".into(), &a_heads, None)
-        .await?;
+    repo.merge_from_heads(
+        &doc_id,
+        &"main".into(),
+        &local_branch("branch-a"),
+        &a_heads,
+        None,
+    )
+    .await?;
 
     // 5. Merge branch-b to main
     let entry = repo.get_doc_branches(&doc_id).await?.unwrap();
@@ -517,8 +564,14 @@ async fn test_v2_merge() -> Res<()> {
         .get(&*local_branch("branch-b").to_string())
         .unwrap()
         .clone();
-    repo.merge_from_heads(&doc_id, &"main".into(), &b_heads, None)
-        .await?;
+    repo.merge_from_heads(
+        &doc_id,
+        &"main".into(),
+        &local_branch("branch-b"),
+        &b_heads,
+        None,
+    )
+    .await?;
 
     // 6. Verify merge
     let doc = repo
@@ -563,6 +616,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -602,13 +656,411 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
         .cloned()
         .ok_or_eyre("doc_a main missing")?;
 
-    let resolved = repo.resolve_handle_for_heads(&doc_b, &doc_a_heads).await?;
+    let resolved = repo
+        .resolve_handle_for_branch_heads(&doc_b, &"main".into(), &doc_a_heads)
+        .await?;
     assert!(
         resolved.is_none(),
         "foreign heads must not resolve to another doc handle"
     );
 
     stop_token.stop().await?;
+    acx_stop.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+        peer_id: "test-stale-heads-after-merges".into(),
+        storage: am_utils_rs::repo::StorageConfig::Memory,
+    })
+    .await?;
+
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        let handle = big_repo.add_doc(doc).await?;
+        handle.document_id().clone()
+    };
+
+    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let (repo, stop_token) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        drawer_doc_id,
+        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        entry_pool,
+        doc_pool,
+        None,
+    )
+    .await?;
+
+    let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let facet_note = FacetKey::from(WellKnownFacetTag::Note);
+
+    for round in 0..32 {
+        let doc_id = repo
+            .add(AddDocArgs {
+                branch_path: "main".into(),
+                facets: [(
+                    facet_note.clone(),
+                    WellKnownFacet::Note(format!("init-{round}").into()).into(),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        let base_heads = repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .ok_or_eyre("missing doc branches after add")?
+            .branches
+            .get("main")
+            .ok_or_eyre("missing main branch after add")?
+            .clone();
+
+        let branch_a = daybook_types::doc::BranchPath::from(format!("/tmp/stale-a-{round}"));
+        repo.create_branch_at_heads_from_branch(
+            &doc_id,
+            &branch_a,
+            &"main".into(),
+            &base_heads,
+            None,
+        )
+        .await?;
+        repo.update_at_heads(
+            DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    facet_title.clone(),
+                    WellKnownFacet::TitleGeneric(format!("A-{round}")).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            branch_a.clone(),
+            Some(base_heads.clone()),
+        )
+        .await?;
+        let a_heads = repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .ok_or_eyre("missing doc branches after branch-a update")?
+            .branches
+            .get(&branch_a.to_string())
+            .ok_or_eyre("missing branch-a state after update")?
+            .clone();
+        repo.merge_from_heads(&doc_id, &"main".into(), &branch_a, &a_heads, None)
+            .await?;
+        let heads_after_a = repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .ok_or_eyre("missing doc branches after merge a")?
+            .branches
+            .get("main")
+            .ok_or_eyre("missing main after merge a")?
+            .clone();
+
+        let branch_b = daybook_types::doc::BranchPath::from(format!("/tmp/stale-b-{round}"));
+        repo.create_branch_at_heads_from_branch(
+            &doc_id,
+            &branch_b,
+            &"main".into(),
+            &heads_after_a,
+            None,
+        )
+        .await?;
+        repo.update_at_heads(
+            DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    facet_note.clone(),
+                    WellKnownFacet::Note(format!("B-{round}").into()).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            branch_b.clone(),
+            Some(heads_after_a.clone()),
+        )
+        .await?;
+        let b_heads = repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .ok_or_eyre("missing doc branches after branch-b update")?
+            .branches
+            .get(&branch_b.to_string())
+            .ok_or_eyre("missing branch-b state after update")?
+            .clone();
+        repo.merge_from_heads(&doc_id, &"main".into(), &branch_b, &b_heads, None)
+            .await?;
+
+        // Recreate the stale-heads path: materialize a new branch from an older main head set
+        // after main has already advanced through an intervening merge.
+        let stale_branch = daybook_types::doc::BranchPath::from(format!("/tmp/stale-c-{round}"));
+        repo.create_branch_at_heads_from_branch(
+            &doc_id,
+            &stale_branch,
+            &"main".into(),
+            &heads_after_a,
+            None,
+        )
+        .await?;
+        repo.update_at_heads(
+            DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    facet_title.clone(),
+                    WellKnownFacet::TitleGeneric(format!("C-{round}")).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            stale_branch.clone(),
+            Some(heads_after_a.clone()),
+        )
+        .await?;
+        let stale_heads = repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .ok_or_eyre("missing doc branches after stale branch update")?
+            .branches
+            .get(&stale_branch.to_string())
+            .ok_or_eyre("missing stale branch state after update")?
+            .clone();
+        repo.merge_from_heads(&doc_id, &"main".into(), &stale_branch, &stale_heads, None)
+            .await?;
+
+        assert!(
+            repo.del(&doc_id).await?,
+            "doc should be removable after round"
+        );
+    }
+
+    stop_token.stop().await?;
+    acx_stop.stop().await?;
+    Ok(())
+}
+
+#[test]
+fn test_raw_automerge_fork_at_stale_heads_after_merges() -> Res<()> {
+    let mut main = automerge::Automerge::new();
+    {
+        let mut tx = main.transaction();
+        tx.put(automerge::ROOT, "note", "init")?;
+        tx.commit();
+    }
+    let h0 = main.get_heads();
+
+    let mut branch_a = main.fork_at(&h0)?;
+    {
+        let mut tx = branch_a.transaction();
+        tx.put(automerge::ROOT, "title", "A")?;
+        tx.commit();
+    }
+    main.merge(&mut branch_a)?;
+    let h1 = main.get_heads();
+    assert_ne!(h1, h0, "main should advance after merge a");
+
+    let mut branch_b = main.fork_at(&h1)?;
+    {
+        let mut tx = branch_b.transaction();
+        tx.put(automerge::ROOT, "note", "B")?;
+        tx.commit();
+    }
+    main.merge(&mut branch_b)?;
+    let h2 = main.get_heads();
+    assert_ne!(h2, h1, "main should advance after merge b");
+
+    let mut stale = main.fork_at(&h1)?;
+    {
+        let mut tx = stale.transaction();
+        tx.put(automerge::ROOT, "title", "C")?;
+        tx.commit();
+    }
+    let stale_heads = stale.get_heads();
+    assert!(
+        !stale_heads.is_empty(),
+        "fork_at on older known heads should produce a valid branch"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_raw_automerge_merge_and_log_then_commit_preserves_stale_forkability() -> Res<()> {
+    let mut main = automerge::Automerge::new();
+    {
+        let mut tx = main.transaction();
+        tx.put(automerge::ROOT, "note", "init")?;
+        tx.commit();
+    }
+    let h0 = main.get_heads();
+
+    let mut branch_a = main.fork_at(&h0)?;
+    {
+        let mut tx = branch_a.transaction();
+        tx.put(automerge::ROOT, "title", "A")?;
+        tx.commit();
+    }
+    {
+        let mut patch_log = automerge::PatchLog::active();
+        main.merge_and_log_patches(&mut branch_a, &mut patch_log)?;
+        let _patches = main.make_patches(&mut patch_log);
+        let mut tx = main.transaction();
+        tx.put(automerge::ROOT, "meta_a", "ok")?;
+        tx.commit();
+    }
+    let h1 = main.get_heads();
+
+    let mut branch_b = main.fork_at(&h1)?;
+    {
+        let mut tx = branch_b.transaction();
+        tx.put(automerge::ROOT, "note", "B")?;
+        tx.commit();
+    }
+    {
+        let mut patch_log = automerge::PatchLog::active();
+        main.merge_and_log_patches(&mut branch_b, &mut patch_log)?;
+        let _patches = main.make_patches(&mut patch_log);
+        let mut tx = main.transaction();
+        tx.put(automerge::ROOT, "meta_b", "ok")?;
+        tx.commit();
+    }
+
+    let stale = main.fork_at(&h1)?;
+    assert!(
+        !stale.get_heads().is_empty(),
+        "stale fork_at should keep working after merge_and_log_patches + follow-up commit"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_raw_automerge_merge_and_log_make_patches_without_followup_commit_stale_forkability(
+) -> Res<()> {
+    let mut main = automerge::Automerge::new();
+    {
+        let mut tx = main.transaction();
+        tx.put(automerge::ROOT, "note", "init")?;
+        tx.commit();
+    }
+    let h0 = main.get_heads();
+
+    let mut branch_a = main.fork_at(&h0)?;
+    {
+        let mut tx = branch_a.transaction();
+        tx.put(automerge::ROOT, "title", "A")?;
+        tx.commit();
+    }
+    {
+        let mut patch_log = automerge::PatchLog::active();
+        main.merge_and_log_patches(&mut branch_a, &mut patch_log)?;
+        let _patches = main.make_patches(&mut patch_log);
+    }
+    let h1 = main.get_heads();
+
+    let mut branch_b = main.fork_at(&h1)?;
+    {
+        let mut tx = branch_b.transaction();
+        tx.put(automerge::ROOT, "note", "B")?;
+        tx.commit();
+    }
+    {
+        let mut patch_log = automerge::PatchLog::active();
+        main.merge_and_log_patches(&mut branch_b, &mut patch_log)?;
+        let _patches = main.make_patches(&mut patch_log);
+    }
+
+    let stale = main.fork_at(&h1)?;
+    assert!(!stale.get_heads().is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_bigrepo_raw_automerge_stale_heads_after_merges() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+        peer_id: "test-bigrepo-stale-heads".into(),
+        storage: am_utils_rs::repo::StorageConfig::Memory,
+    })
+    .await?;
+
+    let main_handle = big_repo.create_doc(automerge::Automerge::new()).await?;
+    main_handle
+        .with_document_local(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "note", "init")?;
+            tx.commit();
+            eyre::Ok(())
+        })
+        .await??;
+    let h0 = main_handle
+        .with_document_local(|doc| doc.get_heads())
+        .await?;
+
+    let branch_a_doc = main_handle
+        .with_document_local(|doc| doc.fork_at(&h0))
+        .await??;
+    let branch_a_handle = big_repo.create_doc(branch_a_doc).await?;
+    branch_a_handle
+        .with_document_local(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "title", "A")?;
+            tx.commit();
+            eyre::Ok(())
+        })
+        .await??;
+    let mut a_snapshot = branch_a_handle
+        .with_document_local(|doc| doc.clone())
+        .await?;
+    main_handle
+        .with_document_local(|doc| doc.merge(&mut a_snapshot))
+        .await??;
+    let h1 = main_handle
+        .with_document_local(|doc| doc.get_heads())
+        .await?;
+
+    let branch_b_doc = main_handle
+        .with_document_local(|doc| doc.fork_at(&h1))
+        .await??;
+    let branch_b_handle = big_repo.create_doc(branch_b_doc).await?;
+    branch_b_handle
+        .with_document_local(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "note", "B")?;
+            tx.commit();
+            eyre::Ok(())
+        })
+        .await??;
+    let mut b_snapshot = branch_b_handle
+        .with_document_local(|doc| doc.clone())
+        .await?;
+    main_handle
+        .with_document_local(|doc| doc.merge(&mut b_snapshot))
+        .await??;
+    let h2 = main_handle
+        .with_document_local(|doc| doc.get_heads())
+        .await?;
+    assert_ne!(h2, h1, "main should advance after second merge");
+
+    let stale = main_handle
+        .with_document_local(|doc| doc.fork_at(&h1))
+        .await??;
+    assert!(
+        !stale.get_heads().is_empty(),
+        "fork_at on older known heads should work through BigRepo handle path"
+    );
+
     acx_stop.stop().await?;
     Ok(())
 }
@@ -654,6 +1106,7 @@ async fn test_v2_sync_smoke() -> Res<()> {
         Arc::clone(&client_acx),
         drawer_doc_id.clone(),
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::clone(&entry_pool),
         Arc::clone(&doc_pool),
@@ -664,6 +1117,7 @@ async fn test_v2_sync_smoke() -> Res<()> {
         Arc::clone(&server_acx),
         drawer_doc_id.clone(),
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::clone(&entry_pool),
         Arc::clone(&doc_pool),
@@ -753,6 +1207,7 @@ async fn test_v2_additional_apis() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -841,6 +1296,14 @@ async fn test_v2_additional_apis() -> Res<()> {
         .get("main")
         .cloned()
         .ok_or_eyre("missing main")?;
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-a"),
+        &"main".into(),
+        &latest_main_heads,
+        None,
+    )
+    .await?;
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -926,6 +1389,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -1075,6 +1539,15 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     let entry = repo.get_doc_branches(&doc_id).await?.unwrap();
 
     // 3. Test 'merge' metadata maintenance
+    let main_heads = entry.branches.get("main").unwrap().clone();
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-a"),
+        &"main".into(),
+        &main_heads,
+        None,
+    )
+    .await?;
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -1087,7 +1560,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
             user_path: None,
         },
         local_branch("branch-a"),
-        Some(entry.branches.get("main").unwrap().clone()),
+        Some(main_heads),
     )
     .await?;
 
@@ -1098,8 +1571,14 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
         .unwrap()
         .clone();
 
-    repo.merge_from_heads(&doc_id, &"main".into(), &a_heads, Some(user_path.clone()))
-        .await?;
+    repo.merge_from_heads(
+        &doc_id,
+        &"main".into(),
+        &local_branch("branch-a"),
+        &a_heads,
+        Some(user_path.clone()),
+    )
+    .await?;
 
     let dmeta_after_merge = get_dmeta_on_main(&repo, &doc_id).await?;
     assert!(
@@ -1145,6 +1624,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -1227,6 +1707,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -1254,6 +1735,14 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
         .get("main")
         .cloned()
         .ok_or_eyre("missing main branch")?;
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-a"),
+        &"main".into(),
+        &main_heads,
+        None,
+    )
+    .await?;
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -1283,6 +1772,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
     repo.merge_from_heads(
         &doc_id,
         &"main".into(),
+        &local_branch("branch-a"),
         &branch_heads,
         Some(merge_user_path.clone()),
     )
@@ -1401,6 +1891,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -1427,6 +1918,14 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     let main_heads = entry.branches.get("main").unwrap().clone();
 
     // 2. Concurrent updates to the same facet on branch-a and branch-b
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-a"),
+        &"main".into(),
+        &main_heads,
+        None,
+    )
+    .await?;
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -1443,6 +1942,14 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     )
     .await?;
 
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-b"),
+        &"main".into(),
+        &main_heads,
+        None,
+    )
+    .await?;
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -1497,10 +2004,22 @@ async fn test_v2_updated_at_merge() -> Res<()> {
         .unwrap()
         .clone();
 
-    repo.merge_from_heads(&doc_id, &"main".into(), &a_heads, None)
-        .await?;
-    repo.merge_from_heads(&doc_id, &"main".into(), &b_heads, None)
-        .await?;
+    repo.merge_from_heads(
+        &doc_id,
+        &"main".into(),
+        &local_branch("branch-a"),
+        &a_heads,
+        None,
+    )
+    .await?;
+    repo.merge_from_heads(
+        &doc_id,
+        &"main".into(),
+        &local_branch("branch-b"),
+        &b_heads,
+        None,
+    )
+    .await?;
 
     // 4. Verify updatedAt list in content doc and that recovered heads
     // can resolve the corresponding facet payload versions.
@@ -1530,7 +2049,12 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     for head in &recovered_heads {
         let single_head = daybook_types::doc::ChangeHashSet([*head].into());
         let at_doc = repo
-            .get_doc_with_facets_at_heads(&doc_id, &single_head, Some(vec![facet_title.clone()]))
+            .get_doc_with_facets_at_branch_heads(
+                &doc_id,
+                &"main".into(),
+                &single_head,
+                Some(vec![facet_title.clone()]),
+            )
             .await?
             .ok_or_eyre("doc missing at recovered facet head")?;
         let raw = at_doc
@@ -1577,6 +2101,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -1606,6 +2131,14 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     assert!(dmeta_initial.facets.contains_key(&facet_title));
 
     // 2. Update facet on branch-a
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-a"),
+        &"main".into(),
+        &initial_heads,
+        None,
+    )
+    .await?;
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -1631,6 +2164,14 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     assert_ne!(a_heads, initial_heads, "branch-a should advance");
 
     // 3. Update different facet on branch-b
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-b"),
+        &"main".into(),
+        &initial_heads,
+        None,
+    )
+    .await?;
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -1652,8 +2193,14 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     assert_ne!(b_heads, initial_heads, "branch-b should advance");
 
     // 4. Merge branch-a to main
-    repo.merge_from_heads(&doc_id, &"main".into(), &a_heads, None)
-        .await?;
+    repo.merge_from_heads(
+        &doc_id,
+        &"main".into(),
+        &local_branch("branch-a"),
+        &a_heads,
+        None,
+    )
+    .await?;
     let entry_merged_a = repo.get_doc_branches(&doc_id).await?.unwrap();
     let main_heads_a = entry_merged_a.branches.get("main").unwrap().clone();
     assert_ne!(
@@ -1664,8 +2211,14 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     assert!(dmeta_after_a.facets.contains_key(&facet_title));
 
     // 5. Merge branch-b to main
-    repo.merge_from_heads(&doc_id, &"main".into(), &b_heads, None)
-        .await?;
+    repo.merge_from_heads(
+        &doc_id,
+        &"main".into(),
+        &local_branch("branch-b"),
+        &b_heads,
+        None,
+    )
+    .await?;
     let entry_merged_b = repo.get_doc_branches(&doc_id).await?.unwrap();
     let main_heads_b = entry_merged_b.branches.get("main").unwrap().clone();
     assert_ne!(
@@ -1709,6 +2262,7 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id_a,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::clone(&entry_pool),
         Arc::clone(&doc_pool),
@@ -1719,6 +2273,7 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id_b,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::clone(&entry_pool),
         Arc::clone(&doc_pool),
@@ -1758,7 +2313,7 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_v2_doc_updated_includes_changed_facet_keys() -> Res<()> {
+async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: "test-v2-changed-facets".into(),
@@ -1781,6 +2336,7 @@ async fn test_v2_doc_updated_includes_changed_facet_keys() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -1826,27 +2382,15 @@ async fn test_v2_doc_updated_includes_changed_facet_keys() -> Res<()> {
     )
     .await?;
 
-    let mut changed_facet_keys = None;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        let next_event = tokio::time::timeout_at(deadline, listener.recv_lossy_async())
-            .await
-            .wrap_err("timeout waiting for update event")?
-            .map_err(|_| eyre::eyre!("listener closed"))?;
-        if let DrawerEvent::DocUpdated { id, diff, .. } = &*next_event {
-            if id == &doc_id {
-                changed_facet_keys = Some(diff.changed_facet_keys.clone());
-                break;
-            }
-        }
-    }
-    let changed_facet_keys =
-        changed_facet_keys.ok_or_eyre("did not observe DocUpdated event for test doc")?;
-
-    let changed: HashSet<FacetKey> = changed_facet_keys.into_iter().collect();
-    assert!(changed.contains(&facet_title));
-    assert!(changed.contains(&facet_note));
-    assert_eq!(changed.len(), 2);
+    let recv = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        listener.recv_lossy_async(),
+    )
+    .await;
+    assert!(
+        recv.is_err(),
+        "content-only update should not emit drawer membership events"
+    );
 
     stop_token.stop().await?;
     acx_stop.stop().await?;
@@ -1877,6 +2421,7 @@ async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> 
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -1953,6 +2498,7 @@ async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
         big_repo,
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -2001,6 +2547,7 @@ async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
         big_repo,
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -2059,6 +2606,7 @@ async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_ta
         big_repo,
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -2205,8 +2753,9 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
 async fn perf_drawer_add_disk_baseline() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
 
-    let temp_dir = tempfile::tempdir()?;
-    let storage_path = temp_dir.path().join("drawer-disk");
+    let storage_path = std::env::temp_dir()
+        .join("drawer-perf")
+        .join(Uuid::new_v4().to_string());
     std::fs::create_dir_all(&storage_path)?;
 
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
@@ -2233,6 +2782,7 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
         Arc::clone(&big_repo),
         drawer_doc_id,
         daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
         doc_pool,
@@ -2279,5 +2829,6 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
     assert!(docs_per_sec > 0.0);
     stop_token.stop().await?;
     acx_stop.stop().await?;
+    let _ = std::fs::remove_dir_all(&storage_path);
     Ok(())
 }

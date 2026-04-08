@@ -96,6 +96,11 @@ pub struct FacetRoutineArgs {
     pub wflow_args_json: Option<String>,
 }
 
+pub(crate) fn facet_routine_args_fingerprint(args: &FacetRoutineArgs) -> String {
+    let bytes = serde_json::to_vec(args).expect(ERROR_JSON);
+    utils_rs::hash::blake3_hash_bytes(&bytes)
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum DispatchEvent {
@@ -297,12 +302,27 @@ impl DispatchRepo {
     pub async fn get_by_wflow_job(&self, job_id: &str) -> Option<Arc<ActiveDispatch>> {
         let state = self.state.lock().await;
         let dispatch_id = state.wflow_to_dispatch.get(job_id)?;
-        state.active_dispatches.get(dispatch_id).map(Arc::clone)
+        let found = state.active_dispatches.get(dispatch_id).map(Arc::clone);
+        if let Some(dispatch) = found.as_ref() {
+            let ActiveDispatchArgs::FacetRoutine(args) = &dispatch.args;
+            debug!(
+                ?job_id,
+                ?dispatch_id,
+                arg_fingerprint = %facet_routine_args_fingerprint(args),
+                doc_id = ?args.doc_id,
+                branch_path = %args.branch_path,
+                staging_branch_path = %args.staging_branch_path,
+                heads = ?am_utils_rs::serialize_commit_heads(args.heads.as_ref()),
+                "dispatch_repo get_by_wflow_job"
+            );
+        }
+        found
     }
 
     pub async fn add(&self, id: String, dispatch: Arc<ActiveDispatch>) -> Res<()> {
         debug!(?id, "adding dispatch to repo");
         let _transition_guard = self.transition_mutex.lock().await;
+        let ActiveDispatchArgs::FacetRoutine(args) = &dispatch.args;
 
         let mut tx = self.db_pool.begin().await?;
         persist_dispatch_tx(&mut tx, &id, &dispatch).await?;
@@ -858,6 +878,16 @@ async fn persist_dispatch_tx(
     id: &str,
     dispatch: &Arc<ActiveDispatch>,
 ) -> Res<()> {
+    let ActiveDispatchArgs::FacetRoutine(args) = &dispatch.args;
+    debug!(
+        dispatch_id = %id,
+        arg_fingerprint = %facet_routine_args_fingerprint(args),
+        doc_id = ?args.doc_id,
+        branch_path = %args.branch_path,
+        staging_branch_path = %args.staging_branch_path,
+        heads = ?am_utils_rs::serialize_commit_heads(args.heads.as_ref()),
+        "dispatch_repo persist_dispatch"
+    );
     let payload_json = serde_json::to_string(dispatch).expect(ERROR_JSON);
     let status = format!("{:?}", dispatch.status);
     let wflow_job_id = match &dispatch.deets {

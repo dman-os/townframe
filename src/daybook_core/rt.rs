@@ -33,8 +33,8 @@ pub mod triage;
 pub mod wash_plugin;
 
 use dispatch::{
-    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchOnSuccessHook, DispatchRepo,
-    FacetRoutineArgs,
+    facet_routine_args_fingerprint, ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets,
+    DispatchOnSuccessHook, DispatchRepo, FacetRoutineArgs,
 };
 use init::InitRepo;
 
@@ -797,6 +797,8 @@ impl Rt {
             if merged_successfully {
                 // Merge staging branch into target branch
                 info!(
+                    %dispatch_id,
+                    %entry_id,
                     ?doc_id,
                     ?staging_branch_path,
                     ?target_branch_path,
@@ -810,13 +812,26 @@ impl Rt {
                     Ok(()) => {}
                     Err(crate::drawer::types::DrawerError::BranchNotFound { name }) => {
                         warn!(
+                            %dispatch_id,
+                            %entry_id,
                             ?doc_id,
                             ?name,
+                            ?staging_branch_path,
+                            ?target_branch_path,
                             "staging branch missing during merge; treating dispatch as failed"
                         );
                         merged_successfully = false;
                     }
                     Err(err) => {
+                        error!(
+                            %dispatch_id,
+                            %entry_id,
+                            ?doc_id,
+                            ?staging_branch_path,
+                            ?target_branch_path,
+                            ?err,
+                            "staging merge returned error"
+                        );
                         return Err(eyre::eyre!(err).wrap_err("error merging staging branch"));
                     }
                 }
@@ -824,6 +839,8 @@ impl Rt {
                 if merged_successfully {
                     // Delete the staging branch after successful merge
                     info!(
+                        %dispatch_id,
+                        %entry_id,
                         ?doc_id,
                         ?staging_branch_path,
                         "deleting staging branch after successful merge"
@@ -834,6 +851,8 @@ impl Rt {
                         .or_else(|err| match err {
                             crate::drawer::types::DrawerError::BranchNotFound { .. } => {
                                 debug!(
+                                    %dispatch_id,
+                                    %entry_id,
                                     ?doc_id,
                                     ?staging_branch_path,
                                     "staging branch already removed after successful merge"
@@ -848,6 +867,8 @@ impl Rt {
             if !merged_successfully {
                 // Delete staging branch on failure if it exists.
                 info!(
+                    %dispatch_id,
+                    %entry_id,
                     ?doc_id,
                     ?staging_branch_path,
                     "deleting staging branch due to failure"
@@ -1535,6 +1556,16 @@ impl Rt {
             waiting_on_dispatch_ids,
             on_success_hooks,
         });
+        let ActiveDispatchArgs::FacetRoutine(args) = &active_dispatch.args;
+        debug!(
+            %dispatch_id,
+            arg_fingerprint = %facet_routine_args_fingerprint(args),
+            doc_id = ?args.doc_id,
+            branch_path = %args.branch_path,
+            staging_branch_path = %args.staging_branch_path,
+            heads = ?am_utils_rs::serialize_commit_heads(args.heads.as_ref()),
+            "dispatch_no_gate_internal prepared dispatch args"
+        );
         if let Err(add_err) = self
             .dispatch_repo
             .add(dispatch_id.clone(), Arc::clone(&active_dispatch))

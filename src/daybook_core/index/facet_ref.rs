@@ -155,8 +155,12 @@ impl DocFacetRefIndexRepo {
 
     async fn handle_worker_item(&self, item: DocFacetRefIndexWorkItem) -> Res<()> {
         match item {
-            DocFacetRefIndexWorkItem::Upsert { doc_id, heads } => {
-                self.reindex_doc(&doc_id, &heads).await?;
+            DocFacetRefIndexWorkItem::Upsert {
+                doc_id,
+                branch_path,
+                heads,
+            } => {
+                self.reindex_doc(&doc_id, &branch_path, &heads).await?;
                 self.registry
                     .notify([DocFacetRefIndexEvent::Updated { doc_id }]);
             }
@@ -220,7 +224,7 @@ impl DocFacetRefIndexRepo {
             };
             let Some(facet_keys) = self
                 .drawer_repo
-                .facet_keys_at_heads(&doc.doc_id, &heads)
+                .facet_keys_at_branch_heads(&doc.doc_id, &branch_path, &heads)
                 .await?
             else {
                 continue;
@@ -231,7 +235,12 @@ impl DocFacetRefIndexRepo {
                 .collect();
             let facets = self
                 .drawer_repo
-                .get_at_heads_with_facets_arc(&doc.doc_id, &heads, Some(selected_keys))
+                .get_at_branch_heads_with_facets_arc(
+                    &doc.doc_id,
+                    &branch_path,
+                    &heads,
+                    Some(selected_keys),
+                )
                 .await?
                 .map(|(facets, _)| facets)
                 .unwrap_or_default();
@@ -242,7 +251,12 @@ impl DocFacetRefIndexRepo {
         Ok(())
     }
 
-    pub async fn reindex_doc(&self, doc_id: &DocId, heads: &ChangeHashSet) -> Res<()> {
+    pub async fn reindex_doc(
+        &self,
+        doc_id: &DocId,
+        branch_path: &BranchPath,
+        heads: &ChangeHashSet,
+    ) -> Res<()> {
         let specs = self.reference_specs.read().await.clone();
         let reference_tags: HashSet<String> = specs.keys().cloned().collect();
         drop(specs);
@@ -251,7 +265,11 @@ impl DocFacetRefIndexRepo {
             return Ok(());
         }
 
-        let Some(facet_keys) = self.drawer_repo.facet_keys_at_heads(doc_id, heads).await? else {
+        let Some(facet_keys) = self
+            .drawer_repo
+            .facet_keys_at_branch_heads(doc_id, branch_path, heads)
+            .await?
+        else {
             self.delete_doc(doc_id).await?;
             return Ok(());
         };
@@ -265,7 +283,7 @@ impl DocFacetRefIndexRepo {
         }
         let facets = self
             .drawer_repo
-            .get_at_heads_with_facets_arc(doc_id, heads, Some(selected_keys))
+            .get_at_branch_heads_with_facets_arc(doc_id, branch_path, heads, Some(selected_keys))
             .await?
             .map(|(facets, _)| facets)
             .unwrap_or_default();
@@ -393,9 +411,18 @@ impl DocFacetRefIndexRepo {
         })
     }
 
-    pub fn enqueue_upsert(&self, doc_id: DocId, heads: ChangeHashSet) -> Res<()> {
+    pub fn enqueue_upsert(
+        &self,
+        doc_id: DocId,
+        branch_path: BranchPath,
+        heads: ChangeHashSet,
+    ) -> Res<()> {
         self.work_tx
-            .send(DocFacetRefIndexWorkItem::Upsert { doc_id, heads })
+            .send(DocFacetRefIndexWorkItem::Upsert {
+                doc_id,
+                branch_path,
+                heads,
+            })
             .map_err(|err| ferr!("doc_facet_ref_index work queue closed: {err}"))?;
         Ok(())
     }
@@ -553,8 +580,14 @@ fn row_to_edge(row: (String, String, String, String, String, String)) -> Res<Doc
 }
 
 enum DocFacetRefIndexWorkItem {
-    Upsert { doc_id: DocId, heads: ChangeHashSet },
-    DeleteDoc { doc_id: DocId },
+    Upsert {
+        doc_id: DocId,
+        branch_path: BranchPath,
+        heads: ChangeHashSet,
+    },
+    DeleteDoc {
+        doc_id: DocId,
+    },
     RefreshSpecsAndReindexAll,
 }
 
@@ -628,7 +661,8 @@ impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
                     else {
                         return Ok(outcome);
                     };
-                    self.index_repo.enqueue_upsert(id.clone(), heads.clone())?;
+                    self.index_repo
+                        .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
                 }
                 crate::drawer::DrawerEvent::DocUpdated {
                     id,
@@ -657,7 +691,8 @@ impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
                         self.index_repo.enqueue_delete(id.clone())?;
                         return Ok(outcome);
                     };
-                    self.index_repo.enqueue_upsert(id.clone(), heads.clone())?;
+                    self.index_repo
+                        .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
                 }
                 crate::drawer::DrawerEvent::ListChanged { .. } => {}
             },

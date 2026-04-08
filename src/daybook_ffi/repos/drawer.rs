@@ -38,6 +38,7 @@ impl DrawerRepoFfi {
                 Arc::clone(&fcx.rcx.big_repo),
                 fcx.rcx.doc_drawer.document_id().clone(),
                 fcx.rcx.local_user_path.clone().into(),
+                fcx.rcx.sql.db_pool.clone(),
                 fcx.rcx.layout.repo_root.join("local_state"),
                 Arc::new(std::sync::Mutex::new(
                     daybook_core::drawer::lru::KeyedLruPool::new(1000),

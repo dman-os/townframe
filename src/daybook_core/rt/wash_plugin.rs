@@ -379,10 +379,11 @@ impl DaybookPlugin {
     async fn get_doc(
         &self,
         doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
     ) -> Res<Option<Arc<daybook_types::doc::Doc>>> {
         self.drawer_repo
-            .get_doc_with_facets_at_heads(doc_id, heads, None)
+            .get_doc_with_facets_at_branch_heads(doc_id, branch_path, heads, None)
             .await
     }
 
@@ -538,7 +539,15 @@ impl drawer::Host for SharedWashCtx {
 
         let plugin = DaybookPlugin::from_ctx(self);
 
-        match plugin.get_doc(&doc_id, &heads).await.to_anyhow()? {
+        match plugin
+            .get_doc(
+                &doc_id,
+                &daybook_types::doc::BranchPath::from("main"),
+                &heads,
+            )
+            .await
+            .to_anyhow()?
+        {
             Some(doc) => {
                 let bind_doc: bindgen_doc::Doc = binds_guest::townframe::daybook_types::doc::Doc {
                     id: doc.id.clone(),
@@ -600,6 +609,9 @@ impl drawer::Host for SharedWashCtx {
             Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => {
                 Ok(Err(drawer::UpdateDocError::BranchNotFound))
             }
+            Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => Err(
+                anyhow::anyhow!("unexpected branch already exists on patch_doc"),
+            ),
             Err(crate::drawer::types::DrawerError::InvalidKey {
                 inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(drawer::UpdateDocError::InvalidKey(tag))),
@@ -642,6 +654,7 @@ impl facet_routine::Host for SharedWashCtx {
             wflow_args_json: _,
         }) = &dispatch.args;
         let ActiveDispatchDeets::Wflow { plug_id, .. } = &dispatch.deets;
+        let routine_name = dispatch.deets.routine_name();
         // Use staging branch path from dispatch (already set when job was created)
         let staging_branch_path = staging_branch_path.clone();
 
@@ -683,6 +696,13 @@ impl facet_routine::Host for SharedWashCtx {
             let facet_key_str = facet_key.to_string();
 
             if access.write {
+                debug!(
+                    ?doc_id,
+                    target_branch_path = %target_branch_path,
+                    staging_branch_path = %staging_branch_path,
+                    heads = ?am_utils_rs::serialize_commit_heads(heads.as_ref()),
+                    "creating rw facet token"
+                );
                 let token = self.table.push(caps::FacetTokenRw {
                     doc_id: doc_id.clone(),
                     heads: heads.clone(),
@@ -695,6 +715,7 @@ impl facet_routine::Host for SharedWashCtx {
             } else if access.read {
                 let token = self.table.push(caps::FacetTokenRo {
                     doc_id: doc_id.clone(),
+                    branch_path: target_branch_path.clone(),
                     heads: heads.clone(),
                     facet_key: facet_key.clone(),
                 })?;
@@ -763,6 +784,7 @@ impl facet_routine::Host for SharedWashCtx {
                 } else if access.read {
                     let token = self.table.push(caps::FacetTokenRo {
                         doc_id: config_doc_id.clone(),
+                        branch_path: daybook_types::doc::BranchPath::from("main"),
                         heads: config_heads.clone(),
                         facet_key: config_facet_key.clone(),
                     })?;

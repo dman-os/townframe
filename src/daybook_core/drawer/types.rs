@@ -16,6 +16,8 @@ pub enum DrawerError {
     DocNotFound { id: DocId },
     /// headless patch for unrecognized branch: {name}
     BranchNotFound { name: String },
+    /// branch already exists: {name}
+    BranchAlreadyExists { name: String },
     /// patch has an invalid key: {inner}
     InvalidKey {
         #[from]

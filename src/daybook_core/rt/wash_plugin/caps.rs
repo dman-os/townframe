@@ -9,6 +9,7 @@ use super::{bindgen_doc, binds_guest, capabilities, drawer, root_doc, wit_doc, D
 
 pub struct DocTokenRo {
     pub doc_id: DocId,
+    pub branch_path: daybook_types::doc::BranchPath,
     pub heads: ChangeHashSet,
 }
 
@@ -24,7 +25,7 @@ impl capabilities::HostDocTokenRo for SharedWashCtx {
             .context("error locating token")
             .to_anyhow()?;
         match plugin
-            .get_doc(&token.doc_id, &token.heads)
+            .get_doc(&token.doc_id, &token.branch_path, &token.heads)
             .await
             .to_anyhow()?
         {
@@ -74,7 +75,7 @@ impl capabilities::HostDocTokenRw for SharedWashCtx {
             .context("error locating token")
             .to_anyhow()?;
         match plugin
-            .get_doc(&token.doc_id, &token.heads)
+            .get_doc(&token.doc_id, &token.branch_path, &token.heads)
             .await
             .to_anyhow()?
         {
@@ -127,6 +128,9 @@ impl capabilities::HostDocTokenRw for SharedWashCtx {
             // or communicate with the wflow engine
             Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => todo!(),
             Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => todo!(),
+            Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => Err(
+                anyhow::anyhow!("unexpected branch already exists on patch_doc"),
+            ),
             Err(crate::drawer::types::DrawerError::InvalidKey {
                 inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(capabilities::UpdateDocError::InvalidKey(tag))),
@@ -147,6 +151,7 @@ impl capabilities::HostDocTokenRw for SharedWashCtx {
 
 pub struct FacetTokenRo {
     pub doc_id: DocId,
+    pub branch_path: daybook_types::doc::BranchPath,
     pub heads: ChangeHashSet,
     pub facet_key: daybook_types::doc::FacetKey,
 }
@@ -163,7 +168,7 @@ impl capabilities::HostFacetTokenRo for SharedWashCtx {
             .context("error locating token")
             .to_anyhow()?;
         let Some(doc) = plugin
-            .get_doc(&token.doc_id, &token.heads)
+            .get_doc(&token.doc_id, &token.branch_path, &token.heads)
             .await
             .to_anyhow()?
         else {
@@ -183,7 +188,7 @@ impl capabilities::HostFacetTokenRo for SharedWashCtx {
             .context("error locating token")
             .to_anyhow()?;
         match plugin
-            .get_doc(&token.doc_id, &token.heads)
+            .get_doc(&token.doc_id, &token.branch_path, &token.heads)
             .await
             .to_anyhow()?
         {
@@ -229,7 +234,7 @@ pub(super) async fn get_facet_raw_from_token_ro(
 ) -> wasmtime::Result<Result<(daybook_types::doc::FacetKey, daybook_types::doc::FacetRaw), String>>
 {
     let plugin = DaybookPlugin::from_ctx(ctx);
-    let (doc_id, heads, facet_key) = {
+    let (doc_id, branch_path, heads, facet_key) = {
         let token = ctx
             .table
             .get(handle)
@@ -237,12 +242,17 @@ pub(super) async fn get_facet_raw_from_token_ro(
             .to_anyhow()?;
         (
             token.doc_id.clone(),
+            token.branch_path.clone(),
             token.heads.clone(),
             token.facet_key.clone(),
         )
     };
 
-    let Some(doc) = plugin.get_doc(&doc_id, &heads).await.to_anyhow()? else {
+    let Some(doc) = plugin
+        .get_doc(&doc_id, &branch_path, &heads)
+        .await
+        .to_anyhow()?
+    else {
         return Ok(Err(format!("doc not found: {doc_id}")));
     };
     let Some(facet_raw) = doc.facets.get(&facet_key) else {
@@ -333,7 +343,7 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             .context("error locating token")
             .to_anyhow()?;
         let Some(doc) = plugin
-            .get_doc(&token.doc_id, &token.heads)
+            .get_doc(&token.doc_id, &token.branch_path, &token.heads)
             .await
             .to_anyhow()?
         else {
@@ -353,7 +363,7 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             .context("error locating token")
             .to_anyhow()?;
         match plugin
-            .get_doc(&token.doc_id, &token.heads)
+            .get_doc(&token.doc_id, &token.branch_path, &token.heads)
             .await
             .to_anyhow()?
         {
@@ -399,6 +409,34 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             .map_err(|err| capabilities::UpdateDocError::InvalidPatch(err.to_string()))?;
         match plugin
             .drawer_repo
+            .create_branch_at_heads_from_branch(
+                &token.doc_id,
+                &token.branch_path,
+                &token.target_branch_path,
+                &token.heads,
+                None,
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(crate::drawer::types::DrawerError::BranchAlreadyExists { name }) => {
+                return Err(anyhow::anyhow!(
+                    "staging branch unexpectedly already exists: {name}"
+                ));
+            }
+            Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => todo!(),
+            Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => todo!(),
+            Err(crate::drawer::types::DrawerError::InvalidKey { .. }) => {
+                return Err(anyhow::anyhow!(
+                    "unexpected invalid key while ensuring branch"
+                ));
+            }
+            Err(crate::drawer::types::DrawerError::Other { inner }) => {
+                return Err(anyhow::anyhow!("unexpected error ensuring branch: {inner}"));
+            }
+        }
+        match plugin
+            .drawer_repo
             .update_at_heads(
                 daybook_types::doc::DocPatch {
                     id: token.doc_id.clone(),
@@ -416,6 +454,9 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             // or communicate with the wflow engine
             Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => todo!(),
             Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => todo!(),
+            Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => Err(
+                anyhow::anyhow!("unexpected branch already exists on facet token update"),
+            ),
             Err(crate::drawer::types::DrawerError::InvalidKey {
                 inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(capabilities::UpdateDocError::InvalidKey(tag))),

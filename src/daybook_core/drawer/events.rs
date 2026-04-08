@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 use super::DrawerRepo;
 
-use crate::drawer::types::{BranchSnapshot, DocEntry, DocEntryDiff, DrawerEvent};
+use crate::drawer::types::{DocEntry, DrawerEvent};
 
 use daybook_types::doc::{ChangeHashSet, DocId, FacetKey};
 use tokio_util::sync::CancellationToken;
@@ -234,8 +234,12 @@ impl DrawerRepo {
                     out.push(DrawerEvent::DocAdded {
                         id: doc_id,
                         entry,
-                        drawer_heads,
+                        drawer_heads: drawer_heads.clone(),
                         origin: event_origin.clone(),
+                    });
+                    out.push(DrawerEvent::ListChanged {
+                        drawer_heads,
+                        origin: event_origin,
                     });
                 } else {
                     let previous_heads = new_entry
@@ -248,20 +252,12 @@ impl DrawerRepo {
                         .ok_or_eyre(
                             "doc update previous entry not found at previous_version_heads",
                         )?;
-                    let diff = self
-                        .compute_doc_update_diff(&doc_id, &old_entry, &new_entry)
-                        .await?;
-                    let entry = self
-                        .current_doc_branches(&doc_id)
-                        .await?
-                        .ok_or_eyre("drawer doc updated but branch state missing")?;
-                    out.push(DrawerEvent::DocUpdated {
-                        id: doc_id,
-                        entry,
-                        diff,
-                        drawer_heads,
-                        origin: event_origin.clone(),
-                    });
+                    if old_entry.branches != new_entry.branches {
+                        out.push(DrawerEvent::ListChanged {
+                            drawer_heads,
+                            origin: event_origin,
+                        });
+                    }
                 }
             }
             automerge::PatchAction::DeleteMap { key, .. } if patch.path.len() == 2 => {
@@ -294,114 +290,18 @@ impl DrawerRepo {
                 // but V1 includes a placeholder entry.
                 out.push(DrawerEvent::DocDeleted {
                     id: doc_id,
-                    drawer_heads,
+                    drawer_heads: drawer_heads.clone(),
                     deleted_facet_keys,
                     entry: None,
+                    origin: event_origin.clone(),
+                });
+                out.push(DrawerEvent::ListChanged {
+                    drawer_heads,
                     origin: event_origin,
                 });
             }
             _ => {}
         }
         Ok(())
-    }
-
-    async fn compute_doc_update_diff(
-        &self,
-        doc_id: &DocId,
-        old_entry: &DocEntry,
-        new_entry: &DocEntry,
-    ) -> Res<DocEntryDiff> {
-        let mut moved_branch_names = Vec::new();
-        let all_branch_names: HashSet<String> = old_entry
-            .branches
-            .keys()
-            .chain(new_entry.branches.keys())
-            .cloned()
-            .collect();
-        for branch_name in all_branch_names {
-            if daybook_types::doc::BranchPath::from(branch_name.as_str())
-                .to_string()
-                .starts_with("/tmp/")
-            {
-                continue;
-            }
-            let old_branch = old_entry.branches.get(&branch_name);
-            let new_branch = new_entry.branches.get(&branch_name);
-            if old_branch != new_branch {
-                moved_branch_names.push(branch_name);
-            }
-        }
-        moved_branch_names.sort();
-
-        let mut added = HashSet::new();
-        let mut removed = HashSet::new();
-        for branch_name in &moved_branch_names {
-            let old_snapshot = if let Some(old_ref) = old_entry.branches.get(branch_name) {
-                if let Some(state) = self
-                    .derive_branch_state(
-                        doc_id,
-                        &daybook_types::doc::BranchPath::from(branch_name.as_str()),
-                    )
-                    .await?
-                {
-                    Some(BranchSnapshot {
-                        branch_doc_id: old_ref.branch_doc_id.clone(),
-                        branch_heads: state.latest_heads,
-                    })
-                } else {
-                    new_entry
-                        .branches_deleted
-                        .get(branch_name)
-                        .and_then(|records| records.last())
-                        .map(|record| BranchSnapshot {
-                            branch_doc_id: record.branch_doc_id.clone(),
-                            branch_heads: record.branch_heads.clone(),
-                        })
-                }
-            } else {
-                None
-            };
-            let new_snapshot = if let Some(new_ref) = new_entry.branches.get(branch_name) {
-                self.derive_branch_state(
-                    doc_id,
-                    &daybook_types::doc::BranchPath::from(branch_name.as_str()),
-                )
-                .await?
-                .map(|state| BranchSnapshot {
-                    branch_doc_id: new_ref.branch_doc_id.clone(),
-                    branch_heads: state.latest_heads,
-                })
-            } else {
-                None
-            };
-
-            let old_keys = if let Some(snapshot) = old_snapshot.as_ref() {
-                self.facet_keys_at_branch_snapshot(doc_id, snapshot).await?
-            } else {
-                HashSet::new()
-            };
-            let new_keys = if let Some(snapshot) = new_snapshot.as_ref() {
-                self.facet_keys_at_branch_snapshot(doc_id, snapshot).await?
-            } else {
-                HashSet::new()
-            };
-            added.extend(new_keys.difference(&old_keys).cloned());
-            removed.extend(old_keys.difference(&new_keys).cloned());
-        }
-
-        let mut changed: Vec<FacetKey> = added.union(&removed).cloned().collect();
-        changed.sort();
-        changed.dedup();
-        let mut added: Vec<FacetKey> = added.into_iter().collect();
-        added.sort();
-        let mut removed: Vec<FacetKey> = removed.into_iter().collect();
-        removed.sort();
-
-        Ok(DocEntryDiff {
-            changed_facet_keys: changed,
-            added_facet_keys: added,
-            removed_facet_keys: removed,
-            moved_branch_names,
-        })
     }
 }
