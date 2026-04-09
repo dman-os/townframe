@@ -1,6 +1,10 @@
 use crate::interlude::*;
 use daybook_types::doc::{self as root_doc};
 
+fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
+    wasmtime::Error::msg(msg.to_string())
+}
+
 mod binds_guest {
     use crate::interlude::*;
 
@@ -532,7 +536,6 @@ impl drawer::Host for SharedWashCtx {
         heads: drawer::Heads,
     ) -> wasmtime::Result<Result<drawer::Doc, drawer::GetDocError>> {
         use crate::rt::dispatch::{ActiveDispatchArgs, FacetRoutineArgs};
-        use anyhow::Context;
 
         let heads = match am_utils_rs::parse_commit_heads(&heads) {
             Ok(val) => val,
@@ -542,12 +545,14 @@ impl drawer::Host for SharedWashCtx {
 
         let plugin = DaybookPlugin::from_ctx(self);
         let wflow_plugin = wflow::wash_plugin_wflow::WflowPlugin::try_from_ctx(self)
-            .context("only wflows are supported as drawer host")?;
+            .ok_or_else(|| wasmtime_err("only wflows are supported as drawer host"))?;
         let job_id = wflow_plugin
             .job_id_of_ctx(self)
             .expect("there should be a job??");
         let Some(dispatch) = plugin.dispatch_repo.get_by_wflow_job(&job_id[..]).await else {
-            anyhow::bail!("no active dispatch found for job: {job_id}");
+            return Err(wasmtime_err(format!(
+                "no active dispatch found for job: {job_id}"
+            )));
         };
         let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
             branch_path,
@@ -555,17 +560,16 @@ impl drawer::Host for SharedWashCtx {
             ..
         }) = &dispatch.args;
         if *dispatch_doc_id != doc_id {
-            anyhow::bail!(
+            return Err(wasmtime_err(format!(
                 "doc_id mismatch for get_doc_at_heads: requested={} dispatch={}",
-                doc_id,
-                dispatch_doc_id
-            );
+                doc_id, dispatch_doc_id
+            )));
         }
 
         match plugin
             .get_doc(&doc_id, branch_path, &heads)
             .await
-            .to_anyhow()?
+            .map_err(wasmtime_err)?
         {
             Some(doc) => {
                 let bind_doc: bindgen_doc::Doc = binds_guest::townframe::daybook_types::doc::Doc {
@@ -629,13 +633,13 @@ impl drawer::Host for SharedWashCtx {
                 Ok(Err(drawer::UpdateDocError::BranchNotFound))
             }
             Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => Err(
-                anyhow::anyhow!("unexpected branch already exists on patch_doc"),
+                wasmtime_err("unexpected branch already exists on patch_doc"),
             ),
             Err(crate::drawer::types::DrawerError::InvalidKey {
                 inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(drawer::UpdateDocError::InvalidKey(tag))),
             Err(crate::drawer::types::DrawerError::Other { inner }) => {
-                Err(anyhow::anyhow!("unexepcted error: {inner}"))
+                Err(wasmtime_err(format!("unexepcted error: {inner}")))
             }
         }
     }
@@ -644,11 +648,10 @@ impl drawer::Host for SharedWashCtx {
 impl facet_routine::Host for SharedWashCtx {
     async fn get_args(&mut self) -> wasmtime::Result<facet_routine::FacetRoutineArgs> {
         use crate::rt::*;
-        use anyhow::Context;
         use daybook_types::doc::FacetKey;
 
         let wflow_plugin = wflow::wash_plugin_wflow::WflowPlugin::try_from_ctx(self)
-            .context("only wflows are supported as facet-routine")?;
+            .ok_or_else(|| wasmtime_err("only wflows are supported as facet-routine"))?;
         let dayook_plugin = DaybookPlugin::from_ctx(self);
         let job_id = wflow_plugin
             .job_id_of_ctx(self)
@@ -658,7 +661,9 @@ impl facet_routine::Host for SharedWashCtx {
             .get_by_wflow_job(&job_id[..])
             .await
         else {
-            anyhow::bail!("no active dispatch found for job: {job_id}");
+            return Err(wasmtime_err(format!(
+                "no active dispatch found for job: {job_id}"
+            )));
         };
         let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
             doc_id,
@@ -759,20 +764,22 @@ impl facet_routine::Host for SharedWashCtx {
                             .get_or_init_plug_config_doc_id(&owner_plug_id, &dayook_plugin.drawer_repo)
                             .await
                             .map_err(|err| {
-                                anyhow::anyhow!(
+                                wasmtime_err(format!(
                                     "error getting/initializing config doc for plug {owner_plug_id}: {err}"
-                                )
+                                ))
                             })?;
                     let config_heads = dayook_plugin
                         .drawer_repo
                         .get_doc_branches(&config_doc_id)
                         .await
-                        .map_err(|err| anyhow::anyhow!("error getting config doc branches: {err}"))?
+                        .map_err(|err| {
+                            wasmtime_err(format!("error getting config doc branches: {err}"))
+                        })?
                         .and_then(|doc| doc.branches.get("main").cloned())
                         .ok_or_else(|| {
-                            anyhow::anyhow!(
+                            wasmtime_err(format!(
                                 "config doc missing main branch for plug {owner_plug_id}"
-                            )
+                            ))
                         })?;
                     owner_config_docs.insert(
                         owner_plug_id.clone(),

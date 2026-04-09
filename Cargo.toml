@@ -171,10 +171,6 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 gloo = { version = "0.11.0", default-features = false }
 
 #
-# wasm
-wit-bindgen = "0.52.0"
-
-#
 # sync
 automerge = "0.7.3"
 autosurgeon = "0.10.1"
@@ -215,6 +211,7 @@ uniffi = { version = "0.31.0" }
 wasmtime = "*"
 wasmtime-wasi = { version = "*" }
 wash-runtime = "0.2.0"
+wit-bindgen = "0.55.0"
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 
 #
@@ -224,11 +221,11 @@ clap_complete = "4.5"
 
 # 
 # networks
-iroh = "0.96.1"
+iroh = "0.97.0"
 
 [patch.crates-io]
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
-wash-runtime = { git = "https://github.com/wasmcloud/wash", rev = "e3cbff002a7922f83af02ce546286d4530203a6b" }
+wash-runtime = { git = "https://github.com/wasmcloud/wasmcloud", rev = "33fa1990f9d4fbc85cac2a2b5f7f8be7b4fab83e" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "2896663de0e23f789cffe8e98bbbcbcbf21f23ad" }
 samod = { git = "https://github.com/dman-os/samod", rev = "2cf21c6654c60872080dc73be2bf344f3cf3269f" }
 samod-core = { git = "https://github.com/dman-os/samod", rev = "2cf21c6654c60872080dc73be2bf344f3cf3269f" }

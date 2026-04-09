@@ -29,8 +29,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "tracin
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 iroh = { workspace = true }
-irpc = { version = "0.12.0", features = ["derive"] }
-irpc-iroh = "0.12.0"
+irpc = { version = "0.13.0", features = ["derive"] }
+irpc-iroh = "0.13.0"
 automerge08 = { package = "automerge", version = "0.8.0" }
 tracing = { workspace = true }
 http.workspace = true
@@ -45,7 +45,6 @@ bon.workspace = true
 indenter = "0.3.4"
 
 data-encoding.workspace = true
-ollama-rs = { version = "0.3.4", default-features = false, features = ["rustls"] }
 oci-spec = "0.8.4"
 oci-wasm = { version = "0.3.0", default-features = false, features = ["rustls-tls"] }
 sha2 = "0.10.9"

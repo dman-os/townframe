@@ -7,6 +7,10 @@ use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
 use super::{bindgen_doc, binds_guest, capabilities, drawer, root_doc, wit_doc, DaybookPlugin};
 
+fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
+    wasmtime::Error::msg(msg.to_string())
+}
+
 pub struct DocTokenRo {
     pub doc_id: DocId,
     pub branch_path: daybook_types::doc::BranchPath,
@@ -22,12 +26,11 @@ impl capabilities::HostDocTokenRo for SharedWashCtx {
         let token = self
             .table
             .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
+            .map_err(|err| wasmtime_err(format!("error locating token: {err}")))?;
         match plugin
             .get_doc(&token.doc_id, &token.branch_path, &token.heads)
             .await
-            .to_anyhow()?
+            .map_err(wasmtime_err)?
         {
             Some(doc) => {
                 let bind_doc: bindgen_doc::Doc = binds_guest::townframe::daybook_types::doc::Doc {
@@ -72,12 +75,11 @@ impl capabilities::HostDocTokenRw for SharedWashCtx {
         let token = self
             .table
             .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
+            .map_err(|err| wasmtime_err(format!("error locating token: {err}")))?;
         match plugin
             .get_doc(&token.doc_id, &token.branch_path, &token.heads)
             .await
-            .to_anyhow()?
+            .map_err(wasmtime_err)?
         {
             Some(doc) => {
                 let bind_doc: bindgen_doc::Doc = binds_guest::townframe::daybook_types::doc::Doc {
@@ -107,8 +109,7 @@ impl capabilities::HostDocTokenRw for SharedWashCtx {
         let token = self
             .table
             .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
+            .map_err(|err| wasmtime_err(format!("error locating token: {err}")))?;
         let patch = wit_doc::DocPatch {
             id: patch.id,
             facets_set: patch.facets_set.into_iter().collect(),
@@ -129,13 +130,13 @@ impl capabilities::HostDocTokenRw for SharedWashCtx {
             Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => todo!(),
             Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => todo!(),
             Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => Err(
-                anyhow::anyhow!("unexpected branch already exists on patch_doc"),
+                wasmtime_err("unexpected branch already exists on patch_doc"),
             ),
             Err(crate::drawer::types::DrawerError::InvalidKey {
                 inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(capabilities::UpdateDocError::InvalidKey(tag))),
             Err(crate::drawer::types::DrawerError::Other { inner }) => {
-                Err(anyhow::anyhow!("unexepcted error: {inner}"))
+                Err(wasmtime_err(format!("unexepcted error: {inner}")))
             }
         }
     }
@@ -165,12 +166,11 @@ impl capabilities::HostFacetTokenRo for SharedWashCtx {
         let token = self
             .table
             .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
+            .map_err(|err| wasmtime_err(format!("error locating token: {err}")))?;
         let Some(doc) = plugin
             .get_doc(&token.doc_id, &token.branch_path, &token.heads)
             .await
-            .to_anyhow()?
+            .map_err(wasmtime_err)?
         else {
             return Ok(false);
         };
@@ -185,12 +185,11 @@ impl capabilities::HostFacetTokenRo for SharedWashCtx {
         let token = self
             .table
             .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
+            .map_err(|err| wasmtime_err(format!("error locating token: {err}")))?;
         match plugin
             .get_doc(&token.doc_id, &token.branch_path, &token.heads)
             .await
-            .to_anyhow()?
+            .map_err(wasmtime_err)?
         {
             Some(doc) => {
                 let Some(facet) = doc.facets.get(&token.facet_key) else {
@@ -214,8 +213,7 @@ impl capabilities::HostFacetTokenRo for SharedWashCtx {
         let token = self
             .table
             .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
+            .map_err(|err| wasmtime_err(format!("error locating token: {err}")))?;
         Ok(am_utils_rs::serialize_commit_heads(token.heads.as_ref()))
     }
 
@@ -238,8 +236,7 @@ pub(super) async fn get_facet_raw_from_token_ro(
         let token = ctx
             .table
             .get(handle)
-            .context("error locating facet token")
-            .to_anyhow()?;
+            .map_err(|err| wasmtime_err(format!("error locating facet token: {err}")))?;
         (
             token.doc_id.clone(),
             token.branch_path.clone(),
@@ -251,7 +248,7 @@ pub(super) async fn get_facet_raw_from_token_ro(
     let Some(doc) = plugin
         .get_doc(&doc_id, &branch_path, &heads)
         .await
-        .to_anyhow()?
+        .map_err(wasmtime_err)?
     else {
         return Ok(Err(format!("doc not found: {doc_id}")));
     };
@@ -334,12 +331,12 @@ pub struct FacetTokenRw {
 async fn refreshed_heads_for_rw_token(
     plugin: &Arc<DaybookPlugin>,
     token: &FacetTokenRw,
-) -> anyhow::Result<ChangeHashSet> {
+) -> wasmtime::Result<ChangeHashSet> {
     let Some(entry) = plugin
         .drawer_repo
         .get_doc_branches(&token.doc_id)
         .await
-        .to_anyhow()?
+        .map_err(wasmtime_err)?
     else {
         return Ok(token.heads.clone());
     };
@@ -361,18 +358,17 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
         let token = self
             .table
             .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
+            .map_err(|err| wasmtime_err(format!("error locating token: {err}")))?;
         let refreshed_heads = refreshed_heads_for_rw_token(&plugin, token).await?;
         let doc = plugin
             .get_doc(&token.doc_id, &token.branch_path, &refreshed_heads)
             .await
-            .to_anyhow()?;
+            .map_err(wasmtime_err)?;
         let doc = if doc.is_none() && token.branch_path != token.target_branch_path {
             plugin
                 .get_doc(&token.doc_id, &token.target_branch_path, &refreshed_heads)
                 .await
-                .to_anyhow()?
+                .map_err(wasmtime_err)?
         } else {
             doc
         };
@@ -390,18 +386,17 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
         let token = self
             .table
             .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
+            .map_err(|err| wasmtime_err(format!("error locating token: {err}")))?;
         let refreshed_heads = refreshed_heads_for_rw_token(&plugin, token).await?;
         let doc = plugin
             .get_doc(&token.doc_id, &token.branch_path, &refreshed_heads)
             .await
-            .to_anyhow()?;
+            .map_err(wasmtime_err)?;
         let doc = if doc.is_none() && token.branch_path != token.target_branch_path {
             plugin
                 .get_doc(&token.doc_id, &token.target_branch_path, &refreshed_heads)
                 .await
-                .to_anyhow()?
+                .map_err(wasmtime_err)?
         } else {
             doc
         };
@@ -428,8 +423,7 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
         let token = self
             .table
             .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
+            .map_err(|err| wasmtime_err(format!("error locating token: {err}")))?;
         Ok(am_utils_rs::serialize_commit_heads(token.heads.as_ref()))
     }
 
@@ -442,8 +436,7 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
         let token = self
             .table
             .get(&handle)
-            .context("error locating token")
-            .to_anyhow()?;
+            .map_err(|err| wasmtime_err(format!("error locating token: {err}")))?;
         let facet: daybook_types::doc::FacetRaw = wit_doc::facet_into(&facet_json)
             .map_err(|err| capabilities::UpdateDocError::InvalidPatch(err.to_string()))?;
         if token.branch_path != token.target_branch_path {
@@ -462,12 +455,12 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
                 Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => todo!(),
                 Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => todo!(),
                 Err(crate::drawer::types::DrawerError::InvalidKey { .. }) => {
-                    return Err(anyhow::anyhow!(
-                        "unexpected invalid key while ensuring branch"
-                    ));
+                    return Err(wasmtime_err("unexpected invalid key while ensuring branch"));
                 }
                 Err(crate::drawer::types::DrawerError::Other { inner }) => {
-                    return Err(anyhow::anyhow!("unexpected error ensuring branch: {inner}"));
+                    return Err(wasmtime_err(format!(
+                        "unexpected error ensuring branch: {inner}"
+                    )));
                 }
             }
         }
@@ -491,13 +484,13 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => todo!(),
             Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => todo!(),
             Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => Err(
-                anyhow::anyhow!("unexpected branch already exists on facet token update"),
+                wasmtime_err("unexpected branch already exists on facet token update"),
             ),
             Err(crate::drawer::types::DrawerError::InvalidKey {
                 inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(capabilities::UpdateDocError::InvalidKey(tag))),
             Err(crate::drawer::types::DrawerError::Other { inner }) => {
-                Err(anyhow::anyhow!("unexepcted error: {inner}"))
+                Err(wasmtime_err(format!("unexepcted error: {inner}")))
             }
         }
     }
@@ -526,8 +519,7 @@ impl capabilities::HostCommandInvokeToken for SharedWashCtx {
         let token = self
             .table
             .get(&handle)
-            .context("error locating command invoke token")
-            .to_anyhow()?;
+            .map_err(|err| wasmtime_err(format!("error locating command invoke token: {err}")))?;
         let request: InvokeCommandRequest = match serde_json::from_str(&request_json) {
             Ok(value) => value,
             Err(err) => {

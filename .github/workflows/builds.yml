@@ -45,6 +45,7 @@ env:
 jobs:
   resolve-release-meta:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     outputs:
       cargo_version: ${{ steps.meta.outputs.cargo_version }}
       release_tag: ${{ steps.meta.outputs.release_tag }}
@@ -160,6 +161,7 @@ jobs:
 
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     needs: resolve-release-meta
     env:
       DAYBOOK_IS_RELEASE_BUILD: ${{ needs.resolve-release-meta.outputs.is_release_build }}
@@ -283,6 +285,7 @@ jobs:
 
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     needs: resolve-release-meta
     env:
       DAYBOOK_IS_RELEASE_BUILD: ${{ needs.resolve-release-meta.outputs.is_release_build }}
@@ -392,6 +395,7 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    timeout-minutes: 90
     needs: resolve-release-meta
     env:
       DAYBOOK_IS_RELEASE_BUILD: ${{ needs.resolve-release-meta.outputs.is_release_build }}
@@ -519,6 +523,7 @@ jobs:
 
   macos:
     runs-on: macos-14
+    timeout-minutes: 90
     needs: resolve-release-meta
     env:
       DAYBOOK_IS_RELEASE_BUILD: ${{ needs.resolve-release-meta.outputs.is_release_build }}
