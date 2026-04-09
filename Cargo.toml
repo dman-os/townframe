@@ -175,9 +175,15 @@ gloo = { version = "0.11.0", default-features = false }
 automerge = "0.7.3"
 autosurgeon = "0.10.1"
 automerge-test = "0.6"
-samod = { version = "0.8.0" }
-samod-core = { version = "0.8.0" }
-# samod = { path = "src/samod/samod" }
+subduction_core = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267" }
+subduction_iroh = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
+subduction_websocket = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
+sedimentree_core = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
+automerge_sedimentree = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
+sedimentree_fs_storage = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
+subduction_crypto = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
+subduction_keyhive = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
+subduction_keyhive_policy = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
 async-channel = "2.5.0"
 qrcode = { version = "0.14.1", default-features = false }
 
@@ -227,8 +233,6 @@ iroh = "0.97.0"
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 wash-runtime = { git = "https://github.com/wasmcloud/wasmcloud", rev = "33fa1990f9d4fbc85cac2a2b5f7f8be7b4fab83e" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "2896663de0e23f789cffe8e98bbbcbcbf21f23ad" }
-samod = { git = "https://github.com/dman-os/samod", rev = "2cf21c6654c60872080dc73be2bf344f3cf3269f" }
-samod-core = { git = "https://github.com/dman-os/samod", rev = "2cf21c6654c60872080dc73be2bf344f3cf3269f" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
 

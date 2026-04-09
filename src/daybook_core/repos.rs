@@ -820,7 +820,7 @@ mod origin_tests {
             &vtag_actor,
             Some(&BigRepoChangeOrigin::Remote {
                 peer_id: "peer-123".into(),
-                connection_id: samod::ConnectionId::from(0_u32),
+                connection_id: am_utils_rs::BigRepoConnectionId::from(0_u32),
             }),
         );
         assert!(matches!(

@@ -51,12 +51,12 @@ pub struct IrohSyncRepo {
 pub enum IrohSyncEvent {
     IncomingConnection {
         endpoint_id: EndpointId,
-        conn_id: samod::ConnectionId,
+        conn_id: am_utils_rs::BigRepoConnectionId,
         peer_id: Arc<str>,
     },
     OutgoingConnection {
         endpoint_id: EndpointId,
-        conn_id: samod::ConnectionId,
+        conn_id: am_utils_rs::BigRepoConnectionId,
         peer_id: Arc<str>,
     },
     ConnectionClosed {
@@ -768,7 +768,7 @@ impl IrohSyncRepo {
                 requested_device_name: None,
                 provision: false,
                 requester_endpoint_id: Some(self.router.endpoint().id().to_string()),
-                requester_peer_key: Some(self.rcx.big_repo.samod_repo().peer_id().to_string()),
+                requester_peer_key: Some(self.rcx.big_repo.local_peer_key()),
             },
         )
         .await?

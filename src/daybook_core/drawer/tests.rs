@@ -1584,7 +1584,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     Ok(())
 }
 
-fn latest_change_actor(handle: &samod::DocHandle) -> Res<automerge::ActorId> {
+fn latest_change_actor(handle: &am_utils_rs::repo::BigDocHandle) -> Res<automerge::ActorId> {
     handle.with_document(|doc| {
         let heads = doc.get_heads();
         let Some(latest_head) = heads.first() else {

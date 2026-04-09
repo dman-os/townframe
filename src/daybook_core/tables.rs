@@ -329,7 +329,7 @@ impl TablesStore {
 pub struct TablesRepo {
     pub big_repo: SharedBigRepo,
     pub app_doc_id: DocumentId,
-    pub app_am_handle: samod::DocHandle,
+    pub app_am_handle: am_utils_rs::repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub local_actor_id: ActorId,
@@ -403,7 +403,7 @@ impl TablesRepo {
         let cancel_token = CancellationToken::new();
         let (ticket, notif_rx) =
             TablesStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
-        let local_peer_id = big_repo.samod_repo().peer_id().to_string();
+        let local_peer_id = big_repo.local_peer_key();
 
         let repo = Self {
             big_repo,
@@ -829,7 +829,7 @@ impl TablesRepo {
         from: ChangeHashSet,
         to: Option<ChangeHashSet>,
     ) -> Res<Vec<TablesEvent>> {
-        let (patches, heads) = self.app_am_handle.with_document(|am_doc| {
+        let (patches, heads) = self.app_am_handle.with_document_sync(|am_doc| {
             let heads = if let Some(ref to_set) = to {
                 to_set.clone()
             } else {

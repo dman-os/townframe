@@ -39,7 +39,6 @@ serde_json.workspace = true
 # automerge
 automerge.workspace = true
 autosurgeon = { workspace = true, features = ["uuid"] }
-samod = { workspace = true, features = ["tokio"] }
 
 # parking_lot = "0.12"
 # libc = "0.2"

@@ -1,32 +1,39 @@
 use crate::interlude::*;
 
-mod broker;
-
 use automerge::ChangeHash;
 use autosurgeon::Prop;
-use samod::{DocHandle, DocumentId};
-use samod_core::ChangeOrigin;
+use crate::repo::DocumentId;
 use std::sync::Mutex;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BigRepoChangeOrigin {
+    Local,
+    Remote {
+        peer_id: Arc<str>,
+        connection_id: crate::repo::BigRepoConnectionId,
+    },
+    Bootstrap,
+}
 
 #[derive(Debug, Clone)]
 pub enum BigRepoChangeNotification {
     DocCreated {
         doc_id: DocumentId,
         heads: Arc<[ChangeHash]>,
-        origin: ChangeOrigin,
+        origin: BigRepoChangeOrigin,
     },
     DocImported {
         doc_id: DocumentId,
         heads: Arc<[ChangeHash]>,
-        origin: ChangeOrigin,
+        origin: BigRepoChangeOrigin,
     },
     DocChanged {
         doc_id: DocumentId,
         patch: Arc<automerge::Patch>,
         heads: Arc<[ChangeHash]>,
-        origin: ChangeOrigin,
+        origin: BigRepoChangeOrigin,
     },
 }
 
@@ -51,7 +58,7 @@ pub enum BigRepoHeadNotification {
     DocHeadsChanged {
         doc_id: DocumentId,
         heads: Arc<[ChangeHash]>,
-        origin: ChangeOrigin,
+        origin: BigRepoChangeOrigin,
     },
 }
 
@@ -126,26 +133,18 @@ impl DocIdFilter {
 }
 
 pub struct DocChangeBrokerLease {
-    handle: Arc<broker::DocChangeBrokerHandle>,
-    stop_token: std::sync::Mutex<Option<broker::DocChangeBrokerStopToken>>,
+    doc_id: DocumentId,
 }
 
 impl DocChangeBrokerLease {
     pub fn filter(&self) -> DocIdFilter {
-        self.handle.filter()
+        DocIdFilter {
+            doc_id: self.doc_id.clone(),
+        }
     }
 
     pub(crate) async fn wait_until_ready(&self) {
-        self.handle.ensure_ready().await
-    }
-}
-
-impl Drop for DocChangeBrokerLease {
-    fn drop(&mut self) {
-        if let Some(stop_token) = self.stop_token.lock().expect(ERROR_MUTEX).take() {
-            stop_token.cancel_token.cancel();
-            stop_token.join_handle.abort();
-        }
+        let _ = &self.doc_id;
     }
 }
 
@@ -159,7 +158,7 @@ impl ChangeListenerManager {
             listeners: default(),
             change_tx,
             head_listeners: default(),
-            head_tx: head_tx.clone(),
+            head_tx,
             local_listeners: default(),
             local_tx,
             brokers: default(),
@@ -184,55 +183,23 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    fn spawn_doc_change_lease(&self, handle: DocHandle) -> Res<Arc<DocChangeBrokerLease>> {
-        let (broker, stop_token) = broker::spawn_doc_listener(
-            handle,
-            self.cancel_token.child_token(),
-            self.change_tx.clone(),
-            self.head_tx.clone(),
-            Arc::new({
-                let listeners = Arc::clone(&self.listeners);
-                move |doc_id, origin| {
-                    let listeners = listeners.lock().expect(ERROR_MUTEX);
-                    listeners.iter().any(|listener| {
-                        let doc_ok = listener
-                            .filter
-                            .doc_id
-                            .as_ref()
-                            .map(|target| target.doc_id == *doc_id)
-                            .unwrap_or(true);
-                        let origin_ok = listener
-                            .filter
-                            .origin
-                            .as_ref()
-                            .map(|target| origin_matches_filter(origin, *target))
-                            .unwrap_or(true);
-                        doc_ok && origin_ok
-                    })
-                }
-            }),
-        )?;
-        Ok(Arc::new(DocChangeBrokerLease {
-            handle: Arc::new(broker),
-            stop_token: std::sync::Mutex::new(Some(stop_token)),
-        }))
+    fn spawn_doc_change_lease(&self, doc_id: DocumentId) -> Arc<DocChangeBrokerLease> {
+        Arc::new(DocChangeBrokerLease { doc_id })
     }
 
-    pub async fn add_doc_listener(&self, handle: DocHandle) -> Res<Arc<DocChangeBrokerLease>> {
+    pub async fn add_doc_listener(&self, doc_id: DocumentId) -> Res<Arc<DocChangeBrokerLease>> {
         self.ensure_live()?;
-
-        let doc_id = handle.document_id().clone();
         match self.brokers.entry(doc_id) {
             dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
                 if let Some(lease) = occupied.get().upgrade() {
                     return Ok(lease);
                 }
-                let lease = self.spawn_doc_change_lease(handle)?;
+                let lease = self.spawn_doc_change_lease(occupied.key().clone());
                 occupied.insert(Arc::downgrade(&lease));
                 Ok(lease)
             }
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                let lease = self.spawn_doc_change_lease(handle)?;
+                let lease = self.spawn_doc_change_lease(vacant.key().clone());
                 vacant.insert(Arc::downgrade(&lease));
                 Ok(lease)
             }
@@ -249,7 +216,7 @@ impl ChangeListenerManager {
             .send(vec![BigRepoChangeNotification::DocCreated {
                 doc_id,
                 heads,
-                origin: ChangeOrigin::Local,
+                origin: BigRepoChangeOrigin::Local,
             }])?;
         Ok(())
     }
@@ -264,7 +231,41 @@ impl ChangeListenerManager {
             .send(vec![BigRepoChangeNotification::DocImported {
                 doc_id,
                 heads,
-                origin: ChangeOrigin::Local,
+                origin: BigRepoChangeOrigin::Local,
+            }])?;
+        Ok(())
+    }
+
+    pub(super) fn notify_doc_changed(
+        &self,
+        doc_id: DocumentId,
+        patch: Arc<automerge::Patch>,
+        heads: Arc<[ChangeHash]>,
+        origin: BigRepoChangeOrigin,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        self.change_tx
+            .send(vec![BigRepoChangeNotification::DocChanged {
+                doc_id,
+                patch,
+                heads,
+                origin,
+            }])?;
+        Ok(())
+    }
+
+    pub(super) fn notify_doc_heads_changed(
+        &self,
+        doc_id: DocumentId,
+        heads: Arc<[ChangeHash]>,
+        origin: BigRepoChangeOrigin,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        self.head_tx
+            .send(vec![BigRepoHeadNotification::DocHeadsChanged {
+                doc_id,
+                heads,
+                origin,
             }])?;
         Ok(())
     }
@@ -595,11 +596,11 @@ fn notification_matches_filter(
     }
 }
 
-fn origin_matches_filter(origin: &ChangeOrigin, filter: OriginFilter) -> bool {
+fn origin_matches_filter(origin: &BigRepoChangeOrigin, filter: OriginFilter) -> bool {
     match filter {
-        OriginFilter::Local => matches!(origin, ChangeOrigin::Local),
-        OriginFilter::Remote => matches!(origin, ChangeOrigin::Remote { .. }),
-        OriginFilter::Bootstrap => matches!(origin, ChangeOrigin::Bootstrap),
+        OriginFilter::Local => matches!(origin, BigRepoChangeOrigin::Local),
+        OriginFilter::Remote => matches!(origin, BigRepoChangeOrigin::Remote { .. }),
+        OriginFilter::Bootstrap => matches!(origin, BigRepoChangeOrigin::Bootstrap),
     }
 }
 

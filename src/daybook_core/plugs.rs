@@ -580,7 +580,7 @@ pub struct PlugsRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     big_repo: SharedBigRepo,
     app_doc_id: DocumentId,
-    app_am_handle: samod::DocHandle,
+    app_am_handle: am_utils_rs::repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<PlugsStore>,
     blobs: Arc<crate::blobs::BlobsRepo>,
     mutation_mutex: tokio::sync::Mutex<()>,
@@ -718,7 +718,7 @@ impl PlugsRepo {
             store,
             blobs,
             local_actor_id,
-            local_peer_id: big_repo.samod_repo().peer_id().to_string(),
+            local_peer_id: big_repo.local_peer_key(),
             registry: Arc::clone(&registry),
             mutation_mutex: tokio::sync::Mutex::new(()),
             plug_config_doc_init_lock: tokio::sync::Mutex::new(()),
@@ -749,7 +749,7 @@ impl PlugsRepo {
 
     pub fn get_plugs_heads(&self) -> ChangeHashSet {
         self.app_am_handle
-            .with_document(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
+            .with_document_sync(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
     }
 
     async fn latest_manifest_delete_actor(
@@ -977,7 +977,7 @@ impl PlugsRepo {
         from: ChangeHashSet,
         to: Option<ChangeHashSet>,
     ) -> Res<Vec<PlugsEvent>> {
-        let (patches, heads) = self.app_am_handle.with_document(|am_doc| {
+        let (patches, heads) = self.app_am_handle.with_document_sync(|am_doc| {
             let heads = if let Some(ref to_set) = to {
                 to_set.clone()
             } else {

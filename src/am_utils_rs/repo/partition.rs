@@ -12,6 +12,7 @@ impl BigRepo {
         doc_id: &samod::DocumentId,
         heads: Vec<automerge::ChangeHash>,
     ) -> Res<()> {
+        self.mirror_doc_into_subduction(doc_id).await?;
         let item_payload = serde_json::json!({
             "heads": crate::serialize_commit_heads(&heads),
             "change_count_hint": 1_u64,
@@ -107,9 +108,20 @@ impl BigRepo {
                 Ok(val) => val,
                 Err(_) => return Ok(None),
             };
-            let doc = match self.repo.local_export(parsed).await {
+            let doc = match self.repo.local_export(parsed.clone()).await {
                 Ok(doc) => doc,
-                Err(samod::LocalExportError::NotFound { .. }) => return Ok(None),
+                Err(samod::LocalExportError::NotFound { .. }) => {
+                    #[cfg(feature = "subduction")]
+                    {
+                        if let Some(doc) = self.load_doc_from_subduction(&parsed).await? {
+                            return Ok(Some(FullDoc {
+                                doc_id,
+                                automerge_save: doc.save(),
+                            }));
+                        }
+                    }
+                    return Ok(None);
+                }
                 Err(err) => {
                     return Err(eyre::Report::from(err).wrap_err("failed local-exporting doc"));
                 }
@@ -194,8 +206,7 @@ mod tests {
                 tx.put(automerge::ROOT, "k", "v")
                     .expect("failed setting test key");
                 tx.commit();
-            })
-            .await?;
+            });
 
         let events = big_repo
             .get_partition_doc_events_for_peer(
@@ -238,8 +249,7 @@ mod tests {
                 tx.put(automerge::ROOT, "v", 1_i64)
                     .expect("failed setting test key");
                 tx.commit();
-            })
-            .await?;
+            });
         big_repo
             .partition_store()
             .remove_member(&partition_id, &target_doc_id, &empty_payload())
@@ -365,8 +375,7 @@ mod tests {
                     tx.put(automerge::ROOT, "idx", i)
                         .expect("failed setting test key");
                     tx.commit();
-                })
-                .await?;
+                });
             let doc_id = handle.document_id().to_string();
             big_repo
                 .partition_store()

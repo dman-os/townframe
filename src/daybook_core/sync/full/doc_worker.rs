@@ -29,11 +29,11 @@ pub async fn spawn_doc_sync_worker(
 
     let fut = {
         async move {
-            let Some(handle) = big_repo.find_doc(&doc_id).await? else {
+            let Some((peer_state, state_stream)) = big_repo.watch_doc_peer_states(&doc_id).await?
+            else {
                 worker.handle_missing_doc();
                 return eyre::Ok(());
             };
-            let (peer_state, state_stream) = handle.peers();
             worker.handle_peer_state_update(peer_state);
 
             let mut idle_timeout = Box::pin(tokio::time::sleep(Duration::from_secs(120)));
@@ -117,11 +117,12 @@ impl DocSyncWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use am_utils_rs::BigRepoConnectionId;
     use automerge::sync::{self, SyncDoc};
     use automerge::transaction::Transactable;
     async fn wait_for_peer_doc_state(
-        handle: &samod::DocHandle,
-        conn_id: ConnectionId,
+        handle: &am_utils_rs::repo::BigDocHandle,
+        conn_id: BigRepoConnectionId,
         predicate: impl Fn(&samod::PeerDocState) -> bool,
     ) -> Res<samod::PeerDocState> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);

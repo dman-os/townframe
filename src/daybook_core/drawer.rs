@@ -60,7 +60,7 @@ pub struct DrawerRepo {
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
     current_heads: std::sync::Mutex<ChangeHashSet>,
-    drawer_am_handle: samod::DocHandle,
+    drawer_am_handle: am_utils_rs::repo::BigDocHandle,
     meta_db_pool: sqlx::SqlitePool,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
 }
@@ -113,7 +113,7 @@ impl DrawerRepo {
             .ok_or_eyre("drawer doc not found")?;
 
         let initial_heads =
-            drawer_am_handle.with_document(|doc| ChangeHashSet(doc.get_heads().into()));
+            drawer_am_handle.with_document_sync(|doc| ChangeHashSet(doc.get_heads().into()));
 
         let broker = big_repo
             .ensure_change_broker(drawer_am_handle.clone())
@@ -132,7 +132,7 @@ impl DrawerRepo {
 
         let main_cancel_token = CancellationToken::new();
         let repo = Arc::new(Self {
-            local_peer_id: big_repo.samod_repo().peer_id().to_string(),
+            local_peer_id: big_repo.local_peer_key(),
             big_repo,
             drawer_doc_id,
             local_actor_id,
@@ -388,7 +388,7 @@ impl DrawerRepo {
             .find_doc_handle(&branch_doc_id)
             .await?
             .ok_or_eyre("branch doc handle missing for tombstoned branch")?;
-        let keys = handle.with_document(|am_doc| {
+        let keys = handle.with_document_sync(|am_doc| {
             let facets_obj = match automerge::ReadDoc::get_at(
                 am_doc,
                 automerge::ROOT,

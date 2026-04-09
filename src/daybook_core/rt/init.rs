@@ -38,7 +38,7 @@ pub struct InitRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     big_repo: SharedBigRepo,
     app_doc_id: DocumentId,
-    app_am_handle: samod::DocHandle,
+    app_am_handle: am_utils_rs::repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<InitStore>,
     local_actor_id: ActorId,
     sql_pool: sqlx::SqlitePool,
@@ -95,7 +95,7 @@ impl InitRepo {
         let cancel_token = CancellationToken::new();
         let (ticket, notif_rx) =
             InitStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
-        let local_peer_id = big_repo.samod_repo().peer_id().to_string();
+        let local_peer_id = big_repo.local_peer_key();
 
         let repo = Arc::new(Self {
             registry: Arc::clone(&registry),
@@ -202,7 +202,7 @@ impl InitRepo {
 
     pub async fn events_for_init(&self) -> Res<Vec<InitEvent>> {
         // Init snapshot is the current app-doc heads.
-        let heads = self.app_am_handle.with_document(|doc| doc.get_heads());
+        let heads = self.app_am_handle.with_document_sync(|doc| doc.get_heads());
         Ok(vec![InitEvent::Changed {
             heads: ChangeHashSet(Arc::from(heads)),
         }])
@@ -213,7 +213,7 @@ impl InitRepo {
         from: ChangeHashSet,
         to: Option<ChangeHashSet>,
     ) -> Res<Vec<InitEvent>> {
-        let (patches, heads) = self.app_am_handle.with_document(|am_doc| {
+        let (patches, heads) = self.app_am_handle.with_document_sync(|am_doc| {
             let heads = if let Some(ref to_set) = to {
                 to_set.clone()
             } else {

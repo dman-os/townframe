@@ -3,8 +3,8 @@ use crate::partition::PartitionStore;
 
 use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
-use samod::DocumentId;
 use sqlx::sqlite::SqliteConnectOptions;
+use utils_rs::prelude::futures::future::BoxFuture;
 use std::str::FromStr;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +16,8 @@ pub mod rpc;
 
 pub use changes::{
     path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
-    BigRepoHeadNotification, BigRepoLocalNotification, ChangeFilter as BigRepoChangeFilter,
+    BigRepoChangeOrigin, BigRepoHeadNotification, BigRepoLocalNotification,
+    ChangeFilter as BigRepoChangeFilter,
     ChangeListenerRegistration as BigRepoChangeListenerRegistration,
     DocChangeBrokerLease as BigRepoDocChangeBrokerLease, DocIdFilter as BigRepoDocIdFilter,
     HeadFilter as BigRepoHeadFilter, HeadListenerRegistration as BigRepoHeadListenerRegistration,
@@ -24,46 +25,32 @@ pub use changes::{
     LocalListenerRegistration as BigRepoLocalListenerRegistration,
     OriginFilter as BigRepoOriginFilter,
 };
-pub use samod_core::ChangeOrigin as BigRepoChangeOrigin;
 
-#[derive(Debug, Clone)]
-pub struct BigRepoConfig {
-    pub sqlite_url: String,
-    pub subscription_capacity: usize,
-}
+pub type DocumentId = crate::ids::DocId32;
+pub type PeerId = crate::ids::PeerId32;
 
 /// Configuration for Automerge storage
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Peer ID for this client
-    pub peer_id: String,
+    pub peer_id: PeerId,
     /// Storage directory for Automerge documents
     pub storage: StorageConfig,
 }
 
 #[derive(Debug, Clone)]
 pub enum StorageConfig {
-    Disk {
-        path: PathBuf,
-        big_repo_sqlite_url: Option<String>,
-    },
+    Disk { path: PathBuf },
     Memory,
 }
 
-impl BigRepoConfig {
-    pub fn new(sqlite_url: impl Into<String>) -> Self {
-        Self {
-            sqlite_url: sqlite_url.into(),
-            subscription_capacity: crate::sync::protocol::DEFAULT_SUBSCRIPTION_CAPACITY,
-        }
-    }
-}
+#[derive(Debug, Clone)]
+struct SubductionMirror {}
+
+impl SubductionMirror {}
 
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct BigRepo {
-    #[educe(Debug(ignore))]
-    repo: samod::Repo,
     #[educe(Debug(ignore))]
     state_pool: sqlx::SqlitePool,
     #[educe(Debug(ignore))]
@@ -73,33 +60,92 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     partition_forwarder_cancel: CancellationToken,
     #[educe(Debug(ignore))]
-    partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
+    join_set: Arc<utils_rs::AbortableJoinSet>,
     #[educe(Debug(ignore))]
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
     #[educe(Debug(ignore))]
     persistent_change_brokers:
         std::sync::Mutex<std::collections::HashMap<DocumentId, Arc<changes::DocChangeBrokerLease>>>,
+    // #[educe(Debug(ignore))]
+    // subduction_storage: sedimentree_fs_storage::FsStorage,
+    // #[educe(Debug(ignore))]
+    // subduction_signer: subduction_crypto::signer::memory::MemorySigner,
 }
 
 pub type SharedBigRepo = Arc<BigRepo>;
 
 impl BigRepo {
-    async fn boot_with_components(
-        repo: samod::Repo,
-        state_pool: sqlx::SqlitePool,
-        partition_store: Arc<PartitionStore>,
-        partition_forwarder_cancel: CancellationToken,
-        partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
-    ) -> Res<Arc<Self>> {
+    pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
+        let Config { peer_id, storage } = config;
+        let (subduction_storage, sqlite_url) = match storage {
+            StorageConfig::Memory => (
+                Box::new(
+                    subduction_core::storage::memory::MemoryStorage::new()
+                ) as Box<dyn subduction_core::storage::traits::Storage + Send + Sync + 'static>,
+                "sqlite::memory".to_string(),
+            ),
+            StorageConfig::Disk { path } => {
+                let subduction_dir = path.join("subduction");
+                std::fs::create_dir_all(&subduction_dir).wrap_err_with(|| {
+                    format!("Failed to create storage directory: {}", path.display())
+                })?;
+                (
+                    Box::new(sedimentree_fs_storage::FsStorage::new(subduction_dir)
+                        .wrap_err("failed booting subduction fs storage")?),
+                    format!("sqlite://{}", path.join("big_repo.sqlite").display()),
+                )
+            }, 
+        };
+        // let keyhive = keyhive_core::
+        // subduction_keyhive_policy::SubductionKeyhive::new()
+        let join_set = Arc::new(utils_rs::AbortableJoinSet::new());
+
+        // let (subduction, handler, listener, manager) = subduction_core::subduction::builder::SubductionBuilder::new()
+        //         .storage(subduction_core::storage::memory::MemoryStorage::new(), Arc::new(subduction_core::policy::open::OpenPolicy))
+        //         .spawner(AbortableTokioSpawn{ set: Arc::clone(&join_set) })
+        //         .signer(subduction_crypto::signer::memory::MemorySigner::from_bytes(peer_id.as_bytes()))
+        //         .timer(TimeoutTokio)
+        //         .build::<future_form::Sendable>()
+        //     ;
+        // join_set.spawn(listener)?;
+        // join_set.spawn(manager)?;
+        let storebox = subduction_core::storage::powerbox::StoragePowerbox::new(
+            subduction_core::storage::memory::MemoryStorage::new(),
+            Arc::new(subduction_core::policy::open::OpenPolicy)
+        );
+
+        let state_pool = {
+            let connect_options = SqliteConnectOptions::from_str(&sqlite_url)
+                .wrap_err_with(|| format!("invalid sqlite url: {sqlite_url}"))?
+                .create_if_missing(true);
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(connect_options)
+                .await
+                .wrap_err("failed connecting big repo sqlite")?
+        };
+        let partition_forwarder_cancel = CancellationToken::new();
+        let partition_store = {
+            let (partition_events_tx, _) =
+                broadcast::channel(crate::sync::protocol::DEFAULT_SUBSCRIPTION_CAPACITY);
+            Arc::new(PartitionStore::new(
+                state_pool.clone(),
+                partition_events_tx,
+                partition_forwarder_cancel.clone(),
+                Arc::clone(&join_set),
+            ))
+        };
+
+        partition_store.ensure_schema().await?;
+
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
 
         let out = Arc::new(Self {
-            repo,
             state_pool,
             partition_store,
             change_manager,
             partition_forwarder_cancel,
-            partition_forwarders,
+            join_set,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
             persistent_change_brokers: std::sync::Mutex::new(default()),
         });
@@ -109,7 +155,7 @@ impl BigRepo {
         {
             let cancel_token = out.partition_forwarder_cancel.child_token();
             let repo = Arc::downgrade(&out);
-            out.partition_forwarders
+            out.join_set
                 .spawn(async move {
                     let _head_reg = _head_reg;
                     let fut = async {
@@ -126,7 +172,7 @@ impl BigRepo {
                                     };
                                     for msg in batch {
                                         let BigRepoHeadNotification::DocHeadsChanged { doc_id, heads, origin } = msg;
-                                        if !matches!(origin, samod_core::ChangeOrigin::Remote { .. }) {
+                                        if !matches!(origin, BigRepoChangeOrigin::Remote { .. }) {
                                             continue;
                                         }
                                         repo.record_doc_heads_change(&doc_id, heads.to_vec())
@@ -142,96 +188,6 @@ impl BigRepo {
                 })
                 .expect("failed spawning remote heads forwarding worker");
         }
-        Ok(out)
-    }
-
-    pub async fn boot_with_repo(repo: samod::Repo, config: BigRepoConfig) -> Res<Arc<Self>> {
-        let connect_options = SqliteConnectOptions::from_str(&config.sqlite_url)
-            .wrap_err_with(|| format!("invalid sqlite url: {}", config.sqlite_url))?
-            .create_if_missing(true);
-        let state_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(connect_options)
-            .await
-            .wrap_err("failed connecting big repo sqlite")?;
-        let (partition_events_tx, _) = broadcast::channel(config.subscription_capacity.max(1));
-        let partition_forwarder_cancel = CancellationToken::new();
-        let partition_forwarders = Arc::new(utils_rs::AbortableJoinSet::new());
-        let partition_store = Arc::new(PartitionStore::new(
-            state_pool.clone(),
-            partition_events_tx,
-            partition_forwarder_cancel.clone(),
-            Arc::clone(&partition_forwarders),
-        ));
-        partition_store.ensure_schema().await?;
-        Self::boot_with_components(
-            repo,
-            state_pool,
-            partition_store,
-            partition_forwarder_cancel,
-            partition_forwarders,
-        )
-        .await
-    }
-
-    pub async fn boot_with_repo_and_partition_store(
-        repo: samod::Repo,
-        partition_store: Arc<PartitionStore>,
-        partition_forwarder_cancel: CancellationToken,
-        partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
-    ) -> Res<Arc<Self>> {
-        Self::boot_with_components(
-            repo,
-            partition_store.state_pool().clone(),
-            partition_store,
-            partition_forwarder_cancel,
-            partition_forwarders,
-        )
-        .await
-    }
-
-    pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
-        let Config { peer_id, storage } = config;
-        let peer_id = samod::PeerId::from_string(peer_id);
-        let repo = samod::Repo::build_tokio().with_peer_id(peer_id);
-        let (repo, sqlite_url) = match storage {
-            StorageConfig::Disk {
-                path,
-                big_repo_sqlite_url,
-            } => {
-                std::fs::create_dir_all(&path).wrap_err_with(|| {
-                    format!("Failed to create storage directory: {}", path.display())
-                })?;
-                let storage_path = path
-                    .to_str()
-                    .ok_or_else(|| eyre::eyre!("storage path contains invalid UTF-8"))?;
-                let repo =
-                    repo.with_storage(samod::storage::TokioFilesystemStorage::new(storage_path));
-                let loaded = repo
-                    .with_announce_policy(samod::AlwaysAnnounce)
-                    .load()
-                    .await;
-                let sqlite_url = if let Some(sqlite_url) = big_repo_sqlite_url {
-                    sqlite_url
-                } else {
-                    let sqlite_sidecar = path.join("big_repo.sqlite");
-                    let sqlite_sidecar = sqlite_sidecar
-                        .to_str()
-                        .ok_or_else(|| eyre::eyre!("storage path contains invalid UTF-8"))?;
-                    format!("sqlite://{sqlite_sidecar}")
-                };
-                (loaded, sqlite_url)
-            }
-            StorageConfig::Memory => {
-                let repo = repo.with_storage(samod::storage::InMemoryStorage::new());
-                let loaded = repo
-                    .with_announce_policy(samod::AlwaysAnnounce)
-                    .load()
-                    .await;
-                (loaded, "sqlite::memory:".to_string())
-            }
-        };
-        let out = Self::boot_with_repo(repo.clone(), BigRepoConfig::new(sqlite_url)).await?;
         let change_manager_stop = out
             .change_manager_stop
             .lock()
@@ -241,84 +197,15 @@ impl BigRepo {
         Ok((
             Arc::clone(&out),
             BigRepoStopToken {
-                repo,
                 change_manager_stop: Some(change_manager_stop),
                 partition_forwarder_cancel: out.partition_forwarder_cancel.clone(),
-                partition_forwarders: Arc::clone(&out.partition_forwarders),
+                partition_forwarders: Arc::clone(&out.join_set),
             },
         ))
-    }
-
-    pub async fn boot_with_partition_store(
-        config: Config,
-        partition_store: Arc<PartitionStore>,
-        partition_forwarder_cancel: CancellationToken,
-        partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
-    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
-        let Config { peer_id, storage } = config;
-        let peer_id = samod::PeerId::from_string(peer_id);
-        let repo = samod::Repo::build_tokio().with_peer_id(peer_id);
-        let repo = match storage {
-            StorageConfig::Disk { path, .. } => {
-                std::fs::create_dir_all(&path).wrap_err_with(|| {
-                    format!("Failed to create storage directory: {}", path.display())
-                })?;
-                let storage_path = path
-                    .to_str()
-                    .ok_or_else(|| eyre::eyre!("storage path contains invalid UTF-8"))?;
-                repo.with_storage(samod::storage::TokioFilesystemStorage::new(storage_path))
-                    .with_announce_policy(samod::AlwaysAnnounce)
-                    .load()
-                    .await
-            }
-            StorageConfig::Memory => {
-                repo.with_storage(samod::storage::InMemoryStorage::new())
-                    .with_announce_policy(samod::AlwaysAnnounce)
-                    .load()
-                    .await
-            }
-        };
-        let out = Self::boot_with_repo_and_partition_store(
-            repo.clone(),
-            partition_store,
-            partition_forwarder_cancel.clone(),
-            Arc::clone(&partition_forwarders),
-        )
-        .await?;
-        let change_manager_stop = out
-            .change_manager_stop
-            .lock()
-            .expect(ERROR_MUTEX)
-            .take()
-            .expect("BigRepo change manager stop token missing");
-        Ok((
-            Arc::clone(&out),
-            BigRepoStopToken {
-                repo,
-                change_manager_stop: Some(change_manager_stop),
-                partition_forwarder_cancel,
-                partition_forwarders,
-            },
-        ))
-    }
-
-    pub fn samod_repo(&self) -> &samod::Repo {
-        &self.repo
-    }
-
-    pub fn state_pool(&self) -> &sqlx::SqlitePool {
-        &self.state_pool
     }
 
     pub fn partition_store(&self) -> Arc<PartitionStore> {
         Arc::clone(&self.partition_store)
-    }
-
-    // NOTE: this method has no users
-    pub fn subscribe_partition_events(
-        &self,
-    ) -> broadcast::Receiver<crate::sync::protocol::PartitionEvent> {
-        self.partition_store.subscribe_partition_events()
     }
 
     pub async fn subscribe_partition_doc_events_local(
@@ -334,14 +221,16 @@ impl BigRepo {
 
     pub async fn ensure_change_broker(
         self: &Arc<Self>,
-        handle: samod::DocHandle,
+        handle: BigDocHandle,
     ) -> Res<Arc<changes::DocChangeBrokerLease>> {
-        self.change_manager.add_doc_listener(handle).await
+        self.change_manager
+            .add_doc_listener(handle.document_id().clone())
+            .await
     }
 
     async fn ensure_persistent_change_broker(
         self: &Arc<Self>,
-        handle: samod::DocHandle,
+        handle: BigDocHandle,
     ) -> Res<Arc<changes::DocChangeBrokerLease>> {
         let doc_id = handle.document_id().clone();
         if let Some(existing) = self
@@ -447,11 +336,10 @@ impl BigRepo {
             .create(initial_content)
             .await
             .map_err(|err| ferr!("failed creating doc: {err}"))?;
-        let _lease = self.ensure_persistent_change_broker(handle.clone()).await?;
         let out = BigDocHandle {
             repo: Arc::clone(self),
-            inner: handle,
         };
+        let _lease = self.ensure_persistent_change_broker(out.clone()).await?;
         let heads = out
             .inner
             .with_document(|doc| Arc::<[automerge::ChangeHash]>::from(doc.get_heads()));
@@ -477,11 +365,10 @@ impl BigRepo {
             .import(document_id, initial_content)
             .await
             .map_err(|err| ferr!("failed importing doc: {err}"))?;
-        let _lease = self.ensure_persistent_change_broker(handle.clone()).await?;
         let out = BigDocHandle {
             repo: Arc::clone(self),
-            inner: handle,
         };
+        let _lease = self.ensure_persistent_change_broker(out.clone()).await?;
         let heads = out
             .inner
             .with_document(|doc| Arc::<[automerge::ChangeHash]>::from(doc.get_heads()));
@@ -508,48 +395,66 @@ impl BigRepo {
         };
         Ok(Some(BigDocHandle {
             repo: Arc::clone(self),
-            inner,
         }))
     }
 
     pub async fn add_doc(
         self: &Arc<Self>,
         initial_content: automerge::Automerge,
-    ) -> Res<samod::DocHandle> {
+    ) -> Res<BigDocHandle> {
         let handle = self
             .repo
             .create(initial_content)
             .await
             .map_err(|err| ferr!("failed creating doc: {err}"))?;
-        let _lease = self.ensure_persistent_change_broker(handle.clone()).await?;
-        let heads =
-            handle.with_document(|doc| Arc::<[automerge::ChangeHash]>::from(doc.get_heads()));
+        let out = BigDocHandle {
+            repo: Arc::clone(self),
+        };
+        let _lease = self.ensure_persistent_change_broker(out.clone()).await?;
+        let heads = out
+            .inner
+            .with_document(|doc| Arc::<[automerge::ChangeHash]>::from(doc.get_heads()));
         self.change_manager
-            .notify_doc_created(handle.document_id().clone(), Arc::clone(&heads))?;
+            .notify_doc_created(out.document_id().clone(), Arc::clone(&heads))?;
         self.change_manager
-            .notify_local_doc_created(handle.document_id().clone(), heads)?;
+            .notify_local_doc_created(out.document_id().clone(), heads)?;
         self.record_doc_heads_change(
-            handle.document_id(),
-            handle.with_document(|doc| doc.get_heads()),
+            out.document_id(),
+            out.inner.with_document(|doc| doc.get_heads()),
         )
         .await?;
-        Ok(handle)
+        Ok(out)
     }
 
     pub async fn find_doc_handle(
         self: &Arc<Self>,
         document_id: &DocumentId,
-    ) -> Res<Option<samod::DocHandle>> {
+    ) -> Res<Option<BigDocHandle>> {
         let handle = self
             .repo
             .find(document_id.clone())
             .await
             .map_err(|err| ferr!("failed finding doc: {err}"))?;
-        let Some(handle) = handle else {
+        let Some(inner) = handle else {
             return Ok(None);
         };
-        Ok(Some(handle))
+        Ok(Some(BigDocHandle {
+            repo: Arc::clone(self),
+        }))
     }
+    //
+    // pub async fn watch_doc_peer_states(
+    //     self: &Arc<Self>,
+    //     document_id: &DocumentId,
+    // ) -> Res<Option<(BigRepoDocPeerStateView, BigRepoDocPeerStateStream)>> {
+    //     use futures::StreamExt as _;
+    //
+    //     let Some(handle) = self.find_doc_handle(document_id).await? else {
+    //         return Ok(None);
+    //     };
+    //     let (peer_state, state_stream) = handle.inner.peers();
+    //     Ok(Some((peer_state, state_stream.boxed())))
+    // }
 
     pub async fn local_contains_document(self: &Arc<Self>, document_id: &DocumentId) -> Res<bool> {
         self.repo
@@ -563,41 +468,158 @@ impl BigRepo {
         doc_id: &DocumentId,
         heads: Vec<automerge::ChangeHash>,
     ) -> Res<()> {
-        self.change_manager.notify_local_doc_heads_updated(
+        let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads.clone());
+        self.change_manager.notify_doc_heads_changed(
             doc_id.clone(),
-            Arc::<[automerge::ChangeHash]>::from(heads.clone()),
+            Arc::clone(&heads_arc),
+            BigRepoChangeOrigin::Local,
         )?;
+        self.change_manager
+            .notify_local_doc_heads_updated(doc_id.clone(), heads_arc)?;
         self.record_doc_heads_change(doc_id, heads).await
     }
 
-    pub async fn spawn_ws_connector(&self, addr: Url) -> Res<tokio::task::JoinHandle<()>> {
-        let repo = self.repo.clone();
-        let handle = repo
-            .dial_websocket(addr, samod::BackoffConfig::default())
-            .wrap_err("error setting up dialer")?;
-        let fut = async move {
-            let mut events = handle.events();
-            while let Some(event) = events.next().await {
-                use samod::DialerEvent;
-                match event {
-                    DialerEvent::Connected { peer_info } => {
-                        info!(?peer_info, "connection established")
-                    }
-                    DialerEvent::Disconnected { reason } => {
-                        warn!(?reason, "error connecting to server")
-                    }
-                    DialerEvent::Reconnecting { attempt } => {
-                        warn!(?attempt, "retrying to conect to server")
-                    }
-                    DialerEvent::MaxRetriesReached => {
-                        unreachable!("we don't have max retries")
-                    }
-                }
+    fn on_doc_patches_changed(
+        &self,
+        doc_id: &DocumentId,
+        heads: Vec<automerge::ChangeHash>,
+        patches: Vec<automerge::Patch>,
+    ) -> Res<()> {
+        let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);
+        for patch in patches {
+            self.change_manager.notify_doc_changed(
+                doc_id.clone(),
+                Arc::new(patch),
+                Arc::clone(&heads_arc),
+                BigRepoChangeOrigin::Local,
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn mirror_doc_into_subduction(&self, doc_id: &DocumentId) -> Res<()> {
+        let Some(mirror) = &self.subduction_mirror else {
+            return Ok(());
+        };
+        let exported = match self.repo.local_export(doc_id.clone()).await {
+            Ok(exported) => exported,
+            Err(samod::LocalExportError::NotFound { .. }) => return Ok(()),
+            Err(err) => {
+                return Err(eyre::Report::from(err).wrap_err("failed local-exporting doc"));
             }
         };
-        Ok(tokio::spawn(fut.instrument(tracing::info_span!(
-            "websocket sync server connector task"
-        ))))
+        mirror.persist_automerge(doc_id, &exported).await
+    }
+}
+
+// subduction helpers
+impl BigRepo {
+    async fn persist_automerge(&self, doc_id: &DocumentId, doc: &automerge::Automerge) -> Res<()> {
+        use sedimentree_core::{
+            blob::{verified::VerifiedBlobMeta, Blob},
+            loose_commit::id::CommitId,
+        };
+        use std::collections::BTreeSet;
+        use subduction_core::storage::traits::Storage;
+        use subduction_crypto::verified_meta::VerifiedMeta;
+
+        let sedimentree_id = doc_id.into();
+        let res = automerge_sedimentree::ingest::ingest_automerge(doc, sedimentree_id)
+            .wrap_err("error ingesting automerge into sedimentree")?;
+
+        self.subduction_storage.save_batch(sedimentree_id, res.sedimentree)
+        <sedimentree_fs_storage::FsStorage as Storage<future_form::Sendable>>::save_sedimentree_id(
+            &self.subduction_storage,
+            sedimentree_id,
+        )
+        .await
+        .map_err(|err| ferr!("failed persisting sedimentree id: {err}"))?;
+        <sedimentree_fs_storage::FsStorage as Storage<future_form::Sendable>>::delete_loose_commits(
+            &self.subduction_storage,
+            sedimentree_id,
+        )
+        .await
+            .map_err(|err| ferr!("failed clearing prior loose commits: {err}"))?;
+        <sedimentree_fs_storage::FsStorage as Storage<future_form::Sendable>>::delete_fragments(
+            &self.subduction_storage,
+            sedimentree_id,
+        )
+        .await
+        .map_err(|err| ferr!("failed clearing prior fragments: {err}"))?;
+
+        for change in doc.get_changes(&[]) {
+            let head = CommitId::new(change.hash().0);
+            let parents = change
+                .deps()
+                .iter()
+                .map(|dep| CommitId::new(dep.0))
+                .collect::<BTreeSet<_>>();
+            let blob = Blob::new(change.raw_bytes().to_vec());
+            let verified_blob = VerifiedBlobMeta::new(blob);
+            let verified = VerifiedMeta::seal::<future_form::Sendable, _>(
+                &self.signer,
+                (sedimentree_id, head, parents),
+                verified_blob,
+            )
+            .await;
+            <sedimentree_fs_storage::FsStorage as Storage<future_form::Sendable>>::save_loose_commit(
+                &self.storage,
+                sedimentree_id,
+                verified,
+            )
+            .await
+            .map_err(|err| ferr!("failed saving loose commit: {err}"))?;
+        }
+        Ok(())
+    }
+
+    async fn load_automerge(&self, doc_id: &DocumentId) -> Res<Option<automerge::Automerge>> {
+        use subduction_core::storage::traits::Storage;
+
+        let sedimentree_id = doc_id.into();
+        let loose =
+            <sedimentree_fs_storage::FsStorage as Storage<future_form::Sendable>>::load_loose_commits(
+                &self.storage,
+                sedimentree_id,
+            )
+            .await
+            .map_err(|err| ferr!("failed loading loose commits: {err}"))?;
+        let fragments =
+            <sedimentree_fs_storage::FsStorage as Storage<future_form::Sendable>>::load_fragments(
+                &self.storage,
+                sedimentree_id,
+            )
+            .await
+            .map_err(|err| ferr!("failed loading fragments: {err}"))?;
+        if loose.is_empty() && fragments.is_empty() {
+            return Ok(None);
+        }
+
+        let mut pending: Vec<Vec<u8>> = fragments
+            .into_iter()
+            .map(|item| item.blob().as_slice().to_vec())
+            .chain(
+                loose
+                    .into_iter()
+                    .map(|item| item.blob().as_slice().to_vec()),
+            )
+            .collect::<Vec<_>>();
+        let mut doc = automerge::Automerge::new();
+        while !pending.is_empty() {
+            let mut next = Vec::new();
+            let mut progressed = false;
+            for blob in pending {
+                match doc.load_incremental(&blob) {
+                    Ok(_) => progressed = true,
+                    Err(_) => next.push(blob),
+                }
+            }
+            if !progressed {
+                eyre::bail!("failed reconstructing automerge doc from subduction blobs");
+            }
+            pending = next;
+        }
+        Ok(Some(doc))
     }
 }
 
@@ -647,7 +669,7 @@ impl BigRepo {
             .find_doc_handle(doc_id)
             .await?
             .ok_or_eyre("doc not found")?;
-        handle.with_document(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
+        handle.with_document_sync(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
             let heads: Arc<[automerge::ChangeHash]> = Arc::from(doc.get_heads());
             if path.is_empty() && obj_id == automerge::ROOT {
                 let value: T = autosurgeon::hydrate(doc).wrap_err("error hydrating")?;
@@ -673,7 +695,7 @@ impl BigRepo {
             .find_doc_handle(doc_id)
             .await?
             .ok_or_eyre("doc not found")?;
-        handle.with_document(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
+        handle.with_document_sync(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
             let heads: Arc<[automerge::ChangeHash]> = Arc::from(heads.to_vec());
             if path.is_empty() && obj_id == automerge::ROOT {
                 let value: T = autosurgeon::hydrate_at(doc, &heads).wrap_err("error hydrating")?;
@@ -690,7 +712,6 @@ impl BigRepo {
 }
 
 pub struct BigRepoStopToken {
-    pub repo: samod::Repo,
     change_manager_stop: Option<changes::ChangeListenerManagerStopToken>,
     partition_forwarder_cancel: CancellationToken,
     partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
@@ -709,38 +730,10 @@ impl BigRepoStopToken {
         Ok(())
     }
 }
-pub struct RepoConnection {
-    pub id: samod::ConnectionId,
-    pub peer_id: Arc<str>,
-    pub peer_info: samod::PeerInfo,
-    #[cfg(feature = "iroh")]
-    pub endpoint_id: Option<::iroh::EndpointId>,
-    // NOTE: if optionaly, we are using a connection that
-    // uses a task we don't manage
-    join_handle: Option<tokio::task::JoinHandle<()>>,
-    cancel_token: CancellationToken,
-}
-
-impl RepoConnection {
-    pub async fn stop(self) -> Res<()> {
-        self.cancel_token.cancel();
-        if let Some(join_handle) = self.join_handle {
-            utils_rs::wait_on_handle_with_timeout(join_handle, Duration::from_secs(5)).await?;
-        }
-        Ok(())
-    }
-}
-
-pub struct ConnFinishSignal {
-    pub conn_id: samod::ConnectionId,
-    pub peer_id: Arc<str>,
-    pub reason: String,
-}
 
 #[derive(Clone)]
 pub struct BigDocHandle {
     repo: Arc<BigRepo>,
-    inner: samod::DocHandle,
 }
 
 impl std::fmt::Debug for BigDocHandle {
@@ -757,32 +750,44 @@ impl BigDocHandle {
         self.inner.document_id()
     }
 
+    pub fn with_document_sync<F, R>(&self, operation: F) -> R
+    where
+        F: FnOnce(&mut automerge::Automerge) -> R,
+    {
+        self.with_document(operation)
+    }
+
     // pub fn raw_handle(&self) -> &samod::DocHandle {
     //     &self.inner
     // }
 
-    pub async fn with_document<F, R>(&self, operation: F) -> Res<R>
+    pub fn with_document<F, R>(&self, operation: F) -> R
     where
-        F: 'static + Send + Sync + FnOnce(&mut automerge::Automerge) -> R,
-        R: 'static + Send + Sync,
+        F: FnOnce(&mut automerge::Automerge) -> R,
     {
-        let handle = self.inner.clone();
-        let (before_heads, out, after_heads) = tokio::task::spawn_blocking(move || {
-            handle.with_document(|doc| {
-                let before_heads = doc.get_heads();
-                let out = operation(doc);
-                let after_heads = doc.get_heads();
-                (before_heads, out, after_heads)
-            })
-        })
-        .await
-        .expect(ERROR_TOKIO);
+        let (before_heads, out, after_heads, patches) = self.inner.with_document(|doc| {
+            let before_heads = doc.get_heads();
+            let out = operation(doc);
+            let after_heads = doc.get_heads();
+            let patches = if before_heads != after_heads {
+                doc.diff(&before_heads, &after_heads)
+            } else {
+                Vec::new()
+            };
+            (before_heads, out, after_heads, patches)
+        });
         if before_heads != after_heads {
-            self.repo
-                .on_doc_heads_changed(self.document_id(), after_heads)
-                .await?;
+            let repo = Arc::clone(&self.repo);
+            let doc_id = self.document_id().clone();
+            tokio::spawn(async move {
+                repo.on_doc_patches_changed(&doc_id, after_heads.clone(), patches)
+                    .unwrap();
+                repo.on_doc_heads_changed(&doc_id, after_heads)
+                    .await
+                    .unwrap();
+            });
         }
-        Ok(out)
+        out
     }
 
     /// WARN: do not use this over join! or select!, it blocks the
@@ -791,13 +796,20 @@ impl BigDocHandle {
     where
         F: FnOnce(&mut automerge::Automerge) -> R,
     {
-        let (before_heads, out, after_heads) = self.inner.with_document(|doc| {
+        let (before_heads, out, after_heads, patches) = self.inner.with_document(|doc| {
             let before_heads = doc.get_heads();
             let out = operation(doc);
             let after_heads = doc.get_heads();
-            (before_heads, out, after_heads)
+            let patches = if before_heads != after_heads {
+                doc.diff(&before_heads, &after_heads)
+            } else {
+                Vec::new()
+            };
+            (before_heads, out, after_heads, patches)
         });
         if before_heads != after_heads {
+            self.repo
+                .on_doc_patches_changed(self.document_id(), after_heads.clone(), patches)?;
             self.repo
                 .on_doc_heads_changed(self.document_id(), after_heads)
                 .await?;
@@ -852,7 +864,6 @@ mod tests {
             peer_id: "bigrepo-nonutf8".to_string(),
             storage: StorageConfig::Disk {
                 path: storage_path,
-                big_repo_sqlite_url: None,
             },
         })
         .await;
@@ -935,14 +946,12 @@ mod tests {
             .await?;
 
         let src_handle = src.create_doc(automerge::Automerge::new()).await?;
-        src_handle
-            .with_document(|doc| {
-                let mut tx = doc.transaction();
-                tx.put(automerge::ROOT, "x", 1_i64)
-                    .expect("failed writing source doc");
-                tx.commit();
-            })
-            .await?;
+        src_handle.with_document(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "x", 1_i64)
+                .expect("failed writing source doc");
+            tx.commit();
+        });
         let doc_id = src_handle.document_id().to_string();
         let bytes = src_handle.inner.with_document(|doc| doc.save());
 
@@ -973,14 +982,12 @@ mod tests {
         let _partition_events_rx = dst.subscribe_partition_events();
 
         let src_handle = src.create_doc(automerge::Automerge::new()).await?;
-        src_handle
-            .with_document(|doc| {
-                let mut tx = doc.transaction();
-                tx.put(automerge::ROOT, "x", 1_i64)
-                    .expect("failed writing source doc");
-                tx.commit();
-            })
-            .await?;
+        src_handle.with_document(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "x", 1_i64)
+                .expect("failed writing source doc");
+            tx.commit();
+        });
         let doc_id = src_handle.document_id().clone();
         let exported = src
             .samod_repo()
@@ -1053,14 +1060,12 @@ mod tests {
             })
             .await?;
 
-        handle
-            .with_document(|doc| {
-                let mut tx = doc.transaction();
-                tx.put(automerge::ROOT, "name", "abc")
-                    .expect("failed writing doc");
-                tx.commit();
-            })
-            .await?;
+        handle.with_document(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "name", "abc")
+                .expect("failed writing doc");
+            tx.commit();
+        });
 
         loop {
             let events = timeout(Duration::from_secs(2), rx.recv())
@@ -1097,14 +1102,12 @@ mod tests {
             })
             .await?;
 
-        doc_b
-            .with_document(|doc| {
-                let mut tx = doc.transaction();
-                tx.put(automerge::ROOT, "b", true)
-                    .expect("failed writing doc b");
-                tx.commit();
-            })
-            .await?;
+        doc_b.with_document(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "b", true)
+                .expect("failed writing doc b");
+            tx.commit();
+        });
         assert!(
             timeout(Duration::from_millis(300), rx.recv())
                 .await
@@ -1112,14 +1115,12 @@ mod tests {
             "doc_id filtered change listener unexpectedly received doc_b event"
         );
 
-        doc_a
-            .with_document(|doc| {
-                let mut tx = doc.transaction();
-                tx.put(automerge::ROOT, "a", true)
-                    .expect("failed writing doc a");
-                tx.commit();
-            })
-            .await?;
+        doc_a.with_document(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "a", true)
+                .expect("failed writing doc a");
+            tx.commit();
+        });
 
         loop {
             let events = timeout(Duration::from_secs(2), rx.recv())
@@ -1171,14 +1172,12 @@ mod tests {
             "path-filtered listener unexpectedly received non-patch event"
         );
 
-        handle
-            .with_document(|doc| {
-                let mut tx = doc.transaction();
-                tx.put(automerge::ROOT, "other_key", "ignored")
-                    .expect("failed writing other_key");
-                tx.commit();
-            })
-            .await?;
+        handle.with_document(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "other_key", "ignored")
+                .expect("failed writing other_key");
+            tx.commit();
+        });
         assert!(
             timeout(Duration::from_millis(300), rx.recv())
                 .await
@@ -1186,17 +1185,15 @@ mod tests {
             "path-filtered listener unexpectedly matched unrelated path"
         );
 
-        handle
-            .with_document(|doc| {
-                let mut tx = doc.transaction();
-                let container = tx
-                    .put_object(automerge::ROOT, "container", automerge::ObjType::Map)
-                    .expect("failed creating container object");
-                tx.put(&container, "inner", "matched")
-                    .expect("failed writing container.inner");
-                tx.commit();
-            })
-            .await?;
+        handle.with_document(|doc| {
+            let mut tx = doc.transaction();
+            let container = tx
+                .put_object(automerge::ROOT, "container", automerge::ObjType::Map)
+                .expect("failed creating container object");
+            tx.put(&container, "inner", "matched")
+                .expect("failed writing container.inner");
+            tx.commit();
+        });
 
         loop {
             let events = timeout(Duration::from_secs(2), rx.recv())
@@ -1251,7 +1248,7 @@ mod tests {
         assert!(local_events.iter().any(|event| {
             matches!(
                 event,
-                BigRepoChangeNotification::DocCreated { doc_id, origin, .. } if *doc_id == target && matches!(origin, samod_core::ChangeOrigin::Local)
+                BigRepoChangeNotification::DocCreated { doc_id, origin, .. } if *doc_id == target && matches!(origin, BigRepoChangeOrigin::Local)
             )
         }));
 
@@ -1279,14 +1276,12 @@ mod tests {
             )
         }));
 
-        created
-            .with_document(|doc| {
-                let mut tx = doc.transaction();
-                tx.put(automerge::ROOT, "key", "value")
-                    .expect("failed updating created doc");
-                tx.commit();
-            })
-            .await?;
+        created.with_document(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "key", "value")
+                .expect("failed updating created doc");
+            tx.commit();
+        });
         loop {
             let events = timeout(Duration::from_secs(2), rx.recv())
                 .await
@@ -1303,14 +1298,12 @@ mod tests {
         }
 
         let src_doc = src.create_doc(automerge::Automerge::new()).await?;
-        src_doc
-            .with_document(|doc| {
-                let mut tx = doc.transaction();
-                tx.put(automerge::ROOT, "n", 1_i64)
-                    .expect("failed writing source");
-                tx.commit();
-            })
-            .await?;
+        src_doc.with_document(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "n", 1_i64)
+                .expect("failed writing source");
+            tx.commit();
+        });
         let import_id = src_doc.document_id().clone();
         let imported_doc =
             automerge::Automerge::load(&src_doc.inner.with_document(|doc| doc.save()))
@@ -1349,14 +1342,12 @@ mod tests {
             })
             .await?;
 
-        doc_b
-            .with_document(|doc| {
-                let mut tx = doc.transaction();
-                tx.put(automerge::ROOT, "b", true)
-                    .expect("failed writing doc b");
-                tx.commit();
-            })
-            .await?;
+        doc_b.with_document(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "b", true)
+                .expect("failed writing doc b");
+            tx.commit();
+        });
         assert!(
             timeout(Duration::from_millis(200), rx.recv())
                 .await
@@ -1364,14 +1355,12 @@ mod tests {
             "doc_id filtered listener unexpectedly received doc_b event"
         );
 
-        doc_a
-            .with_document(|doc| {
-                let mut tx = doc.transaction();
-                tx.put(automerge::ROOT, "a", true)
-                    .expect("failed writing doc a");
-                tx.commit();
-            })
-            .await?;
+        doc_a.with_document(|doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "a", true)
+                .expect("failed writing doc a");
+            tx.commit();
+        });
         loop {
             let events = timeout(Duration::from_secs(2), rx.recv())
                 .await
@@ -1430,5 +1419,36 @@ mod tests {
             "local listener should ignore raw samod-originated changes"
         );
         Ok(())
+    }
+}
+
+pub struct AbortableTokioSpawn {
+    set: Arc<utils_rs::AbortableJoinSet>
+}
+impl subduction_core::connection::manager::Spawn<future_form::Sendable> for AbortableTokioSpawn{
+    fn spawn(&self, fut: BoxFuture<'static, ()>) -> futures::stream::AbortHandle {
+        let (handle, reg) = futures::stream::AbortHandle::new_pair();
+        self.set.spawn(async move {
+            let _ = futures::stream::Abortable::new(fut, reg).await;
+        }).expect("error spawning task");
+        handle
+    }
+}
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TimeoutTokio;
+
+impl subduction_core::timeout::Timeout<future_form::Sendable> for TimeoutTokio {
+    fn timeout<'a, T: 'a>(
+        &'a self,
+        dur: Duration,
+        fut: BoxFuture<'a, T>,
+    ) -> BoxFuture<'a, Result<T, subduction_core::timeout::TimedOut>> {
+        async move {
+            match tokio::time::timeout(dur, fut).await {
+                Ok(v) => Ok(v),
+                Err(_elapsed) => Err(subduction_core::timeout::TimedOut),
+            }
+        }
+        .boxed()
     }
 }

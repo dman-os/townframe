@@ -103,8 +103,8 @@ pub struct RepoCtx {
     pub big_repo: SharedBigRepo,
     big_repo_stop: std::sync::Mutex<Option<am_utils_rs::BigRepoStopToken>>,
 
-    pub doc_app: samod::DocHandle,
-    pub doc_drawer: samod::DocHandle,
+    pub doc_app: am_utils_rs::repo::BigDocHandle,
+    pub doc_drawer: am_utils_rs::repo::BigDocHandle,
 
     pub local_actor_id: automerge::ActorId,
     pub local_user_path: String,
@@ -221,6 +221,8 @@ impl RepoCtx {
             .connect_with(connect_options)
             .await
             .wrap_err("failed connecting big repo sqlite")?;
+        // FIXME: why do we need to boot the partition store outside?? you can access
+        // it aftewrards with the getter
         let (partition_events_tx, _) =
             broadcast::channel(am_utils_rs::sync::protocol::DEFAULT_SUBSCRIPTION_CAPACITY);
         let partition_forwarder_cancel = CancellationToken::new();
@@ -302,8 +304,8 @@ impl RepoCtx {
 
     async fn run_repo_init_dance(
         big_repo: &SharedBigRepo,
-        doc_app: &samod::DocHandle,
-        doc_drawer: &samod::DocHandle,
+        doc_app: &am_utils_rs::repo::BigDocHandle,
+        doc_drawer: &am_utils_rs::repo::BigDocHandle,
         local_user_path: &str,
         sql: &SqlitePool,
         blobs_root: std::path::PathBuf,

@@ -100,7 +100,7 @@ pub enum ConfigEvent {
 pub struct ConfigRepo {
     big_repo: SharedBigRepo,
     app_doc_id: DocumentId,
-    app_am_handle: samod::DocHandle,
+    app_am_handle: am_utils_rs::repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<ConfigStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     plug_repo: Arc<PlugsRepo>,
@@ -233,7 +233,7 @@ impl ConfigRepo {
             registry: Arc::clone(&registry),
             plug_repo,
             local_actor_id,
-            local_peer_id: big_repo.samod_repo().peer_id().to_string(),
+            local_peer_id: big_repo.local_peer_key(),
             sql_pool,
             cancel_token: cancel_token.clone(),
             sync_config_lock: tokio::sync::Mutex::new(()),
@@ -385,7 +385,7 @@ impl ConfigRepo {
         from: ChangeHashSet,
         to: Option<ChangeHashSet>,
     ) -> Res<Vec<ConfigEvent>> {
-        let (patches, heads) = self.app_am_handle.with_document(|am_doc| {
+        let (patches, heads) = self.app_am_handle.with_document_sync(|am_doc| {
             let heads = if let Some(ref to_set) = to {
                 to_set.clone()
             } else {
@@ -529,7 +529,7 @@ impl ConfigRepo {
             .find_doc_handle(&self.app_doc_id)
             .await?
             .ok_or_eyre("app doc not found")?;
-        let heads = handle.with_document(|doc| doc.get_heads());
+        let heads = handle.with_document_sync(|doc| doc.get_heads());
         Ok(Arc::from(heads))
     }
 
