@@ -43,6 +43,12 @@ interface capabilities {
         other(string),
     }
 
+    variant invoke-command-error {
+        bad-request(string),
+        denied(string),
+        other(string),
+    }
+
     resource doc-token-ro {
         get: func() -> doc;
     }
@@ -64,12 +70,16 @@ interface capabilities {
         heads: func() -> heads;
         update: func(patch: facet-raw) -> result<_, update-doc-error>;
     }
+
+    resource command-invoke-token {
+        invoke: func(request-json: string) -> result<string, invoke-command-error>;
+    }
 }
 
 interface facet-routine {
     use townframe:daybook-types/doc.{doc-id};
     use types.{heads};
-    use capabilities.{facet-token-ro, facet-token-rw};
+    use capabilities.{command-invoke-token, facet-token-ro, facet-token-rw};
     use sqlite-connection.{connection as sqlite-connection-token};
 
     record facet-routine-args {
@@ -81,6 +91,7 @@ interface facet-routine {
         ro-facet-tokens: list<tuple<string, facet-token-ro>>,
         rw-config-facet-tokens: list<tuple<string, facet-token-rw>>,
         ro-config-facet-tokens: list<tuple<string, facet-token-ro>>,
+        command-invoke-tokens: list<tuple<string, command-invoke-token>>,
         sqlite-connections: list<tuple<string, sqlite-connection-token>>,
     }
 

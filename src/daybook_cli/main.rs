@@ -985,6 +985,7 @@ Routine impl: {routine_impl:?}
                                     branch_path: branch_path.clone(),
                                     heads: heads.clone(),
                                     facet_key: None,
+                                    wflow_args_json: None,
                                 },
                             )
                             .await?;
@@ -1423,6 +1424,7 @@ mod lazy {
                     Arc::clone(&ctx.big_repo),
                     ctx.doc_app.document_id().clone(),
                     daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+                    ctx.sql.db_pool.clone(),
                 )
                 .await?;
                 register_shutdown(move || async move { dispatch_stop.stop().await });

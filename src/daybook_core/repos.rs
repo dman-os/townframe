@@ -32,6 +32,101 @@ pub trait Repo {
     }
 }
 
+/// Returns true when a live notification patch should be ignored by repo listeners.
+///
+/// This is intentionally only for live notification handling. Historical replay paths
+/// (for example `diff_events`) should pass `live_origin = None` and must not be skipped.
+pub fn should_skip_live_patch(
+    live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+    exclude_peer_id: Option<&str>,
+) -> bool {
+    match live_origin {
+        Some(am_utils_rs::repo::BigRepoChangeOrigin::Local) => true,
+        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
+            exclude_peer_id.is_some_and(|exclude| peer_id.to_string() == exclude)
+        }
+        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) | None => false,
+    }
+}
+
+/// Resolve event origin for versioned map updates where a `vtag` actor id is present.
+///
+/// `live_origin` is advisory for live notifications only. When absent (historical replay),
+/// we infer local-vs-nonlocal from `vtag_actor_id`.
+pub fn resolve_origin_from_vtag_actor(
+    local_actor_id: &automerge::ActorId,
+    vtag_actor_id: &automerge::ActorId,
+    live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+) -> crate::event_origin::SwitchEventOrigin {
+    match live_origin {
+        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+            crate::event_origin::SwitchEventOrigin::Bootstrap
+        }
+        Some(am_utils_rs::repo::BigRepoChangeOrigin::Local) => {
+            if vtag_actor_id == local_actor_id {
+                crate::event_origin::SwitchEventOrigin::Local {
+                    actor_id: vtag_actor_id.to_string(),
+                }
+            } else {
+                crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: "unknown".to_string(),
+                }
+            }
+        }
+        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
+            crate::event_origin::SwitchEventOrigin::Remote {
+                peer_id: peer_id.to_string(),
+            }
+        }
+        _ => crate::event_origin::SwitchEventOrigin::Remote {
+            peer_id: "unknown".to_string(),
+        },
+    }
+}
+
+/// Resolve event origin for delete patches where no `vtag` exists on the deleted entry.
+///
+/// If `live_origin` is unavailable (historical replay), optional tombstone actor can be used
+/// for local-vs-nonlocal inference; otherwise this falls back to non-local/unknown.
+pub fn resolve_origin_for_delete(
+    local_actor_id: &automerge::ActorId,
+    live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+    tombstone_actor_id: Option<&automerge::ActorId>,
+) -> crate::event_origin::SwitchEventOrigin {
+    match live_origin {
+        Some(am_utils_rs::repo::BigRepoChangeOrigin::Local) => {
+            crate::event_origin::SwitchEventOrigin::Local {
+                actor_id: local_actor_id.to_string(),
+            }
+        }
+        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
+            crate::event_origin::SwitchEventOrigin::Remote {
+                peer_id: peer_id.to_string(),
+            }
+        }
+        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+            crate::event_origin::SwitchEventOrigin::Bootstrap
+        }
+        None => {
+            if let Some(actor_id) = tombstone_actor_id {
+                if actor_id == local_actor_id {
+                    crate::event_origin::SwitchEventOrigin::Local {
+                        actor_id: actor_id.to_string(),
+                    }
+                } else {
+                    crate::event_origin::SwitchEventOrigin::Remote {
+                        peer_id: "unknown".to_string(),
+                    }
+                }
+            } else {
+                crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: "unknown".to_string(),
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SubscribeOpts {
     pub capacity: usize,

@@ -27,6 +27,7 @@ mod interlude {
 pub mod blobs;
 pub mod config;
 pub mod drawer;
+pub mod event_origin;
 pub mod imgtools;
 pub mod index;
 pub mod local_state;

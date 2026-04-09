@@ -255,6 +255,9 @@ pub struct RoutineManifest {
     pub r#impl: RoutineImpl,
     #[garde(dive)]
     pub deets: RoutineManifestDeets,
+    #[garde(skip)]
+    #[serde(default)]
+    pub command_invoke_acl: Vec<Url>,
     #[garde(dive)]
     #[serde(default)]
     pub local_state_acl: Vec<RoutineLocalStateAccess>,
@@ -313,6 +316,10 @@ impl RoutineManifest {
             } => config_facet_acl.as_slice(),
             _ => &[],
         }
+    }
+
+    pub fn command_invoke_acl(&self) -> &[Url] {
+        self.command_invoke_acl.as_slice()
     }
 }
 
@@ -447,12 +454,158 @@ pub enum ProcessorDeets {
     /// Tests `predicate` whenever a doc changes and
     /// invokes routine if it's true.
     DocProcessor {
+        #[serde(default)]
+        #[garde(dive)]
+        event_predicate: ProcessorEventPredicate,
         #[garde(dive)]
         predicate: DocPredicateClause,
+        #[serde(rename = "routineName")]
         #[garde(dive)]
         routine_name: KeyGeneric,
     },
     // PropProcessor {}
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessorEventPredicate {
+    #[serde(default)]
+    #[garde(dive)]
+    pub node_predicate: NodePredicate,
+    #[serde(default)]
+    #[garde(dive)]
+    pub doc_change_predicate: DocChangePredicate,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum NodePredicate {
+    ChangeOrigin(#[garde(dive)] ChangeOriginDeets),
+}
+
+impl Default for NodePredicate {
+    fn default() -> Self {
+        Self::ChangeOrigin(ChangeOriginDeets::Local)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeOriginDeets {
+    #[default]
+    Local,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum DocChangePredicate {
+    #[default]
+    Any,
+    Added,
+    Deleted,
+    ChangedFacetTags(#[garde(dive)] Vec<FacetTag>),
+    ChangedFacetKeys(#[garde(skip)] Vec<crate::doc::FacetKey>),
+    AddedFacetTags(#[garde(dive)] Vec<FacetTag>),
+    AddedFacetKeys(#[garde(skip)] Vec<crate::doc::FacetKey>),
+    RemovedFacetTags(#[garde(dive)] Vec<FacetTag>),
+    RemovedFacetKeys(#[garde(skip)] Vec<crate::doc::FacetKey>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocChangeKind {
+    Added,
+    Updated,
+    Deleted,
+}
+
+impl DocChangePredicate {
+    fn matches_tags(
+        tags: &[FacetTag],
+        keys: &std::collections::HashSet<crate::doc::FacetKey>,
+    ) -> bool {
+        keys.iter().any(|key| {
+            tags.iter()
+                .any(|tag| key.tag.to_string().as_str() == tag.0.as_str())
+        })
+    }
+
+    pub fn evaluate_change(
+        &self,
+        kind: DocChangeKind,
+        changed_facet_keys: Option<&std::collections::HashSet<crate::doc::FacetKey>>,
+        added_facet_keys: Option<&std::collections::HashSet<crate::doc::FacetKey>>,
+        removed_facet_keys: Option<&std::collections::HashSet<crate::doc::FacetKey>>,
+    ) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Added => kind == DocChangeKind::Added,
+            Self::Deleted => kind == DocChangeKind::Deleted,
+            Self::ChangedFacetTags(tags) => {
+                let Some(changed_facet_keys) = changed_facet_keys else {
+                    return false;
+                };
+                Self::matches_tags(tags, changed_facet_keys)
+            }
+            Self::ChangedFacetKeys(keys) => {
+                let Some(changed_facet_keys) = changed_facet_keys else {
+                    return false;
+                };
+                keys.iter().any(|key| changed_facet_keys.contains(key))
+            }
+            Self::AddedFacetTags(tags) => {
+                let Some(added_facet_keys) = added_facet_keys else {
+                    return false;
+                };
+                Self::matches_tags(tags, added_facet_keys)
+            }
+            Self::AddedFacetKeys(keys) => {
+                let Some(added_facet_keys) = added_facet_keys else {
+                    return false;
+                };
+                keys.iter().any(|key| added_facet_keys.contains(key))
+            }
+            Self::RemovedFacetTags(tags) => {
+                let Some(removed_facet_keys) = removed_facet_keys else {
+                    return false;
+                };
+                Self::matches_tags(tags, removed_facet_keys)
+            }
+            Self::RemovedFacetKeys(keys) => {
+                let Some(removed_facet_keys) = removed_facet_keys else {
+                    return false;
+                };
+                keys.iter().any(|key| removed_facet_keys.contains(key))
+            }
+        }
+    }
+
+    pub fn append_referenced_facet_scope(
+        &self,
+        read_tags: &mut std::collections::HashSet<String>,
+        read_keys: &mut std::collections::HashSet<crate::doc::FacetKey>,
+    ) {
+        match self {
+            Self::Any | Self::Added | Self::Deleted => {}
+            Self::ChangedFacetTags(tags) => {
+                read_tags.extend(tags.iter().map(|tag| tag.0.clone()));
+            }
+            Self::ChangedFacetKeys(keys) => {
+                read_keys.extend(keys.iter().cloned());
+            }
+            Self::AddedFacetTags(tags) => {
+                read_tags.extend(tags.iter().map(|tag| tag.0.clone()));
+            }
+            Self::AddedFacetKeys(keys) => {
+                read_keys.extend(keys.iter().cloned());
+            }
+            Self::RemovedFacetTags(tags) => {
+                read_tags.extend(tags.iter().map(|tag| tag.0.clone()));
+            }
+            Self::RemovedFacetKeys(keys) => {
+                read_keys.extend(keys.iter().cloned());
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -670,4 +823,112 @@ pub struct LocalStateDependencyManifest {
     pub local_state_key: KeyGeneric,
     #[garde(dive)]
     pub state_kind: LocalStateManifest,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn processor_event_predicate_defaults_to_local_any() {
+        let predicate = ProcessorEventPredicate::default();
+        assert!(matches!(
+            predicate.node_predicate,
+            NodePredicate::ChangeOrigin(ChangeOriginDeets::Local)
+        ));
+        assert!(matches!(
+            predicate.doc_change_predicate,
+            DocChangePredicate::Any
+        ));
+    }
+
+    #[test]
+    fn doc_processor_event_predicate_is_optional_in_serde() {
+        let json = serde_json::json!({
+            "desc": "x",
+            "deets": {
+                "docProcessor": {
+                    "predicate": { "hasTag": "org.example.tag" },
+                    "routineName": "routine1"
+                }
+            }
+        });
+        let manifest: ProcessorManifest = serde_json::from_value(json).expect("valid manifest");
+        let ProcessorDeets::DocProcessor {
+            event_predicate, ..
+        } = manifest.deets;
+        assert!(matches!(
+            event_predicate.node_predicate,
+            NodePredicate::ChangeOrigin(ChangeOriginDeets::Local)
+        ));
+        assert!(matches!(
+            event_predicate.doc_change_predicate,
+            DocChangePredicate::Any
+        ));
+    }
+
+    #[test]
+    fn doc_change_predicate_changed_facet_tags_evaluate_change() {
+        use std::collections::HashSet;
+
+        let changed: HashSet<crate::doc::FacetKey> = vec![
+            crate::doc::FacetKey {
+                tag: "org.example.note".into(),
+                id: "main".into(),
+            },
+            crate::doc::FacetKey {
+                tag: "org.example.todo".into(),
+                id: "1".into(),
+            },
+        ]
+        .into_iter()
+        .collect();
+
+        let pred = DocChangePredicate::ChangedFacetTags(vec!["org.example.todo".into()]);
+        assert!(pred.evaluate_change(DocChangeKind::Updated, Some(&changed), None, None));
+
+        let pred = DocChangePredicate::ChangedFacetTags(vec!["org.example.unknown".into()]);
+        assert!(!pred.evaluate_change(DocChangeKind::Updated, Some(&changed), None, None));
+    }
+
+    #[test]
+    fn doc_change_predicate_changed_facet_keys_evaluate_change() {
+        use std::collections::HashSet;
+
+        let target_key = crate::doc::FacetKey {
+            tag: "org.example.todo".into(),
+            id: "1".into(),
+        };
+        let changed: HashSet<crate::doc::FacetKey> = vec![target_key.clone()].into_iter().collect();
+
+        let pred = DocChangePredicate::ChangedFacetKeys(vec![target_key]);
+        assert!(pred.evaluate_change(DocChangeKind::Updated, Some(&changed), None, None));
+        assert!(!pred.evaluate_change(DocChangeKind::Updated, None, None, None));
+
+        let pred = DocChangePredicate::ChangedFacetKeys(vec![crate::doc::FacetKey {
+            tag: "org.example.todo".into(),
+            id: "nope".into(),
+        }]);
+        assert!(!pred.evaluate_change(DocChangeKind::Updated, Some(&changed), None, None));
+    }
+
+    #[test]
+    fn doc_change_predicate_append_referenced_facet_scope() {
+        use std::collections::HashSet;
+
+        let mut read_tags = HashSet::new();
+        let mut read_keys = HashSet::new();
+        DocChangePredicate::ChangedFacetTags(vec!["org.example.todo".into()])
+            .append_referenced_facet_scope(&mut read_tags, &mut read_keys);
+        assert!(read_tags.contains("org.example.todo"));
+        assert!(read_keys.is_empty());
+
+        let key = crate::doc::FacetKey {
+            tag: "org.example.todo".into(),
+            id: "1".into(),
+        };
+        DocChangePredicate::ChangedFacetKeys(vec![key.clone()])
+            .append_referenced_facet_scope(&mut read_tags, &mut read_keys);
+        assert!(read_keys.contains(&key));
+    }
 }

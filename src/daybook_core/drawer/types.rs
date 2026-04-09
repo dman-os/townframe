@@ -39,10 +39,33 @@ pub struct StoredBranchRef {
     pub branch_doc_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct BranchSnapshot {
+    pub branch_doc_id: String,
+    pub branch_heads: ChangeHashSet,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct BranchDeleteTombstone {
+    pub vtag: VersionTag,
+    pub branch_doc_id: String,
+    pub branch_heads: ChangeHashSet,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DocDeleteTombstone {
+    pub vtag: VersionTag,
+    pub branches: HashMap<String, BranchSnapshot>,
+}
+
 #[derive(Debug, Clone, Reconcile, Hydrate)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DocEntry {
     pub branches: HashMap<String, StoredBranchRef>,
+    pub branches_deleted: HashMap<String, Vec<BranchDeleteTombstone>>,
     // WARN: field ordering is imporant here, we want reconciliation
     // to create changes on the map before the atomic map so that changes
     // to the atmoic version increment will be always observed after the
@@ -84,6 +107,8 @@ impl DocNBranches {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DocEntryDiff {
     pub changed_facet_keys: Vec<FacetKey>,
+    pub added_facet_keys: Vec<FacetKey>,
+    pub removed_facet_keys: Vec<FacetKey>,
     pub moved_branch_names: Vec<String>,
 }
 
@@ -95,6 +120,8 @@ impl DocEntryDiff {
     ) -> Self {
         changed_facet_keys.sort();
         changed_facet_keys.dedup();
+        let added_facet_keys = Vec::new();
+        let removed_facet_keys = Vec::new();
         let mut moved_branch_names = Vec::new();
         let all_branch_names: HashSet<String> = old_entry
             .branches
@@ -113,6 +140,8 @@ impl DocEntryDiff {
 
         Self {
             changed_facet_keys,
+            added_facet_keys,
+            removed_facet_keys,
             moved_branch_names,
         }
     }
@@ -123,21 +152,26 @@ impl DocEntryDiff {
 pub enum DrawerEvent {
     ListChanged {
         drawer_heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
     },
     DocAdded {
         id: DocId,
         entry: DocNBranches,
         drawer_heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
     },
     DocUpdated {
         id: DocId,
         entry: DocNBranches,
         diff: DocEntryDiff,
         drawer_heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
     },
     DocDeleted {
         id: DocId,
         drawer_heads: ChangeHashSet,
+        deleted_facet_keys: Vec<FacetKey>,
         entry: Option<DocEntry>,
+        origin: crate::event_origin::SwitchEventOrigin,
     },
 }

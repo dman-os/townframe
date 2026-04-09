@@ -7,6 +7,7 @@ members = [
   "./src/daybook_core",
   "./src/daybook_fuse",
   "./src/daybook_ffi",
+  "./src/daybook_pdk",
   # "./src/daybook_server",
   "./src/daybook_types",
   "./src/daybook_wflows/",
@@ -14,6 +15,7 @@ members = [
   "./src/mltools/",
   "./src/pauperfuse/",
   "./src/plug_dayledger/",
+  "./src/plug_test/",
   "./src/plug_plabels/",
   "./src/test_wflows",
   "./src/utils_rs",
@@ -58,7 +60,9 @@ macros = { path = "./src/macros" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
+daybook_pdk = { path = "./src/daybook_pdk", default-features = false }
 plug_plabels = { path = "./src/plug_plabels", default-features = false }
+plug_test = { path = "./src/plug_test", default-features = false }
 mltools = { path = "./src/mltools", default-features = false }
 pauperfuse = { path = "./src/pauperfuse", default-features = false }
 wflow = { path = "./src/wflow", default-features = false }

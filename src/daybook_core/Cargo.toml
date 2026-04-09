@@ -27,6 +27,7 @@ daybook_types = { workspace = true, features = [
     "schemars",
     "manifest"
 ] }
+daybook_pdk = { workspace = true }
 mltools = { workspace = true, features = ["hf_hub", "tests"] }
 utils_rs = { workspace = true, features = ["hash", "native", "downloader"] }
 wash_plugin_mltools.workspace = true
@@ -170,3 +171,4 @@ wflow = { workspace = true, features = ["test-harness"] }
 insta = { workspace = true, features = ["json"] }
 tempfile.workspace = true
 loom.workspace = true
+plug_test = { workspace = true }

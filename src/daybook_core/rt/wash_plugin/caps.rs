@@ -1,5 +1,6 @@
 use crate::interlude::*;
 
+use daybook_pdk::{InvokeCommandAccepted, InvokeCommandRequest};
 use daybook_types::doc::ChangeHashSet;
 use daybook_types::doc::DocId;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
@@ -427,6 +428,68 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
     async fn drop(
         &mut self,
         rep: wasmtime::component::Resource<capabilities::FacetTokenRw>,
+    ) -> wasmtime::Result<()> {
+        self.table.delete(rep)?;
+        Ok(())
+    }
+}
+
+pub struct CommandInvokeToken {
+    pub parent_wflow_job_id: Arc<str>,
+    pub target_url: String,
+}
+
+impl capabilities::HostCommandInvokeToken for SharedWashCtx {
+    async fn invoke(
+        &mut self,
+        handle: wasmtime::component::Resource<capabilities::CommandInvokeToken>,
+        request_json: String,
+    ) -> wasmtime::Result<Result<String, capabilities::InvokeCommandError>> {
+        let plugin = DaybookPlugin::from_ctx(self);
+        let token = self
+            .table
+            .get(&handle)
+            .context("error locating command invoke token")
+            .to_anyhow()?;
+        let request: InvokeCommandRequest = match serde_json::from_str(&request_json) {
+            Ok(value) => value,
+            Err(err) => {
+                return Ok(Err(capabilities::InvokeCommandError::BadRequest(
+                    err.to_string(),
+                )))
+            }
+        };
+
+        let rt = match plugin.rt() {
+            Ok(rt) => rt,
+            Err(err) => {
+                return Ok(Err(capabilities::InvokeCommandError::Other(
+                    err.to_string(),
+                )))
+            }
+        };
+        let dispatch_id = match rt
+            .invoke_command_from_wflow_job(&token.parent_wflow_job_id, &token.target_url, request)
+            .await
+        {
+            Ok(dispatch_id) => dispatch_id,
+            Err(crate::rt::InvokeCommandFromWflowError::Denied(reason)) => {
+                return Ok(Err(capabilities::InvokeCommandError::Denied(reason)));
+            }
+            Err(crate::rt::InvokeCommandFromWflowError::Other(err)) => {
+                return Ok(Err(capabilities::InvokeCommandError::Other(
+                    err.to_string(),
+                )));
+            }
+        };
+        let response_json =
+            serde_json::to_string(&InvokeCommandAccepted { dispatch_id }).expect(ERROR_JSON);
+        Ok(Ok(response_json))
+    }
+
+    async fn drop(
+        &mut self,
+        rep: wasmtime::component::Resource<capabilities::CommandInvokeToken>,
     ) -> wasmtime::Result<()> {
         self.table.delete(rep)?;
         Ok(())

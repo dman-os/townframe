@@ -1,5 +1,7 @@
 mod interlude {
     pub use api_utils_rs::prelude::*;
+    pub use std::cell::Cell;
+    pub use std::rc::Rc;
 }
 
 pub mod wit {
@@ -43,6 +45,17 @@ pub enum JobErrorX {
 #[derive(Clone)]
 pub struct WflowCtx {
     pub job: types::JobCtx,
+    in_step: Rc<Cell<bool>>,
+}
+
+struct StepGuard {
+    in_step: Rc<Cell<bool>>,
+}
+
+impl Drop for StepGuard {
+    fn drop(&mut self) {
+        self.in_step.set(false);
+    }
 }
 
 pub struct Json<T>(pub T);
@@ -67,11 +80,23 @@ where
 }
 
 impl WflowCtx {
-    pub fn effect<F, O>(&self, func: F) -> Result<O, JobErrorX>
+    fn enter_step(&self, op: &'static str) -> Result<StepGuard, JobErrorX> {
+        if self.in_step.replace(true) {
+            return Err(JobErrorX::Terminal(ferr!(
+                "nested workflow step entry not allowed while executing '{op}'"
+            )));
+        }
+        Ok(StepGuard {
+            in_step: Rc::clone(&self.in_step),
+        })
+    }
+
+    pub fn effect<F, O>(&mut self, func: F) -> Result<O, JobErrorX>
     where
         F: FnOnce() -> Result<Json<O>, JobErrorX>,
         O: serde::de::DeserializeOwned + Serialize,
     {
+        let _step_guard = self.enter_step("effect")?;
         let state = host::next_step(&self.job.job_id)
             .map_err(|err| ferr!("error getting next op: {err}"))?;
         match state {
@@ -99,7 +124,8 @@ impl WflowCtx {
         }
     }
 
-    pub fn sleep(&self, duration: Duration) -> Result<(), JobErrorX> {
+    pub fn sleep(&mut self, duration: Duration) -> Result<(), JobErrorX> {
+        let _step_guard = self.enter_step("sleep")?;
         let state = host::next_step(&self.job.job_id)
             .map_err(|err| JobErrorX::Terminal(ferr!("error getting next op: {err}")))?;
         match state {
@@ -115,10 +141,11 @@ impl WflowCtx {
         }
     }
 
-    pub fn recv<O>(&self) -> Result<O, JobErrorX>
+    pub fn recv<O>(&mut self) -> Result<O, JobErrorX>
     where
         O: RecvCodec,
     {
+        let _step_guard = self.enter_step("recv")?;
         let state = host::next_step(&self.job.job_id)
             .map_err(|err| JobErrorX::Terminal(ferr!("error getting next op: {err}")))?;
         let value_json = match state {
@@ -175,16 +202,19 @@ pub fn job_error_from_x(err: JobErrorX) -> types::JobError {
 /// ```
 pub fn run_wflow<F, R>(args: types::RunArgs, handler: F) -> types::JobResult
 where
-    F: FnOnce(WflowCtx, &str, &str) -> Result<R, JobErrorX>,
+    F: FnOnce(&mut WflowCtx, &str, &str) -> Result<R, JobErrorX>,
     R: Serialize,
 {
-    let cx = WflowCtx { job: args.ctx };
+    let mut cx = WflowCtx {
+        job: args.ctx,
+        in_step: Rc::new(Cell::new(false)),
+    };
 
     // Parse args JSON
     let args_json = &args.args_json;
 
     // Call handler and convert errors
-    let result = handler(cx, &args.wflow_key, args_json).map_err(job_error_from_x);
+    let result = handler(&mut cx, &args.wflow_key, args_json).map_err(job_error_from_x);
 
     // Serialize result
     match result {
@@ -236,7 +266,7 @@ macro_rules! route_wflows {
                                     key = key
                                 )))?;
                             {
-                                let $cx_ident = cx.clone();
+                                let $cx_ident = cx;
                                 $handler
                             }
                         }

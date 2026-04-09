@@ -15,7 +15,7 @@ const LOCAL_STATE_KEY: &str = "@daybook/plabels/label-candidates-learner";
 const DOWNSIZE_MAX_SIDE: u32 = 896;
 const DOWNSIZE_JPEG_QUALITY: u8 = 80;
 
-pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
+pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 

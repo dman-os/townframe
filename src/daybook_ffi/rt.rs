@@ -92,6 +92,7 @@ impl RtFfi {
                         branch_path: daybook_types::doc::BranchPath::from(branch_path),
                         heads: daybook_types::doc::ChangeHashSet(vec![].into()),
                         facet_key: None,
+                        wflow_args_json: None,
                     },
                 )
                 .await

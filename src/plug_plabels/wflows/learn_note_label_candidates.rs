@@ -13,7 +13,7 @@ const CANDIDATE_SET_CONFIG_FACET_ID: &str = "label-candidates";
 const LOCAL_STATE_KEY: &str = "@daybook/plabels/label-candidates-learner";
 const MAX_NOTE_PROMPT_LEN: usize = 4_000;
 
-pub fn run(cx: WflowCtx) -> Result<(), JobErrorX> {
+pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 

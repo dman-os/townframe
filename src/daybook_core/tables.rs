@@ -221,11 +221,19 @@ pub struct TablesStore {
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     pub windows: HashMap<Uuid, Versioned<Window>>,
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
+    pub windows_deleted: HashMap<Uuid, Vec<VersionTag>>,
+    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     pub tables: HashMap<Uuid, Versioned<Table>>,
+    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
+    pub tables_deleted: HashMap<Uuid, Vec<VersionTag>>,
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     pub tabs: HashMap<Uuid, Versioned<Tab>>,
     #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
+    pub tabs_deleted: HashMap<Uuid, Vec<VersionTag>>,
+    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
     pub panels: HashMap<Uuid, Versioned<Panel>>,
+    #[autosurgeon(with = "autosurgeon::map_with_parseable_keys")]
+    pub panels_deleted: HashMap<Uuid, Vec<VersionTag>>,
 
     // Indices for tracking relationships (not stored in CRDT)
     #[autosurgeon(with = "am_utils_rs::codecs::skip")]
@@ -652,10 +660,16 @@ impl TablesRepo {
                             })
                             .await?;
                     }
-                    TablesEvent::WindowDeleted { id, .. } => {
+                    TablesEvent::WindowDeleted { id, heads } => {
+                        let deleted = self
+                            .load_deleted_tombstones_at_heads("windows_deleted", *id, heads)
+                            .await?;
                         self.store
                             .mutate_sync(|store| {
                                 store.windows.remove(id);
+                                if let Some(deleted) = deleted {
+                                    store.windows_deleted.insert(*id, deleted);
+                                }
                                 store.rebuild_indices();
                             })
                             .await?;
@@ -685,10 +699,16 @@ impl TablesRepo {
                             })
                             .await?;
                     }
-                    TablesEvent::TabDeleted { id, .. } => {
+                    TablesEvent::TabDeleted { id, heads } => {
+                        let deleted = self
+                            .load_deleted_tombstones_at_heads("tabs_deleted", *id, heads)
+                            .await?;
                         self.store
                             .mutate_sync(|store| {
                                 store.tabs.remove(id);
+                                if let Some(deleted) = deleted {
+                                    store.tabs_deleted.insert(*id, deleted);
+                                }
                                 store.rebuild_indices();
                             })
                             .await?;
@@ -719,10 +739,16 @@ impl TablesRepo {
                             })
                             .await?;
                     }
-                    TablesEvent::PanelDeleted { id, .. } => {
+                    TablesEvent::PanelDeleted { id, heads } => {
+                        let deleted = self
+                            .load_deleted_tombstones_at_heads("panels_deleted", *id, heads)
+                            .await?;
                         self.store
                             .mutate_sync(|store| {
                                 store.panels.remove(id);
+                                if let Some(deleted) = deleted {
+                                    store.panels_deleted.insert(*id, deleted);
+                                }
                                 store.rebuild_indices();
                             })
                             .await?;
@@ -753,10 +779,16 @@ impl TablesRepo {
                             })
                             .await?;
                     }
-                    TablesEvent::TableDeleted { id, .. } => {
+                    TablesEvent::TableDeleted { id, heads } => {
+                        let deleted = self
+                            .load_deleted_tombstones_at_heads("tables_deleted", *id, heads)
+                            .await?;
                         self.store
                             .mutate_sync(|store| {
                                 store.tables.remove(id);
+                                if let Some(deleted) = deleted {
+                                    store.tables_deleted.insert(*id, deleted);
+                                }
                                 store.rebuild_indices();
                             })
                             .await?;
@@ -769,6 +801,27 @@ impl TablesRepo {
             }
         }
         Ok(())
+    }
+
+    async fn load_deleted_tombstones_at_heads(
+        &self,
+        deleted_collection: &'static str,
+        item_id: Uuid,
+        heads: &ChangeHashSet,
+    ) -> Res<Option<Vec<VersionTag>>> {
+        self.big_repo
+            .hydrate_path_at_heads::<Vec<VersionTag>>(
+                &self.app_doc_id,
+                &heads.0,
+                automerge::ROOT,
+                vec![
+                    TablesStore::prop().into(),
+                    deleted_collection.into(),
+                    autosurgeon::Prop::Key(item_id.to_string().into()),
+                ],
+            )
+            .await
+            .map(|value| value.map(|(deleted, _)| deleted))
     }
 
     pub async fn diff_events(
@@ -790,6 +843,7 @@ impl TablesRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
+            // Replay path: do not apply live-origin filtering.
             self.events_for_patch(&patch, &heads, &mut events, None, None)
                 .await?;
         }
@@ -801,21 +855,11 @@ impl TablesRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<TablesEvent>,
-        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer: Option<&str>,
+        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer_id: Option<&str>,
     ) -> Res<()> {
-        if let Some(origin) = origin {
-            match origin {
-                am_utils_rs::repo::BigRepoChangeOrigin::Local => return Ok(()),
-                am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. } => {
-                    if let Some(exclude_peer) = exclude_peer {
-                        if peer_id.to_string() == exclude_peer {
-                            return Ok(());
-                        }
-                    }
-                }
-                am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap => {}
-            }
+        if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id) {
+            return Ok(());
         }
         let heads = ChangeHashSet(Arc::clone(patch_heads));
         match &patch.action {
@@ -1506,10 +1550,20 @@ impl TablesRepo {
                 let window_id = store.tab_to_window.get(&tab_id).copied();
 
                 // Remove the tab
+                store
+                    .tabs_deleted
+                    .entry(tab_id)
+                    .or_default()
+                    .push(VersionTag::update(self.local_actor_id.clone()));
                 store.tabs.remove(&tab_id);
 
                 // Remove all panels in this tab
                 for panel_id in panel_ids {
+                    store
+                        .panels_deleted
+                        .entry(panel_id)
+                        .or_default()
+                        .push(VersionTag::update(self.local_actor_id.clone()));
                     store.panels.remove(&panel_id);
                     store.panel_to_tab.remove(&panel_id);
                 }

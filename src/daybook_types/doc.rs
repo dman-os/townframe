@@ -24,6 +24,9 @@ pub struct FacetMeta {
     pub uuid: Vec<Uuid>,
     // NOTE: field oredring is important for reconcilation order
     pub updated_at: Vec<Timestamp>,
+    // Tombstone history; non-empty means facet is currently inactive.
+    #[serde(default)]
+    pub deleted_at: Vec<Timestamp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]

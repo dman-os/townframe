@@ -17,6 +17,7 @@ mod binds_guest {
             "townframe:daybook/capabilities.doc-token-rw": super::caps::DocTokenRw,
             "townframe:daybook/capabilities.facet-token-ro": super::caps::FacetTokenRo,
             "townframe:daybook/capabilities.facet-token-rw": super::caps::FacetTokenRw,
+            "townframe:daybook/capabilities.command-invoke-token": super::caps::CommandInvokeToken,
             "townframe:daybook/sqlite-connection.connection": super::local_state_sql::SqliteConnectionToken,
         }
     });
@@ -124,6 +125,11 @@ mod binds_guest {
                                     created_at: meta.created_at.into(),
                                     updated_at: meta
                                         .updated_at
+                                        .into_iter()
+                                        .map(Into::into)
+                                        .collect(),
+                                    deleted_at: meta
+                                        .deleted_at
                                         .into_iter()
                                         .map(Into::into)
                                         .collect(),
@@ -263,6 +269,11 @@ mod binds_guest {
                                         .into_iter()
                                         .map(|dt| Timestamp::from_second(dt.seconds as i64))
                                         .collect::<Result<_, _>>()?,
+                                    deleted_at: facet_meta
+                                        .deleted_at
+                                        .into_iter()
+                                        .map(|dt| Timestamp::from_second(dt.seconds as i64))
+                                        .collect::<Result<_, _>>()?,
                                     uuid: facet_meta
                                         .uuid
                                         .into_iter()
@@ -333,6 +344,7 @@ pub struct DaybookPlugin {
     sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     config_repo: Arc<crate::config::ConfigRepo>,
     plugs_repo: Arc<crate::plugs::PlugsRepo>,
+    rt: RwLock<Option<std::sync::Weak<crate::rt::Rt>>>,
 }
 
 impl DaybookPlugin {
@@ -351,6 +363,7 @@ impl DaybookPlugin {
             sqlite_local_state_repo,
             config_repo,
             plugs_repo,
+            rt: default(),
         }
     }
 
@@ -382,6 +395,23 @@ impl DaybookPlugin {
         self.drawer_repo
             .update_at_heads(patch, branch_path, heads)
             .await
+    }
+
+    pub fn attach_rt(&self, rt: std::sync::Weak<crate::rt::Rt>) {
+        let mut rt_slot = self.rt.write().expect(ERROR_MUTEX);
+        *rt_slot = Some(rt);
+    }
+
+    fn rt(&self) -> Res<Arc<crate::rt::Rt>> {
+        let weak = self
+            .rt
+            .read()
+            .expect(ERROR_MUTEX)
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| ferr!("daybook runtime not attached to plugin"))?;
+        weak.upgrade()
+            .ok_or_else(|| ferr!("daybook runtime is no longer available"))
     }
 }
 
@@ -608,6 +638,8 @@ impl facet_routine::Host for SharedWashCtx {
             facet_acl,
             config_facet_acl,
             local_state_acl,
+            command_invoke_acl_snapshot,
+            wflow_args_json: _,
         }) = &dispatch.args;
         let ActiveDispatchDeets::Wflow { plug_id, .. } = &dispatch.deets;
         // Use staging branch path from dispatch (already set when job was created)
@@ -633,6 +665,10 @@ impl facet_routine::Host for SharedWashCtx {
         let mut ro_config_facet_tokens: Vec<(
             String,
             wasmtime::component::Resource<capabilities::FacetTokenRo>,
+        )> = Vec::new();
+        let mut command_invoke_tokens: Vec<(
+            String,
+            wasmtime::component::Resource<capabilities::CommandInvokeToken>,
         )> = Vec::new();
 
         for access in facet_acl {
@@ -754,6 +790,14 @@ impl facet_routine::Host for SharedWashCtx {
             ));
         }
 
+        for target_url in command_invoke_acl_snapshot {
+            let token = self.table.push(caps::CommandInvokeToken {
+                parent_wflow_job_id: Arc::clone(&job_id),
+                target_url: target_url.to_string(),
+            })?;
+            command_invoke_tokens.push((target_url.to_string(), token));
+        }
+
         Ok(facet_routine::FacetRoutineArgs {
             doc_id: doc_id.clone(),
             heads: am_utils_rs::serialize_commit_heads(heads.as_ref()),
@@ -762,6 +806,7 @@ impl facet_routine::Host for SharedWashCtx {
             ro_facet_tokens,
             rw_config_facet_tokens,
             ro_config_facet_tokens,
+            command_invoke_tokens,
             sqlite_connections,
         })
     }

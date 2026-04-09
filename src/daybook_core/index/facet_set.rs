@@ -383,6 +383,7 @@ impl crate::rt::switch::SwitchSink for FacetSetTriageListener {
                 id,
                 entry,
                 drawer_heads,
+                ..
             } => {
                 let Some(heads) = entry.branches.get("main") else {
                     return Ok(outcome);

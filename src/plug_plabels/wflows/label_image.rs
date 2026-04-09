@@ -8,7 +8,7 @@ const IMAGE_LABEL_ALGORITHM_TAG: &str = "label-image/embed-gauntlet-nomic-v1";
 const LOCAL_STATE_KEY: &str = "@daybook/plabels/label-classifier";
 const CANDIDATE_SET_ID: &str = "label-candidates";
 
-pub fn run(cx: WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
+pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
@@ -58,7 +58,7 @@ pub fn run(cx: WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
             wflow_sdk::JobErrorX::Terminal(err.wrap_err("input facet is not embedding"))
         })? {
         WellKnownFacet::Embedding(value) => value,
-        _ => unreachable!(),
+        _ => unreachable!("embedding tag must parse as embedding facet"),
     };
 
     if embedding.dtype != daybook_types::doc::EmbeddingDtype::F32 || embedding.compression.is_some()

@@ -6,30 +6,129 @@ use crate::drawer::DrawerEvent;
 use crate::plugs::PlugsEvent;
 use crate::rt::dispatch::DispatchEvent;
 use crate::rt::Rt;
+use am_utils_rs::sync::protocol::{PartitionDocEvent, PartitionDocEventDeets};
 use daybook_types::doc::BranchPath;
-use daybook_types::doc::{Doc, DocId, FacetKey};
+use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
 use daybook_types::manifest::{
     DocPredicateEvalMode, DocPredicateEvalRequirement, DocPredicateEvalResolved,
 };
+use sqlx::Row;
 
 const SUBSCRIPTION_CAPACITY: usize = 256;
 
-#[derive(Default, Debug, Reconcile, Hydrate, Serialize, Deserialize)]
-pub struct SwitchStateStore {
-    pub drawer_heads: Option<ChangeHashSet>,
-    pub plug_heads: Option<ChangeHashSet>,
-    pub dispatch_heads: Option<ChangeHashSet>,
-    pub config_heads: Option<ChangeHashSet>,
-
-    pub dispatch_to_job: HashMap<String, (DocId, String, String)>,
-    pub job_to_dispatch: HashMap<String, String>,
+#[derive(Debug, Clone)]
+struct SwitchDocState {
+    doc_id: DocId,
+    branch_name: String,
+    present: bool,
+    last_heads: Option<ChangeHashSet>,
 }
 
-#[async_trait]
-impl crate::stores::AmStore for SwitchStateStore {
-    fn prop() -> Cow<'static, str> {
-        "switch".into()
+#[derive(Debug, Clone)]
+struct BranchRef {
+    doc_id: DocId,
+    branch_name: String,
+}
+
+#[derive(Clone)]
+pub struct SwitchStore {
+    db_pool: sqlx::SqlitePool,
+}
+
+impl SwitchStore {
+    async fn load(db_pool: sqlx::SqlitePool) -> Res<Self> {
+        init_schema(&db_pool).await?;
+        Ok(Self { db_pool })
     }
+
+    async fn get_partition_cursor(&self, partition_id: &str) -> Res<u64> {
+        let row = sqlx::query("SELECT cursor FROM switch_partition_cursor WHERE partition_id = ?1")
+            .bind(partition_id)
+            .fetch_optional(&self.db_pool)
+            .await?;
+        Ok(row
+            .map(|rowv| rowv.get::<i64, _>("cursor"))
+            .unwrap_or_default()
+            .max(0) as u64)
+    }
+
+    async fn commit_partition_event(
+        &self,
+        partition_id: &str,
+        cursor: u64,
+        branch_doc_id: Option<&str>,
+        state: Option<&SwitchDocState>,
+    ) -> Res<()> {
+        let mut tx = self.db_pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO switch_partition_cursor(partition_id, cursor, updated_at)\n             VALUES (?1, ?2, unixepoch())\n             ON CONFLICT(partition_id) DO UPDATE SET\n                 cursor = excluded.cursor,\n                 updated_at = excluded.updated_at",
+        )
+        .bind(partition_id)
+        .bind(i64::try_from(cursor).expect("cursor exceeds sqlite INTEGER range"))
+        .execute(&mut *tx)
+        .await?;
+        if let (Some(branch_doc_id), Some(state)) = (branch_doc_id, state) {
+            let heads_json = state.last_heads.as_ref().map(|heads| {
+                serde_json::to_string(&am_utils_rs::serialize_commit_heads(heads.as_ref()))
+                    .expect(ERROR_JSON)
+            });
+            sqlx::query(
+                "INSERT INTO switch_doc_state(branch_doc_id, doc_id, branch_name, present, last_heads_json, updated_at)\n                 VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())\n                 ON CONFLICT(branch_doc_id) DO UPDATE SET\n                     doc_id = excluded.doc_id,\n                     branch_name = excluded.branch_name,\n                     present = excluded.present,\n                     last_heads_json = excluded.last_heads_json,\n                     updated_at = excluded.updated_at",
+            )
+            .bind(branch_doc_id)
+            .bind(state.doc_id.to_string())
+            .bind(&state.branch_name)
+            .bind(if state.present { 1_i64 } else { 0_i64 })
+            .bind(heads_json)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn get_doc_state_by_branch_doc_id(
+        &self,
+        branch_doc_id: &str,
+    ) -> Res<Option<SwitchDocState>> {
+        let row = sqlx::query(
+            "SELECT doc_id, branch_name, present, last_heads_json FROM switch_doc_state WHERE branch_doc_id = ?1",
+        )
+        .bind(branch_doc_id)
+        .fetch_optional(&self.db_pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let heads_json: Option<String> = row.get("last_heads_json");
+        let last_heads = match heads_json {
+            Some(json) => {
+                let raw: Vec<String> = serde_json::from_str(&json)?;
+                Some(ChangeHashSet(am_utils_rs::parse_commit_heads(&raw)?))
+            }
+            None => None,
+        };
+        Ok(Some(SwitchDocState {
+            doc_id: DocId::from(row.get::<String, _>("doc_id")),
+            branch_name: row.get("branch_name"),
+            present: row.get::<i64, _>("present") != 0,
+            last_heads,
+        }))
+    }
+}
+
+async fn init_schema(db_pool: &sqlx::SqlitePool) -> Res<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS switch_partition_cursor (\n             partition_id TEXT PRIMARY KEY,\n             cursor INTEGER NOT NULL,\n             updated_at INTEGER NOT NULL\n         )",
+    )
+    .execute(db_pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS switch_doc_state (\n             branch_doc_id TEXT PRIMARY KEY,\n             doc_id TEXT NOT NULL,\n             branch_name TEXT NOT NULL,\n             present INTEGER NOT NULL,\n             last_heads_json TEXT,\n             updated_at INTEGER NOT NULL\n         )",
+    )
+    .execute(db_pool)
+    .await?;
+    Ok(())
 }
 
 /// Worker that listens to drawer events and schedules workflows
@@ -88,7 +187,7 @@ pub struct SwitchSinkOutcome {
 pub struct SwitchSinkCtx<'a> {
     // FIXME: why are these optional?
     pub rt: Option<&'a Arc<Rt>>,
-    pub store: Option<&'a crate::stores::AmStoreHandle<SwitchStateStore>>,
+    pub store: Option<&'a SwitchStore>,
 }
 
 #[async_trait]
@@ -117,15 +216,9 @@ pub async fn spawn_switch_worker(
     sinks: BTreeMap<String, Box<dyn SwitchSink + Send + Sync>>,
 ) -> Res<SwitchWorkerHandle> {
     use crate::repos::{Repo, SubscribeOpts};
-    use crate::stores::AmStore;
 
-    let store = SwitchStateStore::load(&rt.big_repo, &app_doc_id).await?;
-    let store = crate::stores::AmStoreHandle::new(
-        store,
-        Arc::clone(&rt.big_repo),
-        app_doc_id.clone(),
-        rt.local_actor_id.clone(),
-    );
+    let _app_doc_id = app_doc_id;
+    let store = SwitchStore::load(rt.big_repo.state_pool().clone()).await?;
 
     let drawer_listener = rt
         .drawer
@@ -146,6 +239,7 @@ pub async fn spawn_switch_worker(
         prepared_sinks: prepare_sinks(sinks),
         predicate_requirements: HashSet::new(),
         predicate_resolved: HashMap::new(),
+        branch_index: HashMap::new(),
     };
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -154,6 +248,7 @@ pub async fn spawn_switch_worker(
         let cancel_token = cancel_token.clone();
         let rt_cancel_token = rt_cancel_token.clone();
         async move {
+            worker.refresh_branch_index().await?;
             let events = worker.rt.plugs_repo.events_for_init().await?;
             for event in events {
                 let event = Arc::new(event);
@@ -167,6 +262,9 @@ pub async fn spawn_switch_worker(
 
             let events = worker.rt.drawer.events_for_init().await?;
             for event in events {
+                if !matches!(event, DrawerEvent::ListChanged { .. }) {
+                    continue;
+                }
                 let event = Arc::new(event);
                 worker
                     .track_event_heads(&SwitchEvent::Drawer(Arc::clone(&event)))
@@ -197,6 +295,21 @@ pub async fn spawn_switch_worker(
                     .dispatch_to_listeners(&SwitchEvent::Config(event))
                     .await?;
             }
+
+            let docs_partition_id = worker.rt.drawer.replicated_partition_id();
+            let mut cursor = worker
+                .store
+                .get_partition_cursor(&docs_partition_id)
+                .await?;
+            let mut partition_listener = worker
+                .rt
+                .big_repo
+                .subscribe_partition_doc_events_local(
+                    &docs_partition_id,
+                    Some(cursor),
+                    SUBSCRIPTION_CAPACITY,
+                )
+                .await?;
 
             loop {
                 tokio::select! {
@@ -259,20 +372,50 @@ pub async fn spawn_switch_worker(
                                 break;
                             }
                         };
-                        if let Err(error) = worker.track_event_heads(&SwitchEvent::Drawer(Arc::clone(&event))).await {
-                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
-                                debug!(?error, "SwitchWorker exiting during shutdown");
-                                break;
+                        if matches!(&*event, DrawerEvent::ListChanged { .. }) {
+                            if let Err(error) = worker.track_event_heads(&SwitchEvent::Drawer(Arc::clone(&event))).await {
+                                if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
+                                    debug!(?error, "SwitchWorker exiting during shutdown");
+                                    break;
+                                }
+                                return Err(error);
                             }
-                            return Err(error);
-                        }
-                        if let Err(error) = worker.dispatch_to_listeners(&SwitchEvent::Drawer(event)).await {
-                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
-                                debug!(?error, "SwitchWorker exiting during shutdown");
-                                break;
+                            if let Err(error) = worker.dispatch_to_listeners(&SwitchEvent::Drawer(event)).await {
+                                if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
+                                    debug!(?error, "SwitchWorker exiting during shutdown");
+                                    break;
+                                }
+                                return Err(error);
                             }
-                            return Err(error);
+                            if let Err(error) = worker.refresh_branch_index().await {
+                                if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
+                                    debug!(?error, "SwitchWorker exiting during shutdown");
+                                    break;
+                                }
+                                return Err(error);
+                            }
                         }
+                    }
+                    doc_evt = partition_listener.recv() => {
+                        let Some(doc_evt) = doc_evt else {
+                            break;
+                        };
+                        if doc_evt.cursor <= cursor {
+                            continue;
+                        }
+                        let commit = worker.handle_partition_doc_event(&doc_evt).await?;
+                        cursor = doc_evt.cursor;
+                        worker
+                            .store
+                            .commit_partition_event(
+                                &docs_partition_id,
+                                cursor,
+                                commit
+                                    .as_ref()
+                                    .map(|(branch_doc_id, _)| branch_doc_id.as_str()),
+                                commit.as_ref().map(|(_, state)| state),
+                            )
+                            .await?;
                     }
                     event = dispatch_listener.recv_lossy_async() => {
                         let event = match event {
@@ -342,13 +485,259 @@ fn prepare_sinks(
 
 struct SwitchWorker {
     rt: Arc<Rt>,
-    store: crate::stores::AmStoreHandle<SwitchStateStore>,
+    store: SwitchStore,
     prepared_sinks: Vec<PreparedSwitchSink>,
     predicate_requirements: HashSet<DocPredicateEvalRequirement>,
     predicate_resolved: HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
+    branch_index: HashMap<String, BranchRef>,
 }
 
 impl SwitchWorker {
+    async fn refresh_branch_index(&mut self) -> Res<()> {
+        let (_, doc_ids) = self.rt.drawer.list_just_ids().await?;
+        let mut out = HashMap::new();
+        for raw_doc_id in doc_ids {
+            let doc_id = DocId::from(raw_doc_id);
+            let Some(entry) = self.rt.drawer.get_entry(&doc_id).await? else {
+                continue;
+            };
+            for (branch_name, branch_ref) in entry.branches {
+                out.insert(
+                    branch_ref.branch_doc_id,
+                    BranchRef {
+                        doc_id: doc_id.clone(),
+                        branch_name,
+                    },
+                );
+            }
+        }
+        self.branch_index = out;
+        Ok(())
+    }
+
+    async fn resolve_branch_ref(&mut self, branch_doc_id: &str) -> Res<Option<BranchRef>> {
+        if let Some(found) = self.branch_index.get(branch_doc_id) {
+            return Ok(Some(found.clone()));
+        }
+        self.refresh_branch_index().await?;
+        Ok(self.branch_index.get(branch_doc_id).cloned())
+    }
+
+    async fn handle_partition_doc_event(
+        &mut self,
+        event: &PartitionDocEvent,
+    ) -> Res<Option<(String, SwitchDocState)>> {
+        let branch_doc_id = match &event.deets {
+            PartitionDocEventDeets::ItemChanged { item_id, .. }
+            | PartitionDocEventDeets::ItemDeleted { item_id, .. } => item_id.clone(),
+        };
+        let stored_state = self
+            .store
+            .get_doc_state_by_branch_doc_id(&branch_doc_id)
+            .await?;
+        let resolved_branch = self.resolve_branch_ref(&branch_doc_id).await?;
+        let (doc_id, branch_name) = if let Some(branch) = resolved_branch {
+            (branch.doc_id, branch.branch_name)
+        } else if let Some(state) = &stored_state {
+            (state.doc_id.clone(), state.branch_name.clone())
+        } else {
+            return Ok(None);
+        };
+        if branch_name != "main" {
+            return Ok(None);
+        }
+        let mut next_state = stored_state.unwrap_or(SwitchDocState {
+            doc_id: doc_id.clone(),
+            branch_name: branch_name.clone(),
+            present: false,
+            last_heads: None,
+        });
+        next_state.doc_id = doc_id.clone();
+        next_state.branch_name = branch_name.clone();
+
+        match &event.deets {
+            PartitionDocEventDeets::ItemChanged { .. } => {
+                let Some((_, new_heads)) = self
+                    .rt
+                    .drawer
+                    .get_with_heads(&doc_id, &BranchPath::from("main"), None)
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                let prev_heads = next_state.last_heads.clone();
+                if next_state.present && prev_heads.as_ref() == Some(&new_heads) {
+                    return Ok(Some((branch_doc_id, next_state)));
+                }
+                let (diff, origin, deleted_facet_keys) = self
+                    .compute_partition_doc_diff(&doc_id, prev_heads.as_ref(), Some(&new_heads))
+                    .await?;
+                let entry = self
+                    .rt
+                    .drawer
+                    .get_doc_branches(&doc_id)
+                    .await?
+                    .ok_or_else(|| ferr!("missing drawer branches for {}", doc_id))?;
+                let evt = if !next_state.present {
+                    DrawerEvent::DocAdded {
+                        id: doc_id.clone(),
+                        entry,
+                        drawer_heads: ChangeHashSet::default(),
+                        origin,
+                    }
+                } else {
+                    DrawerEvent::DocUpdated {
+                        id: doc_id.clone(),
+                        entry,
+                        diff,
+                        drawer_heads: ChangeHashSet::default(),
+                        origin,
+                    }
+                };
+                let evt = Arc::new(evt);
+                self.track_event_heads(&SwitchEvent::Drawer(Arc::clone(&evt)))
+                    .await?;
+                self.dispatch_to_listeners(&SwitchEvent::Drawer(evt))
+                    .await?;
+                next_state.present = true;
+                next_state.last_heads = Some(new_heads);
+                let _ = deleted_facet_keys;
+            }
+            PartitionDocEventDeets::ItemDeleted { .. } => {
+                if !next_state.present {
+                    return Ok(Some((branch_doc_id, next_state)));
+                }
+                let (diff, origin, deleted_facet_keys) = self
+                    .compute_partition_doc_diff(&doc_id, next_state.last_heads.as_ref(), None)
+                    .await?;
+                let evt = Arc::new(DrawerEvent::DocDeleted {
+                    id: doc_id.clone(),
+                    deleted_facet_keys,
+                    entry: self.rt.drawer.get_entry(&doc_id).await?,
+                    drawer_heads: ChangeHashSet::default(),
+                    origin,
+                });
+                self.track_event_heads(&SwitchEvent::Drawer(Arc::clone(&evt)))
+                    .await?;
+                self.dispatch_to_listeners(&SwitchEvent::Drawer(evt))
+                    .await?;
+                let _ = diff;
+                next_state.present = false;
+                next_state.last_heads = None;
+            }
+        }
+        Ok(Some((branch_doc_id, next_state)))
+    }
+
+    async fn compute_partition_doc_diff(
+        &self,
+        doc_id: &DocId,
+        prev_heads: Option<&ChangeHashSet>,
+        next_heads: Option<&ChangeHashSet>,
+    ) -> Res<(
+        crate::drawer::DocEntryDiff,
+        crate::event_origin::SwitchEventOrigin,
+        Vec<FacetKey>,
+    )> {
+        let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
+        let (old_keys, old_updated_at) = if let Some(heads) = prev_heads {
+            if let Some(doc) = self
+                .rt
+                .drawer
+                .get_doc_with_facets_at_heads(doc_id, heads, Some(vec![dmeta_key.clone()]))
+                .await?
+            {
+                if let Some(dmeta_raw) = doc.facets.get(&dmeta_key) {
+                    let dmeta = match serde_json::from_value::<WellKnownFacet>(dmeta_raw.clone())? {
+                        WellKnownFacet::Dmeta(dmeta) => dmeta,
+                        other => eyre::bail!("expected dmeta facet, got {:?}", other.tag()),
+                    };
+                    let mut keys = HashSet::new();
+                    let mut updated_at = HashMap::new();
+                    for (key, meta) in dmeta.facets {
+                        if key == dmeta_key {
+                            continue;
+                        }
+                        if !meta.deleted_at.is_empty() {
+                            continue;
+                        }
+                        keys.insert(key.clone());
+                        updated_at.insert(key, meta.updated_at);
+                    }
+                    (keys, updated_at)
+                } else {
+                    (HashSet::new(), HashMap::new())
+                }
+            } else {
+                (HashSet::new(), HashMap::new())
+            }
+        } else {
+            (HashSet::new(), HashMap::new())
+        };
+        let (new_keys, new_updated_at) = if let Some(heads) = next_heads {
+            if let Some(doc) = self
+                .rt
+                .drawer
+                .get_doc_with_facets_at_heads(doc_id, heads, Some(vec![dmeta_key.clone()]))
+                .await?
+            {
+                if let Some(dmeta_raw) = doc.facets.get(&dmeta_key) {
+                    let dmeta = match serde_json::from_value::<WellKnownFacet>(dmeta_raw.clone())? {
+                        WellKnownFacet::Dmeta(dmeta) => dmeta,
+                        other => eyre::bail!("expected dmeta facet, got {:?}", other.tag()),
+                    };
+                    let mut keys = HashSet::new();
+                    let mut updated_at = HashMap::new();
+                    for (key, meta) in dmeta.facets {
+                        if key == dmeta_key {
+                            continue;
+                        }
+                        if !meta.deleted_at.is_empty() {
+                            continue;
+                        }
+                        keys.insert(key.clone());
+                        updated_at.insert(key, meta.updated_at);
+                    }
+                    (keys, updated_at)
+                } else {
+                    (HashSet::new(), HashMap::new())
+                }
+            } else {
+                (HashSet::new(), HashMap::new())
+            }
+        } else {
+            (HashSet::new(), HashMap::new())
+        };
+        let mut added: Vec<FacetKey> = new_keys.difference(&old_keys).cloned().collect();
+        let mut removed: Vec<FacetKey> = old_keys.difference(&new_keys).cloned().collect();
+        let mut changed = Vec::new();
+        if prev_heads.is_some() && next_heads.is_some() {
+            for key in old_keys.intersection(&new_keys) {
+                if old_updated_at.get(key) != new_updated_at.get(key) {
+                    changed.push(key.clone());
+                }
+            }
+        }
+        added.sort();
+        removed.sort();
+        changed.sort();
+        // Partition events do not encode authoritative local/remote intent at processor granularity.
+        // Keep origin neutral here; processor-locality is evaluated later during triage.
+        let origin = crate::event_origin::SwitchEventOrigin::Remote {
+            peer_id: "partition".into(),
+        };
+        Ok((
+            crate::drawer::DocEntryDiff {
+                changed_facet_keys: changed,
+                added_facet_keys: added,
+                removed_facet_keys: removed.clone(),
+                moved_branch_names: vec!["main".to_string()],
+            },
+            origin,
+            removed,
+        ))
+    }
+
     #[tracing::instrument(skip(self, event))]
     async fn dispatch_to_listeners(&mut self, event: &SwitchEvent) -> Res<()> {
         for index in 0..self.prepared_sinks.len() {
@@ -432,11 +821,31 @@ impl SwitchWorker {
         };
         match &**event {
             DrawerEvent::ListChanged { .. } => Ok(true),
-            DrawerEvent::DocDeleted { .. } => Ok(true),
+            DrawerEvent::DocDeleted {
+                id,
+                deleted_facet_keys,
+                ..
+            } => {
+                let deleted_set: HashSet<FacetKey> = deleted_facet_keys.iter().cloned().collect();
+                let meta_doc = facet_keys_set_to_meta_doc(id, &deleted_set);
+                self.predicate_requirements.clear();
+                predicate.append_requirements(&mut self.predicate_requirements);
+                resolve_meta_predicate_requirements(
+                    &self.predicate_requirements,
+                    &meta_doc,
+                    &mut self.predicate_resolved,
+                );
+                Ok(predicate.evaluate(
+                    &meta_doc,
+                    DocPredicateEvalMode::ApproxInterest,
+                    &self.predicate_resolved,
+                ))
+            }
             DrawerEvent::DocAdded {
                 id,
                 entry,
                 drawer_heads,
+                ..
             } => {
                 let Some(heads) = entry.branches.get("main") else {
                     return Ok(false);
@@ -479,7 +888,14 @@ impl SwitchWorker {
                     return Ok(false);
                 }
                 let referenced_tags = predicate.referenced_tags();
-                if !diff.changed_facet_keys.iter().any(|facet_key| {
+                let union_changed: HashSet<FacetKey> = diff
+                    .changed_facet_keys
+                    .iter()
+                    .cloned()
+                    .chain(diff.added_facet_keys.iter().cloned())
+                    .chain(diff.removed_facet_keys.iter().cloned())
+                    .collect();
+                if !union_changed.iter().any(|facet_key| {
                     referenced_tags
                         .iter()
                         .any(|tag| tag.0 == facet_key.tag.to_string())
@@ -516,59 +932,7 @@ impl SwitchWorker {
     }
 
     async fn track_event_heads(&self, event: &SwitchEvent) -> Res<()> {
-        match event {
-            SwitchEvent::Drawer(event) => {
-                let drawer_heads = match &**event {
-                    DrawerEvent::ListChanged { drawer_heads } => drawer_heads.clone(),
-                    DrawerEvent::DocAdded { drawer_heads, .. } => drawer_heads.clone(),
-                    DrawerEvent::DocUpdated { drawer_heads, .. } => drawer_heads.clone(),
-                    DrawerEvent::DocDeleted { drawer_heads, .. } => drawer_heads.clone(),
-                };
-                self.store
-                    .mutate_sync(|store| {
-                        store.drawer_heads = Some(drawer_heads);
-                    })
-                    .await?;
-            }
-            SwitchEvent::Plugs(event) => {
-                let plug_heads = match &**event {
-                    PlugsEvent::PlugAdded { heads, .. } => heads.clone(),
-                    PlugsEvent::PlugChanged { heads, .. } => heads.clone(),
-                    PlugsEvent::PlugDeleted { heads, .. } => heads.clone(),
-                    PlugsEvent::ConfigDocsChanged { heads } => heads.clone(),
-                };
-                self.store
-                    .mutate_sync(|store| {
-                        store.plug_heads = Some(plug_heads);
-                    })
-                    .await?;
-            }
-            SwitchEvent::Dispatch(event) => {
-                let dispatch_heads = match &**event {
-                    DispatchEvent::DispatchAdded { heads, .. } => heads.clone(),
-                    DispatchEvent::DispatchUpdated { heads, .. } => heads.clone(),
-                    DispatchEvent::DispatchDeleted { heads, .. } => heads.clone(),
-                };
-                self.store
-                    .mutate_sync(|store| {
-                        store.dispatch_heads = Some(dispatch_heads);
-                    })
-                    .await?;
-            }
-            SwitchEvent::Config(event) => {
-                let config_heads = match &**event {
-                    crate::config::ConfigEvent::Changed { heads } => Some(heads.clone()),
-                    crate::config::ConfigEvent::SyncDevicesChanged => None,
-                };
-                self.store
-                    .mutate_sync(|store| {
-                        if let Some(config_heads) = config_heads {
-                            store.config_heads = Some(config_heads);
-                        }
-                    })
-                    .await?;
-            }
-        }
+        let _ = event;
         Ok(())
     }
 }
@@ -591,6 +955,53 @@ mod tests {
     use crate::rt::dispatch::ActiveDispatch;
     use daybook_types::doc::{AddDocArgs, DocPatch, WellKnownFacetTag};
     use std::sync::{Arc as StdArc, Mutex};
+
+    async fn test_switch_store() -> Res<SwitchStore> {
+        let sqlite_url = "sqlite::memory:";
+        let db_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(sqlite_url)
+            .await?;
+        SwitchStore::load(db_pool).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_switch_store_commit_partition_event_persists_cursor_and_doc_state() -> Res<()> {
+        let store = test_switch_store().await?;
+        let partition_id = "drawer.replicated";
+        let branch_doc_id = "doc-branch-1";
+        let heads = ChangeHashSet::default();
+        let state = SwitchDocState {
+            doc_id: DocId::from("doc-1"),
+            branch_name: "main".into(),
+            present: true,
+            last_heads: Some(heads.clone()),
+        };
+        store
+            .commit_partition_event(partition_id, 42, Some(branch_doc_id), Some(&state))
+            .await?;
+        assert_eq!(store.get_partition_cursor(partition_id).await?, 42);
+        let loaded = store
+            .get_doc_state_by_branch_doc_id(branch_doc_id)
+            .await?
+            .ok_or_eyre("missing stored doc state")?;
+        assert_eq!(loaded.doc_id, state.doc_id);
+        assert_eq!(loaded.branch_name, "main");
+        assert!(loaded.present);
+        assert_eq!(loaded.last_heads, Some(heads));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_switch_store_commit_partition_event_cursor_only() -> Res<()> {
+        let store = test_switch_store().await?;
+        let partition_id = "drawer.replicated";
+        store
+            .commit_partition_event(partition_id, 9, None, None)
+            .await?;
+        assert_eq!(store.get_partition_cursor(partition_id).await?, 9);
+        Ok(())
+    }
 
     struct TestListener {
         name: String,
@@ -615,6 +1026,60 @@ mod tests {
                 .expect("switch test call lock poisoned")
                 .push(self.name.clone());
             Ok(self.outcome.clone().unwrap_or_default())
+        }
+    }
+
+    struct OriginCaptureListener {
+        seen: StdArc<Mutex<Vec<crate::event_origin::SwitchEventOrigin>>>,
+    }
+
+    #[async_trait]
+    impl SwitchSink for OriginCaptureListener {
+        fn interest(&self) -> SwtchSinkInterest {
+            SwtchSinkInterest {
+                consume_drawer: true,
+                consume_plugs: true,
+                consume_dispatch: true,
+                consume_config: true,
+                drawer_predicate: None,
+            }
+        }
+
+        async fn on_event(
+            &mut self,
+            event: &SwitchEvent,
+            _ctx: &SwitchSinkCtx<'_>,
+        ) -> Res<SwitchSinkOutcome> {
+            let origin = match event {
+                SwitchEvent::Drawer(event) => match &**event {
+                    DrawerEvent::ListChanged { origin, .. }
+                    | DrawerEvent::DocAdded { origin, .. }
+                    | DrawerEvent::DocUpdated { origin, .. }
+                    | DrawerEvent::DocDeleted { origin, .. } => origin.clone(),
+                },
+                SwitchEvent::Plugs(event) => match &**event {
+                    PlugsEvent::PlugAdded { origin, .. }
+                    | PlugsEvent::PlugChanged { origin, .. }
+                    | PlugsEvent::PlugDeleted { origin, .. }
+                    | PlugsEvent::ConfigDocsChanged { origin, .. } => origin.clone(),
+                },
+                SwitchEvent::Dispatch(event) => match &**event {
+                    DispatchEvent::DispatchAdded { origin, .. }
+                    | DispatchEvent::DispatchUpdated { origin, .. }
+                    | DispatchEvent::DispatchDeleted { origin, .. } => origin.clone(),
+                },
+                SwitchEvent::Config(event) => match &**event {
+                    crate::config::ConfigEvent::Changed { origin, .. }
+                    | crate::config::ConfigEvent::SyncDevicesChanged { origin, .. } => {
+                        origin.clone()
+                    }
+                },
+            };
+            self.seen
+                .lock()
+                .expect("switch test origin lock poisoned")
+                .push(origin);
+            Ok(SwitchSinkOutcome::default())
         }
     }
 
@@ -731,6 +1196,7 @@ mod tests {
 
         // Wait for test-label dispatch from the add and wait for completion
         let mut initial_dispatch_id: Option<String> = None;
+        let mut initial_done_seen = false;
         for _ in 0..300 {
             let dispatches = ctx.dispatch_repo.list().await;
             if let Some((dispatch_id, _dispatch)) = dispatches.iter().find(|(_, dispatch)| {
@@ -742,13 +1208,24 @@ mod tests {
                 initial_dispatch_id = Some(dispatch_id.clone());
                 break;
             }
+            if ctx
+                .rt
+                .get_processor_runlog_done(&doc_id, "@daybook/wip/test-label")
+                .await?
+                .is_some()
+            {
+                initial_done_seen = true;
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        let initial_dispatch_id =
-            initial_dispatch_id.ok_or_eyre("initial test-label dispatch not found")?;
-        ctx.rt
-            .wait_for_dispatch_end(&initial_dispatch_id, std::time::Duration::from_secs(90))
-            .await?;
+        if let Some(initial_dispatch_id) = initial_dispatch_id {
+            ctx.rt
+                .wait_for_dispatch_end(&initial_dispatch_id, std::time::Duration::from_secs(90))
+                .await?;
+        } else if !initial_done_seen {
+            eyre::bail!("initial test-label dispatch/runlog not found");
+        }
 
         let dispatches_before = ctx.dispatch_repo.list().await;
         let test_label_count_before =
@@ -872,6 +1349,9 @@ mod tests {
             &SwitchEvent::Dispatch(Arc::new(DispatchEvent::DispatchDeleted {
                 id: "hello".into(),
                 heads: ChangeHashSet(Vec::new().into()),
+                origin: crate::event_origin::SwitchEventOrigin::Local {
+                    actor_id: "test-actor".into(),
+                },
             })),
         )
         .await?;
@@ -925,6 +1405,9 @@ mod tests {
             &SwitchEvent::Dispatch(Arc::new(DispatchEvent::DispatchDeleted {
                 id: "hello".into(),
                 heads: ChangeHashSet(Vec::new().into()),
+                origin: crate::event_origin::SwitchEventOrigin::Local {
+                    actor_id: "test-actor".into(),
+                },
             })),
         )
         .await?;
@@ -967,6 +1450,9 @@ mod tests {
             &SwitchEvent::Plugs(Arc::new(PlugsEvent::PlugAdded {
                 id: "id".into(),
                 heads: ChangeHashSet(Vec::new().into()),
+                origin: crate::event_origin::SwitchEventOrigin::Local {
+                    actor_id: "test-actor".into(),
+                },
             })),
         )
         .await?;
@@ -975,6 +1461,79 @@ mod tests {
             predicate,
             Some(daybook_types::manifest::DocPredicateClause::HasTag(_))
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_switch_origin_metadata_propagates() -> Res<()> {
+        let seen = StdArc::new(Mutex::new(Vec::new()));
+        let listeners: BTreeMap<String, Box<dyn SwitchSink + Send + Sync>> = [(
+            "origin".to_string(),
+            Box::new(OriginCaptureListener {
+                seen: StdArc::clone(&seen),
+            }) as Box<dyn SwitchSink + Send + Sync>,
+        )]
+        .into();
+        let mut runtime_listeners = prepare_sinks(listeners);
+
+        dispatch_test_event(
+            &mut runtime_listeners,
+            &SwitchEvent::Drawer(Arc::new(DrawerEvent::ListChanged {
+                drawer_heads: ChangeHashSet(Vec::new().into()),
+                origin: crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: "peer-a".into(),
+                },
+            })),
+        )
+        .await?;
+        dispatch_test_event(
+            &mut runtime_listeners,
+            &SwitchEvent::Plugs(Arc::new(PlugsEvent::ConfigDocsChanged {
+                heads: ChangeHashSet(Vec::new().into()),
+                origin: crate::event_origin::SwitchEventOrigin::Bootstrap,
+            })),
+        )
+        .await?;
+        dispatch_test_event(
+            &mut runtime_listeners,
+            &SwitchEvent::Dispatch(Arc::new(DispatchEvent::DispatchDeleted {
+                id: "d".into(),
+                heads: ChangeHashSet(Vec::new().into()),
+                origin: crate::event_origin::SwitchEventOrigin::Local {
+                    actor_id: "actor-a".into(),
+                },
+            })),
+        )
+        .await?;
+        dispatch_test_event(
+            &mut runtime_listeners,
+            &SwitchEvent::Config(Arc::new(crate::config::ConfigEvent::SyncDevicesChanged {
+                origin: crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: "peer-b".into(),
+                },
+            })),
+        )
+        .await?;
+
+        let got = seen
+            .lock()
+            .expect("switch test origin lock poisoned")
+            .clone();
+        assert_eq!(
+            got,
+            vec![
+                crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: "peer-a".into()
+                },
+                crate::event_origin::SwitchEventOrigin::Bootstrap,
+                crate::event_origin::SwitchEventOrigin::Local {
+                    actor_id: "actor-a".into()
+                },
+                crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: "peer-b".into()
+                }
+            ]
+        );
         Ok(())
     }
 }

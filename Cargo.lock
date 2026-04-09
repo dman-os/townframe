@@ -2368,6 +2368,7 @@ dependencies = [
  "bs58",
  "color-eyre",
  "data-encoding",
+ "daybook_pdk",
  "daybook_types",
  "directories",
  "displaydoc",
@@ -2394,6 +2395,7 @@ dependencies = [
  "oci-wasm",
  "once_cell",
  "pastey",
+ "plug_test",
  "rand 0.9.2",
  "reqwest 0.12.28",
  "samod",
@@ -2480,6 +2482,18 @@ dependencies = [
  "tokio",
  "tokio-util",
  "utils_rs",
+]
+
+[[package]]
+name = "daybook_pdk"
+version = "0.1.0"
+dependencies = [
+ "displaydoc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+ "wflow_sdk",
 ]
 
 [[package]]
@@ -7418,6 +7432,21 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "utils_rs",
+ "wflow_sdk",
+ "wit-bindgen 0.52.0",
+]
+
+[[package]]
+name = "plug_test"
+version = "0.1.0"
+dependencies = [
+ "api_utils_rs",
+ "color-eyre",
+ "daybook_pdk",
+ "daybook_types",
+ "schemars 1.2.0",
+ "serde",
+ "serde_json",
  "wflow_sdk",
  "wit-bindgen 0.52.0",
 ]

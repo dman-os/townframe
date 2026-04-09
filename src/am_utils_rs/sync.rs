@@ -902,20 +902,13 @@ mod tests {
         let src = boot_big_repo("src-unresolved").await?;
         let dst = boot_big_repo("dst-unresolved").await?;
 
-        sqlx::query(
-            r#"
-            INSERT INTO partition_item_state(partition_id, item_id, deleted, item_payload_json, latest_txid)
-            VALUES(?, ?, 0, '{}', 1)
-            ON CONFLICT(partition_id, item_id) DO UPDATE SET
-                deleted = excluded.deleted,
-                item_payload_json = excluded.item_payload_json,
-                latest_txid = excluded.latest_txid
-            "#,
-        )
-        .bind(&part_id)
-        .bind("doc_missing_remote_payload")
-        .execute(src.state_pool())
-        .await?;
+        src.partition_store()
+            .record_item_change(
+                &part_id,
+                "doc_missing_remote_payload",
+                &serde_json::json!({}),
+            )
+            .await?;
 
         let (src_store, src_store_stop) = spawn_sync_store(src.state_pool().clone()).await?;
         let (dst_store, dst_store_stop) = spawn_sync_store(dst.state_pool().clone()).await?;
@@ -979,20 +972,13 @@ mod tests {
         let src = boot_big_repo("src-blocked-cursor").await?;
         let dst = boot_big_repo("dst-blocked-cursor").await?;
 
-        sqlx::query(
-            r#"
-            INSERT INTO partition_item_state(partition_id, item_id, deleted, item_payload_json, latest_txid)
-            VALUES(?, ?, 0, '{}', 1)
-            ON CONFLICT(partition_id, item_id) DO UPDATE SET
-                deleted = excluded.deleted,
-                item_payload_json = excluded.item_payload_json,
-                latest_txid = excluded.latest_txid
-            "#,
-        )
-        .bind(&part_id)
-        .bind("definitely-not-a-samod-doc-id")
-        .execute(src.state_pool())
-        .await?;
+        src.partition_store()
+            .record_item_change(
+                &part_id,
+                "definitely-not-a-samod-doc-id",
+                &serde_json::json!({}),
+            )
+            .await?;
 
         let handle = src.create_doc(automerge::Automerge::new()).await?;
         handle
@@ -1080,20 +1066,9 @@ mod tests {
         let src = boot_big_repo("src-partition-isolation").await?;
         let dst = boot_big_repo("dst-partition-isolation").await?;
 
-        sqlx::query(
-            r#"
-            INSERT INTO partition_item_state(partition_id, item_id, deleted, item_payload_json, latest_txid)
-            VALUES(?, ?, 0, '{}', 1)
-            ON CONFLICT(partition_id, item_id) DO UPDATE SET
-                deleted = excluded.deleted,
-                item_payload_json = excluded.item_payload_json,
-                latest_txid = excluded.latest_txid
-            "#,
-        )
-        .bind(&p_bad)
-        .bind("doc_missing_remote_payload")
-        .execute(src.state_pool())
-        .await?;
+        src.partition_store()
+            .record_item_change(&p_bad, "doc_missing_remote_payload", &serde_json::json!({}))
+            .await?;
 
         let ok_handle = src.create_doc(automerge::Automerge::new()).await?;
         ok_handle

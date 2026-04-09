@@ -10,12 +10,14 @@ pub struct PerInstallDeets {
 #[derive(Reconcile, Hydrate)]
 pub struct InitStore {
     pub per_install_done: HashMap<String, Versioned<ThroughJson<PerInstallDeets>>>,
+    pub per_install_done_deleted: HashMap<String, Vec<VersionTag>>,
 }
 
 impl Default for InitStore {
     fn default() -> Self {
         Self {
             per_install_done: default(),
+            per_install_done_deleted: default(),
         }
     }
 }
@@ -161,15 +163,6 @@ impl InitRepo {
                 else {
                     continue;
                 };
-                match &origin {
-                    am_utils_rs::repo::BigRepoChangeOrigin::Local => continue,
-                    am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. } => {
-                        if peer_id.to_string() == self.local_peer_id {
-                            continue;
-                        }
-                    }
-                    am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap => {}
-                }
                 self.events_for_patch(
                     &patch,
                     &heads,
@@ -198,6 +191,7 @@ impl InitRepo {
                 self.store
                     .mutate_sync(|store| {
                         store.per_install_done = new_store.per_install_done;
+                        store.per_install_done_deleted = new_store.per_install_done_deleted;
                     })
                     .await?;
                 self.registry.notify(events.drain(..));
@@ -207,6 +201,7 @@ impl InitRepo {
     }
 
     pub async fn events_for_init(&self) -> Res<Vec<InitEvent>> {
+        // Init snapshot is the current app-doc heads.
         let heads = self.app_am_handle.with_document(|doc| doc.get_heads());
         Ok(vec![InitEvent::Changed {
             heads: ChangeHashSet(Arc::from(heads)),
@@ -231,6 +226,7 @@ impl InitRepo {
         });
         let mut events = vec![];
         for patch in patches {
+            // Replay path: do not apply live-origin filtering.
             self.events_for_patch(&patch, &heads.0, &mut events, None, None)
                 .await?;
         }
@@ -242,21 +238,13 @@ impl InitRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<InitEvent>,
-        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer: Option<&str>,
+        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer_id: Option<&str>,
     ) -> Res<()> {
-        if let Some(origin) = origin {
-            match origin {
-                am_utils_rs::repo::BigRepoChangeOrigin::Local => return Ok(()),
-                am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. } => {
-                    if let Some(exclude_peer) = exclude_peer {
-                        if peer_id.to_string() == exclude_peer {
-                            return Ok(());
-                        }
-                    }
-                }
-                am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap => {}
-            }
+        // Live notification path only: skip local self-echoes here.
+        // Replay/diff calls pass `live_origin = None` and are never skipped.
+        if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id) {
+            return Ok(());
         }
         if !am_utils_rs::repo::big_repo_path_prefix_matches(
             &[InitStore::prop().into()],

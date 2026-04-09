@@ -262,6 +262,12 @@ impl RepoCtx {
             .get()
             .expect("doc_drawer cell should be initialized")
             .clone();
+        ensure_expected_partitions_for_docs(
+            &big_repo,
+            doc_app.document_id(),
+            doc_drawer.document_id(),
+        )
+        .await?;
 
         if initialize_repo {
             Self::run_repo_init_dance(
@@ -336,7 +342,7 @@ impl RepoCtx {
             plugs_repo = Some(repo);
             plugs_stop = Some(stop);
 
-            let (_config_repo, stop) = ConfigRepo::load(
+            let (config_repo, stop) = ConfigRepo::load(
                 Arc::clone(big_repo),
                 doc_app.document_id().clone(),
                 Arc::clone(plugs_repo.as_ref().expect("plugs repo must be loaded")),
@@ -345,6 +351,22 @@ impl RepoCtx {
             )
             .await?;
             config_stop = Some(stop);
+            let config_user_path = daybook_types::doc::user_path::for_repo(
+                &daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                "config-repo",
+            )?;
+            let config_actor_id = daybook_types::doc::user_path::to_actor_id(&config_user_path);
+            config_repo
+                .upsert_actor_user_path(config_actor_id, config_user_path)
+                .await?;
+            let plugs_user_path = daybook_types::doc::user_path::for_repo(
+                &daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                "plugs-repo",
+            )?;
+            let plugs_actor_id = daybook_types::doc::user_path::to_actor_id(&plugs_user_path);
+            config_repo
+                .upsert_actor_user_path(plugs_actor_id, plugs_user_path)
+                .await?;
 
             let (_tables_repo, stop) = TablesRepo::load(
                 Arc::clone(big_repo),
@@ -353,14 +375,31 @@ impl RepoCtx {
             )
             .await?;
             tables_stop = Some(stop);
+            let tables_user_path = daybook_types::doc::user_path::for_repo(
+                &daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                "tables-repo",
+            )?;
+            let tables_actor_id = daybook_types::doc::user_path::to_actor_id(&tables_user_path);
+            config_repo
+                .upsert_actor_user_path(tables_actor_id, tables_user_path)
+                .await?;
 
             let (_dispatch_repo, stop) = DispatchRepo::load(
                 Arc::clone(big_repo),
                 doc_app.document_id().clone(),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                sql.clone(),
             )
             .await?;
             dispatch_stop = Some(stop);
+            let dispatch_user_path = daybook_types::doc::user_path::for_repo(
+                &daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                "dispatch-repo",
+            )?;
+            let dispatch_actor_id = daybook_types::doc::user_path::to_actor_id(&dispatch_user_path);
+            config_repo
+                .upsert_actor_user_path(dispatch_actor_id, dispatch_user_path)
+                .await?;
 
             let (_drawer_repo, stop) = DrawerRepo::load(
                 Arc::clone(big_repo),
@@ -385,6 +424,14 @@ impl RepoCtx {
             )
             .await?;
             drawer_stop = Some(stop);
+            let drawer_user_path = daybook_types::doc::user_path::for_repo(
+                &daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                "drawer-repo",
+            )?;
+            let drawer_actor_id = daybook_types::doc::user_path::to_actor_id(&drawer_user_path);
+            config_repo
+                .upsert_actor_user_path(drawer_actor_id, drawer_user_path)
+                .await?;
 
             plugs_repo
                 .as_ref()
@@ -440,6 +487,38 @@ impl RepoCtx {
         blobs_repo.shutdown().await?;
         Ok(())
     }
+}
+
+pub(crate) async fn ensure_expected_partitions_for_docs(
+    big_repo: &SharedBigRepo,
+    doc_app_id: &DocumentId,
+    doc_drawer_id: &DocumentId,
+) -> Res<()> {
+    let partition_store = big_repo.partition_store();
+    for partition_id in [
+        crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(doc_drawer_id),
+        crate::sync::CORE_DOCS_PARTITION_ID.to_string(),
+        crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
+        crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
+        crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.to_string(),
+    ] {
+        partition_store.ensure_partition(&partition_id).await?;
+    }
+    partition_store
+        .add_member(
+            &crate::sync::CORE_DOCS_PARTITION_ID.to_string(),
+            &doc_drawer_id.to_string(),
+            &serde_json::json!({}),
+        )
+        .await?;
+    partition_store
+        .add_member(
+            &crate::sync::CORE_DOCS_PARTITION_ID.to_string(),
+            &doc_app_id.to_string(),
+            &serde_json::json!({}),
+        )
+        .await?;
+    Ok(())
 }
 
 pub async fn get_repo_user_id(sql: &SqlitePool) -> Res<Option<String>> {

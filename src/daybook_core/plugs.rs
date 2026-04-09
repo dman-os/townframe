@@ -189,6 +189,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
+                        command_invoke_acl: vec![],
                     }
                     .into(),
                 ),
@@ -220,6 +221,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
+                        command_invoke_acl: vec![],
                     }
                     .into(),
                 ),
@@ -251,6 +253,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
+                        command_invoke_acl: vec![],
                     }
                     .into(),
                 ),
@@ -276,6 +279,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             plug_id: "@daybook/wip".into(),
                             local_state_key: "doc-embedding-index".into(),
                         }],
+                        command_invoke_acl: vec![],
                     }
                     .into(),
                 ),
@@ -299,6 +303,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             config_facet_acl: vec![],
                         },
                         local_state_acl: vec![],
+                        command_invoke_acl: vec![],
                     }
                     .into(),
                 ),
@@ -355,6 +360,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     ProcessorManifest {
                         desc: "Extract OCR text from blob image into note".into(),
                         deets: ProcessorDeets::DocProcessor {
+                            event_predicate: default(),
                             routine_name: "ocr-image".into(),
                             predicate: DocPredicateClause::And(vec![
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),
@@ -371,6 +377,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     ProcessorManifest {
                         desc: "Compute image embedding facet from image blob".into(),
                         deets: ProcessorDeets::DocProcessor {
+                            event_predicate: default(),
                             routine_name: "embed-image".into(),
                             predicate: DocPredicateClause::And(vec![
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),
@@ -390,6 +397,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     ProcessorManifest {
                         desc: "Compute embedding facet from note content".into(),
                         deets: ProcessorDeets::DocProcessor {
+                            event_predicate: default(),
                             routine_name: "embed-text".into(),
                             predicate: DocPredicateClause::And(vec![
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
@@ -409,6 +417,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     ProcessorManifest {
                         desc: "Index embedding facets into local sqlite vec store".into(),
                         deets: ProcessorDeets::DocProcessor {
+                            event_predicate: default(),
                             routine_name: "index-embedding".into(),
                             predicate: DocPredicateClause::HasTag(
                                 WellKnownFacetTag::Embedding.into(),
@@ -440,6 +449,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     ProcessorManifest {
                         desc: "Add a test LabelGeneric for testing".into(),
                         deets: ProcessorDeets::DocProcessor {
+                            event_predicate: default(),
                             routine_name: "test-label".into(),
                             predicate: DocPredicateClause::And(vec![
                                 DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
@@ -492,12 +502,17 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
         },
     ];
 
+    #[cfg(test)]
+    let mut plugs = plugs;
+    #[cfg(test)]
+    plugs.push(plug_test::plug_manifest());
     plugs
 }
 
 #[derive(Reconcile, Hydrate)]
 pub struct PlugsStore {
     pub manifests: HashMap<String, Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>,
+    pub manifests_deleted: HashMap<String, Vec<VersionTag>>,
     pub plug_config_doc_ids: Versioned<ThroughJson<HashMap<String, String>>>,
 
     /// Index: property tag -> plug id (@ns/name)
@@ -512,6 +527,7 @@ impl Default for PlugsStore {
     fn default() -> Self {
         Self {
             manifests: default(),
+            manifests_deleted: default(),
             plug_config_doc_ids: Versioned {
                 vtag: VersionTag::nil(),
                 val: ThroughJson(default()),
@@ -585,10 +601,25 @@ pub struct PlugsRepo {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PlugsEvent {
     // ListChanged { heads: ChangeHashSet },
-    PlugAdded { id: String, heads: ChangeHashSet },
-    PlugChanged { id: String, heads: ChangeHashSet },
-    PlugDeleted { id: String, heads: ChangeHashSet },
-    ConfigDocsChanged { heads: ChangeHashSet },
+    PlugAdded {
+        id: String,
+        heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
+    },
+    PlugChanged {
+        id: String,
+        heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
+    },
+    PlugDeleted {
+        id: String,
+        heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
+    },
+    ConfigDocsChanged {
+        heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
+    },
 }
 
 pub const OCI_PLUG_ARTIFACT_TYPE: &str = "application/vnd.daybook.plug.v1";
@@ -646,6 +677,12 @@ impl crate::repos::Repo for PlugsRepo {
 }
 
 impl PlugsRepo {
+    fn local_origin(&self) -> crate::event_origin::SwitchEventOrigin {
+        crate::event_origin::SwitchEventOrigin::Local {
+            actor_id: self.local_actor_id.to_string(),
+        }
+    }
+
     pub async fn load(
         big_repo: SharedBigRepo,
         blobs: Arc<crate::blobs::BlobsRepo>,
@@ -719,6 +756,30 @@ impl PlugsRepo {
             .with_document(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
     }
 
+    async fn latest_manifest_delete_actor(
+        &self,
+        plug_id: &str,
+        heads: &Arc<[automerge::ChangeHash]>,
+    ) -> Res<Option<ActorId>> {
+        let Some((tags, _)) = self
+            .big_repo
+            .hydrate_path_at_heads::<Vec<VersionTag>>(
+                &self.app_doc_id,
+                heads,
+                automerge::ROOT,
+                vec![
+                    PlugsStore::prop().into(),
+                    "manifests_deleted".into(),
+                    autosurgeon::Prop::Key(plug_id.to_string().into()),
+                ],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(tags.last().map(|tag| tag.actor_id.clone()))
+    }
+
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
@@ -767,7 +828,8 @@ impl PlugsRepo {
             for event in events.drain(..) {
                 let is_added = matches!(event, PlugsEvent::PlugAdded { .. });
                 match event {
-                    PlugsEvent::PlugAdded { id, heads } | PlugsEvent::PlugChanged { id, heads } => {
+                    PlugsEvent::PlugAdded { id, heads, origin }
+                    | PlugsEvent::PlugChanged { id, heads, origin } => {
                         let Some((new_versioned, _)) = self
                             .big_repo
                             .hydrate_path_at_heads::<Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>(
@@ -841,12 +903,12 @@ impl PlugsRepo {
                             })
                             .await?;
                         delivered_events.push(if is_added {
-                            PlugsEvent::PlugAdded { id, heads }
+                            PlugsEvent::PlugAdded { id, heads, origin }
                         } else {
-                            PlugsEvent::PlugChanged { id, heads }
+                            PlugsEvent::PlugChanged { id, heads, origin }
                         });
                     }
-                    PlugsEvent::PlugDeleted { id, heads } => {
+                    PlugsEvent::PlugDeleted { id, heads, origin } => {
                         let removed_manifest = self
                             .store
                             .query_sync(|store| {
@@ -883,10 +945,10 @@ impl PlugsRepo {
                                     store.rebuild_indices();
                                 })
                                 .await?;
-                            delivered_events.push(PlugsEvent::PlugDeleted { id, heads });
+                            delivered_events.push(PlugsEvent::PlugDeleted { id, heads, origin });
                         }
                     }
-                    PlugsEvent::ConfigDocsChanged { heads } => {
+                    PlugsEvent::ConfigDocsChanged { heads, origin } => {
                         let Some((new_versioned, _)) = self
                             .big_repo
                             .hydrate_path_at_heads::<Versioned<ThroughJson<HashMap<String, String>>>>(
@@ -905,7 +967,7 @@ impl PlugsRepo {
                                 store.plug_config_doc_ids = new_versioned;
                             })
                             .await?;
-                        delivered_events.push(PlugsEvent::ConfigDocsChanged { heads });
+                        delivered_events.push(PlugsEvent::ConfigDocsChanged { heads, origin });
                     }
                 }
             }
@@ -933,6 +995,7 @@ impl PlugsRepo {
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
+            // Replay path: do not apply live-origin filtering.
             self.events_for_patch(&patch, &heads, &mut events, None, None)
                 .await?;
         }
@@ -940,6 +1003,7 @@ impl PlugsRepo {
     }
 
     pub async fn events_for_init(&self) -> Res<Vec<PlugsEvent>> {
+        // Init snapshot is synthesized from current local store state.
         let heads = self.get_plugs_heads();
         let plug_ids = self
             .store
@@ -950,6 +1014,7 @@ impl PlugsRepo {
             events.push(PlugsEvent::PlugAdded {
                 id,
                 heads: heads.clone(),
+                origin: self.local_origin(),
             });
         }
         Ok(events)
@@ -960,21 +1025,26 @@ impl PlugsRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<PlugsEvent>,
-        origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer: Option<&str>,
+        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        exclude_peer_id: Option<&str>,
     ) -> Res<()> {
-        if let Some(origin) = origin {
-            match origin {
-                am_utils_rs::repo::BigRepoChangeOrigin::Local => return Ok(()),
-                am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. } => {
-                    if let Some(exclude_peer) = exclude_peer {
-                        if peer_id.to_string() == exclude_peer {
-                            return Ok(());
-                        }
-                    }
-                }
-                am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap => {}
-            }
+        let is_config_docs_vtag_patch = matches!(
+            &patch.action,
+            automerge::PatchAction::PutMap {
+                key,
+                value: (automerge::Value::Scalar(scalar), _),
+                ..
+            } if patch.path.len() == 2
+                && patch.path[1].1 == automerge::Prop::Map("plug_config_doc_ids".into())
+                && key == "vtag"
+                && matches!(&**scalar, automerge::ScalarValue::Bytes(_))
+        );
+        // Live notification path: local writes are emitted by mutators.
+        // Replay/diff paths pass `live_origin = None`.
+        if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id)
+            && !is_config_docs_vtag_patch
+        {
+            return Ok(());
         }
         let heads = ChangeHashSet(Arc::clone(patch_heads));
         match &patch.action {
@@ -998,15 +1068,22 @@ impl PlugsRepo {
                         _ => return Ok(()),
                     };
                     let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
+                    let event_origin = crate::repos::resolve_origin_from_vtag_actor(
+                        &self.local_actor_id,
+                        &vtag.actor_id,
+                        live_origin,
+                    );
                     if vtag.version.is_nil() {
                         out.push(PlugsEvent::PlugAdded {
                             id: plug_id.clone(),
-                            heads,
+                            heads: heads.clone(),
+                            origin: event_origin.clone(),
                         });
                     } else {
                         out.push(PlugsEvent::PlugChanged {
                             id: plug_id.clone(),
-                            heads,
+                            heads: heads.clone(),
+                            origin: event_origin.clone(),
                         });
                     }
                 }
@@ -1015,9 +1092,18 @@ impl PlugsRepo {
                 if patch.path.len() == 2
                     && patch.path[1].1 == automerge::Prop::Map("manifests".into()) =>
             {
+                // Delete patches have no vtag; use delete tombstones at these heads when replaying.
+                let tombstone_actor_id =
+                    self.latest_manifest_delete_actor(key, patch_heads).await?;
+                let event_origin = crate::repos::resolve_origin_for_delete(
+                    &self.local_actor_id,
+                    live_origin,
+                    tombstone_actor_id.as_ref(),
+                );
                 out.push(PlugsEvent::PlugDeleted {
                     id: key.clone(),
                     heads,
+                    origin: event_origin,
                 });
             }
             automerge::PatchAction::PutMap {
@@ -1029,7 +1115,19 @@ impl PlugsRepo {
                 && key == "vtag"
                 && matches!(&**scalar, automerge::ScalarValue::Bytes(_)) =>
             {
-                out.push(PlugsEvent::ConfigDocsChanged { heads });
+                let automerge::ScalarValue::Bytes(vtag_bytes) = &**scalar else {
+                    unreachable!("guard above ensures bytes")
+                };
+                let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
+                let event_origin = crate::repos::resolve_origin_from_vtag_actor(
+                    &self.local_actor_id,
+                    &vtag.actor_id,
+                    live_origin,
+                );
+                out.push(PlugsEvent::ConfigDocsChanged {
+                    heads,
+                    origin: event_origin,
+                });
             }
             _ => {}
         }
@@ -1296,6 +1394,10 @@ impl PlugsRepo {
                                     "/daybook_wflows.wasm.zst"
                                 ))
                                 .as_slice(),
+                                "plug_test.wasm.zst" => {
+                                    include_bytes!(concat!(env!("OUT_DIR"), "/plug_test.wasm.zst"))
+                                        .as_slice()
+                                }
                                 _ => {
                                     eyre::bail!("unsupported static wasm component_url");
                                 }
@@ -1369,9 +1471,17 @@ impl PlugsRepo {
         let heads = ChangeHashSet(hash.into_iter().collect());
         // Notify listeners that the plug list or a specific plug has changed
         self.registry.notify([if is_update {
-            PlugsEvent::PlugChanged { id: plug_id, heads }
+            PlugsEvent::PlugChanged {
+                id: plug_id,
+                heads,
+                origin: self.local_origin(),
+            }
         } else {
-            PlugsEvent::PlugAdded { id: plug_id, heads }
+            PlugsEvent::PlugAdded {
+                id: plug_id,
+                heads,
+                origin: self.local_origin(),
+            }
         }]);
 
         Ok(())
@@ -1790,6 +1900,7 @@ impl PlugsRepo {
                 manifest::ProcessorDeets::DocProcessor {
                     routine_name,
                     predicate: _,
+                    event_predicate: _,
                 } => {
                     if !manifest.routines.contains_key(routine_name) {
                         eyre::bail!(
@@ -1820,6 +1931,7 @@ impl PlugsRepo {
                     }
                     "static" => match url.path() {
                         "daybook_wflows.wasm.zst" => {}
+                        "plug_test.wasm.zst" => {}
                         _ => eyre::bail!("Unrecognized static component_url: {url}",),
                     },
                     scheme if scheme == crate::blobs::BLOB_SCHEME => {
@@ -1859,6 +1971,8 @@ impl PlugsRepo {
             .keys()
             .map(|dep_id_full| parse_dep_base_id(dep_id_full))
             .collect::<Res<HashSet<_>>>()?;
+        let mut cached_command_target_manifests: HashMap<String, Arc<manifest::PlugManifest>> =
+            HashMap::new();
         let mut available_local_states: HashSet<(String, String)> = manifest
             .local_states
             .keys()
@@ -1907,6 +2021,62 @@ impl PlugsRepo {
                     );
                 }
             }
+            for target_command_url in routine.command_invoke_acl() {
+                let parsed_target =
+                    daybook_pdk::parse_command_url(target_command_url).map_err(|err| {
+                        eyre::eyre!(
+                            "Invalid command_invoke_acl in routine '{}': url '{}' is invalid: {}",
+                            routine_name,
+                            target_command_url,
+                            err
+                        )
+                    })?;
+                if parsed_target.plug_id != plug_id
+                    && !dependency_base_ids.contains(&parsed_target.plug_id)
+                {
+                    eyre::bail!(
+                        "Invalid command_invoke_acl in routine '{}': target plug '{}' is neither this plug nor a declared dependency",
+                        routine_name,
+                        parsed_target.plug_id
+                    );
+                }
+                let command_exists = if parsed_target.plug_id == plug_id {
+                    manifest
+                        .commands
+                        .contains_key(parsed_target.command_name.as_str())
+                } else {
+                    let target_manifest = if let Some(cached) =
+                        cached_command_target_manifests.get(&parsed_target.plug_id)
+                    {
+                        Arc::clone(cached)
+                    } else {
+                        let loaded = self
+                            .get(&parsed_target.plug_id)
+                            .await
+                            .ok_or_else(|| {
+                                ferr!(
+                                    "Invalid command_invoke_acl in routine '{}': target plug '{}' not found",
+                                    routine_name,
+                                    parsed_target.plug_id
+                                )
+                            })?;
+                        cached_command_target_manifests
+                            .insert(parsed_target.plug_id.clone(), Arc::clone(&loaded));
+                        loaded
+                    };
+                    target_manifest
+                        .commands
+                        .contains_key(parsed_target.command_name.as_str())
+                };
+                if !command_exists {
+                    eyre::bail!(
+                        "Invalid command_invoke_acl in routine '{}': target command '{}/{}' not found",
+                        routine_name,
+                        parsed_target.plug_id,
+                        parsed_target.command_name
+                    );
+                }
+            }
 
             // If it's a DocProp routine, the 'working_prop_tag' must also be accessible.
             if let manifest::RoutineManifestDeets::DocFacet {
@@ -1927,6 +2097,7 @@ impl PlugsRepo {
             match &processor_manifest.deets {
                 manifest::ProcessorDeets::DocProcessor {
                     predicate,
+                    event_predicate,
                     routine_name: _,
                 } => {
                     for referenced_tag in predicate.referenced_tags() {
@@ -1935,6 +2106,31 @@ impl PlugsRepo {
                                 "Invalid processor predicate in '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
                                 processor_name,
                                 referenced_tag
+                            );
+                        }
+                    }
+                    let mut read_tags = HashSet::new();
+                    let mut read_keys = HashSet::new();
+                    event_predicate
+                        .doc_change_predicate
+                        .append_referenced_facet_scope(&mut read_tags, &mut read_keys);
+                    for referenced_tag in read_tags {
+                        if !available_tags.contains(&referenced_tag) {
+                            eyre::bail!(
+                                "Invalid processor event predicate in '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
+                                processor_name,
+                                referenced_tag
+                            );
+                        }
+                    }
+                    for referenced_key in read_keys {
+                        let referenced_tag = referenced_key.tag.to_string();
+                        if !available_tags.contains(&referenced_tag) {
+                            eyre::bail!(
+                                "Invalid processor event predicate in '{}': tag '{}' (from key '{}') is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
+                                processor_name,
+                                referenced_tag,
+                                referenced_key
                             );
                         }
                     }
@@ -2286,6 +2482,7 @@ mod tests {
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 local_state_acl: vec![],
+                command_invoke_acl: vec![],
             }
             .into(),
         );
@@ -2373,6 +2570,7 @@ mod tests {
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 local_state_acl: vec![],
+                command_invoke_acl: vec![],
             }
             .into(),
         );
@@ -2403,6 +2601,7 @@ mod tests {
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 local_state_acl: vec![],
+                command_invoke_acl: vec![],
             }
             .into(),
         );
@@ -2547,6 +2746,7 @@ mod tests {
             manifest::ProcessorManifest {
                 desc: "Processor".into(),
                 deets: manifest::ProcessorDeets::DocProcessor {
+                    event_predicate: default(),
                     predicate: manifest::DocPredicateClause::HasTag("org.test.tag".into()),
                     routine_name: "missing-routine".into(),
                 },
@@ -2583,6 +2783,7 @@ mod tests {
                 },
                 deets: manifest::RoutineManifestDeets::DocInvoke {},
                 local_state_acl: vec![],
+                command_invoke_acl: vec![],
             }
             .into(),
         );
@@ -2599,6 +2800,7 @@ mod tests {
             manifest::ProcessorManifest {
                 desc: "Processor".into(),
                 deets: manifest::ProcessorDeets::DocProcessor {
+                    event_predicate: default(),
                     predicate: manifest::DocPredicateClause::HasTag("org.test.missing".into()),
                     routine_name: "routine1".into(),
                 },
@@ -2613,6 +2815,151 @@ mod tests {
             .to_string()
             .contains("Invalid processor predicate"));
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_command_invoke_acl_rejects_target_without_dependency() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path().join("component.wasm");
+        tokio::fs::write(&temp_path, b"dummy wasm").await?;
+        let file_url = url::Url::from_file_path(&temp_path).unwrap();
+
+        let mut target = mock_plug("target");
+        target.routines.insert(
+            "routine1".into(),
+            manifest::RoutineManifest {
+                r#impl: manifest::RoutineImpl::Wflow {
+                    key: "wflow1".into(),
+                    bundle: "bundle1".into(),
+                },
+                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                local_state_acl: vec![],
+                command_invoke_acl: vec![],
+            }
+            .into(),
+        );
+        target.commands.insert(
+            "cmd1".into(),
+            manifest::CommandManifest {
+                desc: "target command".into(),
+                deets: manifest::CommandDeets::DocCommand {
+                    routine_name: "routine1".into(),
+                },
+            }
+            .into(),
+        );
+        target.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec!["wflow1".into()],
+                component_urls: vec![file_url.clone()],
+            }
+            .into(),
+        );
+        repo.add(target).await?;
+
+        let mut caller = mock_plug("caller");
+        caller.routines.insert(
+            "routine1".into(),
+            manifest::RoutineManifest {
+                r#impl: manifest::RoutineImpl::Wflow {
+                    key: "wflow1".into(),
+                    bundle: "bundle1".into(),
+                },
+                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                local_state_acl: vec![],
+                command_invoke_acl: vec!["db+command:///@test/target/cmd1".parse().unwrap()],
+            }
+            .into(),
+        );
+        caller.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec!["wflow1".into()],
+                component_urls: vec![file_url.clone()],
+            }
+            .into(),
+        );
+
+        let result = repo.add(caller).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("declared dependency"));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_command_invoke_acl_rejects_missing_command() -> Res<()> {
+        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path().join("component.wasm");
+        tokio::fs::write(&temp_path, b"dummy wasm").await?;
+        let file_url = url::Url::from_file_path(&temp_path).unwrap();
+
+        let mut provider = mock_plug("provider");
+        provider.routines.insert(
+            "routine1".into(),
+            manifest::RoutineManifest {
+                r#impl: manifest::RoutineImpl::Wflow {
+                    key: "wflow1".into(),
+                    bundle: "bundle1".into(),
+                },
+                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                local_state_acl: vec![],
+                command_invoke_acl: vec![],
+            }
+            .into(),
+        );
+        provider.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec!["wflow1".into()],
+                component_urls: vec![file_url.clone()],
+            }
+            .into(),
+        );
+        repo.add(provider).await?;
+
+        let mut caller = mock_plug("caller");
+        caller.dependencies.insert(
+            "@test/provider".into(),
+            manifest::PlugDependencyManifest {
+                keys: vec![],
+                local_states: vec![],
+            }
+            .into(),
+        );
+        caller.routines.insert(
+            "routine1".into(),
+            manifest::RoutineManifest {
+                r#impl: manifest::RoutineImpl::Wflow {
+                    key: "wflow1".into(),
+                    bundle: "bundle1".into(),
+                },
+                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                local_state_acl: vec![],
+                command_invoke_acl: vec!["db+command:///@test/provider/nope".parse().unwrap()],
+            }
+            .into(),
+        );
+        caller.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec!["wflow1".into()],
+                component_urls: vec![file_url],
+            }
+            .into(),
+        );
+
+        let result = repo.add(caller).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("target command"));
         Ok(())
     }
 

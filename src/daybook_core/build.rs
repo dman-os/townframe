@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
@@ -17,6 +17,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .canonicalize()
             .unwrap()
             .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        cwd.join("../plug_test/").canonicalize().unwrap().display()
     );
     println!(
         "cargo:rerun-if-changed={}",
@@ -43,29 +47,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap()
             .display()
     );
-    // TODO: use wasmtools on resulting wasm
-    let mut build_wflows = std::process::Command::new("cargo");
-    build_wflows
-        .args([
-            "build",
-            "-p",
-            "daybook_wflows",
-            "--release",
-            "--target",
-            "wasm32-wasip2",
-        ])
-        .current_dir(cwd.join("../../"))
-        .env("CARGO_TARGET_DIR", &wflows_target_dir);
-    append_tokio_unstable_rustflags(&mut build_wflows);
-    assert!(
-        build_wflows
-            .spawn()
-            .expect("error spawning cargo")
-            .wait()
-            .expect("error building wasm")
-            .success(),
-        "error building daybook_wflows wasm"
-    );
+    build_wasm_crate(&cwd, &wflows_target_dir, "daybook_wflows");
+    build_wasm_crate(&cwd, &wflows_target_dir, "plug_test");
 
     // let cwasm_path = out_dir.join("daybook_wflows.cwasm");
     // assert!(
@@ -112,26 +95,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     .serialize()
     //     .map_err(|err| format!("error serializing component: {err}"))?;
 
-    let wflows_build_profile = "release";
+    compress_wasm(
+        &wflows_target_dir,
+        &out_dir,
+        "daybook_wflows",
+        if profile == "release" { 19 } else { 1 },
+    )?;
+    compress_wasm(
+        &wflows_target_dir,
+        &out_dir,
+        "plug_test",
+        if profile == "release" { 19 } else { 1 },
+    )?;
+
+    Ok(())
+}
+
+fn build_wasm_crate(cwd: &Path, wflows_target_dir: &Path, crate_name: &str) {
+    let mut build_wflows = std::process::Command::new("cargo");
+    build_wflows
+        .args([
+            "build",
+            "--lib",
+            "-p",
+            crate_name,
+            "--release",
+            "--target",
+            "wasm32-wasip2",
+        ])
+        .current_dir(cwd.join("../../"))
+        .env("CARGO_TARGET_DIR", wflows_target_dir);
+    append_tokio_unstable_rustflags(&mut build_wflows);
+    assert!(
+        build_wflows
+            .spawn()
+            .expect("error spawning cargo")
+            .wait()
+            .expect("error building wasm")
+            .success(),
+        "error building {crate_name} wasm"
+    );
+}
+
+fn compress_wasm(
+    wflows_target_dir: &Path,
+    out_dir: &Path,
+    crate_name: &str,
+    level: i32,
+) -> Result<(), Box<dyn std::error::Error>> {
     let wasm_path = wflows_target_dir
         .join("wasm32-wasip2")
-        .join(wflows_build_profile)
-        .join("daybook_wflows.wasm");
-    let wasm_path = wasm_path.canonicalize().map_err(|err| {
-        format!(
-            "error resolving daybook_wflows.wasm at {}: {err}",
-            wasm_path.display()
-        )
-    })?;
+        .join("release")
+        .join(format!("{crate_name}.wasm"));
+    let wasm_path = wasm_path
+        .canonicalize()
+        .map_err(|err| format!("error resolving {}: {err}", wasm_path.display()))?;
     let wasm_bytes = std::fs::read(wasm_path)?;
     zstd::stream::copy_encode(
         &wasm_bytes[..],
-        std::fs::File::create(out_dir.join("daybook_wflows.wasm.zst"))
-            .map_err(|err| format!("error creating daybook_wflows.wasm.zst: {err}"))?,
-        if profile == "release" { 19 } else { 1 },
+        std::fs::File::create(out_dir.join(format!("{crate_name}.wasm.zst")))
+            .map_err(|err| format!("error creating {crate_name}.wasm.zst: {err}"))?,
+        level,
     )
-    .map_err(|err| format!("error compress writing daybook_wflows.wasm.zst: {err}"))?;
-
+    .map_err(|err| format!("error compress writing {crate_name}.wasm.zst: {err}"))?;
     Ok(())
 }
 
