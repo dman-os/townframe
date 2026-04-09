@@ -533,12 +533,14 @@ impl PartitionStore {
             return Ok(item_ids.first().cloned());
         }
         let mut query =
-            sqlx::QueryBuilder::<sqlx::Sqlite>::new("WITH requested(item_id) AS (SELECT ");
+            sqlx::QueryBuilder::<sqlx::Sqlite>::new("WITH requested(item_id, ordinal) AS (SELECT ");
         for (idx, item_id) in item_ids.iter().enumerate() {
             if idx > 0 {
                 query.push(" UNION ALL SELECT ");
             }
             query.push_bind(item_id);
+            query.push(", ");
+            query.push_bind(i64::try_from(idx).expect("item index exceeds sqlite INTEGER range"));
         }
         query.push(") SELECT requested.item_id FROM requested WHERE NOT EXISTS (");
         query
@@ -548,7 +550,7 @@ impl PartitionStore {
         for partition_id in allowed_partitions {
             partitions.push_bind(partition_id);
         }
-        partitions.push_unseparated(")) LIMIT 1");
+        partitions.push_unseparated(")) ORDER BY requested.ordinal LIMIT 1");
         let denied = query
             .build_query_scalar::<String>()
             .fetch_optional(&self.state_pool)

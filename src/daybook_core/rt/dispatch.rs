@@ -90,6 +90,9 @@ pub struct FacetRoutineArgs {
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
     pub local_state_acl: Vec<daybook_types::manifest::RoutineLocalStateAccess>,
     #[serde(default)]
+    #[autosurgeon(with = "am_utils_rs::codecs::json")]
+    pub command_invoke_acl_snapshot: Vec<url::Url>,
+    #[serde(default)]
     pub wflow_args_json: Option<String>,
 }
 
@@ -120,6 +123,7 @@ struct DispatchState {
     wflow_to_dispatch: HashMap<String, String>,
     cancelled_dispatches: HashSet<String>,
     wflow_partition_frontier: HashMap<String, u64>,
+    dispatch_head_index: HashMap<automerge::ChangeHash, String>,
 }
 
 pub struct DispatchRepo {
@@ -127,6 +131,7 @@ pub struct DispatchRepo {
 
     db_pool: sqlx::SqlitePool,
     state: tokio::sync::Mutex<DispatchState>,
+    transition_mutex: tokio::sync::Mutex<()>,
     cancel_token: CancellationToken,
     local_actor_id: ActorId,
 }
@@ -169,6 +174,7 @@ impl DispatchRepo {
             registry,
             db_pool,
             state: tokio::sync::Mutex::new(state),
+            transition_mutex: tokio::sync::Mutex::new(()),
             cancel_token: cancel_token.clone(),
             local_actor_id,
         });
@@ -184,15 +190,52 @@ impl DispatchRepo {
 
     pub async fn diff_events(
         &self,
-        _from: ChangeHashSet,
-        _to: Option<ChangeHashSet>,
+        from: ChangeHashSet,
+        to: Option<ChangeHashSet>,
     ) -> Res<Vec<DispatchEvent>> {
-        self.events_for_init().await
+        let state = self.state.lock().await;
+        let from_set: HashSet<automerge::ChangeHash> = from.0.iter().copied().collect();
+        let to_heads = to.unwrap_or_else(|| dispatch_heads_for_ids(state.dispatches.keys()));
+        let to_set: HashSet<automerge::ChangeHash> = to_heads.0.iter().copied().collect();
+        let mut added_ids = Vec::new();
+        for hash in to_set.difference(&from_set) {
+            let Some(id) = state.dispatch_head_index.get(hash) else {
+                warn!(head = ?hash, "dispatch head missing from index for add diff");
+                continue;
+            };
+            added_ids.push(id.clone());
+        }
+        added_ids.sort();
+        let mut removed_ids = Vec::new();
+        for hash in from_set.difference(&to_set) {
+            let Some(id) = state.dispatch_head_index.get(hash) else {
+                warn!(head = ?hash, "dispatch head missing from index for remove diff");
+                continue;
+            };
+            removed_ids.push(id.clone());
+        }
+        removed_ids.sort();
+        let mut events = Vec::with_capacity(added_ids.len() + removed_ids.len());
+        for id in added_ids {
+            events.push(DispatchEvent::DispatchAdded {
+                id,
+                heads: to_heads.clone(),
+                origin: self.local_origin(),
+            });
+        }
+        for id in removed_ids {
+            events.push(DispatchEvent::DispatchDeleted {
+                id,
+                heads: to_heads.clone(),
+                origin: self.local_origin(),
+            });
+        }
+        Ok(events)
     }
 
     pub async fn events_for_init(&self) -> Res<Vec<DispatchEvent>> {
-        let heads = self.get_dispatch_heads();
         let state = self.state.lock().await;
+        let heads = dispatch_heads_for_ids(state.dispatches.keys());
         let mut events = Vec::with_capacity(state.dispatches.len());
         for id in state.dispatches.keys() {
             events.push(DispatchEvent::DispatchAdded {
@@ -204,8 +247,9 @@ impl DispatchRepo {
         Ok(events)
     }
 
-    pub fn get_dispatch_heads(&self) -> ChangeHashSet {
-        ChangeHashSet(Vec::new().into())
+    pub async fn get_dispatch_heads(&self) -> ChangeHashSet {
+        let state = self.state.lock().await;
+        dispatch_heads_for_ids(state.dispatches.keys())
     }
 
     pub async fn get(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
@@ -258,12 +302,19 @@ impl DispatchRepo {
 
     pub async fn add(&self, id: String, dispatch: Arc<ActiveDispatch>) -> Res<()> {
         debug!(?id, "adding dispatch to repo");
+        let _transition_guard = self.transition_mutex.lock().await;
 
-        persist_dispatch(&self.db_pool, &id, &dispatch).await?;
-        clear_cancelled_mark(&self.db_pool, &id).await?;
+        let mut tx = self.db_pool.begin().await?;
+        persist_dispatch_tx(&mut tx, &id, &dispatch).await?;
+        clear_cancelled_mark_tx(&mut tx, &id).await?;
+        tx.commit().await?;
 
         let mut state = self.state.lock().await;
         state.cancelled_dispatches.remove(&id);
+        state
+            .dispatch_head_index
+            .entry(dispatch_head_for_id(&id))
+            .or_insert_with(|| id.clone());
 
         if let Some(old) = state.dispatches.insert(id.clone(), Arc::clone(&dispatch)) {
             if let ActiveDispatchDeets::Wflow {
@@ -294,11 +345,12 @@ impl DispatchRepo {
             state.wflow_to_dispatch.insert(job.clone(), id.clone());
         }
 
+        let heads = dispatch_heads_for_ids(state.dispatches.keys());
         drop(state);
 
         self.registry.notify([DispatchEvent::DispatchAdded {
             id,
-            heads: self.get_dispatch_heads(),
+            heads,
             origin: self.local_origin(),
         }]);
         Ok(())
@@ -313,8 +365,9 @@ impl DispatchRepo {
             status,
             DispatchStatus::Succeeded | DispatchStatus::Failed | DispatchStatus::Cancelled
         ));
+        let _transition_guard = self.transition_mutex.lock().await;
 
-        let old = self.get(&id).await;
+        let old = self.state.lock().await.dispatches.get(&id).map(Arc::clone);
         let Some(old_dispatch) = old.clone() else {
             return Ok(None);
         };
@@ -323,8 +376,10 @@ impl DispatchRepo {
         next.status = status;
         let next = Arc::new(next);
 
-        persist_dispatch(&self.db_pool, &id, &next).await?;
-        clear_cancelled_mark(&self.db_pool, &id).await?;
+        let mut tx = self.db_pool.begin().await?;
+        persist_dispatch_tx(&mut tx, &id, &next).await?;
+        clear_cancelled_mark_tx(&mut tx, &id).await?;
+        tx.commit().await?;
 
         let mut state = self.state.lock().await;
         state.cancelled_dispatches.remove(&id);
@@ -349,11 +404,16 @@ impl DispatchRepo {
 
         state.active_dispatches.remove(&id);
         state.dispatches.insert(id.clone(), next);
+        state
+            .dispatch_head_index
+            .entry(dispatch_head_for_id(&id))
+            .or_insert_with(|| id.clone());
+        let heads = dispatch_heads_for_ids(state.dispatches.keys());
         drop(state);
 
         self.registry.notify([DispatchEvent::DispatchUpdated {
             id,
-            heads: self.get_dispatch_heads(),
+            heads,
             origin: self.local_origin(),
         }]);
 
@@ -371,6 +431,7 @@ impl DispatchRepo {
     }
 
     pub async fn mark_cancelled(&self, id: &str) -> Res<bool> {
+        let _transition_guard = self.transition_mutex.lock().await;
         let state = self.state.lock().await;
         let Some(dispatch) = state.dispatches.get(id) else {
             eyre::bail!("dispatch not found under {id}");
@@ -386,14 +447,16 @@ impl DispatchRepo {
         }
         drop(state);
 
+        let mut tx = self.db_pool.begin().await?;
         let inserted = sqlx::query(
             "INSERT OR IGNORE INTO dispatch_cancelled_marks(dispatch_id, created_at)\n             VALUES (?1, unixepoch())",
         )
         .bind(id)
-        .execute(&self.db_pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected()
             > 0;
+        tx.commit().await?;
 
         if inserted {
             self.state
@@ -435,9 +498,14 @@ impl DispatchRepo {
         dispatch_id: &str,
         dependency_dispatch_id: &str,
     ) -> Res<Option<Arc<ActiveDispatch>>> {
+        let _transition_guard = self.transition_mutex.lock().await;
         let cur = self
-            .get(dispatch_id)
+            .state
+            .lock()
             .await
+            .dispatches
+            .get(dispatch_id)
+            .map(Arc::clone)
             .ok_or_else(|| eyre::eyre!("dispatch not found under {dispatch_id}"))?;
         if cur.status != DispatchStatus::Waiting {
             return Ok(None);
@@ -450,17 +518,24 @@ impl DispatchRepo {
         let ready = updated.waiting_on_dispatch_ids.is_empty();
         let updated = Arc::new(updated);
 
-        persist_dispatch(&self.db_pool, dispatch_id, &updated).await?;
+        let mut tx = self.db_pool.begin().await?;
+        persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
+        tx.commit().await?;
 
         let mut state = self.state.lock().await;
         state
             .dispatches
             .insert(dispatch_id.to_string(), Arc::clone(&updated));
+        state
+            .dispatch_head_index
+            .entry(dispatch_head_for_id(dispatch_id))
+            .or_insert_with(|| dispatch_id.to_string());
+        let heads = dispatch_heads_for_ids(state.dispatches.keys());
         drop(state);
 
         self.registry.notify([DispatchEvent::DispatchUpdated {
             id: dispatch_id.to_string(),
-            heads: self.get_dispatch_heads(),
+            heads,
             origin: self.local_origin(),
         }]);
 
@@ -476,9 +551,14 @@ impl DispatchRepo {
         dispatch_id: &str,
         deets: ActiveDispatchDeets,
     ) -> Res<Arc<ActiveDispatch>> {
+        let _transition_guard = self.transition_mutex.lock().await;
         let cur = self
-            .get(dispatch_id)
+            .state
+            .lock()
             .await
+            .dispatches
+            .get(dispatch_id)
+            .map(Arc::clone)
             .ok_or_else(|| eyre::eyre!("dispatch not found under {dispatch_id}"))?;
         if cur.status != DispatchStatus::Waiting {
             eyre::bail!("dispatch is not waiting: {dispatch_id}");
@@ -488,20 +568,22 @@ impl DispatchRepo {
         }
 
         let mut updated = (*cur).clone();
-        if let ActiveDispatchDeets::Wflow {
-            wflow_job_id: Some(job),
-            ..
-        } = &updated.deets
-        {
-            self.state.lock().await.wflow_to_dispatch.remove(job);
-        }
         updated.status = DispatchStatus::Active;
         updated.deets = deets;
         let updated = Arc::new(updated);
 
-        persist_dispatch(&self.db_pool, dispatch_id, &updated).await?;
+        let mut tx = self.db_pool.begin().await?;
+        persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
+        tx.commit().await?;
 
         let mut state = self.state.lock().await;
+        if let ActiveDispatchDeets::Wflow {
+            wflow_job_id: Some(job),
+            ..
+        } = &cur.deets
+        {
+            state.wflow_to_dispatch.remove(job);
+        }
         state
             .dispatches
             .insert(dispatch_id.to_string(), Arc::clone(&updated));
@@ -517,11 +599,16 @@ impl DispatchRepo {
                 .wflow_to_dispatch
                 .insert(job.clone(), dispatch_id.to_string());
         }
+        state
+            .dispatch_head_index
+            .entry(dispatch_head_for_id(dispatch_id))
+            .or_insert_with(|| dispatch_id.to_string());
+        let heads = dispatch_heads_for_ids(state.dispatches.keys());
         drop(state);
 
         self.registry.notify([DispatchEvent::DispatchUpdated {
             id: dispatch_id.to_string(),
-            heads: self.get_dispatch_heads(),
+            heads,
             origin: self.local_origin(),
         }]);
 
@@ -533,9 +620,14 @@ impl DispatchRepo {
         dispatch_id: &str,
         deets: ActiveDispatchDeets,
     ) -> Res<Arc<ActiveDispatch>> {
+        let _transition_guard = self.transition_mutex.lock().await;
         let cur = self
-            .get(dispatch_id)
+            .state
+            .lock()
             .await
+            .dispatches
+            .get(dispatch_id)
+            .map(Arc::clone)
             .ok_or_else(|| eyre::eyre!("dispatch not found under {dispatch_id}"))?;
         if cur.status != DispatchStatus::Active {
             eyre::bail!("dispatch is not active: {dispatch_id}");
@@ -545,7 +637,9 @@ impl DispatchRepo {
         updated.deets = deets;
         let updated = Arc::new(updated);
 
-        persist_dispatch(&self.db_pool, dispatch_id, &updated).await?;
+        let mut tx = self.db_pool.begin().await?;
+        persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
+        tx.commit().await?;
 
         let mut state = self.state.lock().await;
 
@@ -573,12 +667,17 @@ impl DispatchRepo {
                 .wflow_to_dispatch
                 .insert(job.clone(), dispatch_id.to_string());
         }
+        state
+            .dispatch_head_index
+            .entry(dispatch_head_for_id(dispatch_id))
+            .or_insert_with(|| dispatch_id.to_string());
+        let heads = dispatch_heads_for_ids(state.dispatches.keys());
 
         drop(state);
 
         self.registry.notify([DispatchEvent::DispatchUpdated {
             id: dispatch_id.to_string(),
-            heads: self.get_dispatch_heads(),
+            heads,
             origin: self.local_origin(),
         }]);
 
@@ -586,7 +685,15 @@ impl DispatchRepo {
     }
 
     pub async fn set_waiting_failed(&self, dispatch_id: &str) -> Res<()> {
-        let Some(cur) = self.get(dispatch_id).await else {
+        let _transition_guard = self.transition_mutex.lock().await;
+        let Some(cur) = self
+            .state
+            .lock()
+            .await
+            .dispatches
+            .get(dispatch_id)
+            .map(Arc::clone)
+        else {
             return Ok(());
         };
 
@@ -594,8 +701,10 @@ impl DispatchRepo {
         updated.status = DispatchStatus::Failed;
         let updated = Arc::new(updated);
 
-        persist_dispatch(&self.db_pool, dispatch_id, &updated).await?;
-        clear_cancelled_mark(&self.db_pool, dispatch_id).await?;
+        let mut tx = self.db_pool.begin().await?;
+        persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
+        clear_cancelled_mark_tx(&mut tx, dispatch_id).await?;
+        tx.commit().await?;
 
         let mut state = self.state.lock().await;
         state.cancelled_dispatches.remove(dispatch_id);
@@ -612,16 +721,39 @@ impl DispatchRepo {
         state
             .dispatches
             .insert(dispatch_id.to_string(), Arc::clone(&updated));
+        state
+            .dispatch_head_index
+            .entry(dispatch_head_for_id(dispatch_id))
+            .or_insert_with(|| dispatch_id.to_string());
+        let heads = dispatch_heads_for_ids(state.dispatches.keys());
         drop(state);
 
         self.registry.notify([DispatchEvent::DispatchUpdated {
             id: dispatch_id.to_string(),
-            heads: self.get_dispatch_heads(),
+            heads,
             origin: self.local_origin(),
         }]);
 
         Ok(())
     }
+}
+
+fn dispatch_head_for_id(id: &str) -> automerge::ChangeHash {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(id.as_bytes());
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest[..]);
+    automerge::ChangeHash(bytes)
+}
+
+fn dispatch_heads_for_ids<'a>(ids: impl Iterator<Item = &'a String>) -> ChangeHashSet {
+    let mut ids = ids.map(|value| value.as_str()).collect::<Vec<_>>();
+    ids.sort_unstable();
+    let mut heads = Vec::with_capacity(ids.len());
+    for id in ids {
+        heads.push(dispatch_head_for_id(id));
+    }
+    ChangeHashSet(Arc::from(heads))
 }
 
 async fn init_schema(db_pool: &sqlx::SqlitePool) -> Res<()> {
@@ -677,6 +809,9 @@ async fn load_state(db_pool: &sqlx::SqlitePool) -> Res<DispatchState> {
     for (id, payload_json) in rows {
         let dispatch: ActiveDispatch = serde_json::from_str(&payload_json)?;
         let dispatch = Arc::new(dispatch);
+        state
+            .dispatch_head_index
+            .insert(dispatch_head_for_id(&id), id.clone());
 
         if dispatch.status == DispatchStatus::Active {
             state
@@ -706,17 +841,20 @@ async fn load_state(db_pool: &sqlx::SqlitePool) -> Res<DispatchState> {
             .fetch_all(db_pool)
             .await?;
     for (part_id, frontier) in frontier_rows {
-        state.wflow_partition_frontier.insert(
-            part_id,
-            u64::try_from(frontier).expect("frontier row is negative in sqlite"),
-        );
+        let frontier = match u64::try_from(frontier) {
+            Ok(value) => value,
+            Err(_) => eyre::bail!(
+                "invalid negative frontier row in sqlite: part_id={part_id} frontier={frontier}"
+            ),
+        };
+        state.wflow_partition_frontier.insert(part_id, frontier);
     }
 
     Ok(state)
 }
 
-async fn persist_dispatch(
-    db_pool: &sqlx::SqlitePool,
+async fn persist_dispatch_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: &str,
     dispatch: &Arc<ActiveDispatch>,
 ) -> Res<()> {
@@ -739,16 +877,19 @@ async fn persist_dispatch(
     .bind(status)
     .bind(payload_json)
     .bind(wflow_job_id)
-    .execute(db_pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
 }
 
-async fn clear_cancelled_mark(db_pool: &sqlx::SqlitePool, dispatch_id: &str) -> Res<()> {
+async fn clear_cancelled_mark_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    dispatch_id: &str,
+) -> Res<()> {
     sqlx::query("DELETE FROM dispatch_cancelled_marks WHERE dispatch_id = ?1")
         .bind(dispatch_id)
-        .execute(db_pool)
+        .execute(&mut **tx)
         .await?;
     Ok(())
 }
@@ -794,6 +935,7 @@ mod tests {
                 facet_acl: vec![],
                 config_facet_acl: vec![],
                 local_state_acl: vec![],
+                command_invoke_acl_snapshot: vec![],
                 wflow_args_json: None,
             }),
             status: DispatchStatus::Active,
@@ -822,6 +964,7 @@ mod tests {
                 facet_acl: vec![],
                 config_facet_acl: vec![],
                 local_state_acl: vec![],
+                command_invoke_acl_snapshot: vec![],
                 wflow_args_json: None,
             }),
             status: DispatchStatus::Waiting,

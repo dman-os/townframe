@@ -58,19 +58,25 @@ pub fn resolve_origin_from_vtag_actor(
     vtag_actor_id: &automerge::ActorId,
     live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
 ) -> crate::event_origin::SwitchEventOrigin {
-    if vtag_actor_id == local_actor_id {
-        return crate::event_origin::SwitchEventOrigin::Local {
-            actor_id: vtag_actor_id.to_string(),
-        };
-    }
     match live_origin {
+        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+            crate::event_origin::SwitchEventOrigin::Bootstrap
+        }
+        Some(am_utils_rs::repo::BigRepoChangeOrigin::Local) => {
+            if vtag_actor_id == local_actor_id {
+                crate::event_origin::SwitchEventOrigin::Local {
+                    actor_id: vtag_actor_id.to_string(),
+                }
+            } else {
+                crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: "unknown".to_string(),
+                }
+            }
+        }
         Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
             crate::event_origin::SwitchEventOrigin::Remote {
                 peer_id: peer_id.to_string(),
             }
-        }
-        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
-            crate::event_origin::SwitchEventOrigin::Bootstrap
         }
         _ => crate::event_origin::SwitchEventOrigin::Remote {
             peer_id: "unknown".to_string(),

@@ -175,10 +175,7 @@ impl host::Host for SharedWashCtx {
                         std::sync::atomic::Ordering::Relaxed,
                     )
                     .expect("impossible: wasm is single threaded");
-                return Ok(Ok(host::StepState::Completed(host::CompletedStepState {
-                    id: stale_step_id,
-                    value_json,
-                })));
+                let _ = value_json;
             }
             anyhow::bail!("concurrent steps not allowed");
         }

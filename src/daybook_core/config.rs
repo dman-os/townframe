@@ -363,7 +363,7 @@ impl ConfigRepo {
         // Init snapshot is a single "current heads changed" event.
         Ok(vec![ConfigEvent::Changed {
             heads: ChangeHashSet(self.get_config_heads().await?),
-            origin: self.local_origin(),
+            origin: crate::event_origin::SwitchEventOrigin::Bootstrap,
         }])
     }
 

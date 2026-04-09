@@ -350,6 +350,7 @@ impl RepoCtx {
                 sql.clone(),
             )
             .await?;
+            config_stop = Some(stop);
             let config_user_path = daybook_types::doc::user_path::for_repo(
                 &daybook_types::doc::UserPath::from(local_user_path.to_string()),
                 "config-repo",
@@ -366,7 +367,6 @@ impl RepoCtx {
             config_repo
                 .upsert_actor_user_path(plugs_actor_id, plugs_user_path)
                 .await?;
-            config_stop = Some(stop);
 
             let (_tables_repo, stop) = TablesRepo::load(
                 Arc::clone(big_repo),
@@ -374,6 +374,7 @@ impl RepoCtx {
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
             )
             .await?;
+            tables_stop = Some(stop);
             let tables_user_path = daybook_types::doc::user_path::for_repo(
                 &daybook_types::doc::UserPath::from(local_user_path.to_string()),
                 "tables-repo",
@@ -382,7 +383,6 @@ impl RepoCtx {
             config_repo
                 .upsert_actor_user_path(tables_actor_id, tables_user_path)
                 .await?;
-            tables_stop = Some(stop);
 
             let (_dispatch_repo, stop) = DispatchRepo::load(
                 Arc::clone(big_repo),
@@ -391,6 +391,7 @@ impl RepoCtx {
                 sql.clone(),
             )
             .await?;
+            dispatch_stop = Some(stop);
             let dispatch_user_path = daybook_types::doc::user_path::for_repo(
                 &daybook_types::doc::UserPath::from(local_user_path.to_string()),
                 "dispatch-repo",
@@ -399,7 +400,6 @@ impl RepoCtx {
             config_repo
                 .upsert_actor_user_path(dispatch_actor_id, dispatch_user_path)
                 .await?;
-            dispatch_stop = Some(stop);
 
             let (_drawer_repo, stop) = DrawerRepo::load(
                 Arc::clone(big_repo),
@@ -423,6 +423,7 @@ impl RepoCtx {
                 )),
             )
             .await?;
+            drawer_stop = Some(stop);
             let drawer_user_path = daybook_types::doc::user_path::for_repo(
                 &daybook_types::doc::UserPath::from(local_user_path.to_string()),
                 "drawer-repo",
@@ -431,7 +432,6 @@ impl RepoCtx {
             config_repo
                 .upsert_actor_user_path(drawer_actor_id, drawer_user_path)
                 .await?;
-            drawer_stop = Some(stop);
 
             plugs_repo
                 .as_ref()

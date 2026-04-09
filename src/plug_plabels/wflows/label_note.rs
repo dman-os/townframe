@@ -58,7 +58,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
             wflow_sdk::JobErrorX::Terminal(err.wrap_err("input facet is not embedding"))
         })? {
         WellKnownFacet::Embedding(value) => value,
-        _ => unreachable!(),
+        _ => unreachable!("expected WellKnownFacet::Embedding here for label_note"),
     };
     if embedding.dtype != daybook_types::doc::EmbeddingDtype::F32 || embedding.compression.is_some()
     {

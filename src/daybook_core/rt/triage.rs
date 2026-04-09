@@ -586,14 +586,18 @@ fn make_processor_done_token(
     branch_path: &daybook_types::doc::BranchPath,
     heads: &ChangeHashSet,
 ) -> String {
-    use std::hash::{Hash, Hasher};
-    // Deterministic fingerprint of this evaluated processor work item.
-    let mut hasher = std::hash::DefaultHasher::default();
-    doc_id.hash(&mut hasher);
-    processor_full_id.hash(&mut hasher);
-    branch_path.hash(&mut hasher);
-    heads.hash(&mut hasher);
-    utils_rs::hash::encode_base58_multibase(hasher.finish().to_le_bytes())
+    let mut fingerprint = String::new();
+    use std::fmt::Write as _;
+    write!(
+        &mut fingerprint,
+        "{}|{}|{}|{}",
+        doc_id,
+        processor_full_id,
+        branch_path.as_str(),
+        serde_json::to_string(heads).expect(ERROR_JSON)
+    )
+    .expect("writing to string should never fail");
+    utils_rs::hash::blake3_hash_bytes(fingerprint.as_bytes())
 }
 
 pub fn doc_processor_triage_listener() -> Box<dyn SwitchSink + Send + Sync> {

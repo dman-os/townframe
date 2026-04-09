@@ -116,6 +116,7 @@ fn build_wasm_crate(cwd: &Path, wflows_target_dir: &Path, crate_name: &str) {
     build_wflows
         .args([
             "build",
+            "--lib",
             "-p",
             crate_name,
             "--release",
@@ -146,13 +147,9 @@ fn compress_wasm(
         .join("wasm32-wasip2")
         .join("release")
         .join(format!("{crate_name}.wasm"));
-    let wasm_path = wasm_path.canonicalize().map_err(|err| {
-        format!(
-            "error resolving {} at {}: {err}",
-            wasm_path.display(),
-            wasm_path.display()
-        )
-    })?;
+    let wasm_path = wasm_path
+        .canonicalize()
+        .map_err(|err| format!("error resolving {}: {err}", wasm_path.display()))?;
     let wasm_bytes = std::fs::read(wasm_path)?;
     zstd::stream::copy_encode(
         &wasm_bytes[..],

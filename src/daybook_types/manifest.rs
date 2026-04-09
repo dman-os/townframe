@@ -459,6 +459,7 @@ pub enum ProcessorDeets {
         event_predicate: ProcessorEventPredicate,
         #[garde(dive)]
         predicate: DocPredicateClause,
+        #[serde(rename = "routineName")]
         #[garde(dive)]
         routine_name: KeyGeneric,
     },
@@ -848,7 +849,7 @@ mod tests {
             "deets": {
                 "docProcessor": {
                     "predicate": { "hasTag": "org.example.tag" },
-                    "routine_name": "routine1"
+                    "routineName": "routine1"
                 }
             }
         });
@@ -864,5 +865,70 @@ mod tests {
             event_predicate.doc_change_predicate,
             DocChangePredicate::Any
         ));
+    }
+
+    #[test]
+    fn doc_change_predicate_changed_facet_tags_evaluate_change() {
+        use std::collections::HashSet;
+
+        let changed: HashSet<crate::doc::FacetKey> = vec![
+            crate::doc::FacetKey {
+                tag: "org.example.note".into(),
+                id: "main".into(),
+            },
+            crate::doc::FacetKey {
+                tag: "org.example.todo".into(),
+                id: "1".into(),
+            },
+        ]
+        .into_iter()
+        .collect();
+
+        let pred = DocChangePredicate::ChangedFacetTags(vec!["org.example.todo".into()]);
+        assert!(pred.evaluate_change(DocChangeKind::Updated, Some(&changed), None, None));
+
+        let pred = DocChangePredicate::ChangedFacetTags(vec!["org.example.unknown".into()]);
+        assert!(!pred.evaluate_change(DocChangeKind::Updated, Some(&changed), None, None));
+    }
+
+    #[test]
+    fn doc_change_predicate_changed_facet_keys_evaluate_change() {
+        use std::collections::HashSet;
+
+        let target_key = crate::doc::FacetKey {
+            tag: "org.example.todo".into(),
+            id: "1".into(),
+        };
+        let changed: HashSet<crate::doc::FacetKey> = vec![target_key.clone()].into_iter().collect();
+
+        let pred = DocChangePredicate::ChangedFacetKeys(vec![target_key]);
+        assert!(pred.evaluate_change(DocChangeKind::Updated, Some(&changed), None, None));
+        assert!(!pred.evaluate_change(DocChangeKind::Updated, None, None, None));
+
+        let pred = DocChangePredicate::ChangedFacetKeys(vec![crate::doc::FacetKey {
+            tag: "org.example.todo".into(),
+            id: "nope".into(),
+        }]);
+        assert!(!pred.evaluate_change(DocChangeKind::Updated, Some(&changed), None, None));
+    }
+
+    #[test]
+    fn doc_change_predicate_append_referenced_facet_scope() {
+        use std::collections::HashSet;
+
+        let mut read_tags = HashSet::new();
+        let mut read_keys = HashSet::new();
+        DocChangePredicate::ChangedFacetTags(vec!["org.example.todo".into()])
+            .append_referenced_facet_scope(&mut read_tags, &mut read_keys);
+        assert!(read_tags.contains("org.example.todo"));
+        assert!(read_keys.is_empty());
+
+        let key = crate::doc::FacetKey {
+            tag: "org.example.todo".into(),
+            id: "1".into(),
+        };
+        DocChangePredicate::ChangedFacetKeys(vec![key.clone()])
+            .append_referenced_facet_scope(&mut read_tags, &mut read_keys);
+        assert!(read_keys.contains(&key));
     }
 }

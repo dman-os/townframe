@@ -88,7 +88,7 @@ mod wasm_runtime {
     {
         args.command_invoke_tokens
             .iter()
-            .find(|(url, _)| url.ends_with(command_name))
+            .find(|(url, _)| url.ends_with(&format!("/{}", command_name.trim_start_matches('/'))))
             .map(|(_, token)| token)
             .ok_or_else(|| {
                 JobErrorX::Terminal(ferr!("missing command invoke token for {command_name}"))

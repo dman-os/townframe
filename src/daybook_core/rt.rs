@@ -204,6 +204,14 @@ pub enum DispatchArgs {
     },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum InvokeCommandFromWflowError {
+    #[error("{0}")]
+    Denied(String),
+    #[error(transparent)]
+    Other(#[from] eyre::Report),
+}
+
 impl Rt {
     pub fn processor_runlog_item_id(doc_id: &str, processor_full_id: &str) -> String {
         format!("v1|doc:{doc_id}|proc:{processor_full_id}")
@@ -1179,7 +1187,7 @@ impl Rt {
         parent_wflow_job_id: &str,
         target_command_url: &str,
         request: daybook_pdk::InvokeCommandRequest,
-    ) -> Res<String> {
+    ) -> Result<String, InvokeCommandFromWflowError> {
         self.ensure_rt_live()?;
         let parent_dispatch = self
             .dispatch_repo
@@ -1226,11 +1234,10 @@ impl Rt {
                     })
                 });
         if !is_allowed {
-            eyre::bail!(
+            return Err(InvokeCommandFromWflowError::Denied(format!(
                 "command target '{}' is not allowlisted by routine '{}'",
-                target_command_url,
-                routine_name
-            );
+                target_command_url, routine_name
+            )));
         }
 
         let target_plug_manifest =
@@ -1258,15 +1265,22 @@ impl Rt {
         } = &target_command_manifest.deets;
 
         let fixed_dispatch_id = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::hash::DefaultHasher::default();
-            dispatch_stable_identity(&parent_dispatch).hash(&mut hasher);
-            target_command_url.hash(&mut hasher);
-            request.request_id.hash(&mut hasher);
-            let hash = hasher.finish();
-            let encoded = utils_rs::hash::encode_base58_multibase(hash.to_le_bytes());
+            let mut identity = String::new();
+            use std::fmt::Write as _;
+            write!(
+                &mut identity,
+                "{}|{}|{}",
+                dispatch_stable_identity(&parent_dispatch),
+                target_command_url,
+                request.request_id
+            )
+            .expect("writing to string should never fail");
+            let encoded = utils_rs::hash::blake3_hash_bytes(identity.as_bytes());
             format!("cmdinvoke-{encoded}")
         };
+        let waiting_on_dispatch_ids = self
+            .ensure_plug_init_dispatches(&target_ref.plug_id)
+            .await?;
 
         self.dispatch_no_gate_internal(
             &target_ref.plug_id,
@@ -1282,11 +1296,12 @@ impl Rt {
                 parent_wflow_job_id: parent_wflow_job_id.to_string(),
                 request_id: request.request_id,
             }],
-            vec![],
+            waiting_on_dispatch_ids,
             Some(fixed_dispatch_id),
             true,
         )
         .await
+        .map_err(InvokeCommandFromWflowError::Other)
     }
 
     async fn dispatch_raw(
@@ -1374,15 +1389,18 @@ impl Rt {
                 };
                 let facet_key = facet_key.to_string();
                 let dispatch_id = {
-                    use std::hash::{Hash, Hasher};
-                    // FIXME: we probably want to use a stable hasher impl
-                    let mut hasher = std::hash::DefaultHasher::default();
-                    doc_id.hash(&mut hasher);
-                    heads.hash(&mut hasher);
-                    plug_id.hash(&mut hasher);
-                    routine_name.hash(&mut hasher);
-                    let hash = hasher.finish();
-                    utils_rs::hash::encode_base58_multibase(hash.to_le_bytes())
+                    let mut identity = String::new();
+                    use std::fmt::Write as _;
+                    write!(
+                        &mut identity,
+                        "{}|{}|{}|{}",
+                        doc_id,
+                        am_utils_rs::serialize_commit_heads(heads.as_ref()).join(","),
+                        plug_id,
+                        routine_name
+                    )
+                    .expect("writing to string should never fail");
+                    utils_rs::hash::blake3_hash_bytes(identity.as_bytes())
                 };
                 let dispatch_id = fixed_dispatch_id
                     .clone()
@@ -1397,6 +1415,7 @@ impl Rt {
                         facet_acl: routine_man.facet_acl().to_vec(),
                         config_facet_acl: routine_man.config_facet_acl().to_vec(),
                         local_state_acl: routine_man.local_state_acl.clone(),
+                        command_invoke_acl_snapshot: routine_man.command_invoke_acl().to_vec(),
                         wflow_args_json,
                         staging_branch_path: daybook_types::doc::BranchPath::from(
                             "/tmp/placeholder",
@@ -1414,15 +1433,20 @@ impl Rt {
             let can_reuse = serde_json::to_string(&existing.on_success_hooks).expect(ERROR_JSON)
                 == serde_json::to_string(&on_success_hooks).expect(ERROR_JSON)
                 && existing.waiting_on_dispatch_ids == waiting_on_dispatch_ids;
-            if can_reuse
-                && (reuse_terminal_on_match
-                    || matches!(
-                        existing.status,
-                        dispatch::DispatchStatus::Waiting | dispatch::DispatchStatus::Active
-                    ))
-            {
+            let reuse_status_ok = matches!(
+                existing.status,
+                dispatch::DispatchStatus::Waiting | dispatch::DispatchStatus::Active
+            );
+            if can_reuse && reuse_status_ok {
                 warn!(?dispatch_id, "dispatch already exists with same identity");
                 return Ok(dispatch_id);
+            }
+            if can_reuse && reuse_terminal_on_match {
+                debug!(
+                    ?dispatch_id,
+                    status = ?existing.status,
+                    "skipping terminal dispatch reuse without CommandInvokeReply replay"
+                );
             }
             dispatch_id = format!("{dispatch_id}-{}", Uuid::new_v4().bs58());
         }

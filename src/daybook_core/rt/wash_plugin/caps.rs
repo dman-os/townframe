@@ -473,12 +473,13 @@ impl capabilities::HostCommandInvokeToken for SharedWashCtx {
             .await
         {
             Ok(dispatch_id) => dispatch_id,
-            Err(err) => {
-                let err_msg = err.to_string();
-                if err_msg.contains("not allowlisted") {
-                    return Ok(Err(capabilities::InvokeCommandError::Denied(err_msg)));
-                }
-                return Ok(Err(capabilities::InvokeCommandError::Other(err_msg)));
+            Err(crate::rt::InvokeCommandFromWflowError::Denied(reason)) => {
+                return Ok(Err(capabilities::InvokeCommandError::Denied(reason)));
+            }
+            Err(crate::rt::InvokeCommandFromWflowError::Other(err)) => {
+                return Ok(Err(capabilities::InvokeCommandError::Other(
+                    err.to_string(),
+                )));
             }
         };
         let response_json =

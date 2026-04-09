@@ -638,10 +638,10 @@ impl facet_routine::Host for SharedWashCtx {
             facet_acl,
             config_facet_acl,
             local_state_acl,
+            command_invoke_acl_snapshot,
             wflow_args_json: _,
         }) = &dispatch.args;
         let ActiveDispatchDeets::Wflow { plug_id, .. } = &dispatch.deets;
-        let routine_name = dispatch.deets.routine_name();
         // Use staging branch path from dispatch (already set when job was created)
         let staging_branch_path = staging_branch_path.clone();
 
@@ -790,15 +790,7 @@ impl facet_routine::Host for SharedWashCtx {
             ));
         }
 
-        let plug_manifest = dayook_plugin
-            .plugs_repo
-            .get(plug_id)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("plug not found for routine tokens: {plug_id}"))?;
-        let routine_manifest = plug_manifest.routines.get(routine_name).ok_or_else(|| {
-            anyhow::anyhow!("routine not found for tokens: {plug_id}/{routine_name}")
-        })?;
-        for target_url in &routine_manifest.command_invoke_acl {
+        for target_url in command_invoke_acl_snapshot {
             let token = self.table.push(caps::CommandInvokeToken {
                 parent_wflow_job_id: Arc::clone(&job_id),
                 target_url: target_url.to_string(),
