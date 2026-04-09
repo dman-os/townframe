@@ -76,7 +76,9 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
         &mut self,
         handle: wasmtime::component::Resource<sqlite_connection::Connection>,
     ) -> wasmtime::Result<String> {
-        ensure_sqlite_file_path(self, &handle).await.to_anyhow()
+        ensure_sqlite_file_path(self, &handle)
+            .await
+            .map_err(|err| wasmtime::Error::msg(err.to_string()))
     }
 
     async fn drop(

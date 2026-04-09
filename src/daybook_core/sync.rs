@@ -149,7 +149,8 @@ impl IrohSyncRepo {
         doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
         progress_repo: Option<Arc<ProgressRepo>>,
     ) -> Res<(Arc<Self>, IrohSyncRepoStopToken)> {
-        let endpoint_builder = iroh::Endpoint::builder().secret_key(rcx.iroh_secret_key.clone());
+        let endpoint_builder = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(rcx.iroh_secret_key.clone());
         #[cfg(test)]
         let endpoint_builder = endpoint_builder
             .relay_mode(iroh::RelayMode::Disabled)

@@ -4,7 +4,6 @@ mod interlude {
 
 use crate::interlude::*;
 
-use anyhow::Context;
 use std::collections::HashSet;
 use std::sync::atomic::AtomicU64;
 use std::sync::RwLock;
@@ -100,6 +99,10 @@ enum SessionResume {
     Stop,
 }
 
+fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
+    wasmtime::Error::msg(msg.to_string())
+}
+
 fn wait_id_for(step_id: u64, attempt_id: u64) -> u64 {
     let lo = step_id & 0xFFFF_FFFF;
     let hi = (attempt_id & 0xFFFF_FFFF) << 32;
@@ -149,7 +152,7 @@ impl host::Host for SharedWashCtx {
             .get(job_id.as_str())
             .cloned()
         else {
-            anyhow::bail!("job not active");
+            return Err(wasmtime_err("job not active"));
         };
         let mut active_step = job.active_step.lock().expect(ERROR_MUTEX);
         if let Some(stale_active) = active_step.as_ref() {
@@ -177,7 +180,7 @@ impl host::Host for SharedWashCtx {
                     .expect("impossible: wasm is single threaded");
                 let _ = value_json;
             } else {
-                anyhow::bail!("concurrent steps not allowed");
+                return Err(wasmtime_err("concurrent steps not allowed"));
             }
         }
         let step_id = job.cur_step.load(std::sync::atomic::Ordering::Relaxed);
@@ -241,15 +244,15 @@ impl host::Host for SharedWashCtx {
             .get(job_id.as_str())
             .cloned()
         else {
-            anyhow::bail!("job not active");
+            return Err(wasmtime_err("job not active"));
         };
         let trap = {
             let mut active_step = job.active_step.lock().expect(ERROR_MUTEX);
             let Some(active_step) = active_step.take() else {
-                anyhow::bail!("step not active");
+                return Err(wasmtime_err("step not active"));
             };
             if active_step.step_id != step_id {
-                anyhow::bail!("given step_id is not active");
+                return Err(wasmtime_err("given step_id is not active"));
             }
             let end_at = Timestamp::now();
             JobTrap::PersistStep {
@@ -271,7 +274,7 @@ impl host::Host for SharedWashCtx {
             .expect("impossible: wasm is single threaded");
 
         if job.yield_tx.send(trap).is_err() {
-            anyhow::bail!("session parent dropped");
+            return Err(wasmtime_err("session parent dropped"));
         }
 
         let mut resume_rx = job.resume_rx.lock().await;
@@ -301,15 +304,15 @@ impl host::Host for SharedWashCtx {
             .get(job_id.as_str())
             .cloned()
         else {
-            anyhow::bail!("job not active");
+            return Err(wasmtime_err("job not active"));
         };
         let (attempt_id, start_at) = {
             let active_step = job.active_step.lock().expect(ERROR_MUTEX);
             let Some(active_step) = active_step.as_ref() else {
-                anyhow::bail!("step not active");
+                return Err(wasmtime_err("step not active"));
             };
             if active_step.step_id != step_id {
-                anyhow::bail!("given step_id is not active");
+                return Err(wasmtime_err("given step_id is not active"));
             }
             (active_step.attempt_id, active_step.start_at)
         };
@@ -328,7 +331,7 @@ impl host::Host for SharedWashCtx {
         };
 
         if job.yield_tx.send(trap).is_err() {
-            anyhow::bail!("session parent dropped");
+            return Err(wasmtime_err("session parent dropped"));
         }
 
         let mut resume_rx = job.resume_rx.lock().await;
@@ -357,15 +360,15 @@ impl host::Host for SharedWashCtx {
             .get(job_id.as_str())
             .cloned()
         else {
-            anyhow::bail!("job not active");
+            return Err(wasmtime_err("job not active"));
         };
         let (attempt_id, start_at) = {
             let active_step = job.active_step.lock().expect(ERROR_MUTEX);
             let Some(active_step) = active_step.as_ref() else {
-                anyhow::bail!("step not active");
+                return Err(wasmtime_err("step not active"));
             };
             if active_step.step_id != step_id {
-                anyhow::bail!("given step_id is not active");
+                return Err(wasmtime_err("given step_id is not active"));
             }
             (active_step.attempt_id, active_step.start_at)
         };
@@ -380,7 +383,7 @@ impl host::Host for SharedWashCtx {
         };
 
         if job.yield_tx.send(trap).is_err() {
-            anyhow::bail!("session parent dropped");
+            return Err(wasmtime_err("session parent dropped"));
         }
 
         let mut resume_rx = job.resume_rx.lock().await;
@@ -394,16 +397,16 @@ impl host::Host for SharedWashCtx {
             Some(SessionResume::Continue) => {
                 let journal = job.journal.lock().expect(ERROR_MUTEX);
                 let Some(step_state) = journal.steps.get(step_id as usize) else {
-                    anyhow::bail!("step missing from journal");
+                    return Err(wasmtime_err("step missing from journal"));
                 };
                 let wflow_core::partition::state::JobStepState::Effect { attempts } = step_state;
                 let Some(last_attempt) = attempts.last() else {
-                    anyhow::bail!("step has no attempts in journal");
+                    return Err(wasmtime_err("step has no attempts in journal"));
                 };
                 let wflow_core::partition::job_events::JobEffectResultDeets::Success { value_json } =
                     &last_attempt.deets
                 else {
-                    anyhow::bail!("step has no success value");
+                    return Err(wasmtime_err("step has no success value"));
                 };
                 Ok(Ok(value_json.to_string()))
             }
@@ -434,7 +437,11 @@ impl partition_host::Host for SharedWashCtx {
 impl metastore::Host for SharedWashCtx {
     async fn get_wflow(&mut self, key: String) -> wasmtime::Result<Option<metastore::WflowMeta>> {
         let plugin = WflowPlugin::from_ctx(self);
-        let meta = plugin.metastore.get_wflow(&key).await.to_anyhow()?;
+        let meta = plugin
+            .metastore
+            .get_wflow(&key)
+            .await
+            .map_err(wasmtime_err)?;
         Ok(meta.map(|meta| metastore::WflowMeta {
             key: meta.key,
             service: match meta.service {
@@ -450,7 +457,11 @@ impl metastore::Host for SharedWashCtx {
 
     async fn get_partitions(&mut self) -> wasmtime::Result<metastore::PartitionsMeta> {
         let plugin = WflowPlugin::from_ctx(self);
-        let meta = plugin.metastore.get_partitions().await.to_anyhow()?;
+        let meta = plugin
+            .metastore
+            .get_partitions()
+            .await
+            .map_err(wasmtime_err)?;
         Ok(metastore::PartitionsMeta {
             version: meta.version,
             partition_count: meta.partition_count,
@@ -583,14 +594,14 @@ impl WflowPlugin {
             .resolved_handle
             .new_store(&workload.component_id)
             .await
-            .to_eyre()
+            .map_err(|err| eyre::eyre!("{err}"))
             .wrap_err("error creating component store")
             .map_err(Into::<job_events::JobRunResult>::into)?;
         let instance = workload
             .instance_pre
             .instantiate_async(&mut store)
             .await
-            .to_eyre()
+            .map_err(|err| eyre::eyre!("{err}"))
             .wrap_err("error creating component store")
             .map_err(Into::<job_events::JobRunResult>::into)?;
         let bundle_args = bundle::RunArgs {
@@ -799,7 +810,7 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
         };
         let instance_pre = resolved.instantiate_pre(component_id).await?;
         let instance_pre = binds_service::ServicePre::new(instance_pre)
-            .context("error pre instantiating service component")?;
+            .map_err(|err| anyhow::anyhow!("error pre instantiating service component: {err}"))?;
 
         // Handle workload restarts/re-resolves deterministically by clearing any
         // prior registration for this workload ID before inserting fresh keys.

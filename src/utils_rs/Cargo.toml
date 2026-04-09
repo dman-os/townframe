@@ -81,4 +81,4 @@ tracing-android = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "tracing"] }
-console-subscriber = { version = "0.5.0" }
+# console-subscriber = { version = "0.5.0" }

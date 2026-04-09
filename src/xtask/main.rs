@@ -361,6 +361,7 @@ async fn main_main() -> Res<()> {
             }
         }
         Commands::Play {} => {
+            /*
             use ollama_rs::generation::completion::request::GenerationRequest;
             use ollama_rs::generation::images::Image;
 
@@ -405,6 +406,7 @@ async fn main_main() -> Res<()> {
                     eyre::Ok(())
                 },
             )?;
+            */
         }
     }
 
@@ -920,7 +922,7 @@ async fn irpc_disconnect_probe() -> Res<()> {
     });
 
     let server_local = Client::<ProbeProtocol>::local(tx);
-    let server_endpoint = iroh::Endpoint::bind().await?;
+    let server_endpoint = iroh::Endpoint::bind(iroh::endpoint::presets::N0).await?;
     let protocol = IrohProtocol::with_sender(
         server_local
             .as_local()
@@ -931,7 +933,7 @@ async fn irpc_disconnect_probe() -> Res<()> {
         .spawn();
     let server_addr = router.endpoint().addr();
 
-    let client_endpoint = iroh::Endpoint::bind().await?;
+    let client_endpoint = iroh::Endpoint::bind(iroh::endpoint::presets::N0).await?;
     let client = irpc_iroh::client::<ProbeProtocol>(client_endpoint, server_addr, IRPC_PROBE_ALPN);
 
     let first = client
@@ -970,7 +972,7 @@ async fn irpc_inflight_disconnect_probe() -> Res<()> {
     });
 
     let server_local = Client::<ProbeProtocol>::local(tx);
-    let server_endpoint = iroh::Endpoint::bind().await?;
+    let server_endpoint = iroh::Endpoint::bind(iroh::endpoint::presets::N0).await?;
     let protocol = IrohProtocol::with_sender(
         server_local
             .as_local()
@@ -981,7 +983,7 @@ async fn irpc_inflight_disconnect_probe() -> Res<()> {
         .spawn();
     let server_addr = router.endpoint().addr();
 
-    let client_endpoint = iroh::Endpoint::bind().await?;
+    let client_endpoint = iroh::Endpoint::bind(iroh::endpoint::presets::N0).await?;
     let client = irpc_iroh::client::<ProbeProtocol>(client_endpoint, server_addr, IRPC_PROBE_ALPN);
 
     let call = tokio::spawn({
@@ -1035,7 +1037,7 @@ async fn irpc_client_cancel_probe() -> Res<()> {
     });
 
     let server_local = Client::<ProbeProtocol>::local(tx);
-    let server_endpoint = iroh::Endpoint::bind().await?;
+    let server_endpoint = iroh::Endpoint::bind(iroh::endpoint::presets::N0).await?;
     let protocol = IrohProtocol::with_sender(
         server_local
             .as_local()
@@ -1046,7 +1048,7 @@ async fn irpc_client_cancel_probe() -> Res<()> {
         .spawn();
     let server_addr = router.endpoint().addr();
 
-    let client_endpoint = iroh::Endpoint::bind().await?;
+    let client_endpoint = iroh::Endpoint::bind(iroh::endpoint::presets::N0).await?;
     let client = irpc_iroh::client::<ProbeProtocol>(client_endpoint, server_addr, IRPC_PROBE_ALPN);
 
     let call = tokio::spawn({
