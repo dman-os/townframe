@@ -104,7 +104,9 @@ impl DocBlobsIndexRepo {
                             let Some(item) = item else {
                                 break;
                             };
-                            repo.handle_worker_item(item).await.unwrap_or_log();
+                            repo.handle_worker_item(item)
+                                .await
+                                .expect("doc blobs worker item handling failed");
                         }
                     }
                 }
@@ -357,17 +359,27 @@ impl DocBlobsIndexRepo {
             serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
                 .expect(ERROR_JSON);
 
+        let mut rows: Vec<(&str, i64)> = Vec::with_capacity(blobs.len());
+        for (hash, length_octets) in blobs {
+            let length_octets_i64 = i64::try_from(*length_octets).map_err(|_| {
+                eyre::eyre!(
+                    "blob length octets exceeds sqlite INTEGER range: doc_id={} branch={} length_octets={}",
+                    doc_id,
+                    branch_path.as_str(),
+                    length_octets
+                )
+            })?;
+            rows.push((hash.as_str(), length_octets_i64));
+        }
+
         let mut query_builder = QueryBuilder::new(
             "INSERT INTO doc_blob_refs (doc_id, branch_path, blob_hash, length_octets, origin_heads) ",
         );
-        query_builder.push_values(blobs.iter(), |mut row, (hash, length_octets)| {
+        query_builder.push_values(rows.iter(), |mut row, (hash, length_octets_i64)| {
             row.push_bind(doc_id)
                 .push_bind(branch_path.as_str())
                 .push_bind(hash)
-                .push_bind(
-                    i64::try_from(*length_octets)
-                        .expect("blob length octets exceeds sqlite INTEGER range"),
-                )
+                .push_bind(*length_octets_i64)
                 .push_bind(&serialized_heads);
         });
         query_builder.push(

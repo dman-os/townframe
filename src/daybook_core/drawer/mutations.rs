@@ -475,6 +475,7 @@ impl DrawerRepo {
             .current_doc_branches(id)
             .await?
             .ok_or_eyre("branch state missing after create_branch_at_heads_from_branch")?;
+        self.branch_handles.insert(branch_doc_id, handle);
         self.registry.notify([DrawerEvent::DocUpdated {
             id: id.clone(),
             entry: updated_entry,
@@ -487,7 +488,6 @@ impl DrawerRepo {
             drawer_heads,
             origin: self.local_origin(),
         }]);
-        self.branch_handles.insert(branch_doc_id, handle);
         Ok(())
     }
 
@@ -683,7 +683,8 @@ impl DrawerRepo {
                         user_path_for_dmeta.as_ref(),
                         &mutation_actor_id,
                     )?;
-                    tx.commit();
+                    let (heads_after_merge, _) = tx.commit();
+                    heads_after_merge.expect("commit failed");
                     invalidated
                 };
 

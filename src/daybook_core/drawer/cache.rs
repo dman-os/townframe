@@ -34,9 +34,39 @@ impl FacetCacheState {
     }
 
     fn estimate_cost(value: &FacetRaw) -> usize {
-        serde_json::to_vec(value)
-            .map(|bytes| bytes.len().max(128))
-            .unwrap_or(1024)
+        fn approx_json_cost(value: &serde_json::Value, depth: usize, budget: &mut usize) -> usize {
+            if *budget == 0 {
+                return 64;
+            }
+            *budget -= 1;
+            if depth >= 8 {
+                return 64;
+            }
+            match value {
+                serde_json::Value::Null => 4,
+                serde_json::Value::Bool(_) => 4,
+                serde_json::Value::Number(_) => 8,
+                serde_json::Value::String(text) => text.len().min(1024) + 2,
+                serde_json::Value::Array(items) => {
+                    let mut cost = 8;
+                    for item in items.iter().take(64) {
+                        cost += approx_json_cost(item, depth + 1, budget);
+                    }
+                    cost
+                }
+                serde_json::Value::Object(map) => {
+                    let mut cost = 16;
+                    for (key, val) in map.iter().take(64) {
+                        cost += key.len().min(256) + 1;
+                        cost += approx_json_cost(val, depth + 1, budget);
+                    }
+                    cost
+                }
+            }
+        }
+
+        let mut budget = 512;
+        approx_json_cost(value, 0, &mut budget).max(128)
     }
 
     fn remember_seen_once(&mut self, key: FacetCacheKey) {
