@@ -1727,6 +1727,19 @@ mod tests {
                                     }
                                 }
                                 crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
+                                    let retained_branches: Vec<daybook_types::doc::BranchPath> = entry
+                                        .branches
+                                        .keys()
+                                        .map(|branch_name| {
+                                            daybook_types::doc::BranchPath::from(branch_name.as_str())
+                                        })
+                                        .collect();
+                                    doc_blobs_index_repo
+                                        .enqueue_delete_branches_not_in(
+                                            id.clone(),
+                                            retained_branches,
+                                        )
+                                        .unwrap_or_log();
                                     for (branch_name, heads) in &entry.branches {
                                         doc_blobs_index_repo
                                             .enqueue_upsert(

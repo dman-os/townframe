@@ -673,7 +673,7 @@ impl facet_routine::Host for SharedWashCtx {
             wflow_args_json: _,
         }) = &dispatch.args;
         let ActiveDispatchDeets::Wflow { plug_id, .. } = &dispatch.deets;
-        let routine_name = dispatch.deets.routine_name();
+        let _routine_name = dispatch.deets.routine_name();
         // Use staging branch path from dispatch (already set when job was created)
         let staging_branch_path = staging_branch_path.clone();
 

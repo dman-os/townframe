@@ -296,22 +296,13 @@ impl DrawerRepo {
             })
             .await??;
 
-        let drawer_heads = self.get_drawer_heads();
-
         // 3. Update caches and notify
-        {
-            let mut pool = self.entry_pool.lock().unwrap();
-            let pruned = pool.insert_key(&patch.id, 1);
-            for pkey in pruned {
-                self.entry_cache.remove(&pkey);
-            }
-        }
+        self.invalidate_entry_cache(&patch.id);
 
         for uuid in invalidated_uuids {
             self.invalidate_facet_cache_entry(&patch.id, &uuid);
         }
 
-        *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
         self.branch_handles
             .insert(handle.document_id().to_string(), handle);
 
@@ -703,14 +694,7 @@ impl DrawerRepo {
         let drawer_heads = self.get_drawer_heads();
 
         // 3. Update caches and notify
-        {
-            let mut pool = self.entry_pool.lock().unwrap();
-            let pruned = pool.insert_key(id, 1);
-            for pkey in pruned {
-                self.entry_cache.remove(&pkey);
-            }
-            self.entry_cache.remove(id);
-        }
+        self.invalidate_entry_cache(id);
 
         for uuid in invalidated_uuids {
             self.invalidate_facet_cache_entry(id, &uuid);
@@ -988,14 +972,7 @@ impl DrawerRepo {
         let diff = DocEntryDiff::new(&entry, &new_entry, Vec::new());
 
         // Update caches and notify
-        {
-            let mut pool = self.entry_pool.lock().unwrap();
-            let pruned = pool.insert_key(id, 1);
-            for pkey in pruned {
-                self.entry_cache.remove(&pkey);
-            }
-            self.entry_cache.remove(id);
-        }
+        self.invalidate_entry_cache(id);
 
         *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
         let updated_entry = self

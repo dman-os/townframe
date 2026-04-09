@@ -20,10 +20,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "cargo:rerun-if-changed={}",
-        cwd.join("../plug_test/").canonicalize().unwrap().display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
         cwd.join("../wflow_sdk/").canonicalize().unwrap().display()
     );
     println!(
@@ -48,7 +44,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .display()
     );
     build_wasm_crate(&cwd, &wflows_target_dir, "daybook_wflows");
-    build_wasm_crate(&cwd, &wflows_target_dir, "plug_test");
 
     // let cwasm_path = out_dir.join("daybook_wflows.cwasm");
     // assert!(
@@ -99,12 +94,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &wflows_target_dir,
         &out_dir,
         "daybook_wflows",
-        if profile == "release" { 19 } else { 1 },
-    )?;
-    compress_wasm(
-        &wflows_target_dir,
-        &out_dir,
-        "plug_test",
         if profile == "release" { 19 } else { 1 },
     )?;
 

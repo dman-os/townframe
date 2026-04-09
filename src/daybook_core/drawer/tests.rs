@@ -1797,6 +1797,90 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+        peer_id: "test-local-facet-touch".into(),
+        storage: am_utils_rs::repo::StorageConfig::Memory,
+    })
+    .await?;
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        let handle = big_repo.add_doc(doc).await?;
+        handle.document_id().clone()
+    };
+    let (repo, stop_token) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        drawer_doc_id,
+        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_db_pool().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+        None,
+    )
+    .await?;
+
+    let doc_id = repo
+        .add(AddDocArgs {
+            branch_path: "main".into(),
+            facets: [(
+                FacetKey::from(WellKnownFacetTag::TitleGeneric),
+                WellKnownFacet::TitleGeneric("base".into()).into(),
+            )]
+            .into(),
+            user_path: None,
+        })
+        .await?;
+
+    let user_path = UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest/plug/routine");
+    let note_key = FacetKey::from(WellKnownFacetTag::Note);
+    repo.update_at_heads(
+        DocPatch {
+            id: doc_id.clone(),
+            facets_set: [(
+                note_key.clone(),
+                WellKnownFacet::Note("from-user-path-actor".into()).into(),
+            )]
+            .into(),
+            facets_remove: vec![],
+            user_path: Some(user_path),
+        },
+        "main".into(),
+        None,
+    )
+    .await?;
+
+    let main_heads = repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("missing entry")?
+        .branches
+        .get("main")
+        .cloned()
+        .ok_or_eyre("missing main branch")?;
+    let touched = repo
+        .facet_keys_touched_by_local_actor(
+            &doc_id,
+            &"main".into(),
+            &main_heads,
+            std::slice::from_ref(&note_key),
+        )
+        .await?;
+    assert!(
+        touched.contains(&note_key),
+        "expected Note facet change from user_path-scoped actor to count as local"
+    );
+
+    stop_token.stop().await?;
+    acx_stop.stop().await?;
+    Ok(())
+}
+
 #[test]
 fn test_facet_cache_admission_requires_second_put() {
     let pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(10_000)));

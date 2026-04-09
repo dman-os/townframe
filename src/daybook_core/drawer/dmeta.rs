@@ -11,7 +11,7 @@ fn dmeta_key() -> String {
 }
 
 fn timestamp_scalar(now: Timestamp) -> automerge::ScalarValue {
-    automerge::ScalarValue::Str(now.to_string().into())
+    automerge::ScalarValue::Timestamp(now.as_second())
 }
 
 pub fn facet_meta_obj<D: ReadDoc>(doc: &D, facet_key: &FacetKey) -> Res<Option<automerge::ObjId>> {
@@ -45,13 +45,26 @@ pub fn facet_uuid_for_key<D: ReadDoc + autosurgeon::ReadDoc>(
     let Some(facet_meta_obj) = facet_meta_obj(doc, facet_key)? else {
         return Ok(None);
     };
-    match autosurgeon::hydrate_prop::<_, Option<Vec<Uuid>>, _, _>(doc, &facet_meta_obj, "uuid") {
-        Ok(Some(uuids)) => Ok(uuids.into_iter().next()),
-        Ok(None) => Ok(None),
-        Err(err) => {
-            tracing::warn!(?facet_key, ?err, "failed hydrating dmeta facet uuid");
-            Ok(None)
+    match automerge::ReadDoc::get(doc, &facet_meta_obj, "uuid")? {
+        Some((automerge::Value::Scalar(scalar), _)) => {
+            Ok(Some(parse_uuid_scalar(scalar.as_ref())?))
         }
+        Some((automerge::Value::Object(automerge::ObjType::List), list_obj)) => {
+            if automerge::ReadDoc::length(doc, &list_obj) == 0 {
+                return Ok(None);
+            }
+            let Some((value, _)) = automerge::ReadDoc::get(doc, &list_obj, 0)? else {
+                return Ok(None);
+            };
+            let automerge::Value::Scalar(scalar) = value else {
+                eyre::bail!("facet uuid list contains non-scalar value for key {facet_key}");
+            };
+            Ok(Some(parse_uuid_scalar(scalar.as_ref())?))
+        }
+        Some((other, _)) => {
+            eyre::bail!("facet uuid has invalid shape for key {facet_key}: {other:?}");
+        }
+        None => Ok(None),
     }
 }
 
@@ -67,19 +80,45 @@ pub fn facet_uuid_for_key_at(
         Some((automerge::Value::Object(automerge::ObjType::List), deleted_at_list)) => {
             doc.length_at(&deleted_at_list, heads) > 0
         }
-        _ => false,
+        Some((other, _)) => {
+            eyre::bail!("facet meta deletedAt has invalid shape for key {facet_key}: {other:?}");
+        }
+        None => false,
     };
     if is_deleted {
         return Ok(None);
     }
-    match autosurgeon::hydrate_prop_at::<_, Option<Vec<Uuid>>, _, _>(
-        doc,
-        &facet_meta_obj,
-        "uuid",
-        heads,
-    ) {
-        Ok(Some(uuids)) => Ok(uuids.into_iter().next()),
-        _ => Ok(None),
+    match doc.get_at(&facet_meta_obj, "uuid", heads)? {
+        Some((automerge::Value::Scalar(scalar), _)) => {
+            Ok(Some(parse_uuid_scalar(scalar.as_ref())?))
+        }
+        Some((automerge::Value::Object(automerge::ObjType::List), list_obj)) => {
+            if doc.length_at(&list_obj, heads) == 0 {
+                return Ok(None);
+            }
+            let Some((value, _)) = doc.get_at(&list_obj, 0, heads)? else {
+                return Ok(None);
+            };
+            let automerge::Value::Scalar(scalar) = value else {
+                eyre::bail!("facet uuid list contains non-scalar value for key {facet_key}");
+            };
+            Ok(Some(parse_uuid_scalar(scalar.as_ref())?))
+        }
+        Some((other, _)) => {
+            eyre::bail!(
+                "facet uuid has invalid shape for key {facet_key} at heads {:?}: {other:?}",
+                am_utils_rs::serialize_commit_heads(heads)
+            );
+        }
+        None => Ok(None),
+    }
+}
+
+fn parse_uuid_scalar(scalar: &automerge::ScalarValue) -> Res<Uuid> {
+    match scalar {
+        automerge::ScalarValue::Str(text) => Ok(Uuid::parse_str(text)?),
+        automerge::ScalarValue::Bytes(bytes) => Ok(Uuid::from_slice(bytes)?),
+        other => eyre::bail!("facet uuid has invalid scalar type: {other:?}"),
     }
 }
 
@@ -279,7 +318,12 @@ fn tombstone_facet_meta(
         }
         let deleted_at_list = match tx.get(&facet_meta_obj, "deletedAt")? {
             Some((automerge::Value::Object(automerge::ObjType::List), id)) => id,
-            _ => tx.put_object(&facet_meta_obj, "deletedAt", automerge::ObjType::List)?,
+            Some((other, _)) => {
+                eyre::bail!(
+                    "facet meta deletedAt has invalid shape while tombstoning key {key_str}: {other:?}"
+                )
+            }
+            None => tx.put_object(&facet_meta_obj, "deletedAt", automerge::ObjType::List)?,
         };
         tx.insert(
             &deleted_at_list,
@@ -320,8 +364,11 @@ fn touch_facet_meta(
     };
     let deleted_at_list = match tx.get(&facet_meta_obj, "deletedAt")? {
         Some((automerge::Value::Object(automerge::ObjType::List), id)) => id,
-        _ if is_new_meta => {
+        None if is_new_meta => {
             tx.put_object(&facet_meta_obj, "deletedAt", automerge::ObjType::List)?
+        }
+        Some((other, _)) if is_new_meta => {
+            eyre::bail!("facet meta deletedAt has invalid shape for key {key_str}: {other:?}")
         }
         _ => eyre::bail!("facet meta missing deletedAt list for key {key_str}"),
     };

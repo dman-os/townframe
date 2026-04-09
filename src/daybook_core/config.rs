@@ -130,6 +130,51 @@ impl ConfigRepo {
         }
     }
 
+    fn origin_from_live(
+        &self,
+        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+    ) -> crate::event_origin::SwitchEventOrigin {
+        match live_origin {
+            Some(am_utils_rs::repo::BigRepoChangeOrigin::Local) => self.local_origin(),
+            Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
+                crate::event_origin::SwitchEventOrigin::Remote {
+                    peer_id: peer_id.to_string(),
+                }
+            }
+            Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+                crate::event_origin::SwitchEventOrigin::Bootstrap
+            }
+            None => crate::event_origin::SwitchEventOrigin::Remote {
+                peer_id: "unknown".to_string(),
+            },
+        }
+    }
+
+    async fn latest_deleted_actor(
+        &self,
+        deleted_prop: &str,
+        key: &str,
+        heads: &Arc<[automerge::ChangeHash]>,
+    ) -> Res<Option<ActorId>> {
+        let Some((tags, _)) = self
+            .big_repo
+            .hydrate_path_at_heads::<Vec<VersionTag>>(
+                &self.app_doc_id,
+                heads,
+                automerge::ROOT,
+                vec![
+                    ConfigStore::prop().into(),
+                    std::borrow::Cow::<str>::Owned(deleted_prop.to_string()).into(),
+                    autosurgeon::Prop::Key(key.to_string().into()),
+                ],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(tags.last().map(|tag| tag.actor_id.clone()))
+    }
+
     pub async fn load(
         big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
@@ -417,6 +462,59 @@ impl ConfigRepo {
                     out.push(ConfigEvent::Changed {
                         heads,
                         origin: event_origin.clone(),
+                    });
+                }
+            }
+            automerge::PatchAction::DeleteMap { key } if patch.path.len() == 2 => {
+                let Some((_obj, automerge::Prop::Map(section_key))) = patch.path.get(1) else {
+                    return Ok(());
+                };
+                let deleted_prop = match section_key.as_ref() {
+                    "facet_display" => Some("facet_display_deleted"),
+                    "users" => Some("users_deleted"),
+                    _ => None,
+                };
+                let event_origin = if let Some(deleted_prop) = deleted_prop {
+                    let tombstone_actor = self
+                        .latest_deleted_actor(deleted_prop, key, patch_heads)
+                        .await?;
+                    crate::repos::resolve_origin_for_delete(
+                        &self.local_actor_id,
+                        live_origin,
+                        tombstone_actor.as_ref(),
+                    )
+                } else {
+                    self.origin_from_live(live_origin)
+                };
+                if matches!(
+                    section_key.as_ref(),
+                    "facet_display"
+                        | "users"
+                        | "mltools"
+                        | "facet_display_deleted"
+                        | "users_deleted"
+                ) {
+                    out.push(ConfigEvent::Changed {
+                        heads,
+                        origin: event_origin,
+                    });
+                }
+            }
+            automerge::PatchAction::PutMap { .. }
+            | automerge::PatchAction::PutSeq { .. }
+            | automerge::PatchAction::Insert { .. }
+                if patch.path.len() >= 2 =>
+            {
+                let Some((_obj, automerge::Prop::Map(section_key))) = patch.path.get(1) else {
+                    return Ok(());
+                };
+                if matches!(
+                    section_key.as_ref(),
+                    "facet_display_deleted" | "users_deleted"
+                ) {
+                    out.push(ConfigEvent::Changed {
+                        heads,
+                        origin: self.origin_from_live(live_origin),
                     });
                 }
             }

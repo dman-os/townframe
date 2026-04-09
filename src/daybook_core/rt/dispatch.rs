@@ -200,7 +200,7 @@ impl DispatchRepo {
     ) -> Res<Vec<DispatchEvent>> {
         let state = self.state.lock().await;
         let from_set: HashSet<automerge::ChangeHash> = from.0.iter().copied().collect();
-        let to_heads = to.unwrap_or_else(|| dispatch_heads_for_ids(state.dispatches.keys()));
+        let to_heads = to.unwrap_or_else(|| dispatch_heads_for_dispatches(state.dispatches.iter()));
         let to_set: HashSet<automerge::ChangeHash> = to_heads.0.iter().copied().collect();
         let mut added_ids = Vec::new();
         for hash in to_set.difference(&from_set) {
@@ -240,7 +240,7 @@ impl DispatchRepo {
 
     pub async fn events_for_init(&self) -> Res<Vec<DispatchEvent>> {
         let state = self.state.lock().await;
-        let heads = dispatch_heads_for_ids(state.dispatches.keys());
+        let heads = dispatch_heads_for_dispatches(state.dispatches.iter());
         let mut events = Vec::with_capacity(state.dispatches.len());
         for id in state.dispatches.keys() {
             events.push(DispatchEvent::DispatchAdded {
@@ -254,7 +254,7 @@ impl DispatchRepo {
 
     pub async fn get_dispatch_heads(&self) -> ChangeHashSet {
         let state = self.state.lock().await;
-        dispatch_heads_for_ids(state.dispatches.keys())
+        dispatch_heads_for_dispatches(state.dispatches.iter())
     }
 
     pub async fn get(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
@@ -322,7 +322,7 @@ impl DispatchRepo {
     pub async fn add(&self, id: String, dispatch: Arc<ActiveDispatch>) -> Res<()> {
         debug!(?id, "adding dispatch to repo");
         let _transition_guard = self.transition_mutex.lock().await;
-        let ActiveDispatchArgs::FacetRoutine(args) = &dispatch.args;
+        let ActiveDispatchArgs::FacetRoutine(_args) = &dispatch.args;
 
         let mut tx = self.db_pool.begin().await?;
         persist_dispatch_tx(&mut tx, &id, &dispatch).await?;
@@ -333,7 +333,7 @@ impl DispatchRepo {
         state.cancelled_dispatches.remove(&id);
         state
             .dispatch_head_index
-            .entry(dispatch_head_for_id(&id))
+            .entry(dispatch_head_for_dispatch(&id, &dispatch))
             .or_insert_with(|| id.clone());
 
         if let Some(old) = state.dispatches.insert(id.clone(), Arc::clone(&dispatch)) {
@@ -365,7 +365,7 @@ impl DispatchRepo {
             state.wflow_to_dispatch.insert(job.clone(), id.clone());
         }
 
-        let heads = dispatch_heads_for_ids(state.dispatches.keys());
+        let heads = dispatch_heads_for_dispatches(state.dispatches.iter());
         drop(state);
 
         self.registry.notify([DispatchEvent::DispatchAdded {
@@ -422,13 +422,14 @@ impl DispatchRepo {
             }
         }
 
+        let next_head = dispatch_head_for_dispatch(&id, &next);
         state.active_dispatches.remove(&id);
         state.dispatches.insert(id.clone(), next);
         state
             .dispatch_head_index
-            .entry(dispatch_head_for_id(&id))
+            .entry(next_head)
             .or_insert_with(|| id.clone());
-        let heads = dispatch_heads_for_ids(state.dispatches.keys());
+        let heads = dispatch_heads_for_dispatches(state.dispatches.iter());
         drop(state);
 
         self.registry.notify([DispatchEvent::DispatchUpdated {
@@ -548,9 +549,9 @@ impl DispatchRepo {
             .insert(dispatch_id.to_string(), Arc::clone(&updated));
         state
             .dispatch_head_index
-            .entry(dispatch_head_for_id(dispatch_id))
+            .entry(dispatch_head_for_dispatch(dispatch_id, &updated))
             .or_insert_with(|| dispatch_id.to_string());
-        let heads = dispatch_heads_for_ids(state.dispatches.keys());
+        let heads = dispatch_heads_for_dispatches(state.dispatches.iter());
         drop(state);
 
         self.registry.notify([DispatchEvent::DispatchUpdated {
@@ -621,9 +622,9 @@ impl DispatchRepo {
         }
         state
             .dispatch_head_index
-            .entry(dispatch_head_for_id(dispatch_id))
+            .entry(dispatch_head_for_dispatch(dispatch_id, &updated))
             .or_insert_with(|| dispatch_id.to_string());
-        let heads = dispatch_heads_for_ids(state.dispatches.keys());
+        let heads = dispatch_heads_for_dispatches(state.dispatches.iter());
         drop(state);
 
         self.registry.notify([DispatchEvent::DispatchUpdated {
@@ -689,9 +690,9 @@ impl DispatchRepo {
         }
         state
             .dispatch_head_index
-            .entry(dispatch_head_for_id(dispatch_id))
+            .entry(dispatch_head_for_dispatch(dispatch_id, &updated))
             .or_insert_with(|| dispatch_id.to_string());
-        let heads = dispatch_heads_for_ids(state.dispatches.keys());
+        let heads = dispatch_heads_for_dispatches(state.dispatches.iter());
 
         drop(state);
 
@@ -743,9 +744,9 @@ impl DispatchRepo {
             .insert(dispatch_id.to_string(), Arc::clone(&updated));
         state
             .dispatch_head_index
-            .entry(dispatch_head_for_id(dispatch_id))
+            .entry(dispatch_head_for_dispatch(dispatch_id, &updated))
             .or_insert_with(|| dispatch_id.to_string());
-        let heads = dispatch_heads_for_ids(state.dispatches.keys());
+        let heads = dispatch_heads_for_dispatches(state.dispatches.iter());
         drop(state);
 
         self.registry.notify([DispatchEvent::DispatchUpdated {
@@ -758,20 +759,27 @@ impl DispatchRepo {
     }
 }
 
-fn dispatch_head_for_id(id: &str) -> automerge::ChangeHash {
+fn dispatch_head_for_dispatch(id: &str, dispatch: &ActiveDispatch) -> automerge::ChangeHash {
     use sha2::Digest;
-    let digest = sha2::Sha256::digest(id.as_bytes());
+    let payload = serde_json::to_vec(dispatch).expect(ERROR_JSON);
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(id.as_bytes());
+    hasher.update([0_u8]);
+    hasher.update(payload);
+    let digest = hasher.finalize();
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(&digest[..]);
     automerge::ChangeHash(bytes)
 }
 
-fn dispatch_heads_for_ids<'a>(ids: impl Iterator<Item = &'a String>) -> ChangeHashSet {
-    let mut ids = ids.map(|value| value.as_str()).collect::<Vec<_>>();
-    ids.sort_unstable();
-    let mut heads = Vec::with_capacity(ids.len());
-    for id in ids {
-        heads.push(dispatch_head_for_id(id));
+fn dispatch_heads_for_dispatches<'a>(
+    dispatches: impl Iterator<Item = (&'a String, &'a Arc<ActiveDispatch>)>,
+) -> ChangeHashSet {
+    let mut items = dispatches.collect::<Vec<_>>();
+    items.sort_unstable_by(|(lhs_id, _), (rhs_id, _)| lhs_id.cmp(rhs_id));
+    let mut heads = Vec::with_capacity(items.len());
+    for (id, dispatch) in items {
+        heads.push(dispatch_head_for_dispatch(id, dispatch));
     }
     ChangeHashSet(Arc::from(heads))
 }
@@ -831,7 +839,7 @@ async fn load_state(db_pool: &sqlx::SqlitePool) -> Res<DispatchState> {
         let dispatch = Arc::new(dispatch);
         state
             .dispatch_head_index
-            .insert(dispatch_head_for_id(&id), id.clone());
+            .insert(dispatch_head_for_dispatch(&id, &dispatch), id.clone());
 
         if dispatch.status == DispatchStatus::Active {
             state

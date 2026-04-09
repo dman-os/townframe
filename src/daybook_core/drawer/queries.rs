@@ -8,7 +8,7 @@ use crate::drawer::{
 };
 
 use automerge::ReadDoc;
-use daybook_types::doc::{ChangeHashSet, Doc, DocId, FacetKey, FacetRaw};
+use daybook_types::doc::{ChangeHashSet, Doc, DocId, FacetKey, FacetRaw, WellKnownFacet};
 
 // queries
 impl DrawerRepo {
@@ -122,66 +122,51 @@ impl DrawerRepo {
                 let mut facets = HashMap::new();
                 let mut facet_heads_by_key = HashMap::new();
                 let mut to_cache = Vec::new();
+                let facets_obj =
+                    match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", heads)? {
+                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                        _ if facet_keys.is_none() => {
+                            return eyre::Ok((facets, facet_heads_by_key, to_cache));
+                        }
+                        _ => eyre::bail!("facets object not found in content doc"),
+                    };
 
-                match &facet_keys {
-                    None => {
-                        let full: ThroughJson<Doc> = autosurgeon::hydrate_at(am_doc, heads)?;
-                        for (key, value) in full.0.facets {
-                            let value = Arc::new(value);
-                            facets.insert(key.clone(), Arc::clone(&value));
-                            if let Some(facet_uuid) =
-                                dmeta::facet_uuid_for_key_at(am_doc, &key, heads)?
-                            {
-                                let facet_heads =
-                                    dmeta::facet_heads_for_key_at(am_doc, &key, heads)?;
-                                facet_heads_by_key.insert(key, facet_heads.clone());
-                                to_cache.push((facet_uuid, facet_heads, value));
-                            }
+                let selected_keys: Vec<FacetKey> = match &facet_keys {
+                    Some(keys) => keys.clone(),
+                    None => automerge::ReadDoc::map_range_at(am_doc, &facets_obj, .., heads)
+                        .map(|item| {
+                            let key_str = item.key.to_string();
+                            FacetKey::from(key_str.as_str())
+                        })
+                        .collect(),
+                };
+
+                for key in selected_keys {
+                    let facet_uuid = dmeta::facet_uuid_for_key_at(am_doc, &key, heads)?;
+                    let facet_heads = if facet_uuid.is_some() {
+                        Some(dmeta::facet_heads_for_key_at(am_doc, &key, heads)?)
+                    } else {
+                        None
+                    };
+                    if let Some(meta_heads) = &facet_heads {
+                        facet_heads_by_key.insert(key.clone(), meta_heads.clone());
+                    }
+
+                    if let (Some(uuid), Some(heads)) = (facet_uuid, &facet_heads) {
+                        if let Some(cached) = self.facet_cache_get(doc_id, &uuid, heads) {
+                            facets.insert(key.clone(), cached);
+                            continue;
                         }
                     }
-                    Some(keys) => {
-                        let facets_obj = match automerge::ReadDoc::get_at(
-                            am_doc,
-                            automerge::ROOT,
-                            "facets",
-                            heads,
-                        )? {
-                            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                            _ => eyre::bail!("facets object not found in content doc"),
-                        };
-                        for key in keys {
-                            let facet_uuid = dmeta::facet_uuid_for_key_at(am_doc, key, heads)?;
-                            let facet_heads = if facet_uuid.is_some() {
-                                Some(dmeta::facet_heads_for_key_at(am_doc, key, heads)?)
-                            } else {
-                                None
-                            };
-                            if let Some(meta_heads) = &facet_heads {
-                                facet_heads_by_key.insert(key.clone(), meta_heads.clone());
-                            }
 
-                            if let (Some(uuid), Some(heads)) = (facet_uuid, &facet_heads) {
-                                if let Some(cached) = self.facet_cache_get(doc_id, &uuid, heads) {
-                                    facets.insert(key.clone(), cached);
-                                    continue;
-                                }
-                            }
-
-                            let key_str = key.to_string();
-                            let value: Option<ThroughJson<FacetRaw>> =
-                                autosurgeon::hydrate_prop_at(
-                                    am_doc,
-                                    &facets_obj,
-                                    &*key_str,
-                                    heads,
-                                )?;
-                            if let Some(facet_value) = value {
-                                let facet_value = Arc::new(facet_value.0);
-                                facets.insert(key.clone(), Arc::clone(&facet_value));
-                                if let (Some(uuid), Some(heads)) = (facet_uuid, facet_heads) {
-                                    to_cache.push((uuid, heads, facet_value));
-                                }
-                            }
+                    let key_str = key.to_string();
+                    let value: Option<ThroughJson<FacetRaw>> =
+                        autosurgeon::hydrate_prop_at(am_doc, &facets_obj, &*key_str, heads)?;
+                    if let Some(facet_value) = value {
+                        let facet_value = Arc::new(facet_value.0);
+                        facets.insert(key.clone(), Arc::clone(&facet_value));
+                        if let (Some(uuid), Some(heads)) = (facet_uuid, facet_heads) {
+                            to_cache.push((uuid, heads, facet_value));
                         }
                     }
                 }
@@ -437,10 +422,55 @@ impl DrawerRepo {
         else {
             return Ok(HashSet::new());
         };
-        let local_actor_id = self.local_actor_id.clone();
-        let local_branch_actor_id = self.content_actor_id(None, &handle.document_id().to_string());
+        let branch_doc_id = handle.document_id().to_string();
+        let local_user_path = self.local_user_path.clone();
+        let mut local_actor_ids = HashSet::from([
+            self.local_actor_id.clone(),
+            self.content_actor_id(None, &branch_doc_id),
+        ]);
+        if let Some(doc) = self
+            .get_doc_with_facets_at_branch_heads(
+                doc_id,
+                branch_path,
+                heads,
+                Some(vec![FacetKey::from(
+                    daybook_types::doc::WellKnownFacetTag::Dmeta,
+                )]),
+            )
+            .await?
+        {
+            if let Some(raw) = doc.facets.get(&FacetKey::from(
+                daybook_types::doc::WellKnownFacetTag::Dmeta,
+            )) {
+                if let Ok(WellKnownFacet::Dmeta(dmeta)) =
+                    serde_json::from_value::<WellKnownFacet>(raw.clone())
+                {
+                    let local_segments: Vec<&str> = local_user_path
+                        .as_str()
+                        .trim_start_matches('/')
+                        .split('/')
+                        .collect();
+                    for user_meta in dmeta.actors.values() {
+                        let user_segments: Vec<&str> = user_meta
+                            .user_path
+                            .as_str()
+                            .trim_start_matches('/')
+                            .split('/')
+                            .collect();
+                        if local_segments.first() == user_segments.first()
+                            && local_segments.get(1) == user_segments.get(1)
+                        {
+                            local_actor_ids.insert(
+                                self.content_actor_id(Some(&user_meta.user_path), &branch_doc_id),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         let mut out = HashSet::new();
         for key in facet_keys {
+            let local_actor_ids = local_actor_ids.clone();
             let facet_heads = self
                 .get_facet_heads_at_branch_heads(doc_id, branch_path, heads, key)
                 .await?;
@@ -448,9 +478,7 @@ impl DrawerRepo {
                 .with_document_local(|am_doc| {
                     for head in &facet_heads {
                         if let Some(change) = am_doc.get_change_by_hash(head) {
-                            if change.actor_id() == &local_actor_id
-                                || change.actor_id() == &local_branch_actor_id
-                            {
+                            if local_actor_ids.contains(change.actor_id()) {
                                 return true;
                             }
                         }
