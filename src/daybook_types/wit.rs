@@ -28,6 +28,7 @@ pub mod doc {
         pub created_at: Datetime,
         #[serde_as(as = "Vec<Datetime>")]
         pub updated_at: Vec<Datetime>,
+        #[serde(default)]
         #[serde_as(as = "Vec<Datetime>")]
         pub deleted_at: Vec<Datetime>,
         pub uuid: Vec<String>,

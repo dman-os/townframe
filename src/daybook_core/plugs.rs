@@ -1028,9 +1028,22 @@ impl PlugsRepo {
         live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
         exclude_peer_id: Option<&str>,
     ) -> Res<()> {
+        let is_config_docs_vtag_patch = matches!(
+            &patch.action,
+            automerge::PatchAction::PutMap {
+                key,
+                value: (automerge::Value::Scalar(scalar), _),
+                ..
+            } if patch.path.len() == 2
+                && patch.path[1].1 == automerge::Prop::Map("plug_config_doc_ids".into())
+                && key == "vtag"
+                && matches!(&**scalar, automerge::ScalarValue::Bytes(_))
+        );
         // Live notification path: local writes are emitted by mutators.
         // Replay/diff paths pass `live_origin = None`.
-        if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id) {
+        if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id)
+            && !is_config_docs_vtag_patch
+        {
             return Ok(());
         }
         let heads = ChangeHashSet(Arc::clone(patch_heads));
@@ -2084,8 +2097,8 @@ impl PlugsRepo {
             match &processor_manifest.deets {
                 manifest::ProcessorDeets::DocProcessor {
                     predicate,
+                    event_predicate,
                     routine_name: _,
-                    event_predicate: _,
                 } => {
                     for referenced_tag in predicate.referenced_tags() {
                         if !available_tags.contains(&referenced_tag.to_string()) {
@@ -2093,6 +2106,31 @@ impl PlugsRepo {
                                 "Invalid processor predicate in '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
                                 processor_name,
                                 referenced_tag
+                            );
+                        }
+                    }
+                    let mut read_tags = HashSet::new();
+                    let mut read_keys = HashSet::new();
+                    event_predicate
+                        .doc_change_predicate
+                        .append_referenced_facet_scope(&mut read_tags, &mut read_keys);
+                    for referenced_tag in read_tags {
+                        if !available_tags.contains(&referenced_tag) {
+                            eyre::bail!(
+                                "Invalid processor event predicate in '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
+                                processor_name,
+                                referenced_tag
+                            );
+                        }
+                    }
+                    for referenced_key in read_keys {
+                        let referenced_tag = referenced_key.tag.to_string();
+                        if !available_tags.contains(&referenced_tag) {
+                            eyre::bail!(
+                                "Invalid processor event predicate in '{}': tag '{}' (from key '{}') is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
+                                processor_name,
+                                referenced_tag,
+                                referenced_key
                             );
                         }
                     }

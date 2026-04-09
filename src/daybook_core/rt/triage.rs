@@ -37,11 +37,28 @@ struct DocProcessorTriageListener {
     facet_reference_specs: Arc<HashMap<String, Vec<FacetReferenceManifest>>>,
     predicate_requirements: HashSet<DocPredicateEvalRequirement>,
     predicate_resolved: HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
-    dispatch_to_job: HashMap<String, (DocId, String)>,
+    dispatch_to_job: HashMap<String, (DocId, String, String)>,
     job_to_dispatch: HashMap<String, String>,
 }
 
 impl DocProcessorTriageListener {
+    fn inflight_job_key(
+        doc_id: &DocId,
+        processor_full_id: &str,
+        branch_path: &BranchPath,
+    ) -> String {
+        format!("{doc_id}:{processor_full_id}:{}", branch_path.as_str())
+    }
+
+    fn clear_inflight_dispatch(&mut self, dispatch_id: &str) {
+        if let Some((doc_id, processor_full_id, branch_path)) =
+            self.dispatch_to_job.remove(dispatch_id)
+        {
+            let job_key = format!("{doc_id}:{processor_full_id}:{branch_path}");
+            self.job_to_dispatch.remove(&job_key);
+        }
+    }
+
     #[tracing::instrument(skip(self, rt))]
     async fn refresh_processors(&mut self, rt: &Arc<Rt>) -> Res<()> {
         let plugs = rt.plugs_repo.list_plugs().await;
@@ -250,7 +267,8 @@ impl DocProcessorTriageListener {
                     wflow_args_json: None,
                 },
             };
-            let job_key = format!("{}:{}", doc_id, processor.processor_full_id);
+            let job_key =
+                Self::inflight_job_key(doc_id, &processor.processor_full_id, &branch_path);
             let old_dispatch = self.job_to_dispatch.get(&job_key).cloned();
             if let Some(dispatch_id) = old_dispatch {
                 info!(
@@ -280,7 +298,11 @@ impl DocProcessorTriageListener {
             self.job_to_dispatch.insert(job_key, dispatch_id.clone());
             self.dispatch_to_job.insert(
                 dispatch_id,
-                (doc_id.clone(), processor.processor_full_id.clone()),
+                (
+                    doc_id.clone(),
+                    processor.processor_full_id.clone(),
+                    branch_path.as_str().to_string(),
+                ),
             );
         }
         Ok(())
@@ -312,14 +334,29 @@ impl SwitchSink for DocProcessorTriageListener {
                 self.refresh_processors(rt).await?;
             }
             SwitchEvent::Config(_) => {}
-            SwitchEvent::Dispatch(event) => {
-                if let DispatchEvent::DispatchDeleted { id, .. } = &**event {
-                    if let Some(job) = self.dispatch_to_job.remove(id) {
-                        let job_key = format!("{}:{}", job.0, job.1);
-                        self.job_to_dispatch.remove(&job_key);
+            SwitchEvent::Dispatch(event) => match &**event {
+                DispatchEvent::DispatchDeleted { id, .. } => {
+                    self.clear_inflight_dispatch(id);
+                }
+                DispatchEvent::DispatchUpdated { id, .. } => {
+                    let rt = ctx
+                        .rt
+                        .ok_or_else(|| ferr!("triage listener context missing rt"))?;
+                    if let Some(dispatch) = rt.dispatch_repo.get_any(id).await {
+                        if matches!(
+                            dispatch.status,
+                            crate::rt::dispatch::DispatchStatus::Succeeded
+                                | crate::rt::dispatch::DispatchStatus::Failed
+                                | crate::rt::dispatch::DispatchStatus::Cancelled
+                        ) {
+                            self.clear_inflight_dispatch(id);
+                        }
+                    } else {
+                        self.clear_inflight_dispatch(id);
                     }
                 }
-            }
+                _ => {}
+            },
             SwitchEvent::Drawer(event) => match &**event {
                 DrawerEvent::ListChanged { .. } => {}
                 DrawerEvent::DocDeleted {

@@ -191,6 +191,7 @@ impl InitRepo {
                 self.store
                     .mutate_sync(|store| {
                         store.per_install_done = new_store.per_install_done;
+                        store.per_install_done_deleted = new_store.per_install_done_deleted;
                     })
                     .await?;
                 self.registry.notify(events.drain(..));

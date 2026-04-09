@@ -1198,8 +1198,7 @@ impl Rt {
             })?;
         let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
             doc_id,
-            branch_path,
-            heads,
+            staging_branch_path,
             facet_key: _,
             ..
         }) = &parent_dispatch.args;
@@ -1281,14 +1280,25 @@ impl Rt {
         let waiting_on_dispatch_ids = self
             .ensure_plug_init_dispatches(&target_ref.plug_id)
             .await?;
+        let staging_heads = self
+            .drawer
+            .get_doc_branches(doc_id)
+            .await?
+            .and_then(|entry| entry.branches.get(staging_branch_path.as_str()).cloned())
+            .ok_or_else(|| {
+                ferr!(
+                    "missing staging branch heads for command invoke: doc_id={doc_id} branch={}",
+                    staging_branch_path.as_str()
+                )
+            })?;
 
         self.dispatch_no_gate_internal(
             &target_ref.plug_id,
             &target_routine_name.0,
             DispatchArgs::DocFacet {
                 doc_id: doc_id.clone(),
-                branch_path: branch_path.clone(),
-                heads: heads.clone(),
+                branch_path: staging_branch_path.clone(),
+                heads: staging_heads,
                 facet_key: None,
                 wflow_args_json: Some(request.args_json.clone()),
             },

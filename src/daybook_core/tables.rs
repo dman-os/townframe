@@ -660,10 +660,16 @@ impl TablesRepo {
                             })
                             .await?;
                     }
-                    TablesEvent::WindowDeleted { id, .. } => {
+                    TablesEvent::WindowDeleted { id, heads } => {
+                        let deleted = self
+                            .load_deleted_tombstones_at_heads("windows_deleted", *id, heads)
+                            .await?;
                         self.store
                             .mutate_sync(|store| {
                                 store.windows.remove(id);
+                                if let Some(deleted) = deleted {
+                                    store.windows_deleted.insert(*id, deleted);
+                                }
                                 store.rebuild_indices();
                             })
                             .await?;
@@ -693,10 +699,16 @@ impl TablesRepo {
                             })
                             .await?;
                     }
-                    TablesEvent::TabDeleted { id, .. } => {
+                    TablesEvent::TabDeleted { id, heads } => {
+                        let deleted = self
+                            .load_deleted_tombstones_at_heads("tabs_deleted", *id, heads)
+                            .await?;
                         self.store
                             .mutate_sync(|store| {
                                 store.tabs.remove(id);
+                                if let Some(deleted) = deleted {
+                                    store.tabs_deleted.insert(*id, deleted);
+                                }
                                 store.rebuild_indices();
                             })
                             .await?;
@@ -727,10 +739,16 @@ impl TablesRepo {
                             })
                             .await?;
                     }
-                    TablesEvent::PanelDeleted { id, .. } => {
+                    TablesEvent::PanelDeleted { id, heads } => {
+                        let deleted = self
+                            .load_deleted_tombstones_at_heads("panels_deleted", *id, heads)
+                            .await?;
                         self.store
                             .mutate_sync(|store| {
                                 store.panels.remove(id);
+                                if let Some(deleted) = deleted {
+                                    store.panels_deleted.insert(*id, deleted);
+                                }
                                 store.rebuild_indices();
                             })
                             .await?;
@@ -761,10 +779,16 @@ impl TablesRepo {
                             })
                             .await?;
                     }
-                    TablesEvent::TableDeleted { id, .. } => {
+                    TablesEvent::TableDeleted { id, heads } => {
+                        let deleted = self
+                            .load_deleted_tombstones_at_heads("tables_deleted", *id, heads)
+                            .await?;
                         self.store
                             .mutate_sync(|store| {
                                 store.tables.remove(id);
+                                if let Some(deleted) = deleted {
+                                    store.tables_deleted.insert(*id, deleted);
+                                }
                                 store.rebuild_indices();
                             })
                             .await?;
@@ -777,6 +801,27 @@ impl TablesRepo {
             }
         }
         Ok(())
+    }
+
+    async fn load_deleted_tombstones_at_heads(
+        &self,
+        deleted_collection: &'static str,
+        item_id: Uuid,
+        heads: &ChangeHashSet,
+    ) -> Res<Option<Vec<VersionTag>>> {
+        self.big_repo
+            .hydrate_path_at_heads::<Vec<VersionTag>>(
+                &self.app_doc_id,
+                &heads.0,
+                automerge::ROOT,
+                vec![
+                    TablesStore::prop().into(),
+                    deleted_collection.into(),
+                    autosurgeon::Prop::Key(item_id.to_string().into()),
+                ],
+            )
+            .await
+            .map(|value| value.map(|(deleted, _)| deleted))
     }
 
     pub async fn diff_events(

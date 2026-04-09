@@ -287,7 +287,9 @@ impl ConfigRepo {
                 self.store
                     .mutate_sync(|store| {
                         store.facet_display = new_store.facet_display;
+                        store.facet_display_deleted = new_store.facet_display_deleted;
                         store.users = new_store.users;
+                        store.users_deleted = new_store.users_deleted;
                         store.mltools = new_store.mltools;
                     })
                     .await?;
